@@ -116,6 +116,10 @@ namespace CardShopCoop.Sync
                 released++;
             }
             _remoteCarried.Clear();
+            // the ownership grace window goes with the carry set: this release is the HOST's
+            // own doing, not a guest set-down, so nobody is owed a window to land a final
+            // edit through. Same wholesale trade-off _remoteCarried.Clear() already makes.
+            _remoteReleased.Clear();
             if (released > 0)
             {
                 CoopPlugin.Log.LogInfo($"BoxSync host: released {released} client-carried box(es) after a disconnect");
@@ -135,6 +139,11 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<ushort, double> _locallyTouched = new Dictionary<ushort, double>();   // client: my recent edits beat stale echoes
         private readonly HashSet<ushort> _snapshotIds = new HashSet<ushort>();      // scratch
         private readonly List<ushort> _removeScratch = new List<ushort>();          // scratch
+        // client, per-apply scratch for the baseline merge: the baseline we entered this
+        // apply with, indexed by id, plus the ids whose apply we SUPPRESSED this pass.
+        // Both are rebuilt at the top of every ClientApplyInner - they never outlive one call.
+        private readonly Dictionary<ushort, Entry> _prevApplied = new Dictionary<ushort, Entry>(); // scratch
+        private readonly HashSet<ushort> _skippedIds = new HashSet<ushort>();       // scratch
         private readonly List<InteractablePackagingBox_Item> _orphanScratch =
             new List<InteractablePackagingBox_Item>();                              // scratch
         // client: id -> host's latest entry for the snapshot currently being applied,
@@ -154,6 +163,11 @@ namespace CardShopCoop.Sync
         private readonly HashSet<ushort> _remoteCarried = new HashSet<ushort>();    // host: client-held boxes
         private readonly HashSet<ushort> _hostCarriedLastTick = new HashSet<ushort>();
         private readonly Dictionary<ushort, double> _hostRecentlyReleased = new Dictionary<ushort, double>(); // host: just set it down; stale client reports must not stomp it
+        // host: id -> when a GUEST let go of it. The guest's set-down report is the LAST
+        // report that carries its edits (the drain it did while holding the box arrives in
+        // the same message that clears Carried), so ownership has to outlive the carry flag
+        // by a grace window or that final delta is dropped and the items are duped back.
+        private readonly Dictionary<ushort, double> _remoteReleased = new Dictionary<ushort, double>();
 
         private float _timer;
         private int _lastHostHash;
@@ -181,6 +195,8 @@ namespace CardShopCoop.Sync
             _carriedLastTick.Clear();
             _recentlyReleased.Clear();
             _locallyTouched.Clear();
+            _prevApplied.Clear();
+            _skippedIds.Clear();
             // clear the worker-untouchable lock on every box we still hold marked as
             // guest-carried BEFORE dropping the maps (B2): a session teardown must not
             // strand a box worker-locked into the next session. Best-effort - dead/
@@ -192,6 +208,7 @@ namespace CardShopCoop.Sync
             _hostById.Clear();
             _nextId = 1;
             _remoteCarried.Clear();
+            _remoteReleased.Clear(); // a reused id must not inherit a prior session's ownership window
             _hostCarriedLastTick.Clear();
             _hostRecentlyReleased.Clear();
             _remWindowStart.Clear();
@@ -540,6 +557,7 @@ namespace CardShopCoop.Sync
                     _hostIds.Remove(dead); // Unity fake-null: reference still hashes
                 _hostById.Remove(id);
                 _remoteCarried.Remove(id);
+                _remoteReleased.Remove(id);
                 _hostCarriedLastTick.Remove(id);
                 _hostRecentlyReleased.Remove(id);
             }
@@ -673,32 +691,42 @@ namespace CardShopCoop.Sync
                 // it (B2). Set on the exact box the request resolved to; cleared the
                 // instant the guest sets it down (the else branch below).
                 if (e.Carried) { _remoteCarried.Add(e.Id); SetHostWorkerLock(box, true); }
-                else { _remoteCarried.Remove(e.Id); SetHostWorkerLock(box, false); }
-                // C-c belt+braces (HOST side): skip CONTENT (count/open) when the host box is
-                // OPEN, NOT client-carried, AND already holds items - a NON-empty open box on
-                // the host is being dispensed from by the host/workers and its contents are
-                // host-authoritative. The guest's ClientTick used to echo EVERY box's lagging
-                // mirror count every cycle, and applying that stale count to a box the host was
-                // actively draining refilled it endlessly ("boxes get unlimited items"). A box
-                // the guest carries is theirs, so let its content through. DEVIATION from the
-                // literal spec (which skipped ALL open non-carried boxes): an EMPTY open box
-                // (count 0) is exempt, because that is the guest pulling the FIRST item into an
-                // open box (B1) - a legitimate gain the host must accept or the item is
-                // destroyed host-side and healed away on the guest. A refill source is always
-                // non-empty, so the count>0 carve-out keeps the refill fix intact while
-                // preserving B1. C-a: hostAuthoritative=true also drops pose/store regardless.
-                bool hostOpen = false; int hostCount = 0;
+                else
+                {
+                    // stamp the moment the guest LET GO (only on the real carried->loose
+                    // edge, not on every loose report): that stamp opens the ownership
+                    // grace window the applyContent gate below reads, because THIS very
+                    // request is the one carrying the edits the guest made while holding
+                    // the box. The worker lock still clears unconditionally, exactly as
+                    // before - the window governs content authority, not worker access.
+                    if (_remoteCarried.Remove(e.Id))
+                        _remoteReleased[e.Id] = Time.realtimeSinceStartupAsDouble;
+                    SetHostWorkerLock(box, false);
+                }
+                // CONTENT AUTHORITY, by OWNERSHIP instead of by direction-of-change. The old
+                // gate let any count INCREASE through on an open host box, which is precisely
+                // how the refill survived: the guest's _locallyTouched latch re-armed itself
+                // forever (its only writer is the diff detector), so the guest kept echoing a
+                // STALE HIGH count at a box the HOST was draining, and the gain carve-out
+                // waved every one of those echoes through - the box refilled itself as fast as
+                // the host emptied it. The mirror image of the same carve-out dropped the
+                // guest's DRAIN at set-down (a loss, so it was blocked) and the items duped
+                // back. Both die here: a guest can only change a box's contents while HOLDING
+                // it, and the carry transition is force-sent every frame, so the host always
+                // has the id in _remoteCarried before the set-down's gain arrives. Everything
+                // outside that window is, by construction, a stale mirror echo - direction is
+                // irrelevant, so losses apply inside the window too and the set-down drain
+                // finally lands. The '|| !hostOpen' keeps the strictly-smaller, behavior-
+                // preserving variant for CLOSED boxes: closed-box count applies were always
+                // allowed, and B1's empty-box seeding path (guest pulls the first shelf item
+                // into a box) depends on reaching the content apply at all.
+                // C-a: hostAuthoritative=true also drops pose/store regardless.
+                bool hostOpen = false;
                 try { hostOpen = box.IsBoxOpened(); } catch { }
-                try { hostCount = box.m_ItemCompartment.GetItemCount(); } catch { }
-                // ...and a count INCREASE is exempt too: a guest reclaiming ANOTHER item into
-                // an already-non-empty open box (RemoveItemFromShelf supports multiples) is a
-                // legitimate gain the host must accept - the refill BUG was the guest's stale
-                // echo of untouched boxes, which the touched-only report gating already kills
-                // at the source; this host-side guard is belt-and-braces against the residual
-                // (host + guest working the SAME box within the touch window), where blocking
-                // equal/lower counts suffices.
-                bool applyContent = !(hostOpen && hostCount > 0 && !_remoteCarried.Contains(e.Id)
-                                      && e.Count <= hostCount);
+                bool guestOwns = _remoteCarried.Contains(e.Id)
+                                 || (_remoteReleased.TryGetValue(e.Id, out double grel)
+                                     && Time.realtimeSinceStartupAsDouble - grel < 6.0);
+                bool applyContent = guestOwns || !hostOpen;
                 ApplyToBox(box, e, hostAuthoritative: true, applyContent: applyContent);
             }
             // fan the change out to everyone NOW - with 3+ players the other
@@ -759,6 +787,7 @@ namespace CardShopCoop.Sync
             _hostIds.Remove(box);
             _hostById.Remove((ushort)id);
             _remoteCarried.Remove((ushort)id);
+            _remoteReleased.Remove((ushort)id);
             _hostCarriedLastTick.Remove((ushort)id);
             _hostRecentlyReleased.Remove((ushort)id);
         }
@@ -829,6 +858,14 @@ namespace CardShopCoop.Sync
 
         private void ClientApplyInner(List<Entry> hostList)
         {
+            // baseline merge setup: index the baseline we're ENTERING this apply with, and
+            // start a fresh suppressed-id set. The baseline is what my mirror actually holds,
+            // so every entry whose apply we skip below has to keep its OLD baseline instead
+            // of adopting the host truth we refused to write (see the merge at the bottom).
+            _prevApplied.Clear();
+            for (int i = 0; i < _lastApplied.Count; i++) _prevApplied[_lastApplied[i].Id] = _lastApplied[i];
+            _skippedIds.Clear();
+
             // drop map entries whose box died locally (reconcile destroys, scene churn)
             _removeScratch.Clear();
             foreach (var kv in _byId)
@@ -884,7 +921,7 @@ namespace CardShopCoop.Sync
                 {
                     // shouldn't happen with stable ids - but never rebuild a box in
                     // someone's HANDS; wait for the set-down
-                    if (IsLocallyCarried(box)) continue;
+                    if (IsLocallyCarried(box)) { _skippedIds.Add(want.Id); continue; }
                     _idOf.Remove(box);
                     UnhookIfStored(box);
                     try { box.OnDestroyed(); } catch { }
@@ -912,10 +949,13 @@ namespace CardShopCoop.Sync
                 }
                 // a box in MY hands is mine until I put it down; a box in the HOST's
                 // hands has a transient position we don't copy
-                if (IsLocallyCarried(box)) continue;
+                if (IsLocallyCarried(box)) { _skippedIds.Add(want.Id); continue; }
                 // a stale "carried" echo about a box I JUST released must not hide it
                 if (want.Carried && _recentlyReleased.TryGetValue(want.Id, out double t) && now - t < 6.0)
+                {
+                    _skippedIds.Add(want.Id);
                     continue;
+                }
                 // my own recent edits (took an item, kicked it) win over stale echoes;
                 // my report reaches the host and the next echo agrees. VISIBILITY is
                 // exempt: someone else's pickup/set-down must show here immediately,
@@ -932,8 +972,13 @@ namespace CardShopCoop.Sync
                         try { box.m_ItemCompartment.SetPriceTagVisibility(false); } catch { }
                         box.gameObject.SetActive(false);
                     }
+                    _skippedIds.Add(want.Id);
                     continue;
                 }
+                // a CARRIED entry is a suppression too, even though we call through:
+                // ApplyToBox hides the box and RETURNS before it touches content or pose,
+                // so the host's count/pose never reach my mirror on this pass either.
+                if (want.Carried) _skippedIds.Add(want.Id);
                 ApplyToBox(box, want, applyPosition: !want.Carried);
             }
 
@@ -982,9 +1027,38 @@ namespace CardShopCoop.Sync
                 }
             }
 
-            // remember the applied truth for local-change detection
+            // remember the APPLIED truth for local-change detection - applied, not merely
+            // received. THIS is where the refill latch was born: the old code swallowed the
+            // whole host list as the new baseline even for entries whose apply we had just
+            // suppressed, so the baseline claimed a truth my mirror does not hold. The very
+            // next ClientTick diffed the real box against that phantom baseline, Differs()
+            // came back true, and _locallyTouched re-armed itself - forever. Its ONLY writer
+            // is that diff detector, so once armed it kept the suppression alive, kept the
+            // stale mirror echoing to the host, and the guest re-asserted its old count until
+            // the host adopted it. A suppressed apply must therefore carry its OLD baseline
+            // forward for everything the mirror owns (Type/Count/IsBig/IsOpen/Pos/Yaw/Settled;
+            // Type+IsBig ride along because for a suppressed id they describe the box I
+            // actually have, and identity/rebuild is decided against the LIVE box anyway) and
+            // take only the host's carry/rack bookkeeping (Carried/Stored/StoreShelf/
+            // StoreComp) - ClientTick keys its report decisions off exactly those fields, so
+            // they must stay the host's. Every other id takes the host entry verbatim.
             _lastApplied.Clear();
-            _lastApplied.AddRange(hostList);
+            for (int i = 0; i < hostList.Count; i++)
+            {
+                var he = hostList[i];
+                if (_skippedIds.Count > 0 && _skippedIds.Contains(he.Id)
+                    && _prevApplied.TryGetValue(he.Id, out var keep))
+                {
+                    keep.Id = he.Id;
+                    keep.Carried = he.Carried;
+                    keep.Stored = he.Stored;
+                    keep.StoreShelf = he.StoreShelf;
+                    keep.StoreComp = he.StoreComp;
+                    _lastApplied.Add(keep);
+                    continue;
+                }
+                _lastApplied.Add(he);
+            }
         }
 
         /// <summary>Client: detect the local player's own box edits and request them.</summary>
@@ -1351,12 +1425,13 @@ namespace CardShopCoop.Sync
                 }
 
                 // open/close FIRST: content semantics depend on the resulting state.
-                // C-c belt+braces: applyContent is false when the HOST box is open and NOT
-                // remote-carried (an open box on the host is being worked by host/workers and
-                // its contents are host-authoritative) - so a guest's stale count/open never
-                // stomps it. That guest echo of an open box's lagging count was the endless
-                // item-refill ("boxes get unlimited items"). On the client applyContent is
-                // always true, so nothing changes there.
+                // C-c belt+braces: applyContent is false when the HOST box is open and the
+                // guest does NOT own it (not carrying it, and outside the grace window that
+                // follows its set-down) - an open box nobody is holding is being worked by the
+                // host/workers and its contents are host-authoritative, so a guest's stale
+                // count/open never stomps it. That guest echo of an open box's lagging count
+                // was the endless item-refill ("boxes get unlimited items"). On the client
+                // applyContent is always true, so nothing changes there.
                 if (applyContent && box.IsBoxOpened() != want.IsOpen && MiSetOpenClose != null)
                 {
                     try { MiSetOpenClose.Invoke(box, null); } catch { }

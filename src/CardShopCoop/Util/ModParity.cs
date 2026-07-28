@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
+using HarmonyLib;
 using UnityEngine;
 
 namespace CardShopCoop.Util
@@ -18,6 +19,15 @@ namespace CardShopCoop.Util
         private static string _plugins;
         private static string _enum;
         private static string _cards;
+
+        /// <summary>Set once we have rewritten the on-disk enum registry (a host sync installed,
+        /// or the guest's own file restored). The bytes on disk are now something the RUNNING
+        /// game has never read - EPL loaded its ids at prepatch, long before either write - so
+        /// this process is permanently out of step with its own registry and must not join
+        /// anything until it restarts. CoopCore reads this by name to refuse a join with a
+        /// "restart first" reason instead of letting the player retry into a silent ID desync.
+        /// Never cleared: nothing short of a new process can make it false again.</summary>
+        public static bool RestartRequired;
 
         /// <summary>Hash of the custom-card ID space minted by CreateCards: each
         /// MonsterConfig's "Monster Type = Monster Type ID" mapping, sorted. This is
@@ -103,39 +113,121 @@ namespace CardShopCoop.Util
             return parts;
         }
 
-        /// <summary>EPL's custom-item ID registry on disk. The hash is cached for the
-        /// whole session ON PURPOSE: after an auto-sync rewrites the file, the game must
-        /// restart before the new IDs are actually loaded, and the stale cached hash
-        /// keeps the host politely refusing a premature rejoin until then.</summary>
+        /// <summary>EPL's custom-item ID registry on disk. Nothing about our IDENTITY reads this
+        /// file any more (EnumHash/EnumLines walk the enums THIS PROCESS actually loaded) - it
+        /// survives only as the payload we ship to a guest and write over theirs.
+        /// THE INVARIANT, and the reason for that move: EPL regenerates enum_values.json at
+        /// PREPATCH, on every boot, from whatever content is installed locally, minting ids in
+        /// discovery order. So (a) comparing or installing the FILE can never converge while the
+        /// two players' content differs - each boot re-mints it - and (b) the file on disk stops
+        /// describing the running game the instant anyone writes to it. Hence: a write here MUST
+        /// NOT change our hash mid-session; only a RESTART loads new ids. That is exactly what
+        /// the 1.0.33 "_enum = null" invalidations broke - they let an unrestarted guest re-Hello
+        /// on the strength of bytes the running game had never read, quietly defeating the
+        /// documented restart requirement. Both are gone; see RestartRequired.</summary>
         public static string EnumFilePath()
         {
             return Path.Combine(Application.persistentDataPath, "PrefabLoader", "enum_values.json");
         }
 
+        /// <summary>The enum types EPL mints custom ids into - exactly the six sections a live
+        /// enum_values.json carries, all global-namespace enums in the decompiled Assembly-CSharp.
+        /// Resolved BY NAME at runtime (the mod's usual AccessTools idiom) so a game update that
+        /// renames or drops one costs us that one section instead of throwing a TypeLoadException
+        /// straight through the handshake.</summary>
+        private static readonly string[] ModdedEnumTypeNames =
+        {
+            "EObjectType", "EDecoObject", "EItemType",
+            "ECardExpansionType", "ERarity", "ECollectionPackType"
+        };
+
+        /// <summary>First id EPL hands out. Vanilla members are a dense 0..~135 per enum (not one
+        /// explicit value in any of the six decompiled enums), so everything from here up is
+        /// modded content - the only slice of the ID space that can differ between two players.</summary>
+        private const long ModdedIdFloor = 200000;
+
+        /// <summary>Hash of the modded ID space THIS PROCESS is actually running. We ask the
+        /// loaded enum types what ids they hold rather than reading enum_values.json, because the
+        /// file is not the truth: EPL re-mints it at prepatch every boot (see EnumFilePath), so
+        /// file-based comparison chased a moving target and file-based installation could never
+        /// converge. The runtime walk describes what our game will really do with an incoming
+        /// ID - and it cannot be faked by dropping a matching file in place, because nothing
+        /// short of a restart changes it. Falls back to the old canonical FILE parse only when
+        /// the walk finds nothing modded at all, and still ends at "none" on a clean vanilla
+        /// machine: the Hello check treats "none" as "unmodded, don't gate on it".</summary>
         public static string EnumHash()
         {
             if (_enum != null) return _enum;
             try
             {
+                var lines = RuntimeEnumEntries();
+                if (lines.Count > 0) { _enum = Short(Sha1(string.Join("\n", lines))); return _enum; }
+                // Zero modded ids in memory. Either the machine is vanilla ("none", as before),
+                // or the walk came up empty against a registry that does exist - in which case
+                // keep the pre-existing file behavior so this is never WORSE than 1.0.33. Hash
+                // the registry's MEANING, not its bytes: EPL re-serializes the file on every
+                // boot (ordering / whitespace churn), and a byte hash made two LOGICALLY
+                // IDENTICAL registries mismatch forever - the endless "synced - RESTART -
+                // rejoin" loop (field report: "custom card database error, regardless of
+                // multiple restarts, via LAN"). Byte hash remains the last resort if the format
+                // ever changes under the parser.
                 string p = EnumFilePath();
                 if (!File.Exists(p)) { _enum = "none"; return _enum; }
-                // Hash the registry's MEANING, not its bytes. EPL re-serializes
-                // enum_values.json on every boot (ordering / whitespace / rewrite churn),
-                // so a byte hash made two LOGICALLY IDENTICAL registries mismatch forever:
-                // the sync installed a byte-copy of the host's file, the next boot rewrote
-                // it, the next Hello re-mismatched - an endless "synced - RESTART - rejoin"
-                // loop that no number of restarts escapes (field report: "custom card
-                // database error, regardless of multiple restarts, via LAN"). Canonical
-                // form: every "EnumType:Name=id" pair, sorted - byte-order-proof. If the
-                // parse ever fails (format change), fall back to the old byte hash: never
-                // worse than before.
-                var lines = CanonicalEnumLines(File.ReadAllText(p));
-                _enum = lines != null && lines.Count > 0
-                    ? Short(Sha1(string.Join("\n", lines)))
+                var fileLines = CanonicalEnumLines(File.ReadAllText(p));
+                _enum = fileLines != null && fileLines.Count > 0
+                    ? Short(Sha1(string.Join("\n", fileLines)))
                     : Short(Sha1Bytes(File.ReadAllBytes(p)));
             }
             catch { _enum = "none"; }
             return _enum;
+        }
+
+        /// <summary>The exact sorted "EnumType:Name=id" lines EnumHash hashes, exposed as a list
+        /// so a mismatch can be SHOWN (which custom item, whose id) instead of only rejected -
+        /// the same pairing PluginHash/PluginList and CardsHash/CardsList already use. Both read
+        /// RuntimeEnumEntries(), so the list a player is shown can never disagree with the hash
+        /// that gated them. Empty when nothing modded is loaded - including the vanilla "none"
+        /// case and the file-fallback branch above, where there are no runtime lines to name and
+        /// the caller's generic wording is the honest answer. CoopCore calls this by name.</summary>
+        public static List<string> EnumLines()
+        {
+            try { return RuntimeEnumEntries(); }
+            catch { return new List<string>(); }
+        }
+
+        /// <summary>The modded enum ids resolved from the LOADED types, sorted - the single source
+        /// both EnumHash and EnumLines read. EPL injects its minted members into these enums at
+        /// prepatch, so Enum.GetNames/GetValues report them for real; anything below
+        /// ModdedIdFloor is vanilla and identical for everyone, so it is left out. A type that
+        /// won't resolve is skipped, not fatal: a partial answer still beats no handshake.</summary>
+        private static List<string> RuntimeEnumEntries()
+        {
+            var lines = new List<string>();
+            foreach (var typeName in ModdedEnumTypeNames)
+            {
+                try
+                {
+                    var t = AccessTools.TypeByName(typeName);
+                    if (t == null || !t.IsEnum) continue;
+                    // GetNames and GetValues are documented to run in the same (binary-value)
+                    // order, so index i is one member - walking them in parallel keeps aliases
+                    // (two names, one id) as the two distinct lines the registry file shows.
+                    var names = Enum.GetNames(t);
+                    var values = Enum.GetValues(t);
+                    int n = Math.Min(names.Length, values.Length);
+                    for (int i = 0; i < n; i++)
+                    {
+                        long id;
+                        try { id = Convert.ToInt64(values.GetValue(i)); }
+                        catch { continue; }
+                        if (id < ModdedIdFloor) continue;
+                        lines.Add(t.Name + ":" + names[i] + "=" + id);
+                    }
+                }
+                catch (Exception e) { CoopPlugin.Log.LogWarning("enum walk (" + typeName + "): " + e.Message); }
+            }
+            lines.Sort(StringComparer.Ordinal);
+            return lines;
         }
 
         /// <summary>Parse EPL's two-level registry ({ "EnumType": { "Name": id, ... }, ... })
@@ -167,7 +259,9 @@ namespace CardShopCoop.Util
         }
 
         /// <summary>Install the host's registry over ours, keeping timestamped backups
-        /// (the newest 3). Returns a user-facing status line.</summary>
+        /// (the newest 3). Returns a user-facing status line, and raises RestartRequired when
+        /// bytes actually landed - the "already synced" early-out does NOT raise it, because
+        /// nothing was written and this process is still in step with its own file.</summary>
         public static string InstallEnumFile(byte[] hostBytes)
         {
             string p = EnumFilePath();
@@ -200,7 +294,13 @@ namespace CardShopCoop.Util
                     Directory.CreateDirectory(Path.GetDirectoryName(p));
                 }
                 File.WriteAllBytes(p, hostBytes);
-                _enum = null; // the on-disk registry changed: never serve a stale hash
+                // Deliberately NO cache invalidation here (see EnumFilePath): our identity is
+                // what this process loaded at prepatch, and writing the file changed none of it.
+                // The 1.0.33 "_enum = null" re-read these fresh bytes and handed the guest a
+                // hash matching the host while the running game still held the old ids - a pass
+                // through the very gate the restart requirement exists to close. The flag below
+                // is the honest version of that signal.
+                RestartRequired = true;
                 // Drop a marker so the mod KNOWS the machine-global registry is now the HOST's,
                 // not the guest's own. Without a restore path a mismatched-enum join used to
                 // silently brick every modded SOLO save ("data lost") until the file was fixed
@@ -250,8 +350,10 @@ namespace CardShopCoop.Util
         /// first copies the CURRENT (host's) file to .hostcopy so nothing is ever destroyed, then
         /// restores the backup over enum_values.json and clears the marker. The game reads the
         /// registry once at startup, so <paramref name="message"/> tells the user to restart
-        /// before loading solo saves. Returns false (with an explaining message) when no backup
-        /// exists to restore. CoopCore calls this by name.</summary>
+        /// before loading solo saves - and a successful restore raises RestartRequired, since
+        /// the ids this process is running are now the HOST's while the file is ours. Returns
+        /// false (with an explaining message) when no backup exists to restore. CoopCore calls
+        /// this by name.</summary>
         public static bool RestoreEnumBackup(out string message)
         {
             string p = EnumFilePath();
@@ -276,7 +378,10 @@ namespace CardShopCoop.Util
                 if (File.Exists(p))
                     File.Copy(p, p + ".hostcopy", overwrite: true);
                 File.Copy(newest, p, overwrite: true);
-                _enum = null; // the on-disk registry changed: never serve a stale hash
+                // Same invariant as InstallEnumFile (see EnumFilePath): the registry on disk is
+                // the guest's own again, but the running game is still holding the HOST's ids
+                // from prepatch. Nothing about our hash may move until a restart reloads them.
+                RestartRequired = true;
                 try { File.Delete(EnumMarkerPath()); } catch { }
                 message = "your card database was restored from backup - RESTART the game before loading your solo saves";
                 return true;

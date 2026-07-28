@@ -478,6 +478,15 @@ namespace CardShopCoop
             if (Role != CoopRole.None) { ErrorLine = "Already in a session."; return; }
             if (InGameLevel()) { ErrorLine = "Go to the main menu first, then accept the invite again."; return; }
             if (!_steamLobby.SteamAvailable()) { ErrorLine = "Steam isn't running."; return; }
+            // FIX C: the card database on disk was replaced by the host's copy this session,
+            // but THIS process is still running the old one (the registry is read once at
+            // startup). Joining now would hand the host our stale ids and earn another
+            // rejection - say so plainly instead of burning a whole handshake on it.
+            if (Util.ModParity.RestartRequired)
+            {
+                ErrorLine = "card database was synced - RESTART the game before joining";
+                return;
+            }
             Role = CoopRole.Client;
             GuestBorrowedWorld = true; // block ALL saves until we're back at the title screen
             IsSteamSession = true;
@@ -521,8 +530,172 @@ namespace CardShopCoop
                 // the host reads these only after the version check passes). Cap 256 each.
                 WriteCappedList(bw, Util.ModParity.PluginList());
                 WriteCappedList(bw, Util.ModParity.CardsList());
+                // FIX C: append this process's RUNTIME enum registry (gzipped). The host no
+                // longer compares whole-file hashes - it hunts for real ID CONFLICTS (the same
+                // "Type:Name" bound to a different id on the two PCs), and for that it needs
+                // our LINES, not our hash. Measured ~6.6KB gzipped on a full modded install,
+                // sent exactly once per join - never in a tick loop. Append-only after the
+                // FIX E3 lists, and the wire is version-gated (the host reads none of this
+                // until the version string matched), so nothing older can mis-read it.
+                byte[] gzEnum;
+                try
+                {
+                    var enumRaw = System.Text.Encoding.UTF8.GetBytes(
+                        string.Join("\n", Util.ModParity.EnumLines()));
+                    gzEnum = Msg.Gzip(enumRaw);
+                }
+                catch (Exception e)
+                {
+                    // never let a registry read failure abort the handshake: an EMPTY blob
+                    // reads on the host as "no modded entries", which conflicts with nobody -
+                    // exactly how the old "none" hash failed open.
+                    CoopPlugin.Log.LogWarning("enum lines for Hello: " + e.Message);
+                    gzEnum = Msg.Gzip(new byte[0]);
+                }
+                bw.Write(gzEnum.Length);
+                bw.Write(gzEnum);
             });
         }
+
+        /// <summary>FIX C: our own runtime registry lines, never throwing into the handshake.
+        /// An empty list means "nothing modded here", which can never conflict.</summary>
+        private static List<string> SafeEnumLines()
+        {
+            try { return Util.ModParity.EnumLines() ?? new List<string>(); }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("enum lines: " + e.Message);
+                return new List<string>();
+            }
+        }
+
+        /// <summary>FIX C wire cap. The real registry is ~100KB of text / ~7KB gzipped, so a
+        /// quarter-megabyte is generous for anything honest and small enough that a malformed
+        /// (or hostile) Hello - which arrives BEFORE the peer is accepted - can't make the
+        /// host allocate its way into trouble.</summary>
+        private const int EnumBlobCap = 256 * 1024;
+
+        /// <summary>FIX C wire helper: read the joiner's gzipped runtime registry and split it
+        /// into "Type:Name=id" lines. The compressed length is capped before ReadBytes and the
+        /// decompressed stream is cut off at EnumBlobCap (the same spirit as ReadCappedList
+        /// capping its count). Anything unreadable returns an empty list - which reads as "no
+        /// modded entries" and conflicts with nobody, i.e. it fails OPEN exactly like the old
+        /// "none" hash. <paramref name="digest"/> fingerprints what they sent, so a rejoin
+        /// with the SAME registry can be told from a genuinely changed one.</summary>
+        private static List<string> ReadCappedEnumBlob(BinaryReader br, out string digest)
+        {
+            digest = "none";
+            var lines = new List<string>();
+            try
+            {
+                int gzLen = br.ReadInt32();
+                if (gzLen <= 0 || gzLen > EnumBlobCap) return lines;
+                var gz = br.ReadBytes(gzLen);
+                if (gz.Length != gzLen) return lines; // truncated payload
+                string text = GunzipCapped(gz, EnumBlobCap);
+                if (text == null) return lines;
+                digest = Fnv(text).ToString("X8");
+                foreach (var line in text.Split('\n'))
+                {
+                    string s = line.Trim();
+                    if (s.Length > 0) lines.Add(s);
+                }
+            }
+            catch { }
+            return lines;
+        }
+
+        /// <summary>Bounded gunzip. Msg.Gunzip grows without limit, which is fine for our own
+        /// world transfers (we asked for them) but not for a blob an unaccepted peer hands us.
+        /// Returns null when the payload isn't valid gzip or blows past the cap.</summary>
+        private static string GunzipCapped(byte[] data, int cap)
+        {
+            try
+            {
+                using (var src = new MemoryStream(data, writable: false))
+                using (var gz = new System.IO.Compression.GZipStream(src, System.IO.Compression.CompressionMode.Decompress))
+                using (var dst = new MemoryStream())
+                {
+                    var buf = new byte[8192];
+                    int n;
+                    while ((n = gz.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        if (dst.Length + n > cap) return null; // junk or a decompression bomb
+                        dst.Write(buf, 0, n);
+                    }
+                    return System.Text.Encoding.UTF8.GetString(dst.ToArray());
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>FIX C: the ONLY registry difference that can corrupt a shared world - the
+        /// same "Type:Name" bound to DIFFERENT ids on the two machines. Entries only one side
+        /// has are NOT a conflict: nobody can spawn what the other doesn't know about, and the
+        /// existing catalog-differs warning already tells both players their sets differ. A
+        /// side with no modded entries at all conflicts with nobody, which preserves the old
+        /// "none" hash guard. Each result reads "Type:Name -&gt; yours &lt;id&gt;, host &lt;id&gt;".</summary>
+        private static List<string> EnumConflicts(List<string> theirs, List<string> ours)
+        {
+            var found = new List<string>();
+            if (theirs == null || theirs.Count == 0 || ours == null || ours.Count == 0) return found;
+            var theirMap = EnumMap(theirs);
+            var ourMap = EnumMap(ours);
+            foreach (var kv in theirMap)
+            {
+                if (ourMap.TryGetValue(kv.Key, out string ourId) && ourId != kv.Value)
+                    found.Add($"{kv.Key} -> yours {kv.Value}, host {ourId}");
+            }
+            found.Sort(StringComparer.Ordinal);
+            return found;
+        }
+
+        /// <summary>"Type:Name=id" -&gt; { "Type:Name": "id" }. Split on the LAST '=' so a name
+        /// containing one still keys correctly; lines without a usable '=' are ignored.</summary>
+        private static Dictionary<string, string> EnumMap(List<string> lines)
+        {
+            var m = new Dictionary<string, string>();
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrEmpty(line)) continue;
+                int eq = line.LastIndexOf('=');
+                if (eq <= 0 || eq == line.Length - 1) continue;
+                m[line.Substring(0, eq)] = line.Substring(eq + 1); // last wins on a dup key
+            }
+            return m;
+        }
+
+        /// <summary>Name up to five conflicting entries in a reject line: a bare count leaves
+        /// the player with nothing to search their content packs for.</summary>
+        private static string DescribeConflicts(List<string> conflicts)
+        {
+            const int Max = 5;
+            int n = Math.Min(conflicts.Count, Max);
+            // "; " between entries: each entry already contains a comma ("yours X, host Y")
+            string s = string.Join("; ", conflicts.GetRange(0, n).ToArray());
+            if (conflicts.Count > n) s += $" (+{conflicts.Count - n} more)";
+            if (s.Length > 400) s = s.Substring(0, 397) + "...";
+            return s;
+        }
+
+        /// <summary>FIX C: identity for the enum-sync memory below. The Steam id would be
+        /// ideal, but the transport keeps its connId-&gt;CSteamID map private - and connId is no
+        /// good anyway: a rejected guest is KICKED, restarts the game and comes back on a fresh
+        /// connId, which is precisely the round trip the loop-breaker has to recognise. The
+        /// player name is the one value that survives it, so that is the key (connId only as a
+        /// last resort, when the name is blank).</summary>
+        private static string PeerSyncKey(string name, int connId)
+        {
+            string n = (name ?? "").Trim().ToLowerInvariant();
+            return n.Length > 0 ? "n:" + n : "c:" + connId;
+        }
+
+        /// <summary>FIX C loop-breaker memory (host only): peer identity -&gt; digest of the
+        /// registry that peer sent when we last handed them our enum file. Re-sending the same
+        /// file to a peer whose registry hasn't changed is the endless "synced - RESTART -
+        /// rejoin" loop, so the second time around they get an honest explanation instead of
+        /// another copy of a file that cannot help them. Cleared in Shutdown.</summary>
+        private readonly Dictionary<string, string> _enumSyncSentTo = new Dictionary<string, string>();
 
         /// <summary>FIX E3 wire helper: [int count (<=256)] then that many strings.</summary>
         private static void WriteCappedList(BinaryWriter bw, List<string> list)
@@ -694,6 +867,22 @@ namespace CardShopCoop
             {
                 if (isAdd)
                 {
+                    // UNKNOWN-CARD guard - the mirror of the negative-reduce guard below, and
+                    // the price of tolerating extra registry entries in the handshake (FIX C):
+                    // a card can now arrive for a content pack THIS PC doesn't have. AddCard
+                    // resolves its slot through CPlayerData.GetCardSaveIndex, whose loop over
+                    // InventoryBase.GetShownMonsterList simply leaves the index at 0 when the
+                    // monster isn't in the list - and GetShownMonsterList itself falls back to
+                    // the TETRAMON list for an expansion outside the vanilla switch. So an
+                    // unknown card doesn't error: it silently credits save index 0, i.e. the
+                    // receiver's FIRST Tetramon card, quietly inflating a real card's count
+                    // (and, for a graded one, filing a bogus entry in the graded album).
+                    // Refuse instead, and return false so the host's relay doesn't spread it.
+                    if (!CardSetInstalledHere(card))
+                    {
+                        CoopPlugin.Log.LogWarning($"card delta: {card.monsterType} is from a card set you don't have installed - skipped");
+                        return false;
+                    }
                     // Register the host's cert with Grading Overhaul BEFORE AddCard, so its
                     // anti-cheat AddCard prefix sees the cert burned+bound and does NOT
                     // re-encode this card as FAKE (the ~20s changing-grade churn). BindCert
@@ -760,6 +949,32 @@ namespace CardShopCoop
             CoopPlugin.Log.LogInfo($"card delta applied: {(isAdd ? "+" : "-")}{amount} {card.monsterType}{(card.cardGrade > 0 ? $" (grade {card.cardGrade})" : card.isFoil ? " (foil)" : "")}");
             RefreshOpenBinder();
             return true;
+        }
+
+        /// <summary>True when THIS install can actually place the card: its expansion has a real
+        /// collected list (CPlayerData.GetCardCollectedList returns null for an expansion outside
+        /// the vanilla switch) AND its monster is in that expansion's shown list - the exact pair
+        /// CPlayerData.GetCardSaveIndex needs to land on the right slot. Anything else is a card
+        /// from content packs we don't have installed. Errs toward REFUSING: a lookup that throws
+        /// can't be trusted to index safely either, and a skipped card is a message we can chase
+        /// in the log, while a mis-indexed one is a silent album corruption.</summary>
+        private static bool CardSetInstalledHere(CardData card)
+        {
+            try
+            {
+                // graded or not, the slot comes from the same (expansion, monster) pair
+                if (CPlayerData.GetCardCollectedList(card.expansionType, card.isDestiny) == null) return false;
+                var shown = InventoryBase.GetShownMonsterList(card.expansionType);
+                if (shown == null) return false;
+                for (int i = 0; i < shown.Count; i++)
+                    if (shown[i] == card.monsterType) return true;
+                return false;
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("card set check: " + e.Message);
+                return false;
+            }
         }
 
         /// <summary>Apply a received card price. For an ENCODED (>10) graded grade, register the
@@ -1374,6 +1589,14 @@ namespace CardShopCoop
             if (InGameLevel()) { ErrorLine = "Join from the main menu (Title screen)."; return; }
             ip = (ip ?? "").Trim();
             if (ip.Length == 0) { ErrorLine = "Enter the host's IP address."; return; }
+            // FIX C: same restart gate as JoinSteam - the on-disk registry was synced from a
+            // host, but this process still has the OLD one loaded, so a join can only end in
+            // another rejection until the game is restarted.
+            if (Util.ModParity.RestartRequired)
+            {
+                ErrorLine = "card database was synced - RESTART the game before joining";
+                return;
+            }
 
             CoopPlugin.LastJoinIP.Value = ip;
             Role = CoopRole.Client;
@@ -1860,6 +2083,7 @@ namespace CardShopCoop
             _deliveringHeld = false;
             _chargeVerdicts.Clear();
             _lastDeclineToast.Clear();
+            _enumSyncSentTo.Clear(); // FIX C: the loop-breaker memory is per hosting session
             _saveBuf = null;
             _saveExpected = -1;
             _pendingSave = null;
@@ -2757,6 +2981,9 @@ namespace CardShopCoop
                         string name = br.ReadString();
                         string password = br.ReadString();
                         string pluginHash = br.ReadString();
+                        // FIX C: the whole-file enum hash is still on the wire (field order
+                        // matters) but no longer GATES anything - a hash can't tell a harmless
+                        // extra entry from a real ID clash. Kept for the diagnostic log below.
                         string enumHash = br.ReadString();
                         string cardsHash = br.ReadString();
                         // FIX E3: these follow cardsHash (append-only wire). Same-version
@@ -2764,6 +2991,10 @@ namespace CardShopCoop
                         // wording below.
                         var theirPlugins = ReadCappedList(br);
                         var theirCards = ReadCappedList(br);
+                        // FIX C: ...and the joiner's runtime registry lines follow those. Read
+                        // in WIRE ORDER here even though the conflict check that uses them sits
+                        // further down with the other parity gates.
+                        var theirEnumLines = ReadCappedEnumBlob(br, out string theirEnumDigest);
                         if (HostPassword.Length > 0 && password != HostPassword)
                         {
                             RejectConn(msg.ConnId, "wrong password");
@@ -2779,24 +3010,54 @@ namespace CardShopCoop
                                 ?? "your mod set differs from the host's - both players need identical mods (same versions)");
                             break;
                         }
-                        string hostEnum = Util.ModParity.EnumHash();
-                        if (enumHash != "none" && hostEnum != "none" && enumHash != hostEnum)
+                        // FIX C: registries no longer have to be IDENTICAL, only
+                        // NON-CONFLICTING. Extra entries on either side are fine - neither
+                        // player can spawn what the other doesn't know about, and the
+                        // catalog-differs warning already says the sets differ. What actually
+                        // corrupts a shared world is the SAME "Type:Name" bound to DIFFERENT
+                        // ids on the two PCs, so that is the only thing we reject on now.
+                        var conflicts = EnumConflicts(theirEnumLines, SafeEnumLines());
+                        if (conflicts.Count > 0)
                         {
-                            // send our registry along with the rejection: the client
-                            // backs theirs up, installs ours, and only has to restart -
-                            // no more hand-copying enum_values.json between PCs
-                            try
+                            CoopPlugin.Log.LogInfo($"enum check: {name} hash {enumHash} vs host {Util.ModParity.EnumHash()} - {conflicts.Count} real conflict(s)");
+                            // LOOP-BREAKER. The old code sent our registry and rejected, every
+                            // single time - but the guest's file is REBUILT at startup from the
+                            // content packs installed on THEIR PC, so our copy never survives
+                            // the restart it demands. That's the endless "synced - RESTART -
+                            // rejoin" report. So: hand over the file ONCE per (peer, registry),
+                            // and if they come back still conflicting with the SAME registry,
+                            // stop promising them that another restart will fix it.
+                            string peerKey = PeerSyncKey(name, msg.ConnId);
+                            bool alreadySent = _enumSyncSentTo.TryGetValue(peerKey, out string sentFor)
+                                               && sentFor == theirEnumDigest;
+                            if (!alreadySent)
                             {
-                                var enumBytes = System.IO.File.ReadAllBytes(Util.ModParity.EnumFilePath());
-                                var gz = Msg.Gzip(enumBytes);
-                                Send(msg.ConnId, MsgType.EnumSync, bw =>
+                                // send our registry along with the rejection: the client
+                                // backs theirs up, installs ours, and only has to restart -
+                                // no more hand-copying enum_values.json between PCs
+                                try
                                 {
-                                    bw.Write(gz.Length);
-                                    bw.Write(gz);
-                                });
+                                    var enumBytes = System.IO.File.ReadAllBytes(Util.ModParity.EnumFilePath());
+                                    var gz = Msg.Gzip(enumBytes);
+                                    Send(msg.ConnId, MsgType.EnumSync, bw =>
+                                    {
+                                        bw.Write(gz.Length);
+                                        bw.Write(gz);
+                                    });
+                                }
+                                catch (Exception e) { CoopPlugin.Log.LogWarning("enum sync send: " + e.Message); }
+                                _enumSyncSentTo[peerKey] = theirEnumDigest;
+                                RejectConn(msg.ConnId,
+                                    "your custom-card database conflicts with the host's - it has been synced from the host; RESTART your game, then join again (e.g. "
+                                    + DescribeConflicts(conflicts) + ")");
                             }
-                            catch (Exception e) { CoopPlugin.Log.LogWarning("enum sync send: " + e.Message); }
-                            RejectConn(msg.ConnId, "your custom-card database differed - it has been synced from the host; RESTART your game, then join again");
+                            else
+                            {
+                                // Second time around with the same registry: the honest answer.
+                                RejectConn(msg.ConnId,
+                                    "your card database still conflicts after syncing - the game rebuilds it at startup from the content packs installed on YOUR PC, so copying the host's file cannot fix this; you and the host need the same content packs (conflicting: "
+                                    + DescribeConflicts(conflicts) + ")");
+                            }
                             break;
                         }
                         // Custom CreateCards/CardForge cards aren't covered by the enum
@@ -3084,6 +3345,16 @@ namespace CardShopCoop
                             {
                                 if (dayChanged && InGameLevel() && MiDayReset != null)
                                 {
+                                    // FIX A-hook: the host advanced the day, so the end-of-day
+                                    // recap this joiner may still be reading is now STALE - and
+                                    // its fullscreen lock is what has his movement pinned. Close
+                                    // it FIRST (client-safe no-op when no report is open), so he
+                                    // walks into the new morning instead of being frozen in
+                                    // yesterday's numbers while the environment resets around
+                                    // him. Guarded on its own: a hiccup in the recap must never
+                                    // cost us the day reset below.
+                                    try { Sync.ReportSync.CloseClientReport(); }
+                                    catch (Exception e) { CoopPlugin.Log.LogWarning("day change: closing stale report: " + e.Message); }
                                     // Run the game's own new-day environment reset (skybox, GI,
                                     // 08:00 clock, morning music) and let exactly one
                                     // OnDayStarted through so the HUD/day label refresh.

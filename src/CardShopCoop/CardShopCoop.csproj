@@ -12,7 +12,7 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
-    <GamePath>C:\Program Files (x86)\Steam\steamapps\common\TCG Card Shop Simulator</GamePath>
+    <GamePath>D:\SteamLibrary\steamapps\common\TCG Card Shop Simulator</GamePath>
     <ManagedPath>$(GamePath)\Card Shop Simulator_Data\Managed</ManagedPath>
     <BepInExPath>$(GamePath)\BepInEx\core</BepInExPath>
   </PropertyGroup>

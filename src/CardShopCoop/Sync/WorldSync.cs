@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using HarmonyLib;
+using UnityEngine;
 
 namespace CardShopCoop.Sync
 {
@@ -27,6 +28,15 @@ namespace CardShopCoop.Sync
         private struct CompState { public int Type; public int Count; }
 
         private readonly Dictionary<int, CompState> _last = new Dictionary<int, CompState>();
+        /// <summary>Client role only: when this machine last reported a change of its own for
+        /// a compartment. Protects a fresh local edit from being rolled back by a host echo
+        /// (or the 12s full-state heal) that was built BEFORE our request landed - mirrors
+        /// CardShelfSync's guard.</summary>
+        private readonly Dictionary<int, double> _locallyChanged = new Dictionary<int, double>();
+        /// <summary>Memoized "can this machine actually build this item type" verdicts. The 12s
+        /// full-state heal can carry every compartment in the shop, so the ItemData lookup must
+        /// not be repeated per entry per heal.</summary>
+        private readonly Dictionary<int, bool> _resolvable = new Dictionary<int, bool>();
         private readonly Dictionary<WarehouseShelf, List<ShelfCompartment>> _whComps
             = new Dictionary<WarehouseShelf, List<ShelfCompartment>>();
         private float _timer;
@@ -57,6 +67,8 @@ namespace CardShopCoop.Sync
         public void Reset()
         {
             _last.Clear();
+            _locallyChanged.Clear();
+            _resolvable.Clear(); // a different host/save can mean a different content-pack set
             _whComps.Clear();
             _timer = 0.35f; // staggered phase: engines must not all walk on the same frame
             _sm = null;
@@ -146,6 +158,10 @@ namespace CardShopCoop.Sync
             if (changes == null) changes = new List<Entry>();
             if (changes.Count >= 512) return; // leave un-recorded; picked up next tick
             _last[key] = new CompState { Type = type, Count = count };
+            // a guest's change is only a REQUEST: it has to round-trip to the host before it
+            // comes back as truth. Stamp it so an in-flight host echo (or the 12s full-state
+            // heal, built before our request landed) can't roll the placement back under us.
+            if (CoopCore.Role == CoopRole.Client) _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
             changes.Add(new Entry { Key = key, Type = type, Count = count });
         }
 
@@ -156,18 +172,80 @@ namespace CardShopCoop.Sync
             if (sm == null) return;
             foreach (var e in entries)
             {
+                ShelfCompartment comp = null;
                 try
                 {
-                    var comp = Resolve(sm, e.Key);
+                    // my own fresh edit is still round-tripping to the host; a stale
+                    // echo (or the periodic full-state heal) must not stomp it
+                    if (CoopCore.Role == CoopRole.Client && _locallyChanged.TryGetValue(e.Key, out double t)
+                        && Time.realtimeSinceStartupAsDouble - t < 6.0)
+                        continue;
+                    comp = Resolve(sm, e.Key);
                     if (comp == null) continue;
-                    ApplyCompartment(comp, e.Type, e.Count);
-                    _last[e.Key] = new CompState { Type = e.Type, Count = e.Count };
+                    // an item type this machine can't build is SKIPPED whole - never cleared.
+                    // ApplyCompartment tears the compartment down before it discovers the type
+                    // is unusable, so a missing content pack would silently empty the shelf
+                    // here. (count == 0 needs no type at all - it's a pure Clear, and
+                    // ApplyCompartment never touches SetCompartmentItemType on that path - so
+                    // an "emptied" instruction is still honoured for an unknown type.)
+                    if (e.Count == 0 || CanResolve(e.Type))
+                        ApplyCompartment(comp, e.Type, e.Count);
                 }
                 catch (Exception ex)
                 {
                     CoopPlugin.Log.LogWarning($"WorldSync apply {e.Key:X}: {ex.Message}");
                 }
+                if (comp == null) continue; // guarded/unresolved: leave our baseline alone
+                try
+                {
+                    // Baseline is ALWAYS what the compartment ACTUALLY holds now - never what
+                    // was requested. A truncated apply (more items than the shelf has slots),
+                    // a mid-apply throw, or a skipped unresolvable type would otherwise leave
+                    // _last claiming the requested value; the next snapshot walk then reads the
+                    // real (smaller) value as a LOCAL change and reports the shortfall back -
+                    // a mirror that couldn't satisfy an apply wiping the side that could.
+                    _last[e.Key] = new CompState { Type = (int)comp.GetItemType(), Count = comp.GetItemCount() };
+                }
+                catch (Exception ex)
+                {
+                    CoopPlugin.Log.LogWarning($"WorldSync read-back {e.Key:X}: {ex.Message}");
+                }
             }
+        }
+
+        /// <summary>
+        /// Can THIS machine actually build a compartment of this item type? A peer running a
+        /// content pack we don't have sends type ids our ItemData table can't answer for, and
+        /// SetCompartmentItemType would then hand CalculatePositionList a zero itemDimension -
+        /// a divide that leaves the compartment with no usable slots, so the clear-and-rebuild
+        /// clears and never rebuilds. Verdicts are memoized (the 12s full-state heal can carry
+        /// every compartment in the shop) and the warning is emitted once per type.
+        /// </summary>
+        private bool CanResolve(int type)
+        {
+            // EItemType.None is the empty compartment - always applicable, and its ItemData is
+            // a blank placeholder whose dimensions are legitimately zero.
+            if (type == (int)EItemType.None) return true;
+            if (_resolvable.TryGetValue(type, out bool known)) return known;
+
+            bool ok = false;
+            try
+            {
+                var data = InventoryBase.GetItemData((EItemType)type); // throws on an id past our table
+                if (data != null)
+                {
+                    var dim = data.itemDimension;
+                    ok = dim.x > 0f && dim.y > 0f && dim.z > 0f;
+                }
+            }
+            catch (Exception ex)
+            {
+                CoopPlugin.Log.LogWarning($"WorldSync item type {type} lookup: {ex.Message}");
+            }
+            _resolvable[type] = ok;
+            if (!ok)
+                CoopPlugin.Log.LogWarning($"WorldSync: shelf item type {type} is from a content pack you don't have - that compartment will look empty for you");
+            return ok;
         }
 
         private static ShelfCompartment Resolve(ShelfManager sm, int key)

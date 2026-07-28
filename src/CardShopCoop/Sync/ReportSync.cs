@@ -18,12 +18,13 @@ namespace CardShopCoop.Sync
     /// the same snapshot is pushed with an open-screen flag so both screens show the
     /// same numbers at the same time.
     ///
-    /// Client: the report screen opens READ-ONLY. Its continue button must not advance
-    /// anything - the vanilla path would run LightManager.GoNextDay and charge the
-    /// game-event host fee through the forwarded ReduceCoin (a second, phantom charge).
-    /// So the client's button is rerouted to plain CloseScreen(), which conveniently IS
-    /// the vanilla bookkeeping (append past-list, reset day collect) that keeps the
-    /// phone's report history aligned with the host's.
+    /// Client: the report screen opens READ-ONLY. Its buttons must not advance anything -
+    /// the vanilla path would run LightManager.GoNextDay and charge the game-event host
+    /// fee through the forwarded ReduceCoin (a second, phantom charge). So BOTH the
+    /// click-anywhere continue and the visible next-day button are rerouted to
+    /// CloseClientReport(), which conveniently IS the vanilla bookkeeping (append
+    /// past-list, reset day collect) that keeps the phone's report history aligned with
+    /// the host's - and is what hands the joiner his movement back.
     /// </summary>
     public class ReportSync
     {
@@ -76,6 +77,9 @@ namespace CardShopCoop.Sync
             _reviewSeq = -1;
             s_openPending = false;
             s_reviewsDirty = false;
+            // last session's recap must not ride along: a stale copy here would be filed
+            // into the NEXT save's phone history the first time the joiner closes a report
+            s_clientOpenReport = default(GameReportDataCollect);
             _screen = null;
             _ipc = null;
         }
@@ -164,22 +168,25 @@ namespace CardShopCoop.Sync
             try { lerping = FiIsLerping != null && (bool)FiIsLerping.GetValue(__instance); } catch { }
             if (lerping) return true; // vanilla behavior: fast-forward the count-up
             // Vanilla would gate on GetHasDayEnded() - which CoopCore pins false on the
-            // client - leaving the joiner locked in the screen forever. Close instead;
-            // CloseScreen is also the vanilla past-list append + day reset. Re-assert
-            // the report this screen actually displayed so a host that already moved
-            // on (and healed a reset report over us) can't make us append zeros.
-            try
-            {
-                CPlayerData.m_GameReportDataCollect = s_clientOpenReport;
-                EndOfDayReportScreen.CloseScreen();
-            }
-            catch { }
+            // client - leaving the joiner locked in the screen forever. Close instead.
+            CloseClientReport();
             return false;
         }
 
         public static bool NextDayBlockPrefix()
         {
-            return CoopCore.Role != CoopRole.Client;
+            if (CoopCore.Role != CoopRole.Client) return true;
+            // This is the big visible "next day" button, and it used to be a silent
+            // no-op on a joiner: the ONLY way out of the recap was the click-anywhere
+            // raw-input reroute above, so a son who politely aimed at the button sat
+            // there with his movement locked (OpenScreen runs EnterLockMoveMode and only
+            // CloseScreen releases it) - and TryOpenReportScreen's IsActive() guard then
+            // swallowed every later night's report. So the button closes the recap too.
+            // It still must never reach the vanilla body: GoNextDay is the host's call,
+            // and the game-event host fee would be charged a second, phantom time
+            // through the forwarded ReduceCoin.
+            CloseClientReport();
+            return false;
         }
 
         // ---------------- host ----------------
@@ -417,6 +424,35 @@ namespace CardShopCoop.Sync
                 EndOfDayReportScreen.OpenScreen();
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync open screen: " + e.Message); }
+        }
+
+        /// <summary>
+        /// The joiner's only way out of the recap - and the only thing that gives him his
+        /// legs back, since OpenScreen took EnterLockMoveMode. Both report buttons route
+        /// here, and so does CoopCore when the host advances the day out from under us.
+        /// Safe to call blind: it no-ops unless a client actually has the screen up.
+        /// </summary>
+        public static void CloseClientReport()
+        {
+            if (CoopCore.Role != CoopRole.Client) return;
+            try
+            {
+                // same rule as TryOpenReportScreen: only touch the vanilla statics when a
+                // REAL screen exists in the scene, or CSingleton fabricates a fake one
+                // that shadows the real screen for the rest of the run
+                if (_screen == null) _screen = UnityEngine.Object.FindObjectOfType<EndOfDayReportScreen>();
+                if (_screen == null) return;
+                if (!EndOfDayReportScreen.IsActive()) return; // nothing open: don't file a phantom day
+
+                // Re-assert the report this screen actually displayed so a host that
+                // already moved on (and healed a reset report over us) can't make us
+                // append zeros. CloseScreen is also the vanilla bookkeeping the phone's
+                // report history needs - past-list append, day-collect reset - plus the
+                // cursor hide and ExitLockMoveMode that unfreeze the joiner.
+                CPlayerData.m_GameReportDataCollect = s_clientOpenReport;
+                EndOfDayReportScreen.CloseScreen();
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync close screen: " + e.Message); }
         }
     }
 }
