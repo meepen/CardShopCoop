@@ -481,10 +481,12 @@ namespace CardShopCoop
             // FIX C: the card database on disk was replaced by the host's copy this session,
             // but THIS process is still running the old one (the registry is read once at
             // startup). Joining now would hand the host our stale ids and earn another
-            // rejection - say so plainly instead of burning a whole handshake on it.
-            if (Util.ModParity.RestartRequired)
+            // rejection - say so plainly instead of burning a whole handshake on it. Only the
+            // INSTALL raises this; restoring your own backup is a solo-save matter and must
+            // not cost a second restart before you can join (see ModParity's two flags).
+            if (Util.ModParity.RestartRequiredForJoin)
             {
-                ErrorLine = "card database was synced - RESTART the game before joining";
+                ErrorLine = "the host's card database was installed on this PC - RESTART the game before joining";
                 return;
             }
             Role = CoopRole.Client;
@@ -680,22 +682,31 @@ namespace CardShopCoop
 
         /// <summary>FIX C: identity for the enum-sync memory below. The Steam id would be
         /// ideal, but the transport keeps its connId-&gt;CSteamID map private - and connId is no
-        /// good anyway: a rejected guest is KICKED, restarts the game and comes back on a fresh
-        /// connId, which is precisely the round trip the loop-breaker has to recognise. The
-        /// player name is the one value that survives it, so that is the key (connId only as a
-        /// last resort, when the name is blank).</summary>
-        private static string PeerSyncKey(string name, int connId)
+        /// good at all here: a rejected guest is KICKED, restarts the game and comes back on a
+        /// fresh connId, which is precisely the round trip the loop-breaker has to recognise.
+        /// The player name usually survives it, but it is a free-text config field - blank
+        /// (PlayerName cleared) or shared-default names are both real - so the REGISTRY DIGEST
+        /// is folded into the key instead of stored as its value. A blank name then falls back
+        /// to the digest alone, which still survives the restart, so the loop-breaker fires for
+        /// an unnamed player too; and two different registries can never collide onto one key,
+        /// so a name collision cannot suppress somebody's first-ever sync. The residual case -
+        /// two blank-named peers running the SAME registry - shares a key on purpose: the same
+        /// file that couldn't help the first cannot help the second either.</summary>
+        private static string PeerSyncKey(string name, string enumDigest)
         {
             string n = (name ?? "").Trim().ToLowerInvariant();
-            return n.Length > 0 ? "n:" + n : "c:" + connId;
+            string d = string.IsNullOrEmpty(enumDigest) ? "none" : enumDigest;
+            return (n.Length > 0 ? "n:" + n : "anon") + "|" + d;
         }
 
-        /// <summary>FIX C loop-breaker memory (host only): peer identity -&gt; digest of the
-        /// registry that peer sent when we last handed them our enum file. Re-sending the same
-        /// file to a peer whose registry hasn't changed is the endless "synced - RESTART -
-        /// rejoin" loop, so the second time around they get an honest explanation instead of
-        /// another copy of a file that cannot help them. Cleared in Shutdown.</summary>
-        private readonly Dictionary<string, string> _enumSyncSentTo = new Dictionary<string, string>();
+        /// <summary>FIX C loop-breaker memory (host only): the set of (peer identity | registry
+        /// digest) pairs we have already handed our enum file to. Re-sending the same file to a
+        /// peer whose registry hasn't changed is the endless "synced - RESTART - rejoin" loop,
+        /// so the second time around they get an honest explanation instead of another copy of a
+        /// file that cannot help them; a peer who genuinely changed their content packs hashes
+        /// to a new key and gets a fresh attempt. Membership is recorded only after the file
+        /// actually went out. Cleared in Shutdown.</summary>
+        private readonly HashSet<string> _enumSyncSentTo = new HashSet<string>();
 
         /// <summary>FIX E3 wire helper: [int count (<=256)] then that many strings.</summary>
         private static void WriteCappedList(BinaryWriter bw, List<string> list)
@@ -951,24 +962,28 @@ namespace CardShopCoop
             return true;
         }
 
-        /// <summary>True when THIS install can actually place the card: its expansion has a real
-        /// collected list (CPlayerData.GetCardCollectedList returns null for an expansion outside
-        /// the vanilla switch) AND its monster is in that expansion's shown list - the exact pair
-        /// CPlayerData.GetCardSaveIndex needs to land on the right slot. Anything else is a card
-        /// from content packs we don't have installed. Errs toward REFUSING: a lookup that throws
-        /// can't be trusted to index safely either, and a skipped card is a message we can chase
-        /// in the log, while a mis-indexed one is a silent album corruption.</summary>
+        /// <summary>True when THIS install can actually place the card: both its expansion and
+        /// monster ids exist in this process's runtime enums (EPL prepatches ids for every
+        /// locally-installed content pack; vanilla ids are always present). An id this process
+        /// has never heard of would mis-index through GetShownMonsterList's default Tetramon
+        /// fallback into save slot 0 - a silent album corruption - so unknown ids are refused
+        /// with a log line instead. Errs toward REFUSING on any throw.</summary>
         private static bool CardSetInstalledHere(CardData card)
         {
             try
             {
-                // graded or not, the slot comes from the same (expansion, monster) pair
-                if (CPlayerData.GetCardCollectedList(card.expansionType, card.isDestiny) == null) return false;
-                var shown = InventoryBase.GetShownMonsterList(card.expansionType);
-                if (shown == null) return false;
-                for (int i = 0; i < shown.Count; i++)
-                    if (shown[i] == card.monsterType) return true;
-                return false;
+                // DO NOT infer "installed" from the vanilla lookups: GetCardCollectedList's
+                // switch returns null for EVERY modded ECardExpansionType (EPL virtualizes
+                // those lists elsewhere), so the old check dropped every EPL/CardForge card -
+                // including packs BOTH players have. The runtime enum identity this build
+                // already trusts for the handshake is the right oracle: EPL patches the ids
+                // for locally-installed content into the CLR enums at prepatch, so an id
+                // that Enum.IsDefined here IS content this machine has. Vanilla ids (small,
+                // dense) are always defined. Refuse only what this process has never heard
+                // of - the exact cards that would mis-index into Tetramon slot 0.
+                if (!Enum.IsDefined(typeof(ECardExpansionType), card.expansionType)) return false;
+                if (!Enum.IsDefined(typeof(EMonsterType), card.monsterType)) return false;
+                return true;
             }
             catch (Exception e)
             {
@@ -1589,12 +1604,12 @@ namespace CardShopCoop
             if (InGameLevel()) { ErrorLine = "Join from the main menu (Title screen)."; return; }
             ip = (ip ?? "").Trim();
             if (ip.Length == 0) { ErrorLine = "Enter the host's IP address."; return; }
-            // FIX C: same restart gate as JoinSteam - the on-disk registry was synced from a
-            // host, but this process still has the OLD one loaded, so a join can only end in
-            // another rejection until the game is restarted.
-            if (Util.ModParity.RestartRequired)
+            // FIX C: same restart gate as JoinSteam - a HOST's registry was installed over ours,
+            // but this process still has the OLD one loaded, so a join can only end in another
+            // rejection until the game is restarted. (A restore does NOT gate here.)
+            if (Util.ModParity.RestartRequiredForJoin)
             {
-                ErrorLine = "card database was synced - RESTART the game before joining";
+                ErrorLine = "the host's card database was installed on this PC - RESTART the game before joining";
                 return;
             }
 
@@ -3016,10 +3031,36 @@ namespace CardShopCoop
                         // catalog-differs warning already says the sets differ. What actually
                         // corrupts a shared world is the SAME "Type:Name" bound to DIFFERENT
                         // ids on the two PCs, so that is the only thing we reject on now.
-                        var conflicts = EnumConflicts(theirEnumLines, SafeEnumLines());
+                        var ourEnumLines = SafeEnumLines();
+                        if (ourEnumLines.Count == 0)
+                        {
+                            // DEAD-GATE VISIBILITY. EnumConflicts short-circuits to "no
+                            // conflicts" whenever either side is empty (correct: a machine with
+                            // no modded ids can't clash with anyone), so an empty list HERE means
+                            // the ID-conflict check waved this joiner through without comparing
+                            // anything. On a vanilla host that is the intended answer; on a
+                            // modded one it means our own registry walk came up empty and the
+                            // only thing standing between two conflicting id spaces just went
+                            // quiet - while the log line below still prints two plausible hashes.
+                            CoopPlugin.Log.LogWarning($"enum check: the host has NO modded enum ids to compare against, so {name} was not ID-checked at all (expected on a vanilla host; on a modded one see the 'enum identity source' line at startup)");
+                        }
+                        var conflicts = EnumConflicts(theirEnumLines, ourEnumLines);
                         if (conflicts.Count > 0)
                         {
                             CoopPlugin.Log.LogInfo($"enum check: {name} hash {enumHash} vs host {Util.ModParity.EnumHash()} - {conflicts.Count} real conflict(s)");
+                            // Our own registry on disk is a BORROWED copy - an earlier join
+                            // installed some other host's file over ours and the .hostlend
+                            // marker is still there. Shipping that as "the host's database"
+                            // would hand this guest a THIRD party's ids, matching neither what
+                            // we are running nor what their content packs mint, and cost them a
+                            // restart to find out. Say so, and put the fix where it belongs.
+                            if (Util.ModParity.HostEnumInstalled())
+                            {
+                                RejectConn(msg.ConnId,
+                                    "your custom-card database conflicts with the host's, and the host's own database is currently a borrowed copy from another session - the HOST has to restore their card database (co-op window) and RESTART before it can be auto-synced to you (conflicting: "
+                                    + DescribeConflicts(conflicts) + ")");
+                                break;
+                            }
                             // LOOP-BREAKER. The old code sent our registry and rejected, every
                             // single time - but the guest's file is REBUILT at startup from the
                             // content packs installed on THEIR PC, so our copy never survives
@@ -3027,14 +3068,14 @@ namespace CardShopCoop
                             // rejoin" report. So: hand over the file ONCE per (peer, registry),
                             // and if they come back still conflicting with the SAME registry,
                             // stop promising them that another restart will fix it.
-                            string peerKey = PeerSyncKey(name, msg.ConnId);
-                            bool alreadySent = _enumSyncSentTo.TryGetValue(peerKey, out string sentFor)
-                                               && sentFor == theirEnumDigest;
+                            string peerKey = PeerSyncKey(name, theirEnumDigest);
+                            bool alreadySent = _enumSyncSentTo.Contains(peerKey);
                             if (!alreadySent)
                             {
                                 // send our registry along with the rejection: the client
                                 // backs theirs up, installs ours, and only has to restart -
                                 // no more hand-copying enum_values.json between PCs
+                                bool sent = false;
                                 try
                                 {
                                     var enumBytes = System.IO.File.ReadAllBytes(Util.ModParity.EnumFilePath());
@@ -3044,12 +3085,21 @@ namespace CardShopCoop
                                         bw.Write(gz.Length);
                                         bw.Write(gz);
                                     });
+                                    // ONLY a peer we actually shipped the file to counts as
+                                    // synced. Recording it on a failed read/send (missing file,
+                                    // locked by EPL or antivirus, permissions) promised a
+                                    // restart that could not possibly help, and then met the
+                                    // retry with the terminal "copying the host's file cannot
+                                    // fix this" - a message about an attempt that never happened.
+                                    _enumSyncSentTo.Add(peerKey);
+                                    sent = true;
                                 }
                                 catch (Exception e) { CoopPlugin.Log.LogWarning("enum sync send: " + e.Message); }
-                                _enumSyncSentTo[peerKey] = theirEnumDigest;
-                                RejectConn(msg.ConnId,
-                                    "your custom-card database conflicts with the host's - it has been synced from the host; RESTART your game, then join again (e.g. "
-                                    + DescribeConflicts(conflicts) + ")");
+                                RejectConn(msg.ConnId, sent
+                                    ? "your custom-card database conflicts with the host's - it has been synced from the host; RESTART your game, then join again (e.g. "
+                                      + DescribeConflicts(conflicts) + ")"
+                                    : "your custom-card database conflicts with the host's, and the host could not send its card database - match your content packs manually (conflicting: "
+                                      + DescribeConflicts(conflicts) + ")");
                             }
                             else
                             {

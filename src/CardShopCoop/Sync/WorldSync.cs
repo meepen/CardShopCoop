@@ -37,6 +37,21 @@ namespace CardShopCoop.Sync
         /// full-state heal can carry every compartment in the shop, so the ItemData lookup must
         /// not be repeated per entry per heal.</summary>
         private readonly Dictionary<int, bool> _resolvable = new Dictionary<int, bool>();
+        /// <summary>Compartments whose last rebuild could NOT hold everything that was asked
+        /// for: same item type, fewer slots on this machine (EPL data packs are parity-exempt,
+        /// so the same type id can carry a different itemDimension - and therefore a different
+        /// m_MaxItemCount - on each PC). The read-back already stops us reporting the shortfall
+        /// back, but the 12s heal's change gate is hashed over the WHOLE shop, so during open
+        /// hours customers keep it moving and the same impossible entry arrives every beat -
+        /// tearing that compartment down and rebuilding it forever. Remembering the request
+        /// that clamped, plus what it clamped TO, lets ApplyRemote skip the identical rebuild
+        /// while still reacting the moment either the request or the compartment changes.</summary>
+        private struct ClampState { public int Type; public int Requested; public int Actual; }
+        private readonly Dictionary<int, ClampState> _clamped = new Dictionary<int, ClampState>();
+        /// <summary>Keys we've already named in the log: a clamp is silent by construction (the
+        /// type IS resolvable), so say it once per compartment or a mismatched-pack shop is
+        /// undiagnosable.</summary>
+        private readonly HashSet<int> _clampWarned = new HashSet<int>();
         private readonly Dictionary<WarehouseShelf, List<ShelfCompartment>> _whComps
             = new Dictionary<WarehouseShelf, List<ShelfCompartment>>();
         private float _timer;
@@ -69,6 +84,8 @@ namespace CardShopCoop.Sync
             _last.Clear();
             _locallyChanged.Clear();
             _resolvable.Clear(); // a different host/save can mean a different content-pack set
+            _clamped.Clear();    // ...and different shelves, so a remembered clamp means nothing
+            _clampWarned.Clear();
             _whComps.Clear();
             _timer = 0.35f; // staggered phase: engines must not all walk on the same frame
             _sm = null;
@@ -182,6 +199,19 @@ namespace CardShopCoop.Sync
                         continue;
                     comp = Resolve(sm, e.Key);
                     if (comp == null) continue;
+                    // PARTIAL-CLAMP SUPPRESSION: this exact request already ran and came up
+                    // short, and the compartment still holds exactly what that rebuild left -
+                    // so running it again can only produce the same result. Skipping saves the
+                    // full teardown+respawn (N DisableItem + N GetItem + a price-tag refresh)
+                    // every heal beat for the rest of the session. Both halves are checked
+                    // against the LIVE compartment on purpose: the instant the host asks for
+                    // something else, or anything (a local pull, a partial apply) moves the
+                    // compartment off the clamped value, the memory stops matching and the
+                    // normal apply resumes.
+                    if (_clamped.TryGetValue(e.Key, out var cl)
+                        && cl.Type == e.Type && cl.Requested == e.Count
+                        && (int)comp.GetItemType() == e.Type && comp.GetItemCount() == cl.Actual)
+                        continue;
                     // an item type this machine can't build is SKIPPED whole - never cleared.
                     // ApplyCompartment tears the compartment down before it discovers the type
                     // is unusable, so a missing content pack would silently empty the shelf
@@ -204,7 +234,21 @@ namespace CardShopCoop.Sync
                     // _last claiming the requested value; the next snapshot walk then reads the
                     // real (smaller) value as a LOCAL change and reports the shortfall back -
                     // a mirror that couldn't satisfy an apply wiping the side that could.
-                    _last[e.Key] = new CompState { Type = (int)comp.GetItemType(), Count = comp.GetItemCount() };
+                    int actualType = (int)comp.GetItemType();
+                    int actualCount = comp.GetItemCount();
+                    _last[e.Key] = new CompState { Type = actualType, Count = actualCount };
+                    // ...and remember an apply that could not be satisfied in full, so the next
+                    // identical request skips the pointless rebuild (see the check above). Only
+                    // a SHORTFALL of the requested type counts: anything else - an exact apply,
+                    // a skipped unresolvable type, a compartment that ended up on some other
+                    // type - clears the memory so no stale entry can suppress a real update.
+                    if (actualType == e.Type && actualCount < e.Count)
+                    {
+                        _clamped[e.Key] = new ClampState { Type = e.Type, Requested = e.Count, Actual = actualCount };
+                        if (_clampWarned.Add(e.Key))
+                            CoopPlugin.Log.LogWarning($"WorldSync: compartment {e.Key:X} only holds {actualCount} of the {e.Count} item(s) the host has there (type {e.Type}) - your copy of that content pack gives the shelf fewer slots; it will stay short instead of rebuilding every heal");
+                    }
+                    else _clamped.Remove(e.Key);
                 }
                 catch (Exception ex)
                 {

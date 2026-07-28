@@ -94,8 +94,19 @@ namespace CardShopCoop.Sync
         {
             if (_remoteCarried.Count == 0) return;
             int released = 0;
+            double now = Time.realtimeSinceStartupAsDouble;
             foreach (var id in _remoteCarried)
             {
+                // Open the ownership grace window instead of dropping the carry outright, and
+                // do it for EVERY id we are force-releasing (before the liveness check, so a
+                // box that is mid-teardown can't skip it). We are ending these carries on the
+                // host's say-so, but in a 3-player session the peer that died may not be the
+                // one holding this box - and a SURVIVING guest's set-down report is the message
+                // that carries everything it did while holding it. Refusing that final edit is
+                // how the drain gets duped back, and _remoteCarried.Clear() below removes the
+                // only other thing that could have let it through. The per-id 6s check retires
+                // these windows on its own, and HostPruneDead drops them with the box.
+                _remoteReleased[id] = now;
                 if (!_hostById.TryGetValue(id, out var box) || box == null) continue;
                 SetHostWorkerLock(box, false);
                 // C-e: a box that was carried can be parked under the floor (hide spot / a
@@ -116,10 +127,10 @@ namespace CardShopCoop.Sync
                 released++;
             }
             _remoteCarried.Clear();
-            // the ownership grace window goes with the carry set: this release is the HOST's
-            // own doing, not a guest set-down, so nobody is owed a window to land a final
-            // edit through. Same wholesale trade-off _remoteCarried.Clear() already makes.
-            _remoteReleased.Clear();
+            // NB: _remoteReleased is deliberately NOT cleared here (each id was stamped in the
+            // loop above). _remoteCarried.Clear() is self-healing - a surviving guest re-asserts
+            // its carry on its next ~0.5s report - but a release window has no re-assert path,
+            // so wiping it wholesale silently refused another guest's in-flight final edit.
             if (released > 0)
             {
                 CoopPlugin.Log.LogInfo($"BoxSync host: released {released} client-carried box(es) after a disconnect");
@@ -661,6 +672,25 @@ namespace CardShopCoop.Sync
             {
                 var e = entries[i];
                 if (!_hostById.TryGetValue(e.Id, out var box) || box == null) continue;
+                // OWNERSHIP BOOKKEEPING FIRST, before any skip guard: the guards below
+                // suppress the APPLY, but they must never suppress the record of who is
+                // holding the box. A carry report that arrives while (say) the box is
+                // still inside the host's 6s recently-released window used to be dropped
+                // wholesale - _remoteCarried never learned of the guest's pickup, so the
+                // ownership window could never open and the guest's set-down edits were
+                // refused (items silently lost). Record carry/release always; apply later.
+                if (e.Carried) { _remoteCarried.Add(e.Id); SetHostWorkerLock(box, true); }
+                else
+                {
+                    // stamp the real carried->loose edge only: it opens the ownership grace
+                    // window the applyContent gate reads (this very request carries the
+                    // edits the guest made while holding the box). The worker lock clears
+                    // unconditionally, as it always did - it governs worker access, not
+                    // content authority.
+                    if (_remoteCarried.Remove(e.Id))
+                        _remoteReleased[e.Id] = Time.realtimeSinceStartupAsDouble;
+                    SetHostWorkerLock(box, false);
+                }
                 // type sanity: a mangled or ancient request must not RESTYLE a box that
                 // already holds a different item. But an EMPTY host box (type None, or a
                 // stale different type with zero contents) legitimately adopts the request's
@@ -686,23 +716,8 @@ namespace CardShopCoop.Sync
                 // stale by definition - the race that teleported boxes mid-restock
                 if (_hostRecentlyReleased.TryGetValue(e.Id, out double rel)
                     && Time.realtimeSinceStartupAsDouble - rel < 6.0) continue;
-                // enter/leave the client-carried set, and pair the worker-untouchable
-                // lock with it: while a guest carries a box no worker may drain or take
-                // it (B2). Set on the exact box the request resolved to; cleared the
-                // instant the guest sets it down (the else branch below).
-                if (e.Carried) { _remoteCarried.Add(e.Id); SetHostWorkerLock(box, true); }
-                else
-                {
-                    // stamp the moment the guest LET GO (only on the real carried->loose
-                    // edge, not on every loose report): that stamp opens the ownership
-                    // grace window the applyContent gate below reads, because THIS very
-                    // request is the one carrying the edits the guest made while holding
-                    // the box. The worker lock still clears unconditionally, exactly as
-                    // before - the window governs content authority, not worker access.
-                    if (_remoteCarried.Remove(e.Id))
-                        _remoteReleased[e.Id] = Time.realtimeSinceStartupAsDouble;
-                    SetHostWorkerLock(box, false);
-                }
+                // (ownership bookkeeping moved ABOVE the skip guards - see the top of the
+                // loop; a suppressed apply must still record carry/release edges)
                 // CONTENT AUTHORITY, by OWNERSHIP instead of by direction-of-change. The old
                 // gate let any count INCREASE through on an open host box, which is precisely
                 // how the refill survived: the guest's _locallyTouched latch re-armed itself
@@ -1046,16 +1061,32 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < hostList.Count; i++)
             {
                 var he = hostList[i];
-                if (_skippedIds.Count > 0 && _skippedIds.Contains(he.Id)
-                    && _prevApplied.TryGetValue(he.Id, out var keep))
+                if (_skippedIds.Count > 0 && _skippedIds.Contains(he.Id))
                 {
-                    keep.Id = he.Id;
-                    keep.Carried = he.Carried;
-                    keep.Stored = he.Stored;
-                    keep.StoreShelf = he.StoreShelf;
-                    keep.StoreComp = he.StoreComp;
-                    _lastApplied.Add(keep);
-                    continue;
+                    // CRITICAL: derive the suppressed baseline from the LIVE box, not the
+                    // pre-suppression _prevApplied snapshot. The frozen snapshot could never
+                    // track the guest's OWN edits made during the suppression window (a
+                    // carried box's dispensing, for example), so Differs() fired against a
+                    // stale baseline and _locallyTouched re-latched forever - the exact echo
+                    // loop this merge exists to kill. Snapshot(live) == what my mirror IS,
+                    // which is the merge's entire contract; only the host's carry/rack
+                    // bookkeeping fields stay the host's (ClientTick keys its report
+                    // decisions off exactly those).
+                    if (_byId.TryGetValue(he.Id, out var liveBox) && liveBox != null)
+                    {
+                        Entry keep;
+                        try { keep = Snapshot(liveBox); }
+                        catch { _lastApplied.Add(he); continue; }
+                        keep.Id = he.Id;
+                        keep.Carried = he.Carried;
+                        keep.Stored = he.Stored;
+                        keep.StoreShelf = he.StoreShelf;
+                        keep.StoreComp = he.StoreComp;
+                        _lastApplied.Add(keep);
+                        continue;
+                    }
+                    // no live box resolved: fall through to the host entry (nothing local
+                    // to preserve, and a missing box will reconcile on the next snapshot)
                 }
                 _lastApplied.Add(he);
             }

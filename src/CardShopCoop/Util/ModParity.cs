@@ -20,14 +20,22 @@ namespace CardShopCoop.Util
         private static string _enum;
         private static string _cards;
 
-        /// <summary>Set once we have rewritten the on-disk enum registry (a host sync installed,
-        /// or the guest's own file restored). The bytes on disk are now something the RUNNING
-        /// game has never read - EPL loaded its ids at prepatch, long before either write - so
-        /// this process is permanently out of step with its own registry and must not join
-        /// anything until it restarts. CoopCore reads this by name to refuse a join with a
-        /// "restart first" reason instead of letting the player retry into a silent ID desync.
-        /// Never cleared: nothing short of a new process can make it false again.</summary>
-        public static bool RestartRequired;
+        /// <summary>Set ONLY by InstallEnumFile: the HOST's registry now sits on disk in place of
+        /// ours. The ids this process is running are still our own (EPL loaded them at prepatch,
+        /// long before the write), so re-Helloing now would hand the host the very lines it just
+        /// rejected and earn the same rejection again - the endless "synced - RESTART - rejoin"
+        /// loop. CoopCore reads this by name to refuse a join with a "restart first" reason
+        /// instead of burning a whole handshake on it. Never cleared: only a new process can
+        /// load the file that was just installed.</summary>
+        public static bool RestartRequiredForJoin;
+
+        /// <summary>Set ONLY by RestoreEnumBackup: the player's OWN registry is back on disk, but
+        /// this process is still running whatever ids it booted with, so a SOLO save that needs
+        /// the restored registry wants a restart first. Deliberately NOT a join gate - restoring
+        /// a file changes nothing about the ids we are running, so it must not cost the player a
+        /// second restart before they can accept dad's invite. Informational: the restore
+        /// message the UI shows already says it, this is the flag form of the same fact.</summary>
+        public static bool RestartRequiredForSolo;
 
         /// <summary>Hash of the custom-card ID space minted by CreateCards: each
         /// MonsterConfig's "Monster Type = Monster Type ID" mapping, sorted. This is
@@ -124,7 +132,7 @@ namespace CardShopCoop.Util
         /// NOT change our hash mid-session; only a RESTART loads new ids. That is exactly what
         /// the 1.0.33 "_enum = null" invalidations broke - they let an unrestarted guest re-Hello
         /// on the strength of bytes the running game had never read, quietly defeating the
-        /// documented restart requirement. Both are gone; see RestartRequired.</summary>
+        /// documented restart requirement. Both are gone; see RestartRequiredForJoin.</summary>
         public static string EnumFilePath()
         {
             return Path.Combine(Application.persistentDataPath, "PrefabLoader", "enum_values.json");
@@ -141,9 +149,10 @@ namespace CardShopCoop.Util
             "ECardExpansionType", "ERarity", "ECollectionPackType"
         };
 
-        /// <summary>First id EPL hands out. Vanilla members are a dense 0..~135 per enum (not one
-        /// explicit value in any of the six decompiled enums), so everything from here up is
-        /// modded content - the only slice of the ID space that can differ between two players.</summary>
+        /// <summary>First id EPL hands out. Vanilla members are dense 0..~135 per enum apart from
+        /// a `None = -1` sentinel (ECardExpansionType and ERarity both declare one), and -1 is
+        /// below the floor like everything else vanilla, so everything from here up is modded
+        /// content - the only slice of the ID space that can differ between two players.</summary>
         private const long ModdedIdFloor = 200000;
 
         /// <summary>Hash of the modded ID space THIS PROCESS is actually running. We ask the
@@ -184,15 +193,60 @@ namespace CardShopCoop.Util
 
         /// <summary>The exact sorted "EnumType:Name=id" lines EnumHash hashes, exposed as a list
         /// so a mismatch can be SHOWN (which custom item, whose id) instead of only rejected -
-        /// the same pairing PluginHash/PluginList and CardsHash/CardsList already use. Both read
-        /// RuntimeEnumEntries(), so the list a player is shown can never disagree with the hash
-        /// that gated them. Empty when nothing modded is loaded - including the vanilla "none"
-        /// case and the file-fallback branch above, where there are no runtime lines to name and
-        /// the caller's generic wording is the honest answer. CoopCore calls this by name.</summary>
+        /// the same pairing PluginHash/PluginList and CardsHash/CardsList already use. These
+        /// lines are ALSO the whole ID-conflict gate (CoopCore.EnumConflicts short-circuits to
+        /// "no conflicts" the moment either side is empty), so they get the SAME fallback chain
+        /// EnumHash has: runtime walk first, then the canonical FILE parse filtered to modded
+        /// ids. Without that, a modded machine whose walk came up empty - EPL minting ids in a
+        /// way Enum.GetNames can't see, a renamed enum type, a throwing reflection call - would
+        /// hand the host an empty blob and silently disable the gate for that join while
+        /// EnumHash still printed a plausible file-derived hash in the log beside it. (On that
+        /// fallback the two are no longer the same set - EnumHash covers the whole file, these
+        /// lines only the modded slice - which is fine: the hash gates nothing any more, it is
+        /// a log diagnostic.) Empty is still the honest answer on a genuinely vanilla machine:
+        /// nothing modded, conflicts with nobody. CoopCore calls this by name.</summary>
         public static List<string> EnumLines()
         {
-            try { return RuntimeEnumEntries(); }
+            try
+            {
+                var lines = RuntimeEnumEntries();
+                if (lines.Count > 0) { LogEnumSourceOnce("runtime enums (" + lines.Count + " modded ids)"); return lines; }
+
+                string p = EnumFilePath();
+                if (!File.Exists(p)) { LogEnumSourceOnce("nothing modded loaded and no registry file - vanilla"); return lines; }
+                var fileLines = CanonicalEnumLines(File.ReadAllText(p));
+                if (fileLines == null) { LogEnumSourceOnce("registry file unparseable - ID-conflict check disabled"); return lines; }
+                // The file carries the FULL id space (vanilla members included); only the
+                // modded slice can differ between two players, so filter it exactly the way
+                // RuntimeEnumEntries does. CanonicalEnumLines already sorted, and dropping
+                // entries keeps that order, so no re-sort is needed.
+                var modded = new List<string>();
+                foreach (var line in fileLines)
+                {
+                    int eq = line.LastIndexOf('=');
+                    if (eq <= 0 || eq == line.Length - 1) continue;
+                    long id;
+                    if (!long.TryParse(line.Substring(eq + 1), out id)) continue;
+                    if (id < ModdedIdFloor) continue;
+                    modded.Add(line);
+                }
+                LogEnumSourceOnce("enum_values.json fallback (" + modded.Count + " modded ids) - the runtime walk found none");
+                return modded;
+            }
             catch { return new List<string>(); }
+        }
+
+        private static bool _enumSourceLogged;
+
+        /// <summary>Say ONCE per session where our registry lines came from. Which source
+        /// answered decides whether the join-time ID-conflict gate is live or quietly
+        /// short-circuited, so it belongs in the log next to the hashes - but it is read on
+        /// every Hello, and one line per join attempt would be noise.</summary>
+        private static void LogEnumSourceOnce(string source)
+        {
+            if (_enumSourceLogged) return;
+            _enumSourceLogged = true;
+            try { CoopPlugin.Log.LogInfo("enum identity source: " + source); } catch { }
         }
 
         /// <summary>The modded enum ids resolved from the LOADED types, sorted - the single source
@@ -259,8 +313,8 @@ namespace CardShopCoop.Util
         }
 
         /// <summary>Install the host's registry over ours, keeping timestamped backups
-        /// (the newest 3). Returns a user-facing status line, and raises RestartRequired when
-        /// bytes actually landed - the "already synced" early-out does NOT raise it, because
+        /// (the newest 3). Returns a user-facing status line, and raises RestartRequiredForJoin
+        /// when bytes actually landed - the "already synced" early-out does NOT raise it, because
         /// nothing was written and this process is still in step with its own file.</summary>
         public static string InstallEnumFile(byte[] hostBytes)
         {
@@ -300,7 +354,7 @@ namespace CardShopCoop.Util
                 // hash matching the host while the running game still held the old ids - a pass
                 // through the very gate the restart requirement exists to close. The flag below
                 // is the honest version of that signal.
-                RestartRequired = true;
+                RestartRequiredForJoin = true;
                 // Drop a marker so the mod KNOWS the machine-global registry is now the HOST's,
                 // not the guest's own. Without a restore path a mismatched-enum join used to
                 // silently brick every modded SOLO save ("data lost") until the file was fixed
@@ -350,10 +404,14 @@ namespace CardShopCoop.Util
         /// first copies the CURRENT (host's) file to .hostcopy so nothing is ever destroyed, then
         /// restores the backup over enum_values.json and clears the marker. The game reads the
         /// registry once at startup, so <paramref name="message"/> tells the user to restart
-        /// before loading solo saves - and a successful restore raises RestartRequired, since
-        /// the ids this process is running are now the HOST's while the file is ours. Returns
-        /// false (with an explaining message) when no backup exists to restore. CoopCore calls
-        /// this by name.</summary>
+        /// before loading solo saves, and a successful restore raises RestartRequiredForSolo.
+        /// That flag says exactly one thing: the restored file has not been LOADED yet. It says
+        /// nothing about whose ids we are running - a restore, like an install, cannot change
+        /// those; this process keeps whatever it booted with either way. Which is why a restore
+        /// must never gate a JOIN (it used to, and a housekeeping click at the title screen then
+        /// cost a second full restart before the player could accept an invite). Returns false
+        /// (with an explaining message) when no backup exists to restore. CoopCore calls this by
+        /// name.</summary>
         public static bool RestoreEnumBackup(out string message)
         {
             string p = EnumFilePath();
@@ -379,9 +437,10 @@ namespace CardShopCoop.Util
                     File.Copy(p, p + ".hostcopy", overwrite: true);
                 File.Copy(newest, p, overwrite: true);
                 // Same invariant as InstallEnumFile (see EnumFilePath): the registry on disk is
-                // the guest's own again, but the running game is still holding the HOST's ids
-                // from prepatch. Nothing about our hash may move until a restart reloads them.
-                RestartRequired = true;
+                // the guest's own again, but the running process still holds the ids it booted
+                // with, so nothing about our identity moves until a restart reloads them. That
+                // is a SOLO-save concern only - see the flag's own doc.
+                RestartRequiredForSolo = true;
                 try { File.Delete(EnumMarkerPath()); } catch { }
                 message = "your card database was restored from backup - RESTART the game before loading your solo saves";
                 return true;

@@ -48,9 +48,25 @@ namespace CardShopCoop.Sync
         // presses continue - CloseScreen would then append zeros to his history.
         private static GameReportDataCollect s_clientOpenReport;
 
+        // client: TRUE only between "the mirror actually opened the recap" and the close that
+        // consumes it. s_clientOpenReport alone can't say that - it is a struct, so "never
+        // filled" and "a legitimately all-zero day" look identical - and IsActive() can be
+        // true for a screen this mirror never opened (a stray vanilla open, or one that
+        // outlived a session). Without this flag those closes filed zeros (or yesterday's
+        // numbers) into the joiner's phone history: the exact phantom day the close guard
+        // exists to prevent. When it is false we still CLOSE - the joiner gets his legs back -
+        // we just let the live host-synced numbers be what CloseScreen files.
+        private static bool s_haveOpenReport;
+
         // client UI state we must read before opening a fullscreen lock
         private static readonly System.Reflection.FieldInfo FiIsLerping =
             AccessTools.Field(typeof(EndOfDayReportScreen), "m_IsLerpingNumber");
+        // ...and the screen's own input latch, which we have to hand back the way OpenScreen
+        // expects it (see CloseClientReport)
+        private static readonly System.Reflection.FieldInfo FiHoldingMouseDown =
+            AccessTools.Field(typeof(EndOfDayReportScreen), "m_IsHoldingMouseDown");
+        private static readonly System.Reflection.FieldInfo FiMouseDownTime =
+            AccessTools.Field(typeof(EndOfDayReportScreen), "m_MouseDownTime");
         private static readonly System.Reflection.FieldInfo FiPhoneMode =
             AccessTools.Field(typeof(InteractionPlayerController), "m_IsPhoneScreenMode");
         private static readonly System.Reflection.FieldInfo FiCashMode =
@@ -80,6 +96,7 @@ namespace CardShopCoop.Sync
             // last session's recap must not ride along: a stale copy here would be filed
             // into the NEXT save's phone history the first time the joiner closes a report
             s_clientOpenReport = default(GameReportDataCollect);
+            s_haveOpenReport = false;
             _screen = null;
             _ipc = null;
         }
@@ -167,8 +184,15 @@ namespace CardShopCoop.Sync
             bool lerping = false;
             try { lerping = FiIsLerping != null && (bool)FiIsLerping.GetValue(__instance); } catch { }
             if (lerping) return true; // vanilla behavior: fast-forward the count-up
-            // Vanilla would gate on GetHasDayEnded() - which CoopCore pins false on the
-            // client - leaving the joiner locked in the screen forever. Close instead.
+            // Vanilla's other branch runs OnPressGoNextDay() whenever GetHasDayEnded() is
+            // true - and on a joiner it usually IS. The DayTime mirror clears
+            // m_HasDayEnded on the host's 2s beat, but LightManager.Update re-latches it
+            // every frame in between (EvaluateTimeClock clamps the mirrored clock to 21:00,
+            // which is the hour that sets the flag), so the vanilla path would advance the
+            // joiner's OWN day and charge the game-event host fee a second, phantom time
+            // through the forwarded ReduceCoin; in the one frame out of ~120 where the flag
+            // is momentarily clear it would instead do nothing at all, leaving him locked in
+            // the screen. Neither is what we want: close read-only instead.
             CloseClientReport();
             return false;
         }
@@ -422,6 +446,11 @@ namespace CardShopCoop.Sync
                 // SaveGameData inside OpenScreen is already no-op'd for joiners by
                 // GamePatches.SaveGuardPrefix; everything else in there is pure UI
                 EndOfDayReportScreen.OpenScreen();
+                // ONLY here: the recap on screen is now the one whose numbers the caller
+                // just stored in s_clientOpenReport, so the close is allowed to file them.
+                // Every other way the screen could be up (the phone-mode bail above, a
+                // vanilla open) leaves this false and the close keeps the live numbers.
+                s_haveOpenReport = true;
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync open screen: " + e.Message); }
         }
@@ -446,11 +475,29 @@ namespace CardShopCoop.Sync
 
                 // Re-assert the report this screen actually displayed so a host that
                 // already moved on (and healed a reset report over us) can't make us
-                // append zeros. CloseScreen is also the vanilla bookkeeping the phone's
-                // report history needs - past-list append, day-collect reset - plus the
-                // cursor hide and ExitLockMoveMode that unfreeze the joiner.
-                CPlayerData.m_GameReportDataCollect = s_clientOpenReport;
+                // append zeros - but ONLY when the mirror is what opened it. A screen this
+                // mirror never opened has no stored numbers behind it, and forcing
+                // s_clientOpenReport in that case is how an all-zero (or duplicated
+                // yesterday) day got filed into the joiner's phone history. Without it the
+                // live host-synced day-collect is what CloseScreen files: not the frozen
+                // open-moment snapshot, but real numbers instead of a phantom.
+                if (s_haveOpenReport) CPlayerData.m_GameReportDataCollect = s_clientOpenReport;
+                s_haveOpenReport = false;
+                // CloseScreen is the vanilla bookkeeping the phone's report history needs -
+                // past-list append, day-collect reset - plus the cursor hide and
+                // ExitLockMoveMode that unfreeze the joiner.
                 EndOfDayReportScreen.CloseScreen();
+                // Hand the screen back the way OpenScreen expects it. Its Update() early-
+                // returns on !m_IsActive BEFORE it reads the key-UP, and every joiner close
+                // path tears the screen down in the same frame as the key-DOWN (the
+                // click-anywhere autofire, the Next Day button, the host's day-change
+                // mirror) - so the release is never seen and m_IsHoldingMouseDown latches
+                // true for the rest of the session. Next night's recap would then autofire
+                // OnPressGoNextButton every 0.05s with no input at all and snap the whole
+                // count-up past the son. m_MouseDownTime matters for the same reason: a
+                // leftover non-zero fires one extra press through Update's else branch.
+                try { FiHoldingMouseDown?.SetValue(_screen, false); } catch { }
+                try { FiMouseDownTime?.SetValue(_screen, 0f); } catch { }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync close screen: " + e.Message); }
         }

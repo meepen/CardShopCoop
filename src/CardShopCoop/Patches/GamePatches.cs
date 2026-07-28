@@ -35,6 +35,19 @@ namespace CardShopCoop.Patches
             Try(h, typeof(CEventManager), "QueueEvent",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(DayEndBlockPrefix)));
 
+            // ...and the joiner must never OPEN the day-end recap himself. The mirrored
+            // clock parks at 21:00, where LightManager.Update re-latches m_HasDayEnded true
+            // every frame (our DayTime mirror only clears it on the host's 2s beat), so a
+            // guest who presses Enter before the host does runs the whole vanilla
+            // ShowGoNextDayScreen: local ShelfManager/WorkerManager.OnPressGoNextDay (staff
+            // sent home, shelves swept on a mirror that owns neither) plus an
+            // EndOfDayReportScreen the host never broadcast - whose close then files a
+            // zeroed (or yesterday's) day into his phone history and swallows the real
+            // recap when it finally arrives. On a client the ONLY thing allowed to raise
+            // that screen is ReportSync's open-screen mirror.
+            Try(h, typeof(InteractionPlayerController), "ShowGoNextDayScreen",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(GoNextDayScreenBlockPrefix)));
+
             // Shared card collection: every add/remove on either side mirrors to the other,
             // so the joiner's pack pulls land in the real binder (and vice versa).
             Try(h, typeof(CPlayerData), "AddCard",
@@ -502,6 +515,19 @@ namespace CardShopCoop.Patches
         }
 
         public static bool ClientBlockPrefix()
+        {
+            return CoopCore.Role != CoopRole.Client;
+        }
+
+        /// <summary>Client only: the joiner never opens his own end-of-day recap. Vanilla
+        /// InteractionPlayerController.Update reaches ShowGoNextDayScreen on any Enter press
+        /// while LightManager.GetHasDayEnded() is true - which on a mirrored 21:00 clock is
+        /// nearly every frame - and the body then runs ShelfManager.OnPressGoNextDay,
+        /// WorkerManager.OnPressGoNextDay and EndOfDayReportScreen.OpenScreen locally. The
+        /// recap is a HOST-driven broadcast here (ReportSync.TryOpenReportScreen); an
+        /// un-mirrored open shows numbers the host never sent and files them into the
+        /// joiner's report history on close. Same Role-check idiom as ClientBlockPrefix.</summary>
+        public static bool GoNextDayScreenBlockPrefix()
         {
             return CoopCore.Role != CoopRole.Client;
         }

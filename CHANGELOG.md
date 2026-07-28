@@ -5,6 +5,22 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.34
+**Fixes for the latest report batch — thanks Metz, Domworth, Toat, and Skibbles (whose repro notes basically drew the map).** Wire format extended, so 1.0.34 only connects to 1.0.34. Both players must update — the launcher does it automatically.
+
+**The recap screen (Metz)**
+- **Fixed: the joiner getting stuck in the end-of-day recap.** The recap's Next Day button silently did nothing for guests, the only exit was an invisible click-anywhere, and once stuck, every later night's recap was swallowed too. Now the button closes it, the host advancing the day closes it automatically, and your movement unlocks properly.
+
+**The "custom card database" loop, part 2 (Toat)**
+- **Fixed: the database-differs loop when your PLUGINS match but your CONTENT packs don't.** The game rebuilds its card-ID registry from YOUR installed content on every boot, so copying the host's database could never stick when content differed — infinite sync-restart-reject. The check now compares the IDs your game is ACTUALLY running (not a file), only rejects on a genuine conflict (same card name mapped to different IDs), and allows one-sided extras — they just show the existing "catalogs differ" heads-up. If a true conflict can't be fixed by syncing, you now get one honest message telling you to match content packs instead of an endless loop. Bonus: far fewer database syncs = far fewer "solo saves won't load" incidents.
+- Safety net that made this possible: a card from a set you don't have installed is now skipped with a clear log line — previously it silently credited your first Tetramon card.
+
+**Items vanishing from shelves (Domworth)**
+- **Fixed three ways items could vanish into the void**: the periodic stock heal could roll back items a guest had *just* placed; a shelf your game couldn't render correctly (content mismatch, capacity differences) echoed its shortfall back and wiped the HOST's shelf too; and an item type from a content pack you don't have was zeroed instead of skipped. All three closed — worst case now is "he sees items I don't" instead of items being destroyed for both of you.
+
+**Box duplication & warping (Skibbles)**
+- **Fixed: items pulled out of a box teleporting back in** (duplication) and **boxes the host places or throws warping away**. Root cause was one mechanism: the guest's mirror could get stuck endlessly re-reporting stale box contents and positions it never touched. Guests now only affect a box's contents while they're actually holding it (or just set it down), and the stale-echo latch is gone — which also fixes the reverse case where items a guest unloaded stayed in the box.
+
 ## 1.0.33
 **Hotfix: the endless "custom-card database differed - RESTART" loop (thanks joshepi89).** The database check compared the registry file byte-for-byte - but the prefab loader rewrites that file on every game boot, so two players whose card databases genuinely MATCHED could mismatch forever (sync, restart, rejoin, rejected again - no number of restarts escaped it). The check now compares what the registry actually MEANS (every card/item name and its ID), so identical databases match on the first rejoin, and the "already synced" message can no longer appear in a loop. If the databases genuinely differ, sync + one restart still fixes it as designed. Both players must update - the launcher does it automatically.
 
