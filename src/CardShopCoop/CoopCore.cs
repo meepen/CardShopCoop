@@ -154,6 +154,15 @@ namespace CardShopCoop
         private struct ChargeVerdict { public bool Accepted; public double At; }
         private readonly Dictionary<int, ChargeVerdict> _chargeVerdicts = new Dictionary<int, ChargeVerdict>();
         private const double VerdictTtl = 1.0;
+        // ...but a DECLINE is not symmetric with an approval, so it keeps its own much longer
+        // TTL. The per-frame dispatch budget can split a cart across frames, putting the
+        // charge in one frame and its products in the next; once the 1s approval window
+        // lapses the products find no fresh verdict, HOLD, and the 1.5s fail-open pump then
+        // DELIVERS product the wallet refused. Staleness is only dangerous in that one
+        // direction: an over-long ACCEPT ships free product, an over-long DECLINE at worst
+        // drops a straggler the player can simply buy again. A newer charge from the same
+        // sender still overwrites the verdict immediately, so this never outlives its cart.
+        private const double VerdictDeclineTtl = 10.0;
         // last decline-toast time per conn: a rejected multi-line cart is N dropped
         // products but should show at most ONE "not enough money" toast per second
         private readonly Dictionary<int, double> _lastDeclineToast = new Dictionary<int, double>();
@@ -217,7 +226,8 @@ namespace CardShopCoop
         private bool _syncActive;
         private Action _actNetPump, _actAvatars, _actWorld, _actCardShelves, _actObjMoves,
             _actBoxes, _actPopulation, _actNpcPuppets, _actRegisterMirror, _actNpcSweep,
-            _actStateSend, _actNpcCollect, _actRegisterCollect, _actModules;
+            _actStateSend, _actNpcCollect, _actRegisterCollect, _actModules, _actCardPriceRetry,
+            _actFrameCardWork;
         private CustomerManager _cmSweep;
         private CustomerManager _cmSpray; // host-side: real customer list for replayed guest deodorant sprays
         private bool _renamerHandled;
@@ -247,6 +257,26 @@ namespace CardShopCoop
             = new System.Collections.Generic.List<InMsg>(64);
         private readonly System.Collections.Generic.HashSet<long> _dispatchSeen
             = new System.Collections.Generic.HashSet<long>();
+        /// <summary>Work UNITS dispatched per frame. The whole Incoming queue is still drained
+        /// into _dispatchBuf (the coalescer needs the full picture), but applying an unbounded
+        /// backlog in one frame is the hitch itself; the remainder keeps its order and waits.</summary>
+        private const int DispatchBudget = 256;
+
+        /// <summary>What one queued message costs against DispatchBudget. Everything is 1 unit
+        /// except a CardDeltaBatch, which carries up to CardDeltaBatchMax card applies behind a
+        /// single message - charging it 1 made the budget bound message COUNT, not work. Read
+        /// straight off the payload (leading little-endian int32 delta count, the same field
+        /// FlushCardDeltaOutbox writes) so nothing is deserialized twice; anything malformed
+        /// falls back to 1 and the handler's own bogus-count guard drops it.</summary>
+        private static int DispatchCost(InMsg m)
+        {
+            if (m.Type != MsgType.CardDeltaBatch) return 1;
+            var p = m.Payload;
+            if (p == null || p.Length < 4) return 1;
+            int n = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+            if (n < 1) return 1;
+            return n > CardDeltaBatchMax ? CardDeltaBatchMax : n;
+        }
 
         // headless auto-test / shortcut args: -coopautohost=SLOT  -coopautojoin=IP
         private int _autoHostSlot = -1;
@@ -330,6 +360,8 @@ namespace CardShopCoop
                 if (Role == CoopRole.Client && (kind == 2 || kind == 3))
                     _cardShelves.InvalidateBaseline();
             };
+            _actCardPriceRetry = CardPriceRetryTick;
+            _actFrameCardWork = FlushFrameCardWork;
             _actNetPump = () => _net.PumpMainThread();
             _actAvatars = () =>
             {
@@ -857,6 +889,61 @@ namespace CardShopCoop
         private readonly List<PendingCard> _pendingCardDeltas = new List<PendingCard>();
         private readonly List<KeyValuePair<CardData, float>> _pendingCardPrices = new List<KeyValuePair<CardData, float>>();
 
+        // OUTGOING card deltas leave through a per-frame outbox instead of one reliable frame
+        // each. A "collect all machines" click fires 300-1300 AddCard/ReduceCard calls in ONE
+        // frame; that many individual CardDelta frames swamped the reliable lane (SteamNet
+        // drops a frame Steam refuses 30 frames running) - which is exactly how a guest's card
+        // price edit went missing. Flushed at the end of Update, and by the send helpers before
+        // any OTHER message goes out so today's global ordering is preserved.
+        private readonly List<PendingCard> _cardDeltaOutbox = new List<PendingCard>();
+        private const int CardDeltaBatchMax = 200; // deltas per CardDeltaBatch frame
+        private bool _flushingCardDeltas;          // re-entrancy guard for the send-helper hook
+        private readonly List<PendingCard> _batchRelayBuf = new List<PendingCard>();
+
+        // ONE binder relayout per frame, not per delta: with the book open RefreshOpenBinder
+        // invokes the game's OnSortingMethodUpdated (O(N^2) re-sort + 72-slot UI rebuild +
+        // album total recompute), which per delta is the reported 20-30s freeze.
+        private static bool _binderRefreshPending;
+
+        // The per-delta apply line is the field-log diagnosis for "cards didn't show up in the
+        // binder", so it survives verbatim for ordinary changes (<=5 applied in a frame) and
+        // folds into one summary line for a flood. Emitted by FlushFrameCardWork.
+        private static readonly List<PendingCard> _deltaLogBuf = new List<PendingCard>();
+        private static int _deltaAppliedThisFrame;
+
+        /// <summary>A card price WE set locally that the other side has not confirmed yet.
+        /// Card prices had NO ack and NO retry: a single dropped reliable frame stranded the
+        /// edit, and the host's 3s price heal then broadcast its own stale value back over it.</summary>
+        private struct MyCardPrice
+        {
+            public CardData Card;   // snapshot: the postfix restores the live object's grade
+            public float Value;
+            public bool Acked;
+            public double LastSend;
+            public int Attempts;
+        }
+        private readonly Dictionary<string, MyCardPrice> _myCardPrices = new Dictionary<string, MyCardPrice>();
+        private readonly List<string> _cardPriceRetryKeys = new List<string>(); // scratch: no mutate-while-iterating
+        private float _cardPriceRetryTimer;
+        private const int MyCardPriceMax = 1024;
+        private const int CardPriceMaxAttempts = 12;
+        /// <summary>Price-equality tolerance. Strictly ABOVE half a display quantum (0.005)
+        /// plus float error, and still far below the smallest price step anyone cares about.
+        /// The game's price store legitimately rounds by up to exactly half a quantum, and the
+        /// quantum depends on each machine's LOCAL currency setting (2dp vs 3dp) - so a
+        /// cross-currency pair landed EXACTLY on the old 0.005 and the ack test at the
+        /// CardPriceSet handler became deterministically unreachable: every edit burned all 12
+        /// retries and then falsely surrendered.</summary>
+        private const float CardPriceEpsilon = 0.0075f;
+
+        /// <summary>An item price WE just set. The host's PriceList is a full-table overwrite
+        /// built BEFORE our ItemPriceContrib landed, so for a few seconds it would repaint our
+        /// fresh price back to the old one. Bulk host state, so a recency window is enough.</summary>
+        private struct MyItemPrice { public float Value; public double At; }
+        private readonly Dictionary<int, MyItemPrice> _myItemPriceEdits = new Dictionary<int, MyItemPrice>();
+        private const int MyItemPriceMax = 256;
+        private const double ItemPriceHoldSeconds = 6.0;
+
         private static InteractionPlayerController _deltaIpc; // NEVER CSingleton<>.Instance (fake-manager landmine)
 
         /// <summary>Returns true when the delta was actually applied - the host's relay to
@@ -956,10 +1043,71 @@ namespace CardShopCoop
             }
             finally { Patches.GamePatches.ApplyingRemoteCards = false; }
             // "cards didn't show up in the binder" reports were undiagnosable from the
-            // receiving side - applies were completely silent
-            CoopPlugin.Log.LogInfo($"card delta applied: {(isAdd ? "+" : "-")}{amount} {card.monsterType}{(card.cardGrade > 0 ? $" (grade {card.cardGrade})" : card.isFoil ? " (foil)" : "")}");
-            RefreshOpenBinder();
+            // receiving side - applies were completely silent. The line still goes out for an
+            // ordinary change; a bulk collect (hundreds of deltas in one frame) folds into one
+            // summary instead of its own log flood. Both are emitted by FlushFrameCardWork.
+            _deltaAppliedThisFrame++;
+            if (_deltaLogBuf.Count < 5)
+                _deltaLogBuf.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = SnapshotCard(card) });
+            // Deferred to the end of the frame: RefreshOpenBinder is O(N^2) re-sort + full UI
+            // rebuild whenever the book is open, and running it per delta is the 20-30s freeze.
+            _binderRefreshPending = true;
             return true;
+        }
+
+        /// <summary>Read ONE card delta in the CardDelta encoding - the same bytes a
+        /// CardDeltaBatch repeats per delta, so both handlers share this.</summary>
+        private static void ReadCardDelta(BinaryReader br, out bool isAdd, out int amount, out CardData card)
+        {
+            isAdd = br.ReadBoolean();
+            amount = br.ReadInt32();
+            card = Msg.ReadCard(br);
+        }
+
+        /// <summary>Shared by the CardDelta and CardDeltaBatch handlers: hold the delta if a
+        /// scene load is in flight (applying mid-load crashes into uninitialized card data;
+        /// nothing is lost, FlushPendingCardWork replays it), otherwise apply it. Returns true
+        /// only when it was actually applied - i.e. when it may be relayed onward.</summary>
+        private bool ApplyOrHoldCardDelta(bool isAdd, int amount, CardData card)
+        {
+            if (!InGameLevel())
+            {
+                _pendingCardDeltas.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = card });
+                return false;
+            }
+            return ApplyCardDelta(isAdd, amount, card);
+        }
+
+        /// <summary>A private copy of exactly the nine fields the wire carries. Anything that
+        /// DEFERS a send must snapshot: AddCardPostfix/SetCardPricePostfix temporarily write the
+        /// ENCODED grade into the game's live cardData and restore it in a finally, so reading
+        /// the same object a frame later would ship the bare 1-10 grade instead.</summary>
+        private static CardData SnapshotCard(CardData c)
+        {
+            return new CardData
+            {
+                expansionType = c.expansionType,
+                monsterType = c.monsterType,
+                borderType = c.borderType,
+                isFoil = c.isFoil,
+                isDestiny = c.isDestiny,
+                isChampionCard = c.isChampionCard,
+                isNew = c.isNew,
+                cardGrade = c.cardGrade,
+                gradedCardIndex = c.gradedCardIndex,
+            };
+        }
+
+        /// <summary>Canonical identity of a card's MARKED PRICE - everything the price store
+        /// keys on and nothing else (gradedCardIndex is a per-copy serial, isNew is cosmetic).
+        /// Used both as the in-flight-edit key and as the human-readable id in the price logs,
+        /// which is why it is a string rather than a packed hash.</summary>
+        private static string CardPriceKey(CardData card)
+        {
+            if (card == null) return null;
+            return (int)card.expansionType + ":" + (int)card.monsterType + ":" + (int)card.borderType
+                + ":" + (card.isFoil ? 1 : 0) + (card.isDestiny ? 1 : 0) + (card.isChampionCard ? 1 : 0)
+                + ":" + card.cardGrade;
         }
 
         /// <summary>True when THIS install can actually place the card: both its expansion and
@@ -992,20 +1140,78 @@ namespace CardShopCoop
             }
         }
 
+        /// <summary>Keys already warned about by ApplyRemoteCardPrice, once per session. The
+        /// price heal rebroadcasts every displayed card at least every 30s, and one-sided
+        /// content packs are ALLOWED (1.0.34) - without this memo an hours-long session logs
+        /// the same "unknown card set" / "store did not accept" line thousands of times.</summary>
+        private static readonly HashSet<string> _priceWarnedKeys = new HashSet<string>();
+
         /// <summary>Apply a received card price. For an ENCODED (>10) graded grade, register the
         /// card with Grading Overhaul first (so its price-store key matches) and let GO's own
         /// SetCardPrice patch route the write into its store; without GO, skip - the vanilla
-        /// 10-slot price array can't index an encoded grade. Callers hold ApplyingRemotePrice.</summary>
-        private static void ApplyRemoteCardPrice(CardData card, float price)
+        /// 10-slot price array can't index an encoded grade. Callers hold ApplyingRemotePrice.
+        /// Returns true when the price is actually STORED here (the host's ack/echo keys off
+        /// this), and reports through <paramref name="actual"/> the value the game's price store
+        /// really ended up holding - vanilla SetCardPrice is a hardcoded six-expansion if-chain
+        /// that silently no-ops for a modded expansion, so "applied" used to mean nothing.
+        /// <paramref name="relayAnyway"/> separates "THIS machine can't hold this price" from
+        /// "this price is garbage": the message is well-formed and other peers may well have
+        /// the content pack / a working store, so the host must still forward it (and the
+        /// sender still needs its ack). False only when the price itself is unusable.</summary>
+        private static bool ApplyRemoteCardPrice(CardData card, float price, string from, out float actual, out bool relayAnyway)
         {
-            if (card == null) return;
+            actual = price;
+            relayAnyway = false;
+            if (card == null) return false; // nothing to relay
+            string key = CardPriceKey(card);
+            // RESOLVABILITY FIRST, on the same runtime-enum oracle the card-delta guard uses:
+            // an id this process has never heard of mis-indexes through GetShownMonsterList's
+            // Tetramon fallback and would price somebody ELSE'S card (save slot 0).
+            if (!CardSetInstalledHere(card))
+            {
+                relayAnyway = true; // one-sided content pack: the OTHER peers may well have it
+                if (_priceWarnedKeys.Add("set:" + key))
+                    CoopPlugin.Log.LogWarning($"card price for unknown card set skipped - other side has a content pack this PC doesn't ({key}; further ones logged once each)");
+                return false;
+            }
             if (card.cardGrade > 10)
             {
-                if (!Util.GradingInterop.Present) return; // modded grade, no grading mod: can't price
-                Util.GradingInterop.Remember(card);       // bind cert so GO's price-store key matches
+                // modded grade, no grading mod HERE: can't price, but a peer that has Grading
+                // Overhaul can, and the sender is still waiting on its ack
+                if (!Util.GradingInterop.Present) { relayAnyway = true; return false; }
+                Util.GradingInterop.Remember(card);             // bind cert so GO's price-store key matches
             }
+            float before = float.NaN;
+            try { before = CPlayerData.GetCardPrice(card); } catch { }
             try { CPlayerData.SetCardPrice(card, price); }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("card price apply: " + e.Message); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("card price apply: " + e.Message); return false; }
+            // READ-BACK, the same GetCardPrice the host's price heal reads: truth on the wire
+            // lets the sender either converge on it or surface its own give-up warning.
+            try { actual = CPlayerData.GetCardPrice(card); }
+            catch (Exception e)
+            {
+                // memoized like the other price warnings: a store whose GetCardPrice throws
+                // throws EVERY heal beat, which used to spam this line forever
+                if (_priceWarnedKeys.Add("read:" + key))
+                    CoopPlugin.Log.LogWarning("card price read-back: " + e.Message);
+                actual = price;
+            }
+            if (Math.Abs(actual - price) > CardPriceEpsilon)
+            {
+                // F4, not F2: a rounding-sized mismatch printed as two IDENTICAL strings, so
+                // the one line that explains the failure read as nonsense
+                if (_priceWarnedKeys.Add("store:" + key))
+                    CoopPlugin.Log.LogWarning($"card price {key}: the game's price store did not accept {price:F4} (it holds {actual:F4}) - modded expansion? (logged once per card)");
+                // The store REJECTED the value. Echoing the read-back would push this
+                // machine's stale/zero price onto every other guest (the reported "prices
+                // reset to 0"), so this is not an apply - but peers with a working store
+                // should still get the original, and the sender still needs its ack.
+                relayAnyway = true;
+                return false;
+            }
+            if (float.IsNaN(before) || Math.Abs(before - actual) > CardPriceEpsilon)
+                CoopPlugin.Log.LogInfo($"card price applied: {key} = {actual:F2} (from {from})"); // this path was invisible in field logs
+            return true;
         }
 
         // NEVER CSingleton<>.Instance (fake-manager landmine); cached, Unity re-resolves.
@@ -1096,11 +1302,35 @@ namespace CardShopCoop
                 if (_pendingCardDeltas.Count > 0)
                     CoopPlugin.Log.LogInfo($"applied {_pendingCardDeltas.Count} card change(s) held during loading");
                 _pendingCardDeltas.Clear();
+                // The results are NOT discardable on the host: a price queued during a scene
+                // load still owes its sender the same ack/relay the live CardPriceSet handler
+                // gives it. Dropping them meant a guest that priced a card while the host was
+                // loading retried 12 times and then falsely surrendered. Echoes are collected
+                // and sent AFTER the flag is cleared, exactly like the live handler.
+                bool echoing = Role == CoopRole.Host;
+                var echoes = echoing ? new List<KeyValuePair<CardData, float>>() : null;
                 Patches.GamePatches.ApplyingRemotePrice = true;
-                try { foreach (var p in _pendingCardPrices) ApplyRemoteCardPrice(p.Key, p.Value); }
+                try
+                {
+                    foreach (var p in _pendingCardPrices)
+                    {
+                        bool applied = ApplyRemoteCardPrice(p.Key, p.Value, "load queue", out float actual, out bool relayAnyway);
+                        if (!echoing) continue;                       // clients never echo
+                        if (applied) echoes.Add(new KeyValuePair<CardData, float>(p.Key, actual));
+                        else if (relayAnyway) echoes.Add(p);          // pure relay of the original
+                    }
+                }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("pending card price apply: " + e.Message); }
                 finally { Patches.GamePatches.ApplyingRemotePrice = false; }
                 _pendingCardPrices.Clear();
+                if (echoes != null)
+                {
+                    for (int i = 0; i < echoes.Count; i++)
+                    {
+                        var kv = echoes[i];
+                        Broadcast(MsgType.CardPriceSet, bw => { Msg.WriteCard(bw, kv.Key); bw.Write(kv.Value); });
+                    }
+                }
             });
         }
 
@@ -1113,9 +1343,103 @@ namespace CardShopCoop
         private void RelayRawToOthers(int senderConn, MsgType type, byte[] payload)
         {
             if (Role != CoopRole.Host || _net == null || _net.ConnectionCount <= 1) return;
+            // UNCONDITIONAL, including when we are relaying a CardDeltaBatch: exempting that
+            // type let a guest's relayed batch overtake the host's OWN queued deltas, so guest
+            // B could see a ReduceCard before the host's AddCard for the same card - the
+            // negative-reduce guard drops the reduce and B keeps a phantom card forever. The
+            // _flushingCardDeltas re-entrancy guard makes the nested call a no-op, which is
+            // what actually stops the recursion (see the send helpers).
+            FlushCardDeltaOutbox();
             var relay = Msg.Build(type, bw => { if (payload != null) bw.Write(payload); });
             foreach (int cid in _net.ConnIds())
                 if (cid != senderConn) _net.Send(cid, relay);
+        }
+
+        /// <summary>Host: relay only the deltas of a CardDeltaBatch that THIS side accepted.
+        /// Used when part of the batch was refused here (corrupt grade / uninstalled card set /
+        /// would-go-negative): the whole-batch case relays the ORIGINAL bytes, but a delta we
+        /// refused must never be propagated onward - exactly the guarantee the single-delta
+        /// case has always had.</summary>
+        private void RelayCardDeltaBatchToOthers(int senderConn, List<PendingCard> deltas)
+        {
+            if (Role != CoopRole.Host || _net == null || _net.ConnectionCount <= 1 || deltas.Count == 0) return;
+            FlushCardDeltaOutbox(); // ordering: our own pending deltas leave first
+            var relay = Msg.Build(MsgType.CardDeltaBatch, bw =>
+            {
+                bw.Write(deltas.Count);
+                for (int i = 0; i < deltas.Count; i++)
+                {
+                    bw.Write(deltas[i].IsAdd);
+                    bw.Write(deltas[i].Amount);
+                    Msg.WriteCard(bw, deltas[i].Card);
+                }
+            });
+            foreach (int cid in _net.ConnIds())
+                if (cid != senderConn) _net.Send(cid, relay);
+        }
+
+        /// <summary>Send everything the card-delta outbox holds, at most CardDeltaBatchMax
+        /// deltas per frame. Called at the end of Update AND by the send helpers before any
+        /// other message goes out, so a game action that emits a delta and then a follow-up
+        /// message (the graded-card flows) still puts them on the wire in that order.</summary>
+        private void FlushCardDeltaOutbox()
+        {
+            if (_cardDeltaOutbox.Count == 0 || _flushingCardDeltas) return;
+            if (_net == null) { _cardDeltaOutbox.Clear(); return; }
+            _flushingCardDeltas = true;
+            try
+            {
+                int total = _cardDeltaOutbox.Count;
+                int sent = 0;
+                while (sent < total)
+                {
+                    int start = sent;
+                    int n = Math.Min(CardDeltaBatchMax, total - start);
+                    Broadcast(MsgType.CardDeltaBatch, bw =>
+                    {
+                        bw.Write(n);
+                        for (int i = start; i < start + n; i++)
+                        {
+                            var d = _cardDeltaOutbox[i];
+                            bw.Write(d.IsAdd);
+                            bw.Write(d.Amount);
+                            Msg.WriteCard(bw, d.Card);
+                        }
+                    });
+                    sent += n;
+                }
+                if (total > CardDeltaBatchMax)
+                    CoopPlugin.Log.LogInfo($"card deltas: {total} sent as {(total + CardDeltaBatchMax - 1) / CardDeltaBatchMax} batch(es)");
+                _cardDeltaOutbox.Clear();
+            }
+            finally { _flushingCardDeltas = false; }
+        }
+
+        /// <summary>End of frame: the folded card-delta log line(s), ONE binder relayout for
+        /// everything applied this frame, then the batched outbox. Runs after every stage that
+        /// can apply or produce a delta (dispatch, the held-during-loading flush, HostTick).</summary>
+        private void FlushFrameCardWork()
+        {
+            if (_deltaAppliedThisFrame > 0)
+            {
+                if (_deltaAppliedThisFrame <= 5)
+                {
+                    for (int i = 0; i < _deltaLogBuf.Count; i++)
+                    {
+                        var d = _deltaLogBuf[i];
+                        CoopPlugin.Log.LogInfo($"card delta applied: {(d.IsAdd ? "+" : "-")}{d.Amount} {d.Card.monsterType}{(d.Card.cardGrade > 0 ? $" (grade {d.Card.cardGrade})" : d.Card.isFoil ? " (foil)" : "")}");
+                    }
+                }
+                else CoopPlugin.Log.LogInfo($"applied {_deltaAppliedThisFrame} card deltas");
+                _deltaLogBuf.Clear();
+                _deltaAppliedThisFrame = 0;
+            }
+            if (_binderRefreshPending)
+            {
+                _binderRefreshPending = false;
+                RefreshOpenBinder();
+            }
+            FlushCardDeltaOutbox();
         }
 
         private void RelayTagToOthers(int senderConn, byte kind, int extra = -1)
@@ -1687,12 +2011,12 @@ namespace CardShopCoop
         public void ForwardCardDelta(CardData card, int amount, bool isAdd)
         {
             if (Role == CoopRole.None || _net == null || card == null || amount <= 0) return;
-            Broadcast(MsgType.CardDelta, bw =>
-            {
-                bw.Write(isAdd);
-                bw.Write(amount);
-                Msg.WriteCard(bw, card);
-            });
+            // QUEUED, not sent: a bulk "collect all machines" fires hundreds of these in one
+            // frame and one reliable frame each overran the send lane. FlushCardDeltaOutbox
+            // ships them as CardDeltaBatch at the end of the frame - or right now, if anything
+            // else tries to send first (see the send helpers). The card is SNAPSHOT because
+            // the postfix restores the live object's encoded grade the moment we return.
+            _cardDeltaOutbox.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = SnapshotCard(card) });
         }
 
         /// <summary>Host: send a card delta to ONE peer instead of broadcasting - for when
@@ -2071,6 +2395,10 @@ namespace CardShopCoop
         {
             if (Role != CoopRole.Client || _net == null) return;
             Send(1, MsgType.ItemPriceContrib, bw => { bw.Write((int)itemType); bw.Write(price); });
+            // Stamp it: the host's next PriceList was built BEFORE this contribution landed,
+            // and applying that full table would visibly repaint our fresh price back.
+            _myItemPriceEdits[(int)itemType] = new MyItemPrice { Value = price, At = Time.realtimeSinceStartupAsDouble };
+            TrimMyItemPriceEdits();
         }
 
         /// <summary>Both roles: mirror a marked-card-price change.</summary>
@@ -2082,6 +2410,116 @@ namespace CardShopCoop
                 Msg.WriteCard(bw, card);
                 bw.Write(price);
             });
+            // GUEST convergence. One fire-and-forget frame was all a card price ever got, and a
+            // reliable frame the transport drops (the CardDelta flood) is gone for good - the
+            // host's 3s price heal then "repaired" the card by broadcasting its own STALE value
+            // back over the edit. Remember what we asked for, retry until the host confirms it,
+            // and ignore any different value for this card until then (see the CardPriceSet
+            // handler). The host needs none of this: its own write IS the authority, and
+            // tracking it there would make the host permanently ignore guest edits.
+            if (Role != CoopRole.Client) return;
+            string key = CardPriceKey(card);
+            if (key == null) return;
+            _myCardPrices[key] = new MyCardPrice
+            {
+                Card = SnapshotCard(card), // the postfix restores the live object's encoded grade
+                Value = price,
+                Acked = false,
+                LastSend = Time.realtimeSinceStartupAsDouble,
+                Attempts = 1,
+            };
+            TrimMyCardPrices();
+        }
+
+        /// <summary>Cap the in-flight card-price table: the oldest ACKED entry goes first (it
+        /// has nothing left to converge); only if nothing is acked do we drop an entry that is
+        /// still trying.</summary>
+        private void TrimMyCardPrices()
+        {
+            while (_myCardPrices.Count > MyCardPriceMax)
+            {
+                string victim = null;
+                double oldest = double.MaxValue;
+                foreach (var kv in _myCardPrices)
+                    if (kv.Value.Acked && kv.Value.LastSend < oldest) { oldest = kv.Value.LastSend; victim = kv.Key; }
+                if (victim == null)
+                    foreach (var kv in _myCardPrices)
+                        if (kv.Value.LastSend < oldest) { oldest = kv.Value.LastSend; victim = kv.Key; }
+                if (victim == null) break;
+                _myCardPrices.Remove(victim);
+            }
+        }
+
+        private void TrimMyItemPriceEdits()
+        {
+            while (_myItemPriceEdits.Count > MyItemPriceMax)
+            {
+                int victim = 0;
+                bool found = false;
+                double oldest = double.MaxValue;
+                foreach (var kv in _myItemPriceEdits)
+                    if (!found || kv.Value.At < oldest) { oldest = kv.Value.At; victim = kv.Key; found = true; }
+                if (!found) break;
+                _myItemPriceEdits.Remove(victim);
+            }
+        }
+
+        /// <summary>True when WE set this item's price within the hold window and the host's
+        /// bulk table still disagrees - that PriceList was built before our edit arrived, so
+        /// applying it would undo the edit in front of the player. Expired stamps are dropped
+        /// here so the host's table goes back to winning.</summary>
+        private bool HeldLocalItemPrice(int itemType, float incoming)
+        {
+            if (_myItemPriceEdits.Count == 0) return false;
+            if (!_myItemPriceEdits.TryGetValue(itemType, out var e)) return false;
+            if (Time.realtimeSinceStartupAsDouble - e.At >= ItemPriceHoldSeconds)
+            {
+                _myItemPriceEdits.Remove(itemType);
+                return false;
+            }
+            // same tolerance as card prices, and for the same reason: the store rounds by up
+            // to half a display quantum and the quantum differs per machine's local currency,
+            // so a 0.0001f compare called an identical price "different" across a mixed pair
+            return Math.Abs(e.Value - incoming) > CardPriceEpsilon;
+        }
+
+        /// <summary>Client, ~1Hz: re-send any card price the host has not confirmed. Nothing
+        /// ever acked a CardPriceSet, so an edit lost with a dropped frame simply vanished.
+        /// After CardPriceMaxAttempts we SURRENDER - drop our tracking entry so the host's
+        /// heals take over again - and say so once, instead of retrying for the session.</summary>
+        private void CardPriceRetryTick()
+        {
+            if (Role != CoopRole.Client || _net == null || _myCardPrices.Count == 0) return;
+            // Mid-scene-load a guest would spend all 12 attempts against a world that isn't up
+            // yet and surrender before the first one could ever be confirmed. LastSend keeps
+            // aging while we're out, so retries resume immediately once the level lands.
+            if (!InGameLevel()) return;
+            double now = Time.realtimeSinceStartupAsDouble;
+            _cardPriceRetryKeys.Clear();
+            foreach (var kv in _myCardPrices)
+                if (!kv.Value.Acked && now - kv.Value.LastSend >= 3.0) _cardPriceRetryKeys.Add(kv.Key);
+            for (int i = 0; i < _cardPriceRetryKeys.Count; i++)
+            {
+                string key = _cardPriceRetryKeys[i];
+                if (!_myCardPrices.TryGetValue(key, out var e)) continue;
+                if (e.Attempts >= CardPriceMaxAttempts)
+                {
+                    // SURRENDER by forgetting the card, not by faking an ack. An untracked card
+                    // adopts the host's next heal cleanly through the normal path; a fake
+                    // "acked" entry only kept bookkeeping (and a stale Value) alive forever.
+                    // Safe to remove here: we iterate the _cardPriceRetryKeys scratch list, not
+                    // the dictionary.
+                    _myCardPrices.Remove(key);
+                    CoopPlugin.Log.LogWarning($"card price for {key} never confirmed - keeping the local value until the host's next price sync");
+                    continue;
+                }
+                var card = e.Card;
+                float value = e.Value;
+                Broadcast(MsgType.CardPriceSet, bw => { Msg.WriteCard(bw, card); bw.Write(value); });
+                e.LastSend = now;
+                e.Attempts++;
+                _myCardPrices[key] = e;
+            }
         }
 
         private void Shutdown(string reason)
@@ -2099,6 +2537,26 @@ namespace CardShopCoop
             _chargeVerdicts.Clear();
             _lastDeclineToast.Clear();
             _enumSyncSentTo.Clear(); // FIX C: the loop-breaker memory is per hosting session
+            // 1.0.35 per-frame/per-session card state: retry stamps, an undelivered outbox and
+            // a half-drained dispatch buffer must never leak into the NEXT session
+            _cardDeltaOutbox.Clear();
+            _batchRelayBuf.Clear();
+            _flushingCardDeltas = false;
+            _binderRefreshPending = false;
+            _deltaLogBuf.Clear();
+            _deltaAppliedThisFrame = 0;
+            // RECEIVED but not-yet-applied card work from the dead session. Leaving these
+            // queued replays the old world's AddCards/prices into whatever save loads next,
+            // because FlushPendingCardWork drains them the moment ANY level is in-game again.
+            _pendingCardDeltas.Clear();
+            _pendingCardPrices.Clear();
+            _myCardPrices.Clear();
+            _cardPriceRetryKeys.Clear();
+            _cardPriceRetryTimer = 0f;
+            _myItemPriceEdits.Clear();
+            _priceWarnedKeys.Clear(); // the once-per-session warn memo is per session
+            _dispatchBuf.Clear();   // leftovers held back by the per-frame dispatch budget
+            _dispatchSeen.Clear();
             _saveBuf = null;
             _saveExpected = -1;
             _pendingSave = null;
@@ -2108,6 +2566,13 @@ namespace CardShopCoop
             _hasLastPos = false;
             _lastCoinSent = double.MinValue;
             _lastPriceHash = 0;
+            // card-price heal change-gate: a re-host inheriting the PREVIOUS world's hash
+            // would gate away the new world's very first price sync (the guests would sit on
+            // whatever they had until something moved), so it resets with the session.
+            _cardPriceBuf.Clear();
+            _lastCardPriceHash = 0;
+            _cardPriceHealBeat = 0f;
+            _cardPriceHealTimer = -2.1f;
             _lastProgressSent = long.MinValue;
             _world.Reset();
             _npcs.Reset();
@@ -2143,13 +2608,24 @@ namespace CardShopCoop
 
         // ------------------------------------------------ send helpers
 
+        // ORDERING GUARANTEE for the deferred card-delta outbox: card deltas are queued now,
+        // not sent, so any OTHER message leaving before the flush would overtake them and
+        // break today's global ordering (a graded-card flow sends a delta and then a follow-up
+        // message about the same card). Every send funnels through these three, so flushing
+        // here first is enough. The flush is UNCONDITIONAL - a CardDeltaBatch exemption here
+        // and in RelayRawToOthers let a RELAYED batch jump ahead of our own queued deltas -
+        // and the recursion is stopped by the _flushingCardDeltas re-entrancy guard inside
+        // FlushCardDeltaOutbox, which turns the nested call into a no-op.
+
         private void Send(int connId, MsgType type, Action<BinaryWriter> write)
         {
+            FlushCardDeltaOutbox();
             _net?.Send(connId, Msg.Build(type, write));
         }
 
         private void Broadcast(MsgType type, Action<BinaryWriter> write)
         {
+            FlushCardDeltaOutbox();
             _net?.Broadcast(Msg.Build(type, write));
         }
 
@@ -2157,6 +2633,13 @@ namespace CardShopCoop
         /// (unreliable-no-delay on Steam; a lost packet is replaced by the next tick).</summary>
         private void BroadcastTransient(MsgType type, Action<BinaryWriter> write)
         {
+            // The flush only ORDERS the LAN transport, where the transient lane maps onto the
+            // SAME ordered TCP stream. On SteamTransport the transient lane is drained BEFORE
+            // the reliable lane every pump (SteamNet.PumpMainThread), so transient messages
+            // intentionally overtake card deltas there and no flush can prevent it.
+            // THEREFORE: no card-coupled message may EVER use the transient lane - only
+            // self-replacing state (positions, crowd, register) belongs here.
+            FlushCardDeltaOutbox();
             _net?.BroadcastTransient(Msg.Build(type, write));
         }
 
@@ -2209,7 +2692,10 @@ namespace CardShopCoop
         {
             if (_deliveringHeld) return PurchaseGate.Process; // re-dispatch of a resolved hold
             double now = Time.realtimeSinceStartupAsDouble;
-            if (_chargeVerdicts.TryGetValue(msg.ConnId, out var vd) && now - vd.At < VerdictTtl)
+            // freshness is asymmetric: an approval expires after VerdictTtl, a decline stays
+            // authoritative for VerdictDeclineTtl so a budget-split cart can't fail open
+            if (_chargeVerdicts.TryGetValue(msg.ConnId, out var vd)
+                && now - vd.At < (vd.Accepted ? VerdictTtl : VerdictDeclineTtl))
             {
                 if (vd.Accepted) return PurchaseGate.Process;
                 CoopPlugin.Log.LogInfo($"purchase ({msg.Type}) from conn {msg.ConnId} dropped - its charge was declined (shared wallet short)");
@@ -2457,7 +2943,9 @@ namespace CardShopCoop
             // multiplexes senders inside the payload, so neither may be coalesced.)
             _pendingReduceThisFrame = 0.0; // reset the per-frame guest-spend accumulator
             PumpHeldPurchases(); // fail-open any held product whose charge never arrived
-            _dispatchBuf.Clear();
+            // Anything last frame's budget held back is still at the FRONT of _dispatchBuf, in
+            // order; the fresh drain appends after it. The coalescer then re-runs over the
+            // combined buffer, so a stale leftover snapshot still loses to a newer one.
             while (_net != null && _net.Incoming.TryDequeue(out var msg))
                 _dispatchBuf.Add(msg);
             if (_dispatchBuf.Count > 8)
@@ -2472,13 +2960,32 @@ namespace CardShopCoop
                     if (!_dispatchSeen.Add(key)) _dispatchBuf[i] = default; // superseded
                 }
             }
+            // BUDGET, in WORK UNITS not messages: coalescing can't help the types that carry
+            // real work (a CardDeltaBatch flood, box/container ops), and applying an unbounded
+            // backlog in one frame is the hitch we're trying to kill. Every message costs 1
+            // unit EXCEPT a CardDeltaBatch, which is charged per delta it carries - counting a
+            // 200-delta batch as one message meant the budget bounded nothing. Spend at most
+            // DispatchBudget units; the rest keeps its place in line for the next frame. The
+            // first message of a frame always goes through even if it alone busts the budget,
+            // so an oversized batch can never wedge the queue.
+            int consumed = 0;
+            int dispatched = 0;
+            int unitsSpent = 0;
             for (int i = 0; i < _dispatchBuf.Count; i++)
             {
-                if (_dispatchBuf[i].Type == 0) continue;
+                if (_dispatchBuf[i].Type == 0) { consumed = i + 1; continue; } // coalesced away
+                int cost = DispatchCost(_dispatchBuf[i]);
+                if (unitsSpent + cost > DispatchBudget && dispatched > 0) break; // next frame's work
+                dispatched++;
+                unitsSpent += cost;
+                consumed = i + 1;
                 try { Dispatch(_dispatchBuf[i]); }
                 catch (Exception e) { CoopPlugin.Log.LogError($"Dispatch {_dispatchBuf[i].Type}: {e}"); }
                 if (_net == null) break; // a Bye may have shut us down mid-drain
             }
+            // (a Bye already cleared the buffer in Shutdown, hence the >= Count branch)
+            if (consumed >= _dispatchBuf.Count) _dispatchBuf.Clear();
+            else if (consumed > 0) _dispatchBuf.RemoveRange(0, consumed);
             if (_net == null) return;
 
             float dt = Time.deltaTime;
@@ -2516,6 +3023,15 @@ namespace CardShopCoop
             {
                 Guarded("npc-puppets", _actNpcPuppets);
                 Guarded("register-mirror", _actRegisterMirror);
+
+                // chase any card price the host hasn't confirmed yet (the retry has its own
+                // 3s per-entry cooldown; this is just the polling cadence)
+                _cardPriceRetryTimer += dt;
+                if (_cardPriceRetryTimer >= 1f)
+                {
+                    _cardPriceRetryTimer = 0f;
+                    Guarded("card-price-retry", _actCardPriceRetry);
+                }
 
                 // The save-load path can leave inert vanilla customers standing around on
                 // the client even though their AI is suppressed; sweep them off so only
@@ -2583,6 +3099,11 @@ namespace CardShopCoop
             }
 
             if (Role == CoopRole.Host) HostTick(dt);
+
+            // LAST: one binder relayout + the folded delta log for everything applied this
+            // frame, then the batched card-delta outbox. Everything above has had its chance
+            // to apply or produce a delta by now.
+            Guarded("frame-card-work", _actFrameCardWork);
         }
 
         /// <summary>Drives the -coopautohost / -coopautojoin command-line flows.</summary>
@@ -3282,6 +3803,10 @@ namespace CardShopCoop
                                 float v = br.ReadSingle();
                                 _incomingPriced.Add(i);
                                 if (i < 0 || i > 500000) continue;
+                                // this table was built BEFORE our own ItemPriceContrib landed:
+                                // for a few seconds our fresh edit outranks it (it still counts
+                                // as "priced" above, so the clear pass below leaves it alone)
+                                if (HeldLocalItemPrice(i, v)) continue;
                                 // write through the game's WOVEN SetItemPrice: raw list
                                 // writes for modded types land in a shadow list the game
                                 // never reads (EPL routes those rows to its own save
@@ -3302,6 +3827,9 @@ namespace CardShopCoop
                             foreach (int i in _clientPriced)
                                 if (!_incomingPriced.Contains(i) && i >= 0 && i <= 500000)
                                 {
+                                    // a clear is an overwrite too: the host simply hasn't seen
+                                    // our brand-new price yet
+                                    if (HeldLocalItemPrice(i, 0f)) continue;
                                     float cur = 0f;
                                     try { cur = CPlayerData.GetItemPrice((EItemType)i, preventZero: false); } catch { }
                                     if (cur != 0f)
@@ -3530,38 +4058,77 @@ namespace CardShopCoop
                     }
                     break;
                 }
+                // Nothing has sent a single CardDelta since the outbox landed (SendCardDeltaTo
+                // still does, and older internal senders may), so this case stays exactly as
+                // it was; CardDeltaBatch below runs the very same per-delta logic in a loop.
                 case MsgType.CardDelta:
                 {
                     using (var br = Msg.Reader(msg.Payload))
                     {
-                        bool isAdd = br.ReadBoolean();
-                        int amount = br.ReadInt32();
-                        var card = new CardData
-                        {
-                            expansionType = (ECardExpansionType)br.ReadInt32(),
-                            monsterType = (EMonsterType)br.ReadInt32(),
-                            borderType = (ECardBorderType)br.ReadInt32(),
-                            isFoil = br.ReadBoolean(),
-                            isDestiny = br.ReadBoolean(),
-                            isChampionCard = br.ReadBoolean(),
-                            isNew = br.ReadBoolean(),
-                            cardGrade = br.ReadInt32(),
-                            gradedCardIndex = br.ReadInt32(),
-                        };
-                        if (!InGameLevel())
-                        {
-                            // applying mid-scene-load crashes into uninitialized card data;
-                            // hold it and flush once the world is up (nothing is lost)
-                            _pendingCardDeltas.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = card });
-                            break;
-                        }
-                        if (!ApplyCardDelta(isAdd, amount, card))
-                            break; // refused here (corrupt/registry mismatch): never propagate it
+                        ReadCardDelta(br, out bool isAdd, out int amount, out var card);
+                        if (!ApplyOrHoldCardDelta(isAdd, amount, card))
+                            break; // held for the level load, or refused here: never propagate it
                     }
                     // shared collection: a card a guest gained/lost has to reach the OTHER guests
                     // too, or their binder totals drift out of sync in 3+ player sessions. Forward
                     // the raw bytes (encoded grades intact) to everyone except the sender.
                     RelayRawToOthers(msg.ConnId, msg.Type, msg.Payload);
+                    break;
+                }
+                case MsgType.CardDeltaBatch:
+                {
+                    // the host only needs the per-delta rebuild when it actually has other
+                    // guests to relay to; snapshot BEFORE applying, because the game's AddCard
+                    // path may mutate the CardData we hand it
+                    bool needFiltered = Role == CoopRole.Host && _net != null && _net.ConnectionCount > 1;
+                    _batchRelayBuf.Clear();
+                    int total, applied = 0;
+                    using (var br = Msg.Reader(msg.Payload))
+                    {
+                        total = br.ReadInt32();
+                        if (total < 0 || total > CardDeltaBatchMax)
+                        {
+                            CoopPlugin.Log.LogWarning($"card delta batch: bogus count {total} - dropped");
+                            break;
+                        }
+                        for (int i = 0; i < total; i++)
+                        {
+                            // PER-DELTA FAULT ISOLATION. One throw used to abort the loop AND
+                            // skip both relay calls below, so deltas this side had ALREADY
+                            // applied were never propagated - the other guests silently lost
+                            // them. The two failure modes are different and get different
+                            // handling: a read fault means the stream itself is unrecoverable
+                            // (every following delta is misaligned garbage), an apply fault
+                            // costs exactly one delta.
+                            bool isAdd = false; int amount = 0; CardData card = null;
+                            try { ReadCardDelta(br, out isAdd, out amount, out card); }
+                            catch (Exception e)
+                            {
+                                CoopPlugin.Log.LogWarning($"card delta batch: payload unreadable at delta {i + 1}/{total} ({e.Message}) - the rest of the batch is lost");
+                                break; // stream is desynced; whatever applied so far still relays
+                            }
+                            var relayCopy = needFiltered ? SnapshotCard(card) : null;
+                            bool ok;
+                            try { ok = ApplyOrHoldCardDelta(isAdd, amount, card); }
+                            catch (Exception e)
+                            {
+                                CoopPlugin.Log.LogWarning($"card delta batch: delta {i + 1}/{total} failed to apply ({e.Message}) - skipped");
+                                continue; // one bad delta costs one delta, not the batch
+                            }
+                            if (!ok) continue;
+                            applied++;
+                            if (needFiltered)
+                                _batchRelayBuf.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = relayCopy });
+                        }
+                    }
+                    // Same shared-collection fan-out as CardDelta, and it runs on EVERY exit
+                    // path above (clean, read-fault, apply-fault). The ORIGINAL bytes go out
+                    // untouched only when every delta applied (encoded grades verbatim); if this
+                    // side refused, skipped or never reached any, only the accepted ones are
+                    // relayed - a delta we refused must never spread, exactly as in the
+                    // single-delta case above.
+                    if (applied == total && total > 0) RelayRawToOthers(msg.ConnId, msg.Type, msg.Payload);
+                    else if (applied > 0) RelayCardDeltaBatchToOthers(msg.ConnId, _batchRelayBuf);
                     break;
                 }
                 case MsgType.GradedRemove:
@@ -4079,14 +4646,35 @@ namespace CardShopCoop
                         float price = br.ReadSingle();
                         if (itemType >= 0 && itemType <= 500000)
                         {
+                            // Resolvability first, same runtime-enum oracle as the card guards:
+                            // a type this host has never heard of can't be priced here at all.
+                            if (!Enum.IsDefined(typeof(EItemType), (EItemType)itemType))
+                            {
+                                CoopPlugin.Log.LogWarning($"item price for unknown item type {itemType} skipped - host missing content pack?");
+                                // tell the SENDER too: the host log is invisible to the guest,
+                                // who otherwise watches its price silently revert on the next
+                                // PriceList with nothing anywhere explaining why
+                                Send(msg.ConnId, MsgType.Toast, bw => bw.Write("the host couldn't apply that price - it may be missing that product"));
+                                break;
+                            }
                             // WOVEN SetItemPrice, never the raw list: EPL routes modded
                             // rows to its own save data, and a raw write is a shadow
                             // entry the game (and our own woven-read broadcast) never
                             // sees. Fires the tag-repaint event itself.
                             Patches.GamePatches.ApplyingRemotePrice = true;
+                            // a bare catch here swallowed the whole failure: the guest saw its
+                            // price "accepted" and nothing anywhere said otherwise
+                            bool priceThrew = false;
                             try { CPlayerData.SetItemPrice((EItemType)itemType, price); }
-                            catch { }
+                            catch (Exception e)
+                            {
+                                priceThrew = true;
+                                CoopPlugin.Log.LogWarning($"item price apply ({(EItemType)itemType}): " + e.Message);
+                            }
                             finally { Patches.GamePatches.ApplyingRemotePrice = false; }
+                            // same reason as the unknown-type branch: the guest has to hear it
+                            if (priceThrew)
+                                Send(msg.ConnId, MsgType.Toast, bw => bw.Write("the host couldn't apply that price - it may be missing that product"));
                             // the periodic PriceList broadcast echoes this to every client
                         }
                     }
@@ -4125,12 +4713,68 @@ namespace CardShopCoop
                             _pendingCardPrices.Add(new KeyValuePair<CardData, float>(card, price));
                             break;
                         }
+                        // IN-FLIGHT EDIT GATE. The host's price heal rebroadcasts its own
+                        // GetCardPrice for every displayed card; when our own CardPriceSet was
+                        // lost, that heal used to stomp the guest's fresh edit right back to the
+                        // old value. While we are still chasing an edit for this card, only OUR
+                        // value is allowed in - the retry loop keeps working until the host
+                        // confirms it (or gives up loudly).
+                        string key = CardPriceKey(card);
+                        if (key != null && _myCardPrices.TryGetValue(key, out var mine))
+                        {
+                            if (Math.Abs(mine.Value - price) <= CardPriceEpsilon)
+                            {
+                                mine.Acked = true;   // the other side is holding our value: ack
+                                _myCardPrices[key] = mine;
+                            }
+                            else if (!mine.Acked)
+                            {
+                                break;               // stale heal racing our edit: ignore it
+                            }
+                            else
+                            {
+                                mine.Value = price;  // they legitimately re-priced it; adopt, or
+                                _myCardPrices[key] = mine; // our heals would war with theirs
+                            }
+                        }
+                        bool applied;
+                        float actual;
+                        bool relayAnyway;
                         Patches.GamePatches.ApplyingRemotePrice = true;
                         // graded (>10 encoded) prices route through Grading Overhaul's own store
                         // (register the card, then GO's SetCardPrice patch handles it); ungraded
                         // prices use the vanilla path; no-op for a modded grade without GO.
-                        try { ApplyRemoteCardPrice(card, price); }
+                        string who = PeerNames.TryGetValue(msg.ConnId, out var pn) ? pn : ("conn " + msg.ConnId);
+                        try { applied = ApplyRemoteCardPrice(card, price, who, out actual, out relayAnyway); }
                         finally { Patches.GamePatches.ApplyingRemotePrice = false; }
+                        if (!applied)
+                        {
+                            // The HOST couldn't store it, but the price itself is fine (content
+                            // pack missing here, encoded grade with no Grading Overhaul here,
+                            // store rejected the write). Forward the ORIGINAL (card, price) once
+                            // - a PURE RELAY, never the read-back, which would be this machine's
+                            // wrong value. It doubles as the sender's ack (it sees its own number
+                            // come back and stops retrying instead of burning 12 attempts) and
+                            // lets guests that DO have the content pack converge.
+                            // Loop-safe: only the host ever re-broadcasts, and a host's own
+                            // Broadcast never comes back to it.
+                            if (relayAnyway && Role == CoopRole.Host)
+                            {
+                                var passCard = card;
+                                float passValue = price;
+                                Broadcast(MsgType.CardPriceSet, bw => { Msg.WriteCard(bw, passCard); bw.Write(passValue); });
+                            }
+                            break;
+                        }
+                        // HOST: the READ-BACK value goes straight back out to every client. That
+                        // one broadcast is both the sender's ACK (this handler acked nothing
+                        // before) and the 3+ player relay (it reached nobody but the host).
+                        if (Role == CoopRole.Host)
+                        {
+                            var echoCard = card;
+                            float echoValue = actual;
+                            Broadcast(MsgType.CardPriceSet, bw => { Msg.WriteCard(bw, echoCard); bw.Write(echoValue); });
+                        }
                     }
                     break;
                 }

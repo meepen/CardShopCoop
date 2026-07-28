@@ -5,6 +5,22 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.35
+**The binder freeze and the price fixes — thanks to the anonymous July-27 reporter running the Pokemon pack-opener setup.** Wire format extended (card changes now travel in batches), so 1.0.35 only connects to 1.0.35. Both players must update — the launcher does it automatically.
+
+**The 20–30 second freeze with the binder open**
+- **Fixed: your game freezing while the other player opens packs or collects card machines with the binder open.** Every single card they gained used to trigger a full re-sort and rebuild of your open binder — hundreds of times for one "collect all" click. The binder now updates once per frame no matter how many cards arrive, card changes travel in one batched message per frame instead of one message per card, and a backlog is processed on a per-frame budget instead of all at once. The freeze is gone; you just see your binder totals tick up.
+
+**Co-op player's card prices (both directions)**
+- **Fixed: the joiner's card prices not sticking / never reaching the host.** A price you set was sent exactly once with no confirmation — if that one message got squeezed out (which the pack-opening flood above did reliably), the host never saw it, and the host's periodic price re-sync then painted its own OLD price right back over yours. That's why it felt like you "couldn't set prices at all." Now the joiner re-sends until the host confirms, the host's re-sync can't overwrite a price you just set, the host confirms every applied price back (which also finally delivers your prices to a third player), and mismatched currency settings between PCs no longer make confirmations impossible.
+- The host now says so in the log when it *can't* store a price (card set not installed, or a modded price store rejecting the write) instead of failing silently — and when the host can't store it but the other players can, it passes the price along anyway.
+- Item prices got the same safety window (the host's bulk price table can no longer repaint an item price you set seconds ago), and a rejected item price now shows a message on your screen instead of silently reverting later.
+
+**Under the hood (co-op safety)**
+- A stale session's not-yet-applied card changes can no longer replay into your NEXT session's collection (they're now cleared on disconnect).
+- One corrupt card change in a batch now costs exactly that one card, not the whole batch.
+- A declined purchase can no longer slip through as free product if the charge and the delivery get split across a message backlog.
+
 ## 1.0.34
 **Fixes for the latest report batch — thanks Metz, Domworth, Toat, and Skibbles (whose repro notes basically drew the map).** Wire format extended, so 1.0.34 only connects to 1.0.34. Both players must update — the launcher does it automatically.
 

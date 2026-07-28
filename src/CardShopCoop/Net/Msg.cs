@@ -74,6 +74,7 @@ namespace CardShopCoop.Net
         FurnBoxState = 67,     // host -> client: furniture delivery box population
         GradedRemove = 68,     // both ways: a graded card left the shared album (RemoveGradedCard)
         SprayHit = 69,         // client -> host: handheld deodorant hold-spray (pos+range+potency), replay against host customers
+        CardDeltaBatch = 70,   // both ways: [int count][count x CardDelta payload] - one frame for a whole frame's card changes
     }
 
     /// <summary>One received message, already reassembled from the wire.</summary>
