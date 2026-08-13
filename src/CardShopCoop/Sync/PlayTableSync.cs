@@ -171,9 +171,13 @@ namespace CardShopCoop.Sync
                     var st = HostSeat(sets[s]);
                     bw.Write(st.Active);
                     if (!st.Active) continue;
-                    bw.Write(st.PlayMat);
-                    bw.Write(st.DeckBox);
-                    bw.Write(st.Comic);
+                    // the three set pieces are EItemTypes, one of the id spaces
+                    // EnhancedPrefabLoader mints custom ids into - so they travel as
+                    // HOST ids like every other modded id (identity below the modded
+                    // floor, and identity here anyway: only the host writes this)
+                    Net.Msg.WriteItemType(bw, (EItemType)st.PlayMat);
+                    Net.Msg.WriteItemType(bw, (EItemType)st.DeckBox);
+                    Net.Msg.WriteItemType(bw, (EItemType)st.Comic);
                 }
             }
         }
@@ -206,9 +210,13 @@ namespace CardShopCoop.Sync
                     var st = new SeatState { Active = br.ReadBoolean() };
                     if (st.Active)
                     {
-                        st.PlayMat = br.ReadInt32();
-                        st.DeckBox = br.ReadInt32();
-                        st.Comic = br.ReadInt32();
+                        // host ids -> ours, so ApplySeat below can cast straight to a
+                        // LOCAL EItemType. A set piece from a pack only the host has
+                        // resolves to EItemType.None and simply paints no mesh - the
+                        // seat is still shown, one-sided packs are allowed
+                        st.PlayMat = (int)Net.Msg.ReadItemType(br);
+                        st.DeckBox = (int)Net.Msg.ReadItemType(br);
+                        st.Comic = (int)Net.Msg.ReadItemType(br);
                     }
                     if (skipTable || sets == null || s >= sets.Count) continue;
                     ApplySeat(tableIdx, s, sets[s], st);

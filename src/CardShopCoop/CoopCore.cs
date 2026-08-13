@@ -352,7 +352,7 @@ namespace CardShopCoop
                 else if (Role == CoopRole.Host) _boxes.HostNotifyLocalDestroyed();
             };
             _boxes.OnLocalRemoved = (idx, type) =>
-                Send(1, MsgType.BoxRemoved, bw => { bw.Write(idx); bw.Write(type); });
+                Send(1, MsgType.BoxRemoved, bw => { bw.Write(idx); Msg.WriteItemType(bw, (EItemType)type); });
             PopulationSync.OnClientStructureChanged = kind =>
             {
                 // a repaired/respawned card display starts empty locally; that emptiness
@@ -470,30 +470,42 @@ namespace CardShopCoop
             CEventManager.AddListener<CEventPlayer_OnOpenCardPack>(OnLocalPackOpened);
 
             // FIX A-hook: warn ONCE per game session if the on-disk custom-card registry is
-            // still a HOST-synced copy from a previous co-op join (marker-file detected by
-            // ModParity). Solo modded saves expect the user's OWN registry, so they may not
-            // load until it's restored. The restore + a restart clears it. Wiring the UI
-            // button (co-op window) is a documented follow-up - see EnumLendState().
-            try
-            {
-                if (Util.ModParity.HostEnumInstalled())
-                    CoopPlugin.Log.LogWarning("CardShopCoop: your custom-card database is currently the HOST's synced copy from a co-op session. Your OWN solo modded saves may not load until you restore it (restore via the co-op window) and RESTART the game.");
-            }
+            // still a HOST-synced copy from a previous co-op join. The warning itself lives in
+            // EnumLendState() now - see there for why Awake is too early to ask. This call is
+            // kept only as the fast path for the case where EPL IS already chainloaded: it emits
+            // the warning at boot (where a player looking for it expects it) and sets the memo so
+            // EnumLendState cannot repeat it.
+            try { EnumLendState(); }
             catch { }
         }
+
+        /// <summary>Has the "your card database is the host's" warning already been logged this
+        /// process? One-shot memo shared by the Awake fast path and EnumLendState.</summary>
+        private static bool _enumLendWarned;
 
         /// <summary>FIX A-hook: exposed for the co-op UI (CoopUI, owned elsewhere). Returns a
         /// one-line notice when the on-disk enum registry is a host-synced copy - so the UI
         /// can show it and offer a restore button - or null when the registry is the user's
-        /// own. The restore itself is Util.ModParity.RestoreEnumBackup(out msg). Hooking a
-        /// button to this is a documented follow-up.</summary>
+        /// own. The restore itself is Util.ModParity.RestoreEnumBackup(out msg).
+        ///
+        /// THE LOG WARNING LIVES HERE, NOT IN AWAKE. HostEnumInstalled() short-circuits on
+        /// !EplLoaded(), and EplLoaded() probes for EPL's PLUGIN assembly types - which BepInEx
+        /// may not have chainloaded yet when our Awake runs. A single call at Awake therefore
+        /// answers "no" on exactly the modded machines the warning was written for, and being a
+        /// one-shot, the warning was then lost for the whole session. CoopUI polls this every
+        /// OnGUI frame, so emitting on the FIRST non-null answer catches it whenever EPL turns
+        /// up; the memo keeps it to one line no matter how many frames ask.</summary>
         public static string EnumLendState()
         {
             try
             {
-                return Util.ModParity.HostEnumInstalled()
-                    ? "custom-card database is the HOST's copy (co-op sync) - solo modded saves may not load; restore via the co-op window"
-                    : null;
+                if (!Util.ModParity.HostEnumInstalled()) return null;
+                if (!_enumLendWarned)
+                {
+                    _enumLendWarned = true;
+                    CoopPlugin.Log.LogWarning("CardShopCoop: your custom-card database is currently the HOST's synced copy from a co-op session. Your OWN solo modded saves may not load until you restore it (restore via the co-op window) and RESTART the game.");
+                }
+                return "custom-card database is the HOST's copy (co-op sync) - solo modded saves may not load; restore via the co-op window";
             }
             catch { return null; }
         }
@@ -538,6 +550,8 @@ namespace CardShopCoop
             if (Role != CoopRole.None) { ErrorLine = "Already in a session."; return; }
             if (!InGameLevel()) { ErrorLine = "Load your shop first, then host."; return; }
             if (!_steamLobby.SteamAvailable()) { ErrorLine = "Steam isn't running - use LAN instead."; return; }
+            // a HOST must never translate: drop any table a previous session left behind
+            Util.EnumMap.Clear();
             Role = CoopRole.Host;
             IsSteamSession = true;
             HostPassword = password ?? "";
@@ -603,6 +617,52 @@ namespace CardShopCoop
             }
         }
 
+        /// <summary>Our CreateCards/CardForge custom-card identity lines ("MonsterName=id"),
+        /// never throwing into the handshake. Empty means "no custom cards here".</summary>
+        private static List<string> SafeCardsList()
+        {
+            try { return Util.ModParity.CardsList() ?? new List<string>(); }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("cards list: " + e.Message);
+                return new List<string>();
+            }
+        }
+
+        /// <summary>The one encoding for a registry blob on the wire, factored out of SendHello
+        /// so the host's Welcome blobs are byte-identical in shape to the guest's Hello blob:
+        /// gzipped "\n"-joined lines, written as [int gzLen][gz bytes] and read back by
+        /// ReadCappedEnumBlob under EnumBlobCap. A read failure yields a gzipped EMPTY blob
+        /// rather than aborting: the receiver reads that as "nothing modded", which is the
+        /// pre-translation behavior and conflicts with nobody.</summary>
+        private static byte[] GzipLines(List<string> lines)
+        {
+            try
+            {
+                var arr = (lines ?? new List<string>()).ToArray();
+                var raw = System.Text.Encoding.UTF8.GetBytes(string.Join("\n", arr));
+                // SAY SO WHEN WE ARE ABOUT TO SEND SOMETHING THE READER WILL THROW AWAY. The
+                // reader caps the DECOMPRESSED text at EnumBlobCap, and until now the writer
+                // never looked: an over-cap registry simply failed inside GunzipCapped on the
+                // far side and was logged there as "no registry - fine if the host is vanilla",
+                // which is the single most misleading thing we could say about the most heavily
+                // modded host on the network. Still SEND it - the reader degrades to identity,
+                // which is what this build did before translation existed - but leave a line in
+                // the sender's own log that names the size, because that is the only machine
+                // where the fix (fewer content packs, or a bigger cap) can be applied.
+                if (raw.Length > EnumBlobCap)
+                    CoopPlugin.Log.LogWarning("registry blob is OVER THE WIRE CAP: " + arr.Length + " ids, "
+                        + raw.Length + " bytes uncompressed vs a " + EnumBlobCap
+                        + "-byte cap - the other PC will IGNORE it and modded ids will not be translated this session (ids must already match)");
+                return Msg.Gzip(raw);
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("registry blob: " + e.Message);
+                return Msg.Gzip(new byte[0]);
+            }
+        }
+
         /// <summary>FIX C wire cap. The real registry is ~100KB of text / ~7KB gzipped, so a
         /// quarter-megabyte is generous for anything honest and small enough that a malformed
         /// (or hostile) Hello - which arrives BEFORE the peer is accepted - can't make the
@@ -623,7 +683,26 @@ namespace CardShopCoop
             try
             {
                 int gzLen = br.ReadInt32();
-                if (gzLen <= 0 || gzLen > EnumBlobCap) return lines;
+                if (gzLen <= 0) return lines;
+                if (gzLen > EnumBlobCap)
+                {
+                    // CONSUME THE PAYLOAD BEFORE BAILING. Welcome reads two of these blobs back
+                    // to back, so returning here with the bytes still in the stream left the
+                    // reader mid-blob and the SECOND read parsed compressed garbage as a length.
+                    // Skipped in bounded chunks rather than one ReadBytes(gzLen): the whole point
+                    // of the cap is to refuse a single huge allocation an unaccepted peer asked
+                    // for. Reading short just means the frame ended - nothing more to skip.
+                    int left = gzLen;
+                    while (left > 0)
+                    {
+                        int got = br.ReadBytes(Math.Min(left, 8192)).Length;
+                        if (got <= 0) break;
+                        left -= got;
+                    }
+                    CoopPlugin.Log.LogWarning("registry blob over cap (" + gzLen + " bytes compressed, cap "
+                        + EnumBlobCap + ") - ignored; modded ids will not be translated from it");
+                    return lines;
+                }
                 var gz = br.ReadBytes(gzLen);
                 if (gz.Length != gzLen) return lines; // truncated payload
                 string text = GunzipCapped(gz, EnumBlobCap);
@@ -641,7 +720,10 @@ namespace CardShopCoop
 
         /// <summary>Bounded gunzip. Msg.Gunzip grows without limit, which is fine for our own
         /// world transfers (we asked for them) but not for a blob an unaccepted peer hands us.
-        /// Returns null when the payload isn't valid gzip or blows past the cap.</summary>
+        /// Returns null when the payload isn't valid gzip or blows past the cap - and LOGS which
+        /// of the two it was, because the caller's silent empty-list return is otherwise
+        /// indistinguishable from "the peer is vanilla and sent nothing", the exact confusion
+        /// that had an over-cap modded host reported as a vanilla one.</summary>
         private static string GunzipCapped(byte[] data, int cap)
         {
             try
@@ -654,13 +736,25 @@ namespace CardShopCoop
                     int n;
                     while ((n = gz.Read(buf, 0, buf.Length)) > 0)
                     {
-                        if (dst.Length + n > cap) return null; // junk or a decompression bomb
+                        if (dst.Length + n > cap)
+                        {
+                            // junk or a decompression bomb - but on an honest peer this is simply
+                            // a registry bigger than the cap, so name the cap, not the peer.
+                            CoopPlugin.Log.LogWarning("registry blob unpacked OVER CAP (more than "
+                                + cap + " bytes from " + data.Length + " compressed) - ignored, NOT a vanilla peer");
+                            return null;
+                        }
                         dst.Write(buf, 0, n);
                     }
                     return System.Text.Encoding.UTF8.GetString(dst.ToArray());
                 }
             }
-            catch { return null; }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("registry blob could not be unpacked (" + data.Length
+                    + " bytes, not valid gzip: " + e.Message + ") - ignored");
+                return null;
+            }
         }
 
         /// <summary>FIX C: the ONLY registry difference that can corrupt a shared world - the
@@ -731,14 +825,40 @@ namespace CardShopCoop
             return (n.Length > 0 ? "n:" + n : "anon") + "|" + d;
         }
 
-        /// <summary>FIX C loop-breaker memory (host only): the set of (peer identity | registry
-        /// digest) pairs we have already handed our enum file to. Re-sending the same file to a
-        /// peer whose registry hasn't changed is the endless "synced - RESTART - rejoin" loop,
-        /// so the second time around they get an honest explanation instead of another copy of a
-        /// file that cannot help them; a peer who genuinely changed their content packs hashes
-        /// to a new key and gets a fresh attempt. Membership is recorded only after the file
-        /// actually went out. Cleared in Shutdown.</summary>
-        private readonly HashSet<string> _enumSyncSentTo = new HashSet<string>();
+        /// <summary>Loop-breaker memory (host only): how many times we have handed our enum file
+        /// to a given (peer identity | registry digest) pair. Counted rather than a bare set
+        /// since 1.0.36, because the premise changed: syncing genuinely CAN converge (EPL seeds
+        /// its ids from the file it finds - see ModParity.EnumFilePath), so a peer who comes back
+        /// with the SAME digest has almost certainly not APPLIED the file yet - they never fully
+        /// restarted, the write failed, or the host was itself gated - rather than proved the
+        /// file useless. One more attempt (EnumSyncMaxSends) is worth far more than the old flat
+        /// refusal, and the counter still keeps the original promise: we never tell a player
+        /// "restart and it will work" over and over. A peer who genuinely changed their content
+        /// packs hashes to a new key and starts fresh. Incremented only after the file actually
+        /// went out. Cleared in Shutdown.</summary>
+        private readonly Dictionary<string, int> _enumSyncSentTo = new Dictionary<string, int>();
+
+        /// <summary>The SECOND loop-breaker, keyed on the peer NAME alone, and the reason both
+        /// keys exist. The digest-bearing key above is the precise one - a peer who genuinely
+        /// changed their content packs SHOULD get a fresh budget - but it is only a terminator
+        /// while the digest holds still. EPL re-mints ids whenever it hits a collision, so a
+        /// guest in that state hashes to a DIFFERENT registry on every single boot, mints a
+        /// brand-new key, and gets the full EnumSyncMaxSends budget again: an unbounded
+        /// "synced - RESTART - rejoin" loop wearing a bounded counter's clothes. This counter
+        /// cannot be shifted by anything on the guest's disk, so it always terminates. Both are
+        /// kept because either alone is wrong: name-only would deny a legitimately re-packed
+        /// guest their second chance, digest-only never ends.</summary>
+        private readonly Dictionary<string, int> _enumSyncSentToPeer = new Dictionary<string, int>();
+
+        /// <summary>How many times the same peer+registry may be sent our enum file before the
+        /// terminal message. Two: one to install, and one for the very common "they clicked
+        /// straight back to the title screen instead of quitting to desktop".</summary>
+        private const int EnumSyncMaxSends = 2;
+
+        /// <summary>Hard ceiling on sends to ONE peer per hosting session, whatever their registry
+        /// digest does. Five, so a guest who really is re-minting ids still gets a couple of
+        /// honest retries past the per-digest budget before we call it.</summary>
+        private const int EnumSyncMaxSendsPerPeer = 5;
 
         /// <summary>FIX E3 wire helper: [int count (<=256)] then that many strings.</summary>
         private static void WriteCappedList(BinaryWriter bw, List<string> list)
@@ -864,8 +984,13 @@ namespace CardShopCoop
             }
             else
             {
+                // EItemType ids: the avatar resolves a real item prefab from them, so a modded
+                // id minted in a different order on the sender would draw the WRONG product in
+                // the other player's hands. hold==1 puts the box's big/small flag (0 or 1) in
+                // slot 0 ahead of the item type - that is not an item id, but it is far below
+                // EnumMap's modded floor, so it rides through the helper unchanged.
                 types = new List<int>(n);
-                for (int i = 0; i < n; i++) types.Add(br.ReadInt32());
+                for (int i = 0; i < n; i++) types.Add((int)Msg.ReadItemType(br));
             }
         }
 
@@ -880,7 +1005,9 @@ namespace CardShopCoop
             else
             {
                 bw.Write((byte)(types?.Count ?? 0));
-                if (types != null) foreach (int t in types) bw.Write(t);
+                // see ReadHoldPayload: EItemType ids (plus a 0/1 box-size flag on hold==1,
+                // which is below the modded floor and therefore an identity pass)
+                if (types != null) foreach (int t in types) Msg.WriteItemType(bw, (EItemType)t);
             }
         }
 
@@ -1129,6 +1256,15 @@ namespace CardShopCoop
                 // that Enum.IsDefined here IS content this machine has. Vanilla ids (small,
                 // dense) are always defined. Refuse only what this process has never heard
                 // of - the exact cards that would mis-index into Tetramon slot 0.
+                // ...and refuse the None sentinels explicitly. Since 1.0.37 an incoming modded
+                // id whose NAME does not exist on this PC is translated to the game's own None
+                // member (Util.EnumMap.FromWire) instead of arriving as a foreign number. None
+                // is a DEFINED member of both enums (ECardExpansionType.None = -1,
+                // EMonsterType.None = 0), so Enum.IsDefined alone would wave it straight through
+                // into the Tetramon-slot-0 mis-index this guard exists to stop. Neither value
+                // names a real card, so refusing them costs nothing.
+                if (card.expansionType == ECardExpansionType.None) return false;
+                if (card.monsterType == EMonsterType.None) return false;
                 if (!Enum.IsDefined(typeof(ECardExpansionType), card.expansionType)) return false;
                 if (!Enum.IsDefined(typeof(EMonsterType), card.monsterType)) return false;
                 return true;
@@ -1445,7 +1581,10 @@ namespace CardShopCoop
         private void RelayTagToOthers(int senderConn, byte kind, int extra = -1)
         {
             if (Role != CoopRole.Host || _net == null || _net.ConnectionCount <= 1) return;
-            var relay = Msg.Build(MsgType.RelayTag, bw => { bw.Write((byte)senderConn); bw.Write(kind); bw.Write(extra); });
+            // extra is the pack's EItemType for kind 1, and the unused -1 for an emote - which is
+            // below the modded floor and so passes through the helper untouched. Host-side this
+            // write is the identity function either way.
+            var relay = Msg.Build(MsgType.RelayTag, bw => { bw.Write((byte)senderConn); bw.Write(kind); Msg.WriteItemType(bw, (EItemType)extra); });
             foreach (int cid in _net.ConnIds())
                 if (cid != senderConn) _net.Send(cid, relay);
         }
@@ -1467,7 +1606,11 @@ namespace CardShopCoop
         private void OnLocalPackOpened(CEventPlayer_OnOpenCardPack evt)
         {
             if (Role != CoopRole.None && _net != null && _net.ConnectionCount > 0)
-                Broadcast(MsgType.Activity, bw => { bw.Write((byte)1); bw.Write(evt.m_PackIndex); });
+                // m_PackIndex is named like an index but is spent as an EItemType on the far
+                // side (AvatarManager.ShowPackOpen -> GetItemMeshData((EItemType)packIndex)),
+                // so a modded pack needs translating like any other item id or the peer's
+                // avatar holds up whichever product wears that number locally.
+                Broadcast(MsgType.Activity, bw => { bw.Write((byte)1); Msg.WriteItemType(bw, (EItemType)evt.m_PackIndex); });
         }
 
         private void OnDestroy()
@@ -1728,7 +1871,8 @@ namespace CardShopCoop
                 else
                 {
                     bw.Write((byte)_holdTypesBuf.Count);
-                    foreach (int t in _holdTypesBuf) bw.Write(t);
+                    // same payload shape (and same 0/1 box-flag caveat) as WriteHoldPayload
+                    foreach (int t in _holdTypesBuf) Msg.WriteItemType(bw, (EItemType)t);
                 }
             });
             _diagSent++;
@@ -1904,6 +2048,8 @@ namespace CardShopCoop
             ErrorLine = "";
             if (Role != CoopRole.None) { ErrorLine = "Already in a session."; return; }
             if (!InGameLevel()) { ErrorLine = "Load your shop first, then host."; return; }
+            // a HOST must never translate: drop any table a previous session left behind
+            Util.EnumMap.Clear();
             try
             {
                 var tcp = new Transport { KeepaliveFrame = Msg.Build(MsgType.Ping) };
@@ -2068,7 +2214,7 @@ namespace CardShopCoop
             catch { }
             Send(1, MsgType.OrderRequest, bw =>
             {
-                bw.Write((int)rd.itemType);
+                Msg.WriteItemType(bw, rd.itemType);
                 bw.Write(rd.isBigBox);
                 bw.Write(rd.name ?? "");
                 bw.Write(count);
@@ -2087,10 +2233,13 @@ namespace CardShopCoop
             int itemType = (int)rd.itemType;
             bool isBig = rd.isBigBox;
             string rdName = rd.name ?? "";
+            // rdName is the durable identity (ApplyLicenseUnlock falls back to it), but the id
+            // is tried FIRST, so an untranslated modded id from a permuted registry unlocks the
+            // wrong product on the peer. Host-side these writes are the identity function.
             if (Role == CoopRole.Host)
-                Broadcast(MsgType.LicenseUnlock, bw => { bw.Write(itemType); bw.Write(isBig); bw.Write(rdName); });
+                Broadcast(MsgType.LicenseUnlock, bw => { Msg.WriteItemType(bw, (EItemType)itemType); bw.Write(isBig); bw.Write(rdName); });
             else
-                Send(1, MsgType.LicenseUnlock, bw => { bw.Write(itemType); bw.Write(isBig); bw.Write(rdName); });
+                Send(1, MsgType.LicenseUnlock, bw => { Msg.WriteItemType(bw, (EItemType)itemType); bw.Write(isBig); bw.Write(rdName); });
         }
 
         // ---- EPL virtual catalog bridge ----
@@ -2280,7 +2429,12 @@ namespace CardShopCoop
                     bw.Write((ushort)cnt);
                     for (int i = 0; i < cnt; i++)
                     {
-                        bw.Write((int)entries[i].itemType);
+                        // The name hash rides along, but CatalogKey mixes the ID INTO the same
+                        // key rather than falling back to the name, so an untranslated modded id
+                        // makes an identical product read as "differs". That is exactly the false
+                        // report this diagnostic produced in the field (a constant +6 offset on
+                        // four of five "conflicts"), so the id is translated like any other.
+                        Msg.WriteItemType(bw, entries[i].itemType);
                         bw.Write(entries[i].isBigBox);
                         bw.Write(Fnv(entries[i].name ?? ""));
                     }
@@ -2295,7 +2449,10 @@ namespace CardShopCoop
             var joiner = new HashSet<long>();
             for (int i = 0; i < n; i++)
             {
-                int t = br.ReadInt32();
+                // Host side, so this is the identity function; the joiner already translated.
+                // A product the host does not have arrives as None and simply fails to match
+                // any host row - which is the truth this diagnostic is trying to report.
+                int t = (int)Msg.ReadItemType(br);
                 bool big = br.ReadBoolean();
                 int nameHash = br.ReadInt32();
                 joiner.Add(CatalogKey(t, big, nameHash));
@@ -2384,7 +2541,7 @@ namespace CardShopCoop
             if (Role != CoopRole.Client || _net == null) return;
             Send(1, MsgType.FurnitureOrder, bw =>
             {
-                bw.Write(objType);
+                Msg.WriteObjType(bw, (EObjectType)objType);
                 bw.Write(pos.x); bw.Write(pos.y); bw.Write(pos.z);
                 bw.Write(rot.x); bw.Write(rot.y); bw.Write(rot.z); bw.Write(rot.w);
             });
@@ -2394,7 +2551,7 @@ namespace CardShopCoop
         public void ForwardItemPrice(EItemType itemType, float price)
         {
             if (Role != CoopRole.Client || _net == null) return;
-            Send(1, MsgType.ItemPriceContrib, bw => { bw.Write((int)itemType); bw.Write(price); });
+            Send(1, MsgType.ItemPriceContrib, bw => { Msg.WriteItemType(bw, itemType); bw.Write(price); });
             // Stamp it: the host's next PriceList was built BEFORE this contribution landed,
             // and applying that full table would visibly repaint our fresh price back.
             _myItemPriceEdits[(int)itemType] = new MyItemPrice { Value = price, At = Time.realtimeSinceStartupAsDouble };
@@ -2537,6 +2694,17 @@ namespace CardShopCoop
             _chargeVerdicts.Clear();
             _lastDeclineToast.Clear();
             _enumSyncSentTo.Clear(); // FIX C: the loop-breaker memory is per hosting session
+            _enumSyncSentToPeer.Clear(); // ...and its digest-free companion ceiling
+            // The canonical id space was the HOST's, and it died with the session. Clearing is
+            // not housekeeping, it is correctness: the next session may be one where WE host,
+            // and a host must translate nothing.
+            Util.EnumMap.Clear();
+            // The PriceList swap-buffer pair, for the same reason and in the same breath: both
+            // hold LOCAL item ids from the DEAD session's translation. Left behind, _clientPriced
+            // is read by the next session's clear pass ("the host cleared everything not in this
+            // list") and would zero real prices on a later host whose ids mean something else.
+            _clientPriced.Clear();
+            _incomingPriced.Clear();
             // 1.0.35 per-frame/per-session card state: retry stamps, an undelivered outbox and
             // a half-drained dispatch buffer must never leak into the NEXT session
             _cardDeltaOutbox.Clear();
@@ -3223,7 +3391,7 @@ namespace CardShopCoop
                             bw.Write(_priceBuf.Count);
                             for (int i = 0; i < _priceBuf.Count; i++)
                             {
-                                bw.Write(_priceBuf[i].Key);
+                                Msg.WriteItemType(bw, (EItemType)_priceBuf[i].Key);
                                 bw.Write(_priceBuf[i].Value);
                             }
                         });
@@ -3462,7 +3630,7 @@ namespace CardShopCoop
                             bw.Write((ushort)unlocked.Count);
                             foreach (var rd in unlocked)
                             {
-                                bw.Write((int)rd.itemType);
+                                Msg.WriteItemType(bw, rd.itemType);
                                 bw.Write(rd.isBigBox);
                                 // NAME identity: modded enum ints can drift between
                                 // machines; the heal must still map the unlock
@@ -3569,64 +3737,156 @@ namespace CardShopCoop
                         if (conflicts.Count > 0)
                         {
                             CoopPlugin.Log.LogInfo($"enum check: {name} hash {enumHash} vs host {Util.ModParity.EnumHash()} - {conflicts.Count} real conflict(s)");
-                            // Our own registry on disk is a BORROWED copy - an earlier join
-                            // installed some other host's file over ours and the .hostlend
-                            // marker is still there. Shipping that as "the host's database"
-                            // would hand this guest a THIRD party's ids, matching neither what
-                            // we are running nor what their content packs mint, and cost them a
-                            // restart to find out. Say so, and put the fix where it belongs.
-                            if (Util.ModParity.HostEnumInstalled())
+                            // Can we honestly ship our registry file? The old test here was
+                            // "is it a BORROWED copy?" (ModParity.HostEnumInstalled - the
+                            // .hostlend marker). That was the wrong question, and an expensive
+                            // one: the marker survives restarts, so a host who joined somebody
+                            // once, restarted, and has been happily RUNNING that registry ever
+                            // since - a perfectly coherent id space, and exactly the file this
+                            // guest needs - still hard-rejected every conflicting guest AND
+                            // skipped the send that would have fixed them. That PC could never
+                            // auto-sync anyone again.
+                            //
+                            // The real hazard is narrower: the bytes on disk are not what this
+                            // process actually loaded, so shipping them promises the guest an id
+                            // space nobody is running. That is tracked precisely by our own two
+                            // writes - see ModParity.RegistryFileMatchesRuntime.
+                            if (!Util.ModParity.RegistryFileMatchesRuntime())
                             {
                                 RejectConn(msg.ConnId,
-                                    "your custom-card database conflicts with the host's, and the host's own database is currently a borrowed copy from another session - the HOST has to restore their card database (co-op window) and RESTART before it can be auto-synced to you (conflicting: "
+                                    "your custom-card database conflicts with the host's, and the host's card-database FILE was changed this session so it no longer matches what the host is running - the HOST has to RESTART the game before it can be auto-synced to you (conflicting: "
                                     + DescribeConflicts(conflicts) + ")");
                                 break;
                             }
-                            // LOOP-BREAKER. The old code sent our registry and rejected, every
-                            // single time - but the guest's file is REBUILT at startup from the
-                            // content packs installed on THEIR PC, so our copy never survives
-                            // the restart it demands. That's the endless "synced - RESTART -
-                            // rejoin" report. So: hand over the file ONCE per (peer, registry),
-                            // and if they come back still conflicting with the SAME registry,
-                            // stop promising them that another restart will fix it.
+                            // BOUNDED RETRY (1.0.36; was a one-shot loop-breaker). The premise
+                            // this block was built on turned out to be wrong: EPL does NOT
+                            // re-mint the registry from local content every boot, it LOADS the
+                            // file and reuses every saved id verbatim (see
+                            // ModParity.EnumFilePath). So our copy DOES survive the restart it
+                            // demands, and sending it really is the fix - the mismatch is
+                            // usually nothing but the same content packs installed in a
+                            // different ORDER. What the old one-shot rule actually caught was
+                            // guests who never APPLIED the file (no full restart, a failed
+                            // write, or a host gated by the borrowed-registry branch above), and
+                            // those deserve another copy plus a blunter instruction, not a
+                            // permanent refusal. So: up to EnumSyncMaxSends attempts per (peer,
+                            // registry), then the honest terminal message - the loop-breaker's
+                            // original job, which is to never promise a restart forever.
                             string peerKey = PeerSyncKey(name, theirEnumDigest);
-                            bool alreadySent = _enumSyncSentTo.Contains(peerKey);
-                            if (!alreadySent)
+                            int sentBefore;
+                            _enumSyncSentTo.TryGetValue(peerKey, out sentBefore);
+                            // ...and the digest-free ceiling. A guest whose EPL re-mints ids on
+                            // every boot presents a NEW digest each time, so the key above is
+                            // fresh each time and its budget never runs out - see
+                            // _enumSyncSentToPeer for why both counters are needed.
+                            string peerNameKey = PeerSyncKey(name, null);
+                            int sentToPeer;
+                            _enumSyncSentToPeer.TryGetValue(peerNameKey, out sentToPeer);
+                            if (sentBefore < EnumSyncMaxSends && sentToPeer < EnumSyncMaxSendsPerPeer)
                             {
                                 // send our registry along with the rejection: the client
                                 // backs theirs up, installs ours, and only has to restart -
                                 // no more hand-copying enum_values.json between PCs
                                 bool sent = false;
+                                string failReason = null;
                                 try
                                 {
-                                    var enumBytes = System.IO.File.ReadAllBytes(Util.ModParity.EnumFilePath());
-                                    var gz = Msg.Gzip(enumBytes);
-                                    Send(msg.ConnId, MsgType.EnumSync, bw =>
+                                    string enumPath = Util.ModParity.EnumFilePath();
+                                    if (!System.IO.File.Exists(enumPath))
                                     {
-                                        bw.Write(gz.Length);
-                                        bw.Write(gz);
-                                    });
-                                    // ONLY a peer we actually shipped the file to counts as
-                                    // synced. Recording it on a failed read/send (missing file,
-                                    // locked by EPL or antivirus, permissions) promised a
-                                    // restart that could not possibly help, and then met the
-                                    // retry with the terminal "copying the host's file cannot
-                                    // fix this" - a message about an attempt that never happened.
-                                    _enumSyncSentTo.Add(peerKey);
-                                    sent = true;
+                                        // Distinct from an IO failure and worth naming: a host
+                                        // whose registry file is missing has nothing to give.
+                                        failReason = "the host has no card-database file on disk to send";
+                                    }
+                                    else
+                                    {
+                                        var enumBytes = System.IO.File.ReadAllBytes(enumPath);
+                                        var gz = Msg.Gzip(enumBytes);
+                                        Send(msg.ConnId, MsgType.EnumSync, bw =>
+                                        {
+                                            bw.Write(gz.Length);
+                                            bw.Write(gz);
+                                        });
+                                        // ONLY a peer we actually shipped the file to counts as
+                                        // synced. Counting a failed read/send (missing file,
+                                        // locked by EPL or antivirus, permissions) promised a
+                                        // restart that could not possibly help, and burned one
+                                        // of the attempts on something that never happened.
+                                        _enumSyncSentTo[peerKey] = sentBefore + 1;
+                                        _enumSyncSentToPeer[peerNameKey] = sentToPeer + 1;
+                                        sent = true;
+                                    }
                                 }
-                                catch (Exception e) { CoopPlugin.Log.LogWarning("enum sync send: " + e.Message); }
-                                RejectConn(msg.ConnId, sent
-                                    ? "your custom-card database conflicts with the host's - it has been synced from the host; RESTART your game, then join again (e.g. "
-                                      + DescribeConflicts(conflicts) + ")"
-                                    : "your custom-card database conflicts with the host's, and the host could not send its card database - match your content packs manually (conflicting: "
-                                      + DescribeConflicts(conflicts) + ")");
+                                catch (Exception e)
+                                {
+                                    failReason = e.Message;
+                                    CoopPlugin.Log.LogWarning("enum sync send: " + e.Message);
+                                }
+                                string why = DescribeConflicts(conflicts);
+                                string reject;
+                                if (!sent)
+                                {
+                                    // Name the actual reason when we know it - "match your
+                                    // content packs manually" alone told the player nothing
+                                    // about which machine had the problem.
+                                    reject = "your custom-card database conflicts with the host's, and the host could not send its card database"
+                                        + (failReason != null ? " (" + failReason + ")" : "")
+                                        + " - ask the host to check that "
+                                        + "AppData\\LocalLow\\OPNeonGames\\Card Shop Simulator\\PrefabLoader\\enum_values.json exists and is readable, or copy it across by hand (conflicting: "
+                                        + why + ")";
+                                }
+                                else if (sentBefore == 0)
+                                {
+                                    // Careful with the claims here: the guest only WRITES the
+                                    // file if their AutoSyncCardDatabase option is on, and they
+                                    // may have had no registry of their own to back up.
+                                    reject = "your custom-card database conflicts with the host's - the host's copy has just been sent to you, and (unless you switched auto-sync off) saved on your PC with your old file backed up first. Now QUIT THE GAME TO DESKTOP, start it again, then join: the ids are only read while the game is booting, so nothing changes until you do (conflicting: "
+                                        + why + ")";
+                                }
+                                else
+                                {
+                                    // Same digest as last time: their registry is byte-for-byte
+                                    // the identity they sent before, so the file we sent was
+                                    // never loaded. Say that plainly rather than repeating the
+                                    // first message word for word.
+                                    reject = "your card database is UNCHANGED since the last sync, so the host's copy never took effect - usually because the game was not fully closed (returning to the title screen is not enough), or because auto-sync is switched off on your side. It has been sent again: QUIT TO DESKTOP, start the game, then join (conflicting: "
+                                        + why + ")";
+                                }
+                                RejectConn(msg.ConnId, reject);
                             }
                             else
                             {
-                                // Second time around with the same registry: the honest answer.
+                                // Out of attempts. The terminal message must be TRUE: syncing
+                                // does work, so the fault is that it is not being applied - the
+                                // old wording ("the game rebuilds it from YOUR content packs, so
+                                // copying the host's file cannot fix this") was wrong in both
+                                // halves and sent people off to reinstall content packs that
+                                // were never the problem.
+                                //
+                                // WHAT THIS MESSAGE MUST NOT SAY: "check the host isn't on a
+                                // borrowed card database". We only get here with a registry that
+                                // RegistryFileMatchesRuntime() already vouched for - the file we
+                                // sent IS the id space this host is running - so that advice is
+                                // inapplicable, and a host who follows it restores a registry
+                                // their own shop save was never written under and corrupts it.
+                                // The guest-side cause the two-send messages already name is the
+                                // one that belongs here: auto-sync switched off means the file
+                                // never landed at all.
+                                //
+                                // Two ways to land here and the wording has to be true for both:
+                                // the per-digest budget ran out (their registry never changed), or
+                                // the per-peer ceiling did (their registry changes every boot, so
+                                // the per-digest budget alone would never have ended). Only the
+                                // first may claim the file is unchanged.
+                                bool digestHeld = sentBefore >= EnumSyncMaxSends;
+                                int sendsMade = digestHeld ? sentBefore : sentToPeer;
                                 RejectConn(msg.ConnId,
-                                    "your card database still conflicts after syncing - the game rebuilds it at startup from the content packs installed on YOUR PC, so copying the host's file cannot fix this; you and the host need the same content packs (conflicting: "
+                                    "your card database still conflicts after " + sendsMade + " sync"
+                                    + (sendsMade == 1 ? "" : "s") + " from the host"
+                                    + (digestHeld
+                                        ? " and has not changed at all"
+                                        : " and keeps coming back DIFFERENT each time (your card ids are being re-minted every boot)")
+                                    + ", so the host's copy is not being applied on your PC. Syncing normally DOES fix this - the ids usually differ only because the same content packs were installed in a different order. Check, in this order: (1) you fully quit the game to DESKTOP after the sync and started it again (returning to the title screen is not enough); (2) CardShopCoop's AutoSyncCardDatabase option is ON on YOUR side - with it off nothing is ever written to your PC; (3) failing that, copy the host's enum_values.json from AppData\\LocalLow\\OPNeonGames\\Card Shop Simulator\\PrefabLoader into the same folder on your PC by hand and restart (conflicting: "
                                     + DescribeConflicts(conflicts) + ")");
                             }
                             break;
@@ -3667,6 +3927,53 @@ namespace CardShopCoop
                         _hostSlot = br.ReadInt32();
                         _bundleExpected = br.ReadInt32();
                         _selfId = br.ReadByte();
+                        // ID TRANSLATION IS BUILT HERE. "Welcome is the first message of the
+                        // session, so every later message is already translated" was the comment
+                        // that used to sit here and it is FALSE - do not rely on it.
+                        //
+                        // THE REAL WINDOW: SendWorldTo snapshots the host's registry on the main
+                        // thread but builds and sends the Welcome from a WORKER thread, while the
+                        // main thread carries on broadcasting. Roster, PriceList and LicenseState
+                        // can therefore reach a client BEFORE its Welcome, and on Steam a
+                        // PlayerState riding the transient lane can overtake the reliable one and
+                        // do the same. Those messages are dispatched with EnumMap inactive, i.e.
+                        // UNTRANSLATED.
+                        //
+                        // WHY THAT IS ACCEPTABLE TODAY: a session only gets this far when the
+                        // Hello conflict gate found no "same name, different id" between the two
+                        // registries, so on every ALLOWED session the ids in that pre-Welcome
+                        // traffic mean the same thing on both PCs - the translation would be the
+                        // identity function anyway. This is exactly 1.0.35 behavior, unchanged.
+                        // The one place the window could leak state across the boundary is the
+                        // PriceList swap buffers, and those are cleared right after Build below.
+                        //
+                        // ACTIVATION BLOCKER: the moment translation is allowed to activate for
+                        // PERMUTED registries - i.e. the day the conflict gate stops rejecting
+                        // them - this window becomes a correctness bug, because those same
+                        // messages would then carry ids that genuinely differ. Before that ships,
+                        // the client MUST gate or queue every non-Welcome message until
+                        // Util.EnumMap.Active, and drain the queue after Build. Deliberately not
+                        // built now: a queue that can only ever be a no-op is a new failure mode
+                        // (drops, ordering, memory) bought for nothing.
+                        //
+                        // Both blobs fail to an EMPTY list (missing, truncated, not gzip, over the
+                        // cap), and an empty list leaves that half of the map unbuilt, which is
+                        // the identity function - today's behavior, never garbage.
+                        var hostEnumLines = ReadCappedEnumBlob(br, out _);
+                        var hostCardLines = ReadCappedEnumBlob(br, out _);
+                        if (hostEnumLines.Count == 0 && hostCardLines.Count == 0)
+                            CoopPlugin.Log.LogWarning("no registry from the host - modded ids will NOT be translated this session. Causes, in order of likelihood: the host is vanilla (fine, nothing to translate); or the host's registry was too big for the wire cap or could not be read/unpacked (see the host's log for 'registry blob over cap' / 'over-cap' - in that case ids must already match on both PCs)");
+                        Util.EnumMap.Build(hostEnumLines, hostCardLines);
+                        // The PriceList swap buffers must start EMPTY under this session's brand-
+                        // new id map. Shutdown clears them too, but a PriceList can legitimately
+                        // land BEFORE this Welcome (see the window described above), and anything
+                        // it recorded was recorded UNTRANSLATED - i.e. in the host's ids, read as
+                        // ours. Residue like that survives into the first translated PriceList,
+                        // where the clear pass would zero real local prices for ids that never
+                        // meant what they looked like. Dropping it costs nothing: the very next
+                        // PriceList is a full sparse snapshot.
+                        _clientPriced.Clear();
+                        _incomingPriced.Clear();
                         PeerNames[msg.ConnId] = hostName;
                         _avatars.SetName(msg.ConnId, hostName);
                         _saveBuf = new MemoryStream(_saveExpected > 0 ? _saveExpected : 1024);
@@ -3799,8 +4106,16 @@ namespace CardShopCoop
                             int changed = 0;
                             for (int k = 0; k < n; k++)
                             {
-                                int i = br.ReadInt32();
+                                // Both sets below are keyed by LOCAL item ids (they are compared
+                                // against our own catalog and against _myItemPriceEdits), so the
+                                // translation has to happen here, before anything is recorded.
+                                bool known = Util.EnumMap.TryFromWire(Util.EnumKind.ItemType, br.ReadInt32(), out int i);
                                 float v = br.ReadSingle();
+                                // A price for a product only the HOST has: there is nothing local
+                                // to price, and - critically - it must NOT be recorded as priced,
+                                // because every unmappable id would collapse onto the same None
+                                // sentinel and the clear pass below reads this set.
+                                if (!known) continue;
                                 _incomingPriced.Add(i);
                                 if (i < 0 || i > 500000) continue;
                                 // this table was built BEFORE our own ItemPriceContrib landed:
@@ -3823,7 +4138,11 @@ namespace CardShopCoop
                             // stale-price reports were undiagnosable: applies were silent
                             if (changed > 0)
                                 CoopPlugin.Log.LogInfo($"price apply: {changed} price(s) updated from host");
-                            // a price the host CLEARED is absent from the sparse set
+                            // a price the host CLEARED is absent from the sparse set.
+                            // BOTH sets hold LOCAL ids now, so this stays an apples-to-apples
+                            // comparison. A host-only product can never be zeroed here: it never
+                            // resolved, so it was never added above and so cannot be in
+                            // _clientPriced either. One-sided content packs keep their prices.
                             foreach (int i in _clientPriced)
                                 if (!_incomingPriced.Contains(i) && i >= 0 && i <= 500000)
                                 {
@@ -3984,7 +4303,10 @@ namespace CardShopCoop
                 case MsgType.Activity:
                 {
                     int packIdx = -1;
-                    try { using (var br = Msg.Reader(msg.Payload)) { br.ReadByte(); packIdx = br.ReadInt32(); } }
+                    // an EItemType despite the name - see OnLocalPackOpened. Unmappable lands on
+                    // None (-1), which ShowPackOpen's existing "packIndex >= 0" test skips: no
+                    // prop in the avatar's hands, rather than the wrong one.
+                    try { using (var br = Msg.Reader(msg.Payload)) { br.ReadByte(); packIdx = (int)Msg.ReadItemType(br); } }
                     catch { }
                     _avatars.ShowTag(msg.ConnId, "opening a pack!", 3f);
                     _avatars.ShowPackOpen(msg.ConnId, packIdx);
@@ -4047,7 +4369,7 @@ namespace CardShopCoop
                         int senderId = br.ReadByte();
                         byte kind = br.ReadByte();
                         int extra = -1;
-                        try { extra = br.ReadInt32(); } catch { }
+                        try { extra = (int)Msg.ReadItemType(br); } catch { } // pack EItemType for kind 1; -1 for an emote
                         if (senderId == _selfId) break;
                         if (kind == 0) _avatars.ShowEmote(1000 + senderId);
                         else
@@ -4197,11 +4519,14 @@ namespace CardShopCoop
                     if (Role != CoopRole.Host || !InGameLevel()) break;
                     using (var br = Msg.Reader(msg.Payload))
                     {
-                        int objType = br.ReadInt32();
+                        // The whole handler keys off this id (price lookup, prefab lookup, spawn),
+                        // so a permuted modded id would deliver - and charge for - the wrong piece
+                        // of furniture. Unmappable becomes EObjectType.None, whose prefab lookup
+                        // returns null, which drops into the existing refund-and-toast path.
+                        var eObj = Msg.ReadObjType(br);
                         var pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
                         var rot = new Quaternion(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
                         string who = PeerNames.TryGetValue(msg.ConnId, out var n) ? n : "player";
-                        var eObj = (EObjectType)objType;
 
                         // Charge/product coupling (charge-first): honor this cart's charge
                         // verdict if it already landed (accept -> process, decline -> drop
@@ -4261,7 +4586,12 @@ namespace CardShopCoop
                     if (Role != CoopRole.Host || !InGameLevel()) break;
                     using (var br = Msg.Reader(msg.Payload))
                     {
-                        int itemType = br.ReadInt32();
+                        // ResolveRestockIndex matches on the id BEFORE the name, so an untranslated
+                        // modded id from a peer whose EPL numbering is a permutation of ours would
+                        // match the WRONG product on the first pass - the same class of bug as the
+                        // raw restock index this message replaced. Unmappable lands on None, which
+                        // no catalog row carries, so the name pass resolves it or the refund does.
+                        int itemType = (int)Msg.ReadItemType(br);
                         bool isBig = br.ReadBoolean();
                         string rdName = br.ReadString();
                         int count = br.ReadInt32();
@@ -4330,7 +4660,11 @@ namespace CardShopCoop
                     using (var br = Msg.Reader(msg.Payload))
                     {
                         int id = br.ReadInt32();
-                        int type = br.ReadInt32();
+                        // HostApplyRemoval refuses the removal unless this type matches the
+                        // tracked box's own item type, so the id has to be in local terms. An
+                        // unmappable one lands on None, fails that guard, and the box is left
+                        // standing - the safe direction for a destructive op.
+                        int type = (int)Msg.ReadItemType(br);
                         string who = PeerNames.TryGetValue(msg.ConnId, out var n) ? n : "player";
                         CoopPlugin.Log.LogInfo($"{who} trashed box id {id} ({(EItemType)type})");
                         _boxes.HostApplyRemoval(id, type, msg.ConnId);
@@ -4342,7 +4676,7 @@ namespace CardShopCoop
                     if (!InGameLevel()) break;
                     using (var br = Msg.Reader(msg.Payload))
                     {
-                        int itemType = br.ReadInt32();
+                        int itemType = (int)Msg.ReadItemType(br);
                         bool isBig = br.ReadBoolean();
                         string rdName = br.ReadString();
                         // Charge/product coupling (host only, charge-first): honor this
@@ -4356,7 +4690,7 @@ namespace CardShopCoop
                             if (ok) // echo to the other clients + confirm to the buyer
                             {
                                 Broadcast(MsgType.LicenseUnlock, bw =>
-                                { bw.Write(itemType); bw.Write(isBig); bw.Write(rdName); });
+                                { Msg.WriteItemType(bw, (EItemType)itemType); bw.Write(isBig); bw.Write(rdName); });
                                 Send(msg.ConnId, MsgType.Toast, bw =>
                                     bw.Write($"license unlocked for everyone: {rdName}"));
                             }
@@ -4378,10 +4712,17 @@ namespace CardShopCoop
                         var wantedNames = new HashSet<long>();
                         for (int i = 0; i < n; i++)
                         {
-                            int t = br.ReadInt32();
+                            // The name key below is already machine-independent, but the ID key
+                            // is NOT a redundant spare: it is OR'd in, and matched against our
+                            // OWN rl[i].itemType, so an untranslated modded id from a permuted
+                            // registry is a false POSITIVE - it unlocks whichever local product
+                            // happens to wear that number. Translate it, and when the host has a
+                            // product we don't, add no id key at all rather than letting every
+                            // unmappable one collapse onto the None sentinel and match together.
+                            bool known = Util.EnumMap.TryFromWire(Util.EnumKind.ItemType, br.ReadInt32(), out int t);
                             bool big = br.ReadBoolean();
                             int nameFnv = br.ReadInt32();
-                            wanted.Add(((long)t << 1) | (big ? 1L : 0L));
+                            if (known) wanted.Add(((long)t << 1) | (big ? 1L : 0L));
                             wantedNames.Add(((long)(uint)nameFnv << 1) | (big ? 1L : 0L));
                         }
                         // don't re-lock during the window where our own purchase is
@@ -4642,7 +4983,12 @@ namespace CardShopCoop
                     if (Role != CoopRole.Host) break;
                     using (var br = Msg.Reader(msg.Payload))
                     {
-                        int itemType = br.ReadInt32();
+                        // Host side, so this read is the identity function - but it goes through
+                        // the helper anyway so the contract is stated once per wire field rather
+                        // than depending on the reader knowing which end of the link runs this.
+                        // An unmappable id would arrive as EItemType.None (-1), which the
+                        // existing range guard below already refuses.
+                        int itemType = (int)Msg.ReadItemType(br);
                         float price = br.ReadSingle();
                         if (itemType >= 0 && itemType <= 500000)
                         {
@@ -4833,7 +5179,9 @@ namespace CardShopCoop
                             if (sm == null || counterIdx >= sm.m_CashierCounterList.Count) break;
                             var counter = sm.m_CashierCounterList[counterIdx];
                             CardData card = isCard ? Msg.ReadCard(br) : null;
-                            EItemType itemType = isCard ? default : (EItemType)br.ReadInt32();
+                            // the echo is built host-side (RegisterServe.Serve) and therefore
+                            // already speaks host ids; this end is the one that translates
+                            EItemType itemType = isCard ? default : Msg.ReadItemType(br);
                             Sync.RegisterServe.ApplyScanEcho(counter, isCard, price, hostTotal, itemType, card);
                         }
                         catch { } // vanilla UI not open on this side - totals still fine
@@ -4976,6 +5324,16 @@ namespace CardShopCoop
                 return;
             }
 
+            // The HOST's id space is the canonical one for this session, so the client needs our
+            // registry (EPL enums) and our custom-card list (CreateCards/CardForge) to translate
+            // by NAME at the wire boundary - see Util.EnumMap. Snapshotted HERE, on the main
+            // thread, because both readers walk loaded types and the BepInEx plugin list; the
+            // send itself runs on the worker below. Same encoding as the Hello blob, same cap,
+            // same fail-to-empty behavior (an empty blob leaves the client on identity, i.e. on
+            // exactly what this build did before translation existed).
+            byte[] gzHostEnum = GzipLines(SafeEnumLines());
+            byte[] gzHostCards = GzipLines(SafeCardsList());
+
             var net = _net;
             new Thread(() =>
             {
@@ -4994,6 +5352,13 @@ namespace CardShopCoop
                         bw.Write(hostSlot);
                         bw.Write(bundle.Length);
                         bw.Write((byte)connId); // tells the client its own id (to skip in rosters)
+                        // Append-only, and safe: the host only reaches SendWorldTo after the
+                        // Hello version check matched, so the reader on the other end is this
+                        // exact build. Two blobs, each in the Hello blob's [int len][gz] shape.
+                        bw.Write(gzHostEnum.Length);
+                        bw.Write(gzHostEnum);
+                        bw.Write(gzHostCards.Length);
+                        bw.Write(gzHostCards);
                     }));
 
                     for (int off = 0; off < payload.Length; off += chunk)

@@ -241,12 +241,14 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < vanilla; i++)
                 if (list[i] != 0f)
                 {
-                    bw.Write(i);
+                    // the index IS an EItemType; below the modded floor WriteItemType is the
+                    // identity, so this whole vanilla half is byte-for-byte what it always was
+                    Net.Msg.WriteItemType(bw, (EItemType)i);
                     bw.Write((short)Mathf.Clamp(Mathf.RoundToInt(list[i] * 100f), short.MinValue, short.MaxValue));
                 }
             for (int k = 0; k < moddedVals.Count; k++)
             {
-                bw.Write(moddedVals[k].Key);
+                Net.Msg.WriteItemType(bw, (EItemType)moddedVals[k].Key);
                 bw.Write((short)Mathf.Clamp(Mathf.RoundToInt(moddedVals[k].Value * 100f), short.MinValue, short.MaxValue));
             }
         }
@@ -264,12 +266,12 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < vanilla; i++)
                 if (list[i] != 0f)
                 {
-                    bw.Write(i);
+                    Net.Msg.WriteItemType(bw, (EItemType)i); // identity below the modded floor
                     bw.Write(list[i]);
                 }
             for (int k = 0; k < moddedVals.Count; k++)
             {
-                bw.Write(moddedVals[k].Key);
+                Net.Msg.WriteItemType(bw, (EItemType)moddedVals[k].Key);
                 bw.Write(moddedVals[k].Value);
             }
         }
@@ -279,8 +281,16 @@ namespace CardShopCoop.Sync
             int n = br.ReadInt32();
             for (int k = 0; k < n; k++)
             {
-                int i = br.ReadInt32();
+                int wire = br.ReadInt32();
                 float v = br.ReadSingle(); // always consume the wire bytes
+                // host id -> ours. TryFromWire rather than the raw value because the row we
+                // write to is CHOSEN by this number: an unmappable modded id (a content pack
+                // only the host has) has no row here at all, and writing it anywhere - the
+                // None sentinel's row included - would park the host's price on the wrong
+                // item. Dropping it is the harmless case for a sparse table: absent entries
+                // keep their local value by design (see WriteSparseFloats).
+                int i;
+                if (!Util.EnumMap.TryFromWire(Util.EnumKind.ItemType, wire, out i)) continue;
                 if (list == null || i < 0 || i > 500000) continue;
                 if (i >= VanillaItemTypes && EplMarketBridge())
                 {
@@ -304,13 +314,29 @@ namespace CardShopCoop.Sync
                 // modded percents need the same absent-means-zero treatment, but they
                 // live in EPL save data, not in the raw list zeroed above
                 var modded = EplModdedItemTypes();
-                for (int k = 0; k < modded.Count; k++) EplSetFloat(modded[k], s_eplPctChange, 0f);
+                for (int k = 0; k < modded.Count; k++)
+                {
+                    // ...except for a pack only WE have. This zeroing pass is the "absent from
+                    // the incoming table means no change rolled" rule, and that rule only holds
+                    // for items the host can actually SEND: an item with no counterpart there is
+                    // absent from every snapshot forever, so zeroing it here would peg its
+                    // market at 0% for the rest of the session instead of leaving our own
+                    // rolled value alone. ToWire answers "does the host know this item" and is
+                    // the identity (never None) on vanilla ids and in an untranslated session,
+                    // so nothing that used to be zeroed here stops being zeroed.
+                    if (Util.EnumMap.ToWire(Util.EnumKind.ItemType, modded[k]) == (int)EItemType.None) continue;
+                    EplSetFloat(modded[k], s_eplPctChange, 0f);
+                }
             }
             int n = br.ReadInt32();
             for (int k = 0; k < n; k++)
             {
-                int i = br.ReadInt32();
+                int wire = br.ReadInt32();
                 float v = br.ReadInt16() / 100f; // always consume the wire bytes
+                // host id -> ours; an unmappable modded id has no local row to write (see
+                // ReadSparseFloatsInto) and its percent stays whatever the skip above left
+                int i;
+                if (!Util.EnumMap.TryFromWire(Util.EnumKind.ItemType, wire, out i)) continue;
                 if (list == null || i < 0 || i > 500000) continue;
                 if (i >= VanillaItemTypes && EplMarketBridge())
                 {

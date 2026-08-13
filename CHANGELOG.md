@@ -5,6 +5,19 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.36
+**The join-rejection fixes — thanks Curi Cole's screenshot and the pair who tested on a pure vanilla game (that report cracked it).** Wire format extended, so 1.0.36 only connects to 1.0.36. Both players must update — the launcher does it automatically.
+
+**"Your card database still conflicts after syncing" (the big one)**
+- **We were wrong about how the content-pack loader works, and the fix follows from it.** That error told you copying the host's database can't work and that you need identical content packs. Neither is true: the loader KEEPS every ID already in the database file — it only invents fresh IDs for genuinely new content. What actually differs between two PCs with the same packs is just the ORDER the IDs were handed out (install order). So the database sync does fix it — the message now says so, the sync is attempted twice per session instead of once, and if it still fails the error tells you the actual reason (didn't fully quit to desktop, the host needs a restart, or where to hand-copy the file).
+- **Fixed: a host who had ever JOINED someone couldn't auto-sync anyone afterward.** An internal "my database is borrowed" flag never cleared and made the host refuse to send its database — forever. It now only blocks when the database file genuinely doesn't match what the host is running (i.e., an actual restart is owed).
+
+**"Same error on a pure vanilla game"**
+- **Fixed: leftover files from uninstalled mods haunting the connection check.** Uninstalling your content mods doesn't delete the ID database (it lives outside the game folder), and the check would fall back to reading that stale file — so two vanilla players could conflict forever over Pokemon content neither of them still had. A game with no content loader loaded now reports a clean empty state, always.
+
+**Under the hood**
+- Groundwork for name-based ID translation: the host's registry now travels in the join handshake, and every modded ID that crosses the wire goes through a translation layer. With matching registries it changes nothing (identity, verified). The one place it's already live: content only ONE of you has installed now crosses the wire as an explicit "not installed here" marker instead of a raw foreign number — which closes a few places where a foreign ID could accidentally collide with something you DO have. Full translation (no more restart-after-sync) activates in a future version.
+
 ## 1.0.35
 **The binder freeze and the price fixes — thanks to the anonymous July-27 reporter running the Pokemon pack-opener setup.** Wire format extended (card changes now travel in batches), so 1.0.35 only connects to 1.0.35. Both players must update — the launcher does it automatically.
 

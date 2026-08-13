@@ -331,7 +331,7 @@ namespace CardShopCoop.Sync
                 bw.Write(rv.day);
                 bw.Write((byte)Mathf.Clamp(rv.hour, 0, 255));
                 bw.Write((byte)Mathf.Clamp(rv.minute, 0, 255));
-                bw.Write((int)rv.itemType);
+                Net.Msg.WriteItemType(bw, rv.itemType); // modded ids travel as HOST ids
                 bw.Write(rv.customerName ?? "");
             }
         }
@@ -396,7 +396,10 @@ namespace CardShopCoop.Sync
                 rv.day = br.ReadInt32();
                 rv.hour = br.ReadByte();
                 rv.minute = br.ReadByte();
-                rv.itemType = (EItemType)br.ReadInt32();
+                // host id -> ours; a review about an item from a pack only the host has
+                // reads back as EItemType.None, which the phone's review row renders as
+                // no icon - the review text itself is unaffected
+                rv.itemType = Net.Msg.ReadItemType(br);
                 rv.customerName = br.ReadString();
                 if (firstSeq + i > _reviewSeq && reviews != null)
                     reviews.Add(rv); // in place: CustomerReviewManager aliases this list

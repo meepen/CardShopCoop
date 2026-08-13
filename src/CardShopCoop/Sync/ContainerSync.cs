@@ -296,7 +296,14 @@ namespace CardShopCoop.Sync
                     int n = Mathf.Min(stored?.Count ?? 0, 250);
                     bw.Write((byte)n);
                     for (int i = 0; i < n; i++)
-                        bw.Write(stored[i] != null ? (int)stored[i].GetItemType() : 0);
+                        // ONE id convention for the whole container family: WriteItemType here,
+                        // (int)ReadItemType on the far side, like every other EItemType on the
+                        // wire. An empty slot goes out as EItemType.None rather than the old
+                        // literal 0 - 0 is a REAL item type, so a null slot used to arrive
+                        // indistinguishable from that item. INERT EITHER WAY: PackMirror.StoredTypes
+                        // is written and never read by anything, so nothing observable changes;
+                        // this exists so the field cannot become a bug the day something reads it.
+                        Net.Msg.WriteItemType(bw, stored[i] != null ? stored[i].GetItemType() : EItemType.None);
                     bw.Write(p != null && p.GetIsProcessing());
                     bw.Write(p != null ? (FiPoOpenTimer?.GetValue(p) as float? ?? 0f) : 0f);
                     bw.Write(p != null ? p.GetPackOpenedCount() : 0);
@@ -361,9 +368,20 @@ namespace CardShopCoop.Sync
                     case OpPackInsert:
                     {
                         int idx = br.ReadByte();
-                        var itemType = (EItemType)br.ReadInt32();
+                        var itemType = Net.Msg.ReadItemType(br); // guest id -> ours; see PackOpenerAddItemPrefix
                         var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
                         if (p == null) break;
+                        // a pack from a content pack THIS PC does not have arrives as
+                        // EItemType.None. Note WHY this has to be an explicit value test:
+                        // GetItemMeshData(None) does not fail, it returns a BLANK but NON-NULL
+                        // ItemMeshData, so SpawnItem would happily build a meshless prop the
+                        // opener then holds forever. Skip explicitly and say so once.
+                        if (itemType == EItemType.None)
+                        {
+                            CoopPlugin.Log.LogWarning(
+                                "ContainerSync pack insert: item type has no counterpart here (one-sided content pack) - skipped");
+                            break;
+                        }
                         // apply unconditionally (like a worker refill would): dropping it
                         // would eat the pack the joiner's box already gave up
                         var item = SpawnItem(itemType, p.m_PosInside);
@@ -546,7 +564,11 @@ namespace CardShopCoop.Sync
                         {
                             int sc = br.ReadByte();
                             var types = new List<int>(sc);
-                            for (int i = 0; i < sc; i++) types.Add(br.ReadInt32());
+                            // mirror of the write above: host id -> ours. An empty slot (or a
+                            // pack from a content pack this PC lacks) lands as EItemType.None.
+                            // Nothing reads StoredTypes today, so this is inert - it is here so
+                            // the two ends can never drift into disagreeing about the convention.
+                            for (int i = 0; i < sc; i++) types.Add((int)Net.Msg.ReadItemType(br));
                             bool proc = br.ReadBoolean();
                             float timer = br.ReadSingle();
                             int opened = br.ReadInt32();
@@ -886,7 +908,9 @@ namespace CardShopCoop.Sync
                 {
                     bw.Write(OpPackInsert);
                     bw.Write((byte)idx);
-                    bw.Write(itemType);
+                    // the host spawns a real pack prefab from this, so a modded id minted in
+                    // a different order here would insert the WRONG product on the host
+                    Net.Msg.WriteItemType(bw, (EItemType)itemType);
                 });
                 self.Touch(KindPackOpener, idx); // protect the local insert from a stale echo
             }
@@ -1056,7 +1080,9 @@ namespace CardShopCoop.Sync
             {
                 var e = list[i] ?? new CompactCardDataAmount();
                 bw.Write(e.cardSaveIndex);
-                bw.Write((int)e.expansionType);
+                // Modded expansion ids differ between two PCs; the wire speaks the HOST's, so
+                // this goes through the typed helper (a no-op for vanilla ids and on the host).
+                Net.Msg.WriteExpansion(bw, e.expansionType);
                 bw.Write(e.isDestiny);
                 bw.Write(e.amount);
                 bw.Write(e.gradedCardIndex);
@@ -1071,7 +1097,7 @@ namespace CardShopCoop.Sync
             {
                 var e = new CompactCardDataAmount();
                 e.cardSaveIndex = br.ReadInt32();
-                e.expansionType = (ECardExpansionType)br.ReadInt32();
+                e.expansionType = Net.Msg.ReadExpansion(br); // host id -> ours; see WriteCards
                 e.isDestiny = br.ReadBoolean();
                 e.amount = br.ReadInt32();
                 e.gradedCardIndex = br.ReadInt32();

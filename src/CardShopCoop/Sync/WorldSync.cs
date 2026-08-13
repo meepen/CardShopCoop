@@ -218,7 +218,14 @@ namespace CardShopCoop.Sync
                     // here. (count == 0 needs no type at all - it's a pure Clear, and
                     // ApplyCompartment never touches SetCompartmentItemType on that path - so
                     // an "emptied" instruction is still honoured for an unknown type.)
-                    if (e.Count == 0 || CanResolve(e.Type))
+                    // TYPE None WITH ITEMS ON IT is the id-translation miss, and it takes that
+                    // same skip-don't-clear path: Msg.ReadItemType yields EItemType.None for a
+                    // modded id whose name has no counterpart HERE, and Msg.WriteItemType does
+                    // the same for one the RECEIVER lacks, so this one test covers a one-sided
+                    // content pack in either direction. CanResolve can't decide it for us - it
+                    // answers "yes" for None, which is right for a genuinely empty compartment
+                    // but would send an unmappable type straight into the clear-and-rebuild.
+                    if (e.Count == 0 || (e.Type != (int)EItemType.None && CanResolve(e.Type)))
                         ApplyCompartment(comp, e.Type, e.Count);
                 }
                 catch (Exception ex)
@@ -397,7 +404,11 @@ namespace CardShopCoop.Sync
             foreach (var e in entries)
             {
                 bw.Write(e.Key);
-                bw.Write(e.Type);
+                // EItemType crosses the wire in the HOST's id space (Msg.WriteItemType). A
+                // client's modded ids are a permutation of the host's, so the raw int here
+                // used to put someone else's product on the shelf; below the modded floor
+                // this is the identity function, so vanilla stock is untouched.
+                Net.Msg.WriteItemType(bw, (EItemType)e.Type);
                 bw.Write((ushort)Math.Max(0, Math.Min(e.Count, ushort.MaxValue)));
             }
         }
@@ -407,7 +418,15 @@ namespace CardShopCoop.Sync
             int n = br.ReadUInt16();
             var list = new List<Entry>(n);
             for (int i = 0; i < n; i++)
-                list.Add(new Entry { Key = br.ReadInt32(), Type = br.ReadInt32(), Count = br.ReadUInt16() });
+                list.Add(new Entry
+                {
+                    Key = br.ReadInt32(),
+                    // back into OUR id space (identity on the host and on every vanilla id).
+                    // A modded type this PC has no counterpart for arrives as EItemType.None -
+                    // ApplyRemote skips those instead of clearing the compartment.
+                    Type = (int)Net.Msg.ReadItemType(br),
+                    Count = br.ReadUInt16(),
+                });
             return list;
         }
 

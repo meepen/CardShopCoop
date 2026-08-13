@@ -146,10 +146,13 @@ namespace CardShopCoop.Sync
                     case OpGameEvent:
                     {
                         int fmt = br.ReadInt32();
-                        int exp = br.ReadInt32();
+                        // the wire already speaks our ids (we are the host, so this read
+                        // is the identity function) - it goes through the helper anyway so
+                        // the op's two ends stay visibly paired
+                        var exp = Net.Msg.ReadExpansion(br);
                         // the vanilla confirm is exactly these two field writes
                         CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)fmt;
-                        CPlayerData.m_PendingGameEventExpansionType = (ECardExpansionType)exp;
+                        CPlayerData.m_PendingGameEventExpansionType = exp;
                         break;
                     }
                     case OpGameEventFee:
@@ -261,8 +264,11 @@ namespace CardShopCoop.Sync
 
                 CPlayerData.m_GameEventFormat = (EGameEventFormat)br.ReadInt32();
                 CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)br.ReadInt32();
-                CPlayerData.m_GameEventExpansionType = (ECardExpansionType)br.ReadInt32();
-                CPlayerData.m_PendingGameEventExpansionType = (ECardExpansionType)br.ReadInt32();
+                // host ids -> ours (see WriteState). A game event on an expansion only the
+                // host has resolves to ECardExpansionType.None, which reads exactly like
+                // "no expansion picked yet" - the joiner's own packs are untouched
+                CPlayerData.m_GameEventExpansionType = Net.Msg.ReadExpansion(br);
+                CPlayerData.m_PendingGameEventExpansionType = Net.Msg.ReadExpansion(br);
                 int feeCount = br.ReadByte();
                 for (int i = 0; i < feeCount; i++)
                 {
@@ -362,10 +368,13 @@ namespace CardShopCoop.Sync
             bw.Write(CPlayerData.m_EquippedFloorDecoIndexB);
             bw.Write(CPlayerData.m_EquippedCeilingDecoIndex);
             bw.Write(CPlayerData.m_EquippedCeilingDecoIndexB);
+            // EGameEventFormat is a vanilla-only id space (identical on every PC) and
+            // stays raw; the two ECardExpansionTypes are NOT - EPL mints modded ids into
+            // that enum - so they travel as HOST ids like every other modded id
             bw.Write((int)CPlayerData.m_GameEventFormat);
             bw.Write((int)CPlayerData.m_PendingGameEventFormat);
-            bw.Write((int)CPlayerData.m_GameEventExpansionType);
-            bw.Write((int)CPlayerData.m_PendingGameEventExpansionType);
+            Net.Msg.WriteExpansion(bw, CPlayerData.m_GameEventExpansionType);
+            Net.Msg.WriteExpansion(bw, CPlayerData.m_PendingGameEventExpansionType);
             var fees = CPlayerData.m_SetGameEventPriceList;
             int fn = Mathf.Min(fees.Count, 255);
             bw.Write((byte)fn);
@@ -489,8 +498,10 @@ namespace CardShopCoop.Sync
             inst.SendOp(bw =>
             {
                 bw.Write(OpGameEvent);
-                bw.Write((int)CPlayerData.m_PendingGameEventFormat);
-                bw.Write((int)CPlayerData.m_PendingGameEventExpansionType);
+                bw.Write((int)CPlayerData.m_PendingGameEventFormat); // vanilla ids: raw
+                // ...but the expansion is a modded id space: send the HOST's id for the
+                // pack we picked, so the host schedules the event the joiner meant
+                Net.Msg.WriteExpansion(bw, CPlayerData.m_PendingGameEventExpansionType);
             });
         }
 

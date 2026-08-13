@@ -24,6 +24,14 @@ namespace CardShopCoop.Sync
                                  // REJECT an entry whose (kind,index) now resolves to a
                                  // DIFFERENT object (a stale index from a fresh/lagging peer
                                  // that never moves the wrong furniture). NoType = couldn't read.
+            /// <summary>Client only: the host sent a MODDED type id whose name does not exist on
+            /// this PC (a content pack only he has). Type is then the enum's None sentinel and
+            /// means NOTHING, so the identity guard must not be handed it - EDecoObject.None is
+            /// 0, a perfectly comparable real value, so an unmappable deco move could MATCH a
+            /// local object whose type genuinely reads 0 and teleport the wrong decoration.
+            /// Same flag, same reason, as PopulationSync.Entry.Unresolved. Always false on the
+            /// host (which never translates) and for every vanilla id.</summary>
+            public bool Unresolved;
             public Vector3 Pos;
             public Quaternion Rot;
         }
@@ -181,6 +189,11 @@ namespace CardShopCoop.Sync
             {
                 try
                 {
+                    // Unmappable modded type: e.Type is a None sentinel and carries no identity
+                    // at all, so it can never be compared against a live object (see Entry.
+                    // Unresolved). We do not have the object the host moved, so there is nothing
+                    // here to move - drop the entry before Resolve can hand us a stand-in.
+                    if (e.Unresolved) continue;
                     var comp = Resolve(sm, e.Key);
                     if (comp == null) continue;
                     // IDENTITY GUARD: the (kind,index) may resolve to a DIFFERENT object than
@@ -257,13 +270,27 @@ namespace CardShopCoop.Sync
 
         // ---- wire ----
 
+        /// <summary>Which modded id space Entry.Type lives in for a given kind - the same
+        /// split TypeIdOf makes: kind 5 carries an EDecoObject, everything else an
+        /// EObjectType. Used in BOTH directions because these two helpers serve both
+        /// messages (client->host requests and host->client deltas); the host's half of
+        /// each is the identity function, which is what keeps the wire speaking host ids.
+        /// NoType (int.MinValue) is far below the modded floor, so it passes through
+        /// untranslated and the "can't verify identity" path keeps working.</summary>
+        private static Util.EnumKind KindOf(int kind)
+        {
+            return kind == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
+        }
+
         public static void WriteEntries(BinaryWriter bw, List<Entry> entries)
         {
             bw.Write((byte)entries.Count);
             foreach (var e in entries)
             {
                 bw.Write(e.Key);
-                bw.Write(e.Type); // identity guard - append-only, safe on the 1.0.30-only wire
+                // identity guard - append-only, safe on the 1.0.30-only wire. The kind for
+                // the translation rides in the key we just wrote.
+                bw.Write(Util.EnumMap.ToWire(KindOf(e.Key >> 24), e.Type));
                 bw.Write(e.Pos.x); bw.Write(e.Pos.y); bw.Write(e.Pos.z);
                 bw.Write(e.Rot.x); bw.Write(e.Rot.y); bw.Write(e.Rot.z); bw.Write(e.Rot.w);
             }
@@ -275,10 +302,21 @@ namespace CardShopCoop.Sync
             var list = new List<Entry>(n);
             for (int i = 0; i < n; i++)
             {
+                int key = br.ReadInt32();
+                // matches WriteEntries order (both peers 1.0.30). Translated back to a
+                // LOCAL id so ApplyRemote's guard can compare it against a live object.
+                // TryFromWire, not FromWire: furniture from a pack only the sender has yields
+                // a None sentinel, and for kind-5 decos that sentinel is EDecoObject.None = 0 -
+                // a real, comparable value that can MATCH a local object and move the wrong
+                // decoration. Flagging it lets ApplyRemote drop the entry outright instead of
+                // trusting a guard it can silently pass.
+                int type;
+                bool unresolved = !Util.EnumMap.TryFromWire(KindOf(key >> 24), br.ReadInt32(), out type);
                 list.Add(new Entry
                 {
-                    Key = br.ReadInt32(),
-                    Type = br.ReadInt32(), // matches WriteEntries order (both peers 1.0.30)
+                    Key = key,
+                    Type = type,
+                    Unresolved = unresolved,
                     Pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
                     Rot = new Quaternion(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
                 });

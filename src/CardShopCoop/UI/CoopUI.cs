@@ -153,6 +153,21 @@ namespace CardShopCoop.UI
                 GUILayout.Label(core.ErrorLine, CoopTheme.LabelDanger);
             }
 
+            // The restore OUTCOME lives out here, NOT inside the lend block below. A successful
+            // restore (and the no-backup branch, which also clears the marker) makes
+            // EnumLendState() return null, so a message drawn inside that block would be drawn
+            // for zero frames - the button appeared to do nothing at all. Out here it stays put
+            // until the player closes the window.
+            if (_enumRestoreMsg != null)
+            {
+                GUILayout.BeginHorizontal();
+                CoopTheme.Chip("CARD DATABASE", CoopTheme.ChipWarn);
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+                GUILayout.Label(_enumRestoreMsg, CoopTheme.LabelWarn);
+                GUILayout.Space(4f);
+            }
+
             // Custom-card database on loan: a mismatched-enum join replaced the machine-global
             // registry with the HOST's copy (with a backup). Until it is restored, the player's
             // own modded SOLO saves fail to load ("data lost") - the exact field report this
@@ -166,7 +181,8 @@ namespace CardShopCoop.UI
                 GUILayout.FlexibleSpace();
                 GUILayout.EndHorizontal();
                 GUILayout.Label(lend, CoopTheme.LabelWarn);
-                if (_enumRestoreMsg != null) GUILayout.Label(_enumRestoreMsg, CoopTheme.LabelWarn);
+                // (the restore outcome is rendered above, outside this block, because a
+                // successful restore removes the very banner it would otherwise sit under)
                 // restoring mid-session would break the CURRENT co-op world's custom cards;
                 // only offer it when not connected
                 if (CoopCore.Role == CoopRole.None

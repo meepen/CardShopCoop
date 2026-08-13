@@ -40,7 +40,11 @@ namespace CardShopCoop.Sync
             public float TargetYaw;
             public float NetSpeed;
             public byte HoldState;
-            public List<int> HoldTypes;         // actual EItemTypes being carried
+            // actual EItemTypes being carried, already LOCAL ids: the translation happened
+            // at the wire boundary (Msg.ReadItemType inside CoopCore.ReadHoldPayload), not
+            // here. Owned, not aliased: the host relays the sender's list on to the other
+            // clients verbatim and must not see anything we do to our copy.
+            public readonly List<int> HoldTypes = new List<int>(6);
             public List<CardData> HoldCards;    // actual cards fanned in hand
             public readonly Snapshot[] Snaps = new Snapshot[SnapBufferSize];
             public int SnapHead = -1;           // index of newest snapshot
@@ -121,7 +125,28 @@ namespace CardShopCoop.Sync
             av.TargetYaw = yaw;
             av.NetSpeed = speed;
             av.HoldState = holdState;
-            av.HoldTypes = holdTypes;
+            // THE HOLD PAYLOAD IS ALREADY IN LOCAL IDS: CoopCore.ReadHoldPayload built it
+            // with Msg.ReadItemType, which is the one and only translation boundary for
+            // these values. Do NOT translate again here - a second FromWire on an
+            // already-local id is how a modded product turns into the wrong prop (or into
+            // None). This loop is a plain copy into the avatar's OWN list (not aliased: the
+            // host relays the sender's list on to the other clients verbatim).
+            // An item from a content pack this PC does not have already arrived as
+            // EItemType.None, and the hold-prop loop tests for that sentinel BY VALUE: note
+            // that GetItemMeshData(None) hands back a BLANK but non-null ItemMeshData, so a
+            // "meshData == null" check alone would NOT skip it. Skipped explicitly, the avatar
+            // carries one item fewer and nothing is destroyed.
+            av.HoldTypes.Clear();
+            if (holdTypes != null)
+            {
+                // hold state 1 packs [isBigBox flag, product EItemType]: slot 0 is a BOOL,
+                // not an id, and must never be translated. ReadHoldPayload already honours
+                // that (the flag is 0/1, far below EnumMap's modded floor, so its
+                // Msg.ReadItemType pass is the identity function) - and nothing here
+                // translates at all, so the copy is uniform.
+                for (int i = 0; i < holdTypes.Count; i++)
+                    av.HoldTypes.Add(holdTypes[i]);
+            }
             av.HoldCards = holdCards;
             av.HasState = true;
 
@@ -133,9 +158,11 @@ namespace CardShopCoop.Sync
             // this cadence, and Tick then only compares cached strings so rendering never
             // allocates while something is carried (steady per-frame garbage was a GC-stutter
             // source on the joiner).
+            // the sigs are built from the LOCAL-id list, so they describe what will
+            // actually be rendered here rather than what the sender saw
             av.PendingBoxSig = holdState == 1
-                ? (holdTypes != null && holdTypes.Count >= 2
-                    ? holdTypes[0] + ":" + holdTypes[1] : "0:0")
+                ? (av.HoldTypes.Count >= 2
+                    ? av.HoldTypes[0] + ":" + av.HoldTypes[1] : "0:0")
                 : "";
             if (holdState == 3 && holdCards != null && holdCards.Count > 0)
             {
@@ -146,8 +173,8 @@ namespace CardShopCoop.Sync
                 av.PendingCardSig = sb.ToString();
             }
             else av.PendingCardSig = "";
-            av.PendingItemSig = holdState == 2 && holdTypes != null && holdTypes.Count > 0
-                ? string.Join(",", holdTypes) : "";
+            av.PendingItemSig = holdState == 2 && av.HoldTypes.Count > 0
+                ? string.Join(",", av.HoldTypes) : "";
 
             if (!av.EverPositioned && av.Go != null)
             {
@@ -324,6 +351,11 @@ namespace CardShopCoop.Sync
             if (!_avatars.TryGetValue(connId, out var av) || av.Go == null) return;
             av.PackTimer = 4f;
             try { if (av.Anim != null) av.Anim.SetTrigger("GrabItem"); } catch { }
+            // packIndex is ALREADY A LOCAL EItemType: both callers (CoopCore's Activity and
+            // RelayTag handlers) read it with Msg.ReadItemType, which is the one translation
+            // boundary for it. Do NOT translate again here. A pack from a set only the
+            // sender has already arrived as EItemType.None (-1), which the >= 0 guard below
+            // refuses: the avatar plays the grab motion with no pack in hand.
             if (av.PackProp == null && packIndex >= 0)
             {
                 try
@@ -431,8 +463,8 @@ namespace CardShopCoop.Sync
                     av.BoxSig = av.PendingBoxSig;
                     if (showBox)
                     {
-                        bool isBig = av.HoldTypes != null && av.HoldTypes.Count >= 1 && av.HoldTypes[0] == 1;
-                        int prodType = av.HoldTypes != null && av.HoldTypes.Count >= 2 ? av.HoldTypes[1] : 0;
+                        bool isBig = av.HoldTypes.Count >= 1 && av.HoldTypes[0] == 1;
+                        int prodType = av.HoldTypes.Count >= 2 ? av.HoldTypes[1] : 0;
                         TrySpawnBoxProp(av, isBig, prodType);
                     }
                 }
@@ -495,12 +527,18 @@ namespace CardShopCoop.Sync
                 {
                     ReleaseItems(av); // items only: growing the pile must not kill pack/binder/box visuals
                     av.HeldSig = av.PendingItemSig;
-                    if (av.HeldSig.Length > 0 && av.HoldTypes != null)
+                    if (av.HeldSig.Length > 0)
                     {
                         for (int i = 0; i < av.HoldTypes.Count; i++)
                         {
                             try
                             {
+                                // TEST THE SENTINEL EXPLICITLY - the null guard below does NOT
+                                // catch it. InventoryBase.GetItemMeshData(EItemType.None) returns
+                                // a BLANK `new ItemMeshData()`, which is non-null, so an item from
+                                // a content pack this PC does not have would build a real pooled
+                                // prop with no mesh instead of being skipped.
+                                if (av.HoldTypes[i] == (int)EItemType.None) continue;
                                 var meshData = InventoryBase.GetItemMeshData((EItemType)av.HoldTypes[i]);
                                 if (meshData == null) continue;
                                 var item = ItemSpawnManager.GetItem(av.Go.transform);

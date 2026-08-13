@@ -132,7 +132,7 @@ namespace CardShopCoop.Sync
                         bw.Write(after - before);
                         bw.Write(after);
                         if (scannedCard != null) Net.Msg.WriteCard(bw, scannedCard);
-                        else bw.Write((int)scannedType);
+                        else Net.Msg.WriteItemType(bw, scannedType); // host ids on the wire (identity here: the host never translates)
                         bw.Flush();
                         scanEcho = ms.ToArray();
                     }
@@ -276,7 +276,9 @@ namespace CardShopCoop.Sync
                     bw.Write((byte)typeBuf.Count);
                     for (int k = 0; k < typeBuf.Count; k++)
                     {
-                        bw.Write(typeBuf[k]);
+                        // the cart's EItemType ships in the host's id space (identity here -
+                        // this is the host - and identity for every vanilla item either way)
+                        Net.Msg.WriteItemType(bw, (EItemType)typeBuf[k]);
                         bw.Write(posBuf[k].x); bw.Write(posBuf[k].y); bw.Write(posBuf[k].z);
                     }
                     count++;
@@ -307,7 +309,11 @@ namespace CardShopCoop.Sync
                 ci.ItemLocal = new List<Vector3>(n);
                 for (int k = 0; k < n; k++)
                 {
-                    ci.ItemTypes.Add(br.ReadInt32());
+                    // back into our id space; a type from a content pack we don't have arrives
+                    // as EItemType.None, which SpawnProp refuses BY VALUE - it has to, because
+                    // GetItemMeshData(None) hands back a blank but non-null ItemMeshData rather
+                    // than "no mesh". That cart slot is simply absent on this side.
+                    ci.ItemTypes.Add((int)Net.Msg.ReadItemType(br));
                     ci.ItemLocal.Add(new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
                 }
                 list.Add(ci);
@@ -417,11 +423,18 @@ namespace CardShopCoop.Sync
             return true;
         }
 
-        /// <summary>Acquire and place one pooled prop, or null when its mesh is missing.</summary>
+        /// <summary>Acquire and place one pooled prop, or null when there is nothing to show -
+        /// an unmappable type (EItemType.None) or a missing mesh.</summary>
         private Item SpawnProp(Transform t, int idx, int type, Vector3 local)
         {
             try
             {
+                // THE SENTINEL MUST BE TESTED BY VALUE. GetItemMeshData(EItemType.None) returns a
+                // BLANK but NON-NULL ItemMeshData, so the null guard below never fired for it:
+                // a cart item from a content pack this PC does not have built a real pooled prop
+                // with no mesh AND a live collider registered in _propColliders - an invisible
+                // but clickable cart item the player could "scan".
+                if (type == (int)EItemType.None) return null;
                 var meshData = InventoryBase.GetItemMeshData((EItemType)type);
                 if (meshData == null) return null;
                 var item = ItemSpawnManager.GetItem(t);

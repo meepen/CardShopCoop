@@ -177,7 +177,10 @@ namespace CardShopCoop.Sync
                 {
                     var p = new TournamentPrizeData();
                     if (br.ReadBoolean()) p.m_CardData = Msg.ReadCard(br);
-                    p.m_ItemType = (EItemType)br.ReadInt32();
+                    // host id -> ours; a prize from a pack only the host has becomes
+                    // EItemType.None and the prize slot just shows nothing, which is
+                    // what an unresolvable prize did before translation existed
+                    p.m_ItemType = Msg.ReadItemType(br);
                     p.m_Count = br.ReadInt32();
                     slot.m_PrizeDataList.Add(p);
                 }
@@ -319,7 +322,9 @@ namespace CardShopCoop.Sync
                     bool hasCard = p != null && p.m_CardData != null;
                     bw.Write(hasCard);
                     if (hasCard) Msg.WriteCard(bw, p.m_CardData);
-                    bw.Write(p != null ? (int)p.m_ItemType : 0);
+                    // item prizes are EItemTypes (a modded id space) - the card above
+                    // already goes through the WriteCard chokepoint
+                    Msg.WriteItemType(bw, p != null ? p.m_ItemType : (EItemType)0);
                     bw.Write(p != null ? p.m_Count : 0);
                 }
             }

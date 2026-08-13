@@ -37,6 +37,11 @@ namespace CardShopCoop.Sync
             public byte StoreComp;  // compartment index within that shelf while stored
             public Vector3 Pos;
             public float Yaw;
+            /// <summary>NOT a wire field - set by ReadEntries when Type came off the wire as a
+            /// modded id with no counterpart on this PC (a content pack only the sender has).
+            /// Type is then EItemType.None, which is indistinguishable from a legitimately
+            /// empty box's compartment type, so the flag is the only way to tell them apart.</summary>
+            public bool Unmapped;
         }
 
         /// <summary>Set by CoopCore: is this box currently in the LOCAL player's hands?</summary>
@@ -910,6 +915,10 @@ namespace CardShopCoop.Sync
                 {
                     var want = hostList[i];
                     if (_byId.TryGetValue(want.Id, out var mapped) && mapped != null) continue;
+                    // an unmappable type pairs by type+size against nothing meaningful: its
+                    // Type is the None sentinel, which would happily match any genuinely EMPTY
+                    // local box and adopt the wrong one into the host's id
+                    if (want.Unmapped) continue;
                     for (int j = 0; j < _orphanScratch.Count; j++)
                     {
                         var cand = _orphanScratch[j];
@@ -930,6 +939,13 @@ namespace CardShopCoop.Sync
             {
                 var want = hostList[i];
                 _snapshotIds.Add(want.Id);
+                // ONE-SIDED CONTENT PACK: the host's box holds an item type that does not exist
+                // on this PC. Leave the id ENTIRELY alone - no spawn (there is nothing to
+                // spawn), and above all no type-mismatch rebuild, which would read the
+                // unmappable None as "wrong box here" and destroy a local box. The id stays in
+                // _snapshotIds (added above, deliberately before this skip) so the absence
+                // sweep below cannot read "we can't map it" as "the host destroyed it".
+                if (want.Unmapped) continue;
                 _byId.TryGetValue(want.Id, out var box);
                 if (box != null && (box.m_ItemCompartment.GetItemType() != (EItemType)want.Type
                                     || box.m_IsBigBox != want.IsBig))
@@ -1559,7 +1575,10 @@ namespace CardShopCoop.Sync
             {
                 var e = entries[i];
                 bw.Write(e.Id);
-                bw.Write(e.Type);
+                // EItemType goes out in the HOST's id space (identity on the host, and on
+                // every vanilla id): the raw int used to spawn a different product's box on
+                // a peer whose EPL ids are a permutation of ours.
+                Net.Msg.WriteItemType(bw, (EItemType)e.Type);
                 bw.Write((ushort)Mathf.Clamp(e.Count, 0, ushort.MaxValue));
                 bw.Write((byte)((e.IsBig ? 1 : 0) | (e.IsOpen ? 2 : 0) | (e.Carried ? 4 : 0) | (e.Settled ? 8 : 0) | (e.Stored ? 16 : 0)));
                 bw.Write(e.StoreShelf);
@@ -1575,7 +1594,16 @@ namespace CardShopCoop.Sync
             var list = new List<Entry>(n);
             for (int i = 0; i < n; i++)
             {
-                var e = new Entry { Id = br.ReadUInt16(), Type = br.ReadInt32(), Count = br.ReadUInt16() };
+                var e = new Entry { Id = br.ReadUInt16() };
+                // Back into OUR id space. TryFromWire, not the plain read: a box's compartment
+                // type is LEGITIMATELY None (an empty box that never took a type), so the None
+                // an unmappable modded id translates to is ambiguous on its own - only the
+                // return flag tells "empty box" from "content pack we don't have". Identity,
+                // and always true, on the host and on every vanilla id.
+                int localType;
+                e.Unmapped = !Util.EnumMap.TryFromWire(Util.EnumKind.ItemType, br.ReadInt32(), out localType);
+                e.Type = localType;
+                e.Count = br.ReadUInt16();
                 byte f = br.ReadByte();
                 e.IsBig = (f & 1) != 0;
                 e.IsOpen = (f & 2) != 0;

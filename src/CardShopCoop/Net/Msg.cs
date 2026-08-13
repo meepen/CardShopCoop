@@ -145,11 +145,56 @@ namespace CardShopCoop.Net
             }
         }
 
+        // ------------------------------------------------------------ typed enum wire helpers
+        //
+        // EVERY modded enum id that crosses the wire MUST go through one of these, and never
+        // through a raw bw.Write((int)someEnum) / (SomeEnum)br.ReadInt32(). They are the single
+        // enforcement point for the session's id contract:
+        //
+        //   THE WIRE SPEAKS THE HOST'S IDS. Only a CLIENT translates (Util.EnumMap); the host
+        //   translates nothing, and every id below EnumMap's modded floor - i.e. all vanilla
+        //   content - passes through untouched, so vanilla traffic cannot be affected by any of
+        //   this. A modded id with no counterpart on the receiving PC becomes that enum's None
+        //   sentinel, which the existing skip paths refuse; one-sided content packs are allowed
+        //   and must never be "fixed" by zeroing or dropping the message.
+        //
+        // Enums NOT listed here are vanilla-only id spaces (identical on every PC) and are
+        // deliberately written raw - adding a helper for one would be pure ceremony.
+        //
+        //   TRANSLATE EXACTLY ONCE, AT THE WIRE BOUNDARY. Util.EnumMap.ToWire/FromWire are
+        //   called ONLY from these Msg.Read*/Write* helpers, plus the handful of explicit
+        //   EnumMap.TryFromWire branch sites that must know whether an id resolved. NEVER
+        //   from Sync\ code (or any other consumer) on a value that has already been parsed:
+        //   everything handed to the Sync layer is LOCAL ids. Translating a second time
+        //   remaps an already-local modded id into a different item or into None, and that is
+        //   exactly how the AvatarManager UpdateState / ShowPackOpen double-translations
+        //   happened. If a Sync method needs the raw wire id, it must read it itself.
+
+        public static void WriteItemType(BinaryWriter bw, EItemType v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.ItemType, (int)v)); }
+        public static EItemType ReadItemType(BinaryReader br) { return (EItemType)Util.EnumMap.FromWire(Util.EnumKind.ItemType, br.ReadInt32()); }
+
+        public static void WriteObjType(BinaryWriter bw, EObjectType v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.ObjectType, (int)v)); }
+        public static EObjectType ReadObjType(BinaryReader br) { return (EObjectType)Util.EnumMap.FromWire(Util.EnumKind.ObjectType, br.ReadInt32()); }
+
+        public static void WriteDecoType(BinaryWriter bw, EDecoObject v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.DecoObject, (int)v)); }
+        public static EDecoObject ReadDecoType(BinaryReader br) { return (EDecoObject)Util.EnumMap.FromWire(Util.EnumKind.DecoObject, br.ReadInt32()); }
+
+        public static void WriteExpansion(BinaryWriter bw, ECardExpansionType v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.CardExpansion, (int)v)); }
+        public static ECardExpansionType ReadExpansion(BinaryReader br) { return (ECardExpansionType)Util.EnumMap.FromWire(Util.EnumKind.CardExpansion, br.ReadInt32()); }
+
+        public static void WriteMonsterType(BinaryWriter bw, EMonsterType v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.MonsterType, (int)v)); }
+        public static EMonsterType ReadMonsterType(BinaryReader br) { return (EMonsterType)Util.EnumMap.FromWire(Util.EnumKind.MonsterType, br.ReadInt32()); }
+
         /// <summary>Shared CardData wire format (used by CardDelta, CardShelfDelta, CardPriceSet).</summary>
         public static void WriteCard(BinaryWriter bw, CardData card)
         {
-            bw.Write((int)card.expansionType);
-            bw.Write((int)card.monsterType);
+            WriteExpansion(bw, card.expansionType);
+            WriteMonsterType(bw, card.monsterType);
+            // borderType is VANILLA and stays raw ON PURPOSE. ECardBorderType is not one of the
+            // enums EnhancedPrefabLoader mints custom ids into (ModParity.ModdedEnumTypeNames:
+            // EObjectType, EDecoObject, EItemType, ECardExpansionType, ERarity,
+            // ECollectionPackType), so its ids are identical on every PC and translating it
+            // could only ever introduce a bug. Do not "fix" this line.
             bw.Write((int)card.borderType);
             bw.Write(card.isFoil);
             bw.Write(card.isDestiny);
@@ -163,9 +208,9 @@ namespace CardShopCoop.Net
         {
             return new CardData
             {
-                expansionType = (ECardExpansionType)br.ReadInt32(),
-                monsterType = (EMonsterType)br.ReadInt32(),
-                borderType = (ECardBorderType)br.ReadInt32(),
+                expansionType = ReadExpansion(br),
+                monsterType = ReadMonsterType(br),
+                borderType = (ECardBorderType)br.ReadInt32(), // vanilla - see WriteCard
                 isFoil = br.ReadBoolean(),
                 isDestiny = br.ReadBoolean(),
                 isChampionCard = br.ReadBoolean(),

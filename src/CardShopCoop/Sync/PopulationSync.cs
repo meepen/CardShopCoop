@@ -47,6 +47,12 @@ namespace CardShopCoop.Sync
         public struct Entry
         {
             public int ObjType;
+            /// <summary>Client only: the host sent a MODDED object id whose name does not
+            /// exist on this PC (a content pack only he has). ObjType is then the enum's
+            /// None sentinel and means nothing - so this entry may never be compared
+            /// against a local object or spawned. Always false on the host, which never
+            /// translates, and false for every vanilla id, which never needs to.</summary>
+            public bool Unresolved;
             public Vector3 Pos;
             public Quaternion Rot;
         }
@@ -170,6 +176,12 @@ namespace CardShopCoop.Sync
             {
                 var obj = list[i] as InteractableObject;
                 if (obj == null) continue;
+                // an object from a content pack only the HOST has: his id carries no name
+                // we know, so want[i].ObjType is a None sentinel that would mismatch
+                // whatever stands here and destroy it every tick. Leave the slot alone -
+                // one-sided packs are allowed, and a mirror we cannot build is not a
+                // licence to delete the joiner's furniture.
+                if (want[i].Unresolved) continue;
                 // compare on the correct identity per kind, or a wrong deco variant (whose
                 // m_ObjectType is always -1) could never be detected and repaired
                 int cur = (kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType;
@@ -188,6 +200,11 @@ namespace CardShopCoop.Sync
             while (list.Count < want.Count && guard-- > 0)
             {
                 var e = want[list.Count];
+                // nothing to spawn for content we don't have installed: the id resolved to
+                // None, whose prefab lookup would fail anyway. Stop here rather than skip -
+                // the slot IS the identity every other sync keys on, so it cannot be filled
+                // by the next object along.
+                if (e.Unresolved) break;
                 // decorations self-register into m_DecoObjectList via SpawnDecoObject; the
                 // generic SpawnInteractableObject would land them in the wrong list (and
                 // resolve a null prefab from EObjectType.None), so they never appeared
@@ -204,18 +221,28 @@ namespace CardShopCoop.Sync
 
         // ---- wire ----
 
+        /// <summary>Which modded id space a kind's ObjType lives in: kind 5 serializes
+        /// m_DecoObjectType (EDecoObject), every other kind m_ObjectType (EObjectType) -
+        /// the same split the snapshot and ReconcileKind use. Both are enums EPL mints
+        /// custom ids into, so both translate; the two are NOT interchangeable.</summary>
+        private static Util.EnumKind KindOf(int kind)
+        {
+            return kind == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
+        }
+
         public static void Write(BinaryWriter bw, List<List<Entry>> all)
         {
             bw.Write((byte)all.Count);
-            foreach (var entries in all)
+            for (int k = 0; k < all.Count; k++)
             {
+                var entries = all[k];
                 // ushort count (was byte capped at 250): a big shop can hold >250 of one
                 // kind, and a byte cap silently dropped the tail AND could wedge the gate
                 bw.Write((ushort)entries.Count);
                 for (int i = 0; i < entries.Count; i++)
                 {
                     var e = entries[i];
-                    bw.Write(e.ObjType);
+                    bw.Write(Util.EnumMap.ToWire(KindOf(k), e.ObjType)); // -> host ids
                     bw.Write(e.Pos.x); bw.Write(e.Pos.y); bw.Write(e.Pos.z);
                     bw.Write(e.Rot.x); bw.Write(e.Rot.y); bw.Write(e.Rot.z); bw.Write(e.Rot.w);
                 }
@@ -232,12 +259,17 @@ namespace CardShopCoop.Sync
                 var entries = new List<Entry>(n);
                 for (int i = 0; i < n; i++)
                 {
-                    entries.Add(new Entry
-                    {
-                        ObjType = br.ReadInt32(),
-                        Pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
-                        Rot = new Quaternion(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
-                    });
+                    var e = new Entry();
+                    // TryFromWire, not FromWire: ReconcileKind BRANCHES on this id (spawn
+                    // it / destroy a local object that disagrees with it), so it has to be
+                    // able to tell "the host placed an object this PC does not have" apart
+                    // from a real mismatch. Vanilla ids always resolve.
+                    int objType;
+                    e.Unresolved = !Util.EnumMap.TryFromWire(KindOf(k), br.ReadInt32(), out objType);
+                    e.ObjType = objType;
+                    e.Pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+                    e.Rot = new Quaternion(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+                    entries.Add(e);
                 }
                 all.Add(entries);
             }
