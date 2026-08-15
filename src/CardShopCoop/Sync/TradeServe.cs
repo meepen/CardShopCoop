@@ -465,11 +465,28 @@ namespace CardShopCoop.Sync
             string name = null;
             try
             {
-                var md = InventoryBase.GetMonsterData(c.monsterType);
-                if (md != null) name = md.GetName();
+                // GetMonsterData is NOT EPL-aware for third-party callers: EPL redirects the
+                // game's own CALL SITES with a transpiler rather than patching the method, so a
+                // modded expansion's card runs the ORIGINAL body here and comes back null - or,
+                // worse, as the WRONG vanilla monster's data, because modded cards are numbered
+                // as small ordinals that collide with vanilla ids. Only trust it inside the
+                // vanilla expansion range; anything at or past MAX falls through to the numeric
+                // form below, which is at least honest.
+                if ((int)c.expansionType < (int)ECardExpansionType.MAX)
+                {
+                    var md = InventoryBase.GetMonsterData(c.monsterType);
+                    if (md != null) name = md.GetName();
+                }
             }
             catch { }
-            if (string.IsNullOrEmpty(name)) name = c.monsterType.ToString();
+            // The MODDED fallback must NOT be monsterType.ToString(): modded cards are small
+            // ordinals, so 1..122 print a colliding VANILLA member name - a confidently wrong
+            // card name in the trade prompt. Expansion#N is honest across the whole range.
+            // A vanilla expansion whose GetMonsterData came back null keeps the old text.
+            if (string.IsNullOrEmpty(name))
+                name = (int)c.expansionType < (int)ECardExpansionType.MAX
+                    ? c.monsterType.ToString()
+                    : c.expansionType + "#" + (int)c.monsterType;
             if (c.isFoil) name += " (foil)";
             // S5: with Grading Overhaul installed, cardGrade is an ENCODED int (e.g.
             // 370009134) packing company+grade+cert - printing it raw showed the guest a

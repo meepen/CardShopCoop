@@ -333,6 +333,15 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < cards.Count; i++)
             {
                 if (cards[i] == null) continue;
+                // Wire-derived card: AddCard would mis-index (vanilla) or throw on
+                // CardCountList[-1] (EPL) for content this PC doesn't have. Unlike the delta
+                // path there is nothing to relay here - the restore IS the host's AddCard - so
+                // the card really is lost, and skipping it silently left no trace at all.
+                if (!CoopCore.CardSetInstalledHere(cards[i]))
+                {
+                    CoopCore.WarnRefusedCard(cards[i], "grade-return");
+                    continue;
+                }
                 if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
                     Util.GradingInterop.Remember(cards[i]);
                 CPlayerData.AddCard(cards[i], 1);

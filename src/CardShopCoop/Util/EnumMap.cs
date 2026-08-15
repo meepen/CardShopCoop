@@ -90,6 +90,23 @@ namespace CardShopCoop.Util
         /// pack would print the same line thousands of times in an evening.</summary>
         private static readonly HashSet<long> _loggedMisses = new HashSet<long>();
 
+        /// <summary>The last "id translation ready" summary actually logged at Info, so an
+        /// identical one is demoted to Debug instead of repeating.
+        ///
+        /// DO NOT reset this in <see cref="Clear"/>. Clear runs on EVERY teardown and on BOTH
+        /// host-start paths, i.e. at least once between any two Builds - clearing it would make
+        /// every summary look new again, restore the per-join spam, and turn this into a no-op.
+        /// A stale value across sessions is harmless: it only ever suppresses a duplicate line,
+        /// and the moment the content set differs the text differs and it logs.</summary>
+        private static string _lastSummary;
+
+        /// <summary>How many times <see cref="Build"/> has run this process - i.e. the join
+        /// number, since Build has exactly one call site (the client's Welcome handler). Printed
+        /// with the repeat line so a field log still shows that a re-join HAPPENED even when the
+        /// summary text is identical. NOT reset in <see cref="Clear"/>, same rule and same reason
+        /// as <see cref="_lastSummary"/> above (Clear runs between any two Builds).</summary>
+        private static int _buildCount;
+
         /// <summary>The value handed back for a modded id with no counterpart on this PC. The
         /// game's OWN "nothing" member for that enum, checked against the decompiled sources
         /// rather than assumed - because the convention is NOT uniform: EItemType, EObjectType
@@ -202,6 +219,7 @@ namespace CardShopCoop.Util
         public static void Build(List<string> hostEnumLines, List<string> hostCardLines)
         {
             Clear();
+            _buildCount++; // every Build is a join; Clear() must not reset this (see the field)
             try
             {
                 var outTables = new Table[KindCount];
@@ -241,8 +259,22 @@ namespace CardShopCoop.Util
                 _outTables = outTables;
                 _inTables = inTables;
                 _active = true;   // written LAST: readers see complete tables or none at all
-                Log("id translation ready (wire speaks HOST ids): " +
-                    (summary.Count > 0 ? string.Join("; ", summary.ToArray()) : "nothing modded on either side - identity"));
+                // Compacted, NOT silenced, when it says the same thing as last time. Every
+                // emission of this line IS a genuine re-join (Build has one call site, the
+                // client's Welcome handler, as SendWorldTo does on the host side), and 14 joins
+                // in one evening was a real session - so the line is not spurious, it is just
+                // repetitive, and the interesting event is the summary CHANGING (a content pack
+                // came or went). This used to go to LogDebug, which BepInEx does not write to
+                // the disk log by default, so a re-join left NO trace in the logs people
+                // actually send us. Info + the join counter keeps it one short line per join.
+                string line = "id translation ready (wire speaks HOST ids): " +
+                    (summary.Count > 0 ? string.Join("; ", summary.ToArray()) : "nothing modded on either side - identity");
+                if (!string.Equals(line, _lastSummary, StringComparison.Ordinal))
+                {
+                    _lastSummary = line;
+                    Log(line);
+                }
+                else Log("id translation ready (unchanged, join #" + _buildCount + ")");
             }
             catch (Exception e)
             {

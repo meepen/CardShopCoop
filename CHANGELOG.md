@@ -5,6 +5,16 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.37
+**Hotfix: modded cards missing from the shared album — thanks Aetheryk and the_capyman, and especially the paired host+guest logs, which proved it in one read.** Both players must update — the launcher does it automatically.
+
+**Pokemon (and other content-pack) cards not appearing in your partner's album**
+- **Fixed: cards your partner pulled being wrongly refused as "from a card set you don't have installed" — even though you both have everything.** Since 1.0.34, the safety check that protects your album from genuinely-unknown cards asked the wrong authority: it checked the game's enum table, but content packs register their monsters as DATA, numbered 1..N per expansion — so every card past #122 in a modded set failed the check on every PC, universally, while cards #1–122 slipped through by accidental number collision with vanilla monsters (that split is why "some" cards synced and some didn't). The check now asks the same per-expansion card list the game itself uses, so data-backed modded cards pass and genuinely-missing content is still refused.
+- Also hardened: card REMOVES ran no check at all and could crash outright for modded cards; two more paths (grading returns, card-box collection) applied wire cards unguarded; and the check could no longer be tricked into permanently breaking the game's item database during a loading screen.
+- Better logs: refused and applied modded cards now print as Expansion#N instead of a bare number (which could render as an unrelated vanilla monster's name), refusals log once per card instead of hundreds of times, and a card that genuinely can't be processed on one PC now says so instead of vanishing silently.
+- In a 3+ player session, the host now passes along card changes for content packs it doesn't have installed itself, so two guests who share a pack stay in sync even when the host lacks it.
+- Your partner's cards were never deleted — they always existed on their side. After both of you update, newly pulled cards sync normally, and older stuck cards can be nudged across by having their owner place one on the card table and pick it back up (this transfers exactly one copy per card — repeating it won't duplicate).
+
 ## 1.0.36
 **The join-rejection fixes — thanks Curi Cole's screenshot and the pair who tested on a pure vanilla game (that report cracked it).** Wire format extended, so 1.0.36 only connects to 1.0.36. Both players must update — the launcher does it automatically.
 

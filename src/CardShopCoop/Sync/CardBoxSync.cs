@@ -332,6 +332,15 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < cards.Count; i++)
                 {
                     if (cards[i] == null) continue;
+                    // Wire-derived card: AddCard would mis-index (vanilla) or throw on
+                    // CardCountList[-1] (EPL) for content this PC doesn't have. The box is
+                    // destroyed below either way, so a skipped card is genuinely gone on this
+                    // PC - it must at least say so.
+                    if (!CoopCore.CardSetInstalledHere(cards[i]))
+                    {
+                        CoopCore.WarnRefusedCard(cards[i], "card-box");
+                        continue;
+                    }
                     CPlayerData.AddCard(cards[i], 1); // mirrored by CardDelta
                     if (cards[i].cardGrade == 10)
                         CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained++;

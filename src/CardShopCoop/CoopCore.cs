@@ -1075,39 +1075,62 @@ namespace CardShopCoop
 
         /// <summary>Returns true when the delta was actually applied - the host's relay to
         /// OTHER guests keys off this, so a delta this side REFUSED (corrupt grade, would-go-
-        /// negative registry mismatch) is never propagated onward and can't spread divergence.</summary>
-        private static bool ApplyCardDelta(bool isAdd, int amount, CardData card)
+        /// negative registry mismatch) is never propagated onward and can't spread divergence.
+        /// <paramref name="relayAnyway"/> separates "THIS PC lacks the content" from "this delta
+        /// is garbage", exactly as the price path does: identical registries do NOT imply
+        /// identical installed data (EPL seeds enum ids from enum_values.json even for bundles
+        /// that aren't installed), so the host can fully RESOLVE a card it has no data row for.
+        /// Refusing it locally is right; swallowing it is not - a third player who DOES have the
+        /// pack must still receive it, which is what the 3+ player regression was. True ONLY for
+        /// the CardSetInstalledHere refusal; false for a corrupt grade, a would-go-negative
+        /// reduce, a graded-remove album mismatch, and (via the callers' catch) any throw.</summary>
+        private static bool ApplyCardDelta(bool isAdd, int amount, CardData card, out bool relayAnyway)
         {
+            relayAnyway = false;
             // A cardGrade > 10 is NOT corruption when Grading Overhaul is installed: it's an
             // ENCODED grade (company + 1-10 grade + cert serial). The old hard 1-10 drop-guard
             // discarded every real graded card. Only a >10 grade WITHOUT Grading Overhaul is
             // impossible/genuine corruption (vanilla only writes 1-10), so still refuse that.
             if (card.cardGrade != 0 && (card.cardGrade < 1 || card.cardGrade > 10) && !Util.GradingInterop.Present)
             {
-                CoopPlugin.Log.LogWarning($"card delta: dropping corrupt graded card {card.monsterType} (grade {card.cardGrade}) - not applied (Grading Overhaul absent)");
+                CoopPlugin.Log.LogWarning($"card delta: dropping corrupt graded card {CardIdent(card)} (grade {card.cardGrade}) - not applied (Grading Overhaul absent)");
                 return false;
             }
             Patches.GamePatches.ApplyingRemoteCards = true;
             try
             {
+                // UNKNOWN-CARD guard - the mirror of the negative-reduce guard below, and the
+                // price of tolerating extra registry entries in the handshake (FIX C): a card
+                // can now arrive for a content pack THIS PC doesn't have. Every branch below
+                // resolves the card's slot through CPlayerData.GetCardSaveIndex, whose loop over
+                // InventoryBase.GetShownMonsterList simply leaves the index at 0 when the monster
+                // isn't in the list - and GetShownMonsterList itself falls back to the TETRAMON
+                // list for an expansion outside the vanilla switch. So on the vanilla path an
+                // unknown card doesn't error: it silently credits save index 0, i.e. the
+                // receiver's FIRST Tetramon card, quietly inflating a real card's count (and,
+                // for a graded one, filing a bogus entry in the graded album). Under EPL the same
+                // lookup is an IndexOf that returns -1, and CardCountList[-1] THROWS.
+                // Guards ALL THREE branches (it used to sit inside the add arm only, leaving the
+                // graded-remove and ungraded-reduce paths to reach GetCardSaveIndex unguarded).
+                // Returns false so the host's relay doesn't spread it.
+                if (!CardSetInstalledHere(card))
+                {
+                    // RELAY ANYWAY: the delta is well-formed, this PC just has no data row for
+                    // that card. Other peers may well have the pack, and before 1.0.37 this
+                    // case reached the ungraded-reduce arm, returned true (a vanilla no-op) and
+                    // so kept relaying - dropping the relay is what broke 3+ player sessions.
+                    relayAnyway = true;
+                    // Memoized per card key, like the price path: one host log showed 995
+                    // identical lines. Printed through CardIdent because an ordinary modded id
+                    // is a small ORDINAL: below ~122 the bare monsterType renders an unrelated
+                    // VANILLA name, at 123+ it renders a bare number (EMonsterType has no
+                    // members up there) - neither identifies the card without the expansion.
+                    if (_priceWarnedKeys.Add("delta:" + CardPriceKey(card)))
+                        CoopPlugin.Log.LogWarning($"card delta: {CardIdent(card)} is from a card set you don't have installed - skipped");
+                    return false;
+                }
                 if (isAdd)
                 {
-                    // UNKNOWN-CARD guard - the mirror of the negative-reduce guard below, and
-                    // the price of tolerating extra registry entries in the handshake (FIX C):
-                    // a card can now arrive for a content pack THIS PC doesn't have. AddCard
-                    // resolves its slot through CPlayerData.GetCardSaveIndex, whose loop over
-                    // InventoryBase.GetShownMonsterList simply leaves the index at 0 when the
-                    // monster isn't in the list - and GetShownMonsterList itself falls back to
-                    // the TETRAMON list for an expansion outside the vanilla switch. So an
-                    // unknown card doesn't error: it silently credits save index 0, i.e. the
-                    // receiver's FIRST Tetramon card, quietly inflating a real card's count
-                    // (and, for a graded one, filing a bogus entry in the graded album).
-                    // Refuse instead, and return false so the host's relay doesn't spread it.
-                    if (!CardSetInstalledHere(card))
-                    {
-                        CoopPlugin.Log.LogWarning($"card delta: {card.monsterType} is from a card set you don't have installed - skipped");
-                        return false;
-                    }
                     // Register the host's cert with Grading Overhaul BEFORE AddCard, so its
                     // anti-cheat AddCard prefix sees the cert burned+bound and does NOT
                     // re-encode this card as FAKE (the ~20s changing-grade churn). BindCert
@@ -1133,7 +1156,7 @@ namespace CardShopCoop
                     }
                     if (removed == 0)
                     {
-                        CoopPlugin.Log.LogWarning($"graded remove: {card.monsterType} (grade {card.cardGrade}) not in this album - skipped (album mismatch?)");
+                        CoopPlugin.Log.LogWarning($"graded remove: {CardIdent(card)} (grade {card.cardGrade}) not in this album - skipped (album mismatch?)");
                         return false;
                     }
                 }
@@ -1146,26 +1169,15 @@ namespace CardShopCoop
                     // that ReduceCard decrements, so it's the exact amount the apply would hit.
                     // (Graded cards - cardGrade > 10 - never reach here; they route through
                     // RemoveGradedCard above.)
-                    // MODDED-EXPANSION guard first: GetCardCollectedList returns NULL for an
-                    // expansionType outside the vanilla switch (unless EPL's interceptor is
-                    // woven in), and GetCardAmount would NRE on it. Vanilla ReduceCard treats
-                    // the same case as a silent no-op, so preserve exactly that old behavior
-                    // for out-of-vocabulary expansions instead of throwing.
-                    var collected = CPlayerData.GetCardCollectedList(card.expansionType, card.isDestiny);
-                    if (collected == null)
+                    // No null-collected-list arm here any more: CardSetInstalledHere above owns
+                    // that case (it refuses when GetCardCollectedList is null) and relays it on.
+                    int owned = CPlayerData.GetCardAmount(card);
+                    if (owned < amount)
                     {
-                        CPlayerData.ReduceCard(card, amount); // vanilla no-ops on unknown expansions
+                        CoopPlugin.Log.LogWarning($"card delta would drive {CardIdent(card)} negative (have {owned}, remove {amount}) - skipped (card registry mismatch?)");
+                        return false;
                     }
-                    else
-                    {
-                        int owned = CPlayerData.GetCardAmount(card);
-                        if (owned < amount)
-                        {
-                            CoopPlugin.Log.LogWarning($"card delta would drive {card.monsterType} negative (have {owned}, remove {amount}) - skipped (card registry mismatch?)");
-                            return false;
-                        }
-                        CPlayerData.ReduceCard(card, amount);
-                    }
+                    CPlayerData.ReduceCard(card, amount);
                 }
             }
             finally { Patches.GamePatches.ApplyingRemoteCards = false; }
@@ -1194,15 +1206,23 @@ namespace CardShopCoop
         /// <summary>Shared by the CardDelta and CardDeltaBatch handlers: hold the delta if a
         /// scene load is in flight (applying mid-load crashes into uninitialized card data;
         /// nothing is lost, FlushPendingCardWork replays it), otherwise apply it. Returns true
-        /// only when it was actually applied - i.e. when it may be relayed onward.</summary>
-        private bool ApplyOrHoldCardDelta(bool isAdd, int amount, CardData card)
+        /// only when it was actually applied - i.e. when it may be relayed onward - and reports
+        /// through <paramref name="relayAnyway"/> the "this PC lacks the content, but the delta
+        /// is fine" refusal that must still be forwarded (see ApplyCardDelta).</summary>
+        private bool ApplyOrHoldCardDelta(bool isAdd, int amount, CardData card, out bool relayAnyway)
         {
+            relayAnyway = false;
             if (!InGameLevel())
             {
+                // HELD, not relayAnyway. Note this is NOT "it will relay later": the replay in
+                // FlushPendingCardWork applies without relaying, so a delta held across a scene
+                // load never reaches the other guests. That is pre-existing 1.0.36 behavior and
+                // is deliberately left alone here - the relay-anyway work is about content this
+                // PC lacks, not about the load window.
                 _pendingCardDeltas.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = card });
                 return false;
             }
-            return ApplyCardDelta(isAdd, amount, card);
+            return ApplyCardDelta(isAdd, amount, card, out relayAnyway);
         }
 
         /// <summary>A private copy of exactly the nine fields the wire carries. Anything that
@@ -1237,43 +1257,138 @@ namespace CardShopCoop
                 + ":" + card.cardGrade;
         }
 
-        /// <summary>True when THIS install can actually place the card: both its expansion and
-        /// monster ids exist in this process's runtime enums (EPL prepatches ids for every
-        /// locally-installed content pack; vanilla ids are always present). An id this process
-        /// has never heard of would mis-index through GetShownMonsterList's default Tetramon
-        /// fallback into save slot 0 - a silent album corruption - so unknown ids are refused
-        /// with a log line instead. Errs toward REFUSING on any throw.</summary>
-        private static bool CardSetInstalledHere(CardData card)
+        /// <summary>Per-expansion set of the monster ids that genuinely have a data row on THIS
+        /// machine, taken from InventoryBase.GetShownMonsterList - the one list EPL prefixes, so
+        /// it reports the expansion's real card keys on the modded path and the vanilla ones on
+        /// the vanilla path. Built lazily and kept for the session (the shown lists are
+        /// ScriptableObject content: they do not change while the game runs).</summary>
+        private static readonly Dictionary<ECardExpansionType, HashSet<EMonsterType>> _shownMonsters =
+            new Dictionary<ECardExpansionType, HashSet<EMonsterType>>();
+
+        /// <summary>Drop the shown-monster cache. Called from Shutdown beside EnumMap.Clear():
+        /// the next session may load a different save/content set, and a stale membership set
+        /// would either refuse cards this install now has or admit ones it doesn't.</summary>
+        internal static void ClearCardSetCache()
+        {
+            _shownMonsters.Clear();
+        }
+
+        /// <summary>Membership test: does a data row for this monster exist under this expansion
+        /// on this machine? Fills the cache on first ask, but NEVER caches a null-or-empty list -
+        /// that means "InventoryBase isn't ready yet" (pre-load, or mid scene swap), and latching
+        /// it would turn a timing miss into a permanent refusal for the rest of the session.</summary>
+        private static bool MonsterHasDataRowHere(ECardExpansionType expansion, EMonsterType monster)
+        {
+            // FABRICATED-SINGLETON GATE. InventoryBase.GetShownMonsterList reads
+            // CSingleton<InventoryBase>.Instance, and that getter does NOT return null when the
+            // real inventory is absent (client reload window - InGameLevel() stays true there):
+            // it FABRICATES one (new GameObject + AddComponent + DontDestroyOnLoad) and caches
+            // it forever, so the fake permanently shadows the real inventory for the rest of the
+            // run. Same house rule as everywhere else in this file - see the comment above Inv()
+            // (~"NEVER CSingleton<>.Instance for scene-lifetime managers"). Asking Inv() first
+            // (FindObjectOfType, fabricates nothing) both avoids that and makes the no-latch
+            // not-ready refusal below actually reachable: without it this window threw an NRE
+            // out of the fake's empty fields and landed in CardSetInstalledHere's catch.
+            if (Inv() == null) return false; // not ready - do not latch, do not fabricate
+            HashSet<EMonsterType> set;
+            if (!_shownMonsters.TryGetValue(expansion, out set))
+            {
+                var shown = InventoryBase.GetShownMonsterList(expansion);
+                if (shown == null || shown.Count == 0) return false; // not ready - do not latch
+                set = new HashSet<EMonsterType>(shown);
+                _shownMonsters[expansion] = set;
+            }
+            return set.Contains(monster);
+        }
+
+        /// <summary>True when THIS install can actually place the card - i.e. a data row for
+        /// (expansion, monster) really exists here. Anything else would mis-index through
+        /// GetCardSaveIndex/GetShownMonsterList into save slot 0 (silent album corruption on the
+        /// vanilla path) or into CardCountList[-1] (a throw on the EPL path), so it is refused.
+        /// Errs toward REFUSING on any throw.
+        ///
+        /// TWO ORACLES THAT LOOK RIGHT AND ARE NOT - do not reinstate either:
+        ///
+        ///  1. Enum.IsDefined(typeof(EMonsterType), ...). EPL never MINTS EMonsterType members.
+        ///     A modded expansion numbers its cards as plain ORDINALS - (EMonsterType)(index+1),
+        ///     1..N - so the ids collide with whatever vanilla names happen to sit at those
+        ///     numbers. That split the pack's own cards in two, which is what made the field
+        ///     reports so confusing: ordinals 1..122 PASSED IsDefined by pure numeric collision
+        ///     and synced SILENTLY (they never reached the refusal log at all, and they landed
+        ///     in the save slot of the colliding vanilla card); ordinals 123 and up failed the
+        ///     check on EVERY machine - including both players' - and were universally refused,
+        ///     logging as BARE NUMBERS because EMonsterType simply has no members up there.
+        ///     So "some of the modded cards work" was the collision half, and the missing cards
+        ///     were the 123+ half. Note the ECardExpansionType half of the check IS legitimate -
+        ///     expansions genuinely ARE EPL-minted enum members - which is exactly why the two
+        ///     halves look symmetric and are not.
+        ///
+        ///  2. InventoryBase.GetMonsterData(...) != null. EPL does not patch that method; it
+        ///     rewrites the game's own CALL SITES with a transpiler. A third-party caller like
+        ///     this mod runs the ORIGINAL body, which for a modded id returns null or - worse -
+        ///     the wrong vanilla monster's data by collision.
+        ///
+        /// The oracle that holds on both paths is per-expansion MEMBERSHIP in
+        /// GetShownMonsterList, which EPL prefixes with the expansion's real card keys:
+        /// membership means "a data row exists here", which is precisely the question.</summary>
+        internal static bool CardSetInstalledHere(CardData card)
         {
             try
             {
-                // DO NOT infer "installed" from the vanilla lookups: GetCardCollectedList's
-                // switch returns null for EVERY modded ECardExpansionType (EPL virtualizes
-                // those lists elsewhere), so the old check dropped every EPL/CardForge card -
-                // including packs BOTH players have. The runtime enum identity this build
-                // already trusts for the handshake is the right oracle: EPL patches the ids
-                // for locally-installed content into the CLR enums at prepatch, so an id
-                // that Enum.IsDefined here IS content this machine has. Vanilla ids (small,
-                // dense) are always defined. Refuse only what this process has never heard
-                // of - the exact cards that would mis-index into Tetramon slot 0.
-                // ...and refuse the None sentinels explicitly. Since 1.0.37 an incoming modded
-                // id whose NAME does not exist on this PC is translated to the game's own None
-                // member (Util.EnumMap.FromWire) instead of arriving as a foreign number. None
-                // is a DEFINED member of both enums (ECardExpansionType.None = -1,
-                // EMonsterType.None = 0), so Enum.IsDefined alone would wave it straight through
-                // into the Tetramon-slot-0 mis-index this guard exists to stop. Neither value
-                // names a real card, so refusing them costs nothing.
+                if (card == null) return false;
+                // Refuse the None sentinels explicitly. Since 1.0.37 an incoming modded id whose
+                // NAME does not exist on this PC is translated to the game's own None member
+                // (Util.EnumMap.FromWire) instead of arriving as a foreign number, and None is a
+                // DEFINED member of both enums (ECardExpansionType.None = -1, EMonsterType.None
+                // = 0). Neither value names a real card, so refusing them costs nothing.
                 if (card.expansionType == ECardExpansionType.None) return false;
                 if (card.monsterType == EMonsterType.None) return false;
+                // Expansions ARE EPL-minted enum members, so IsDefined is the correct oracle
+                // HERE (and only here - see the doc comment above).
                 if (!Enum.IsDefined(typeof(ECardExpansionType), card.expansionType)) return false;
-                if (!Enum.IsDefined(typeof(EMonsterType), card.monsterType)) return false;
-                return true;
+                // ...and the expansion must still be one this save actually has a collected list
+                // for. Without EPL's interceptor woven in, GetCardCollectedList returns null for
+                // an out-of-vocabulary expansion, and every downstream lookup would fall through
+                // GetShownMonsterList's default arm onto the TETRAMON list - the slot-0 mis-index.
+                if (CPlayerData.GetCardCollectedList(card.expansionType, card.isDestiny) == null) return false;
+                return MonsterHasDataRowHere(card.expansionType, card.monsterType);
             }
             catch (Exception e)
             {
-                CoopPlugin.Log.LogWarning("card set check: " + e.Message);
+                // MEMOIZED like every other per-card warning here. This catch used to be
+                // effectively dead (the not-ready window NRE'd elsewhere); now that the
+                // fabricated-singleton gate in MonsterHasDataRowHere returns cleanly, anything
+                // that still throws here throws on EVERY card - and this path runs up to
+                // CardDeltaBatchMax times per frame during a collect-all burst.
+                if (_priceWarnedKeys.Add("check:" + CardPriceKey(card)))
+                    CoopPlugin.Log.LogWarning("card set check: " + e.Message);
                 return false;
             }
+        }
+
+        /// <summary>Human-readable card id for the log lines that can now carry MODDED cards.
+        /// A modded expansion numbers its cards as plain ORDINALS (1..N), so for anything at or
+        /// past the vanilla expansion range the bare monsterType renders a completely unrelated
+        /// vanilla member NAME by numeric collision - which is worse than useless in a field log.
+        /// Vanilla expansions keep the readable name; modded ones print Expansion#N.</summary>
+        private static string CardIdent(CardData c)
+        {
+            if (c == null) return "(null card)";
+            if ((int)c.expansionType < (int)ECardExpansionType.MAX) return c.monsterType.ToString();
+            return c.expansionType + "#" + (int)c.monsterType;
+        }
+
+        /// <summary>Shared "this PC can't process that card" warning for the sites that have no
+        /// choice but to SKIP a card outright (grade-return, card-box collect) - unlike the delta
+        /// path there is no relay to fall back on, so the card is genuinely lost here and a silent
+        /// `continue` left zero trace in the field logs. Memoized per (context, card) on the same
+        /// set the price/delta warnings use: a rejected 300-card grading submission would
+        /// otherwise print 300 lines.</summary>
+        internal static void WarnRefusedCard(CardData c, string context)
+        {
+            if (c == null) return;
+            if (_priceWarnedKeys.Add(context + ":" + CardPriceKey(c)))
+                CoopPlugin.Log.LogWarning($"{context}: {c.expansionType}#{(int)c.monsterType} is from a card set this PC doesn't have - the card could NOT be processed here");
         }
 
         /// <summary>Keys already warned about by ApplyRemoteCardPrice, once per session. The
@@ -1434,7 +1549,9 @@ namespace CardShopCoop
             if (!InGameLevel() || (_pendingCardDeltas.Count == 0 && _pendingCardPrices.Count == 0)) return;
             Guarded("pending-cards", () =>
             {
-                foreach (var p in _pendingCardDeltas) ApplyCardDelta(p.IsAdd, p.Amount, p.Card);
+                // The relay-anyway flag is discarded here on purpose: this replay path has never
+                // relayed anything (see ApplyOrHoldCardDelta's hold comment).
+                foreach (var p in _pendingCardDeltas) ApplyCardDelta(p.IsAdd, p.Amount, p.Card, out _);
                 if (_pendingCardDeltas.Count > 0)
                     CoopPlugin.Log.LogInfo($"applied {_pendingCardDeltas.Count} card change(s) held during loading");
                 _pendingCardDeltas.Clear();
@@ -1563,7 +1680,7 @@ namespace CardShopCoop
                     for (int i = 0; i < _deltaLogBuf.Count; i++)
                     {
                         var d = _deltaLogBuf[i];
-                        CoopPlugin.Log.LogInfo($"card delta applied: {(d.IsAdd ? "+" : "-")}{d.Amount} {d.Card.monsterType}{(d.Card.cardGrade > 0 ? $" (grade {d.Card.cardGrade})" : d.Card.isFoil ? " (foil)" : "")}");
+                        CoopPlugin.Log.LogInfo($"card delta applied: {(d.IsAdd ? "+" : "-")}{d.Amount} {CardIdent(d.Card)}{(d.Card.cardGrade > 0 ? $" (grade {d.Card.cardGrade})" : d.Card.isFoil ? " (foil)" : "")}");
                     }
                 }
                 else CoopPlugin.Log.LogInfo($"applied {_deltaAppliedThisFrame} card deltas");
@@ -2699,6 +2816,9 @@ namespace CardShopCoop
             // not housekeeping, it is correctness: the next session may be one where WE host,
             // and a host must translate nothing.
             Util.EnumMap.Clear();
+            // Same reasoning for the per-expansion shown-monster membership sets: they describe
+            // THIS install's content as it stood during the dead session.
+            ClearCardSetCache();
             // The PriceList swap-buffer pair, for the same reason and in the same breath: both
             // hold LOCAL item ids from the DEAD session's translation. Left behind, _clientPriced
             // is read by the next session's clear pass ("the host cleared everything not in this
@@ -4388,8 +4508,10 @@ namespace CardShopCoop
                     using (var br = Msg.Reader(msg.Payload))
                     {
                         ReadCardDelta(br, out bool isAdd, out int amount, out var card);
-                        if (!ApplyOrHoldCardDelta(isAdd, amount, card))
-                            break; // held for the level load, or refused here: never propagate it
+                        if (!ApplyOrHoldCardDelta(isAdd, amount, card, out bool relayAnyway) && !relayAnyway)
+                            break; // held for the level load, or genuinely refused: don't propagate
+                        // relayAnyway == this PC lacks the content pack but the delta is sound;
+                        // a third player who HAS it still needs it, so fall through to the relay.
                     }
                     // shared collection: a card a guest gained/lost has to reach the OTHER guests
                     // too, or their binder totals drift out of sync in 3+ player sessions. Forward
@@ -4404,7 +4526,7 @@ namespace CardShopCoop
                     // path may mutate the CardData we hand it
                     bool needFiltered = Role == CoopRole.Host && _net != null && _net.ConnectionCount > 1;
                     _batchRelayBuf.Clear();
-                    int total, applied = 0;
+                    int total, applied = 0, relayedOnly = 0;
                     using (var br = Msg.Reader(msg.Payload))
                     {
                         total = br.ReadInt32();
@@ -4430,27 +4552,31 @@ namespace CardShopCoop
                                 break; // stream is desynced; whatever applied so far still relays
                             }
                             var relayCopy = needFiltered ? SnapshotCard(card) : null;
-                            bool ok;
-                            try { ok = ApplyOrHoldCardDelta(isAdd, amount, card); }
+                            bool ok, relayAnyway = false;
+                            try { ok = ApplyOrHoldCardDelta(isAdd, amount, card, out relayAnyway); }
                             catch (Exception e)
                             {
                                 CoopPlugin.Log.LogWarning($"card delta batch: delta {i + 1}/{total} failed to apply ({e.Message}) - skipped");
                                 continue; // one bad delta costs one delta, not the batch
                             }
-                            if (!ok) continue;
-                            applied++;
+                            // A delta this PC can't hold because it lacks the content pack still
+                            // belongs in the relay set (its snapshot was taken BEFORE the apply,
+                            // same as the applied ones) - a third player may have that pack.
+                            if (!ok && !relayAnyway) continue;
+                            if (ok) applied++; else relayedOnly++;
                             if (needFiltered)
                                 _batchRelayBuf.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = relayCopy });
                         }
                     }
                     // Same shared-collection fan-out as CardDelta, and it runs on EVERY exit
                     // path above (clean, read-fault, apply-fault). The ORIGINAL bytes go out
-                    // untouched only when every delta applied (encoded grades verbatim); if this
-                    // side refused, skipped or never reached any, only the accepted ones are
-                    // relayed - a delta we refused must never spread, exactly as in the
-                    // single-delta case above.
-                    if (applied == total && total > 0) RelayRawToOthers(msg.ConnId, msg.Type, msg.Payload);
-                    else if (applied > 0) RelayCardDeltaBatchToOthers(msg.ConnId, _batchRelayBuf);
+                    // untouched only when every delta applied here and none was merely forwarded
+                    // (encoded grades verbatim); otherwise the filtered rebuild carries the
+                    // accepted deltas PLUS the ones this PC lacks the content for - a delta we
+                    // genuinely refused (corrupt grade, would-go-negative, throw) must never
+                    // spread, exactly as in the single-delta case above.
+                    if (applied == total && relayedOnly == 0 && total > 0) RelayRawToOthers(msg.ConnId, msg.Type, msg.Payload);
+                    else if (_batchRelayBuf.Count > 0) RelayCardDeltaBatchToOthers(msg.ConnId, _batchRelayBuf);
                     break;
                 }
                 case MsgType.GradedRemove:
@@ -4466,8 +4592,11 @@ namespace CardShopCoop
                             _pendingCardDeltas.Add(new PendingCard { IsAdd = false, Amount = 1, Card = card });
                             break;
                         }
-                        if (!ApplyCardDelta(isAdd: false, amount: 1, card: card))
-                            break; // refused here: never propagate it
+                        if (!ApplyCardDelta(isAdd: false, amount: 1, card: card, relayAnyway: out bool relayAnyway) && !relayAnyway)
+                            break; // genuinely refused here: never propagate it
+                        // ...but "this PC has no data row for that card" is not a refusal of the
+                        // message, only of the local apply - a peer that HAS the pack still owns
+                        // that graded copy and must see the removal. Same rule as CardDelta.
                     }
                     // same shared-collection fan-out as CardDelta: relay the graded-remove to the
                     // other guests byte-for-byte so the encoded grade in the payload is preserved.
