@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 
 namespace CardShopCoop.Net
@@ -153,6 +154,164 @@ namespace CardShopCoop.Net
             catch { }
 
             return false;
+        }
+
+        // =====================================================================
+        // SAVE-BACKEND ORACLE (added 2026-08-17 for 1.0.39).
+        //
+        // NEVER USE SteamworksPresent TO DECIDE ANYTHING ABOUT SAVES. It answers a
+        // question about OUR dll-resolution environment ("can this process bind the
+        // Steamworks wrapper?"), not about which backend the GAME writes saves with, and
+        // the field proved the difference: a Game Pass install carrying a stray
+        // com.rlabrecque.steamworks.net.dll (bundled by another mod, or left over from a
+        // fork) answers TRUE, so both of SaveTransfer's gates took the Steam branch -
+        // hosting threw FileNotFoundException demanding a savedGames_Release6.json the
+        // wgs backend never writes, and joining skipped the m_SavedGame injection and
+        // loaded the guest's own world instead of the host's. Assembly presence is the
+        // right oracle for "can Steam UI exist here", the wrong one for "where do saves
+        // live". Two different questions; keep them apart.
+        //
+        // The oracle that IS right is the game's own save-completion counter -
+        // CPlayerData.m_SaveIndex/m_SaveCycle, bumped inside CGameData.SaveGameData
+        // UPSTREAM of the backend call, so it advances identically on the Steam json
+        // writer and on the Game Pass Gamecore/wgs writer. Sample it either side of
+        // CGameManager.SaveGameData: a bump is positive proof the save ran all the way
+        // through its four guards, no bump is positive proof it bailed. That is the same
+        // completion proof the slot-file freshness clock buys on Steam, obtained from the
+        // game instead of from the filesystem, and it needs no platform knowledge at all.
+        //
+        // <see cref="GamePassBuild"/> below is the LAST-RESORT tiebreak, used only when
+        // the counter fields cannot be found (an unknown future build) - never as the
+        // primary answer.
+        //
+        // Everything here is string-keyed reflection: this file names no game type in its
+        // metadata either, so nothing in it can fault at JIT on a reshaped build.
+        // =====================================================================
+
+        private static Assembly _gameAsm;
+        private static bool _gameAsmSearched;
+
+        /// <summary>The game's Assembly-CSharp, by SIMPLE NAME, or null. Cached.</summary>
+        private static Assembly GameAssembly()
+        {
+            if (!_gameAsmSearched)
+            {
+                _gameAsmSearched = true;
+                try
+                {
+                    foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                        if (string.Equals(a.GetName().Name, "Assembly-CSharp",
+                                          StringComparison.OrdinalIgnoreCase))
+                        { _gameAsm = a; break; }
+                }
+                catch { }
+            }
+            return _gameAsm;
+        }
+
+        private static FieldInfo _saveIndexField, _saveCycleField;
+        private static bool _counterSearched;
+
+        /// <summary>
+        /// PRIMARY SAVE ORACLE. Reads the game's save-completion counter pair
+        /// (CPlayerData.m_SaveIndex, CPlayerData.m_SaveCycle). Returns false - meaning
+        /// "unknown build, this oracle cannot answer" - when either field is missing;
+        /// callers must fall through to <see cref="GamePassBuild"/> in that case, never
+        /// treat false as "the save did not run".
+        ///
+        /// Sample it BEFORE and AFTER CGameManager.SaveGameData and compare the PAIR: the
+        /// index wraps to 0 and bumps the cycle at 1e9, so index alone is not enough.
+        ///
+        /// Read CPlayerData's statics, NOT CSaveLoad.m_SavedGame.m_SaveIndex: on Game Pass
+        /// the Gamecore writer may not re-point m_SavedGame the way CSaveLoad.Save does,
+        /// but CPlayerData's counter is bumped before the backends split.
+        /// </summary>
+        public static bool TrySampleSaveCounter(out int index, out int cycle)
+        {
+            index = 0; cycle = 0;
+            try
+            {
+                if (!_counterSearched)
+                {
+                    _counterSearched = true;
+                    var t = GameAssembly()?.GetType("CPlayerData");
+                    if (t != null)
+                    {
+                        const BindingFlags f = BindingFlags.Static | BindingFlags.Public |
+                                               BindingFlags.NonPublic;
+                        _saveIndexField = t.GetField("m_SaveIndex", f);
+                        _saveCycleField = t.GetField("m_SaveCycle", f);
+                    }
+                }
+                if (_saveIndexField == null || _saveCycleField == null) return false;
+                index = (int)_saveIndexField.GetValue(null);
+                cycle = (int)_saveCycleField.GetValue(null);
+                return true;
+            }
+            catch { index = 0; cycle = 0; return false; }
+        }
+
+        private static int _gpState; // 0 = unknown, 1 = Game Pass, 2 = not
+
+        /// <summary>
+        /// LAST-RESORT save-backend tiebreak: does the game assembly contain a Gamecore
+        /// (Xbox Game Save / wgs) type? Derived from the GAME, not from our dll
+        /// environment, which is what makes it legitimate where SteamworksPresent is not.
+        /// Verified absent on the Steam build (zero hits for "Gamecore" across the whole
+        /// 608-file decompile), so a match means Game Pass. SUBSTRING match on purpose:
+        /// the exact Game Pass type name is community hearsay and we have no Game Pass
+        /// assembly to check it against. Cached; never throws.
+        ///
+        /// Only consult this when <see cref="TrySampleSaveCounter"/> returns false.
+        /// </summary>
+        public static bool GamePassBuild
+        {
+            get
+            {
+                if (_gpState == 0) _gpState = DetectGamecore() ? 1 : 2;
+                return _gpState == 1;
+            }
+        }
+
+        private static bool DetectGamecore()
+        {
+            var asm = GameAssembly();
+            if (asm == null) return false;
+            Type[] types;
+            // a partially-loadable assembly still tells us what we need: walk .Types and
+            // skip the nulls rather than giving up on the whole probe
+            try { types = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException e) { types = e.Types; }
+            catch { return false; }
+            if (types == null) return false;
+            foreach (var t in types)
+            {
+                if (t == null) continue;
+                try
+                {
+                    if (t.Name.IndexOf("Gamecore", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        /// <summary>One-line save-backend verdict for the startup log. Deliberately
+        /// separate from the Steamworks line: they answer different questions, and 1.0.38
+        /// shipped a field report where the Steam line was true and the save backend was
+        /// not.</summary>
+        public static string SaveBackendDescription
+        {
+            get
+            {
+                int i, c;
+                bool counter = TrySampleSaveCounter(out i, out c);
+                return (GamePassBuild ? "Xbox containers (Game Pass)" : "local files")
+                     + (counter
+                        ? " [save-completion counter available]"
+                        : " [save-completion counter UNAVAILABLE - unknown build, falling back to the Gamecore type probe]");
+            }
         }
     }
 

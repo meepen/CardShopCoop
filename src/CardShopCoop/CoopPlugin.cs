@@ -12,7 +12,7 @@ namespace CardShopCoop
     {
         public const string Guid = "com.zwhit.cardshopcoop";
         public const string Name = "CardShopCoop";
-        public const string Version = "1.0.38";
+        public const string Version = "1.0.39";
 
         public static ManualLogSource Log;
 
@@ -77,10 +77,28 @@ namespace CardShopCoop
             // Pass player (or a support thread) is told to look for, and it is most useful
             // precisely in the session where CoopCore fails to load - so it must not sit
             // downstream of the very failure it explains.
+            //
+            // IT REPORTS ONLY WHAT IT ACTUALLY KNOWS (1.0.39). PlatformProbe answers exactly
+            // one question - "can this process bind the Steamworks wrapper?" - and the field
+            // proved that is NOT the same question as "will Steam work here": a Game Pass
+            // install carrying a stray com.rlabrecque.steamworks.net.dll answers TRUE, and the
+            // old wording then PROMISED that player "Steam lobbies, invites and P2P available"
+            // on a build where Steam can never run. So this line is now a neutral statement of
+            // fact about the assembly, and the promise moved to CoopCore.Awake - the first
+            // point that knows whether the bridge actually came up. Do not put it back here:
+            // nothing at this point in startup is entitled to make it.
             if (!Net.PlatformProbe.SteamworksPresent)
-                Log.LogInfo("Steamworks not present - Game Pass / DRM-free build assumed, LAN and direct IP only (a HarmonyX ReflectionTypeLoadException warning naming Steamworks types may appear when any mod - including this one - enumerates loaded types; it is EXPECTED on this build and harmless)");
+                Log.LogInfo("Steamworks assembly not detected - LAN and direct IP only (a HarmonyX ReflectionTypeLoadException warning naming Steamworks types may appear when any mod - including this one - enumerates loaded types; it is EXPECTED on this build and harmless)");
             else
-                Log.LogInfo("Steamworks present - Steam lobbies, invites and P2P available.");
+                Log.LogInfo("Steamworks assembly detected.");
+
+            // SECOND LINE, ON PURPOSE. The line above answers "can Steam UI exist here"; this
+            // one answers "where do this game's saves live", and 1.0.38 shipped a field report
+            // where the first was true and the second was not (a stray
+            // com.rlabrecque.steamworks.net.dll in a Game Pass install). SaveTransfer no longer
+            // infers one from the other, and neither should the log.
+            Log.LogInfo("save backend: " + Net.PlatformProbe.SaveBackendDescription +
+                        " - decided from the game's own save-completion counter at join time, never from Steamworks presence.");
 
             // ORDER MATTERS, AND NOT THE WAY YOU'D EXPECT. CoopCore is added FIRST and the
             // Harmony patches only go in if that succeeded.

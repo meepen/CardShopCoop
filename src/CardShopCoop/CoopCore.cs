@@ -492,8 +492,29 @@ namespace CardShopCoop
             // callbacks used to do now lives inside the bridge (SteamBridgeImpl.Init),
             // because it is Steam-typed; only the Steam-free outcome arrives here.
             _steam = SteamBridge.TryCreate();
+
+            // THE PLATFORM PROMISE IS MADE HERE, NOT IN CoopPlugin.Awake. The startup line up
+            // there can only report whether the ASSEMBLY resolved, and 1.0.39's field reports
+            // showed that answering TRUE and Steam actually working are different things (a
+            // Game Pass install with a stray com.rlabrecque.steamworks.net.dll bundled by
+            // another mod). This is the first point in startup that knows the real answer,
+            // because TryCreate has now both loaded the type AND probed the native runtime
+            // (SteamBridgeImpl's constructor) - so this is where a player is told what they
+            // actually have. TryCreate's own warning is deliberately left alone: it carries the
+            // exception detail, and these two lines carry the verdict.
+            if (_steam == null && PlatformProbe.SteamworksPresent)
+            {
+                // The assembly loaded but the bridge did not: a stripped Steamworks (Game Pass
+                // 0.70 has SteamAPI but no Callback`1) or a complete stray dll with no native
+                // steam_api64.dll behind it. Either way Steam is unreachable here and the UI
+                // stays hidden - say so plainly rather than leaving the startup line's
+                // "assembly detected" as the last word on the subject.
+                CoopPlugin.Log.LogInfo("Steamworks assembly present but NOT functional (stripped assembly or no Steam runtime - Game Pass build?) - LAN and direct IP only.");
+            }
+
             if (_steam != null)
             {
+                CoopPlugin.Log.LogInfo("Steam bridge ready - lobbies, invites and P2P available.");
                 _steam.Init();
                 _steam.OnError = err => { ErrorLine = err; CoopPlugin.Log.LogWarning(err); };
                 _steam.OnLobbyLive = lobby =>

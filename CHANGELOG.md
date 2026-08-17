@@ -5,6 +5,16 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.39
+**Hotfix: Game Pass hosting broken in 1.0.38 — thanks Tonio's crew, whose logs from seven join attempts told the whole story in one read.** Both players must update.
+
+**"Host snapshot failed" on Game Pass**
+- **Fixed: the mod deciding you were on Steam because a Steam file exists on your PC.** It turns out the Game Pass build itself ships a hollowed-out copy of Steam's networking library (with most of its insides stripped out), and other mods sometimes bundle a full copy — either way the old check saw the file and demanded a save file Game Pass never creates. The mod now ignores that file entirely for saves and instead asks the game directly whether the save it just requested actually completed, using the game's own save counter — which works identically on both builds.
+- **Bonus fix for Steam:** if the game's save succeeds but its file write fails (locked file, full disk), hosting now ships the confirmed-current world from memory instead of erroring out.
+- The joiner-side world delivery no longer depends on platform detection at all.
+- If a full copy of Steam's library sneaks onto a Game Pass install (bundled by another mod), the Steam buttons no longer appear as dead controls — the mod now tests whether Steam can actually run before offering any of it.
+- Logs now state plainly which save backend is in use and, when a world is sent from memory, which world it was (day and shop name) — so the next report answers itself.
+
 ## 1.0.38
 **One mod for everyone: the same download now works on Steam AND Xbox Game Pass — huge thanks to Jburne10, whose Game Pass port supplied the save-transfer fix and the proof it works.** Both players must update — Steam players via the launcher as usual, Game Pass players by dropping the same DLL into `BepInEx\plugins`.
 

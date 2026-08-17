@@ -455,6 +455,11 @@ namespace CardShopCoop.Net
     /// reaches it, because <see cref="SteamBridge.TryCreate"/> checks
     /// <see cref="PlatformProbe.SteamworksPresent"/> first and is the only caller.
     ///
+    /// Since 1.0.39 it also fails DELIBERATELY: the constructor probes the native Steam
+    /// runtime and throws when there isn't one, so a Game Pass install carrying a stray but
+    /// COMPLETE Steamworks dll (which loads perfectly, being pure managed code) degrades to
+    /// the same null bridge as a build with no dll at all. See the constructor.
+    ///
     /// NOTHING OUTSIDE THIS FILE MAY NAME THIS TYPE except SteamBridge.Create(). Referencing
     /// it from CoopCore/CoopUI/CoopPlugin would drag the Steamworks metadata straight back
     /// into an always-loaded type, which is exactly the bug the bridge exists to prevent.
@@ -471,6 +476,77 @@ namespace CardShopCoop.Net
         /// <summary>Reused across calls: CoopUI's browser polls Lobbies every OnGUI frame
         /// (which runs 2+ times a frame), and a fresh list each time is pure garbage.</summary>
         private readonly List<LobbyRow> _rows = new List<LobbyRow>();
+
+        /// <summary>
+        /// RUNTIME VIABILITY PROBE (1.0.39). Constructing this type is NOT proof that Steam
+        /// can work here. The field turned up two different Game Pass cohorts, and only one
+        /// of them was already handled:
+        ///
+        ///  (1) STRIPPED ASSEMBLY - the stock Game Pass 0.70 build ships a cut-down
+        ///      com.rlabrecque.steamworks.net where Steamworks.SteamAPI still exists (so
+        ///      PlatformProbe.SteamworksPresent answers TRUE) but Callback`1 is gone. Every
+        ///      field of this type and of SteamLobby is Steam-typed, so `new SteamBridgeImpl()`
+        ///      dies at TYPE LOAD and SteamBridge.TryCreate already turns that into a null
+        ///      bridge. Field-proven, verbatim: "Steam bridge unavailable: Could not load
+        ///      type ... Callback`1". Nothing below is needed for this cohort.
+        ///
+        ///  (2) COMPLETE STRAY COPY - a Game Pass install where ANOTHER MOD bundled a full,
+        ///      unstripped Steamworks.NET dll. Nothing faults, because the whole wrapper is
+        ///      pure managed code: the bridge constructs, Init() wires its callbacks, and the
+        ///      Steam UI comes alive on a build where Steam can never run. That is strictly
+        ///      worse than hiding it - a dead "Host via Steam" button, a lobby browser that
+        ///      P/Invokes unguarded and latches ListRefreshing forever, and "Steam isn't
+        ///      running" messages that tell the player to go fix something they cannot fix.
+        ///
+        /// So ask the NATIVE layer, which is precisely what cohort (2) is missing.
+        ///
+        /// WHY SteamAPI.IsSteamRunning - VERIFIED, NOT ASSUMED. Checked against the shipped
+        /// com.rlabrecque.steamworks.net.dll rather than taken on faith, because a wrapper that
+        /// could answer from managed state would probe nothing at all. Its IL body is 11 bytes:
+        /// `call InteropHelp.TestIfPlatformSupported; call NativeMethods.SteamAPI_IsSteamRunning;
+        /// ret` - and that second method carries [DllImport("steam_api64", EntryPoint =
+        /// "SteamAPI_IsSteamRunning", CallingConvention = Cdecl)]. It therefore CANNOT return
+        /// without binding steam_api64.dll, which is the property we want. (SteamAPI.Init would
+        /// bind it too, and is exactly the wrong call to make here: we RIDE the game's own
+        /// Heathen-initialized Steamworks and must never fight it for ownership - see the
+        /// SteamTransport remark at the top of this file.)
+        ///
+        /// ANY exception becomes a plain InvalidOperationException - DllNotFoundException (no
+        /// steam_api64.dll beside the executable: the Game Pass case), EntryPointNotFoundException,
+        /// a TypeLoadException out of a half-stripped InteropHelp, anything at all. The thrown
+        /// type names nothing Steam-shaped, so SteamBridge.TryCreate's EXISTING catch handles it
+        /// unchanged and every stray-dll machine degrades to the same clean LAN-only state the
+        /// stripped-assembly machines already get, carrying the same one warning line.
+        ///
+        /// A NORMAL RETURN OF false IS DELIBERATELY NOT AN ERROR. That means "Steam is installed
+        /// but the client isn't running" - a state the player can actually fix, and the exact
+        /// distinction ISteamBridge documents and SteamAvailable() exists to report. Only a
+        /// THROW proves the runtime isn't there at all. (Residual, and accepted: a Game Pass
+        /// install carrying both the stray managed wrapper AND a stray steam_api64.dll, on a PC
+        /// where the Steam client happens to be running, still answers true and still gets the
+        /// Steam UI. No probe short of SteamAPI.Init can separate that case, and Init is the one
+        /// call we are not allowed to make.)
+        ///
+        /// THIS MUST STAY IN THE CONSTRUCTOR AND MUST NOT MOVE INTO Init(). TryCreate's
+        /// try/catch wraps only Create() - that is, `new SteamBridgeImpl()`. CoopCore calls
+        /// Init() afterwards, outside any catch, so a throw from there would take CoopCore.Awake
+        /// down with it and kill the whole mod instead of degrading it.
+        /// </summary>
+        public SteamBridgeImpl()
+        {
+            try
+            {
+                SteamAPI.IsSteamRunning();
+            }
+            catch (Exception e)
+            {
+                // include the real reason: TryCreate logs this message, and "which exception"
+                // is what separates a Game Pass stray dll from a genuinely broken install.
+                throw new InvalidOperationException(
+                    "Steamworks runtime is not functional on this install (" +
+                    e.GetType().Name + ": " + e.Message + ")");
+            }
+        }
 
         public Action<string> OnError { get; set; }
         public Action<ulong> OnLobbyLive { get; set; }
