@@ -23,8 +23,20 @@ namespace CardShopCoop.Util
     /// </summary>
     public static class GradingInterop
     {
-        private static readonly Type TReg = AccessTools.TypeByName("TCGCardShopSimulator.GradingOverhaul.EncodedGradeRegistry");
-        private static readonly Type THelper = AccessTools.TypeByName("TCGCardShopSimulator.GradingOverhaul.Helper");
+        /// <summary>SIMPLE ASSEMBLY NAME of Grading Overhaul, which is NOT its namespace and
+        /// not a compressed form of it: the plugin ships as "Grading Overhaul.dll" and declares
+        /// [assembly: AssemblyTitle("Grading Overhaul")] - space and all - while its types live
+        /// under TCGCardShopSimulator.GradingOverhaul (verified in the decompiled 3.4.2). It is
+        /// only the fast path; ResolveType falls back to the type walk if this is ever wrong,
+        /// so a rename by GO costs a little log noise on Game Pass, never the integration.</summary>
+        private const string GradingAssembly = "Grading Overhaul";
+
+        // Assembly-qualified bind first, app-domain type walk only if it misses. This is a
+        // STATIC INITIALIZER: it runs the first time anything touches GradingInterop, and with
+        // the bare walk that was one guaranteed ReflectionTypeLoadException in the log of every
+        // Game Pass session that ever synced a card. See Util.ModParity.ResolveType.
+        private static readonly Type TReg = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.EncodedGradeRegistry", GradingAssembly);
+        private static readonly Type THelper = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.Helper", GradingAssembly);
 
         // void RememberForExternalMod(CardData, int) - public static, decompiled :5900
         private static readonly MethodInfo MiRemember = TReg == null ? null

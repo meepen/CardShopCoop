@@ -6,13 +6,24 @@ using System.Reflection;
 using System.Threading;
 using CardShopCoop.Net;
 using CardShopCoop.Sync;
-using Steamworks;
+// NO `using Steamworks;` HERE, AND NEVER AGAIN. CoopCore is an always-loaded type: a
+// single Steamworks token in one of its fields or method bodies makes the whole class
+// (and therefore the whole mod) fail to load on the Game Pass build, which ships no
+// com.rlabrecque.steamworks.net.dll. Everything Steam-shaped goes through
+// Net.ISteamBridge. The absence of this using is the compiler-enforced proof.
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop
 {
     public enum CoopRole { None, Host, Client }
+
+    /// <summary>How far the invite code has got. Off = not LAN-hosting (or a Steam session,
+    /// where Steam's own invites do this job). Resolving = the worker is still asking the
+    /// router and the STUN server. Ready = the code carries a public address. LanOnly = we
+    /// could not establish a public address, so the code carries the LAN one - still perfectly
+    /// good for the other PC in the house, useless over the internet.</summary>
+    public enum InviteState { Off, Resolving, Ready, LanOnly }
 
     public class CoopCore : MonoBehaviour
     {
@@ -44,7 +55,11 @@ namespace CardShopCoop
         public readonly Dictionary<int, string> PeerNames = new Dictionary<int, string>();
 
         private ICoopTransport _net;
-        private readonly SteamLobby _steamLobby = new SteamLobby();
+        /// <summary>Null on any build where the Steamworks assembly is absent (Game Pass /
+        /// DRM-free). NOT the same as "Steam isn't running" - see ISteamBridge. Must stay an
+        /// INTERFACE-typed field: a SteamLobby-typed one would put Steamworks metadata back
+        /// on CoopCore.</summary>
+        private ISteamBridge _steam;
         private ulong _autoJoinSteamLobby; // from +connect_lobby (game launched via invite)
         public bool IsSteamSession { get; private set; }
         private readonly AvatarManager _avatars = new AvatarManager();
@@ -75,6 +90,32 @@ namespace CardShopCoop
         private float _npcSweepTimer = -1.3f;
         private float _regStateTimer = -0.17f;
         public string PromptLine = "";
+
+        // ---- invite code / UPnP (LAN hosting only) ----
+        // COMPUTED BY A WORKER THREAD, WRITTEN ON THE MAIN ONE, READ BY OnGUI. The resolve
+        // worker blocks on SSDP, HTTP and STUN for several seconds and the host panel has to
+        // keep drawing something honest the entire time - so the worker hands each result back
+        // through _mainThread (see Publish), which puts every write in the same single-threaded
+        // order as Shutdown's reset and the UI's reads. They stay volatile anyway: that is one
+        // cheap line against a future caller that writes one of them from a worker again, and
+        // OnGUI itself latches them per Layout pass (CoopUI.DrawInvite) because an IMGUI window
+        // whose CONTROL COUNT changes between the Layout and Repaint passes throws.
+        public volatile InviteState InviteStatus = InviteState.Off;
+        /// <summary>The composed code, or null while it is still unknown (the copy button is
+        /// disabled until this exists).</summary>
+        public volatile string InviteCodeText;
+        /// <summary>Why the code is LAN-only, in words a player can act on. Null otherwise.</summary>
+        public volatile string InviteReason;
+        /// <summary>0 = nothing to say (pending, or auto-forwarding is off), 1 = the router
+        /// accepted the request, 2 = the router declined. Deliberately not a bool: "we haven't
+        /// asked yet" and "the router said no" must not draw the same line.</summary>
+        public volatile int PortForwardState;
+        /// <summary>Bumped by every invite resolve AND by every Shutdown. The worker captures
+        /// it and publishes nothing if it has moved on - otherwise a host who stops and
+        /// re-hosts inside the resolve window (which is SECONDS long) gets the dead session's
+        /// address and port presented as this session's ready code.</summary>
+        private int _inviteGen;
+
         private readonly ConcurrentQueue<Action> _mainThread = new ConcurrentQueue<Action>();
         private UI.CoopUI _ui;
 
@@ -445,27 +486,40 @@ namespace CardShopCoop
             if (_autoJoinIp != null) CoopPlugin.Log.LogInfo($"AUTO: will join {_autoJoinIp}");
             if (_autoJoinSteamLobby != 0) CoopPlugin.Log.LogInfo($"AUTO: will join Steam lobby {_autoJoinSteamLobby}");
 
-            _steamLobby.Init();
-            _steamLobby.OnError = err => { ErrorLine = err; CoopPlugin.Log.LogWarning(err); };
-            _steamLobby.OnLobbyCreated = lobby =>
+            // Steam, if this build has any. TryCreate returns null - silently, and without
+            // ever touching a Steamworks type - on Game Pass / DRM-free installs, and the
+            // whole plugin simply runs LAN-only from there. The transport wiring these
+            // callbacks used to do now lives inside the bridge (SteamBridgeImpl.Init),
+            // because it is Steam-typed; only the Steam-free outcome arrives here.
+            _steam = SteamBridge.TryCreate();
+            if (_steam != null)
             {
-                if (_net is SteamTransport st) st.LobbyId = lobby;
-                StatusLine = "Hosting via Steam - click 'Invite friend'";
-                CoopPlugin.Log.LogInfo("steam: lobby live " + lobby);
-            };
-            _steamLobby.OnEnteredLobby = owner =>
-            {
-                if (Role != CoopRole.Client || !(_net is SteamTransport st)) return;
-                st.LobbyId = _steamLobby.LobbyId;
-                st.ConnectToHost(owner);
-                StatusLine = "Connected via Steam - requesting world...";
-                SendHello();
-            };
-            _steamLobby.OnInviteAccepted = lobby =>
-            {
-                CoopPlugin.Log.LogInfo("steam: invite accepted -> lobby " + lobby);
-                JoinSteam(lobby);
-            };
+                _steam.Init();
+                _steam.OnError = err => { ErrorLine = err; CoopPlugin.Log.LogWarning(err); };
+                _steam.OnLobbyLive = lobby =>
+                {
+                    StatusLine = "Hosting via Steam - click 'Invite friend'";
+                    // The id is the one thing a support log needs from this line: it is what
+                    // the joiner's "+connect_lobby <id>" and invite-accept both name, so
+                    // without it the two halves of a failed join cannot be matched up.
+                    CoopPlugin.Log.LogInfo("steam: lobby live " + lobby);
+                };
+                _steam.OnConnectedToHost = () =>
+                {
+                    // THE ROLE GUARD LIVES HERE NOW (it used to sit beside the transport
+                    // wiring, inside the OnEnteredLobby handler). Do not drop it: it is
+                    // what stops a stray lobby-enter from starting a handshake while we
+                    // are hosting or idle.
+                    if (Role != CoopRole.Client) return;
+                    StatusLine = "Connected via Steam - requesting world...";
+                    SendHello();
+                };
+                _steam.OnInviteAccepted = lobby =>
+                {
+                    CoopPlugin.Log.LogInfo("steam: invite accepted -> lobby " + lobby);
+                    JoinSteam(lobby);
+                };
+            }
 
             CEventManager.AddListener<CEventPlayer_OnOpenCardPack>(OnLocalPackOpened);
 
@@ -512,16 +566,26 @@ namespace CardShopCoop
 
         public string HostPassword = "";        // required from joiners when non-empty
         private string _joinPassword = "";       // sent in our Hello when joining
-        public CSteamID LastFailedLobby = CSteamID.Nil; // for the wrong-password retry flow
-        public SteamLobby Lobby => _steamLobby;
+        /// <summary>Raw lobby id (0 = none) for the wrong-password retry flow. A ulong, NOT
+        /// a CSteamID: a Steamworks STRUCT field here would stop CoopCore loading at all on
+        /// a build without the Steamworks assembly.</summary>
+        public ulong LastFailedLobby;
+
+        /// <summary>The Steam facade, or NULL when this build has no Steamworks assembly at
+        /// all. The UI uses `Steam == null` as its single "hide every Steam control" test.</summary>
+        public ISteamBridge Steam => _steam;
 
         /// <summary>Join a host through Steam (invite accept, browser, +connect_lobby).</summary>
-        public void JoinSteam(CSteamID lobby, string password = "")
+        public void JoinSteam(ulong lobby, string password = "")
         {
             ErrorLine = "";
             if (Role != CoopRole.None) { ErrorLine = "Already in a session."; return; }
             if (InGameLevel()) { ErrorLine = "Go to the main menu first, then accept the invite again."; return; }
-            if (!_steamLobby.SteamAvailable()) { ErrorLine = "Steam isn't running."; return; }
+            // Two DIFFERENT failures, two different messages: no assembly means Steam can
+            // never work on this install (nothing the player can do), whereas the client
+            // simply not running is fixable. Never collapse these into one line.
+            if (_steam == null) { ErrorLine = "This build has no Steam support - use LAN or direct IP."; return; }
+            if (!_steam.SteamAvailable()) { ErrorLine = "Steam isn't running."; return; }
             // FIX C: the card database on disk was replaced by the host's copy this session,
             // but THIS process is still running the old one (the registry is read once at
             // startup). Joining now would hand the host our stale ids and earn another
@@ -538,9 +602,11 @@ namespace CardShopCoop
             IsSteamSession = true;
             _joinPassword = password ?? "";
             LastFailedLobby = lobby;
-            _net = new SteamTransport(isHost: false) { KeepaliveFrame = Msg.Build(MsgType.Ping) };
+            // ORDER IS LOAD-BEARING: the transport must exist before Join(), because the
+            // bridge's lobby-entered callback wires the host connection into it.
+            _net = _steam.CreateTransport(false, Msg.Build(MsgType.Ping));
             StatusLine = "Joining Steam lobby...";
-            _steamLobby.Join(lobby);
+            _steam.Join(lobby);
         }
 
         /// <summary>Host through Steam: friends-only (invite) or public (lobby browser).</summary>
@@ -549,21 +615,29 @@ namespace CardShopCoop
             ErrorLine = "";
             if (Role != CoopRole.None) { ErrorLine = "Already in a session."; return; }
             if (!InGameLevel()) { ErrorLine = "Load your shop first, then host."; return; }
-            if (!_steamLobby.SteamAvailable()) { ErrorLine = "Steam isn't running - use LAN instead."; return; }
+            // Same two-step check as JoinSteam: missing assembly vs. client not running.
+            if (_steam == null) { ErrorLine = "This build has no Steam support - use LAN instead."; return; }
+            if (!_steam.SteamAvailable()) { ErrorLine = "Steam isn't running - use LAN instead."; return; }
             // a HOST must never translate: drop any table a previous session left behind
             Util.EnumMap.Clear();
             Role = CoopRole.Host;
             IsSteamSession = true;
             HostPassword = password ?? "";
-            _net = new SteamTransport(isHost: true) { KeepaliveFrame = Msg.Build(MsgType.Ping) };
+            // ORDER IS LOAD-BEARING: transport first, then Host() - the bridge's
+            // lobby-created callback stamps the new lobby id onto this transport.
+            _net = _steam.CreateTransport(true, Msg.Build(MsgType.Ping));
             StatusLine = "Creating Steam lobby...";
-            _steamLobby.Host(isPublic, lobbyName, HostPassword.Length > 0);
+            _steam.Host(isPublic, lobbyName, HostPassword.Length > 0);
         }
 
-        public void OpenSteamInvite() { _steamLobby.OpenInviteDialog(); }
+        public void OpenSteamInvite() { _steam?.OpenInviteDialog(); }
 
         private void SendHello()
         {
+            // Logged on BOTH sides of every Hello (the host logs the pair when it reads
+            // them): when a cross-play session misbehaves, the two logs together say
+            // immediately whether the two PCs are even on the same game build.
+            CoopPlugin.Log.LogInfo($"game build: sending {Application.version} / Unity {Application.unityVersion}");
             Send(1, MsgType.Hello, bw =>
             {
                 bw.Write(CoopPlugin.Version);
@@ -602,6 +676,19 @@ namespace CardShopCoop
                 }
                 bw.Write(gzEnum.Length);
                 bw.Write(gzEnum);
+                // GAME-BUILD FINGERPRINT (1.0.38). The Steam and Game Pass releases of Card
+                // Shop Simulator are DIFFERENT builds of the same game: their Assembly-CSharp
+                // can differ in ways the mod-parity hashes above cannot see (those cover OUR
+                // plugin set and card ids, not the game itself). Two peers on mismatched game
+                // builds desync in ways that look like mod bugs, so name it at the door.
+                //
+                // APPENDED AT THE VERY END, deliberately. The wire is version-gated - the host
+                // does not read a single field past the plugin-version string unless that
+                // string matched its own - so appending here cannot confuse any peer: a peer
+                // that reads these is by definition a peer that writes them. That reasoning
+                // only holds while these stay LAST; put a new field after them, never between.
+                bw.Write(Application.version ?? "");
+                bw.Write(Application.unityVersion ?? "");
             });
         }
 
@@ -2175,16 +2262,198 @@ namespace CardShopCoop
                 Role = CoopRole.Host;
                 StatusLine = "Hosting - waiting for a player...";
                 CoopPlugin.Log.LogInfo($"Hosting on port {CoopPlugin.Port.Value}");
+                // THE PORT AND THE PASSWORD ARE ONE DECISION, so this sits here rather than in
+                // the UI: LAN hosting may be about to ask the router to open this port to the
+                // whole internet (AutoPortForward), and an open port with no password is an
+                // open door into the player's game and save. Generated BEFORE
+                // BeginInviteResolve, which snapshots HostPassword into the invite code - get
+                // this order wrong and the code carries "" while the Hello gate demands the
+                // password, i.e. a code that cannot join its own host.
+                if (CoopPlugin.AutoLanPassword.Value && string.IsNullOrEmpty(HostPassword))
+                    HostPassword = GenerateSessionPassword();
+                BeginInviteResolve();
             }
             catch (Exception e)
             {
                 ErrorLine = "Could not host: " + e.Message;
                 _net?.Stop(); _net = null;
                 Role = CoopRole.None;
+                HostPassword = ""; // nothing is listening; don't leave a stale one behind
             }
         }
 
+        /// <summary>Eight Crockford base32 characters from the crypto RNG - 40 bits, which is
+        /// far beyond anything guessable through a TCP handshake, and short enough to read out
+        /// loud. Same alphabet as the invite code on purpose: this string is meant to be spoken
+        /// over voice chat when a friend types the IP by hand, and dropping I/L/O/U is exactly
+        /// what makes that survivable. 32 divides 256, so the byte-to-symbol reduction below is
+        /// unbiased.</summary>
+        private static string GenerateSessionPassword()
+        {
+            const string alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+            var bytes = new byte[8];
+            using (var rng = new System.Security.Cryptography.RNGCryptoServiceProvider())
+                rng.GetBytes(bytes);
+            var chars = new char[bytes.Length];
+            for (int i = 0; i < bytes.Length; i++) chars[i] = alphabet[bytes[i] & 31];
+            return new string(chars);
+        }
+
+        /// <summary>LAN hosting just started: work out the one string a friend can paste, on a
+        /// worker thread, and (unless the player turned it off) ask the router to open the port
+        /// while we're at it.
+        ///
+        /// EVERY LINE OF THIS RUNS OFF THE MAIN THREAD, and it must: SSDP discovery alone is a
+        /// 3-second blocking wait, the router's HTTP can take another 4, and STUN 2 more. On
+        /// the main thread that is a nine-second freeze of the whole GAME at the exact moment
+        /// the player pressed Host. Hosting itself is already live before this starts - the
+        /// invite code is a convenience layered on top, and nothing in here can fail in a way
+        /// that touches the session.
+        ///
+        /// SEQUENCE: router mapping (optional) -> the router's own external address -> STUN as
+        /// the fallback -> compose. A router that reports a PRIVATE external address is on
+        /// carrier-grade NAT, and no amount of port forwarding at this end will make it
+        /// reachable; that case is called out by name instead of being papered over with the
+        /// carrier's address, which would produce a code that silently never connects.</summary>
+        private void BeginInviteResolve()
+        {
+            InviteCodeText = null;
+            InviteReason = null;
+            PortForwardState = 0;
+            InviteStatus = InviteState.Resolving;
+
+            int port = CoopPlugin.Port.Value;
+            string password = HostPassword ?? "";
+            bool forward = CoopPlugin.AutoPortForward.Value;
+            int gen = Interlocked.Increment(ref _inviteGen);
+
+            new Thread(() =>
+            {
+                string lan = null, publicIp = null, reason = null;
+                try
+                {
+                    NetHelpers.BeginDiscovery(); // one SSDP sweep per run, not one per call
+
+                    if (forward)
+                    {
+                        bool mapped = NetHelpers.TryMapPort(port, out string why, out long epoch);
+                        if (!mapped)
+                            CoopPlugin.Log.LogInfo("automatic port forwarding did not happen: " + (why ?? "unknown"));
+
+                        // ORPHAN GUARD. The gen check at the BOTTOM of this worker stops a dead
+                        // session's code from being published, but a mapping is not a field we
+                        // can decline to publish - it is a hole already open in the router. If
+                        // the session ended while TryMapPort was blocking (host stopped, or
+                        // stopped and re-hosted), nothing downstream would ever remove it:
+                        // Shutdown's own unmap ran BEFORE this mapping existed. Close it here,
+                        // on this thread, and stop - blocking is what worker threads are for.
+                        //
+                        // BY EPOCH, not just by port. A stop-and-re-host maps the SAME port
+                        // again, and this worker can be finishing while the new session's
+                        // worker is already inside NetHelpers; a plain "remove the mapping for
+                        // port 27886" would then delete the LIVE session's forward and leave it
+                        // reporting success. The epoch names the mapping THIS call made, and
+                        // NetHelpers no-ops when a newer one has replaced it.
+                        if (Volatile.Read(ref _inviteGen) != gen)
+                        {
+                            if (mapped)
+                            {
+                                CoopPlugin.Log.LogInfo("port mapping completed after its session ended - removing it again");
+                                NetHelpers.RemoveMapping(epoch);
+                            }
+                            return;
+                        }
+                        Publish(gen, () => PortForwardState = mapped ? 1 : 2);
+
+                        string ext = NetHelpers.UpnpExternalIp();
+                        if (ext != null && !NetHelpers.IsPublicIPv4(ext))
+                            reason = $"your router's own internet address ({ext}) is a private one - your line is behind carrier-grade NAT, so no port forward at this end can reach you";
+                        else
+                            publicIp = ext;
+                    }
+
+                    if (publicIp == null && reason == null)
+                    {
+                        publicIp = NetHelpers.StunPublicIp();
+                        if (publicIp != null && !NetHelpers.IsPublicIPv4(publicIp)) publicIp = null;
+                        if (publicIp == null) reason = "couldn't reach the internet resolver";
+                    }
+
+                    // THE LAN FALLBACK ADDRESS, AND WHY IT IS COMPUTED HERE rather than at the
+                    // top of the worker. Once a gateway has been discovered we know which
+                    // adapter actually talks to it, and that is the address the code must
+                    // carry: LocalIPv4() only RANKS adapters by prefix, so a VirtualBox, VPN or
+                    // Hyper-V adapter on 192.168.x can outrank the real LAN card - and then the
+                    // code names one adapter while the port mapping points at another, which
+                    // cannot work from either side of the router. No gateway (auto-forwarding
+                    // off, or nothing answered) means there is nothing to be route-correct
+                    // about, and the ranking is the best guess there is.
+                    lan = NetHelpers.LocalIPv4ForGateway() ?? NetHelpers.LocalIPv4();
+                }
+                catch (Exception e)
+                {
+                    // Belt and braces - every helper already swallows its own failures, so
+                    // landing here means something genuinely unexpected. The session is
+                    // untouched either way; we just fall back to the LAN code.
+                    reason = e.Message;
+                    CoopPlugin.Log.LogWarning("invite code resolve failed: " + e.GetType().Name + ": " + e.Message);
+                    // ...and the LAN address is computed inside the try now, so a throw above
+                    // would otherwise take the LAN-only code down with it.
+                    if (lan == null) { try { lan = NetHelpers.LocalIPv4(); } catch { } }
+                }
+
+                string chosen = publicIp ?? lan;
+                string code = chosen != null ? InviteCode.Encode(chosen, port, password) : null;
+                if (code == null && reason == null) reason = "this PC has no usable network address";
+
+                string finalReason = reason;
+                bool ready = publicIp != null && code != null;
+                Publish(gen, () =>
+                {
+                    InviteCodeText = code;
+                    InviteReason = finalReason;
+                    InviteStatus = ready ? InviteState.Ready : InviteState.LanOnly;
+                });
+                CoopPlugin.Log.LogInfo(publicIp != null
+                    ? "invite code ready (internet address)"
+                    : "invite code is LAN-only: " + (reason ?? "no public address"));
+            })
+            { IsBackground = true, Name = "CoopInvite" }.Start();
+        }
+
+        /// <summary>Hands one invite-code field write back to the MAIN THREAD, and drops it if
+        /// the session it belongs to has ended in the meantime.
+        ///
+        /// The fields are still volatile, and the UI still latches them once per Layout pass -
+        /// this is the third leg of the same stool and the only one that removes the race
+        /// rather than tolerating it. Worker-side publishing had two problems: OnGUI could see
+        /// InviteCodeText and InviteStatus from DIFFERENT instants (a code with a status that
+        /// disagrees), and the gen check could pass a nanosecond before Shutdown bumped it,
+        /// resurrecting a dead session's code. Both disappear when the write happens on the
+        /// same thread as Shutdown and the UI: the check and the assignment are then in the
+        /// same single-threaded order as everything else.</summary>
+        private void Publish(int gen, Action write)
+        {
+            _mainThread.Enqueue(() =>
+            {
+                if (Volatile.Read(ref _inviteGen) != gen)
+                {
+                    CoopPlugin.Log.LogInfo("invite code resolve finished after its session ended - discarded");
+                    return;
+                }
+                write();
+            });
+        }
+
         public void Join(string ip)
+        {
+            Join(ip, CoopPlugin.Port.Value, "");
+        }
+
+        /// <summary>The LAN join every path ends up in. The port and password arguments exist
+        /// for the invite code, which carries a host's ACTUAL port rather than assuming both
+        /// PCs left the config alone.</summary>
+        public void Join(string ip, int joinPort, string password)
         {
             ErrorLine = "";
             if (Role != CoopRole.None) { ErrorLine = "Already in a session."; return; }
@@ -2203,10 +2472,15 @@ namespace CardShopCoop
             CoopPlugin.LastJoinIP.Value = ip;
             Role = CoopRole.Client;
             GuestBorrowedWorld = true; // block ALL saves until we're back at the title screen
+            // Sent in our Hello; empty for a plain "Join LAN", non-empty only when an invite
+            // code carried the host's lobby password.
+            _joinPassword = password ?? "";
             StatusLine = "Connecting to " + ip + "...";
             var net = new Transport { KeepaliveFrame = Msg.Build(MsgType.Ping) };
             _net = net;
-            int port = CoopPlugin.Port.Value;
+            // A code from a host on a non-default port has to win over our own config; a
+            // nonsense value falls back rather than throwing at the socket.
+            int port = (joinPort > 0 && joinPort <= 65535) ? joinPort : CoopPlugin.Port.Value;
             new Thread(() =>
             {
                 try
@@ -2379,7 +2653,9 @@ namespace CardShopCoop
                 if (!_eplProbed)
                 {
                     _eplProbed = true;
-                    var t = HarmonyLib.AccessTools.TypeByName("EnhancedPrefabLoader.Core.EplRuntimeData");
+                    // assembly-qualified bind first, app-domain type walk only if it misses -
+                    // see Util.ModParity.ResolveType for why the walk is worth avoiding
+                    var t = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.EplRuntimeData", "EnhancedPrefabLoader");
                     const BindingFlags F = BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
                     _eplAssetsProp = t?.GetProperty("Assets", F);
                     var assets = _eplAssetsProp?.GetValue(null);
@@ -2872,13 +3148,43 @@ namespace CardShopCoop
             ModulesReset();
             PromptLine = "";
             _lastShopNameSent = null;
-            _steamLobby.Leave();
+            // UNCONDITIONAL PATH: Shutdown runs from OnDestroy and OnApplicationQuit, i.e.
+            // on EVERY game exit and every LAN session too. The null-conditional is what
+            // keeps this whole method JIT-clean on a Steamworks-less build.
+            //
+            // ORDERING: THIS MUST STAY ABOVE `Role = CoopRole.None` BELOW. The bridge's
+            // lobby-entered path wires the transport and raises OnConnectedToHost BEFORE
+            // CoopCore's role guard on that handler gets to run, so the only thing that
+            // actually closes the stray-enter window is Leave() clearing the lobby's
+            // _joining flag and dropping _tx. Clear Role first and there is a gap in which
+            // a late lobby-enter callback can still land on a live bridge with the role
+            // already reset - a connection nobody owns.
+            _steam?.Leave();
             IsSteamSession = false;
             HostPassword = "";
             _joinPassword = "";
             _selfId = -1;
             _relayIds.Clear();
             _pendingKicks.Clear();
+            // The hole we asked the router to open closes with the session. FIRE AND FORGET on
+            // a worker, because Shutdown runs from OnDestroy and OnApplicationQuit - blocking
+            // the main thread on a SOAP round trip there would hang the game on exit.
+            //
+            // THIS CALL IS THE CLEANUP, not a nicety on top of one. We ask for a 24h lease and
+            // no longer retry as a PERMANENT mapping when the router refuses to lease (1.0.38 -
+            // see NetHelpers.TryMapPort), so a mapping that outlives this delete should expire
+            // on its own - but "should" is the router's opinion: nothing in UPnP stops it
+            // clamping or ignoring the duration we asked for. Treat a failed delete as a hole
+            // that stays open until someone clears it in the router's admin page, which is why
+            // it now logs at Warning. HasMapping is false for every client and every Steam
+            // session, so this costs those nothing.
+            if (Net.NetHelpers.HasMapping)
+                new Thread(Net.NetHelpers.RemoveMapping) { IsBackground = true, Name = "CoopUnmap" }.Start();
+            Interlocked.Increment(ref _inviteGen); // a resolve still in flight belongs to a dead session
+            InviteStatus = InviteState.Off;
+            InviteCodeText = null;
+            InviteReason = null;
+            PortForwardState = 0;
             Application.runInBackground = false; // back to the game's normal behavior
             Role = CoopRole.None;
             // Only clear the save guard if we're NOT in a level - i.e. a join that failed at
@@ -3433,13 +3739,16 @@ namespace CardShopCoop
                     _autoPhase = 99;
                 }
             }
-            else if (_autoJoinSteamLobby != 0)
+            // AutoTick runs unconditionally every frame from Update, so ANY Steamworks token
+            // in this method body would fault at JIT on a Steamworks-less build - which is
+            // why the CSteamID construction that used to live below had to go.
+            else if (_autoJoinSteamLobby != 0 && _steam != null)
             {
                 if (_autoPhase == 0 && _autoTimer > 10f && !InGameLevel()
                     && CSingleton<CGameManager>.Instance != null)
                 {
                     CoopPlugin.Log.LogInfo($"AUTO: joining Steam lobby {_autoJoinSteamLobby}...");
-                    JoinSteam(new CSteamID(_autoJoinSteamLobby));
+                    JoinSteam(_autoJoinSteamLobby);
                     _autoPhase = 99;
                 }
             }
@@ -3819,10 +4128,52 @@ namespace CardShopCoop
                         // in WIRE ORDER here even though the conflict check that uses them sits
                         // further down with the other parity gates.
                         var theirEnumLines = ReadCappedEnumBlob(br, out string theirEnumDigest);
+                        // GAME-BUILD FINGERPRINT: last two fields of the Hello (see SendHello
+                        // for why appending at the END is what makes this wire-safe). Read in
+                        // WIRE ORDER here; the comparison itself sits below the password gate.
+                        //
+                        // TOTAL READ. Being LAST on the wire makes these the two fields a
+                        // truncated or malformed tail eats first, and an EndOfStreamException
+                        // out of here would unwind through Dispatch: the Hello is dropped, no
+                        // RejectConn is ever sent, and the joiner sits on "requesting world..."
+                        // forever with no Bye and no reason. Degrading to empty strings instead
+                        // keeps the message alive and lets it fail through the worded cross-build
+                        // rejection below - "" matches no Application.version, so a peer that
+                        // cannot state its build is told exactly that, in words it can act on.
+                        string theirGameVersion = "", theirUnityVersion = "";
+                        try
+                        {
+                            theirGameVersion = br.ReadString();
+                            theirUnityVersion = br.ReadString();
+                        }
+                        catch (Exception e)
+                        {
+                            CoopPlugin.Log.LogWarning("coop: Hello from " + name + " has no readable game-build fingerprint (" + e.GetType().Name + ") - treating it as a build mismatch");
+                        }
+                        CoopPlugin.Log.LogInfo($"game build: host is {Application.version} / Unity {Application.unityVersion}; {name} is {theirGameVersion} / Unity {theirUnityVersion}");
                         if (HostPassword.Length > 0 && password != HostPassword)
                         {
                             RejectConn(msg.ConnId, "wrong password");
                             break;
+                        }
+                        // Cross-play between the Steam and Game Pass releases works ONLY when
+                        // both PCs run the same game build - the two storefronts ship updates
+                        // at different times, and a version skew shows up as inexplicable
+                        // desyncs rather than an obvious failure. Runs AFTER the mod-version
+                        // check above (both peers are 1.0.38+, so these fields always exist).
+                        if (theirGameVersion != Application.version || theirUnityVersion != Application.unityVersion)
+                        {
+                            // ESCAPE HATCH: a host who has deliberately set AllowCrossBuildJoin
+                            // takes the risk knowingly (supervised Steam <-> Game Pass testing),
+                            // so we let the join through and shout about it instead. Rejecting
+                            // stays the default; only the HOST's config can open this door.
+                            if (!CoopPlugin.AllowCrossBuildJoin.Value)
+                            {
+                                RejectConn(msg.ConnId,
+                                    $"your GAME build doesn't match the host's (host: {Application.version} / Unity {Application.unityVersion}, you: {theirGameVersion} / Unity {theirUnityVersion}) - the Steam and Game Pass versions of the game can only play together when both are on the same game version (a host who understands the risk can enable AllowCrossBuildJoin in the config)");
+                                break;
+                            }
+                            CoopPlugin.Log.LogWarning($"AllowCrossBuildJoin is ON - letting {name} in on a DIFFERENT game build (host: {Application.version} / Unity {Application.unityVersion}, {name}: {theirGameVersion} / Unity {theirUnityVersion}). Two different game builds can corrupt each other's saves - back up before playing.");
                         }
                         if (pluginHash != Util.ModParity.PluginHash())
                         {

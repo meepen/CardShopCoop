@@ -199,6 +199,11 @@ namespace CardShopCoop.Util
             "EnhancedPrefabLoader.Core.Models.SaveData.ItemSaveData"
         };
 
+        /// <summary>Simple name of the assembly the sentinels above live in - the second half of
+        /// the assembly-qualified name EplLoaded asks Type.GetType for. Kept beside the sentinels
+        /// so an EPL rename moves both together.</summary>
+        private const string EplAssemblyName = "EnhancedPrefabLoader";
+
         private static bool _eplLoaded;
         private static bool _eplProbed;
         private static int _eplProbeTick;
@@ -215,9 +220,24 @@ namespace CardShopCoop.Util
         /// Cached, but only a POSITIVE result is permanent. This is reachable from OnGUI (the
         /// restore prompt polls HostEnumInstalled every frame) and the earliest such call can
         /// land before BepInEx has chainloaded EPL's plugin assembly, so latching the first "no"
-        /// forever would be its own stale-latch bug. A "no" is therefore re-checked, throttled,
-        /// because AccessTools.TypeByName walks every loaded assembly and that is not a per-frame
-        /// cost we want to pay on a vanilla machine.</summary>
+        /// forever would be its own stale-latch bug. A "no" is therefore re-checked, throttled -
+        /// it is a probe, not a per-frame cost we want to pay on a vanilla machine.
+        ///
+        /// 1.0.38 - WHY THERE IS NO APP-DOMAIN TYPE WALK HERE ANY MORE. This used to call
+        /// AccessTools.TypeByName, which enumerates the types of EVERY loaded assembly. Ours is
+        /// one of them, and on Game Pass our DLL intentionally contains types that cannot load
+        /// (everything Steam-typed - see Net/ISteamBridge). The walk hits them, HarmonyX logs a
+        /// ReflectionTypeLoadException naming Steamworks types, and a player reads that as the
+        /// mod crashing when it is doing exactly what it was designed to do - and the probe runs
+        /// every 5 seconds on a vanilla machine, so it is not one line but a stream of them.
+        /// Both branches below ask a targeted question instead and are quiet on every build:
+        ///  (a) Type.GetType("&lt;sentinel&gt;, EnhancedPrefabLoader") - a direct, assembly-qualified
+        ///      bind. It loads nothing that is not already loaded, touches no other assembly, and
+        ///      returns null quietly when EPL is absent (throwOnError:false).
+        ///  (b) BepInEx's own plugin list - metadata strings only, no reflection at all - for the
+        ///      case where EPL's assembly simple name is not what we assumed. Matching on
+        ///      "enhancedprefabloader" in the GUID or the name is deliberately loose: this is the
+        ///      backstop, and a false NEGATIVE here costs the modded machine its ID-conflict gate.</summary>
         public static bool EplLoaded()
         {
             if (_eplLoaded) return true;
@@ -230,11 +250,28 @@ namespace CardShopCoop.Util
             {
                 try
                 {
-                    if (AccessTools.TypeByName(typeName) == null) continue;
+                    if (Type.GetType(typeName + ", " + EplAssemblyName, false) == null) continue;
                     _eplLoaded = true;
                     break;
                 }
                 catch { /* a probe must never throw into a handshake or into OnGUI */ }
+            }
+            if (!_eplLoaded)
+            {
+                try
+                {
+                    foreach (var kv in BepInEx.Bootstrap.Chainloader.PluginInfos)
+                    {
+                        var meta = kv.Value != null ? kv.Value.Metadata : null;
+                        if (meta == null) continue;
+                        if (Mentions(kv.Key, "enhancedprefabloader") || Mentions(meta.Name, "enhancedprefabloader"))
+                        {
+                            _eplLoaded = true;
+                            break;
+                        }
+                    }
+                }
+                catch { /* same rule: a probe must never throw */ }
             }
             if (_eplLoaded && !_eplLoadedLogged)
             {
@@ -242,6 +279,41 @@ namespace CardShopCoop.Util
                 try { CoopPlugin.Log.LogInfo("EnhancedPrefabLoader detected - a custom id registry is in play"); } catch { }
             }
             return _eplLoaded;
+        }
+
+        /// <summary>THE ONE WAY THIS MOD LOOKS UP ANOTHER MOD'S TYPE. Asks for the type by its
+        /// assembly-qualified name first - a direct bind that loads nothing new, touches no
+        /// other assembly and answers null quietly - and only falls back to
+        /// AccessTools.TypeByName, which walks the types of EVERY loaded assembly, when that
+        /// misses (a mod repackaged under a different assembly name, or a name we guessed
+        /// wrong).
+        ///
+        /// The walk is the thing worth avoiding: OUR assembly is one of the ones it enumerates,
+        /// and on the Game Pass build our DLL deliberately contains types that cannot load
+        /// (everything Steam-typed - see Net/ISteamBridge). Every walk therefore makes HarmonyX
+        /// log a ReflectionTypeLoadException naming Steamworks types, which reads to a player
+        /// as the mod crashing while it is doing exactly what it was designed to do. Same fast
+        /// path EplLoaded uses; this is the version the rest of the mod shares.
+        ///
+        /// <paramref name="assemblySimpleName"/> is the SIMPLE name of the assembly the type
+        /// lives in (no version, no key) - "EnhancedPrefabLoader", "Grading Overhaul".</summary>
+        public static Type ResolveType(string typeName, string assemblySimpleName)
+        {
+            try
+            {
+                Type t = Type.GetType(typeName + ", " + assemblySimpleName, false);
+                if (t != null) return t;
+            }
+            catch { /* a lookup must never throw into a handshake, a probe or OnGUI */ }
+            try { return HarmonyLib.AccessTools.TypeByName(typeName); }
+            catch { return null; }
+        }
+
+        /// <summary>Case-insensitive substring test used by the plugin-list backstop above.
+        /// Null-safe: BepInEx metadata fields are plain strings and nothing guarantees them.</summary>
+        private static bool Mentions(string haystack, string needle)
+        {
+            return haystack != null && haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         /// <summary>The one wording for "this process loads no registry at all", shared by

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 using CardShopCoop.Net;
@@ -21,6 +22,15 @@ namespace CardShopCoop.Sync
     /// </summary>
     public class TournamentSync
     {
+        /// <summary>TournamentPrizeShelf.m_ScreenMesh (the shelf's little tournament display) is
+        /// absent from the Game Pass Assembly-CSharp, which made a direct field access fail to
+        /// COMPILE against that build - one cosmetic toggle taking the whole universal DLL down
+        /// with it. Resolved once through reflection instead, so a missing or renamed field just
+        /// disables the show/hide. Null when the field isn't there; every use is null-guarded.
+        /// (Reflection change contributed by Jburne10 for the Game Pass build.)</summary>
+        private static readonly FieldInfo FiScreenMesh =
+            AccessTools.Field(typeof(TournamentPrizeShelf), "m_ScreenMesh");
+
         /// <summary>Set by CoopCore: host -> clients state broadcast.</summary>
         public Action<Action<BinaryWriter>> BroadcastState;
 
@@ -243,8 +253,9 @@ namespace CardShopCoop.Sync
                     var shelves = ShelfManager.GetTournamentPrizeShelfList();
                     for (int i = 0; i < shelves.Count; i++)
                     {
-                        if (shelves[i] != null && shelves[i].m_ScreenMesh != null)
-                            shelves[i].m_ScreenMesh.SetActive(showBoard);
+                        if (shelves[i] == null || FiScreenMesh == null) continue;
+                        var mesh = FiScreenMesh.GetValue(shelves[i]) as GameObject;
+                        if (mesh != null) mesh.SetActive(showBoard);
                     }
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("TournamentSync board vis: " + e.Message); }

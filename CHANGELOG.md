@@ -5,6 +5,24 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.38
+**One mod for everyone: the same download now works on Steam AND Xbox Game Pass — huge thanks to Jburne10, whose Game Pass port supplied the save-transfer fix and the proof it works.** Both players must update — Steam players via the launcher as usual, Game Pass players by dropping the same DLL into `BepInEx\plugins`.
+
+**Game Pass support (new)**
+- **The mod now loads and runs on the Microsoft Store / Game Pass build.** Previously it didn't just fail there — it left half-installed hooks that broke saving and customers. Now it detects that Steam isn't part of that build and cleanly runs in LAN / direct-IP mode.
+- **Fixed: hosting on Game Pass never delivered the world to the joiner.** Game Pass saves live in Xbox storage containers the game's own process can't even see, so the old file-based world snapshot could never find them. On Game Pass the world is now read straight from the game's memory (Jburne10's approach) — no files involved. On Steam the slot file stays the only accepted source: if the game skips the save you get a clear error rather than a stale world.
+- Game Pass play is LAN / direct IP: same house just works; over the internet the host port-forwards and the joiner enters the host's public IP. The co-op window shows exactly the options your build supports — no dead Steam buttons.
+- **New safety gate: the game versions must match.** The Game Pass build can run a different game version than Steam; the join handshake now compares them and refuses a mismatched pair with a clear message instead of letting two different game builds corrupt each other. (A host who understands the risk can set `AllowCrossBuildJoin` in the config for supervised cross-play testing.)
+
+**Invite codes + automatic port forwarding (new, for LAN / direct-IP play)**
+- **Hosting now gives you a "Copy invite code" button** — one short code with your address, port, and a randomly generated session password baked in. Your friend pastes it into the new "Join by code" field and they're in. No more reading IP addresses over voice chat.
+- **LAN hosting now has a session password.** A random password is generated each time you host (shown in the host panel for friends who type the IP by hand, and carried inside the invite code automatically), so an internet-reachable port is never an open door. Configurable (`AutoLanPassword`, on by default).
+- **The mod now asks your router to forward the co-op port automatically (UPnP)** while you host, and removes the mapping when you stop. Works on most home routers; when the router declines, the host panel says so and the manual port-forward instructions still apply. Configurable (`AutoPortForward`, on by default).
+- Steam sessions are untouched by all of this — Steam invites already cover it. (The "Join by code" field works on Steam builds too, so a Steam player can join a Game Pass host's code over IP.)
+
+**For Steam players**
+- Nothing changes: Steam lobbies, invites, and the launcher all work exactly as before. This release was verified against the Steam build line-by-line; Game Pass support is marked experimental until it's been through more field time.
+
 ## 1.0.37
 **Hotfix: modded cards missing from the shared album — thanks Aetheryk and the_capyman, and especially the paired host+guest logs, which proved it in one read.** Both players must update — the launcher does it automatically.
 

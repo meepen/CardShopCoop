@@ -420,8 +420,11 @@ namespace CardShopCoop.Sync
                 s_eplProbed = true;
                 try
                 {
-                    var t = AccessTools.TypeByName("EnhancedPrefabLoader.Core.EplRuntimeData");
-                    var save = AccessTools.TypeByName("EnhancedPrefabLoader.Core.Models.SaveData.ItemSaveData");
+                    // assembly-qualified bind first, app-domain type walk only if it misses -
+                    // see Util.ModParity.ResolveType for why the walk is worth avoiding
+                    const string EplAsm = "EnhancedPrefabLoader";
+                    var t = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.EplRuntimeData", EplAsm);
+                    var save = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.Models.SaveData.ItemSaveData", EplAsm);
                     const BindingFlags F = BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
                     s_eplAssetsProp = t?.GetProperty("Assets", F);
                     var assets = s_eplAssetsProp?.GetValue(null);

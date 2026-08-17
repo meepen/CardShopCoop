@@ -446,4 +446,110 @@ namespace CardShopCoop.Net
             _joining = false;
         }
     }
+
+    /// <summary>
+    /// The one and only <see cref="ISteamBridge"/> implementation, and the designated
+    /// FAILURE ZONE. This type owns the SteamLobby and the SteamTransport it hands out,
+    /// does every CSteamID&lt;-&gt;ulong conversion, and is allowed to fail to load: on a
+    /// build with no com.rlabrecque.steamworks.net.dll (Game Pass, DRM-free) nothing ever
+    /// reaches it, because <see cref="SteamBridge.TryCreate"/> checks
+    /// <see cref="PlatformProbe.SteamworksPresent"/> first and is the only caller.
+    ///
+    /// NOTHING OUTSIDE THIS FILE MAY NAME THIS TYPE except SteamBridge.Create(). Referencing
+    /// it from CoopCore/CoopUI/CoopPlugin would drag the Steamworks metadata straight back
+    /// into an always-loaded type, which is exactly the bug the bridge exists to prevent.
+    ///
+    /// It also absorbs the lobby-callback wiring that used to live in CoopCore.Awake: the
+    /// transport plumbing (which is Steam-typed) stays here, and only the Steam-free
+    /// outcome - "lobby is live", "we're connected" - is raised to CoopCore.
+    /// </summary>
+    internal sealed class SteamBridgeImpl : ISteamBridge
+    {
+        private readonly SteamLobby _lobby = new SteamLobby();
+        private SteamTransport _tx;
+
+        /// <summary>Reused across calls: CoopUI's browser polls Lobbies every OnGUI frame
+        /// (which runs 2+ times a frame), and a fresh list each time is pure garbage.</summary>
+        private readonly List<LobbyRow> _rows = new List<LobbyRow>();
+
+        public Action<string> OnError { get; set; }
+        public Action<ulong> OnLobbyLive { get; set; }
+        public Action OnConnectedToHost { get; set; }
+        public Action<ulong> OnInviteAccepted { get; set; }
+
+        public void Init()
+        {
+            _lobby.Init();
+            _lobby.OnError = e => OnError?.Invoke(e);
+            _lobby.OnLobbyCreated = id =>
+            {
+                // Host side. The transport is always created BEFORE Host() is called
+                // (see CreateTransport's contract), so _tx is non-null here in every
+                // real flow; the guard is only for a Leave() racing the callback.
+                if (_tx != null) _tx.LobbyId = id;
+                // .m_SteamID, not the struct: the boundary is what keeps CoopCore's handler
+                // free of Steamworks metadata (see ISteamBridge).
+                OnLobbyLive?.Invoke(id.m_SteamID);
+            };
+            _lobby.OnEnteredLobby = owner =>
+            {
+                // Client side. NOTE: the Role != Client guard that used to sit here now
+                // lives on CoopCore's OnConnectedToHost handler - the bridge has no idea
+                // what a CoopRole is. SteamLobby._joining already filters the host's own
+                // lobby-enter, so this only fires on a real join.
+                if (_tx == null) return;
+                _tx.LobbyId = _lobby.LobbyId;
+                _tx.ConnectToHost(owner);
+                OnConnectedToHost?.Invoke();
+            };
+            _lobby.OnInviteAccepted = id => OnInviteAccepted?.Invoke(id.m_SteamID);
+            _lobby.OnListUpdated = () => { };
+        }
+
+        public bool SteamAvailable() { return _lobby.SteamAvailable(); }
+
+        public ICoopTransport CreateTransport(bool isHost, byte[] keepalive)
+        {
+            _tx = new SteamTransport(isHost) { KeepaliveFrame = keepalive };
+            return _tx;
+        }
+
+        public void Host(bool isPublic, string lobbyName, bool hasPassword)
+        {
+            _lobby.Host(isPublic, lobbyName, hasPassword);
+        }
+
+        public void Join(ulong lobbyId) { _lobby.Join(new CSteamID(lobbyId)); }
+
+        public void Leave()
+        {
+            _lobby.Leave();
+            // Drop the transport reference too: CoopCore disposes it separately, and a
+            // stale one here would let a late lobby callback write into a dead transport.
+            _tx = null;
+        }
+
+        public void OpenInviteDialog() { _lobby.OpenInviteDialog(); }
+        public void RefreshList() { _lobby.RefreshList(); }
+        public bool ListRefreshing { get { return _lobby.ListRefreshing; } }
+
+        public List<LobbyRow> Lobbies
+        {
+            get
+            {
+                _rows.Clear();
+                foreach (var r in _lobby.Lobbies)
+                    _rows.Add(new LobbyRow
+                    {
+                        Id = r.Id.m_SteamID,
+                        Name = r.Name,
+                        Players = r.Players,
+                        Max = r.Max,
+                        HasPw = r.HasPw,
+                        Ver = r.Ver,
+                    });
+                return _rows;
+            }
+        }
+    }
 }
