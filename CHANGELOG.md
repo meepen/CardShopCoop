@@ -5,6 +5,20 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.40
+**Grading Overhaul submissions from the joiner — thanks cavi, whose "charged the company price, got a vanilla slab" detail pointed straight at the seam.** Both players must update.
+
+**Joiner grading submissions (Grading Overhaul)**
+- **Fixed: the joiner's grading submissions coming back vanilla-graded (no company slab, no certificate) despite paying the company's price.** Grading runs on the host's game, and the "which company" part of the submission never made the trip — the host filed it as a plain vanilla submission. The submission now carries the company across, and the host enrolls it exactly the way Grading Overhaul itself would: same encoding, same pre-rolled grades, same certificates. What you paid for is what comes back.
+- **Also fixed: the joiner's grading app showing wrong tiers/days for the HOST's company submissions.** A number that carries Grading Overhaul's company info was being squeezed through a field too small for it on the way to the joiner. This was broken independently of the submission bug.
+- One deliberate rule: whether "cheat mode" grading odds apply is decided by the HOST's Grading Overhaul settings, not the joiner's — a joiner can't force fake cards into the shared album.
+- Money note: you were never double-charged — the shared wallet paid once. The bug was paying premium price for a vanilla product; now the product matches the price.
+
+**Small stuff**
+- **Fixed a card-loss trap: the joiner submitting more than 8 cards for grading** (Grading Overhaul expands the screen to 52 slots) **silently lost the extra cards.** The co-op wire now carries up to 52 when Grading Overhaul is installed, and if a submission ever can't be forwarded whole, it's aborted with your cards left safely in the binder instead of being trimmed.
+- The mod's grading-submission hook now explicitly runs AFTER Grading Overhaul's own validations, so a joiner can't accidentally submit a combination GO would have rejected (mixed companies, already-regraded cards).
+- When the router declines automatic port forwarding, the host panel now also suggests the practical fix: have the other player host.
+
 ## 1.0.39
 **Hotfix: Game Pass hosting broken in 1.0.38 — thanks Tonio's crew, whose logs from seven join attempts told the whole story in one read.** Both players must update.
 

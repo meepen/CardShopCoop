@@ -48,6 +48,68 @@ namespace CardShopCoop.Util
         private static readonly MethodInfo MiActual = THelper == null ? null
             : AccessTools.Method(THelper, "GetActualGrade", new[] { typeof(int) });
 
+        // ------------------------------------------------------------------
+        // JOB ENROLLMENT bridge (GradingSync.HostApplyOp).
+        //
+        // A submission is only a Grading Overhaul job because GO's OnPressSubmitButton
+        // POSTFIX stamps it: GradingJobSubmissionRegistryPatch (decompiled :12866-12895)
+        // registers the company, takes a jobId, ENCODES that into m_ServiceLevel and
+        // pre-rolls the grades. That postfix is gated on
+        // m_GradeCardInProgressList.Contains(m_CurrentGradeCardSubmitSet), so it can
+        // never fire for a set the HOST enrolled on a guest's behalf off the wire -
+        // GO's maturation then fails TryDecode, misses the reference-keyed registry and
+        // the cards come back vanilla-graded. These members let GradingSync replay that
+        // exact chain by reflection for a wire-born set.
+        // ------------------------------------------------------------------
+
+        private static readonly Type TTheme = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingWebsiteThemeController", GradingAssembly);
+        /// <summary>GO's GradingCompany enum (decompiled :1036 - Cardinals, Custom, PSA, Beckett).
+        /// Resolved, never hard-coded: a future GO reorder must show up as a decode mismatch,
+        /// not as silently mis-stamped jobs. <see cref="LogCompanyEnum"/> prints it once.</summary>
+        private static readonly Type TCompany = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingCompany", GradingAssembly);
+        private static readonly Type TJobRegistry = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingJobCompanyRegistry", GradingAssembly);
+        private static readonly Type TPreRoll = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.PreRollManager", GradingAssembly);
+        private static readonly Type TCodec = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.ServiceLevelCodec", GradingAssembly);
+        private static readonly Type TConfig = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.ConfigSettings", GradingAssembly);
+
+        // GradingCompany CurrentWebsiteCompany { get; private set; } - decompiled :4108.
+        // Read RAW. GO's own recording postfixes read exactly this property with no fallback
+        // (:7940, :12884); only the VALIDATION prefix (:13064) substitutes
+        // ConfigSettings.ActiveCompanyProfile when the raw value is Cardinals, and copying that
+        // fallback here would stamp jobs with a company the recorder never saw.
+        private static readonly PropertyInfo PiCurrentCompany = TTheme == null ? null
+            : AccessTools.Property(TTheme, "CurrentWebsiteCompany");
+        // private static readonly GradingCompany[] AllowedCompanies - decompiled :4017.
+        // The website can only ever select these three; Custom (=1) is the internal cheat skin.
+        private static readonly FieldInfo FiAllowed = TTheme == null ? null
+            : AccessTools.Field(TTheme, "AllowedCompanies");
+        // public static ConfigEntry<bool> UseCheatsWebsite - decompiled :9585.
+        private static readonly FieldInfo FiUseCheats = TConfig == null ? null
+            : AccessTools.Field(TConfig, "UseCheatsWebsite");
+
+        private static readonly MethodInfo MiOnJobSubmitted = (TJobRegistry == null || TCompany == null) ? null
+            : AccessTools.Method(TJobRegistry, "OnJobSubmitted",
+                new[] { typeof(GradeCardSubmitSet), TCompany, typeof(bool), TCompany });
+        private static readonly MethodInfo MiNextJobId = TPreRoll == null ? null
+            : AccessTools.Method(TPreRoll, "GetNextJobId", Type.EmptyTypes);
+        private static readonly MethodInfo MiPreRoll = (TPreRoll == null || TCompany == null) ? null
+            : AccessTools.Method(TPreRoll, "PreRollOnSubmit",
+                new[] { typeof(GradeCardSubmitSet), TCompany, typeof(bool), typeof(int) });
+        // int Encode(GradingCompany, int tierIndex, int jobId) - decompiled :5574. The class is
+        // INTERNAL, so this is unreachable without reflection even though the method is public.
+        // Overloaded (a 2-arg Encode exists at :5553), hence the explicit signature.
+        private static readonly MethodInfo MiEncode = (TCodec == null || TCompany == null) ? null
+            : AccessTools.Method(TCodec, "Encode", new[] { TCompany, typeof(int), typeof(int) });
+        // bool TryDecode(int, out GradingCompany, out int) - decompiled :5604 (also overloaded).
+        private static readonly MethodInfo MiTryDecode = (TCodec == null || TCompany == null) ? null
+            : AccessTools.Method(TCodec, "TryDecode",
+                new[] { typeof(int), TCompany.MakeByRefType(), typeof(int).MakeByRefType() });
+
+        /// <summary>Sentinel written on the wire when GO is absent or the company is unreadable.
+        /// Chosen outside any plausible enum ordinal so the host can reject it by the same
+        /// <see cref="IsAllowedCompany"/> test it applies to everything else.</summary>
+        public const int NoCompany = 255;
+
         private static bool _logged;
 
         /// <summary>True when Grading Overhaul is loaded and the integration API resolved.</summary>
@@ -59,8 +121,274 @@ namespace CardShopCoop.Util
                 {
                     _logged = true;
                     CoopPlugin.Log.LogInfo("Grading Overhaul detected - graded cards will sync via its encoded-grade API");
+                    LogCompanyEnum();
                 }
                 return MiRemember != null;
+            }
+        }
+
+        /// <summary>One-shot startup dump of GO's GradingCompany members and ordinals. The wire
+        /// carries a company as its ORDINAL, and both peers' hosts encode/decode with it, so a
+        /// future GO release that inserts or reorders a member silently re-points every stamped
+        /// job. Printing the resolved table means the first field log after such a release shows
+        /// the change instead of hiding it behind mis-graded cards.</summary>
+        private static void LogCompanyEnum()
+        {
+            try
+            {
+                if (TCompany == null || !TCompany.IsEnum)
+                {
+                    CoopPlugin.Log.LogWarning("GradingInterop: GO present but GradingCompany enum did not resolve - job enrollment disabled");
+                    return;
+                }
+                var names = Enum.GetNames(TCompany);
+                var parts = new string[names.Length];
+                for (int i = 0; i < names.Length; i++)
+                    parts[i] = names[i] + "=" + Convert.ToInt32(Enum.Parse(TCompany, names[i]));
+                CoopPlugin.Log.LogInfo("GradingInterop: GO GradingCompany = " + string.Join(", ", parts)
+                    + "; allowed on the website = " + AllowedList());
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.LogCompanyEnum: " + e.Message); }
+        }
+
+        private static string AllowedList()
+        {
+            try
+            {
+                var arr = FiAllowed?.GetValue(null) as Array;
+                if (arr == null) return "<unreadable>";
+                var parts = new string[arr.Length];
+                for (int i = 0; i < arr.Length; i++)
+                {
+                    object v = arr.GetValue(i);
+                    parts[i] = v + "=" + Convert.ToInt32(v);
+                }
+                return string.Join(", ", parts);
+            }
+            catch { return "<unreadable>"; }
+        }
+
+        /// <summary>The grading company the local website is showing RIGHT NOW, as an ordinal,
+        /// or <see cref="NoCompany"/> when GO is absent or the property will not read. Read raw
+        /// (see <see cref="PiCurrentCompany"/>) because this is what GO's recording postfixes
+        /// stamp a job with - the wire has to carry the same value the guest's own postfix
+        /// would have recorded had it been allowed to run.</summary>
+        public static int CurrentCompanyId
+        {
+            get
+            {
+                if (PiCurrentCompany == null) return NoCompany;
+                try
+                {
+                    object v = PiCurrentCompany.GetValue(null, null);
+                    return v == null ? NoCompany : Convert.ToInt32(v);
+                }
+                catch { return NoCompany; }
+            }
+        }
+
+        /// <summary>Host-side gate on a wire-supplied company ordinal: it must be a real
+        /// GradingCompany member AND one the website is actually allowed to select. The second
+        /// half is the load-bearing one - Custom (ordinal 1) is a defined member but it is GO's
+        /// internal cheat skin, never offered by the site, and a crafted wire must not be able to
+        /// enrol a job under it.</summary>
+        public static bool IsAllowedCompany(int id)
+        {
+            if (TCompany == null || !TCompany.IsEnum) return false;
+            try
+            {
+                if (!Enum.IsDefined(TCompany, Enum.ToObject(TCompany, id))) return false;
+                var arr = FiAllowed?.GetValue(null) as Array;
+                if (arr == null)
+                {
+                    // Field walked away (GO rename/refactor). Keep the one rule that actually
+                    // protects the shared album rather than opening the gate: everything except
+                    // the cheat skin. Name-based so a reorder cannot turn this into "allow all".
+                    string n = Enum.GetName(TCompany, Enum.ToObject(TCompany, id));
+                    CoopPlugin.Log.LogWarning("GradingInterop: GO AllowedCompanies unreadable - falling back to name check for " + n);
+                    return n != null && n != "Custom";
+                }
+                for (int i = 0; i < arr.Length; i++)
+                    if (Convert.ToInt32(arr.GetValue(i)) == id) return true;
+                return false;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Display name of a company ordinal, for the enrollment log line.</summary>
+        public static string CompanyName(int id)
+        {
+            if (TCompany == null || !TCompany.IsEnum) return id.ToString();
+            try { return Enum.GetName(TCompany, Enum.ToObject(TCompany, id)) ?? id.ToString(); }
+            catch { return id.ToString(); }
+        }
+
+        /// <summary>This machine's Grading Overhaul "Enable Probability System (FAKE CARDS)"
+        /// setting (ConfigSettings.UseCheatsWebsite, decompiled :9585/:9739). Defaults to false
+        /// on any failure to read.
+        ///
+        /// The HOST's value is deliberately the one GradingSync uses for a guest's submission,
+        /// even though GO's postfix would have read the SUBMITTER's. Grading results land in the
+        /// shared album that every peer mirrors, and useCheats=true makes GO grade the job with
+        /// the Custom slider odds and stamp the cards as FAKE. Taking the flag off the wire would
+        /// let a guest push fake cards into the host's save with the host's own config saying no.
+        /// The cost of host-authority is the reverse case: a guest with cheats on submitting to a
+        /// clean host gets honest grades - which is the failure direction to prefer.</summary>
+        public static bool HostUseCheatsWebsite
+        {
+            get
+            {
+                try
+                {
+                    var entry = FiUseCheats?.GetValue(null) as BepInEx.Configuration.ConfigEntry<bool>;
+                    return entry != null && entry.Value;
+                }
+                catch { return false; }
+            }
+        }
+
+        /// <summary>True when every reflection member the enrollment chain needs resolved.
+        /// Checked before the chain runs so a partial resolve leaves the raw tier alone
+        /// instead of half-stamping a job.</summary>
+        public static bool CanEnroll
+        {
+            get
+            {
+                return TCompany != null && TCompany.IsEnum
+                    && MiOnJobSubmitted != null && MiNextJobId != null
+                    && MiPreRoll != null && MiTryDecode != null;
+            }
+        }
+
+        /// <summary>Step (b) of GO's chain: GradingJobCompanyRegistry.OnJobSubmitted (decompiled
+        /// :10209). embeddedCompany is passed as the same company, exactly as GO does at :12886.</summary>
+        public static bool RegisterJobCompany(GradeCardSubmitSet set, int companyId, bool useCheats)
+        {
+            if (set == null || MiOnJobSubmitted == null) return false;
+            try
+            {
+                object company = Enum.ToObject(TCompany, companyId);
+                MiOnJobSubmitted.Invoke(null, new object[] { set, company, useCheats, company });
+                return true;
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.RegisterJobCompany: " + e.Message); return false; }
+        }
+
+        /// <summary>Step (c): PreRollManager.GetNextJobId (decompiled :5366). 0 on failure - GO
+        /// treats jobId &lt;= 0 as "no pre-roll" at maturation (:8022), so 0 is a safe sentinel.</summary>
+        public static int NextJobId()
+        {
+            if (MiNextJobId == null) return 0;
+            try { return Convert.ToInt32(MiNextJobId.Invoke(null, null)); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.NextJobId: " + e.Message); return 0; }
+        }
+
+        /// <summary>Step (d): ServiceLevelCodec.Encode(company, tier, jobId) (decompiled :5574).
+        /// Returns 0 when the internal method could not be invoked, so the caller can fall back
+        /// to the literal layout. NEVER trust the result without <see cref="TryDecodeServiceLevel"/>.</summary>
+        public static int EncodeServiceLevel(int companyId, int tier, int jobId)
+        {
+            if (MiEncode == null) return 0;
+            try { return Convert.ToInt32(MiEncode.Invoke(null, new object[] { Enum.ToObject(TCompany, companyId), tier, jobId })); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.EncodeServiceLevel: " + e.Message); return 0; }
+        }
+
+        /// <summary>ServiceLevelCodec.TryDecode(raw, out company, out tier) (decompiled :5604) -
+        /// the same call GO's maturation makes first (:8007). Used to VERIFY an encode before it
+        /// is written into a live set.</summary>
+        public static bool TryDecodeServiceLevel(int raw, out int companyId, out int tier)
+        {
+            companyId = -1;
+            tier = raw;
+            if (MiTryDecode == null) return false;
+            try
+            {
+                var args = new object[] { raw, Enum.ToObject(TCompany, 0), 0 };
+                bool ok = (bool)MiTryDecode.Invoke(null, args);
+                if (!ok) return false;
+                companyId = Convert.ToInt32(args[1]);
+                tier = Convert.ToInt32(args[2]);
+                return true;
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.TryDecodeServiceLevel: " + e.Message); return false; }
+        }
+
+        /// <summary>Step (e): PreRollManager.PreRollOnSubmit (decompiled :5371). Rolls each card's
+        /// grade and burns its cert NOW, so maturation just applies the stored result.</summary>
+        public static bool PreRollJob(GradeCardSubmitSet set, int companyId, bool useCheats, int jobId)
+        {
+            if (set == null || MiPreRoll == null) return false;
+            try
+            {
+                MiPreRoll.Invoke(null, new object[] { set, Enum.ToObject(TCompany, companyId), useCheats, jobId });
+                return true;
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.PreRollJob: " + e.Message); return false; }
+        }
+
+        /// <summary>Lowest m_ServiceLevel value that is a GO-ENCODED level rather than a vanilla
+        /// tier index (ServiceLevelCodec V1_MAGIC, decompiled :5543). Anything at or above this
+        /// must not be fed to vanilla's GetGradeCardServiceData for real meaning.</summary>
+        public const int EncodedLevelFloor = 10000;
+
+        // ------------------------------------------------------------------
+        // SUBMIT SLOT COUNT (GradingSync.ClientSubmit / HostApplyOp).
+        //
+        // Vanilla GradedCardSubmitSelectScreen.OnPressSubmitButton rebuilds the scratch set
+        // with EIGHT empty slots (decompiled GradedCardSubmitSelectScreen.cs :193), and the
+        // submit screen only ever shows eight panels. Grading Overhaul changes both halves:
+        // GradingSlotExpansionPatches builds up to 52 panels (:1421, :1459) and TRANSPILES
+        // OnPressSubmitButton, rewriting that ldc.i4.8 to ldc.i4.s 52
+        // (PatchSubmitSlotCount, decompiled-grading Grading Overhaul.decompiled.cs
+        // :1498-1515). So with GO a guest really can have up to 52 cards sitting in
+        // m_CurrentGradeCardSubmitSet when he presses submit.
+        //
+        // The named source is GradingSlotExpansionPatches.MAX_SLOTS = 52 (:1338). It is a
+        // private const, so C# inlines it at every use site - but a const still exists in
+        // metadata as a literal field, which is exactly what GetRawConstantValue reads.
+        // Resolve it so a GO release that raises the cap is picked up on its own, and fall
+        // back to the literal 52 read off that decompile if the field ever walks away.
+        // ------------------------------------------------------------------
+
+        private static readonly Type TSlotExpansion = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingSlotExpansionPatches", GradingAssembly);
+
+        /// <summary>Vanilla's submit-set slot count. Also the shape every vanilla
+        /// GradeCardSubmitSet carries, so it stays the pad target for un-enrolled sets.</summary>
+        public const int VanillaSubmitSlots = 8;
+
+        /// <summary>Value of GO 3.4.2's GradingSlotExpansionPatches.MAX_SLOTS (:1338), used
+        /// only when the const cannot be read back off the loaded assembly.</summary>
+        private const int GoSubmitSlotsFallback = 52;
+
+        private static int _maxSubmitSlots; // resolved once, 0 = not yet resolved
+
+        /// <summary>How many cards one submission may legitimately carry on this machine:
+        /// 8 without Grading Overhaul, GO's MAX_SLOTS (52) with it. Bounded to 255 because
+        /// the wire carries the card count as a byte.</summary>
+        public static int MaxSubmitSlots
+        {
+            get
+            {
+                if (!Present) return VanillaSubmitSlots;
+                if (_maxSubmitSlots > 0) return _maxSubmitSlots;
+                int v = GoSubmitSlotsFallback;
+                string how = "GO 3.4.2 decompile literal (MAX_SLOTS unreadable)";
+                try
+                {
+                    var fi = TSlotExpansion == null ? null : AccessTools.Field(TSlotExpansion, "MAX_SLOTS");
+                    if (fi != null && fi.IsLiteral && fi.FieldType == typeof(int))
+                    {
+                        int raw = Convert.ToInt32(fi.GetRawConstantValue());
+                        // Never below vanilla (a smaller cap would start dropping cards the
+                        // vanilla screen can hold) and never past the byte the wire carries.
+                        if (raw >= VanillaSubmitSlots && raw <= 255) { v = raw; how = "GradingSlotExpansionPatches.MAX_SLOTS"; }
+                        else CoopPlugin.Log.LogWarning($"GradingInterop: GO MAX_SLOTS = {raw} is out of the usable 8..255 range - using {v}");
+                    }
+                }
+                catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.MaxSubmitSlots: " + e.Message); }
+                _maxSubmitSlots = v;
+                CoopPlugin.Log.LogInfo($"GradingInterop: grading submit slot cap = {v} (from {how})");
+                return v;
             }
         }
 

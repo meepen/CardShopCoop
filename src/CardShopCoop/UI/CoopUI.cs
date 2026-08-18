@@ -533,7 +533,13 @@ namespace CardShopCoop.UI
             if (_invPortState == 1)
                 GUILayout.Label("<size=10>port forward requested on your router automatically</size>", CoopTheme.LabelDim);
             else if (_invPortState == 2)
-                GUILayout.Label($"<size=10>router declined - forward port {CoopPlugin.Port.Value} manually for internet play</size>", CoopTheme.LabelDim);
+                // Say what to DO about it, not just that it happened: forwarding the port is a
+                // router-admin job this mod cannot do, and the other player hosting instead is
+                // the answer for anyone who isn't going to go find their router password.
+                // Kept short AND wrapped: the long form measured wider than this 400px panel,
+                // and LabelDim doesn't wrap, so the tail was clipped off-screen - the half that
+                // carried the advice. LabelDimWrap is LabelDim + wordWrap.
+                GUILayout.Label($"<size=10>router declined - forward port {CoopPlugin.Port.Value} manually, or let the other player host</size>", CoopTheme.LabelDimWrap);
         }
 
         private static string InviteStatusText(InviteState state)

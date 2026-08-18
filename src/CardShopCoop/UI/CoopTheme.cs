@@ -47,7 +47,7 @@ namespace CardShopCoop.UI
 
         // ---- built styles (all created once in EnsureBuilt) -----------------------------
         public static GUIStyle Window, HeaderStrip, Header, HeaderVersion, SectionHeader;
-        public static GUIStyle Label, LabelDim, LabelBold, LabelWrap, LabelDanger, LabelWarn;
+        public static GUIStyle Label, LabelDim, LabelDimWrap, LabelBold, LabelWrap, LabelDanger, LabelWarn;
         public static GUIStyle SectionBox, Toggle;
         public static GUIStyle ButtonPrimary, ButtonSecondary, ButtonDanger;
         public static GUIStyle TextField;
@@ -165,6 +165,13 @@ namespace CardShopCoop.UI
 
             LabelWrap = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 12, wordWrap = true };
             LabelWrap.normal.textColor = Text;
+
+            // LabelDim, but wrapping. LabelDim has no wordWrap, so a dim line longer than the
+            // 400px panel is simply clipped at the edge instead of running onto a second row -
+            // fine for the short status blips it was built for, wrong for anything that has to
+            // give the player an instruction (see the UPnP-declined hint in CoopUI).
+            LabelDimWrap = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 11, wordWrap = true };
+            LabelDimWrap.normal.textColor = TextDim;
 
             LabelDanger = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 12, wordWrap = true };
             LabelDanger.normal.textColor = Danger;
