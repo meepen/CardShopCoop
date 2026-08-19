@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 
@@ -419,6 +420,235 @@ namespace CardShopCoop.Util
             if (encoded <= 10 || MiActual == null) return encoded;
             try { return (int)MiActual.Invoke(null, new object[] { encoded }); }
             catch { return encoded; }
+        }
+
+        // ------------------------------------------------------------------
+        // CERT IDENTITY + THE CERT-EXISTENCE UNION (CoopCore's graded-album digest).
+        //
+        // The encoded grade IS the album key (CPlayerData.RemoveGradedCard matches on
+        // cardSaveIndex + amount == cardGrade + expansionType + isDestiny, :1552-1571) and it
+        // packs the grading company and the cert serial, so the cert is the card's identity.
+        // gradedCardIndex is NOT: AddCard sets it to m_GradedCardInventoryList.Count + 1
+        // (:1509), which stops being unique the moment any row is removed.
+        // ------------------------------------------------------------------
+
+        // internal static void DecodeGradeFull(int, out GradingCompany, out int grade, out int cert)
+        // - decompiled-grading :15953. The PUBLIC DecodeGrade wrapper right above it (:15948)
+        // deliberately zeroes the cert on the way out, so it is useless here; the internal one is
+        // reachable by reflection all the same.
+        private static readonly MethodInfo MiDecodeFull = (THelper == null || TCompany == null) ? null
+            : AccessTools.Method(THelper, "DecodeGradeFull",
+                new[] { typeof(int), TCompany.MakeByRefType(), typeof(int).MakeByRefType(), typeof(int).MakeByRefType() });
+        // public static bool IsCheatFlagged(int) - decompiled-grading :16005 (encoded >= 1e9).
+        private static readonly MethodInfo MiIsCheat = THelper == null ? null
+            : AccessTools.Method(THelper, "IsCheatFlagged", new[] { typeof(int) });
+
+        /// <summary>Split an encoded grade into its grading company ordinal and cert serial.
+        /// False (and cert 0) for a bare 1-10 grade, when Grading Overhaul is absent, or when the
+        /// decode member could not be resolved - callers must then simply skip cert reasoning
+        /// rather than guess, since a fabricated cert would produce false collision reports.</summary>
+        public static bool DecodeCert(int encoded, out int companyId, out int cert)
+        {
+            companyId = -1;
+            cert = 0;
+            if (encoded <= 10 || MiDecodeFull == null) return false;
+            try
+            {
+                var args = new object[] { encoded, Enum.ToObject(TCompany, 0), 0, 0 };
+                MiDecodeFull.Invoke(null, args);
+                companyId = Convert.ToInt32(args[1]);
+                cert = Convert.ToInt32(args[3]);
+                return cert > 0;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>(company, cert) packed exactly the way GO's own BuildExistingCertSet packs it
+        /// (decompiled-grading :8801-8880) - a serial is only unique WITHIN a company. 0 means
+        /// "no usable cert", never a valid key.</summary>
+        public static long CertKey(int encoded)
+        {
+            int company, cert;
+            if (!DecodeCert(encoded, out company, out cert)) return 0L;
+            return ((long)company << 32) | (uint)cert;
+        }
+
+        /// <summary>True when GO has stamped this grade with its FAKE encoding (+1,000,000,000).
+        /// Worth naming in a divergence report: a FAKE-flagged row on one side and a clean cert
+        /// on the other is the duplicate-cert sweep having fired, not a missing card.</summary>
+        public static bool CheatFlagged(int encoded)
+        {
+            if (MiIsCheat == null) return false;
+            try { return (bool)MiIsCheat.Invoke(null, new object[] { encoded }); }
+            catch { return false; }
+        }
+
+        /// <summary>One graded card as the digest identifies it. Everything
+        /// CPlayerData.GetCardSaveIndex reads (monsterType, borderType, isFoil - :795-811) plus
+        /// the expansion, isDestiny and the encoded grade. Border and foil are NOT decoration:
+        /// they are half of cardSaveIndex, so a digest without them both under-reports (two
+        /// border variants of one monster collapse into one key) and, worse, would make the adopt
+        /// path file a borrowed card as border 0 / non-foil - a different card.</summary>
+        public struct GradedEntry
+        {
+            public ECardExpansionType Expansion;
+            public EMonsterType Monster;
+            public ECardBorderType Border;
+            public bool IsFoil;
+            public bool IsDestiny;
+            public int Encoded;
+
+            /// <summary>Local bookkeeping only - NEVER written to or read from the wire (see
+            /// CoopCore.WriteGradedDigest, which writes the six identity fields and nothing else).
+            /// Set by CoopCore.GradedAdopt on a candidate it refused, so the entry can stay in the
+            /// per-peer diff for the report while being excluded from the offer count.</summary>
+            public bool Refused;
+
+            /// <summary>Set-membership key for the diff. String rather than a packed hash for the
+            /// same reason CoopCore.CardPriceKey is one: it is also what the log lines print.</summary>
+            public string Key
+            {
+                get
+                {
+                    return (int)Expansion + ":" + (int)Monster + ":" + (int)Border
+                        + ":" + (IsFoil ? 1 : 0) + (IsDestiny ? 1 : 0) + ":" + Encoded;
+                }
+            }
+
+            public CardData ToCard()
+            {
+                return new CardData
+                {
+                    expansionType = Expansion,
+                    monsterType = Monster,
+                    borderType = Border,
+                    isFoil = IsFoil,
+                    isDestiny = IsDestiny,
+                    isChampionCard = false,
+                    isNew = false,
+                    cardGrade = Encoded,
+                    gradedCardIndex = 0, // never an identity - see the block comment above
+                };
+            }
+        }
+
+        /// <summary>Every place a graded cert can legitimately live on THIS machine, deduped.
+        ///
+        /// THIS IS A DELIBERATE SUPERSET OF GRADING OVERHAUL'S OWN BuildExistingCertSet
+        /// (decompiled-grading :8801-8880, which reads only m_GradedCardInventoryList,
+        /// m_HoldCardDataList, m_CardShelfSaveDataList and m_PackageBoxCardSaveDataList), and the
+        /// asymmetry is the whole reason the extra containers are listed here. The two consumers
+        /// fail in OPPOSITE directions:
+        ///  - GO misses a container and merely UNDER-FLAGS: a cert it cannot see is a cert its
+        ///    duplicate sweep does not fire on. Nothing is created; a cheat slips by.
+        ///  - We miss a container and the card looks ABSENT from this PC, so the digest reports it
+        ///    as peer-only, the F2 panel FABRICATES an adopt offer for a card that is already here,
+        ///    and pressing it calls AddCard - which is exactly the duplicate-cert input that makes
+        ///    GO rewrite BOTH rows to the FAKE encoding. A miss here MANUFACTURES the corruption.
+        /// So this list must be at least as wide as GO's and is allowed to be wider. Never trim it
+        /// back toward GO's set "for parity" - parity is the bug.
+        ///
+        /// Beyond GO's four: m_GradeCardInProgressList (jobs at the grader),
+        /// m_CurrentGradeCardSubmitSet (cards STAGED on the submit screen but not yet submitted -
+        /// a player can sit in that state indefinitely, or back out of it, and every second there
+        /// is a second the album does not list the card), and the four storage containers whose
+        /// save data holds cards directly: card storage shelves, card/item combi shelves, bulk
+        /// donation boxes and auto pack openers. An ALBUM-ONLY digest reports a false "missing" for
+        /// every graded card the other player happens to be holding, has put on a display shelf,
+        /// has sitting in a graded-returns box, has staged for grading, or has filed in any of
+        /// those containers. Those are exactly the states a session spends seconds at a time in.
+        ///
+        /// Only encoded grades (&gt; 10) are collected: a bare 1-10 vanilla grade carries no cert,
+        /// so it has no stable identity to diff and every one of them would "collide" on cert 0.
+        /// With Grading Overhaul absent this therefore returns an empty list, which self-gates the
+        /// whole diagnostic off rather than needing a Present check (and Present has a one-shot
+        /// logging side effect that does not belong on a 45s timer).</summary>
+        public static List<GradedEntry> BuildGradedCertInventory()
+        {
+            var list = new List<GradedEntry>();
+            var seen = new HashSet<string>();
+            try
+            {
+                AddAllCompact(list, seen, CPlayerData.m_GradedCardInventoryList);
+                AddAll(list, seen, CPlayerData.m_HoldCardDataList);
+                var shelves = CPlayerData.m_CardShelfSaveDataList;
+                if (shelves != null)
+                    for (int i = 0; i < shelves.Count; i++)
+                        AddAll(list, seen, shelves[i]?.cardDataList);
+                var boxes = CPlayerData.m_PackageBoxCardSaveDataList;
+                if (boxes != null)
+                    for (int i = 0; i < boxes.Count; i++)
+                        AddAll(list, seen, boxes[i]?.cardDataList);
+                var inProgress = CPlayerData.m_GradeCardInProgressList;
+                if (inProgress != null)
+                    for (int i = 0; i < inProgress.Count; i++)
+                        AddAll(list, seen, inProgress[i]?.m_CardDataList);
+                // The stage-then-abandon state: cards sitting in the submit screen's scratch set.
+                AddAll(list, seen, CPlayerData.m_CurrentGradeCardSubmitSet?.m_CardDataList);
+                var storage = CPlayerData.m_CardStorageShelfSaveDataList;
+                if (storage != null)
+                    for (int i = 0; i < storage.Count; i++)
+                        AddAllCompact(list, seen, storage[i]?.compactCardDataAmountList);
+                var combi = CPlayerData.m_CardItemCombiShelfSaveDataList;
+                if (combi != null)
+                    for (int i = 0; i < combi.Count; i++)
+                        AddAll(list, seen, combi[i]?.cardDataList);
+                var donation = CPlayerData.m_BulkDonationSaveDataList;
+                if (donation != null)
+                    for (int i = 0; i < donation.Count; i++)
+                        AddAllCompact(list, seen, donation[i]?.compactCardDataAmountList);
+                var openers = CPlayerData.m_AutoPackOpenerSaveDataList;
+                if (openers != null)
+                    for (int i = 0; i < openers.Count; i++)
+                        AddAllCompact(list, seen, openers[i]?.compactCardDataAmountList);
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("GradingInterop.BuildGradedCertInventory: " + e.Message);
+            }
+            return list;
+        }
+
+        private static void AddAll(List<GradedEntry> list, HashSet<string> seen, List<CardData> cards)
+        {
+            if (cards == null) return;
+            for (int i = 0; i < cards.Count; i++) Add(list, seen, cards[i]);
+        }
+
+        /// <summary>Compact (save-shaped) rows, where the encoded grade rides in <c>amount</c>.
+        /// Per-ROW try/catch, never per-list: GetGradedCardData divides by
+        /// GetCardAmountPerMonsterType, which is 0 for an expansion this install has no data for,
+        /// and one such row must not silently truncate the rest of a container's contents - a
+        /// truncated container is precisely the miss that fabricates an adopt offer.</summary>
+        private static void AddAllCompact(List<GradedEntry> list, HashSet<string> seen,
+            List<CompactCardDataAmount> rows)
+        {
+            if (rows == null) return;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var row = rows[i];
+                if (row == null || row.amount <= 10) continue;
+                try { Add(list, seen, CPlayerData.GetGradedCardData(row)); }
+                catch { }
+            }
+        }
+
+        private static void Add(List<GradedEntry> list, HashSet<string> seen, CardData c)
+        {
+            if (c == null || c.cardGrade <= 10) return;
+            var e = new GradedEntry
+            {
+                Expansion = c.expansionType,
+                Monster = c.monsterType,
+                Border = c.borderType,
+                IsFoil = c.isFoil,
+                IsDestiny = c.isDestiny,
+                Encoded = c.cardGrade,
+            };
+            // Deduped because this is an EXISTENCE set, not a count. The duplicate rows GO's
+            // anti-cheat sweep leaves behind would otherwise inflate one side's total and make a
+            // pure set difference read as a count difference.
+            if (seen.Add(e.Key)) list.Add(e);
         }
     }
 }

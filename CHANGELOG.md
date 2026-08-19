@@ -5,6 +5,23 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.41
+**Graded-card drift: detect it, stop it growing, and offer a real repair — thanks cavi, whose two-sided logs and their own analysis of the remove/re-add pattern cracked a genuinely deep one.** Both players must update.
+
+**Graded cards appearing out of nowhere / vanishing on one side**
+- **Fixed: moving graded cards around (staging them for grading, picking them up, putting them back) could make copies materialize on the other player's screen.** When your albums had quietly drifted apart, a "move" arrived as just the "put back" half — manufacturing a card the other side never had, and in the worst case tripping Grading Overhaul's anti-cheat into flagging REAL cards as fakes. A move is now treated as a move: if the "take out" half didn't apply, the "put back" half is skipped too (and still passed along to other players who do have the card).
+- **New: the mod now compares graded albums between players and tells you when they've drifted** — a warning names the exact cards each side is missing (checking albums, shelves, hands, boxes, and cards away for grading, so it doesn't cry wolf about cards that are just in motion).
+- **New: a repair button.** When drift is detected, the co-op window offers "Adopt N graded cards \<player\> has that you don't" — one click, one direction, adds only, never deletes, and refuses any card whose certificate number already exists on this PC in any form (Grading Overhaul's anti-cheat matches on the certificate alone, so that's the only safe rule). Nothing is ever repaired automatically, and the button's count is exactly what it will add.
+- Cards whose certificate exists on both PCs but got rewritten by the anti-cheat on one side are reported as their own "re-encoded" category — the clearest sign of past drift — and are never offered for adoption.
+- Certificate collisions (same cert number on two different cards, one per PC) are reported loudly as their own category with no auto-repair — merging those is exactly what turns real cards into fakes.
+- The log now says plainly when joining replaced this slot's Grading Overhaul data with the host's copy (solo slots are never touched).
+
+**Deodorant machine crash on the joiner (the "kind 10" error)**
+- **Fixed: the joiner's auto cleanser machine erroring forever after a join.** The machine's item counter got inflated during the world download and every sync after that tripped over it — and the periodic re-send just reproduced the error each time. The counter now stays in step, and an already-broken machine self-heals within a couple of syncs.
+
+**Warehouse racks**
+- **Fixed: rack slots being permanently lost to "ghost" boxes.** A destroyed box could leave its slot occupied forever, forcing every later box to be pinned in place instead of stored properly — and each pin made it worse. Dead slots are now reclaimed on the spot.
+
 ## 1.0.40
 **Grading Overhaul submissions from the joiner — thanks cavi, whose "charged the company price, got a vanilla slab" detail pointed straight at the seam.** Both players must update.
 

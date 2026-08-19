@@ -436,6 +436,11 @@ namespace CardShopCoop.Sync
             public bool Stored;    // host's latest: is it stored at all?
             public int Shelf;      // host's latest StoreShelf (valid only if Stored)
             public int Comp;       // host's latest StoreComp (valid only if Stored)
+            // NOTE: there is deliberately no "this id resolves to a different object" flag.
+            // _idOf and _byId are written in lockstep (every _idOf[box] = id sits beside a
+            // _byId[id] = box), so such a test is dead by construction. The duplicate case that
+            // does occur - one object listed twice in a compartment - is detected by reference
+            // while walking the occupants in TryEvictGhostAndRetryStore.
         }
         /// <summary>Default: nothing is tracked (host path / not wired) - eviction no-ops.</summary>
         public static Func<InteractablePackagingBox_Item, HostBoxWhere> HostLocationOf =
@@ -473,9 +478,16 @@ namespace CardShopCoop.Sync
         /// places it at a DIFFERENT shelf/comp (or not stored at all), it is a stale GHOST
         /// left over from rack-index divergence occupying the slot. Evict it (the game's own
         /// RemoveBox via UnhookIfStored) and retry the store in the same pass. Only evicts on
-        /// POSITIVE identification (tracked box + host disagrees about its location) - an
-        /// untracked box, or one the host agrees belongs here, is left alone and the caller
-        /// falls through to fail-counting. Always logs a diagnostic that proves-or-kills the
+        /// POSITIVE identification - three cases, all provably slot leaks: a DESTROYED
+        /// occupant the compartment still counts, the SAME OBJECT listed in the compartment
+        /// twice, or a tracked box the host places elsewhere. An untracked
+        /// box, or one the host agrees belongs here, is left alone and the caller falls
+        /// through to fail-counting (the pin-at-host-pose fallback), which stays the terminal
+        /// state for a GENUINE mismatch: a rejected box never registers in a compartment
+        /// (decompiled InteractablePackagingBox_Item :200 is past all five rejection exits),
+        /// so a pinned box costs no slot and un-pins the moment the host reports it
+        /// not-stored. Freeing the leaked slots is what actually lets those retries land -
+        /// do not add a retry loop on top of the pin. Always logs a diagnostic that proves-or-kills the
         /// index-divergence theory: the resolved rack's GetIndex/GetWarehouseIndex, the
         /// occupant ids found, and where the host claims each occupant lives.</summary>
         private static bool TryEvictGhostAndRetryStore(
@@ -500,10 +512,65 @@ namespace CardShopCoop.Sync
                 {
                     // snapshot the list: UnhookIfStored -> RemoveBox mutates it under us
                     var snap = new List<InteractablePackagingBox_Item>(occupants);
+                    // Same OBJECT listed twice in one compartment. This is the real duplicate
+                    // leak, and it is only visible here: the id maps cannot show it, because
+                    // every writer that sets _idOf[box] sets _byId[id] on the adjacent line, so
+                    // _byId[_idOf[occ]] is occ by construction and the old "resolves to a
+                    // different object" test could never once be true. A repeated reference costs
+                    // a real slot (AddBox incremented m_ItemAmount both times) while looking
+                    // perfectly legitimate to the host-location test, since both entries ARE the
+                    // box the host places here. Only LIVE occupants are ever compared (the
+                    // != null test is Unity's, so a destroyed box falls through to the null
+                    // branch below) - which matters, because UnityEngine.Object.Equals treats
+                    // any two DESTROYED objects as equal and would otherwise read a compartment
+                    // of dead boxes as one box repeated.
+                    var seenOccupants = new HashSet<object>();
                     for (int i = 0; i < snap.Count; i++)
                     {
                         var occ = snap[i];
-                        if (occ == null) { diag.Append("[null] "); continue; }
+                        if (occ != null && !seenOccupants.Add(occ))
+                        {
+                            // BARE RemoveBox, never the take-recipe: the object is legitimately
+                            // stored and staying stored - we are dropping one surplus LIST ENTRY
+                            // and the counter that came with it. Unparenting it or turning its
+                            // physics back on would make the box the player can actually see fall
+                            // out of the rack. List.Remove drops the first match, which is the
+                            // entry we already accepted; the object keeps its place either way.
+                            diag.Append("[dup-ref-evicted] ");
+                            evictedAny = true; // before the call - see the null branch
+                            try { rackComp.RemoveBox(occ); }
+                            catch (Exception e) { CoopPlugin.Log.LogWarning("BoxSync store evict dup: " + e.Message); }
+                            continue;
+                        }
+                        if (occ == null)
+                        {
+                            // A destroyed occupant that was never RemoveBox'd. Skipping it -
+                            // which is what this branch used to do - leaked the slot FOREVER:
+                            // ShelfCompartment.m_ItemAmount still counts it and HasEnoughSlot
+                            // stays false, so one dead entry pins every box ever routed here
+                            // (field log: rack 0/2 blocked box id 3, then box id 25 three
+                            // minutes later). It is unambiguously reclaimable - AddBox never
+                            // inserts null (decompiled ShelfCompartment :189-190), so a null
+                            // element can only be a Unity-destroyed box. RemoveBox matches by
+                            // reference through List.Remove, so this frees exactly one entry
+                            // and decrements the counter with it. No unparent/physics recipe:
+                            // there is no object left to make loose.
+                            //
+                            // FLAG BEFORE THE CALL, not after. RemoveBox commits the two things
+                            // that matter in its FIRST TWO statements - m_ItemAmount-- then
+                            // List.Remove (decompiled ShelfCompartment :230-231) - and only then
+                            // walks the remaining occupants via SetPriceTagItemAmountText (:237),
+                            // which is exactly where a compartment full of destroyed boxes
+                            // throws. Setting the flag afterwards therefore lost the retry for a
+                            // slot that HAD been freed: the caller saw evictedAny false, gave up,
+                            // and the reclaimed slot sat unused until the next snapshot. The catch
+                            // and its log stay - the throw is still real and still worth seeing.
+                            diag.Append("[null-evicted] ");
+                            evictedAny = true;
+                            try { rackComp.RemoveBox(occ); }
+                            catch (Exception e) { CoopPlugin.Log.LogWarning("BoxSync store evict null: " + e.Message); }
+                            continue;
+                        }
                         var where = HostLocationOf(occ);
                         if (!where.Tracked)
                         {
@@ -516,7 +583,7 @@ namespace CardShopCoop.Sync
                             || where.Shelf != want.StoreShelf || where.Comp != want.StoreComp;
                         diag.Append($"[id {where.Id} host={hostSays}{(hostDisagrees ? " GHOST" : "")}] ");
                         // never evict the box we're trying to store, and never evict one the
-                        // host agrees belongs in THIS slot (that's a legitimately-full slot)
+                        // host agrees belongs in THIS slot (that's a legitimately-full slot).
                         if (hostDisagrees && !ReferenceEquals(occ, box))
                         {
                             // full take-recipe, not just RemoveBox: a stored box has physics

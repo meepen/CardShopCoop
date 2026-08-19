@@ -219,6 +219,11 @@ namespace CardShopCoop.UI
                 case CoopRole.Client: DrawClient(core); break;
             }
 
+            // Out here rather than inside the three role branches so it reaches all of them with
+            // one call: the Steam host path returns early from DrawHost, and Role None simply has
+            // no offers to draw.
+            DrawGradedAdopt(core);
+
             string focused = GUI.GetNameOfFocusedControl();
             TextFieldFocused = focused != null && focused.StartsWith("coop_");
 
@@ -560,6 +565,45 @@ namespace CardShopCoop.UI
                 CoopTheme.LabelWrap);
             if (GUILayout.Button("Wave  (" + CoopPlugin.EmoteKey.Value + ")", CoopTheme.ButtonSecondary)) core.SendEmote();
             if (GUILayout.Button("Leave session", CoopTheme.ButtonDanger)) core.Disconnect();
+        }
+
+        /// <summary>The graded-album repair offer, drawn only while a one-sided difference is
+        /// actually known - i.e. after a digest exchange found graded cards the peer has and this
+        /// PC does not. One button per peer, and pressing it is the ONLY thing in the whole
+        /// graded-divergence feature that changes a card: it adds, one way, and never removes.
+        ///
+        /// LATCHED IN THE LAYOUT PASS for the reason spelled out at the top of this file - the
+        /// offer list is rebuilt from the network pump, and a row count that differs between
+        /// Layout and Repaint takes the entire window down with "Mismatched LayoutGroup".</summary>
+        private readonly List<CoopCore.GradedAdoptOffer> _adoptOffers = new List<CoopCore.GradedAdoptOffer>();
+
+        private void DrawGradedAdopt(CoopCore core)
+        {
+            if (Event.current.type == EventType.Layout)
+            {
+                _adoptOffers.Clear();
+                _adoptOffers.AddRange(core.GradedAdoptOffers);
+            }
+            if (_adoptOffers.Count == 0) return;
+
+            CoopTheme.Divider();
+            GUILayout.BeginVertical(CoopTheme.SectionBox);
+            GUILayout.BeginHorizontal();
+            CoopTheme.Chip("GRADED ALBUM", CoopTheme.ChipWarn);
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+            // Must state the guard EXACTLY as GradedAdopt enforces it: refusal is on certificate
+            // PRESENCE, not on "a different card". Promising the narrower rule invited the press
+            // that duplicated a card this PC already held under Grading Overhaul's FAKE flag.
+            GUILayout.Label("<size=11>Your graded albums don't match. This only ADDS cards to yours - it never removes any, and it refuses any card whose certificate number is already on this PC, whichever card is carrying it.</size>",
+                CoopTheme.LabelWrap);
+            for (int i = 0; i < _adoptOffers.Count; i++)
+            {
+                var o = _adoptOffers[i];
+                if (GUILayout.Button($"Adopt {o.Count} graded card(s) {o.Who} has that you don't", CoopTheme.ButtonSecondary))
+                    core.GradedAdopt(o.ConnId);
+            }
+            GUILayout.EndVertical();
         }
 
         private void DrawBrowser(CoopCore core)

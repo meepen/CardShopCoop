@@ -75,6 +75,11 @@ namespace CardShopCoop.Net
         GradedRemove = 68,     // both ways: a graded card left the shared album (RemoveGradedCard)
         SprayHit = 69,         // client -> host: handheld deodorant hold-spray (pos+range+potency), replay against host customers
         CardDeltaBatch = 70,   // both ways: [int count][count x CardDelta payload] - one frame for a whole frame's card changes
+        // BOTH WAYS, and the same payload writer/reader serves both directions on purpose.
+        // Client -> host on the catalog gating (first send in-game, then hash change, min 45s);
+        // host -> client only in REPLY to a divergent one, so the guest can see its own
+        // one-sided difference. Report-only: receiving it never changes a card.
+        GradedDigest = 71,     // both ways: graded-cert existence digest (album + hold + shelves + boxes + in-progress)
     }
 
     /// <summary>One received message, already reassembled from the wire.</summary>

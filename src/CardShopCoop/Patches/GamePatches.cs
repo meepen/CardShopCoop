@@ -470,7 +470,25 @@ namespace CardShopCoop.Patches
         {
             if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None) return;
             if (cardData == null || cardData.cardGrade <= 0) return;
-            try { CoopCore.Instance?.ForwardGradedRemoval(cardData); }
+            try
+            {
+                // The SAME encoded-grade swap AddCardPostfix does, for the same reason and with
+                // the same restore - a removal is only useful to the peer if it names the card in
+                // the identity the peer FILED it under, and for a graded card that identity IS the
+                // encoded grade (CPlayerData.RemoveGradedCard matches on amount == cardGrade,
+                // decompiled :1552-1571). Shipping a bare 1-10 that a display path transiently
+                // swapped in makes the removal match nothing on the other side, and the ghost the
+                // add direction was fixed to prevent comes straight back on the remove direction.
+                int enc = Util.GradingInterop.Present ? Util.GradingInterop.Encoded(cardData) : cardData.cardGrade;
+                if (enc > 10 && cardData.cardGrade <= 10)
+                {
+                    int saved = cardData.cardGrade;
+                    cardData.cardGrade = enc;
+                    try { CoopCore.Instance?.ForwardGradedRemoval(cardData); }
+                    finally { cardData.cardGrade = saved; } // never leave the game's object mutated
+                }
+                else CoopCore.Instance?.ForwardGradedRemoval(cardData);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("RemoveGradedCardPostfix forward failed: " + e.Message); }
         }
 

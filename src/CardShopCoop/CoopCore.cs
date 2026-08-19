@@ -1189,9 +1189,10 @@ namespace CardShopCoop
         /// identical installed data (EPL seeds enum ids from enum_values.json even for bundles
         /// that aren't installed), so the host can fully RESOLVE a card it has no data row for.
         /// Refusing it locally is right; swallowing it is not - a third player who DOES have the
-        /// pack must still receive it, which is what the 3+ player regression was. True ONLY for
-        /// the CardSetInstalledHere refusal; false for a corrupt grade, a would-go-negative
-        /// reduce, a graded-remove album mismatch, and (via the callers' catch) any throw.</summary>
+        /// pack must still receive it, which is what the 3+ player regression was. True for the
+        /// CardSetInstalledHere refusal, for the graded-remove album mismatch and for the
+        /// suppressed follow-up add that pairs with one; false for a corrupt grade, a
+        /// would-go-negative reduce, and (via the callers' catch) any throw.</summary>
         private static bool ApplyCardDelta(bool isAdd, int amount, CardData card, out bool relayAnyway)
         {
             relayAnyway = false;
@@ -1239,6 +1240,26 @@ namespace CardShopCoop
                 }
                 if (isAdd)
                 {
+                    // PAIRED-ADD SUPPRESSION. A graded remove this PC could not satisfy, followed
+                    // seconds later by an add of the SAME key, is one gesture on the sender: the
+                    // card came out of the album into their hand / a grading submit slot and went
+                    // straight back (GradedCardSubmitSelectScreen.OnCloseScreen AddCards every
+                    // occupied slot in ONE frame, decompiled :84-95). Their net change is ZERO -
+                    // they still own exactly one copy. Applying only the ADD half therefore
+                    // MANUFACTURES a copy here. It looked like a heal because sometimes the
+                    // absence was a real deficit, but that is a coin flip on state neither side
+                    // can see, and when the cert is already present here in mutated form GO's
+                    // duplicate-cert sweep (decompiled-grading :8532-8582) answers the add by
+                    // flagging BOTH rows FAKE - so the "heal" corrupts a card that was fine.
+                    // Relay-anyway rather than a silent drop, by the same rule as the
+                    // CardSetInstalledHere case above: a third peer that genuinely owns the pair
+                    // must still receive it.
+                    if (card.cardGrade > 0 && ConsumeGradedRemoveSkip(card))
+                    {
+                        CoopPlugin.Log.LogWarning($"graded add suppressed: {CardIdent(card)} (grade {card.cardGrade}) pairs with the remove this PC skipped moments ago - the sender only MOVED a card they still own, and this PC never had that copy, so applying the add alone would create one out of nothing");
+                        relayAnyway = true;
+                        return false;
+                    }
                     // Register the host's cert with Grading Overhaul BEFORE AddCard, so its
                     // anti-cheat AddCard prefix sees the cert burned+bound and does NOT
                     // re-encode this card as FAKE (the ~20s changing-grade churn). BindCert
@@ -1264,9 +1285,20 @@ namespace CardShopCoop
                     }
                     if (removed == 0)
                     {
+                        RecordGradedRemoveSkip(card);
                         CoopPlugin.Log.LogWarning($"graded remove: {CardIdent(card)} (grade {card.cardGrade}) not in this album - skipped (album mismatch?)");
+                        // RELAY ANYWAY, by the same argument that gave CardSetInstalledHere its
+                        // relay above: THIS album saying nothing about a card says nothing about
+                        // a THIRD peer's album. Before this the GradedRemove handler broke without
+                        // relaying and the third player kept a ghost copy forever. No effect on a
+                        // 2-player session.
+                        relayAnyway = true;
                         return false;
                     }
+                    // A remove for this key SUCCEEDED, so whatever the album was missing it is not
+                    // missing now: drop the skip memo, or the NEXT legitimate re-add of the same
+                    // card would be suppressed on the strength of a stale one.
+                    _gradedRemoveSkipped.Remove(CardPriceKey(card));
                 }
                 else
                 {
@@ -1381,6 +1413,54 @@ namespace CardShopCoop
             _shownMonsters.Clear();
         }
 
+        /// <summary>Graded removes this PC could NOT satisfy, keyed exactly as the album matches
+        /// (<see cref="CardPriceKey"/> already carries expansion, monster, border, foil, isDestiny
+        /// and the encoded grade - a superset of RemoveGradedCard's predicate) and stamped with
+        /// realtimeSinceStartup. Read once, by the add arm, to recognise the second half of a
+        /// stage-then-abandon gesture. Small and short-lived on purpose: it is a pairing hint, not
+        /// state.</summary>
+        private static readonly Dictionary<string, float> _gradedRemoveSkipped = new Dictionary<string, float>();
+        /// <summary>Observed pair gaps in the field log run 3.2 / 4.9 / 10.2 / 13 / 19s, so 20s is
+        /// already too tight - and 60s is still nowhere near "took it off the shelf again later".</summary>
+        private const float GradedSkipWindow = 60f;
+        private const int GradedSkipMax = 64;
+
+        /// <summary>Cleared beside <see cref="ClearCardSetCache"/> on disconnect and on every
+        /// scene load: a pairing hint from a dead session (or a different world) describes an
+        /// album that no longer exists, and acting on it would suppress a legitimate add.</summary>
+        internal static void ClearGradedSkipMemory()
+        {
+            _gradedRemoveSkipped.Clear();
+        }
+
+        private static void RecordGradedRemoveSkip(CardData card)
+        {
+            string key = CardPriceKey(card);
+            if (key == null) return;
+            if (_gradedRemoveSkipped.Count >= GradedSkipMax && !_gradedRemoveSkipped.ContainsKey(key))
+            {
+                string oldest = null;
+                float at = float.MaxValue;
+                foreach (var kv in _gradedRemoveSkipped)
+                    if (kv.Value < at) { at = kv.Value; oldest = kv.Key; }
+                if (oldest != null) _gradedRemoveSkipped.Remove(oldest);
+            }
+            _gradedRemoveSkipped[key] = Time.realtimeSinceStartup;
+        }
+
+        /// <summary>True when a skipped graded remove for this exact key is still inside the
+        /// window. Always CONSUMES the memo (expired or not) - it has done its one job either
+        /// way, and leaving stale keys behind would just burn the 64 slots.</summary>
+        private static bool ConsumeGradedRemoveSkip(CardData card)
+        {
+            string key = CardPriceKey(card);
+            if (key == null) return false;
+            float at;
+            if (!_gradedRemoveSkipped.TryGetValue(key, out at)) return false;
+            _gradedRemoveSkipped.Remove(key);
+            return Time.realtimeSinceStartup - at <= GradedSkipWindow;
+        }
+
         /// <summary>Membership test: does a data row for this monster exist under this expansion
         /// on this machine? Fills the cache on first ask, but NEVER caches a null-or-empty list -
         /// that means "InventoryBase isn't ready yet" (pre-load, or mid scene swap), and latching
@@ -1478,10 +1558,17 @@ namespace CardShopCoop
         /// A modded expansion numbers its cards as plain ORDINALS (1..N), so for anything at or
         /// past the vanilla expansion range the bare monsterType renders a completely unrelated
         /// vanilla member NAME by numeric collision - which is worse than useless in a field log.
-        /// Vanilla expansions keep the readable name; modded ones print Expansion#N.</summary>
+        /// Vanilla expansions keep the readable name; modded ones print Expansion#N.
+        ///
+        /// None (= -1, NOT a missing member) needs its own arm: it is numerically BELOW MAX, so
+        /// the vanilla branch used to claim it and render whatever monster name collides with that
+        /// ordinal - a confidently wrong card name on exactly the rows where the expansion is the
+        /// thing that failed to resolve (a card off the wire from a pack this PC lacks, or one
+        /// whose expansion id did not map). Naming the unknown beats naming the wrong card.</summary>
         private static string CardIdent(CardData c)
         {
             if (c == null) return "(null card)";
+            if (c.expansionType == ECardExpansionType.None) return "unknown-pack card #" + (int)c.monsterType;
             if ((int)c.expansionType < (int)ECardExpansionType.MAX) return c.monsterType.ToString();
             return c.expansionType + "#" + (int)c.monsterType;
         }
@@ -1868,6 +1955,14 @@ namespace CardShopCoop
             _inventory = null;
             _renamerHandled = false;
             _catalogSent = false;
+            // A new world means a new album: the pairing hints and the whole diff describe one
+            // that no longer exists, and a stale hint would suppress a legitimate add.
+            ClearGradedSkipMemory();
+            _gradedSent = false;
+            _lastGradedHash = -1;
+            _gradedPeerOnly.Clear();
+            _gradedWarnedConns.Clear();
+            GradedAdoptOffers.Clear();
             if (ClientReloading) _reloadGrace = 10f; // countdown starts once in-game
             _playerTf = null;
             _playerCamTf = null;
@@ -1953,6 +2048,23 @@ namespace CardShopCoop
                     {
                         _lastCatalogSentHash = h;
                         SendCatalogDigest();
+                    }
+                }
+                // ...and the graded-cert digest on the same gating for the same reason: the album
+                // changes constantly (every pack opened, every card graded), so a one-shot send
+                // would be stale within a minute. Built once and reused for both the hash test
+                // and the send - the union walk is the expensive half, not the write.
+                _gradedTimer += _dt;
+                if (inGame && (_gradedTimer >= 45f || !_gradedSent))
+                {
+                    _gradedTimer = 0f;
+                    _gradedSent = true;
+                    var inv = Util.GradingInterop.BuildGradedCertInventory();
+                    int gh = GradedHash(inv);
+                    if (gh != _lastGradedHash)
+                    {
+                        _lastGradedHash = gh;
+                        SendGradedDigest(1, inv);
                     }
                 }
             }
@@ -2912,6 +3024,450 @@ namespace CardShopCoop
             Send(connId, MsgType.Toast, bw => bw.Write(summary));
         }
 
+        // ---- graded-album divergence report (report-only) + opt-in one-way adopt ----
+        //
+        // Modelled line for line on the catalog digest above, for the same reason it exists: two
+        // peers can pass every handshake and still hold different graded cards, and until now the
+        // only trace was a "graded remove ... not in this album" warning that named one card at a
+        // time and never said how deep the difference went.
+        //
+        // NOTHING HERE CHANGES A CARD BY ITSELF. The digest reports; the adopt button is a human
+        // pressing a button, one-way, add-only. That is deliberate and the two rejected
+        // alternatives are worth naming: auto-adopting the HOST's superset would have DELETED
+        // roughly eight graded cards from the guest in the field case that prompted this (the host
+        // was the deficient side), and a two-way merge hand-feeds GO's duplicate-cert anti-cheat -
+        // put two different cards carrying one cert on one machine and BOTH get flagged FAKE, so a
+        // merge converts real cards into fakes and is strictly worse than doing nothing.
+
+        private bool _gradedSent;
+        private float _gradedTimer;
+        /// <summary>-1, not 0, so a guest whose graded album is genuinely EMPTY still sends its
+        /// first (empty) digest instead of matching a zero-initialised hash and reporting nothing
+        /// for the whole session.</summary>
+        private int _lastGradedHash = -1;
+        private readonly HashSet<int> _gradedWarnedConns = new HashSet<int>();
+        /// <summary>Per peer, the graded cards THEY have that WE do not - the adopt candidates.
+        /// Populated on both roles: the host builds it from the guest's digest, and the guest
+        /// builds it from the digest the host sends back when it finds a divergence.</summary>
+        private readonly Dictionary<int, List<Util.GradingInterop.GradedEntry>> _gradedPeerOnly =
+            new Dictionary<int, List<Util.GradingInterop.GradedEntry>>();
+
+        /// <summary>One offer row for the F2 panel. Rebuilt on the main thread whenever the diff
+        /// changes; CoopUI latches the list in its Layout pass (IMGUI matches Layout to Repaint by
+        /// control index, so a row count that changes mid-frame throws over the whole window).</summary>
+        public struct GradedAdoptOffer { public int ConnId; public string Who; public int Count; }
+        public readonly List<GradedAdoptOffer> GradedAdoptOffers = new List<GradedAdoptOffer>();
+
+        private static int GradedHash(List<Util.GradingInterop.GradedEntry> inv)
+        {
+            // Order-INdependent: the album list shifts on every RemoveAt, and an order-sensitive
+            // hash would re-send the identical set every time a card moved position.
+            int h = inv.Count;
+            for (int i = 0; i < inv.Count; i++) h ^= inv[i].Key.GetHashCode();
+            return h;
+        }
+
+        private void SendGradedDigest(int connId, List<Util.GradingInterop.GradedEntry> inv)
+        {
+            try { Send(connId, MsgType.GradedDigest, bw => WriteGradedDigest(bw, inv)); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("graded digest: " + e.Message); }
+        }
+
+        /// <summary>ONE writer for both directions. The wire speaks the host's ids and only a
+        /// client translates (see Msg's enum-helper block), so a client's WriteExpansion maps
+        /// local -&gt; host and the host's is the identity; on the way back the host writes raw and
+        /// the client's ReadExpansion maps host -&gt; local. Border stays raw exactly as
+        /// Msg.WriteCard leaves it - ECardBorderType is not an enum EPL mints ids into.</summary>
+        private static void WriteGradedDigest(BinaryWriter bw, List<Util.GradingInterop.GradedEntry> inv)
+        {
+            int cnt = Mathf.Min(inv.Count, ushort.MaxValue);
+            bw.Write((ushort)cnt);
+            for (int i = 0; i < cnt; i++)
+            {
+                var e = inv[i];
+                Msg.WriteExpansion(bw, e.Expansion);
+                Msg.WriteMonsterType(bw, e.Monster);
+                bw.Write((int)e.Border);
+                bw.Write(e.IsFoil);
+                bw.Write(e.IsDestiny);
+                bw.Write(e.Encoded); // plain int: an encoded grade is in no id space
+            }
+        }
+
+        private static List<Util.GradingInterop.GradedEntry> ReadGradedDigest(BinaryReader br)
+        {
+            int n = br.ReadUInt16();
+            var list = new List<Util.GradingInterop.GradedEntry>(n);
+            for (int i = 0; i < n; i++)
+            {
+                list.Add(new Util.GradingInterop.GradedEntry
+                {
+                    Expansion = Msg.ReadExpansion(br),
+                    Monster = Msg.ReadMonsterType(br),
+                    Border = (ECardBorderType)br.ReadInt32(),
+                    IsFoil = br.ReadBoolean(),
+                    IsDestiny = br.ReadBoolean(),
+                    Encoded = br.ReadInt32(),
+                });
+            }
+            return list;
+        }
+
+        private static string GradedDesc(Util.GradingInterop.GradedEntry e)
+        {
+            int company, cert;
+            Util.GradingInterop.DecodeCert(e.Encoded, out company, out cert);
+            string s = CardIdent(e.ToCard()) + " grade " + Util.GradingInterop.Actual(e.Encoded);
+            if (cert > 0) s += " (cert " + cert + ")";
+            if (Util.GradingInterop.CheatFlagged(e.Encoded)) s += " [FAKE-flagged]";
+            return s;
+        }
+
+        /// <summary>Same CARD, ignoring the grade - every field that feeds
+        /// CPlayerData.GetCardSaveIndex (monster, border, foil) plus expansion and isDestiny.
+        /// Border and foil are in here on purpose: two border variants of one monster are two
+        /// different save slots, so calling them "the same card" would file a cert clash as a
+        /// harmless re-encoding.</summary>
+        private static bool SameCard(Util.GradingInterop.GradedEntry a, Util.GradingInterop.GradedEntry b)
+        {
+            return a.Expansion == b.Expansion && a.Monster == b.Monster && a.Border == b.Border
+                && a.IsFoil == b.IsFoil && a.IsDestiny == b.IsDestiny;
+        }
+
+        /// <summary>Set difference between the peer's graded-cert union and ours. Report only -
+        /// it never adds, removes or rewrites a card. <paramref name="isHost"/> owns the two
+        /// things only a host may do: toast the sender, and answer a divergent digest with our
+        /// own so the guest can see ITS one-sided half (the guest must never answer back, or the
+        /// two would ping-pong digests forever).</summary>
+        private void CompareGradedDigests(BinaryReader br, int connId, bool isHost)
+        {
+            var theirs = ReadGradedDigest(br);
+            var mine = Util.GradingInterop.BuildGradedCertInventory();
+
+            var mineKeys = new HashSet<string>();
+            var mineByCert = new Dictionary<long, Util.GradingInterop.GradedEntry>();
+            for (int i = 0; i < mine.Count; i++)
+            {
+                mineKeys.Add(mine[i].Key);
+                long ck = Util.GradingInterop.CertKey(mine[i].Encoded);
+                if (ck != 0L && !mineByCert.ContainsKey(ck)) mineByCert[ck] = mine[i];
+            }
+
+            string who = PeerNames.TryGetValue(connId, out var nm) ? nm : (isHost ? "the joiner" : "the host");
+
+            var peerOnly = new List<Util.GradingInterop.GradedEntry>();
+            var peerExamples = new List<string>();
+            var collisions = new List<string>();
+            var reEncodings = new List<string>();
+            // Certs the two PCs agree on the CARD for but disagree on the ENCODING of. Both
+            // halves are excluded from the one-sided counts below - they are ONE card in two
+            // states, and printing them as "only here" plus "only on theirs" is what made the
+            // field report read as two unrelated missing cards.
+            var reEncodedCerts = new HashSet<long>();
+            var theirKeys = new HashSet<string>();
+            int peerOnlyTotal = 0, peerOnlyNoContent = 0, collisionTotal = 0;
+            int reEncodedTotal = 0, peerOnlyCertHeld = 0;
+            for (int i = 0; i < theirs.Count; i++)
+            {
+                var e = theirs[i];
+                theirKeys.Add(e.Key);
+
+                // Does a card carrying THIS cert already live somewhere on this PC? Decided once,
+                // up front, because it gates both the report category and adopt candidacy.
+                long theirCk = Util.GradingInterop.CertKey(e.Encoded);
+                Util.GradingInterop.GradedEntry m = default(Util.GradingInterop.GradedEntry);
+                bool certHeldHere = theirCk != 0L && mineByCert.TryGetValue(theirCk, out m);
+                bool sameCard = certHeldHere && SameCard(m, e);
+                // Same cert, same card, DIFFERENT encoding - the field symptom (host 1380002639
+                // vs wire 380002639: identical company/grade/cert, one side carrying GO's +1e9
+                // FAKE flag). Its own category: nothing is missing, GO's duplicate-cert sweep has
+                // already fired on one side, and there is no add that repairs it.
+                bool reEncoded = sameCard && m.Encoded != e.Encoded;
+                if (reEncoded)
+                {
+                    reEncodedTotal++;
+                    reEncodedCerts.Add(theirCk);
+                    if (reEncodings.Count < 8)
+                        reEncodings.Add($"{GradedDesc(m)} here vs {GradedDesc(e)} on {who}");
+                }
+
+                if (!mineKeys.Contains(e.Key) && !reEncoded)
+                {
+                    peerOnlyTotal++;
+                    if (peerExamples.Count < 8) peerExamples.Add(GradedDesc(e));
+                    // Only cards this install could actually PLACE, AND whose cert this PC does
+                    // not already hold, become adopt candidates - so the button's count is the
+                    // number it will really add. A card from a content pack this PC does not
+                    // have still belongs in the REPORT (that difference is real and is worth
+                    // naming) but adopting it is impossible - GetCardSaveIndex would mis-index
+                    // it into save slot 0 or throw. A card whose cert is already held here is
+                    // refused by GradedAdopt for the reason spelled out on that guard, so
+                    // offering it would promise an add that never happens.
+                    if (certHeldHere) peerOnlyCertHeld++;
+                    else if (CardSetInstalledHere(e.ToCard())) peerOnly.Add(e);
+                    else peerOnlyNoContent++;
+                }
+
+                // CERT COLLISION - a separate category on purpose, and the one that silently
+                // turns real cards into fakes. Certs are only unique while both GO save stores
+                // agree; a role swap, or a session where the sidecar did not apply, leaves two
+                // machines issuing the same serial. Merging those two cards onto one PC is what
+                // GO's duplicate-cert sweep flags FAKE, so this is reported and NEVER repaired.
+                if (certHeldHere && !sameCard)
+                {
+                    collisionTotal++;
+                    int company, cert;
+                    Util.GradingInterop.DecodeCert(e.Encoded, out company, out cert);
+                    if (collisions.Count < 8)
+                        collisions.Add($"cert {cert} is {CardIdent(m.ToCard())} here and {CardIdent(e.ToCard())} on {who}");
+                }
+            }
+
+            int oursOnly = 0;
+            var ourExamples = new List<string>();
+            for (int i = 0; i < mine.Count; i++)
+            {
+                if (theirKeys.Contains(mine[i].Key)) continue;
+                // the other half of a re-encoding pair - already reported as its own category
+                if (reEncodedCerts.Contains(Util.GradingInterop.CertKey(mine[i].Encoded))) continue;
+                oursOnly++;
+                if (ourExamples.Count < 8) ourExamples.Add(GradedDesc(mine[i]));
+            }
+
+            if (peerOnly.Count > 0) _gradedPeerOnly[connId] = peerOnly;
+            else _gradedPeerOnly.Remove(connId);
+            RebuildGradedAdoptOffers();
+
+            if (oursOnly == 0 && peerOnlyTotal == 0 && collisionTotal == 0 && reEncodedTotal == 0)
+            {
+                CoopPlugin.Log.LogInfo($"graded album check: identical ({mine.Count} graded cards)");
+                // Same retraction as the catalog check: a digest can be taken while a card is
+                // mid-flight between hand and album, so the recheck must also withdraw the cry.
+                bool wasWarned = _gradedWarnedConns.Remove(connId);
+                if (wasWarned && isHost)
+                {
+                    const string clear = "graded albums match now - the earlier difference is gone";
+                    RegisterLine = clear;
+                    RegisterLineTimer = 8f;
+                    Send(connId, MsgType.Toast, bw => bw.Write(clear));
+                }
+                return;
+            }
+
+            string summary = $"heads-up: graded albums differ ({oursOnly} only here, {peerOnlyTotal} only on {who}) - nothing was changed"
+                + (peerOnly.Count > 0 ? "; the co-op panel can adopt the " + peerOnly.Count + " you're missing" : "")
+                + (peerOnlyNoContent > 0 ? $" ({peerOnlyNoContent} of them are from content packs this PC doesn't have)" : "")
+                + (peerOnlyCertHeld > 0 ? $" ({peerOnlyCertHeld} can't be adopted - this PC already holds those certificate numbers)" : "")
+                + (reEncodedTotal > 0 ? $"; {reEncodedTotal} more are the SAME card with a different grade encoding" : "");
+            CoopPlugin.Log.LogWarning("graded album check: " + summary
+                + (ourExamples.Count > 0 ? " | only here e.g.: " + string.Join(" / ", ourExamples.ToArray()) : "")
+                + (peerExamples.Count > 0 ? $" | only on {who} e.g.: " + string.Join(" / ", peerExamples.ToArray()) : ""));
+            if (reEncodedTotal > 0)
+                CoopPlugin.Log.LogWarning($"graded album check: RE-ENCODED - {reEncodedTotal} cert(s) sit on the SAME card on both PCs but carry a DIFFERENT encoded grade. "
+                    + "This is NOT a missing card and adopting it would not repair it: the two rows are one card in two states, and the usual cause is Grading Overhaul's "
+                    + "duplicate-cert sweep having already fired on one side and rewritten that row to its FAKE encoding (+1,000,000,000 - e.g. 1380002639 against a clean 380002639). "
+                    + "Adding the clean twin here would only make GO flag BOTH, so these are reported and never offered for adoption. | " + string.Join(" / ", reEncodings.ToArray()));
+            if (collisionTotal > 0)
+                CoopPlugin.Log.LogWarning($"graded album check: CERT COLLISION - {collisionTotal} cert(s) exist on BOTH PCs bound to DIFFERENT cards. "
+                    + "This is NOT a missing card and there is NO automated repair: bringing both copies onto one PC is exactly what makes Grading Overhaul flag both of them FAKE. "
+                    + "The two save stores have drifted apart and one side's certs need re-issuing by hand. | " + string.Join(" / ", collisions.ToArray()));
+            _gradedWarnedConns.Add(connId);
+
+            if (isHost)
+            {
+                RegisterLine = summary;
+                RegisterLineTimer = 10f;
+                // Written from the GUEST's point of view, not reused from the host's summary:
+                // "only here" on the host means "only on yours" to the reader of this toast, and
+                // a heads-up that says the opposite of what the player sees is worse than none.
+                string toast = $"heads-up: your graded albums differ ({peerOnlyTotal} graded cards only on yours, {oursOnly} only on the host's) - nothing was changed"
+                    + (oursOnly > 0 ? "; open the co-op panel to adopt the ones you're missing" : "")
+                    + (collisionTotal > 0 ? " - and some certificate numbers clash, see the log" : "")
+                    + (reEncodedTotal > 0 ? $" - and {reEncodedTotal} card(s) carry a different grade encoding on each PC, see the log" : "");
+                Send(connId, MsgType.Toast, bw => bw.Write(toast));
+                // Send OUR digest back so the guest can see the half of the difference that is on
+                // ITS side, and offer the same adopt button. Same writer, opposite direction.
+                SendGradedDigest(connId, mine);
+            }
+        }
+
+        /// <summary>Counts only the ADOPTABLE entries, never the list length: GradedAdopt leaves
+        /// the ones it refused in <see cref="_gradedPeerOnly"/> (marked) so the difference is
+        /// still reportable, and a peer whose whole diff turned out to be unrepairable must show
+        /// NO button at all rather than one that promises an add and then refuses every row.</summary>
+        private void RebuildGradedAdoptOffers()
+        {
+            GradedAdoptOffers.Clear();
+            foreach (var kv in _gradedPeerOnly)
+            {
+                if (kv.Value == null || kv.Value.Count == 0) continue;
+                int adoptable = 0;
+                for (int i = 0; i < kv.Value.Count; i++) if (!kv.Value[i].Refused) adoptable++;
+                if (adoptable == 0) continue;
+                string who = PeerNames.TryGetValue(kv.Key, out var nm) ? nm
+                    : (Role == CoopRole.Host ? "the joiner" : "the host");
+                GradedAdoptOffers.Add(new GradedAdoptOffer { ConnId = kv.Key, Who = who, Count = adoptable });
+            }
+        }
+
+        /// <summary>The F2 button. ONE WAY, ADD ONLY, NEVER AUTOMATIC: it adds the graded cards
+        /// the peer reported and we do not have, and it removes nothing, ever.
+        ///
+        /// THE LOAD-BEARING GUARD IS THE CERT ONE, AND IT REFUSES ON CERT PRESENCE ALONE.
+        /// Grading Overhaul's duplicate-cert sweep (AntiCheat_AddCard_Patch, decompiled-grading
+        /// :8534-8573) matches candidates on (company, cert) and NOTHING ELSE - it never compares
+        /// card identity - and it reaches the comparison through Helper.DecodeGradeFull, which
+        /// STRIPS the +1,000,000,000 FAKE flag before decoding (:15953). Two consequences, both
+        /// of which the old "cert on a DIFFERENT card" test walked straight into:
+        ///  - a FAKE-flagged local twin of the very same card decodes to the very same
+        ///    (company, cert), so it is already in our cert map and GO already counts it;
+        ///  - adopting past it calls AddCard, the sweep sees two rows on one cert, and it rewrites
+        ///    BOTH to the FAKE encoding.
+        /// The old guard waved that same-card twin through because the expansion/monster matched.
+        /// GO then mutated the freshly adopted copy, mineKeys had recorded the CLEAN key, so the
+        /// next digest still reported the card as missing and every press appended another FAKE
+        /// row. Hence: if the cert exists here at all, in any card, in any encoding, refuse.
+        ///
+        /// The rest of the path is the one ApplyCardDelta already uses for a received graded card:
+        /// Remember (burns + binds the cert so GO's anti-cheat leaves it alone), then AddCard.
+        /// ApplyingRemoteCards is held over the loop so our own AddCard postfix does not forward
+        /// the repair back to the peer as a fresh card.</summary>
+        public void GradedAdopt(int connId)
+        {
+            if (!_gradedPeerOnly.TryGetValue(connId, out var wanted) || wanted == null || wanted.Count == 0) return;
+            // Without GO there is no cert to burn or bind, so every added card would land on GO's
+            // absent anti-cheat as an unvouched encoded grade the moment the peer installs it -
+            // and the digest that produced this list is itself empty-by-construction here. Say so
+            // rather than adding cards nothing on this PC can account for.
+            if (!Util.GradingInterop.Present)
+            {
+                RegisterLine = "Grading Overhaul isn't loaded here - graded cards can't be adopted";
+                RegisterLineTimer = 8f;
+                CoopPlugin.Log.LogWarning("graded adopt: refused - Grading Overhaul is not present on this PC, so a received cert cannot be burned or bound");
+                return;
+            }
+            if (!InGameLevel())
+            {
+                RegisterLine = "load into the shop first, then adopt";
+                RegisterLineTimer = 6f;
+                return;
+            }
+
+            // Rebuilt AT PRESS TIME, never reused from the digest-time snapshot. Minutes can pass
+            // between the digest and the click, and this union is the only thing standing between
+            // the peer's list and a duplicate AddCard - a stale one re-offers cards that have
+            // since arrived by any other route (delta sync, a grading job maturing, a box opened).
+            var mine = Util.GradingInterop.BuildGradedCertInventory();
+            var mineKeys = new HashSet<string>();
+            var mineByCert = new Dictionary<long, Util.GradingInterop.GradedEntry>();
+            for (int i = 0; i < mine.Count; i++)
+            {
+                mineKeys.Add(mine[i].Key);
+                long ck0 = Util.GradingInterop.CertKey(mine[i].Encoded);
+                if (ck0 != 0L && !mineByCert.ContainsKey(ck0)) mineByCert[ck0] = mine[i];
+            }
+
+            int added = 0, alreadyHere = 0, certClash = 0, noContent = 0;
+            // Refused candidates are KEPT (marked) so the difference stays visible in the report
+            // instead of vanishing with the button; RebuildGradedAdoptOffers counts only the
+            // unmarked ones, so a peer whose whole diff is unrepairable shows no button at all.
+            var keep = new List<Util.GradingInterop.GradedEntry>();
+            Patches.GamePatches.ApplyingRemoteCards = true;
+            try
+            {
+                for (int i = 0; i < wanted.Count; i++)
+                {
+                    var e = wanted[i];
+                    e.Refused = false;
+                    if (mineKeys.Contains(e.Key)) { alreadyHere++; continue; } // arrived since the digest
+                    var card = e.ToCard();
+                    if (!CardSetInstalledHere(card))
+                    {
+                        noContent++;
+                        e.Refused = true; keep.Add(e);
+                        CoopPlugin.Log.LogWarning($"graded adopt: {GradedDesc(e)} is from a card set you don't have installed - skipped");
+                        continue;
+                    }
+                    long ck = Util.GradingInterop.CertKey(e.Encoded);
+                    if (ck != 0L && mineByCert.TryGetValue(ck, out var clash))
+                    {
+                        certClash++;
+                        e.Refused = true; keep.Add(e);
+                        // Two genuinely different faults, so two distinct wordings - reading
+                        // "already exists on a different card" under a same-card FAKE twin is
+                        // what sent the last investigation looking for a card that was never
+                        // there. SameCard compares the full save-index identity, not just the
+                        // monster, so a border/foil variant still reads as the collision it is.
+                        if (!SameCard(clash, e))
+                            CoopPlugin.Log.LogWarning($"graded adopt: REFUSED {GradedDesc(e)} - that certificate number is already on this PC bound to a DIFFERENT card, {GradedDesc(clash)}. "
+                                + "Adding it would make Grading Overhaul flag BOTH cards FAKE, so it is left alone.");
+                        else
+                            CoopPlugin.Log.LogWarning($"graded adopt: REFUSED {GradedDesc(e)} - you already hold that cert; the local copy is FAKE-flagged (or identical): {GradedDesc(clash)}. "
+                                + "Grading Overhaul's duplicate-cert sweep matches on (company, cert) alone and decodes past the FAKE flag, so adopting would make it flag both.");
+                        continue;
+                    }
+                    Util.GradingInterop.Remember(card);
+                    CPlayerData.AddCard(card, 1);
+                    added++;
+                    mineKeys.Add(e.Key);
+                    if (ck != 0L && !mineByCert.ContainsKey(ck)) mineByCert[ck] = e;
+                }
+            }
+            catch (Exception ex) { CoopPlugin.Log.LogWarning("graded adopt: " + ex.Message); }
+            finally { Patches.GamePatches.ApplyingRemoteCards = false; }
+
+            _binderRefreshPending = true;
+            if (keep.Count > 0) _gradedPeerOnly[connId] = keep;
+            else _gradedPeerOnly.Remove(connId);
+            RebuildGradedAdoptOffers();
+            _lastGradedHash = -1; // our album changed - re-digest on the next client tick
+
+            string line = $"adopted {added} graded card(s)"
+                + (alreadyHere > 0 ? $", {alreadyHere} already here" : "")
+                + (certClash > 0 ? $", {certClash} refused (cert already on this PC - see the log)" : "")
+                + (noContent > 0 ? $", {noContent} from missing content packs" : "");
+            // Zero adoptable candidates remain for this peer by construction - every entry that
+            // survived into `keep` was marked Refused - so the local half of the divergence is as
+            // repaired as it will ever get. Clear the warned state HERE, both halves of it: the
+            // on-screen line was just replaced by the adopt summary above, and this drops the
+            // "we already cried wolf about this peer" latch. Left set, that latch strands
+            // CompareGradedDigests' retraction, which only fires on a wasWarned -> albums-match
+            // transition. If what REMAINS is one-sided the other way (cards only here, which an
+            // add-only repair can never touch) or simply unrepairable (refused certs), the digests
+            // never match again, the toast is never reached, and the latch sits true for the rest
+            // of the session with nothing left to retract.
+            _gradedWarnedConns.Remove(connId);
+        }
+
+        /// <summary>"Did this file's CONTENT change?" as a cheap comparable string: length plus an
+        /// FNV-1a-64 over the bytes. Absent files stamp as "-" so created-from-nothing reads as a
+        /// change too. Errs to "?" on any IO fault, which compares unequal to itself and so at
+        /// worst logs one extra notice.
+        ///
+        /// CONTENT, not metadata, and that is the whole point of the function. The obvious
+        /// (length, LastWriteTimeUtc) stamp made the Grading Overhaul cert-store warning fire on
+        /// EVERY join, because SidecarTransfer always rewrites the file whether or not the host's
+        /// copy differs - so the mtime always advances and the stamp always changes. A warning
+        /// that severe ("graded cards in this slot may now be flagged FAKE") has to mean something
+        /// when it appears; one that cries on every single join is one players learn to scroll
+        /// past, which is worse than not having it. Files here are a few KB of JSON, so hashing
+        /// them twice per join costs nothing worth measuring.</summary>
+        private static string FileStamp(string path)
+        {
+            try
+            {
+                if (!File.Exists(path)) return "-";
+                var bytes = File.ReadAllBytes(path);
+                unchecked
+                {
+                    ulong h = 14695981039346656037UL;
+                    for (int i = 0; i < bytes.Length; i++) { h ^= bytes[i]; h *= 1099511628211UL; }
+                    return bytes.Length + "#" + h.ToString("x16");
+                }
+            }
+            catch { return "?"; }
+        }
+
         private void LogCatalogCandidates(string name)
         {
             try
@@ -3116,6 +3672,14 @@ namespace CardShopCoop
             // Same reasoning for the per-expansion shown-monster membership sets: they describe
             // THIS install's content as it stood during the dead session.
             ClearCardSetCache();
+            // The graded pairing hints and the graded diff die with the session too - they
+            // describe the DEAD session's peer, and the adopt offers must not survive it.
+            ClearGradedSkipMemory();
+            _gradedSent = false;
+            _lastGradedHash = -1;
+            _gradedPeerOnly.Clear();
+            _gradedWarnedConns.Clear();
+            GradedAdoptOffers.Clear();
             // The PriceList swap-buffer pair, for the same reason and in the same breath: both
             // hold LOCAL item ids from the DEAD session's translation. Left behind, _clientPriced
             // is read by the next session's clear pass ("the host cleared everything not in this
@@ -4537,6 +5101,22 @@ namespace CardShopCoop
                     _bundleBuf = null;
                     _worldRequested = true;
                     StatusLine = "World received - loading...";
+                    // GRADING OVERHAUL'S CERT STORE IS IN THAT BUNDLE, and its replacement is the
+                    // single most consequential thing the sidecar does that nobody can see. GO
+                    // keeps burned serials and cert->card bindings in
+                    // <persistentDataPath>/Grading - Overhaul/GradingOverhaul_<slot>.json
+                    // (decompiled-grading GetSaveFilePath/GetSaveDataDirectory :482-499), which
+                    // matches the sidecar's slot pattern, so joining someone REPLACES it with
+                    // theirs. GO then re-scans certs on every save load and rewrites any row it
+                    // cannot vouch for to its FAKE encoding - which from this mod's side of the
+                    // fence looks like graded cards silently vanishing. Stamped before and after
+                    // rather than logged from inside ApplyBundle, which stays a dumb file copier -
+                    // and stamped by CONTENT, because ApplyBundle rewrites this file on every join
+                    // regardless of whether the host's copy differs, so any mtime-based test warns
+                    // every single time and means nothing (see FileStamp).
+                    string goStore = Path.Combine(Path.Combine(Application.persistentDataPath, "Grading - Overhaul"),
+                        "GradingOverhaul_" + SaveTransfer.CoopSlot + ".json");
+                    string goBefore = FileStamp(goStore);
                     try
                     {
                         if (bundle.Length > 0) bundle = Msg.Gunzip(bundle);
@@ -4546,6 +5126,11 @@ namespace CardShopCoop
                     {
                         CoopPlugin.Log.LogWarning("Sidecar apply failed (continuing): " + e.Message);
                     }
+                    if (FileStamp(goStore) != goBefore)
+                        CoopPlugin.Log.LogWarning("Grading Overhaul cert store replaced by the host's copy for the borrowed world: "
+                            + goStore + " - your own SOLO save slots are untouched, but graded cards in THIS co-op slot are now judged "
+                            + "against the host's burned serials and cert bindings, and any this PC issued itself can be flagged FAKE on the next load. "
+                            + "The previous file was kept once as .coopbak beside it.");
                     // the game's world-(re)load teardown (LoadInteractableObjectData ->
                     // RestockManager.DestroyAllObject) destroys every existing box via
                     // OnDestroyed - if a world was live (rejoin, or solo save loaded
@@ -5153,6 +5738,18 @@ namespace CardShopCoop
                     if (Role != CoopRole.Host || !InGameLevel()) break;
                     using (var br = Msg.Reader(msg.Payload))
                         CompareCatalogs(br, msg.ConnId);
+                    break;
+                }
+                case MsgType.GradedDigest:
+                {
+                    // BOTH roles: the host compares a guest's digest, and a guest compares the
+                    // one the host sends back when it found a difference. On the client the peer
+                    // is always the host, so the diff is filed under conn 1 - the same id the
+                    // client sends to - rather than whatever the transport labelled the frame.
+                    if (Role == CoopRole.None || !InGameLevel()) break;
+                    bool amHost = Role == CoopRole.Host;
+                    using (var br = Msg.Reader(msg.Payload))
+                        CompareGradedDigests(br, amHost ? msg.ConnId : 1, amHost);
                     break;
                 }
                 case MsgType.BoxRemoved:

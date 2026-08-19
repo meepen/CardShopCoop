@@ -92,6 +92,12 @@ namespace CardShopCoop.Sync
             AccessTools.Field(typeof(InteractableAutoCleanser), "m_IsSprayOnCooldown");
         private static readonly FieldInfo FiClTimer =
             AccessTools.Field(typeof(InteractableAutoCleanser), "m_Timer");
+        // the cleanser is the only container whose count is stored independently of its
+        // list (every other one derives from m_StoredItemList.Count), and vanilla indexes
+        // the list with it - so the reconcile has to be able to force the two back into
+        // agreement rather than trust either one. See ApplyCleanserState.
+        private static readonly FieldInfo FiClItemAmount =
+            AccessTools.Field(typeof(InteractableAutoCleanser), "m_ItemAmount");
 
         /// <summary>Client's copy of a pack opener's host-side truth. Kept OUTSIDE the
         /// game object because the machine's own fields must stay inert (see class doc).</summary>
@@ -112,6 +118,14 @@ namespace CardShopCoop.Sync
         private readonly List<int> _dirty = new List<int>();                               // host
         private readonly Dictionary<int, double> _touched = new Dictionary<int, double>(); // client
         private readonly Dictionary<int, PackMirror> _packMirrors = new Dictionary<int, PackMirror>();
+        /// <summary>Client: cleanser reconcile-catch throttle, keyed PER CONTAINER INDEX. A single
+        /// shared timestamp made the machines compete for one 10s window - the first cleanser to
+        /// fault printed, and every other cleanser faulting in that window was silenced, so a shop
+        /// with several of them reported one machine's symptom and hid the rest. That is the wrong
+        /// thing to economise on: the point of the throttle is to stop ONE machine repeating
+        /// itself, not to cap how many distinct machines can be heard from. Small by construction -
+        /// one entry per cleanser that has actually faulted, never per apply.</summary>
+        private readonly Dictionary<int, double> _lastCleanserWarn = new Dictionary<int, double>();
 
         // hash delegates cached once: a fresh closure per kind per tick would be a
         // steady GC drip for the whole session (same reasoning as CoopCore's stages)
@@ -169,6 +183,9 @@ namespace CardShopCoop.Sync
             _dirty.Clear();
             _touched.Clear();
             _packMirrors.Clear();
+            // container indices are re-derived per world, so a kept timestamp would throttle a
+            // DIFFERENT machine in the next session
+            _lastCleanserWarn.Clear();
         }
 
         public void ForceResend()
@@ -614,7 +631,7 @@ namespace CardShopCoop.Sync
                             for (int i = 0; i < cnt; i++) fills.Add(br.ReadSingle());
                             var c = Get<InteractableAutoCleanser>(kind, idx);
                             if (c == null || IsTouched(kind, idx)) break;
-                            ApplyCleanserState(c, (flags & 1) != 0, (flags & 2) != 0, fills);
+                            ApplyCleanserState(idx, c, (flags & 1) != 0, (flags & 2) != 0, fills);
                             break;
                         }
                         default:
@@ -702,37 +719,65 @@ namespace CardShopCoop.Sync
             finally { ApplyingRemote = false; }
         }
 
-        private void ApplyCleanserState(InteractableAutoCleanser c, bool on, bool needRefill,
+        private void ApplyCleanserState(int idx, InteractableAutoCleanser c, bool on, bool needRefill,
             List<float> fills)
         {
             ApplyingRemote = true;
             try
             {
-                // reconcile the visible spray cans through the vanilla add/remove so
-                // m_ItemAmount and the slot layout stay coherent; guards bound the loops
-                // because RemoveItem itself can shed additional empty cans
+                // Reconcile the visible spray cans through the vanilla add/remove so the
+                // slot layout stays coherent - but drive the loops off the REAL stored list,
+                // never off GetItemCount()/GetLastItem(). Vanilla keeps m_ItemAmount as a
+                // second, independent count and indexes the list with it
+                // (GetLastItem = m_StoredItemList[m_ItemAmount - 1], decompiled :357, behind
+                // a guard that only tests the list's length), so any drift between the two
+                // throws IndexOutOfRange straight out of this handler. Reading the list is
+                // bounds-safe by construction, and the forced write at the bottom converges
+                // the counter instead of merely dodging it.
+                var stored = c.GetStoredItemList();
+                // guards bound the loops because a vanilla remove can shed additional cans
                 int guard = 12;
-                while (c.GetItemCount() > fills.Count && guard-- > 0)
+                while ((stored?.Count ?? 0) > fills.Count && guard-- > 0)
                 {
-                    var last = c.GetLastItem();
-                    if (last == null) break;
+                    // same element GetLastItem WOULD return once the two counts agree
+                    var last = stored[stored.Count - 1];
+                    if (last == null) { stored.RemoveAt(stored.Count - 1); continue; }
                     c.RemoveItem(last);
                     try { ItemSpawnManager.DisableItem(last); } catch { }
                 }
                 guard = 12;
-                while (c.GetItemCount() < fills.Count && guard-- > 0 && c.HasEnoughSlot())
+                // keep HasEnoughSlot(): it is the m_PosList bound AddItem itself indexes with
+                while ((stored?.Count ?? 0) < fills.Count && guard-- > 0 && c.HasEnoughSlot())
                 {
                     var item = SpawnItem(EItemType.Deodorant, c.m_PosList[0], 1f);
                     if (item == null) break;
                     c.AddItem(item, addToFront: true);
                 }
-                var stored = c.GetStoredItemList();
                 if (stored != null)
                     for (int i = 0; i < stored.Count && i < fills.Count; i++)
                         if (stored[i] != null) stored[i].SetContentFill(fills[i]);
-                // flags last: AddItem flips m_IsNeedRefill on its own
+                // Force the counter into agreement with what the machine physically holds.
+                // This is what makes the reconcile idempotent, and it is the only thing that
+                // repairs a guest ALREADY diverged mid-session (LoadData never re-runs, so
+                // the join-time fix in CleanserAddItemPrefix only helps from the next join).
+                FiClItemAmount?.SetValue(c, stored?.Count ?? 0);
+                // flags last: AddItem/RemoveItem flip m_IsNeedRefill on their own
                 FiClTurnedOn?.SetValue(c, on);
                 FiClNeedRefill?.SetValue(c, needRefill);
+            }
+            catch (Exception e)
+            {
+                // never let a cleanser reconcile escape into the record loop's catch: that
+                // one returns and strands the rest of the batch. Re-force the counter so the
+                // next apply starts from a coherent machine even if this one bailed midway.
+                try { FiClItemAmount?.SetValue(c, c.GetStoredItemList()?.Count ?? 0); } catch { }
+                double now = Time.realtimeSinceStartupAsDouble;
+                double last;
+                if (!_lastCleanserWarn.TryGetValue(idx, out last) || now - last > 10.0)
+                {
+                    _lastCleanserWarn[idx] = now;
+                    CoopPlugin.Log.LogWarning($"ContainerSync cleanser {idx} reconcile: " + e.Message);
+                }
             }
             finally { ApplyingRemote = false; }
         }
@@ -842,6 +887,13 @@ namespace CardShopCoop.Sync
                 prefix: new HarmonyMethod(typeof(ContainerSync), nameof(CleanserAddItemPrefix)));
             Try(h, typeof(InteractableAutoCleanser), "TakeItemToHand",
                 prefix: new HarmonyMethod(typeof(ContainerSync), nameof(TakeItemBlockPrefix)));
+
+            // say so loudly rather than silently no-op the null-conditional: without this
+            // field ApplyCleanserState can no longer force the counter back onto the list,
+            // and the join-time drift would return unnoticed on a renamed game build
+            if (FiClItemAmount == null)
+                CoopPlugin.Log.LogWarning(
+                    "Field missing: InteractableAutoCleanser.m_ItemAmount - cleanser can count cannot self-heal");
         }
 
         public static void StorageContentPostfix(InteractableCardStorageShelf __instance)
@@ -993,12 +1045,26 @@ namespace CardShopCoop.Sync
             // same join-LoadData dupe as PackOpenerAddItemPrefix: InteractableAutoCleanser
             // .LoadData calls AddItem once per saved spray can (decompiled ~396). Forwarding
             // each as OpCleanserRefill makes the host spawn extra deodorant cans on every
-            // join/rejoin. Skip the op during the reload; still retire the local item.
-            if (CoopCore.ClientReloading)
-            {
-                try { ItemSpawnManager.DisableItem(item); } catch { }
-                return false;
-            }
+            // join/rejoin, so the reload must not send an op.
+            //
+            // It must NOT suppress vanilla AddItem to do that, though: LoadData ends with an
+            // unconditional `m_ItemAmount = saveData.itemAmount` (decompiled :398) that runs
+            // whether or not the AddItem calls landed. Swallowing them left the guest with
+            // m_ItemAmount = N and m_StoredItemList empty, and vanilla GetLastItem
+            // (decompiled :353-357) guards on the LIST's length but subscripts with the
+            // COUNTER - so every later reconcile shrink threw IndexOutOfRange, permanently,
+            // for the rest of the session. Returning true lets AddItem move both together,
+            // which is exactly what :398 then agrees with. Nothing is forwarded: the op is
+            // written further down, past this early-out. The cans are inert local props -
+            // the cleanser hash is collected host-side only and ApplyCleanserState reconciles
+            // the guest's copy against it.
+            //
+            // Do NOT copy this to PackOpenerAddItemPrefix. That machine's suppression is
+            // load-bearing for a different reason (an empty client m_StoredItemList is what
+            // stops its own Update() rolling packs the host never rolled - see class doc),
+            // and its LoadData derives everything from the list with no counter hard-set, so
+            // it has no equivalent bug to fix.
+            if (CoopCore.ClientReloading) return true;
             var self = Instance;
             if (self == null) return true;
             int idx = self.IndexOf(KindCleanser, __instance);
