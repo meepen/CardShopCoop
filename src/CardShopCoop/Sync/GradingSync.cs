@@ -32,6 +32,32 @@ namespace CardShopCoop.Sync
     /// delete a duplicate copy on every peer that held one). Graded results return via
     /// RestockManager.SpawnPackageBoxCard - a card box the host opens; the resulting AddCard
     /// calls mirror through CardDelta.
+    ///
+    /// THE CERT AUTHORITY RULE - THE HOST IS THE SOLE MINTER OF CERTIFICATES.
+    /// A Grading Overhaul certificate serial is only unique while exactly one machine issues it.
+    /// The guest must NEVER reach a Grading Overhaul code path that calls CertCounter.GetNextCert:
+    /// every serial it holds arrives over the wire and is adopted VERBATIM. The wire already
+    /// carries CardData.cardGrade unmodified in both directions (Net/Msg's card writer, and the
+    /// graded digest in CoopCore), and the receive path is Remember-then-AddCard
+    /// (CoopCore.ApplyCardDelta, and CoopCore.GradedAdopt) - GradingInterop.Remember burns and
+    /// binds the HOST's serial into the guest's store without minting anything.
+    /// Everything that could break that rule is blocked on the guest, and each block is commented
+    /// where it lives:
+    ///  - local submission never enrols locally (SubmitPrefix below, forwarded as a GradingOp),
+    ///    and it is not forwarded at all if Grading Overhaul's own validator refuses it
+    ///    (GoVetoesSubmit - HarmonyX gives GO no veto of its own here, so we have to ask);
+    ///  - local maturation never runs: MatureBlockPrefix below stops the VANILLA path, and a
+    ///    second patch on Grading Overhaul's OWN day-start prefix stops GO's. Patch ORDER cannot
+    ///    do this job - under HarmonyX every prefix runs whatever the others return - and
+    ///    believing otherwise is the hole 1.0.41 shipped with. Read the comment on those two
+    ///    registrations before changing either;
+    ///  - a serial the guest's store has ALREADY bound to a different card is REFUSED rather than
+    ///    rebound (GradingInterop.CertFreeForCard). There is deliberately no automatic re-mint and
+    ///    no silent overwrite: re-minting on the guest is the exact divergence this rule exists to
+    ///    end, and overwriting the binding would make Grading Overhaul flag the RESIDENT card as a
+    ///    fake. Collisions that already exist are reported (CoopCore's CERT COLLISION category) and
+    ///    are genuinely unrepairable in place; the clean reset is a rejoin, which transfers the
+    ///    host's grading store again.
     /// </summary>
     public class GradingSync
     {
@@ -75,6 +101,78 @@ namespace CardShopCoop.Sync
         // lives here, so reading it forwards GO's actual number instead of the vanilla-flat guess.
         private static readonly FieldInfo FiServiceTotalCost =
             AccessTools.Field(typeof(GradedCardSubmitSelectScreen), "m_ServiceTotalCost");
+
+        /// <summary>Grading Overhaul's own submit validator,
+        /// GradingSubmit_CompanyValidation_Patch.Prefix(GradedCardSubmitSelectScreen)
+        /// (decompiled-grading :13032-13036) - a private static in a public static class, so
+        /// reflection-only. Invoked, not reimplemented: it reads
+        /// m_CurrentGradeCardSubmitSet directly, honours GO's own EnableMod switch, and shows GO's
+        /// own error popup, so calling it gives the guest byte-for-byte the refusal a solo player
+        /// would get. See <see cref="GoVetoesSubmit"/> for why we have to call it ourselves.</summary>
+        private static readonly MethodInfo MiGoSubmitVeto = ResolveGoSubmitVeto();
+
+        private static MethodInfo ResolveGoSubmitVeto()
+        {
+            try
+            {
+                var t = Util.ModParity.ResolveType(
+                    "TCGCardShopSimulator.GradingOverhaul.GradingSubmit_CompanyValidation_Patch",
+                    Util.GradingInterop.GradingAssembly);
+                return t == null ? null
+                    : AccessTools.Method(t, "Prefix", new[] { typeof(GradedCardSubmitSelectScreen) });
+            }
+            catch { return null; }
+        }
+
+        /// <summary>One-shot latch for the fail-open notice in <see cref="GoVetoesSubmit"/>.</summary>
+        private static bool _goVetoWarned;
+
+        /// <summary>Did Grading Overhaul just reject this submission? True = do not forward it.
+        ///
+        /// WHY THIS EXISTS AT ALL: under HarmonyX a prefix returning false does not stop any other
+        /// prefix (see the note on ApplyPatches), so GO's validator cannot stop OUR prefix from
+        /// forwarding the op - it can only stop the vanilla method neither of us wants to run. A
+        /// guest without this check ships the host a set GO would have refused, the host enrols it,
+        /// and the cards mature into something the guest's own install considers illegal.
+        ///
+        /// FAILS OPEN, DELIBERATELY. If GO is absent there is nothing to veto; if GO is present but
+        /// the validator cannot be reached (a rename, a refactor), we FORWARD anyway and log it
+        /// once. The alternative - refusing every submission because a reflection lookup missed -
+        /// would break grading for a guest whose install is otherwise fine, and the host still
+        /// applies its own caps. An exception out of GO's validator is treated the same way.
+        ///
+        /// It runs GO's validator a SECOND time (HarmonyX already ran it and discarded the
+        /// answer), which is safe and deliberate: the method only reads the submit set and calls
+        /// GradingSubmitErrorPopup_Patch.ShowCustomError, which just re-shows the same popup with
+        /// the same message (decompiled-grading :15524-15528). The one visible artefact is a
+        /// duplicated "[GradingSubmit] Blocked" line in the log - do not go looking for two
+        /// separate rejections.</summary>
+        private static bool GoVetoesSubmit(GradedCardSubmitSelectScreen screen)
+        {
+            if (!Util.GradingInterop.Present) return false;
+            if (MiGoSubmitVeto == null)
+            {
+                if (!_goVetoWarned)
+                {
+                    _goVetoWarned = true;
+                    CoopPlugin.Log.LogWarning("GradingSync: Grading Overhaul is loaded but its submit validator could not be resolved"
+                        + " (GradingSubmit_CompanyValidation_Patch.Prefix) - submissions are forwarded to the host WITHOUT that check,"
+                        + " so a set Grading Overhaul would have refused (fake, mixed-company or already-regraded cards) can still be enrolled.");
+                }
+                return false;
+            }
+            try { return !(bool)MiGoSubmitVeto.Invoke(null, new object[] { screen }); }
+            catch (Exception e)
+            {
+                if (!_goVetoWarned)
+                {
+                    _goVetoWarned = true;
+                    CoopPlugin.Log.LogWarning("GradingSync: Grading Overhaul's submit validator threw - " + e.Message
+                        + " - forwarding the submission anyway (fail open)");
+                }
+                return false;
+            }
+        }
 
         private float _timer;
         private int _lastHash;
@@ -121,16 +219,18 @@ namespace CardShopCoop.Sync
             // The joiner's submit confirm: intercept BEFORE the fee is charged and the
             // set lands in his never-maturing local list.
             //
-            // Priority.Low is load-bearing, not tidiness. Grading Overhaul puts its own PREFIXES
-            // on this same method: GradingSubmit_CompanyValidation_Patch at default priority
-            // (decompiled-grading Grading Overhaul.decompiled.cs :13032) rejects fake cards,
-            // mixed-company regrades and already-regraded cards, and GradingJobLimitGuard_Submit
-            // at 800 (:13007) enforces the 4-job cap. Our prefix returns FALSE unconditionally on
-            // the client, which skips every prefix Harmony has not run yet - so whichever of us
-            // sorts first decides whether GO's validations happen at all, and today that is
-            // nothing but load order. Sorting ourselves last means GO always gets to veto first:
-            // if it does, we never send the op and the cards stay in the guest's open screen
-            // (closing it refunds them through the vanilla OnCloseScreen -> AddCard path).
+            // Priority.Low IS NOT A VETO, and do not read it as one. Grading Overhaul puts two
+            // PREFIXES on this same method: GradingSubmit_CompanyValidation_Patch at default
+            // priority (decompiled-grading Grading Overhaul.decompiled.cs :13032) rejects fake
+            // cards, mixed-company regrades and already-regraded cards, and
+            // GradingJobLimitGuard_Submit at 800 (:13007) enforces the 4-job cap. Under HarmonyX -
+            // which is what the game ships - EVERY prefix runs regardless of what any other one
+            // returns; a false return only skips the ORIGINAL method (the full mechanism is
+            // written out on the day-start patch below). So sorting ourselves last does NOT let GO
+            // veto first: GO returns false, we still run, and 1.0.41 forwarded a submission GO had
+            // just rejected. The low priority is kept only so GO's error popups are the ones the
+            // player sees last; the veto itself is REPLICATED in ClientSubmit, which asks GO's own
+            // validator before it forwards anything.
             Try(h, typeof(GradedCardSubmitSelectScreen), "OnPressSubmitButton",
                 prefix: new HarmonyMethod(typeof(GradingSync), nameof(SubmitPrefix)) { priority = Priority.Low });
 
@@ -139,8 +239,90 @@ namespace CardShopCoop.Sync
             // that GamePatches lets through per host day would otherwise mature the
             // client's mirrored list - re-rolling grades locally and spawning a phantom
             // result box. Grading matures on host days only.
+            //
+            // THE PRIORITY AND `before` HERE BUY ORDER ONLY - THEY DO NOT SKIP GRADING OVERHAUL.
+            // Read this before touching either: the game ships HarmonyX (BepInEx/core/0Harmony.dll,
+            // HarmonyLib.Internal.Patching.HarmonyManipulator, MonoMod-based), NOT pardeike
+            // Harmony 2.x, and the two do not agree about what a false return means.
+            // HarmonyManipulator.WritePrefixes emits `runOriginal = true`, then calls EVERY prefix
+            // in the sorted list back to back with NO branch between them; a bool-returning prefix
+            // only gets its result folded in with `Ldloc runOriginal; And; Stloc runOriginal`, and
+            // the single `Brfalse` that consumes that local is emitted AFTER the loop and skips
+            // only the ORIGINAL METHOD BODY. There is no per-prefix skip anywhere in that emitter.
+            // So "we return false, therefore GO's prefix never runs" - the claim 1.0.41 and the
+            // first cut of 1.0.42 both shipped - is simply not how this runtime behaves. GO's
+            // CompanyStamp_RestockManager_OnDayStartedPatch.Prefix (decompiled-grading :7977-7980,
+            // [HarmonyPriority(800)]) runs on the guest every host day no matter what we return:
+            // it forces m_MinutePassed=540 on the MIRRORED in-progress list (:7992-7997), finds no
+            // pre-roll (PreRollOnSubmit wrote the HOST's store), falls into GradeJobWithCompany and
+            // MINTS fresh certs from the GUEST's own counter (CertCounter.GetNextCert :8087,
+            // :8099) - permanently advancing NextSerialByCompany and seeding the cert collisions
+            // that have no repair - and it fills _completedJobs, so its [HarmonyPriority(0)]
+            // postfix spawns a phantom package box.
+            //
+            // The registration below is kept because the ORDER half is correct and free
+            // (PriorityComparer sorts descending, PatchSorter matches `before` against a Harmony
+            // OWNER id, and GO's really is "munch.gradingoverhaul" - decompiled-grading :16959),
+            // so if this ever runs on vanilla Harmony we are already in the right slot. It stops
+            // VANILLA maturation, which is its whole job. What stops GO is the patch after it.
             Try(h, typeof(RestockManager), "OnDayStarted",
-                prefix: new HarmonyMethod(typeof(GradingSync), nameof(MatureBlockPrefix)));
+                prefix: new HarmonyMethod(typeof(GradingSync), nameof(MatureBlockPrefix))
+                {
+                    priority = 1000,
+                    before = new[] { "munch.gradingoverhaul" },
+                });
+
+            // THE ACTUAL GRADING OVERHAUL BLOCK: patch GO's OWN prefix method.
+            //
+            // A Harmony patch method is an ordinary static method and the manipulator emits a
+            // plain `call` to it - so from the point of view of a patch ON that method, GO's
+            // prefix BODY is the "original" that HarmonyX's single `__runOriginal` gate skips.
+            // Returning false here therefore really does stop GO's day-start work, which is the
+            // one thing priority could never do. Nothing else about GO is touched: its postfix
+            // still runs, still sees _completedJobs null (that field is only ever assigned inside
+            // the body we skipped, and the postfix nulls it again after every host day it does
+            // handle) and takes its early return at :8205-8208 - no phantom box, no minting, and
+            // the guest's cert counter never moves.
+            //
+            // DEGRADES TO A NO-OP: no Grading Overhaul, a renamed class or a refactored prefix and
+            // this simply does not register - one line in the log, and the vanilla block above is
+            // unaffected.
+            TryPatchGoDayStart(h);
+        }
+
+        /// <summary>Registers <see cref="GoMatureBlockPrefix"/> on Grading Overhaul's own day-start
+        /// prefix. Separate from <see cref="ApplyPatches"/> so the reflection can fail alone and
+        /// loudly - see the comment at the call site for why order-based blocking cannot work
+        /// under HarmonyX.</summary>
+        private static void TryPatchGoDayStart(Harmony h)
+        {
+            try
+            {
+                var t = Util.ModParity.ResolveType(
+                    "TCGCardShopSimulator.GradingOverhaul.CompanyStamp_RestockManager_OnDayStartedPatch",
+                    Util.GradingInterop.GradingAssembly);
+                var m = t == null ? null : AccessTools.Method(t, "Prefix", Type.EmptyTypes);
+                if (m == null)
+                {
+                    // Present separates "GO is not installed" (normal - there is nothing to block)
+                    // from "GO is installed but moved" (a real hole: that guest mints certs again).
+                    if (Util.GradingInterop.Present)
+                        CoopPlugin.Log.LogWarning("GradingSync: Grading Overhaul is loaded but its day-start patch class could not be resolved"
+                            + " (CompanyStamp_RestockManager_OnDayStartedPatch.Prefix) - a JOINER in this session may still mint its own"
+                            + " certificate numbers on every host day, which is what creates the cert collisions that cannot be repaired."
+                            + " Check whether Grading Overhaul has been updated.");
+                    else
+                        CoopPlugin.Log.LogInfo("GradingSync: Grading Overhaul not loaded - no day-start guard needed");
+                    return;
+                }
+                h.Patch(m, prefix: new HarmonyMethod(typeof(GradingSync), nameof(GoMatureBlockPrefix)));
+                CoopPlugin.Log.LogInfo("GradingSync: Grading Overhaul day-start grading is guarded (while joining, the host mints every certificate)");
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("GradingSync: could not guard Grading Overhaul's day-start patch - " + e.Message
+                    + " (vanilla maturation is still blocked; a joiner may still mint certificate numbers)");
+            }
         }
 
         public static bool MatureBlockPrefix()
@@ -148,6 +330,15 @@ namespace CardShopCoop.Sync
             // block guest-side maturation whenever we're a client OR still standing in the
             // host's borrowed world (post-disconnect), same guard as the save-guard; the
             // host owns grading progress and the guest is a pure mirror
+            return CoopCore.Role != CoopRole.Client && !CoopCore.GuestBorrowedWorld;
+        }
+
+        /// <summary>Prefix on GRADING OVERHAUL'S OWN day-start prefix (see TryPatchGoDayStart).
+        /// Same predicate as <see cref="MatureBlockPrefix"/> and deliberately a separate method:
+        /// this one names GO in a stack trace, and the two must stay independently removable.
+        /// Side-effect-free, so running it on the host costs a comparison.</summary>
+        public static bool GoMatureBlockPrefix()
+        {
             return CoopCore.Role != CoopRole.Client && !CoopCore.GuestBorrowedWorld;
         }
 
@@ -189,6 +380,21 @@ namespace CardShopCoop.Sync
             if (picked.Count == 0)
             {
                 NotEnoughResourceTextPopup.ShowText(ENotEnoughResourceText.NoCardSelected);
+                return;
+            }
+
+            // GRADING OVERHAUL'S VETO, ASKED FOR EXPLICITLY. HarmonyX ran GO's validator already
+            // and threw its answer away (only the vanilla original is gated by a false return), so
+            // this is the only place that answer can still stop us. Refuse exactly as GO would:
+            // return WITHOUT sending the op and WITHOUT resetting the scratch set, so the screen
+            // keeps every card and closing it refunds them through the vanilla OnCloseScreen ->
+            // AddCard path (mirrored by CardDelta) - the same shape as every other abort here. GO
+            // has already put its own error popup on screen explaining which card it objected to.
+            // The vanilla 4-job cap that GO's OTHER submit prefix enforces is checked below, on
+            // the mirrored in-progress list, and is the same limit with the same effect.
+            if (GoVetoesSubmit(screen))
+            {
+                CoopPlugin.Log.LogInfo("GradingSync: submission refused by Grading Overhaul's own validator - not forwarded to the host");
                 return;
             }
 

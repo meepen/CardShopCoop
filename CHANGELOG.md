@@ -5,6 +5,25 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.42
+**Fixes a bug I introduced in 1.0.41 — the graded-album drift warning was mostly false alarms, and the repair button could make things worse. Thanks cavi for the report that exposed it.** Both players must update.
+
+**The drift warning kept coming back**
+- **Fixed: the album check counting cards that were simply in someone's hand.** A graded card you're holding — just picked up, or just taken out of a returned package — was counted as "in your album" on your PC while your partner's copy had correctly already been removed. So every single graded card either of you touched got reported as drift. The check now only looks at places both games actually share, so cards in motion no longer raise an alarm.
+- **Fixed: the warning never going away once it appeared.** The "all clear" reply was only sent when something *did* differ, so a ten-second hand-hold left a permanent button on screen. Both sides now confirm a match, and the alert clears itself.
+- **Fixed: shelved graded cards drifting depending on when each of you last opened a menu.** The check was reading a snapshot of your shelves that each PC refreshes at different moments; it now reads the live shelves.
+
+**⚠️ If you used the "Adopt" button in 1.0.41**
+- Pressing it while a card was still in someone's hand could add a *second* copy of that card — and when the holder put the original away, Grading Overhaul saw the same certificate twice and marked both as fake. That window is closed in 1.0.42, but if you have graded cards showing as fake that shouldn't be, that's where they came from. Sorry — that one's on me.
+
+**A real one, found while investigating**
+- **Fixed: the joiner's game secretly grading its own cards every in-game day.** Grading Overhaul's day-end grading was running ahead of the mod's block on the joiner, minting its own certificate numbers from the joiner's counter. That's very likely the original source of mismatched certificates between players. The host is now the only machine that issues certificate numbers; the joiner adopts the host's exactly.
+- **Also fixed, and it dates back to 1.0.40:** the joiner could forward a grading submission that Grading Overhaul had already rejected (mixed companies, fake cards, already-regraded). The mod was relying on patch ordering to give GO's checks the final say, and the mod loader this game uses doesn't work that way — every check runs regardless of order, so GO's "no" was being discarded. The joiner's submissions now ask Grading Overhaul directly and stop when it says no, using GO's own rules and its own error message.
+
+**Requested**
+- **New setting: quiet the on-screen drift alert.** The popup and banner can be set to show always, once per session, or never. The log line always prints regardless, so a bug report still has everything in it.
+- Auto-adopt was requested too and is deliberately *not* here: with the false alarms gone, drift stops recurring, so there's nothing to automate — and automating the button would mean pressing it during exactly the moments that caused the duplicate problem above.
+
 ## 1.0.41
 **Graded-card drift: detect it, stop it growing, and offer a real repair — thanks cavi, whose two-sided logs and their own analysis of the remove/re-add pattern cracked a genuinely deep one.** Both players must update.
 

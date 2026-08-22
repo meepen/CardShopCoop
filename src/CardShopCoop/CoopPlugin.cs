@@ -1,4 +1,4 @@
-using BepInEx;
+﻿using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
@@ -7,12 +7,25 @@ using UnityEngine;
 
 namespace CardShopCoop
 {
+    /// <summary>How loudly a graded-album divergence is announced ON SCREEN.
+    /// The LOG is never gated by this - a support log has to be complete whatever the player
+    /// chose, and the whole point of the setting is to quiet the screen without going blind.</summary>
+    public enum GradedAlertMode { Always, OncePerSession, Never }
+
     [BepInPlugin(Guid, Name, Version)]
+    // SOFT dependency on Grading Overhaul: it changes NOTHING when GO is absent, and when GO is
+    // present it guarantees GO is loaded before our Awake. That ordering is load-bearing now that
+    // Sync/GradingSync patches GO's OWN day-start prefix and resolves GO's submit validator at
+    // patch time (see TryPatchGoDayStart) - both are one-shot reflective lookups, so a guest that
+    // happened to sort ahead of GO in the chainloader would silently lose the guard that stops it
+    // minting certificate numbers. Guid copied from GO's own BepInPlugin (decompiled-grading
+    // :16912), which is also the Harmony owner id used in the `before` array over there.
+    [BepInDependency("munch.gradingoverhaul", BepInDependency.DependencyFlags.SoftDependency)]
     public class CoopPlugin : BaseUnityPlugin
     {
         public const string Guid = "com.zwhit.cardshopcoop";
         public const string Name = "CardShopCoop";
-        public const string Version = "1.0.41";
+        public const string Version = "1.0.42";
 
         public static ManualLogSource Log;
 
@@ -31,6 +44,7 @@ namespace CardShopCoop
         public static ConfigEntry<bool> AllowCrossBuildJoin;
         public static ConfigEntry<bool> AutoPortForward;
         public static ConfigEntry<bool> AutoLanPassword;
+        public static ConfigEntry<GradedAlertMode> GradedDriftAlert;
 
         private void Awake()
         {
@@ -72,6 +86,8 @@ namespace CardShopCoop
                 "While you are LAN-hosting, ask your router over UPnP to open the co-op port so a friend outside your house can join with an invite code - and remove that opening again when you stop hosting. Turn it off if you forward the port yourself, or if you would rather nothing touched the router. Either way the invite code still works inside your own house.");
             AutoLanPassword = Config.Bind("Network", "AutoLanPassword", true,
                 "Hosting via LAN generates a random session password. It is baked into the invite code (so a friend using the code notices nothing), shown in the host panel for a friend typing your IP by hand, and checked exactly like the Steam lobby password. Leave this on: the port your router opens for you is a door into your game, and this is the lock on it.");
+            GradedDriftAlert = Config.Bind("Graded", "DriftAlert", GradedAlertMode.Always,
+                "How loudly to announce that your graded albums have drifted apart. THIS CONTROLS THE HOST'S SCREEN. While you are HOSTING it decides both your own on-screen line and the heads-up sent to the joiner. While you are JOINING it does nothing at all: the host's setting alone decides whether you get that heads-up, because the drift is only ever announced from the host's side. Always: announce every check that finds a difference. OncePerSession: say it once per player per session and then stay quiet - including for a later, bigger difference. Never: never put it on screen at all. The log records every check whichever you pick and on both PCs, so a support log stays complete whatever you choose; this only controls the screen, and it never changes what the co-op panel's adopt button offers.");
 
             // PLATFORM LINE FIRST, ABOVE EVERYTHING THAT CAN FAIL. This is the line a Game
             // Pass player (or a support thread) is told to look for, and it is most useful

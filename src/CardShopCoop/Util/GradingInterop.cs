@@ -29,8 +29,10 @@ namespace CardShopCoop.Util
         /// [assembly: AssemblyTitle("Grading Overhaul")] - space and all - while its types live
         /// under TCGCardShopSimulator.GradingOverhaul (verified in the decompiled 3.4.2). It is
         /// only the fast path; ResolveType falls back to the type walk if this is ever wrong,
-        /// so a rename by GO costs a little log noise on Game Pass, never the integration.</summary>
-        private const string GradingAssembly = "Grading Overhaul";
+        /// so a rename by GO costs a little log noise on Game Pass, never the integration.
+        /// PUBLIC because Sync/GradingSync resolves one of GO's own patch classes with it (the
+        /// day-start block); there must be exactly one spelling of this string in the mod.</summary>
+        public const string GradingAssembly = "Grading Overhaul";
 
         // Assembly-qualified bind first, app-domain type walk only if it misses. This is a
         // STATIC INITIALIZER: it runs the first time anything touches GradingInterop, and with
@@ -400,6 +402,8 @@ namespace CardShopCoop.Util
         public static void Remember(CardData card)
         {
             if (card == null || card.cardGrade <= 10 || MiRemember == null) return;
+            // REFUSE rather than paper over: see CertFreeForCard.
+            if (!CertFreeForCard(card)) return;
             try { MiRemember.Invoke(null, new object[] { card, card.cardGrade }); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.Remember: " + e.Message); }
         }
@@ -442,6 +446,107 @@ namespace CardShopCoop.Util
         // public static bool IsCheatFlagged(int) - decompiled-grading :16005 (encoded >= 1e9).
         private static readonly MethodInfo MiIsCheat = THelper == null ? null
             : AccessTools.Method(THelper, "IsCheatFlagged", new[] { typeof(int) });
+
+        // GO's cert store. The class is public but every member below is INTERNAL, so this is
+        // reflection-only even though nothing about it is private.
+        //  - bool HasCertBinding(GradingCompany, int)            - decompiled-grading :644
+        //  - bool IsCertBoundToCard(GradingCompany, int, CardData) - decompiled-grading :600
+        private static readonly Type TSaveMgr =
+            ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingOverhaulSaveManager", GradingAssembly);
+        private static readonly MethodInfo MiHasBinding = (TSaveMgr == null || TCompany == null) ? null
+            : AccessTools.Method(TSaveMgr, "HasCertBinding", new[] { TCompany, typeof(int) });
+        private static readonly MethodInfo MiIsBoundTo = (TSaveMgr == null || TCompany == null) ? null
+            : AccessTools.Method(TSaveMgr, "IsCertBoundToCard", new[] { TCompany, typeof(int), typeof(CardData) });
+
+        /// <summary>THE CERT AUTHORITY REFUSAL, and the reason <see cref="Remember"/> can decline
+        /// to register a card that arrived over the wire.
+        ///
+        /// The authority rule is stated in full in Sync/GradingSync's header: the HOST is the sole
+        /// minter of certs and the guest adopts them verbatim. This is the one case that rule
+        /// cannot fix retroactively - a serial this PC's Grading Overhaul store ALREADY bound to a
+        /// DIFFERENT card, from before the rule was enforced (a pre-1.0.42 session where GO's
+        /// day-start prefix outranked our block and minted from the guest's own counter, a role
+        /// swap, or a sidecar transfer that did not apply).
+        ///
+        /// GO's own RememberForExternalMod does not defend against it: BurnCert returns false for
+        /// an already-burned serial (decompiled-grading :551-559) and RememberForExternalMod
+        /// IGNORES that result and calls BindCert anyway (:5921-5922), and BindCert OVERWRITES the
+        /// entry (:582-593). So the card that legitimately owned that serial silently loses its
+        /// binding, and GO's next AddCard prefix or day-start scan flags THAT card - a card that
+        /// was fine - as FAKE. Papering over the collision destroys the resident card.
+        ///
+        /// So we refuse, loudly, and let the incoming card take the consequences instead: without
+        /// the Remember call GO's AddCard prefix sees a cert bound elsewhere (:8526) and re-encodes
+        /// the ARRIVING copy as FAKE. That is a visible, reported, one-card outcome affecting the
+        /// copy whose provenance is already in doubt, instead of a silent one affecting a card that
+        /// was never in doubt. There is deliberately NO automatic re-mint: minting on the guest is
+        /// precisely the divergence the authority rule exists to end.
+        ///
+        /// Unknown or unreadable = permitted. This guard only ever declines on a POSITIVE reading
+        /// of a conflicting binding; when GO is absent, the members do not resolve, the grade has
+        /// no cert, or anything throws, behaviour is exactly what it was before.</summary>
+        /// <summary>(company, cert) keys this session has already printed the full refusal
+        /// paragraph for - see the memo note inside <see cref="CertFreeForCard"/>.</summary>
+        private static readonly HashSet<long> _refusalWarned = new HashSet<long>();
+
+        private static bool CertFreeForCard(CardData card)
+        {
+            if (MiHasBinding == null || MiIsBoundTo == null) return true;
+            // A FAKE-flagged encoding is never burned or bound by GO itself
+            // (RememberForExternalMod :5919 skips both), so there is nothing here to protect.
+            if (CheatFlagged(card.cardGrade)) return true;
+            int companyId, cert;
+            if (!DecodeCert(card.cardGrade, out companyId, out cert)) return true;
+            try
+            {
+                object company = Enum.ToObject(TCompany, companyId);
+                if (!(bool)MiHasBinding.Invoke(null, new object[] { company, cert })) return true;
+                if ((bool)MiIsBoundTo.Invoke(null, new object[] { company, cert, card })) return true;
+            }
+            catch { return true; }
+
+            // MEMOIZED PER CERT, exactly like CoopCore's _priceWarnedKeys and for the same
+            // reason. Three of Remember()'s four callers are one-shot per card event, but
+            // CoopCore.ApplyRemoteCardPrice is on the repeating price-heal beat - so ONE standing
+            // collision used to reprint this whole paragraph every heal, forever, in the very log
+            // the refusal exists to make readable. First refusal per cert says everything; after
+            // that it is one line. Session-lifetime on purpose: a refused cert stays refused
+            // until the rejoin the paragraph asks for, and that rebuilds the process anyway.
+            if (!_refusalWarned.Add(((long)companyId << 32) | (uint)cert))
+            {
+                CoopPlugin.Log.LogWarning("graded cert REFUSED again: certificate " + cert.ToString("D7")
+                    + " (company " + companyId + ") on " + CardIdent(card)
+                    + " - same collision as reported earlier this session, still not registered");
+                return false;
+            }
+
+            CoopPlugin.Log.LogWarning("graded cert REFUSED: certificate " + cert.ToString("D7")
+                + " (company " + companyId + ") arrived on " + CardIdent(card)
+                + ", but this PC's Grading Overhaul store already has that certificate bound to a"
+                + " DIFFERENT card. Registering it would silently steal the binding from the card"
+                + " that holds it here and make Grading Overhaul flag THAT card as a fake, so the"
+                + " incoming copy is not registered - Grading Overhaul will mark the ARRIVING copy"
+                + " instead. This is not repairable in place and it is not re-minted on purpose:"
+                + " the host is the only machine allowed to issue certificates. The two save stores"
+                + " have drifted apart; the clean reset is to rejoin so the host's grading store"
+                + " transfers again.");
+            return false;
+        }
+
+        /// <summary>Short, log-safe identity for the refusal line above. Deliberately local to
+        /// this file: CoopCore's CardIdent knows about the co-op session, and this can be reached
+        /// from a card path with no session at all.</summary>
+        private static string CardIdent(CardData card)
+        {
+            if (card == null) return "(null card)";
+            try
+            {
+                return card.monsterType + "/" + card.expansionType
+                    + (card.isFoil ? " foil" : "") + (card.isDestiny ? " destiny" : "")
+                    + " border " + (int)card.borderType;
+            }
+            catch { return "(unreadable card)"; }
+        }
 
         /// <summary>Split an encoded grade into its grading company ordinal and cert serial.
         /// False (and cert 0) for a bare 1-10 grade, when Grading Overhaul is absent, or when the
@@ -534,79 +639,286 @@ namespace CardShopCoop.Util
 
         /// <summary>Every place a graded cert can legitimately live on THIS machine, deduped.
         ///
-        /// THIS IS A DELIBERATE SUPERSET OF GRADING OVERHAUL'S OWN BuildExistingCertSet
-        /// (decompiled-grading :8801-8880, which reads only m_GradedCardInventoryList,
-        /// m_HoldCardDataList, m_CardShelfSaveDataList and m_PackageBoxCardSaveDataList), and the
-        /// asymmetry is the whole reason the extra containers are listed here. The two consumers
-        /// fail in OPPOSITE directions:
-        ///  - GO misses a container and merely UNDER-FLAGS: a cert it cannot see is a cert its
-        ///    duplicate sweep does not fire on. Nothing is created; a cheat slips by.
-        ///  - We miss a container and the card looks ABSENT from this PC, so the digest reports it
-        ///    as peer-only, the F2 panel FABRICATES an adopt offer for a card that is already here,
-        ///    and pressing it calls AddCard - which is exactly the duplicate-cert input that makes
-        ///    GO rewrite BOTH rows to the FAKE encoding. A miss here MANUFACTURES the corruption.
-        /// So this list must be at least as wide as GO's and is allowed to be wider. Never trim it
-        /// back toward GO's set "for parity" - parity is the bug.
+        /// THE RULE - AND IT IS THE OPPOSITE OF WHAT THE 1.0.41 COMMENT ARGUED HERE:
+        /// this union may contain ONLY containers that BOTH PEERS MIRROR. A container that
+        /// exists on one PC alone must never be counted, however much more "complete" it would
+        /// make the local picture look.
         ///
-        /// Beyond GO's four: m_GradeCardInProgressList (jobs at the grader),
-        /// m_CurrentGradeCardSubmitSet (cards STAGED on the submit screen but not yet submitted -
-        /// a player can sit in that state indefinitely, or back out of it, and every second there
-        /// is a second the album does not list the card), and the four storage containers whose
-        /// save data holds cards directly: card storage shelves, card/item combi shelves, bulk
-        /// donation boxes and auto pack openers. An ALBUM-ONLY digest reports a false "missing" for
-        /// every graded card the other player happens to be holding, has put on a display shelf,
-        /// has sitting in a graded-returns box, has staged for grading, or has filed in any of
-        /// those containers. Those are exactly the states a session spends seconds at a time in.
+        /// The 1.0.41 comment reasoned about ONE consumer and shipped a bug; 1.0.42's first cut
+        /// then fixed that consumer and broke the other one, so both are named here. Two
+        /// questions are asked of this data and they fail in OPPOSITE directions:
+        ///  - "Do I already hold this cert?" - the adopt REFUSAL (CoopCore.GradedAdopt's cert
+        ///    guard, and the certHeldHere / reEncoded / CERT COLLISION half of
+        ///    CoopCore.CompareGradedDigests). That wants the widest view available: a miss offers
+        ///    an add for a card that is already here, AddCard puts a second row on one cert, and
+        ///    Grading Overhaul's duplicate-cert sweep rewrites BOTH rows to the FAKE encoding.
+        ///  - "Is my peer missing this?" - the DIFF (the mineKeys / oursOnly / peerOnlyTotal half
+        ///    of CompareGradedDigests, and everything SendGradedDigest puts on the wire). That is
+        ///    a comparison against the PEER's union, and a comparison only means anything when
+        ///    the two sides were built from the same containers.
+        /// A local-only container satisfies the first and destroys the second - and the second is
+        /// the one that ends up MUTATING CARDS, because the diff is what the F2 adopt button is
+        /// built from.
+        ///
+        /// SO THERE ARE TWO WALKS, NOT ONE. This method is the NARROW one and answers only the
+        /// second question. <see cref="LocalOnlyGradedCerts"/> is the local-only remainder, and
+        /// the guard callers use the UNION of the two - see the contract on that method.
+        /// Behind BOTH of them sits <see cref="CertFreeForCard"/>, which asks Grading Overhaul's
+        /// own store the same question at Remember() time and is the last line that covers the
+        /// refusal direction: a future reader who deletes that guard is also deleting the
+        /// backstop for every cert this union cannot see.
+        ///
+        /// Worked through, because this is the exact 1.0.41 defect: put the player's HAND in here
+        /// and every graded card in motion reads as a genuine two-sided divergence. Picking a slab
+        /// out of the binder calls CPlayerData.RemoveGradedCard, which IS mirrored
+        /// (GamePatches.RemoveGradedCardPostfix -> CoopCore.ForwardGradedRemoval), so the peer's
+        /// album really does drop it, while the local hand keeps it in this union. The old comment
+        /// feared an album-only digest would "cry wolf about a card the other player is holding" -
+        /// but the PEER's hand is not in the PEER's digest either. With the hand gone from BOTH
+        /// sides a held card is absent on both and the digests MATCH. Including it is what creates
+        /// the cry, and then the button offers a card that was never missing, the adopt AddCards
+        /// it, the holder puts the real one away, and GO flags both copies FAKE. A diagnostic
+        /// destroyed a real card.
+        ///
+        /// SO THE TRADE IS NOT SYMMETRIC AND MUST NEVER BE TREATED AS IF IT WERE:
+        ///   a FALSE NEGATIVE - a card in transit is briefly invisible, so a genuine loss is
+        ///   reported one cycle later - is HARMLESS;
+        ///   a FALSE POSITIVE - a local-only container makes this PC a strict superset of the
+        ///   peer - is DESTRUCTIVE.
+        /// Never add a container to this walk without first naming the module that mirrors it.
+        ///
+        /// BANNED FROM THIS WALK - AND MANDATORY IN THE GUARD WALK. Both containers were in the
+        /// 1.0.41 union, both ARE the diff bug, and both are REQUIRED by the refusal; they live in
+        /// <see cref="LocalOnlyGradedCerts"/> for exactly that reason. Do not re-add them here and
+        /// do not delete them from there. The reason they are mandatory in the guard is Grading
+        /// Overhaul itself, not a hunch: AntiCheat_AddCard_Patch.Prefix scans m_HoldCardDataList
+        /// for a duplicate (company, cert) and, on a hit, re-encodes BOTH the held card and the
+        /// arriving one as FAKE (decompiled-grading :8554-8573), and GO's own BuildExistingCertSet
+        /// counts the hand as well (:8801-8880). A cert we cannot see but GO can is a cert our
+        /// refusal waves through and GO then punishes AT THE AddCard - two real cards flagged by
+        /// one press of an adopt button. The guard has to be at least as wide as GO's own view.
+        ///  - CPlayerData.m_HoldCardDataList - the local player's HAND. Nothing mirrors it; the
+        ///    name appears nowhere else in src/. Every "received a graded card" passes through it
+        ///    (InteractablePackagingBox_Card.OnPressOpenBox :110-118 ->
+        ///    InteractionPlayerController.AddHoldCard :3598), and so does every binder pull
+        ///    (CollectionBinderFlipAnimCtrl.cs:465-472).
+        ///  - CPlayerData.m_CurrentGradeCardSubmitSet - the submit screen's scratch buffer, which
+        ///    is each player's own UI state (see GradingSync) and never on the wire. Staging a
+        ///    graded card there RemoveGradedCards it off every peer while it sits somewhere only
+        ///    this PC can see: the same shape as the hand.
+        /// Being WIDER than Grading Overhaul's own BuildExistingCertSet (decompiled-grading
+        /// :8801-8880) is still fine wherever the extra container is mirrored - GO missing a
+        /// container merely UNDER-flags a cheat, while we have to be right about BOTH sides - so
+        /// this is not a trim "for parity" with GO. It is a trim to what the wire actually shares.
+        ///
+        /// WHAT IS IN, AND WHO MIRRORS IT:
+        ///  - m_GradedCardInventoryList, the album - CardDelta / GradedRemove.
+        ///  - m_GradeCardInProgressList, jobs at the grader - GradingSync's pending-list mirror.
+        ///  - card shelves and card/item combi shelves - CardShelfSync.
+        ///  - card packaging (graded-return) boxes - CardBoxSync.
+        ///  - card storage shelves, bulk donation boxes, auto pack openers - ContainerSync.
+        ///
+        /// THE FIVE WORLD CLASSES ARE READ LIVE, never from CPlayerData's save-time snapshot
+        /// lists (m_CardShelfSaveDataList and friends). Those lists are written only by
+        /// ShelfManager.SaveInteractableObjectData, which fires from unrelated UI - PauseScreen
+        /// (:25), the end-of-day report (:64), the shop screens, an Alt/Backspace hotkey
+        /// (InteractionPlayerController.cs:318) - so each PC's snapshot is stale by a DIFFERENT
+        /// amount and the pair diverge for reasons that have nothing to do with cards. That is
+        /// the same rule as above wearing a different hat: both peers have to be describing the
+        /// same world at the same moment, and only the live managers do.
         ///
         /// Only encoded grades (&gt; 10) are collected: a bare 1-10 vanilla grade carries no cert,
         /// so it has no stable identity to diff and every one of them would "collide" on cert 0.
         /// With Grading Overhaul absent this therefore returns an empty list, which self-gates the
         /// whole diagnostic off rather than needing a Present check (and Present has a one-shot
-        /// logging side effect that does not belong on a 45s timer).</summary>
+        /// logging side effect that does not belong on a 45s timer).
+        ///
+        /// NULL MEANS "CANNOT CHECK NOW", AND IT IS NOT THE SAME AS EMPTY. Five of the seven
+        /// sources are live scene objects that fill progressively during a world load, so during
+        /// that window the walk would return a SHORT union - the direction that fabricates adopt
+        /// offers on the peer and disarms the refusal here. There is no gate anywhere else that
+        /// covers it: InGameLevel() stays TRUE through the client reload screen and through a
+        /// host mid-session save load (CoopCore's note on that), so the digest timer and the F2
+        /// button are both live throughout. We therefore FAIL CLOSED on the shelf manager's own
+        /// readiness flag (ShelfManager.m_FinishLoadingObjectData, the same flag the game gates
+        /// its own object save/load on) and every caller must treat null as "skip this cycle" -
+        /// never as an empty album.</summary>
         public static List<GradedEntry> BuildGradedCertInventory()
         {
+            var sm0 = Shelves();
+            if (sm0 == null || !sm0.m_FinishLoadingObjectData) return null;
+
             var list = new List<GradedEntry>();
             var seen = new HashSet<string>();
-            try
+
+            // PER-CONTAINER-CLASS try/catch, never one catch around the lot. A throw partway
+            // through used to abandon every container after it, and a truncated union is exactly
+            // the false negative that makes cards which ARE here look missing - the direction
+            // that fabricates adopt offers. One unreadable class now costs one class, loudly.
+            Step("graded album", () => AddAllCompact(list, seen, CPlayerData.m_GradedCardInventoryList));
+
+            Step("grading jobs in progress", () =>
             {
-                AddAllCompact(list, seen, CPlayerData.m_GradedCardInventoryList);
-                AddAll(list, seen, CPlayerData.m_HoldCardDataList);
-                var shelves = CPlayerData.m_CardShelfSaveDataList;
-                if (shelves != null)
-                    for (int i = 0; i < shelves.Count; i++)
-                        AddAll(list, seen, shelves[i]?.cardDataList);
-                var boxes = CPlayerData.m_PackageBoxCardSaveDataList;
-                if (boxes != null)
-                    for (int i = 0; i < boxes.Count; i++)
-                        AddAll(list, seen, boxes[i]?.cardDataList);
                 var inProgress = CPlayerData.m_GradeCardInProgressList;
                 if (inProgress != null)
                     for (int i = 0; i < inProgress.Count; i++)
                         AddAll(list, seen, inProgress[i]?.m_CardDataList);
-                // The stage-then-abandon state: cards sitting in the submit screen's scratch set.
-                AddAll(list, seen, CPlayerData.m_CurrentGradeCardSubmitSet?.m_CardDataList);
-                var storage = CPlayerData.m_CardStorageShelfSaveDataList;
+            });
+
+            Step("card shelves", () =>
+            {
+                var sm = Shelves();
+                var shelves = sm == null ? null : sm.m_CardShelfList;
+                if (shelves != null)
+                    for (int i = 0; i < shelves.Count; i++) AddShelfCards(list, seen, shelves[i]);
+            });
+
+            Step("card/item combi shelves", () =>
+            {
+                var sm = Shelves();
+                var combi = sm == null ? null : sm.m_CardItemCombiShelfList;
+                if (combi != null)
+                    for (int i = 0; i < combi.Count; i++) AddShelfCards(list, seen, combi[i]);
+            });
+
+            Step("card packaging boxes", () =>
+            {
+                var rm = Restock();
+                var boxes = rm == null ? null : rm.m_CardPackagingBoxList;
+                if (boxes != null)
+                    for (int i = 0; i < boxes.Count; i++)
+                        if (boxes[i] != null) AddAll(list, seen, boxes[i].GetCardDataList());
+            });
+
+            Step("card storage shelves", () =>
+            {
+                var sm = Shelves();
+                var storage = sm == null ? null : sm.m_CardStorageShelfList;
                 if (storage != null)
                     for (int i = 0; i < storage.Count; i++)
-                        AddAllCompact(list, seen, storage[i]?.compactCardDataAmountList);
-                var combi = CPlayerData.m_CardItemCombiShelfSaveDataList;
-                if (combi != null)
-                    for (int i = 0; i < combi.Count; i++)
-                        AddAll(list, seen, combi[i]?.cardDataList);
-                var donation = CPlayerData.m_BulkDonationSaveDataList;
+                        if (storage[i] != null)
+                            AddAllCompact(list, seen, storage[i].GetCompactCardDataAmountList());
+            });
+
+            Step("bulk donation boxes", () =>
+            {
+                var sm = Shelves();
+                var donation = sm == null ? null : sm.m_BulkDonationBoxList;
                 if (donation != null)
                     for (int i = 0; i < donation.Count; i++)
-                        AddAllCompact(list, seen, donation[i]?.compactCardDataAmountList);
-                var openers = CPlayerData.m_AutoPackOpenerSaveDataList;
+                        if (donation[i] != null)
+                            AddAllCompact(list, seen, donation[i].GetCompactCardDataAmountList());
+            });
+
+            Step("auto pack openers", () =>
+            {
+                var sm = Shelves();
+                var openers = sm == null ? null : sm.m_AutoPackOpenerList;
                 if (openers != null)
                     for (int i = 0; i < openers.Count; i++)
-                        AddAllCompact(list, seen, openers[i]?.compactCardDataAmountList);
-            }
+                        if (openers[i] != null)
+                            AddAllCompact(list, seen, openers[i].GetCompactCardDataAmountList());
+            });
+
+            return list;
+        }
+
+        /// <summary>The LOCAL-ONLY graded certs: the two containers
+        /// <see cref="BuildGradedCertInventory"/> is forbidden to walk, walked on purpose.
+        ///
+        /// WHAT THIS IS FOR, AND WHAT IT MUST NEVER TOUCH. This list answers "do I already hold
+        /// this cert?" and NOTHING ELSE. It must never reach the wire, never seed mineKeys in the
+        /// diff, and never influence oursOnly / peerOnlyTotal - those are comparisons against a
+        /// peer that cannot see these containers, and feeding them a local-only card is the exact
+        /// 1.0.41 defect (a card in your hand read as a genuine two-sided divergence, the button
+        /// offered it, and Grading Overhaul flagged both copies FAKE). Callers therefore take the
+        /// UNION of this and the narrow walk for mineByCert only, per the contract there.
+        ///
+        /// Why it has to exist at all: Grading Overhaul's AntiCheat_AddCard_Patch.Prefix scans
+        /// CPlayerData.m_HoldCardDataList for a duplicate (company, cert) and re-encodes BOTH the
+        /// held card and the arriving one as FAKE (decompiled-grading :8554-8573); its own cert
+        /// set includes the hand too (:8801-8880). A guard narrower than GO's view is a guard
+        /// that lets the player press a button GO then punishes.
+        ///
+        /// These are CPlayerData snapshot lists, not live scene objects, so unlike the narrow
+        /// walk there is nothing here to gate on world load - they are whole the moment the save
+        /// is. Same per-container Step policy: one unreadable container costs one container,
+        /// loudly, because a miss here is a miss in the direction that lets a bad add through.</summary>
+        public static List<GradedEntry> LocalOnlyGradedCerts()
+        {
+            var list = new List<GradedEntry>();
+            var seen = new HashSet<string>();
+
+            Step("the player's hand", () => AddAll(list, seen, CPlayerData.m_HoldCardDataList));
+
+            Step("the grading submit screen's scratch set", () =>
+            {
+                var set = CPlayerData.m_CurrentGradeCardSubmitSet;
+                if (set != null) AddAll(list, seen, set.m_CardDataList);
+            });
+
+            return list;
+        }
+
+        /// <summary>One container class of either walk, isolated - shared by
+        /// <see cref="BuildGradedCertInventory"/> and <see cref="LocalOnlyGradedCerts"/>. See the
+        /// note at the top of the first: an unreadable container is a false NEGATIVE, which is
+        /// the harmless direction for the diff but the DANGEROUS one for the adopt refusal, so it
+        /// is warned about by name rather than swallowed.</summary>
+        private static void Step(string what, Action body)
+        {
+            try { body(); }
             catch (Exception e)
             {
-                CoopPlugin.Log.LogWarning("GradingInterop.BuildGradedCertInventory: " + e.Message);
+                CoopPlugin.Log.LogWarning("GradingInterop: could not read "
+                    + what + " - " + e.Message
+                    + " (graded cards in that container look MISSING on this PC for this check; if"
+                    + " this repeats, treat the graded album report as unreliable this session)");
             }
-            return list;
+        }
+
+        /// <summary>Cached ShelfManager for the live-world walk.
+        ///
+        /// NEVER CSingleton&lt;ShelfManager&gt;.Instance: that getter CREATES an empty fake
+        /// manager when the real one does not exist yet and the fake then shadows the real one for
+        /// the rest of the session (the 1.0.11 store-mirror field report; the same warning is
+        /// written out at Sync/BoxSync.cs and Sync/WorldSync.cs). Unity's fake-null makes this
+        /// cache self-invalidating across a scene change, so there is nothing to reset.</summary>
+        private static ShelfManager _shelfMgr;
+        private static ShelfManager Shelves()
+        {
+            if (_shelfMgr == null) _shelfMgr = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            return _shelfMgr;
+        }
+
+        /// <summary>Cached RestockManager, resolved the same way and for the same reason -
+        /// RestockManager.GetCardPackagingBoxList() goes through CSingleton and would carry the
+        /// fake-manager hazard into a 45s timer.</summary>
+        private static RestockManager _restockMgr;
+        private static RestockManager Restock()
+        {
+            if (_restockMgr == null) _restockMgr = UnityEngine.Object.FindObjectOfType<RestockManager>();
+            return _restockMgr;
+        }
+
+        /// <summary>The cards on one live card shelf (or card/item combi shelf, which derives from
+        /// it). Slot 0 of each compartment only: that is the representative the game's own save
+        /// takes (ShelfManager.SaveInteractableObjectData) AND the one CardShelfSync mirrors, so it
+        /// is exactly the part of a shelf that both peers agree about. Reading deeper into
+        /// m_StoredCardList would count state no module mirrors - the banned direction.</summary>
+        private static void AddShelfCards(List<GradedEntry> list, HashSet<string> seen, CardShelf shelf)
+        {
+            if (shelf == null) return;
+            var comps = shelf.GetCardCompartmentList();
+            if (comps == null) return;
+            for (int i = 0; i < comps.Count; i++)
+            {
+                var comp = comps[i];
+                if (comp == null || comp.m_StoredCardList == null || comp.m_StoredCardList.Count == 0) continue;
+                var card3d = comp.m_StoredCardList[0];
+                if (card3d == null || card3d.m_Card3dUI == null || card3d.m_Card3dUI.m_CardUI == null) continue;
+                Add(list, seen, card3d.m_Card3dUI.m_CardUI.GetCardData());
+            }
         }
 
         private static void AddAll(List<GradedEntry> list, HashSet<string> seen, List<CardData> cards)

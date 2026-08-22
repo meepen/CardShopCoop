@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -1961,7 +1961,8 @@ namespace CardShopCoop
             _gradedSent = false;
             _lastGradedHash = -1;
             _gradedPeerOnly.Clear();
-            _gradedWarnedConns.Clear();
+            _gradedAlertEverShown.Clear();
+            _gradedAlertStanding.Clear();
             GradedAdoptOffers.Clear();
             if (ClientReloading) _reloadGrace = 10f; // countdown starts once in-game
             _playerTf = null;
@@ -2057,14 +2058,27 @@ namespace CardShopCoop
                 _gradedTimer += _dt;
                 if (inGame && (_gradedTimer >= 45f || !_gradedSent))
                 {
-                    _gradedTimer = 0f;
-                    _gradedSent = true;
                     var inv = Util.GradingInterop.BuildGradedCertInventory();
-                    int gh = GradedHash(inv);
-                    if (gh != _lastGradedHash)
+                    // NULL IS NOT AN EMPTY ALBUM - it is "the world here is still spawning", and
+                    // sending a SHORT union is the one direction that hurts: the host would read
+                    // every graded card on our own shelves as one-sided and offer them back for
+                    // adoption. InGameLevel() cannot tell us apart from a loaded world (it stays
+                    // true through the client reload screen), so this is the gate. Do not mark
+                    // the send done; come back in a second rather than in 45.
+                    if (inv == null)
                     {
-                        _lastGradedHash = gh;
-                        SendGradedDigest(1, inv);
+                        _gradedTimer = 44f;
+                    }
+                    else
+                    {
+                        _gradedTimer = 0f;
+                        _gradedSent = true;
+                        int gh = GradedHash(inv);
+                        if (gh != _lastGradedHash)
+                        {
+                            _lastGradedHash = gh;
+                            SendGradedDigest(1, inv);
+                        }
                     }
                 }
             }
@@ -3045,7 +3059,20 @@ namespace CardShopCoop
         /// first (empty) digest instead of matching a zero-initialised hash and reporting nothing
         /// for the whole session.</summary>
         private int _lastGradedHash = -1;
-        private readonly HashSet<int> _gradedWarnedConns = new HashSet<int>();
+        /// <summary>Peers we have EVER put a graded-drift alert ON SCREEN for. Read only by
+        /// GradedAlertMode.OncePerSession; nothing but a new world or a dead session clears it.
+        /// Separate from <see cref="_gradedAlertStanding"/> on purpose: "has this player ever
+        /// been told" and "is an alarm currently up" answer different questions, and OncePerSession
+        /// needs the first to survive the retraction that clears the second.</summary>
+        private readonly HashSet<int> _gradedAlertEverShown = new HashSet<int>();
+        /// <summary>Peers whose graded-drift alert is currently STANDING - put on screen and not
+        /// yet retracted. THE ONLY LATCH THE ALL-CLEAR READS, and the whole retraction contract:
+        /// it is set only inside the host's showAlert branch and cleared only when a later digest
+        /// comes back identical, so an all-clear can never fire for an alarm the config
+        /// suppressed, and a player who never saw the alarm never gets one. Nothing else touches
+        /// it - notably a press of the adopt button does NOT, because a press does not prove the
+        /// albums now match.</summary>
+        private readonly HashSet<int> _gradedAlertStanding = new HashSet<int>();
         /// <summary>Per peer, the graded cards THEY have that WE do not - the adopt candidates.
         /// Populated on both roles: the host builds it from the guest's digest, and the guest
         /// builds it from the digest the host sends back when it finds a divergence.</summary>
@@ -3069,6 +3096,11 @@ namespace CardShopCoop
 
         private void SendGradedDigest(int connId, List<Util.GradingInterop.GradedEntry> inv)
         {
+            // "Cannot check now" never goes on the wire - a null union is a world still loading,
+            // and the peer would read the short list as our real album (see
+            // GradingInterop.BuildGradedCertInventory). Both callers already skip on null; this
+            // is the backstop that keeps a future third caller from shipping a partial view.
+            if (inv == null) return;
             try { Send(connId, MsgType.GradedDigest, bw => WriteGradedDigest(bw, inv)); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("graded digest: " + e.Message); }
         }
@@ -3136,13 +3168,32 @@ namespace CardShopCoop
 
         /// <summary>Set difference between the peer's graded-cert union and ours. Report only -
         /// it never adds, removes or rewrites a card. <paramref name="isHost"/> owns the two
-        /// things only a host may do: toast the sender, and answer a divergent digest with our
-        /// own so the guest can see ITS one-sided half (the guest must never answer back, or the
-        /// two would ping-pong digests forever).</summary>
+        /// things only a host may do: toast the sender, and answer EVERY digest with our own so
+        /// the guest can see ITS one-sided half and can retract a stale offer (the guest must
+        /// never answer back, or the two would ping-pong digests forever); only a divergence
+        /// toasts.
+        ///
+        /// TWO SETS, TWO JOBS - do not collapse them back into one. `mineKeys` is the NARROW
+        /// walk, because it is compared against a peer that can only see the mirrored containers
+        /// and because the same list is what SendGradedDigest puts on the wire; `mineByCert` is
+        /// the WIDE union (narrow + GradingInterop.LocalOnlyGradedCerts), because every question
+        /// it answers is "does Grading Overhaul already see this cert on this PC?" and GO counts
+        /// the hand. Widening mineByCert can only ever move a card OUT of the adopt offer and
+        /// into a report count - peerOnlyTotal is still gated on the narrow mineKeys - so it
+        /// cannot inflate the divergence.</summary>
         private void CompareGradedDigests(BinaryReader br, int connId, bool isHost)
         {
             var theirs = ReadGradedDigest(br);
             var mine = Util.GradingInterop.BuildGradedCertInventory();
+            // FAIL CLOSED DURING A LOAD. Null is "cannot check now", never "my album is empty":
+            // the live containers fill progressively while the world spawns, and a short union
+            // here reports the peer's whole shelf as one-sided and offers it for adoption. Skip
+            // the cycle entirely - the digest timer brings us straight back.
+            if (mine == null)
+            {
+                CoopPlugin.Log.LogInfo("graded album check: skipped - the world is still loading here, so this PC cannot see its own shelves yet");
+                return;
+            }
 
             var mineKeys = new HashSet<string>();
             var mineByCert = new Dictionary<long, Util.GradingInterop.GradedEntry>();
@@ -3151,6 +3202,14 @@ namespace CardShopCoop
                 mineKeys.Add(mine[i].Key);
                 long ck = Util.GradingInterop.CertKey(mine[i].Encoded);
                 if (ck != 0L && !mineByCert.ContainsKey(ck)) mineByCert[ck] = mine[i];
+            }
+            // The local-only half of the GUARD set, mirrored containers first so a collision
+            // report names the card the peer could actually be told about.
+            var localOnly = Util.GradingInterop.LocalOnlyGradedCerts();
+            for (int i = 0; i < localOnly.Count; i++)
+            {
+                long ck = Util.GradingInterop.CertKey(localOnly[i].Encoded);
+                if (ck != 0L && !mineByCert.ContainsKey(ck)) mineByCert[ck] = localOnly[i];
             }
 
             string who = PeerNames.TryGetValue(connId, out var nm) ? nm : (isHost ? "the joiner" : "the host");
@@ -3172,8 +3231,10 @@ namespace CardShopCoop
                 var e = theirs[i];
                 theirKeys.Add(e.Key);
 
-                // Does a card carrying THIS cert already live somewhere on this PC? Decided once,
-                // up front, because it gates both the report category and adopt candidacy.
+                // Does a card carrying THIS cert already live somewhere on this PC - anywhere
+                // Grading Overhaul can see it, hand and submit scratch set included? Decided
+                // once, up front, because it gates both the report category and adopt candidacy,
+                // and it reads the WIDE mineByCert for the reason given on this method.
                 long theirCk = Util.GradingInterop.CertKey(e.Encoded);
                 Util.GradingInterop.GradedEntry m = default(Util.GradingInterop.GradedEntry);
                 bool certHeldHere = theirCk != 0L && mineByCert.TryGetValue(theirCk, out m);
@@ -3241,10 +3302,27 @@ namespace CardShopCoop
             if (oursOnly == 0 && peerOnlyTotal == 0 && collisionTotal == 0 && reEncodedTotal == 0)
             {
                 CoopPlugin.Log.LogInfo($"graded album check: identical ({mine.Count} graded cards)");
-                // Same retraction as the catalog check: a digest can be taken while a card is
-                // mid-flight between hand and album, so the recheck must also withdraw the cry.
-                bool wasWarned = _gradedWarnedConns.Remove(connId);
-                if (wasWarned && isHost)
+
+                // ANSWER EVERY DIGEST, NOT ONLY A DIVERGENT ONE. This reply is DATA and is never
+                // gated by the alert config. Until 1.0.42 the host replied only from the
+                // divergence tail below, which meant the guest re-ran this compare only while a
+                // difference persisted: the moment the albums healed the host went quiet, the
+                // guest's _gradedPeerOnly was never rewritten, the else-branch that erases it was
+                // never reached, and its adopt button stood on a minutes-old list for the rest of
+                // the session. A ten-second transient became a permanent button. With this reply
+                // the guest sees the match, clears the list and retracts the row.
+                // NO PING-PONG: the reply stays gated on isHost, and a guest that receives it
+                // takes this same early return with isHost false, so the exchange is still
+                // exactly one reply per guest-initiated digest.
+                if (isHost) SendGradedDigest(connId, mine);
+
+                // Withdraw the cry. A digest pair can still straddle a real in-flight change
+                // (a card between two mirrored containers, a shelf placement racing the 45s
+                // tick), so a check that finds nothing must be able to take the alarm back.
+                bool alertStood = _gradedAlertStanding.Remove(connId);
+                // SCREEN, so it follows the alert config by construction: an all-clear can only
+                // fire for an alarm this config actually let onto the screen.
+                if (isHost && alertStood)
                 {
                     const string clear = "graded albums match now - the earlier difference is gone";
                     RegisterLine = clear;
@@ -3259,6 +3337,29 @@ namespace CardShopCoop
                 + (peerOnlyNoContent > 0 ? $" ({peerOnlyNoContent} of them are from content packs this PC doesn't have)" : "")
                 + (peerOnlyCertHeld > 0 ? $" ({peerOnlyCertHeld} can't be adopted - this PC already holds those certificate numbers)" : "")
                 + (reEncodedTotal > 0 ? $"; {reEncodedTotal} more are the SAME card with a different grade encoding" : "");
+
+            // SCREEN ONLY, AND DECIDED ABOVE THE LOG ON PURPOSE. Everything below this point that
+            // writes RegisterLine or sends a Toast is gated by this flag; NOTHING else is. The
+            // LogWarning immediately below, the RE-ENCODED line, the CERT COLLISION line and the
+            // reply digest all run whatever the player chose - a log the player hands to someone
+            // else has to say everything the check found, and the reply digest is the only way the
+            // peer learns about its own half of the difference. The adopt button is not gated
+            // either: "stop shouting at me" is not "hide the repair".
+            //
+            // AND IT IS THE HOST'S COPY OF THE SETTING THAT DECIDES, in both directions. Every
+            // screen-facing statement in this method - the RegisterLine, the Toast, and the
+            // all-clear above - sits inside `if (isHost)`, so on a guest this flag is computed
+            // and never read: a joiner who picks Never still receives the host's heads-up, and a
+            // joiner who picks Always still gets nothing if the host picked Never. That is
+            // deliberate for now and the config description says so out loud. Closing the gap
+            // would mean putting a preference byte on the wire and having the host keep per-conn
+            // preference state across rejoins - new wire surface in the release whose whole point
+            // is that this diagnostic over-reached - and it would let a guest silence the ONLY
+            // graded-drift signal that ever reaches them, about their own album.
+            var alertMode = CoopPlugin.GradedDriftAlert.Value;
+            bool showAlert = alertMode == GradedAlertMode.Always
+                || (alertMode == GradedAlertMode.OncePerSession && !_gradedAlertEverShown.Contains(connId));
+
             CoopPlugin.Log.LogWarning("graded album check: " + summary
                 + (ourExamples.Count > 0 ? " | only here e.g.: " + string.Join(" / ", ourExamples.ToArray()) : "")
                 + (peerExamples.Count > 0 ? $" | only on {who} e.g.: " + string.Join(" / ", peerExamples.ToArray()) : ""));
@@ -3271,22 +3372,27 @@ namespace CardShopCoop
                 CoopPlugin.Log.LogWarning($"graded album check: CERT COLLISION - {collisionTotal} cert(s) exist on BOTH PCs bound to DIFFERENT cards. "
                     + "This is NOT a missing card and there is NO automated repair: bringing both copies onto one PC is exactly what makes Grading Overhaul flag both of them FAKE. "
                     + "The two save stores have drifted apart and one side's certs need re-issuing by hand. | " + string.Join(" / ", collisions.ToArray()));
-            _gradedWarnedConns.Add(connId);
 
             if (isHost)
             {
-                RegisterLine = summary;
-                RegisterLineTimer = 10f;
-                // Written from the GUEST's point of view, not reused from the host's summary:
-                // "only here" on the host means "only on yours" to the reader of this toast, and
-                // a heads-up that says the opposite of what the player sees is worse than none.
-                string toast = $"heads-up: your graded albums differ ({peerOnlyTotal} graded cards only on yours, {oursOnly} only on the host's) - nothing was changed"
-                    + (oursOnly > 0 ? "; open the co-op panel to adopt the ones you're missing" : "")
-                    + (collisionTotal > 0 ? " - and some certificate numbers clash, see the log" : "")
-                    + (reEncodedTotal > 0 ? $" - and {reEncodedTotal} card(s) carry a different grade encoding on each PC, see the log" : "");
-                Send(connId, MsgType.Toast, bw => bw.Write(toast));
+                if (showAlert)
+                {
+                    _gradedAlertEverShown.Add(connId);
+                    _gradedAlertStanding.Add(connId);
+                    RegisterLine = summary;
+                    RegisterLineTimer = 10f;
+                    // Written from the GUEST's point of view, not reused from the host's summary:
+                    // "only here" on the host means "only on yours" to the reader of this toast, and
+                    // a heads-up that says the opposite of what the player sees is worse than none.
+                    string toast = $"heads-up: your graded albums differ ({peerOnlyTotal} graded cards only on yours, {oursOnly} only on the host's) - nothing was changed"
+                        + (oursOnly > 0 ? "; open the co-op panel to adopt the ones you're missing" : "")
+                        + (collisionTotal > 0 ? " - and some certificate numbers clash, see the log" : "")
+                        + (reEncodedTotal > 0 ? $" - and {reEncodedTotal} card(s) carry a different grade encoding on each PC, see the log" : "");
+                    Send(connId, MsgType.Toast, bw => bw.Write(toast));
+                }
                 // Send OUR digest back so the guest can see the half of the difference that is on
                 // ITS side, and offer the same adopt button. Same writer, opposite direction.
+                // ALWAYS - this is data, and gating it would blind the guest, not quiet it.
                 SendGradedDigest(connId, mine);
             }
         }
@@ -3357,7 +3463,28 @@ namespace CardShopCoop
             // between the digest and the click, and this union is the only thing standing between
             // the peer's list and a duplicate AddCard - a stale one re-offers cards that have
             // since arrived by any other route (delta sync, a grading job maturing, a box opened).
+            //
+            // THE FULL UNION HERE, BOTH SETS FROM IT. Unlike CompareGradedDigests, NOTHING in
+            // this method goes on the wire and nothing is compared against the peer's view, so
+            // there is no reason to stay narrow and every reason not to: a card in the player's
+            // hand or staged on the grading submit screen is a card this PC already HAS, so it
+            // must count as `alreadyHere`, and its cert must count as a clash. Grading Overhaul
+            // reads those same two containers in its AddCard duplicate-cert scan
+            // (decompiled-grading :8554-8573) and would flag BOTH copies FAKE the moment this
+            // button added a second row on that cert.
             var mine = Util.GradingInterop.BuildGradedCertInventory();
+            // Null is "cannot check now" - see BuildGradedCertInventory. During a world load the
+            // live containers are still spawning, so the guard would be blind in exactly the
+            // direction that lets a duplicate through. Refuse rather than adopt against a partial
+            // view; the offer is still there when the world has finished loading.
+            if (mine == null)
+            {
+                RegisterLine = "still loading the shop - try adopting again in a moment";
+                RegisterLineTimer = 6f;
+                CoopPlugin.Log.LogWarning("graded adopt: refused - the world is still loading, so this PC cannot yet see every place a graded card lives; adopting now could duplicate a certificate");
+                return;
+            }
+            mine.AddRange(Util.GradingInterop.LocalOnlyGradedCerts());
             var mineKeys = new HashSet<string>();
             var mineByCert = new Dictionary<long, Util.GradingInterop.GradedEntry>();
             for (int i = 0; i < mine.Count; i++)
@@ -3426,17 +3553,20 @@ namespace CardShopCoop
                 + (alreadyHere > 0 ? $", {alreadyHere} already here" : "")
                 + (certClash > 0 ? $", {certClash} refused (cert already on this PC - see the log)" : "")
                 + (noContent > 0 ? $", {noContent} from missing content packs" : "");
-            // Zero adoptable candidates remain for this peer by construction - every entry that
-            // survived into `keep` was marked Refused - so the local half of the divergence is as
-            // repaired as it will ever get. Clear the warned state HERE, both halves of it: the
-            // on-screen line was just replaced by the adopt summary above, and this drops the
-            // "we already cried wolf about this peer" latch. Left set, that latch strands
-            // CompareGradedDigests' retraction, which only fires on a wasWarned -> albums-match
-            // transition. If what REMAINS is one-sided the other way (cards only here, which an
-            // add-only repair can never touch) or simply unrepairable (refused certs), the digests
-            // never match again, the toast is never reached, and the latch sits true for the rest
-            // of the session with nothing left to retract.
-            _gradedWarnedConns.Remove(connId);
+            // A PRESS CHANGES NO ALARM STATE, AND THAT IS THE CONTRACT - do not "clear the
+            // warning" here. The only thing that retracts a graded-drift alert is a later digest
+            // that comes back IDENTICAL: CompareGradedDigests clears _gradedAlertStanding and
+            // sends the all-clear, and only the HOST ever does either (the guest's standing set
+            // is always empty, so nothing on the guest is waiting to be retracted). An adopt does
+            // not prove the albums match - it repairs at most the half that is add-only, and what
+            // typically REMAINS is one-sided the other way (cards only here) or unrepairable
+            // (refused certs), which is precisely the case where the alarm SHOULD still stand.
+            // Zero adoptable candidates remain for this peer by construction, every entry that
+            // survived into `keep` was marked Refused, and the summary below is the whole of this
+            // button's feedback.
+            RegisterLine = line;
+            RegisterLineTimer = 8f;
+            CoopPlugin.Log.LogInfo("graded adopt: " + line);
         }
 
         /// <summary>"Did this file's CONTENT change?" as a cheap comparable string: length plus an
@@ -3678,7 +3808,8 @@ namespace CardShopCoop
             _gradedSent = false;
             _lastGradedHash = -1;
             _gradedPeerOnly.Clear();
-            _gradedWarnedConns.Clear();
+            _gradedAlertEverShown.Clear();
+            _gradedAlertStanding.Clear();
             GradedAdoptOffers.Clear();
             // The PriceList swap-buffer pair, for the same reason and in the same breath: both
             // hold LOCAL item ids from the DEAD session's translation. Left behind, _clientPriced
