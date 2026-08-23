@@ -5,6 +5,27 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.43
+**Fixes a bug I introduced in 1.0.28 that permanently destroyed Grading Overhaul grades. If you use Grading Overhaul, please read the recovery section below before you play again.** Both players must update.
+
+**What it did**
+- The binder's "total value" number is refreshed live while you play, so it keeps up as cards arrive and leave. To calculate it, my code copied what the base game does — including a line that says *"any grade above 10, set it to 10."* Grading Overhaul stores the grading company, the real grade and the certificate number packed into that single value, so that line flattened all three into a plain grade 10. Permanently, for **every graded card in your album**, written straight to your save.
+- It fired whenever a card moved between the two of you **while the graded card album was open** — so it could run many times in a session, on either player's PC. The base game only does this once when you open the binder, and Grading Overhaul ships a companion mod (GradeDataLifeSaver) that stops it there. That mod could never stop mine, because it patches the game and my copy lives inside CardShopCoop.
+- Nothing writes to your graded album from this code any more. The total is now calculated from a throwaway copy, and it also stopped under-reporting the value of graded cards by ignoring Grading Overhaul's company multipliers.
+
+**If your graded cards already turned into plain grade-10 slabs**
+- **Your cards are not ruined.** They are ordinary grade-10 cards now — the top of the base game's scale — and **you can submit them for grading again** to get real certificates and slabs back.
+- **Only the album was affected.** Graded cards on shelves, in your hand, in package boxes, or away at the grading company kept everything.
+- **Check your partner's copy first.** This only ever damaged the PC whose graded album was open. If only one of you was in the album, the other's cards are intact, and the **Adopt graded cards** button in the co-op panel restores them properly — grades and all.
+- **Check for an older save**, in `%USERPROFILE%\AppData\LocalLow\OPNeonGames\Card Shop Simulator\`: `savedGames_Release1/2/3.json` are one-time snapshots the game makes into free slots, and `savedGames_ReleaseBackupFile0.json` is the previous save — **that one is overwritten by the next autosave, so copy it somewhere safe now** if you want it.
+- **The grades themselves cannot be recovered from Grading Overhaul's files.** It records which certificate belongs to which card, but it has never stored the grade. Be careful of any tool claiming it can repair this: assigning a certificate to the wrong copy makes Grading Overhaul mark the card **fake** — 1% of its value, permanently, and a fake card can't be regraded. That is worse than leaving it as a grade 10.
+
+**Two smaller fixes**
+- **Fixed: abandoned grading slots showing up as phantom certificates.** Backing out of the grading screen leaves the slot holding a certificate with no card attached, and the album check counted it — then reported a "certificate collision" against the real card holding that certificate.
+- **Fixed: certificate-collision warnings printing the same card name twice.** The message compared the expansion, card, border, foil and dimension version, but only printed the expansion and card — so a genuine clash between, say, a foil and a non-foil copy read as nonsense. It now spells out what actually differs.
+
+Both players must update — the launcher does it automatically.
+
 ## 1.0.42
 **Fixes a bug I introduced in 1.0.41 — the graded-album drift warning was mostly false alarms, and the repair button could make things worse. Thanks cavi for the report that exposed it.** Both players must update.
 

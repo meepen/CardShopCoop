@@ -1711,14 +1711,113 @@ namespace CardShopCoop
                             : ECardExpansionType.None;
                         if (isGraded)
                         {
-                            // graded album: sum GetCardMarketPrice over the graded inventory,
-                            // clamping amount>10 to 10 first - exactly the open path's loop (~810-819).
+                            // graded album: sum GetCardMarketPrice over the graded inventory - and
+                            // DELIBERATELY NOT the way the open path's loop (~810-819) does it.
+                            //
+                            // DO NOT "MAKE THIS MATCH VANILLA" AGAIN. Vanilla's loop WRITES
+                            // m_GradedCardInventoryList[i].amount = 10 on every row over 10.
+                            // CompactCardDataAmount is a CLASS (decompiled/CompactCardDataAmount.cs:4)
+                            // and that list is the LIVE save list CGameData hands to the serializer
+                            // BY REFERENCE (decompiled/CGameData.cs:1119 -> SetLoadData's
+                            // `data = loadData` at :1019), so the write is a write to the save. With
+                            // Grading Overhaul installed `amount` is not an amount at all: it is the
+                            // ENCODED grade, packing grading company + the real 1-10 + the certificate
+                            // serial (CPlayerData.AddCard stores cardGrade straight into it,
+                            // decompiled/CPlayerData.cs:1506). Clamping it replaces every certificate
+                            // in the album with a bare 10, permanently and world-wide, and it is
+                            // UNRECOVERABLE - GO's own repair sweeps all skip amount <= 10
+                            // (decompiled-grading :8266, :8652, :8804, :8901) and its
+                            // EncodedGradeRegistry is keyed by CardData REFERENCE (:5881) while
+                            // GetGradedCardData mints a fresh CardData every call (:1689).
+                            //
+                            // Ours was strictly worse than vanilla's, which is why this had to
+                            // diverge rather than be left alone: vanilla runs that loop only on the
+                            // binder OPEN transition (m_OpenBinder && !m_IsBookOpen,
+                            // decompiled/CollectionBinderFlipAnimCtrl.cs:766), whereas this method is
+                            // armed on the success tail of every applied card delta (~1333) and by
+                            // the graded-adopt path, then drained per frame - so it re-ran on an
+                            // ALREADY-OPEN book. GradeDataLifeSaver, the community fix, transpiles
+                            // vanilla's clamp away but patches CollectionBinderFlipAnimCtrl.Update,
+                            // so it can never reach a copy compiled into CardShopCoop.dll.
+                            //
+                            // So: READ the row, never write it. GetGradedCardData returns a brand-new
+                            // CardData every call (:1689-1701), so nothing done to that throwaway
+                            // copy can reach the save.
+                            //
+                            // AND WITH GO PRESENT, HAND ITS GRADE TO GetCardMarketPrice ENCODED AND
+                            // UNTOUCHED. Do NOT "decode it first so vanilla sees a real 1-10" -
+                            // vanilla already does. GO's
+                            // PricingPatch_MarketPrice_GetMarketPrice.Prefix takes `ref int cardGrade`
+                            // and does `if (cardGrade > 10) cardGrade = Helper.GetActualGrade(cardGrade)`
+                            // (decompiled-grading :13697-13708), so MarketPrice.GetMarketPrice's body
+                            // runs on the decoded value either way. Pre-decoding buys nothing there
+                            // and COSTS the whole company multiplier: GO's postfix on
+                            // CPlayerData.GetCardMarketPrice - PricingFix_GetCardMarketPrice_UseRegistry
+                            // (:15052-15069) - reads the ENCODED value back off the card and applies
+                            // nothing unless Helper.TryGetCompanyFromGrade accepts it, and that
+                            // returns FALSE for every value in 1-10 (:16026-16035). Note the registry
+                            // read it does that through is keyed by CardData REFERENCE (:5881, :5929),
+                            // so for a fresh copy like this one it can only ever return the field we
+                            // just set - the value we pass IS the value that decides the multiplier.
+                            // Dropping it is not a rounding error: Cardinals 10 is 3x, PSA 10 is
+                            // 16.43x, Beckett 10 is 21x and a Beckett Black Label multiplies that by
+                            // 5 again for 105x (tables :1867-1881, applied at :1925-1975). A decoded
+                            // copy therefore understates a top-grade album by up to 105x - and
+                            // OVERSTATES a low-grade one, since grades 1-6 multiply by less than 1.
+                            // An earlier version of this comment claimed that cost "a few percent";
+                            // that was false, and it is why the decode is gone.
+                            //
+                            // The clamp survives for the NO-GO case ONLY. With GO absent nothing
+                            // decodes an encoded grade on the way in, and vanilla indexes
+                            // `(index * 10 + (cardGrade - 1)) % list.Count` (:1415-1420 ->
+                            // MarketPrice.cs:18) - the `%` means an encoded int WRAPS rather than
+                            // throws, so it cannot crash, it just totals a meaningless slot. Present
+                            // is "GO's assembly loaded and its API resolved" (Util/GradingInterop.cs:119),
+                            // which is also the only condition under which anything on this PC could
+                            // have written an encoded grade in the first place. It does NOT track
+                            // GO's own ConfigSettings.EnableMod, which gates both patches above; a
+                            // player who installs GO and then disables it in config gets the same
+                            // meaningless-slot number here, for the same harmless reason.
+                            bool goPresent = Util.GradingInterop.Present;
                             float total = 0f;
                             for (int i = 0; i < CPlayerData.m_GradedCardInventoryList.Count; i++)
                             {
-                                if (CPlayerData.m_GradedCardInventoryList[i].amount > 10)
-                                    CPlayerData.m_GradedCardInventoryList[i].amount = 10;
-                                total += CPlayerData.GetCardMarketPrice(CPlayerData.GetGradedCardData(CPlayerData.m_GradedCardInventoryList[i]));
+                                var row = CPlayerData.m_GradedCardInventoryList[i];
+                                if (row == null) continue;
+                                // PER-ROW, never around the loop: one bad row must not abandon the
+                                // rest of the total. Same hazard as the compact-row walk documented
+                                // on Util/GradingInterop.AddAllCompact, and it is NOT the divide by
+                                // zero an earlier draft of this comment claimed.
+                                // GetCardAmountPerMonsterType initialises num = 6 BEFORE its switch,
+                                // every case assigns 6 (or 1 for Ghost), and there is no default arm
+                                // (decompiled/CPlayerData.cs:692-721, the init at :694), so it
+                                // returns 6 or 12 for an expansion it has never heard of and cannot
+                                // return 0.
+                                //
+                                // What can actually throw is an out-of-range INDEX, and BOTH calls
+                                // inside this try can do it for a row whose card set this install
+                                // does not have. GetGradedCardData resolves the monster through
+                                // GetMonsterTypeFromCardSaveIndex, which indexes
+                                // InventoryBase.GetShownMonsterList(exp)[cardSaveIndex / perType]
+                                // (:790-793) - a list that falls back to TETRAMON's for an unknown
+                                // expansion (decompiled/InventoryBase.cs:290-308). GetCardMarketPrice
+                                // then indexes m_GenCardMarketPriceList[GetCardSaveIndex(card)]
+                                // (:1415-1420), and that list is sized from THIS install's own
+                                // GetCardCollectionDataCount() + 100 (:491), so a high enough index
+                                // runs off the end. Skipping such a row costs its value in one
+                                // header total, which is the trade this loop wants.
+                                //
+                                // Verified against vanilla and Grading Overhaul (GO's only reference
+                                // to GetCardAmountPerMonsterType is a read, decompiled-grading
+                                // :7132). EPL is not visible from this repo and could patch it, so
+                                // the catch - not the invariant - is what makes this safe.
+                                try
+                                {
+                                    var copy = CPlayerData.GetGradedCardData(row);
+                                    if (!goPresent && copy.cardGrade > 10) copy.cardGrade = 10;
+                                    total += CPlayerData.GetCardMarketPrice(copy);
+                                }
+                                catch { continue; }
                             }
                             ui.SetTotalValue(total);
                         }
@@ -3145,14 +3244,49 @@ namespace CardShopCoop
             return list;
         }
 
-        private static string GradedDesc(Util.GradingInterop.GradedEntry e)
+        /// <summary>One entry as a report line. <paramref name="full"/> swaps in the complete
+        /// save-index identity for the lines that assert two entries are DIFFERENT cards - see
+        /// <see cref="CardIdentFull"/>; everywhere else the short name keeps the summaries
+        /// readable.</summary>
+        private static string GradedDesc(Util.GradingInterop.GradedEntry e, bool full = false)
         {
             int company, cert;
             Util.GradingInterop.DecodeCert(e.Encoded, out company, out cert);
-            string s = CardIdent(e.ToCard()) + " grade " + Util.GradingInterop.Actual(e.Encoded);
+            string s = (full ? CardIdentFull(e) : CardIdent(e.ToCard())) + " grade " + Util.GradingInterop.Actual(e.Encoded);
             if (cert > 0) s += " (cert " + cert + ")";
             if (Util.GradingInterop.CheatFlagged(e.Encoded)) s += " [FAKE-flagged]";
             return s;
+        }
+
+        /// <summary>Card id for the two lines that have to say WHY <see cref="SameCard"/> said no.
+        /// CardIdent alone names only SOME of the identity, so a divergence in the rest rendered as
+        /// the SAME STRING TWICE - the field log read "cert 4050 is AscendedHeroesEXP#411 here and
+        /// AscendedHeroesEXP#411 on rocio", i.e. a collision reported against what it itself names
+        /// as one card. This spells out all five fields <see cref="SameCard"/> compares, so a line
+        /// that says DIFFERENT can always be checked against a line that says which field differed.
+        ///
+        /// The expansion is printed HERE rather than left to CardIdent, and that is the whole point
+        /// of this method rather than an accident: CardIdent only carries the expansion on two of
+        /// its three arms - a modded id renders "Expansion#N" and an unresolved one renders
+        /// "unknown-pack card #N", but every VANILLA expansion falls into
+        /// <c>(int)expansionType &lt; (int)ECardExpansionType.MAX</c> and returns the bare
+        /// <c>monsterType.ToString()</c> with no expansion at all (CoopCore.cs:1568). SameCard does
+        /// compare Expansion, so without this prefix two vanilla sets sharing a monster ordinal
+        /// were exactly the illegible repeat this method exists to kill. Naming it unconditionally
+        /// also means CardIdent can keep changing its own branching without silently re-opening
+        /// that hole; the cost is that a modded id repeats its expansion, which is noise in a
+        /// diagnostic line and cheap next to another unreadable field report.
+        ///
+        /// Border and foil are the rest of what CPlayerData.GetCardSaveIndex consumes
+        /// (decompiled/CPlayerData.cs:795-811) and isDestiny is the one identity field SameCard
+        /// checks from outside it. Reached by the CERT COLLISION line and, through
+        /// <c>GradedDesc(e, full: true)</c>, by the adopt's DIFFERENT-card refusal; every other
+        /// report line is about a card rather than a disagreement over one and keeps the short
+        /// name.</summary>
+        private static string CardIdentFull(Util.GradingInterop.GradedEntry e)
+        {
+            return e.Expansion + " " + CardIdent(e.ToCard()) + " " + e.Border
+                + (e.IsFoil ? " foil" : "") + (e.IsDestiny ? " destiny" : "");
         }
 
         /// <summary>Same CARD, ignoring the grade - every field that feeds
@@ -3280,7 +3414,7 @@ namespace CardShopCoop
                     int company, cert;
                     Util.GradingInterop.DecodeCert(e.Encoded, out company, out cert);
                     if (collisions.Count < 8)
-                        collisions.Add($"cert {cert} is {CardIdent(m.ToCard())} here and {CardIdent(e.ToCard())} on {who}");
+                        collisions.Add($"cert {cert} is {CardIdentFull(m)} here and {CardIdentFull(e)} on {who}");
                 }
             }
 
@@ -3525,8 +3659,16 @@ namespace CardShopCoop
                         // what sent the last investigation looking for a card that was never
                         // there. SameCard compares the full save-index identity, not just the
                         // monster, so a border/foil variant still reads as the collision it is.
+                        // The ALARMING arm now prints the FULL save-index identity on both sides so
+                        // the line can be CHECKED rather than appearing to name one card twice: the
+                        // field report that read "cert 4050 is AscendedHeroesEXP#411 here and
+                        // AscendedHeroesEXP#411 on rocio" was almost certainly a REAL collision and
+                        // merely illegible, the two entries differing by border, foil, destiny or
+                        // expansion - none of which CardIdent is guaranteed to print (see
+                        // CardIdentFull). Both arms refuse the adopt either way - the choice only
+                        // ever decides what the log says.
                         if (!SameCard(clash, e))
-                            CoopPlugin.Log.LogWarning($"graded adopt: REFUSED {GradedDesc(e)} - that certificate number is already on this PC bound to a DIFFERENT card, {GradedDesc(clash)}. "
+                            CoopPlugin.Log.LogWarning($"graded adopt: REFUSED {GradedDesc(e, full: true)} - that certificate number is already on this PC bound to a DIFFERENT card, {GradedDesc(clash, full: true)}. "
                                 + "Adding it would make Grading Overhaul flag BOTH cards FAKE, so it is left alone.");
                         else
                             CoopPlugin.Log.LogWarning($"graded adopt: REFUSED {GradedDesc(e)} - you already hold that cert; the local copy is FAKE-flagged (or identical): {GradedDesc(clash)}. "

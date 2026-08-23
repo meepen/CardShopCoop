@@ -928,10 +928,32 @@ namespace CardShopCoop.Util
         }
 
         /// <summary>Compact (save-shaped) rows, where the encoded grade rides in <c>amount</c>.
-        /// Per-ROW try/catch, never per-list: GetGradedCardData divides by
-        /// GetCardAmountPerMonsterType, which is 0 for an expansion this install has no data for,
-        /// and one such row must not silently truncate the rest of a container's contents - a
-        /// truncated container is precisely the miss that fabricates an adopt offer.</summary>
+        /// Per-ROW try/catch, never per-list: one row that throws must not silently truncate the
+        /// rest of a container's contents, because a truncated container is precisely the miss
+        /// that fabricates an adopt offer.
+        ///
+        /// What throws is NOT a divide by zero - an earlier version of this comment claimed
+        /// GetCardAmountPerMonsterType returns 0 for an expansion this install has no data for,
+        /// and that is false. It initialises <c>num = 6</c> BEFORE its switch, every case assigns
+        /// 6 (or 1 for Ghost), and there is no default arm
+        /// (decompiled/CPlayerData.cs:692-721, the init at :694), so it returns 6 or 12 even for an
+        /// expansion it has never heard of. GetGradedCardData cannot divide by zero.
+        ///
+        /// The real hazard is an out-of-range INDEX. GetGradedCardData resolves the monster through
+        /// GetMonsterTypeFromCardSaveIndex, which does
+        /// <c>InventoryBase.GetShownMonsterList(exp)[cardSaveIndex / perType]</c> (:790-793), and
+        /// that list falls back to the TETRAMON list for any expansion this install lacks
+        /// (decompiled/InventoryBase.cs:290-308, the default arm). A row saved against a card set
+        /// the other PC has and this one does not therefore indexes the wrong, usually shorter,
+        /// list: ArgumentOutOfRangeException when the index runs off the end, and a confidently
+        /// wrong monster when it happens to land inside. It can also NullReference through
+        /// <c>CSingleton&lt;InventoryBase&gt;.Instance</c> before any of that.
+        ///
+        /// That reading is verified against VANILLA and Grading Overhaul only - GO's single
+        /// reference to GetCardAmountPerMonsterType is a read (decompiled-grading :7132), it does
+        /// not patch it. EPL is not visible from this repo and could in principle patch it, so do
+        /// not lean on "never zero" as a guarantee anywhere: the catch, not the invariant, is what
+        /// makes this loop safe either way, and it stays whichever hazard is the live one.</summary>
         private static void AddAllCompact(List<GradedEntry> list, HashSet<string> seen,
             List<CompactCardDataAmount> rows)
         {
@@ -948,6 +970,17 @@ namespace CardShopCoop.Util
         private static void Add(List<GradedEntry> list, HashSet<string> seen, CardData c)
         {
             if (c == null || c.cardGrade <= 10) return;
+            // A BLANKED SUBMIT SLOT IS NOT A CARD. GradedCardSubmitSelectScreen.OnCloseScreen
+            // hands every staged card back and then sets monsterType = EMonsterType.None on the
+            // slot it abandoned (decompiled/GradedCardSubmitSelectScreen.cs:92) - it does NOT
+            // clear cardGrade, so the slot keeps its encoded value. LocalOnlyGradedCerts walks
+            // exactly that list, so without this the abandoned slot entered the digest as a GHOST
+            // ENTRY: a real certificate on a card with no monster. It then collided under SameCard
+            // with the genuine card that still holds that cert, and the check reported a CERT
+            // COLLISION - the one category that means "Grading Overhaul is about to call both
+            // copies FAKE" - for a slot that no longer holds anything.
+            if (c.monsterType == EMonsterType.None) return;
+
             var e = new GradedEntry
             {
                 Expansion = c.expansionType,
