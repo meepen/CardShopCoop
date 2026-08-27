@@ -74,17 +74,16 @@ namespace CardShopCoop.Patches
             Try(h, typeof(RestockManager), "Update",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(RestockUpdatePrefix)));
 
-            // The client must NOT roll its own card BASE market prices. RestockManager.Init
-            // calls GenerateCardMarketPrice per expansion, which for every card index whose
-            // GetCardMarketPrice is still 0 rolls a fresh base with the LOCAL Unity Random
-            // (RestockManager.cs GenerateCardMarketPrice ~237 guard then ~255-271 Random.Range
-            // -> SetCardGeneratedMarketPrice ~314). The host had that same index at 0 too, so
-            // both sides roll DIFFERENT bases that never heal - only pricePercentChangeList is
-            // synced, not the base - leaving guest and host binder totals silently diverged.
-            // GenerateCardMarketPrice does NOTHING but roll card bases, so blocking the whole
-            // method on the client is the narrowest safe cut: the join-time save transfer
-            // writes m_GenCardMarketPriceList directly (not through this method), so the guest
-            // still gets the host's authoritative bases.
+            // The client must NOT roll its own card BASE market prices while the host's are
+            // here. RestockManager.Init calls GenerateCardMarketPrice per expansion, which for
+            // every card index whose GetCardMarketPrice is still 0 rolls a fresh base with the
+            // LOCAL Unity Random (RestockManager.cs GenerateCardMarketPrice ~237 guard then
+            // ~255-271 Random.Range -> SetCardGeneratedMarketPrice ~314). The host had that same
+            // index at 0 too, so both sides roll DIFFERENT bases, leaving guest and host binder
+            // totals silently diverged. Normally the join-time save transfer writes
+            // m_GenCardMarketPriceList directly (not through this method) and the prefix skips
+            // the roll; it lets the roll through ONLY for an expansion the transfer left
+            // all-zero, which MarketSync then repairs. See the prefix.
             Try(h, typeof(RestockManager), "GenerateCardMarketPrice",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(GenerateCardMarketPriceBlockPrefix)));
 
@@ -258,15 +257,68 @@ namespace CardShopCoop.Patches
             try { FiOobTimer?.SetValue(__instance, 0f); } catch { }
         }
 
-        /// <summary>Client only: skip the local card-base-price roll entirely. On the host this
-        /// runs and defines the authoritative bases; on the guest, running it would roll a
-        /// DIFFERENT base (local Random) for every index the host also had at 0, and only the
-        /// percent-change list is synced afterwards - so the two binders drift apart forever.
-        /// Returning false leaves m_GenCardMarketPriceList as the join-time save transfer wrote
-        /// it (the host's real bases). Same Role-check idiom as ClientBlockPrefix.</summary>
-        public static bool GenerateCardMarketPriceBlockPrefix()
+        private static bool s_warnedNoCardBases;
+
+        /// <summary>Client only: skip the local card-base-price roll WHEN the host's bases are
+        /// actually here. On the host this runs and defines the authoritative bases; on the
+        /// guest, running it would roll a DIFFERENT base (local Random) for every index the host
+        /// also had at 0, so returning false leaves m_GenCardMarketPriceList as the join-time
+        /// save transfer wrote it (the host's real bases).
+        ///
+        /// But that transfer can fail to land: CGameData.PropagateLoadData restores all seven
+        /// card price tables behind ONE gate (decompiled/CGameData.cs:758-773), so when that gate
+        /// reads false every base in every table stays 0. Vanilla's own repair is this very
+        /// method (it fills only indices still at zero, decompiled/RestockManager.cs:237), so
+        /// blocking it unconditionally left the guest at $0.00 on every card forever. With an
+        /// all-zero table we now let vanilla roll, and MarketSync's next snapshot overwrites
+        /// those local rolls with the host's bases - which only became safe once
+        /// generatedMarketPrice went on the wire.
+        ///
+        /// The test is PER EXPANSION because the repair is: RestockManager.Init calls this once
+        /// per expansion and each call writes only its OWN list
+        /// (CPlayerData.SetCardGeneratedMarketPrice, decompiled/CPlayerData.cs:1157-1186).
+        /// Testing one table for all of them would let the first call's fresh rolls read as
+        /// "the host's bases arrived" and block the other five.</summary>
+        public static bool GenerateCardMarketPriceBlockPrefix(ECardExpansionType expansionType)
         {
-            return CoopCore.Role != CoopRole.Client;
+            if (CoopCore.Role != CoopRole.Client) return true;
+            bool landed;
+            switch (expansionType)
+            {
+                case ECardExpansionType.Tetramon: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceList); break;
+                case ECardExpansionType.Destiny: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListDestiny); break;
+                // one Ghost call fills BOTH halves - it doubles its range and splits them with
+                // isDestiny (RestockManager.cs:214-226 -> CPlayerData.cs:1167-1175) - and the
+                // load gate restores the pair together, so either one filled means both landed
+                case ECardExpansionType.Ghost: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListGhost)
+                                                     || AnyCardBase(CPlayerData.m_GenCardMarketPriceListGhostBlack); break;
+                case ECardExpansionType.Megabot: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListMegabot); break;
+                case ECardExpansionType.FantasyRPG: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListFantasyRPG); break;
+                case ECardExpansionType.CatJob: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListCatJob); break;
+                // An expansion we can't name has no table among MarketSync's seven either, so a
+                // local roll into it could never be corrected by the host's snapshot. Keep
+                // blocking: visible $0.00 beats prices that silently disagree with the host.
+                default: return false;
+            }
+            if (landed) return false;
+            if (!s_warnedNoCardBases)
+            {
+                s_warnedNoCardBases = true;
+                CoopPlugin.Log.LogWarning("card base prices did not arrive with the join world (every generatedMarketPrice is 0) - letting vanilla roll local bases so cards aren't $0.00; MarketSync's next snapshot replaces them with the host's");
+            }
+            return true;
+        }
+
+        /// <summary>Any non-zero base means the join world's card price block landed for this
+        /// table: vanilla never rolls a base of 0 (RestockManager.cs:314 always passes a
+        /// positive multiplier), so 0 everywhere can only be the untouched initial state
+        /// (CPlayerData.cs:563-565 seeds the lists with blank MarketPrice objects).</summary>
+        private static bool AnyCardBase(System.Collections.Generic.List<MarketPrice> list)
+        {
+            if (list == null) return false;
+            for (int i = 0; i < list.Count; i++)
+                if (list[i] != null && list[i].generatedMarketPrice != 0f) return true;
+            return false;
         }
 
         /// <summary>Skip the move-preview teardown when there's no preview to tear down

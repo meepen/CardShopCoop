@@ -5,6 +5,28 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.44
+**Fixes $0.00 card prices on the joining player, and the empty collection binder and bulk-box lists that come with them.** Mostly hit Game Pass players. Both players must update.
+
+**If your cards look like they vanished, they didn't**
+- Nothing was deleted. Every card is still in your collection — the binder just stopped being able to sort them.
+- The binder sorts by **price** by default. When every card reads $0.00 there is nothing to sort by, so instead of your collection being grouped together on the first few pages it gets spread one card at a time across every page, with empty slots in between. It looks exactly like most of your collection is gone.
+- **Switch the binder sort from Price to Amount and they all come straight back.** That works even without this update. Avoid *Duplicate Price* and *Total Value* — those read the price too, so they look just as broken.
+
+**What was actually wrong**
+- When you join, the host's card prices are supposed to arrive with their world. On the Game Pass build they weren't arriving, and the base price for every card stayed at zero.
+- The game repairs that by itself a moment after loading — it fills in any card price still sitting at zero. **My mod blocked that repair on the joining player.** For a good reason: left alone, your copy would invent its own prices and drift away from the host's. But I blocked the repair without ever sending the real prices over the network, so there was nothing left to fix it. It stayed at $0.00 for the rest of the session, and every session after.
+- Card prices now travel between players, the same way item prices already did. And the repair is only blocked when the host's prices actually arrived — if they didn't, your copy fills them in and then gets corrected by the host a moment later.
+
+**Why the bulk boxes were empty too**
+- The workbench and the bulk donation box hide any card worth less than $0.01, and the minimum can't be dragged below a penny. With every card at $0.00 that filter removed all of them before it even looked at how many you had. Fixed by the same change.
+
+Both players must update — the launcher does it automatically.
+
+Thanks to **ItsYourBoyBlu** and **wd-40** for the reports and logs.
+
+---
+
 ## 1.0.43
 **Fixes a bug I introduced in 1.0.28 that permanently destroyed Grading Overhaul grades. If you use Grading Overhaul, please read the recovery section below before you play again.** Both players must update.
 

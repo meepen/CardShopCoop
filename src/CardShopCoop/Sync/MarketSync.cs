@@ -356,6 +356,11 @@ namespace CardShopCoop.Sync
             {
                 float v = list[i] != null ? list[i].pricePercentChangeList : 0f;
                 bw.Write((short)Mathf.Clamp(Mathf.RoundToInt(v * 100f), short.MinValue, short.MaxValue));
+                // The card BASE, for the same reason the item bases ride along above: a save
+                // whose card price block failed to restore leaves every base at 0, and the
+                // percent alone multiplies 0 into $0.00 cards forever. Full float - unlike the
+                // percent these are raw prices with no game clamp.
+                bw.Write(list[i] != null ? list[i].generatedMarketPrice : 0f);
             }
         }
 
@@ -365,8 +370,14 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < n; i++)
             {
                 float v = br.ReadInt16() / 100f;
+                float gen = br.ReadSingle(); // always consume: a shorter local list must not desync the rest of the stream
                 if (list != null && i < list.Count && list[i] != null)
+                {
                     list[i].pricePercentChangeList = v; // in place: consumers hold the object
+                    // Rows past the host's shown-monster range are legitimately 0 over there;
+                    // copying that in would blank a row vanilla had just filled locally.
+                    if (gen != 0f) list[i].generatedMarketPrice = gen;
+                }
             }
         }
 
@@ -565,7 +576,14 @@ namespace CardShopCoop.Sync
         {
             if (list == null) return h;
             for (int i = 0; i < list.Count; i++)
-                h = h * 31 + (int)((list[i] != null ? list[i].pricePercentChangeList : 0f) * 100f);
+            {
+                var m = list[i];
+                h = h * 31 + (int)((m != null ? m.pricePercentChangeList : 0f) * 100f);
+                // bases too, now that they are on the wire: they change when the host rolls
+                // rows for newly shown monsters, and a base-only change that doesn't move the
+                // hash sits unsent until the slow heal
+                h = h * 31 + (int)((m != null ? m.generatedMarketPrice : 0f) * 100f);
+            }
             return h;
         }
     }
