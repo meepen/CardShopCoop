@@ -38,20 +38,11 @@ namespace CardShopCoop
         /// safely back at the title (no session AND out of any game level) - see Update.</summary>
         public static bool GuestBorrowedWorld;
 
-        /// <summary>FIX E4 (opt-in, default OFF): lets the HOST work its own register with
-        /// the mod's serve key, the same way a guest does. The host IS the register
-        /// authority, so it calls RegisterServe.Serve directly - no ServeRequest round-trip.
-        /// Config plumbing lives in CoopPlugin (not editable from here); wiring a
-        /// ConfigEntry to flip this is a documented follow-up. Left false so nothing changes
-        /// for the host's normal (mouse-click) register interaction until opted in.</summary>
-        public static bool HostServeKeyEnabled = false;
-
         public string StatusLine = "Not connected";
         public string ErrorLine = "";
         public string HostTimeLine = "";
         public string RegisterLine = "";
         public float RegisterLineTimer;
-        private float _serveThrottle;
         public readonly Dictionary<int, string> PeerNames = new Dictionary<int, string>();
 
         private ICoopTransport _net;
@@ -84,11 +75,11 @@ namespace CardShopCoop
         private readonly TournamentSync _tournament = new TournamentSync();
         private readonly CardBoxSync _cardBoxes = new CardBoxSync();
         private readonly FurnBoxSync _furnBoxes = new FurnBoxSync();
+        private readonly Sync.RegisterSync _register = new Sync.RegisterSync();
         private string _lastShopNameSent;
         private float _shopNameTimer = -1.0f; // staggered phase (see _lightSyncTimer note)
-        private readonly Sync.RegisterMirror _registerMirror = new Sync.RegisterMirror();
         private float _npcSweepTimer = -1.3f;
-        private float _regStateTimer = -0.17f;
+        private float _tradePromptTimer = -0.17f;
         public string PromptLine = "";
 
         // ---- invite code / UPnP (LAN hosting only) ----
@@ -266,8 +257,8 @@ namespace CardShopCoop
         private float _dt;
         private bool _syncActive;
         private Action _actNetPump, _actAvatars, _actWorld, _actCardShelves, _actObjMoves,
-            _actBoxes, _actPopulation, _actNpcPuppets, _actRegisterMirror, _actNpcSweep,
-            _actStateSend, _actNpcCollect, _actRegisterCollect, _actModules, _actCardPriceRetry,
+            _actBoxes, _actPopulation, _actNpcPuppets, _actRegisterPrompt, _actNpcSweep,
+            _actStateSend, _actNpcCollect, _actModules, _actCardPriceRetry,
             _actFrameCardWork;
         private CustomerManager _cmSweep;
         private CustomerManager _cmSpray; // host-side: real customer list for replayed guest deodorant sprays
@@ -423,17 +414,19 @@ namespace CardShopCoop
             };
             _actPopulation = () => { if (Role == CoopRole.Host) _population.HostTick(_dt, _syncActive); };
             _actNpcPuppets = () => _npcs.TickPuppets(_dt, InGameLevel());
-            _actRegisterMirror = RegisterMirrorTick;
+            _actRegisterPrompt = RegisterPromptTick;
             _actNpcSweep = NpcSweepTick;
             _actStateSend = StateSendTick;
             _actNpcCollect = NpcCollectTick;
-            _actRegisterCollect = RegisterCollectTick;
 
             _grading.SendOp = w => Send(1, MsgType.GradingOp, w);
             _grading.BroadcastState = w => Broadcast(MsgType.GradingState, w);
             _trades.SendOp = w => Send(1, MsgType.TradeOp, w);
             _trades.BroadcastState = w => Broadcast(MsgType.TradeState, w);
             _tables.BroadcastState = w => Broadcast(MsgType.TableState, w);
+            _register.SendOp = w => Send(1, MsgType.RegisterOp, w);
+            _register.BroadcastState = w => Broadcast(MsgType.RegisterState, w);
+            _register.BroadcastCart = w => Broadcast(MsgType.RegisterCart, w);
             _staff.SendOp = w => Send(1, MsgType.StaffOp, w);
             _staff.BroadcastState = w => Broadcast(MsgType.StaffState, w);
             _shopState.SendOp = w => Send(1, MsgType.ShopOp, w);
@@ -2045,7 +2038,6 @@ namespace CardShopCoop
             _objMoves.Reset();
             _boxes.Reset();
             _population.Reset();
-            _registerMirror.Reset();
             ModulesReset();
             PromptLine = "";
             _lightManager = null;
@@ -2129,6 +2121,7 @@ namespace CardShopCoop
                 _tournament.HostTick(_dt, inGame);
                 _cardBoxes.HostTick(_dt, inGame);
                 _furnBoxes.HostTick(_dt, inGame);
+                _register.HostTick(_dt, inGame);
             }
             else if (Role == CoopRole.Client)
             {
@@ -2213,6 +2206,7 @@ namespace CardShopCoop
             _tournament.Reset();
             _cardBoxes.Reset();
             _furnBoxes.Reset();
+            _register.Reset();
         }
 
         private void ModulesForceResend()
@@ -2229,24 +2223,22 @@ namespace CardShopCoop
             _tournament.ForceResend();
             _cardBoxes.ForceResend();
             _furnBoxes.ForceResend();
+            _register.ForceResend();
         }
 
-        private void RegisterMirrorTick()
+        private void RegisterPromptTick()
         {
-            _registerMirror.Tick(_dt);
-            _regStateTimer += _dt;
-            if (_regStateTimer >= 0.5f && InGameLevel())
+            // Only the TRADE/sell-in prompt survives here: the register itself is pure vanilla
+            // (no hints, no serve key) - the manning player just clicks it and serves.
+            _tradePromptTimer += _dt;
+            if (_tradePromptTimer >= 0.5f && InGameLevel())
             {
-                _regStateTimer -= 0.5f;
+                _tradePromptTimer -= 0.5f;
                 var tf = ResolvePlayer();
                 int near = tf != null ? Sync.RegisterServe.FindNearestCounter(tf.position, CoopPlugin.ServeReach.Value, quiet: true) : -1;
-                // Prefer the TRADE prompt over the register prompt at a shared counter - a
-                // trade/sell customer is the rarer, time-limited event and was being shadowed.
-                string prompt = _trades.PromptFor(near) ?? _registerMirror.PromptFor(near);
-                // Walk-up hint: on the guest the "!" trade customer is a collider-less render
-                // puppet, so clicking it (the vanilla serve gesture) does nothing and the
-                // guest never learns to stand at the counter. Proactively teach it whenever a
-                // trade offer is live and no closer prompt is showing.
+                string prompt = _trades.PromptFor(near);
+                // walk-up hint for the collider-less "!" trade puppet, so the guest knows how
+                // to answer it; a walk-up trade is the rarer, time-limited event
                 if (prompt == null && Role == CoopRole.Client && _trades.AnyKnownOffer())
                     prompt = $"a customer wants to trade - go to the counter and press {CoopPlugin.ServeKey.Value}";
                 PromptLine = prompt ?? "";
@@ -2282,8 +2274,12 @@ namespace CardShopCoop
             {
                 var list = _cmSweep.GetCustomerList();
                 for (int i = 0; i < list.Count; i++)
-                    if (list[i] != null && list[i].gameObject.activeSelf)
-                        list[i].gameObject.SetActive(false);
+                {
+                    var cust = list[i];
+                    if (cust == null || Sync.RegisterSync.IsCarrier(cust)
+                        || Sync.NpcSync.IsExistingCustomer(cust)) continue;
+                    if (cust.gameObject.activeSelf) cust.gameObject.SetActive(false);
+                }
             }
             var workers = WorkerManager.GetWorkerList();
             if (workers != null)
@@ -2337,18 +2333,6 @@ namespace CardShopCoop
             {
                 var c = chunks[i];
                 BroadcastTransient(MsgType.NpcState, bw => bw.Write(c));
-            }
-        }
-
-        private void RegisterCollectTick()
-        {
-            _regStateTimer += _dt;
-            if (_regStateTimer >= 0.5f)
-            {
-                _regStateTimer -= 0.5f;
-                var batch = Sync.RegisterServe.CollectStates();
-                if (batch != null)
-                    BroadcastTransient(MsgType.RegisterState, bw => bw.Write(batch));
             }
         }
 
@@ -4002,7 +3986,6 @@ namespace CardShopCoop
             _objMoves.Reset();
             _boxes.Reset();
             _population.Reset();
-            _registerMirror.Reset();
             ModulesReset();
             PromptLine = "";
             _lastShopNameSent = null;
@@ -4225,107 +4208,11 @@ namespace CardShopCoop
             if (Role != CoopRole.None && Input.GetKeyDown(CoopPlugin.EmoteKey.Value) && !UI.CoopUI.TextFieldFocused)
                 SendEmote();
 
-            if (_serveThrottle > 0f) _serveThrottle -= Time.deltaTime;
             if (RegisterLineTimer > 0f)
             {
                 RegisterLineTimer -= Time.deltaTime;
                 if (RegisterLineTimer <= 0f) RegisterLine = "";
             }
-            // tap V = one register action; HOLD V = auto-serve (~4 actions/sec)
-            bool serveTap = Input.GetKeyDown(CoopPlugin.ServeKey.Value);
-            // focus suppression must be LOUD on a real tap: these guards silently ate every
-            // serve press when a stale focus stuck (the "guest can't interact with npc"
-            // report) - undiagnosable from the log until this line existed
-            if (serveTap && Role == CoopRole.Client
-                && (UI.CoopUI.TextFieldFocused || NativeTextInputFocused()))
-                CoopPlugin.Log.LogInfo("serve key ignored (a text field has focus - "
-                    + (UI.CoopUI.TextFieldFocused ? "co-op window" : "game input") + ")");
-            if (Role == CoopRole.Client && _serveThrottle <= 0f && InGameLevel()
-                && (serveTap || Input.GetKey(CoopPlugin.ServeKey.Value)) && !UI.CoopUI.TextFieldFocused
-                && !NativeTextInputFocused())
-            {
-                _serveThrottle = 0.25f;
-                Guarded("serve", () =>
-                {
-                    var tf = ResolvePlayer();
-                    int idx = tf != null ? Sync.RegisterServe.FindNearestCounter(tf.position, CoopPlugin.ServeReach.Value, quiet: !serveTap) : -1;
-                    // a live trade/sell-in offer owns this counter: TradeServe's own key
-                    // handling sends the TradeOp; a ServeRequest here would answer
-                    // "no customer" and stomp the trade feedback line
-                    if (idx >= 0 && _trades.HasOffer(idx)) return;
-                    if (idx < 0)
-                    {
-                        if (serveTap) // don't nag every repeat while held
-                        {
-                            RegisterLine = "walk up to the register first";
-                            RegisterLineTimer = 2f;
-                        }
-                    }
-                    else
-                    {
-                        Send(1, MsgType.ServeRequest, bw => bw.Write(idx));
-                    }
-                });
-            }
-
-            // FIX E4 (opt-in): the HOST can also man its own register with the serve key.
-            // It is the authority, so it calls Serve DIRECTLY (no ServeRequest), discards
-            // the scan echo (its own vanilla checkout UI already reflects the scan), and
-            // surfaces the status on RegisterLine. OFF by default (HostServeKeyEnabled).
-            if (Role == CoopRole.Host && HostServeKeyEnabled && _serveThrottle <= 0f && InGameLevel()
-                && (serveTap || Input.GetKey(CoopPlugin.ServeKey.Value)) && !UI.CoopUI.TextFieldFocused
-                && !NativeTextInputFocused())
-            {
-                _serveThrottle = 0.25f;
-                Guarded("host-serve", () =>
-                {
-                    var tf = ResolvePlayer();
-                    int idx = tf != null ? Sync.RegisterServe.FindNearestCounter(tf.position, CoopPlugin.ServeReach.Value, quiet: !serveTap) : -1;
-                    if (idx >= 0 && _trades.HasOffer(idx)) return; // trade offer owns this counter
-                    if (idx < 0)
-                    {
-                        if (serveTap)
-                        {
-                            RegisterLine = "walk up to the register first";
-                            RegisterLineTimer = 2f;
-                        }
-                        return;
-                    }
-                    string status = Sync.RegisterServe.Serve(idx, CoopPlugin.PlayerName.Value, out _);
-                    if (!string.IsNullOrEmpty(status))
-                    {
-                        RegisterLine = status;
-                        RegisterLineTimer = 8f;
-                    }
-                });
-            }
-
-            // natural register: clicking a mirrored cart item scans it; clicking during the
-            // payment/change phases advances the sale - works like the normal till.
-            if (Role == CoopRole.Client && _serveThrottle <= 0f && InGameLevel()
-                && Input.GetMouseButtonDown(0) && !UI.CoopUI.TextFieldFocused)
-            {
-                Guarded("serve-click", () =>
-                {
-                    var cam = Camera.main;
-                    if (cam == null) return;
-                    if (Physics.Raycast(cam.ScreenPointToRay(Input.mousePosition), out var hit, 6f)
-                        && _registerMirror.TryGetPropCounter(hit.collider, out int propIdx))
-                    {
-                        _serveThrottle = 0.25f;
-                        Send(1, MsgType.ServeRequest, bw => bw.Write(propIdx));
-                        return;
-                    }
-                    var tf = ResolvePlayer();
-                    int near = tf != null ? Sync.RegisterServe.FindNearestCounter(tf.position, CoopPlugin.ServeReach.Value, quiet: true) : -1;
-                    if (near >= 0 && _registerMirror.IsPaymentPhase(near))
-                    {
-                        _serveThrottle = 0.3f;
-                        Send(1, MsgType.ServeRequest, bw => bw.Write(near));
-                    }
-                });
-            }
-
             if (_net == null) return;
 
             Guarded("net-pump", _actNetPump);
@@ -4368,6 +4255,7 @@ namespace CardShopCoop
                     try { _boxes.HostReleaseRemoteCarried(); } catch { }
                     try { _cardBoxes.HostReleaseRemoteCarried(); } catch { }
                     try { _furnBoxes.HostReleaseRemoteCarried(); } catch { }
+                    try { _register.HostReleaseConn(left); } catch { }
                     // and DROP any product still held for the departed guest: its charge
                     // is never coming, and the fail-open pump would otherwise deliver the
                     // product chargeless 1.5s from now. Its charge verdict goes too.
@@ -4407,7 +4295,7 @@ namespace CardShopCoop
                 {
                     var t = _dispatchBuf[i].Type;
                     if (t != MsgType.PlayerState && t != MsgType.RegisterState
-                        && t != MsgType.BoxState && t != MsgType.PopState) continue;
+                        && t != MsgType.RegisterCart && t != MsgType.BoxState && t != MsgType.PopState) continue;
                     long key = ((long)t << 32) | (uint)_dispatchBuf[i].ConnId;
                     if (!_dispatchSeen.Add(key)) _dispatchBuf[i] = default; // superseded
                 }
@@ -4474,7 +4362,7 @@ namespace CardShopCoop
             if (Role == CoopRole.Client)
             {
                 Guarded("npc-puppets", _actNpcPuppets);
-                Guarded("register-mirror", _actRegisterMirror);
+                Guarded("register-prompt", _actRegisterPrompt);
 
                 // chase any card price the host hasn't confirmed yet (the retry has its own
                 // 3s per-entry cooldown; this is just the polling cadence)
@@ -4628,7 +4516,6 @@ namespace CardShopCoop
             if (InGameLevel())
             {
                 Guarded("npc-collect", _actNpcCollect);
-                Guarded("register-collect", _actRegisterCollect);
             }
 
             _priceTimer += dt;
@@ -6499,64 +6386,21 @@ namespace CardShopCoop
                 {
                     if (Role != CoopRole.Client || !InGameLevel()) break;
                     using (var br = Msg.Reader(msg.Payload))
-                        _registerMirror.Apply(Sync.RegisterServe.ReadStates(br));
+                        _register.ClientApplyState(br);
                     break;
                 }
-                case MsgType.ServeRequest:
-                {
-                    if (Role != CoopRole.Host || !InGameLevel()) break;
-                    using (var br = Msg.Reader(msg.Payload))
-                    {
-                        int idx = br.ReadInt32();
-                        string who = PeerNames.TryGetValue(msg.ConnId, out var n) ? n : "player";
-                        string status = Sync.RegisterServe.Serve(idx, who, out var scanEcho);
-                        Send(msg.ConnId, MsgType.ServeStatus, bw => bw.Write(status));
-                        if (scanEcho != null)
-                            Send(msg.ConnId, MsgType.ScanEcho, bw => bw.Write(scanEcho));
-                    }
-                    break;
-                }
-                case MsgType.ServeStatus:
-                {
-                    if (Role != CoopRole.Client) break;
-                    using (var br = Msg.Reader(msg.Payload))
-                    {
-                        RegisterLine = br.ReadString();
-                        RegisterLineTimer = 3f;
-                    }
-                    if (RegisterLine == "sale complete!")
-                    {
-                        // clear EACH counter's own checkout screen AND the counters' running
-                        // totals for the next customer. Resetting one arbitrary screen (the
-                        // old behavior) left the scanned-item bar stale on the OTHER counters
-                        // of a multi-counter shop.
-                        Guarded("reset-screens", Sync.RegisterServe.ClientResetScreens);
-                        Guarded("reset-totals", Sync.RegisterServe.ClientResetTotals);
-                    }
-                    break;
-                }
-                case MsgType.ScanEcho:
+                case MsgType.RegisterCart:
                 {
                     if (Role != CoopRole.Client || !InGameLevel()) break;
                     using (var br = Msg.Reader(msg.Payload))
-                    {
-                        int counterIdx = br.ReadByte();
-                        bool isCard = br.ReadBoolean();
-                        double price = br.ReadDouble();
-                        double hostTotal = br.ReadDouble();
-                        try
-                        {
-                            var sm = FindObjectOfType<ShelfManager>();
-                            if (sm == null || counterIdx >= sm.m_CashierCounterList.Count) break;
-                            var counter = sm.m_CashierCounterList[counterIdx];
-                            CardData card = isCard ? Msg.ReadCard(br) : null;
-                            // the echo is built host-side (RegisterServe.Serve) and therefore
-                            // already speaks host ids; this end is the one that translates
-                            EItemType itemType = isCard ? default : Msg.ReadItemType(br);
-                            Sync.RegisterServe.ApplyScanEcho(counter, isCard, price, hostTotal, itemType, card);
-                        }
-                        catch { } // vanilla UI not open on this side - totals still fine
-                    }
+                        _register.ClientApplyCart(br);
+                    break;
+                }
+                case MsgType.RegisterOp:
+                {
+                    if (Role != CoopRole.Host || !InGameLevel()) break;
+                    using (var br = Msg.Reader(msg.Payload))
+                        _register.HostApplyOp(br, msg.ConnId);
                     break;
                 }
                 case MsgType.EconContrib:

@@ -979,8 +979,7 @@ namespace CardShopCoop.Sync
             }
         }
 
-        /// <summary>True while a trade/sell-in offer is live at this counter - CoopCore's
-        /// serve-key path must skip ServeRequest for it (this module answers instead).</summary>
+        /// <summary>True while a trade/sell-in offer is live at this counter.</summary>
         public bool HasOffer(int counterIdx)
         {
             return counterIdx >= 0 && _offers.ContainsKey(counterIdx);
@@ -996,8 +995,7 @@ namespace CardShopCoop.Sync
             return false;
         }
 
-        /// <summary>Client: prompt for the nearest counter's live offer, or null
-        /// (composes with RegisterMirror.PromptFor in CoopCore).</summary>
+        /// <summary>Client: prompt for the nearest counter's live offer, or null.</summary>
         public string PromptFor(int nearestCounter)
         {
             if (nearestCounter < 0 || !_offers.TryGetValue(nearestCounter, out var o)) return null;
