@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <GamePath Condition="'$(GamePath)' == '' and '$(CARDSHOP_GAMEPATH)' != ''">$(CARDSHOP_GAMEPATH)</GamePath>
+    <GamePath Condition="'$(GamePath)' == ''">D:\SteamLibrary\steamapps\common\TCG Card Shop Simulator</GamePath>
+  </PropertyGroup>
+  <Import Project="$(MSBuildThisFileDirectory)Directory.Build.user.props" Condition="Exists('$(MSBuildThisFileDirectory)Directory.Build.user.props')" />
+</Project>

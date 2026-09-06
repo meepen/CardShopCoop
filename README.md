@@ -49,7 +49,11 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
 
 - `src/CardShopCoop/` — plugin source. Build: `dotnet build -c Release`
   (auto-deploys into the game's plugins; pass `/p:SkipDeploy=true` while the game runs).
-  Set `<GamePath>` in the csproj to your install.
+  The game install path (`GamePath`) is resolved by `Directory.Build.props`:
+  point it at your install by copying `Directory.Build.user.props.example` to
+  `Directory.Build.user.props` (git-ignored), or set the `CARDSHOP_GAMEPATH`
+  environment variable. `dotnet build -p:GamePath=...` overrides either for a
+  one-off/CI build. Don't edit the csproj.
 - `tools/Decomp/` — regenerates the decompiled game-assembly reference locally
   (ILSpy; the output is not part of this repo).
 - Ready-to-install builds: see [Releases](https://github.com/DeliriumPulse/CardShopCoop/releases)

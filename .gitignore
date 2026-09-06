@@ -3,6 +3,7 @@ src/CardShopCoop/obj/
 tools/Decomp/bin/
 tools/Decomp/obj/
 decompiled/
+Directory.Build.user.props
 backup/
 diag/
 # dist/ holds personal deployment kits and release packaging - releases ship
