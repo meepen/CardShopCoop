@@ -24,8 +24,10 @@ namespace CardShopCoop.Patches
             // No local customer simulation on the client (host streams the real economy).
             Try(h, typeof(CustomerManager), "Update",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(ClientBlockPrefix)));
+            Try(h, typeof(Customer), "Update",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(CustomerUpdatePrefix)));
             Try(h, typeof(Customer), "ActivateCustomer",
-                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ClientBlockPrefix)));
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(CustomerActivatePrefix)));
 
             // No local workers on the client either.
             Try(h, typeof(WorkerManager), "ActivateWorker",
@@ -119,17 +121,6 @@ namespace CardShopCoop.Patches
             Try(h, typeof(PlaceDecoUIScreen), "StartPlaceDecoItem",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(PlaceDecoBlockPrefix)));
 
-            // The vanilla cashier-register click is fully live on the guest: clicking near a
-            // counter runs InteractableCashierCounter.OnMouseButtonUp -> OnEnterCashCounterMode,
-            // which SetStopMovement(true) + SetCurrentGameState(CashCounterState) - a soft-lock
-            // with no working exit for the guest (their serve flow is the ServeKey, never the
-            // vanilla register). Block the left-click entry on the client; the toast points them
-            // at the ServeKey. Right-click (OnRightMouseButtonUp -> OpenCashierSettingScreen) is a
-            // settings screen, NOT this movement-stopping mode, so it's intentionally left alone.
-            // Host untouched (Role check).
-            Try(h, typeof(InteractableCashierCounter), "OnMouseButtonUp",
-                prefix: new HarmonyMethod(typeof(GamePatches), nameof(CashierCounterClickBlockPrefix)));
-
             // Handheld deodorant spray: the guest's hold-spray loop only ever hits the
             // LOCAL customer list - inert puppets on a client - so a guest could never
             // clean a smelly customer. Intercept the per-customer check and forward one
@@ -188,6 +179,7 @@ namespace CardShopCoop.Patches
             TryModule("tournament", Sync.TournamentSync.ApplyPatches, h);
             TryModule("grading", Sync.GradingSync.ApplyPatches, h);
             TryModule("trades", Sync.TradeServe.ApplyPatches, h);
+            TryModule("register", Sync.RegisterSync.ApplyPatches, h);
             TryModule("playtables", Sync.PlayTableSync.ApplyPatches, h);
             TryModule("cardboxes", Sync.CardBoxSync.ApplyPatches, h);
             TryModule("furnboxes", Sync.FurnBoxSync.ApplyPatches, h);
@@ -389,23 +381,6 @@ namespace CardShopCoop.Patches
             return false;
         }
 
-        /// <summary>Client only: block the vanilla register click. On the guest,
-        /// InteractableCashierCounter.OnMouseButtonUp -> OnEnterCashCounterMode stops the player's
-        /// movement and switches to CashCounterState with no working exit (the guest's serve flow
-        /// is the ServeKey, not the vanilla register) - a soft-lock. Returning false before that
-        /// call keeps the guest free; the toast tells them how to actually serve. Host is
-        /// unaffected (Role check). Same block+toast idiom as RenamerBlockPrefix.</summary>
-        public static bool CashierCounterClickBlockPrefix()
-        {
-            if (CoopCore.Role != CoopRole.Client) return true;
-            if (CoopCore.Instance != null)
-            {
-                CoopCore.Instance.RegisterLine = $"press {CoopPlugin.ServeKey.Value} at the counter to serve customers";
-                CoopCore.Instance.RegisterLineTimer = 3f;
-            }
-            return false;
-        }
-
         // ---- handheld deodorant spray (guest -> host forward) -----------------
         // The vanilla hold-spray loop (InteractionPlayerController.RaycastHoldSprayState
         // ~1612-1631) calls DeodorantSprayCheck once PER CUSTOMER per spray tick with the
@@ -589,6 +564,16 @@ namespace CardShopCoop.Patches
             return CoopCore.Role != CoopRole.Client;
         }
 
+        public static bool CustomerActivatePrefix()
+        {
+            return CoopCore.Role != CoopRole.Client || RegisterSync.AllowClientCustomerLifecycle;
+        }
+
+        public static bool CustomerUpdatePrefix(Customer __instance)
+        {
+            return CoopCore.Role != CoopRole.Client;
+        }
+
         /// <summary>Client only: the joiner never opens his own end-of-day recap. Vanilla
         /// InteractionPlayerController.Update reaches ShowGoNextDayScreen on any Enter press
         /// while LightManager.GetHasDayEnded() is true - which on a mirrored 21:00 clock is
@@ -624,21 +609,25 @@ namespace CardShopCoop.Patches
             // pass through, so there is no feedback loop.
             if (evt is CEventPlayer_AddCoin addCoin)
             {
+                if (RegisterSync.SuppressClientRegisterEvents) return false;
                 CoopCore.Instance?.ForwardContribution(1, (float)addCoin.m_CoinValue);
                 return false;
             }
             if (evt is CEventPlayer_ReduceCoin reduceCoin)
             {
+                if (RegisterSync.SuppressClientRegisterEvents) return false;
                 CoopCore.Instance?.ForwardContribution(2, (float)reduceCoin.m_CoinValue);
                 return false;
             }
             if (evt is CEventPlayer_AddShopExp addExp)
             {
+                if (RegisterSync.SuppressClientRegisterEvents) return false;
                 CoopCore.Instance?.ForwardContribution(3, addExp.m_ExpValue);
                 return false;
             }
             if (evt is CEventPlayer_AddFame addFame)
             {
+                if (RegisterSync.SuppressClientRegisterEvents) return false;
                 CoopCore.Instance?.ForwardContribution(4, addFame.m_FameValue);
                 return false;
             }

@@ -26,13 +26,10 @@ namespace CardShopCoop.Net
         EconContrib = 19,  // client -> host: forwarded money/XP/fame earned by the joiner
         CardDelta = 20,    // both ways: a card entered/left the shared collection
         NpcState = 21,     // host -> client: batched customer/worker puppet states
-        ServeRequest = 22, // client -> host: joiner works the register (scan / take payment)
-        ServeStatus = 23,  // host -> client: register feedback (scanned n/m, paid, no customer)
         CardShelfDelta = 24,   // host -> client: authoritative card display slots
         CardShelfRequest = 25, // client -> host: joiner placed/removed a display card
         CardPriceSet = 26,     // both ways: a card's marked price changed
-        RegisterState = 27,    // host -> client: per-counter checkout state + cart items
-        ScanEcho = 28,         // host -> client: a scan landed (fills the vanilla checkout UI)
+        RegisterState = 27,    // host -> client: observer checkout state + mannedBy
         Roster = 29,           // host -> clients: connId->name table for relayed peers
         RelayState = 30,       // host -> clients: another client's PlayerState [senderId + state]
         RelayTag = 31,         // host -> clients: another client's emote/activity [senderId + kind]
@@ -80,6 +77,8 @@ namespace CardShopCoop.Net
         // host -> client only in REPLY to a divergent one, so the guest can see its own
         // one-sided difference. Report-only: receiving it never changes a card.
         GradedDigest = 71,     // both ways: graded-cert existence digest (album + hold + shelves + boxes + in-progress)
+        RegisterCart = 72,     // host -> client: authoritative cart, prices, phase, and scanned slots
+        RegisterOp = 73,       // client -> host: the manning player's register action (scan / payment / change / finish)
     }
 
     /// <summary>One received message, already reassembled from the wire.</summary>

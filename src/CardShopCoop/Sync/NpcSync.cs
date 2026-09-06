@@ -6,7 +6,8 @@ namespace CardShopCoop.Sync
 {
     /// <summary>
     /// v0.3 phase B: the host streams every active customer and worker (identity, position,
-    /// yaw, speed, action flags) at 8 Hz; the client renders them as stripped-clone puppets.
+    /// yaw, speed, action flags) at 8 Hz; the client renders normal NPCs as stripped-clone
+    /// puppets and temporarily uses real pooled customers for register interaction.
     /// Identity is the NPC's index in its manager list, which the game keeps stable for a
     /// whole session (pooled, append-only). Appearance is CharacterCustomization.CharacterName,
     /// sent only when it changes (plus a periodic refresh for late joiners / lost packets);
@@ -70,13 +71,38 @@ namespace CardShopCoop.Sync
         private BinaryWriter _sendBw;
         private int _chunkCount;
         private readonly Dictionary<int, string> _sentNames = new Dictionary<int, string>();
+        private readonly Dictionary<int, int> _customerGenerations = new Dictionary<int, int>();
+        private readonly Dictionary<int, bool> _customerActive = new Dictionary<int, bool>();
+        private readonly Dictionary<int, ExistingCustomer> _existing = new Dictionary<int, ExistingCustomer>();
+        private static NpcSync _live;
+
+        private sealed class ExistingCustomer
+        {
+            public Customer Customer;
+            public int Generation;
+            public float LastSeen;
+            public readonly Snap[] Buf = new Snap[4];
+            public int BufHead;
+            public int BufCount;
+            public NpcFlags Flags;
+            public int AppliedFlags = -1;
+            public Vector3 PrevRenderedPos;
+            public float RenderYaw;
+            public float AnimSpeed;
+        }
 
         public void Reset()
         {
+            _live = this;
             _cm = null;
             _sendTimer = 0f;
             _nameRefreshIn = 0f;
             _sentNames.Clear();
+            _customerGenerations.Clear();
+            _customerActive.Clear();
+            foreach (var mirror in _existing.Values)
+                if (mirror.Customer != null) mirror.Customer.gameObject.SetActive(false);
+            _existing.Clear();
             ClearPuppets();
         }
 
@@ -84,6 +110,7 @@ namespace CardShopCoop.Sync
         /// each under the Steam unreliable packet limit (null when not due / nothing).</summary>
         public List<byte[]> HostCollect(float dt)
         {
+            _live = this;
             _sendTimer += dt;
             if (_sendTimer < SendInterval) return null;
             _sendTimer -= SendInterval; // preserve cadence across frame boundaries
@@ -113,7 +140,15 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < customers.Count; i++)
             {
                 var c = customers[i];
-                if (c == null || !c.m_IsActive || !c.gameObject.activeSelf) continue;
+                bool active = c != null && c.m_IsActive && c.gameObject.activeSelf;
+                bool wasActive = _customerActive.TryGetValue(i, out var oldActive) && oldActive;
+                if (active && !wasActive)
+                {
+                    _customerGenerations.TryGetValue(i, out int generation);
+                    _customerGenerations[i] = generation + 1;
+                }
+                _customerActive[i] = active;
+                if (!active) continue;
                 // m_CharacterCustom is momentarily null during pooled activation; skipping
                 // one tick is harmless (client despawn timeout is 1.5s) whereas an empty
                 // name would churn the puppet through a bogus re-dress
@@ -127,7 +162,7 @@ namespace CardShopCoop.Sync
                 // bool - mirror it so the guest can see which customer wants to be served
                 try { if (c.m_ExclaimationMesh != null && c.m_ExclaimationMesh.activeSelf) flags |= NpcFlags.Exclaim; } catch { }
                 WriteEntry(chunks, hostTime, KindCustomer, (ushort)i, cc.CharacterName,
-                    c.transform, c.m_CurrentMoveSpeed, flags);
+                    c.transform, c.m_CurrentMoveSpeed, flags, _customerGenerations[i]);
             }
 
             var workers = WorkerManager.GetWorkerList();
@@ -144,7 +179,7 @@ namespace CardShopCoop.Sync
                     var wflags = CollectFlags(w.m_Anim);
                     if (w.m_IsFemale) wflags |= NpcFlags.Female;
                     WriteEntry(chunks, hostTime, KindWorker, (ushort)i, cc.CharacterName,
-                        w.transform, 0f, wflags, speedFromAnim: w.m_Anim);
+                        w.transform, 0f, wflags, speedFromAnim: w.m_Anim, identity: 0);
                 }
             }
 
@@ -171,7 +206,8 @@ namespace CardShopCoop.Sync
         }
 
         private void WriteEntry(List<byte[]> chunks, float hostTime, byte kind, ushort index,
-            string charName, Transform t, float moveSpeed, NpcFlags flags, Animator speedFromAnim = null)
+            string charName, Transform t, float moveSpeed, NpcFlags flags,
+            int identity = 0, Animator speedFromAnim = null)
         {
             if (_sendMs.Position >= ChunkSoftLimit || _chunkCount == byte.MaxValue)
             {
@@ -188,6 +224,7 @@ namespace CardShopCoop.Sync
 
             _sendBw.Write(kind);
             _sendBw.Write(index);
+            _sendBw.Write(identity);
             _sendBw.Write((byte)(sendName ? 1 : 0));
             if (sendName) _sendBw.Write(charName);
             var p = t.position;
@@ -255,6 +292,11 @@ namespace CardShopCoop.Sync
         private float _clockOffset;
         private bool _clockInit;
 
+        /// <summary>Client: customer list indices whose puppet clone must NOT render, because
+        /// the register's carrier (a real, active pool customer) IS that served customer and
+        /// shows its own real interactable cash. Populated by RegisterSync; cleared on reset.</summary>
+        public static readonly HashSet<int> SuppressedCustomer = new HashSet<int>();
+
         public int PuppetCount => _puppets.Count;
 
         private static CustomerManager s_diagCm;
@@ -285,8 +327,78 @@ namespace CardShopCoop.Sync
             foreach (var p in _puppets.Values)
                 if (p.Go != null) Object.Destroy(p.Go);
             _puppets.Clear();
+            SuppressedCustomer.Clear();
             _cmClient = null;
             _clockInit = false;
+        }
+
+        public static int GetCustomerGeneration(Customer customer)
+        {
+            if (_live == null || customer == null) return 0;
+            if (_live._cm == null) _live._cm = Object.FindObjectOfType<CustomerManager>();
+            var list = _live._cm != null ? _live._cm.GetCustomerList() : null;
+            if (list == null) return 0;
+            int index = list.IndexOf(customer);
+            if (index < 0) return 0;
+            if (!_live._customerGenerations.TryGetValue(index, out int generation) || generation == 0)
+            {
+                generation = 1;
+                _live._customerGenerations[index] = generation;
+            }
+            bool active = customer.m_IsActive && customer.gameObject.activeSelf;
+            bool wasActive = _live._customerActive.TryGetValue(index, out var oldActive) && oldActive;
+            if (active && !wasActive) generation++;
+            _live._customerGenerations[index] = generation;
+            _live._customerActive[index] = active;
+            return generation;
+        }
+
+        public static void DetachExistingCustomer(int index, Customer customer)
+        {
+            if (_live == null) return;
+            SuppressedCustomer.Remove(index);
+            int key = (KindCustomer << 16) | index;
+            if (_live._puppets.TryGetValue(key, out var puppet) && puppet.Go != null && puppet.BufCount > 0)
+            {
+                _live._existing.Remove(index);
+                puppet.Go.SetActive(true);
+                if (customer != null) customer.gameObject.SetActive(false);
+            }
+            // If the puppet has not received a usable snapshot yet, retain the existing
+            // customer mirror as the visible representation. It will continue interpolating
+            // until the puppet is ready, so checkout can never create a one-frame disappearance.
+        }
+
+        public static void AttachExistingCustomer(int index, int generation, Customer customer)
+        {
+            if (_live == null || customer == null) return;
+            if (!_live._existing.TryGetValue(index, out var existing) || existing.Generation != generation)
+            {
+                existing = new ExistingCustomer
+                {
+                    Customer = customer,
+                    Generation = generation,
+                    LastSeen = _live._now,
+                    PrevRenderedPos = customer.transform.position,
+                    RenderYaw = customer.transform.eulerAngles.y,
+                };
+                _live._existing[index] = existing;
+            }
+            else existing.Customer = customer;
+            int key = (KindCustomer << 16) | index;
+            if (_live._puppets.TryGetValue(key, out var puppet))
+            {
+                _live._puppets.Remove(key);
+                if (puppet.Go != null) Object.Destroy(puppet.Go);
+            }
+        }
+
+        public static bool IsExistingCustomer(Customer customer)
+        {
+            if (_live == null || customer == null) return false;
+            foreach (var mirror in _live._existing.Values)
+                if (ReferenceEquals(mirror.Customer, customer)) return true;
+            return false;
         }
 
         /// <summary>Client only. Apply one received NpcState batch.</summary>
@@ -314,6 +426,7 @@ namespace CardShopCoop.Sync
             {
                 byte kind = br.ReadByte();
                 ushort index = br.ReadUInt16();
+                int identity = br.ReadInt32();
                 bool hasName = (br.ReadByte() & 1) != 0;
                 string charName = hasName ? br.ReadString() : null;
                 var pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
@@ -323,6 +436,28 @@ namespace CardShopCoop.Sync
                 if (!inGame) continue; // consume the payload, render nothing yet
 
                 int key = (kind << 16) | index;
+                if (kind == KindCustomer && _existing.TryGetValue(index, out var existingMirror)
+                    && existingMirror.Generation == identity)
+                {
+                    var existing = existingMirror;
+                    if (existing != null)
+                    {
+                        existing.LastSeen = _now;
+                        if (existing.BufCount == 0 || snapTime > existing.Buf[existing.BufHead].Time + 0.0005f)
+                        {
+                            existing.BufHead = (existing.BufHead + 1) & 3;
+                            existing.Buf[existing.BufHead] = new Snap
+                            {
+                                Pos = pos, Yaw = yaw, Speed = speed, Flags = flags, Time = snapTime
+                            };
+                            if (existing.BufCount < 4) existing.BufCount++;
+                        }
+                        existing.Flags = flags;
+                    }
+                    continue;
+                }
+                // the register carrier renders this customer for real (with clickable cash);
+                // do not also paint an inert clone over it
                 if (!_puppets.TryGetValue(key, out var p))
                 {
                     // no cached wardrobe yet: skip this tick; the periodic name refresh
@@ -354,7 +489,32 @@ namespace CardShopCoop.Sync
                 }
                 p.Flags = flags;
                 p.LastSeen = _now;
+                if (kind == KindCustomer && SuppressedCustomer.Contains(index) && p.Go != null)
+                    p.Go.SetActive(false);
             }
+        }
+
+        private static void ApplyExistingFlags(Customer customer, NpcFlags flags, float speed)
+        {
+            if (customer.m_Anim == null) return;
+            customer.m_Anim.SetFloat(HashMoveSpeed, speed);
+            customer.m_Anim.SetBool(HashHoldingBag, (flags & NpcFlags.HoldingBag) != 0);
+            customer.m_Anim.SetBool(HashHandingOverCash, (flags & NpcFlags.HandingOverCash) != 0);
+            customer.m_Anim.SetBool(HashIsSitting, (flags & NpcFlags.IsSitting) != 0);
+            customer.m_Anim.SetBool(HashIsPlaying, (flags & NpcFlags.IsPlaying) != 0);
+            customer.m_Anim.SetBool(HashIsHoldingBox, (flags & NpcFlags.IsHoldingBox) != 0);
+            if (customer.m_ShoppingBagTransform != null)
+                customer.m_ShoppingBagTransform.gameObject.SetActive((flags & NpcFlags.HoldingBag) != 0);
+            if (customer.m_CustomerCash != null)
+                customer.m_CustomerCash.gameObject.SetActive((flags & NpcFlags.HandingOverCash) != 0);
+            if (customer.m_GameCardFanOut != null)
+                customer.m_GameCardFanOut.SetActive((flags & NpcFlags.IsPlaying) != 0);
+            if (customer.m_GameCardSingle != null)
+                customer.m_GameCardSingle.SetActive((flags & NpcFlags.IsPlaying) != 0);
+            if (customer.m_SmellyFX != null)
+                customer.m_SmellyFX.SetActive((flags & NpcFlags.Smelly) != 0);
+            if (customer.m_ExclaimationMesh != null)
+                customer.m_ExclaimationMesh.SetActive((flags & NpcFlags.Exclaim) != 0);
         }
 
         /// <summary>On a wardrobe change, re-dress the existing clone in place via the
@@ -408,6 +568,8 @@ namespace CardShopCoop.Sync
             foreach (var kv in _puppets)
             {
                 var p = kv.Value;
+                if (kv.Key < 65536 && SuppressedCustomer.Contains(kv.Key) && p.Go != null)
+                    p.Go.SetActive(false);
                 // generous: NPC state rides the UNRELIABLE lane, and flaky NATs starve
                 // it in bursts - a 1.5s timeout made whole crowds blink out and back
                 // for players on rough connections (first field report)
@@ -463,6 +625,84 @@ namespace CardShopCoop.Sync
                 }
             }
             if (dead != null) foreach (int k in dead) _puppets.Remove(k);
+
+            List<int> existingDead = null;
+            foreach (var kv in _existing)
+            {
+                var mirror = kv.Value;
+                if (_now - mirror.LastSeen > 6f)
+                {
+                    if (mirror.Customer != null) mirror.Customer.gameObject.SetActive(false);
+                    (existingDead = existingDead ?? new List<int>()).Add(kv.Key);
+                    continue;
+                }
+                if (mirror.Customer == null || mirror.BufCount == 0) continue;
+                SampleExisting(mirror, renderTime, out var target, out float targetYaw);
+                float existingPosBlend = 1f - Mathf.Exp(-18f * dt);
+                float existingYawBlend = 1f - Mathf.Exp(-14f * dt);
+                float existingSpeedBlend = 1f - Mathf.Exp(-8f * dt);
+                var transform = mirror.Customer.transform;
+                bool snap = (transform.position - target).sqrMagnitude > 25f;
+                var newPos = snap ? target : Vector3.Lerp(transform.position, target, existingPosBlend);
+                transform.position = newPos;
+                mirror.RenderYaw = snap ? targetYaw : Mathf.LerpAngle(mirror.RenderYaw, targetYaw, existingYawBlend);
+                transform.rotation = Quaternion.Euler(0f, mirror.RenderYaw, 0f);
+                float rendered = snap ? 0f : Mathf.Min((newPos - mirror.PrevRenderedPos).magnitude / dt, 10f);
+                mirror.PrevRenderedPos = newPos;
+                mirror.AnimSpeed = Mathf.Lerp(mirror.AnimSpeed, rendered, existingSpeedBlend);
+                if (mirror.AnimSpeed < 0.05f) mirror.AnimSpeed = 0f;
+                if (mirror.Customer.m_Anim != null)
+                    mirror.Customer.m_Anim.SetFloat(HashMoveSpeed, mirror.AnimSpeed);
+                if ((int)mirror.Flags != mirror.AppliedFlags)
+                {
+                    ApplyExistingFlags(mirror.Customer, mirror.Flags, mirror.AnimSpeed);
+                    mirror.AppliedFlags = (int)mirror.Flags;
+                }
+            }
+            if (existingDead != null)
+                foreach (int key in existingDead) _existing.Remove(key);
+        }
+
+        private static void SampleExisting(ExistingCustomer mirror, float renderTime,
+            out Vector3 target, out float targetYaw)
+        {
+            var newest = mirror.Buf[mirror.BufHead];
+            if (newest.Time <= renderTime)
+            {
+                var velocity = Vector3.zero;
+                if (mirror.BufCount >= 2)
+                {
+                    var previous = mirror.Buf[(mirror.BufHead + 3) & 3];
+                    float span = newest.Time - previous.Time;
+                    if (span > 0.001f)
+                    {
+                        velocity = (newest.Pos - previous.Pos) / span;
+                        velocity.y = 0f;
+                        velocity = Vector3.ClampMagnitude(velocity, 5f);
+                    }
+                }
+                float extrapolation = Mathf.Min(renderTime - newest.Time, 0.25f);
+                velocity *= Mathf.Exp(-3f * extrapolation);
+                target = newest.Pos + velocity * extrapolation;
+                targetYaw = newest.Yaw;
+                return;
+            }
+            var newer = newest;
+            for (int i = 1; i < mirror.BufCount; i++)
+            {
+                var older = mirror.Buf[(mirror.BufHead - i + 4) & 3];
+                if (older.Time <= renderTime)
+                {
+                    float span = newer.Time - older.Time;
+                    float blend = span > 0.0001f ? (renderTime - older.Time) / span : 1f;
+                    target = Vector3.Lerp(older.Pos, newer.Pos, blend);
+                    targetYaw = Mathf.LerpAngle(older.Yaw, newer.Yaw, blend);
+                    return;
+                }
+                newer = older;
+            }
+            target = newer.Pos;
+            targetYaw = newer.Yaw;
         }
 
         /// <summary>Interpolate between the two snapshots bracketing renderTime. If the

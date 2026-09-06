@@ -25,7 +25,7 @@ namespace CardShopCoop
     {
         public const string Guid = "com.zwhit.cardshopcoop";
         public const string Name = "CardShopCoop";
-        public const string Version = "1.0.44";
+        public const string Version = "1.0.45";
 
         public static ManualLogSource Log;
 
@@ -40,7 +40,6 @@ namespace CardShopCoop
         public static ConfigEntry<int> ClientWorldSlot;
         public static ConfigEntry<bool> AutoSyncCardDatabase;
         public static ConfigEntry<float> ServeReach;
-        public static ConfigEntry<bool> HostServeKey;
         public static ConfigEntry<bool> AllowCrossBuildJoin;
         public static ConfigEntry<bool> AutoPortForward;
         public static ConfigEntry<bool> AutoLanPassword;
@@ -71,15 +70,13 @@ namespace CardShopCoop
             EmoteKey = Config.Bind("Keys", "EmoteKey", KeyCode.G,
                 "Sends a wave emote that pops above your avatar.");
             ServeKey = Config.Bind("Keys", "ServeKey", KeyCode.V,
-                "When JOINING: stand at the register and press this to serve the customer (scan items, take payment, give change).");
+                "When JOINING: press this to answer a counter trade/sell-in offer (the register itself is the exact vanilla experience - just click it and serve).");
             ClientWorldSlot = Config.Bind("Network", "ClientWorldSlot", 7,
                 "Save slot the co-op world uses when JOINING someone (your own slots 0-3 are never touched). On a PC dedicated to co-op you can set 0 for maximum mod-data fidelity.");
             AutoSyncCardDatabase = Config.Bind("Network", "AutoSyncCardDatabase", true,
                 "When your modded-card ID registry (EPL enum_values.json) differs from the host's, automatically install the host's copy (yours is backed up beside it) so you only need to restart and rejoin. Set false to handle the file yourself.");
             ServeReach = Config.Bind("Player", "ServeReach", 1.6f,
-                "How close (meters, to the counter's center) a JOINER must stand to serve the register or a trade customer. The counter itself is ~1m wide, so values below ~1.2 make it unreachable.");
-            HostServeKey = Config.Bind("Keys", "HostServeKey", false,
-                "Let the HOST also use the serve key to run the register (quick-serve, bypassing the minigame) - the same shortcut joiners get. ADDITIVE to the game's normal mouse serving; off by default.");
+                "How close (meters, to the counter's center) a JOINER must stand to answer a counter trade customer. The counter itself is ~1m wide, so values below ~1.2 make it unreachable.");
             AllowCrossBuildJoin = Config.Bind("Network", "AllowCrossBuildJoin", false,
                 "Let players join even when the GAME build fingerprint (game version / Unity version) differs from the host's. Dangerous: two different game builds can corrupt each other's saves. Only enable for supervised testing of Steam <-> Game Pass cross-play.");
             AutoPortForward = Config.Bind("Network", "AutoPortForward", true,
@@ -135,7 +132,7 @@ namespace CardShopCoop
             bool coreLoaded;
             try
             {
-                AttachCore(go, HostServeKey.Value);
+                AttachCore(go);
                 coreLoaded = true;
             }
             catch (System.Exception e)
@@ -170,16 +167,14 @@ namespace CardShopCoop
         /// token - and CoopCore's type-load fault with it - migrates up past the catch,
         /// which takes the whole plugin down on a build where CoopCore can't load.
         ///
-        /// The HostServeKeyEnabled write lives HERE, not in Awake, and after the
-        /// AddComponent on purpose: a stsfld is a type-init trigger exactly like the
-        /// AddComponent is, so writing it in Awake's body would force CoopCore's load
-        /// outside the catch and defeat the whole arrangement.
+        /// The AddComponent lives HERE, not in Awake, on purpose: it is a type-init trigger,
+        /// so putting it in Awake's body would force CoopCore's load outside the catch and
+        /// defeat the whole arrangement.
         /// </summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void AttachCore(GameObject go, bool hostServeKey)
+        private static void AttachCore(GameObject go)
         {
             go.AddComponent<CoopCore>();
-            CoopCore.HostServeKeyEnabled = hostServeKey;
         }
     }
 }
