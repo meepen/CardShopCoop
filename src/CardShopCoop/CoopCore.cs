@@ -29,6 +29,7 @@ namespace CardShopCoop
     {
         public static CoopCore Instance { get; private set; }
         public static CoopRole Role { get; private set; } = CoopRole.None;
+        private static double _lastImmediateObjectSync;
 
         /// <summary>Called by mutation postfixes. The modules still coalesce their own
         /// state into one snapshot; this only removes the normal polling latency.</summary>
@@ -36,6 +37,13 @@ namespace CardShopCoop
         {
             var core = Instance;
             if (core == null || Role == CoopRole.None) return;
+            // Several vanilla methods can participate in one gameplay action (for example
+            // removing an item updates both the compartment and the box). Coalesce those
+            // callbacks into one sync pass; a 100 ms ceiling is still far below the normal
+            // snapshot cadence and avoids repeatedly arming every scanner in one burst.
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (now - _lastImmediateObjectSync < 0.10) return;
+            _lastImmediateObjectSync = now;
             try
             {
                 core._world.ForceNextTick();
@@ -59,7 +67,7 @@ namespace CardShopCoop
         public void NotifyHostStructureChanged()
         {
             if (Role != CoopRole.Host || !InGameLevel()) return;
-            try { _population.ForceNextTick(); }
+            try { RequestImmediateObjectSync(); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("host structure change: " + e.Message); }
         }
 
@@ -451,6 +459,11 @@ namespace CardShopCoop
                 AvatarManager.ViewCamera = _playerCamTf; // the camera the player SEES through
                 _avatars.Tick(_dt);
             };
+            // Population must be broadcast before any index-keyed content state. A shelf
+            // can register in the host's list before the client has created its mirror;
+            // sending ShelfDelta/CardShelfDelta first makes the client discard the update
+            // and the host's diff baseline then prevents it from being sent again.
+            _actPopulation = () => { if (Role == CoopRole.Host) _population.HostTick(_dt, _syncActive); };
             _actWorld = () => _world.Tick(_dt, _syncActive);
             _actCardShelves = () =>
             {
@@ -463,7 +476,6 @@ namespace CardShopCoop
                 if (Role == CoopRole.Host) _boxes.HostTick(_dt, _syncActive);
                 else if (Role == CoopRole.Client) _boxes.ClientTick(_dt, _syncActive && !ClientPreloadHold);
             };
-            _actPopulation = () => { if (Role == CoopRole.Host) _population.HostTick(_dt, _syncActive); };
             _actNpcPuppets = () => _npcs.TickPuppets(_dt, InGameLevel());
             _actNpcSweep = NpcSweepTick;
             _actStateSend = StateSendTick;
@@ -4399,11 +4411,11 @@ namespace CardShopCoop
             }
             Guarded("avatars", _actAvatars);
             _syncActive = Role != CoopRole.None && _net.ConnectionCount > 0 && InGameLevel();
+            Guarded("population", _actPopulation);
             Guarded("world", _actWorld);
             Guarded("cardshelves", _actCardShelves);
             Guarded("objmoves", _actObjMoves);
             Guarded("boxes", _actBoxes);
-            Guarded("population", _actPopulation);
             Guarded("modules", _actModules);
 
             if (Role == CoopRole.Client)

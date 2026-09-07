@@ -118,6 +118,8 @@ namespace CardShopCoop.Patches
             // box); the placed object mirrors back through the population sync.
             Try(h, typeof(ShelfManager), "SpawnInteractableObjectInPackageBox",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(FurnitureOrderPrefix)));
+            Try(h, typeof(ShelfManager), "SpawnInteractableObjectInPackageBox",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(FurnitureSpawnPostfix)));
 
             // Furniture SELL is host-only for now (money-printer guard). On the guest,
             // InteractionPlayerController.ConfirmSellFurniture credits the SHARED wallet via
@@ -698,6 +700,15 @@ namespace CardShopCoop.Patches
             if (CoopCore.Role != CoopRole.Client) return true;
             if (!ShopStateSync.ApplyingRemote) ShopStateSync.RequestLightToggle();
             return false;
+        }
+
+        /// <summary>Spawning a delivery creates and registers the placed object before the
+        /// furniture box is opened. Force the population snapshot immediately so a client
+        /// cannot receive shelf/card contents for an object that it has not created yet.</summary>
+        public static void FurnitureSpawnPostfix()
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                CoopCore.Instance?.NotifyHostStructureChanged();
         }
 
         public static void ClientLightUpdatePostfix(LightManager __instance)
