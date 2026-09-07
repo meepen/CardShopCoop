@@ -1,6 +1,8 @@
 using System;
+using System.Reflection;
 using CardShopCoop.Sync;
 using HarmonyLib;
+using UnityEngine;
 
 namespace CardShopCoop.Patches
 {
@@ -15,6 +17,9 @@ namespace CardShopCoop.Patches
     /// </summary>
     public static class GamePatches
     {
+        private static readonly FieldInfo FiLightDayEnded =
+            AccessTools.Field(typeof(LightManager), "m_HasDayEnded");
+
         public static void ApplyAll(Harmony h)
         {
             // Client saves always land in the co-op slot, never the player's own slots.
@@ -32,6 +37,8 @@ namespace CardShopCoop.Patches
             // No local workers on the client either.
             Try(h, typeof(WorkerManager), "ActivateWorker",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(ClientBlockPrefix)));
+            Try(h, typeof(Worker), "PlayWorkerActionAnim",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(WorkerActionPostfix)));
 
             // The client's clock follows the host; its own day must never end.
             Try(h, typeof(CEventManager), "QueueEvent",
@@ -49,6 +56,19 @@ namespace CardShopCoop.Patches
             // that screen is ReportSync's open-screen mirror.
             Try(h, typeof(InteractionPlayerController), "ShowGoNextDayScreen",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(GoNextDayScreenBlockPrefix)));
+
+            // Alternate switch implementations and mods may call LightManager directly;
+            // route those client requests through the host as well.
+            Try(h, typeof(LightManager), "ToggleShopLight",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ClientLightTogglePrefix)));
+            Try(h, typeof(LightManager), "Update",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ClientLightUpdatePostfix)));
+            Try(h, typeof(LightManager), "ToggleShopLight",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(LightStateChangedPostfix)));
+            Try(h, typeof(LightManager), "Init",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(LightStateChangedPostfix)));
+            Try(h, typeof(LightManager), "UpdateLightTimeData",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(LightStateChangedPostfix)));
 
             // Shared card collection: every add/remove on either side mirrors to the other,
             // so the joiner's pack pulls land in the real binder (and vice versa).
@@ -144,6 +164,58 @@ namespace CardShopCoop.Patches
             Try(h, typeof(InteractablePackagingBox_Item), "OnDestroyed",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(BoxDestroyedPrefix)));
 
+            // Selling/trashing a placed object re-indexes the ShelfManager list (every
+            // index-keyed mirror keys off it). On the host the list is already shifted by
+            // the time the subclass override reaches base.OnDestroyed - so this postfix is
+            // the moment to tell the client to re-align its roster BEFORE the ~0.75s
+            // content syncs broadcast shifted-index deltas that would otherwise land on the
+            // wrong shelves (see NotifyHostStructureChanged).
+            Try(h, typeof(InteractableObject), "OnDestroyed",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(InteractableObjectDestroyedPostfix)));
+
+            // Mutation-driven fast path. The synchronizers still hash/coalesce their
+            // snapshots, but these postfixes remove the normal polling latency after a
+            // completed action. They intentionally run after vanilla has committed the
+            // change, so the next co-op frame reads authoritative state.
+            Try(h, typeof(InteractableObject), "PlaceMovedObject",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractablePackagingBox_Item), "StartHoldBox",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractablePackagingBox_Item), "ThrowBox",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractablePackagingBox_Item), "DropBox",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractablePackagingBox_Item), "FillBoxWithItem",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractablePackagingBox_Item), "DispenseItem",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractablePackagingBox_Item), "RemoveItemFromShelf",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractablePackagingBox_Item), "SetOpenCloseBox",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(ShelfCompartment), "AddBox",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(ShelfCompartment), "RemoveBox",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(ShelfCompartment), "AddItem",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(ShelfCompartment), "RemoveItem",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(ShelfCompartment), "SpawnItem",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            // Removing a shelf label (right-click on the tag, when the compartment is empty)
+            // only clears m_ItemType - none of the Add/Remove/Spawn paths above fire, so
+            // without this hook the label change waited for the slow poll (and the far side
+            // kept its label). Nudge the world sync immediately.
+            Try(h, typeof(ShelfCompartment), "RemoveLabel",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractableCardCompartment), "SetCardOnShelf",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractableCardCompartment), "RemoveCardFromShelf",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            Try(h, typeof(InteractableCardCompartment), "DisableAllCard",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+
             // Product licenses are shared: bought by either player, unlocked for both.
             // Identity travels as (itemType + box size), never a restock-list index -
             // modded restock lists can be ordered differently per machine.
@@ -207,6 +279,35 @@ namespace CardShopCoop.Patches
         {
             if (!BoxSync.ApplyingRemote) BoxSync.LocalBoxDestroyed?.Invoke(__instance);
             return true;
+        }
+
+        /// <summary>Host only: a placed object's OnDestroyed fired after the ShelfManager
+        /// list was already re-indexed (a shelf was sold or trashed). Every index-keyed
+        /// mirror goes stale from this moment, so tell the host to force the population
+        /// broadcast for the next frame - the client reconciles its roster (position-aware)
+        /// before the content syncs can emit shifted-index deltas. Scene-reload teardown
+        /// (DestroyAllObject) is excluded: that isn't a mid-session removal, and the client
+        /// is reloading anyway. Cards on display and packaging boxes are destroyed constantly
+        /// during play but are NOT roster entries (they aren't in the ShelfManager lists the
+        /// mirrors key off), so they're excluded too - otherwise every card sold would spam a
+        /// population broadcast.</summary>
+        public static void InteractableObjectDestroyedPostfix(InteractableObject __instance)
+        {
+            if (CoopCore.Role != CoopRole.Host) return;
+            if (CoopCore.ClientReloading || __instance == null) return;
+            // a placed object carries a real (or deco) object type; cards/boxes don't.
+            if (__instance is InteractablePackagingBox) return;
+            if (__instance is InteractableCard3d) return;
+            if (__instance.m_ObjectType == EObjectType.None
+                && __instance.m_DecoObjectType == EDecoObject.None) return;
+            try { CoopCore.Instance?.NotifyHostStructureChanged(); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("OnDestroyed structure change: " + e.Message); }
+        }
+
+        public static void ObjectMutationPostfix()
+        {
+            if (CoopCore.Role != CoopRole.None)
+                CoopCore.RequestImmediateObjectSync();
         }
 
         public static bool ApplyingRemoteLicense;
@@ -574,6 +675,11 @@ namespace CardShopCoop.Patches
             return CoopCore.Role != CoopRole.Client;
         }
 
+        public static void WorkerActionPostfix(Worker __instance)
+        {
+            Sync.NpcSync.RecordWorkerAction(__instance);
+        }
+
         /// <summary>Client only: the joiner never opens his own end-of-day recap. Vanilla
         /// InteractionPlayerController.Update reaches ShowGoNextDayScreen on any Enter press
         /// while LightManager.GetHasDayEnded() is true - which on a mirrored 21:00 clock is
@@ -585,6 +691,24 @@ namespace CardShopCoop.Patches
         public static bool GoNextDayScreenBlockPrefix()
         {
             return CoopCore.Role != CoopRole.Client;
+        }
+
+        public static bool ClientLightTogglePrefix()
+        {
+            if (CoopCore.Role != CoopRole.Client) return true;
+            if (!ShopStateSync.ApplyingRemote) ShopStateSync.RequestLightToggle();
+            return false;
+        }
+
+        public static void ClientLightUpdatePostfix(LightManager __instance)
+        {
+            if (CoopCore.Role == CoopRole.Client)
+                FiLightDayEnded?.SetValue(__instance, false);
+        }
+
+        public static void LightStateChangedPostfix(LightManager __instance)
+        {
+            CoopCore.Instance?.ObserveHostLightState(__instance);
         }
 
         /// <summary>Set by CoopCore right before it mirrors a host day-change, so exactly

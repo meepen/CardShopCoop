@@ -82,6 +82,11 @@ namespace CardShopCoop.Sync
             _last.Clear();
         }
 
+        public void ForceNextTick()
+        {
+            _timer = 0.9f;
+        }
+
         private ShelfManager Sm()
         {
             if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();

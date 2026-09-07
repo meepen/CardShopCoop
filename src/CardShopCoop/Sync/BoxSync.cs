@@ -37,6 +37,7 @@ namespace CardShopCoop.Sync
             public byte StoreComp;  // compartment index within that shelf while stored
             public Vector3 Pos;
             public float Yaw;
+            public short HolderWorker; // -1 when not held by a worker
             /// <summary>NOT a wire field - set by ReadEntries when Type came off the wire as a
             /// modded id with no counterpart on this PC (a content pack only the sender has).
             /// Type is then EItemType.None, which is indistinguishable from a legitimately
@@ -59,6 +60,8 @@ namespace CardShopCoop.Sync
         // hands and broke its bring-boxes-inside loop (field report)
         private static readonly System.Reflection.FieldInfo FiBeingHold =
             AccessTools.Field(typeof(InteractableObject), "m_IsBeingHold");
+        private static readonly System.Reflection.FieldInfo FiWorkerHoldBox =
+            AccessTools.Field(typeof(Worker), "m_CurrentHoldItemBox");
         // private on InteractablePackagingBox_Item (NOT InteractableObject): gates the
         // worker restock candidate filters via CanWorkerTakeBox() (= !m_PreventWorkerTakeBox,
         // decompiled InteractablePackagingBox_Item ~337-340). The worker filters
@@ -75,6 +78,16 @@ namespace CardShopCoop.Sync
         private static bool IsBeingHeld(InteractablePackagingBox_Item box)
         {
             try { return FiBeingHold?.GetValue(box) is bool b && b; } catch { return false; }
+        }
+
+        private static short WorkerHolding(InteractablePackagingBox_Item box)
+        {
+            var workers = WorkerManager.GetWorkerList();
+            if (workers == null) return -1;
+            for (int i = 0; i < workers.Count; i++)
+                if (workers[i] != null && ReferenceEquals(FiWorkerHoldBox?.GetValue(workers[i]), box))
+                    return (short)i;
+            return -1;
         }
 
         /// <summary>Host: mark/unmark a box worker-untouchable while a GUEST carries it,
@@ -266,6 +279,64 @@ namespace CardShopCoop.Sync
             return RestockManager.GetItemPackagingBoxList();
         }
 
+        /// <summary>Returns the authoritative world pose of a packaging box. The
+        /// Rigidbody is the object the game actually simulates; using the root
+        /// Transform alone can preserve a stale pose while a box is parented to a
+        /// warehouse slot or is being moved by physics.</summary>
+        public static Vector3 PhysicsPosition(InteractablePackagingBox box)
+        {
+            try { if (box != null && box.m_Rigidbody != null) return box.m_Rigidbody.position; }
+            catch { }
+            return box != null ? box.transform.position : Vector3.zero;
+        }
+
+        public static Quaternion PhysicsRotation(InteractablePackagingBox box)
+        {
+            try { if (box != null && box.m_Rigidbody != null) return box.m_Rigidbody.rotation; }
+            catch { }
+            return box != null ? box.transform.rotation : Quaternion.identity;
+        }
+
+        public static bool PhysicsSettled(InteractablePackagingBox box)
+        {
+            try
+            {
+                var rb = box != null ? box.m_Rigidbody : null;
+                return rb == null || rb.isKinematic || rb.IsSleeping()
+                    || rb.velocity.sqrMagnitude < 0.04f;
+            }
+            catch { return true; }
+        }
+
+        /// <summary>Moves the real physics body, not merely the visual root. This
+        /// keeps the next physics tick and the next snapshot on the same pose.</summary>
+        public static void ApplyPhysicsPose(InteractablePackagingBox box, Vector3 position, float yaw)
+        {
+            if (box == null) return;
+            var rotation = Quaternion.Euler(0f, yaw, 0f);
+            try
+            {
+                var rb = box.m_Rigidbody;
+                if (rb != null)
+                {
+                    rb.position = position;
+                    rb.rotation = rotation;
+                    if (!rb.isKinematic)
+                    {
+                        rb.velocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                        rb.WakeUp();
+                    }
+                }
+                else box.transform.SetPositionAndRotation(position, rotation);
+            }
+            catch
+            {
+                try { box.transform.SetPositionAndRotation(position, rotation); } catch { }
+            }
+            try { ObjMoveSync.SyncTagGroup(box.transform); } catch { }
+        }
+
         private static Entry Snapshot(InteractablePackagingBox_Item box)
         {
             // mid-tumble poses must never be broadcast: applying them teleports the
@@ -279,9 +350,7 @@ namespace CardShopCoop.Sync
                 // child body that depth-first search returns first, so we'd read "settled"
                 // while the real body is still mid-fall -> the host broadcasts a mid-air pose
                 // and the box hangs frozen on the guest (the "floating boxes" report)
-                var rb = box.m_Rigidbody;
-                settled = rb == null || rb.isKinematic || rb.IsSleeping()
-                    || rb.velocity.sqrMagnitude < 0.04f;
+                settled = PhysicsSettled(box);
             }
             catch { }
             // warehouse-rack storage: the slot transform owns the pose, so a stored
@@ -315,8 +384,9 @@ namespace CardShopCoop.Sync
                 Stored = stored,
                 StoreShelf = (byte)Mathf.Clamp(sShelf, 0, 255),
                 StoreComp = (byte)Mathf.Clamp(sComp, 0, 255),
-                Pos = box.transform.position,
-                Yaw = box.transform.eulerAngles.y,
+                Pos = PhysicsPosition(box),
+                Yaw = PhysicsRotation(box).eulerAngles.y,
+                HolderWorker = IsBeingHeld(box) ? WorkerHolding(box) : (short)-1,
             };
         }
 
@@ -324,9 +394,13 @@ namespace CardShopCoop.Sync
         {
             if (a.Type != b.Type || a.Count != b.Count || a.IsBig != b.IsBig || a.IsOpen != b.IsOpen) return true;
             if (a.Stored != b.Stored) return true;
-            // both stored: the rack slot owns the pose - comparing transforms would
-            // report phantom "drift" every tick and fight the game's arrangement
-            if (a.Stored) return a.StoreShelf != b.StoreShelf || a.StoreComp != b.StoreComp;
+            // Rack membership is separate bookkeeping. The physical pose is still
+            // part of the truth while stored, so a stale parent/rig pose cannot hide
+            // a real location mismatch.
+            if (a.Stored)
+                return a.StoreShelf != b.StoreShelf || a.StoreComp != b.StoreComp
+                    || (a.Pos - b.Pos).sqrMagnitude > 0.01f
+                    || Mathf.Abs(Mathf.DeltaAngle(a.Yaw, b.Yaw)) > 3f;
             return (a.Pos - b.Pos).sqrMagnitude > 0.01f || Mathf.Abs(Mathf.DeltaAngle(a.Yaw, b.Yaw)) > 3f;
         }
 
@@ -659,7 +733,10 @@ namespace CardShopCoop.Sync
                 {
                     if (scan[i] == null) continue;
                     ushort id = HostIdFor(scan[i]);
-                    if (IsLocallyCarried(scan[i]))
+                    // Worker pickup/drop is a real box ownership transition too. Treat it
+                    // like a player carry transition so the peer learns about the rack
+                    // removal/placement immediately instead of waiting for the 1.5s beat.
+                    if (IsLocallyCarried(scan[i]) || IsBeingHeld(scan[i]))
                     {
                         if (_hostCarriedLastTick.Add(id)) force = true;
                     }
@@ -723,6 +800,7 @@ namespace CardShopCoop.Sync
                     hash = hash * 31 + e.Count;
                     hash = hash * 31 + ((e.IsBig ? 1 : 0) | (e.IsOpen ? 2 : 0) | (e.Carried ? 4 : 0) | (e.Settled ? 8 : 0) | (e.Stored ? 16 : 0));
                     hash = hash * 31 + e.StoreShelf * 311 + e.StoreComp;
+                    hash = hash * 31 + e.HolderWorker;
                     hash = hash * 31 + (int)(e.Pos.x * 8f);
                     hash = hash * 31 + (int)(e.Pos.y * 8f); // include height: a box that settled to a corrected Y must re-broadcast
                     hash = hash * 31 + (int)(e.Pos.z * 8f);
@@ -1385,7 +1463,36 @@ namespace CardShopCoop.Sync
                         // live-lock the store forever (closed-box path is data-only, safe
                         // whether stored already or about to be)
                         ApplyClosedCount(box, want.Count);
-                        if (locallyStored) return;              // already stored; slot owns it
+                        if (locallyStored)
+                        {
+                            // Do not trust m_IsStored by itself. A previous mirror can leave
+                            // this box registered on a DIFFERENT compartment after rack
+                            // ordering changed or a worker took/set it down during an apply.
+                            // Returning here would preserve the wrong membership forever and
+                            // make the next worker placement appear desynced.
+                            bool atRequestedSlot = false;
+                            try
+                            {
+                                var current = box.GetBoxStoredCompartment();
+                                atRequestedSlot = current != null
+                                    && current.GetWarehouseIndex() == want.StoreShelf
+                                    && current.GetIndex() == want.StoreComp;
+                            }
+                            catch { }
+                            if (atRequestedSlot)
+                            {
+                                if (want.Settled && !UnderMapPose(want))
+                                    ApplyPhysicsPose(box, want.Pos, want.Yaw);
+                                return; // membership is correct; pose is now authoritative too
+                            }
+
+                            // Move through the same unstore recipe used below instead of
+                            // merely changing the transform. This keeps the old compartment's
+                            // box list and item count in sync with m_IsStored.
+                            UnhookIfStored(box);
+                            try { box.transform.SetParent(null); } catch { }
+                            try { box.SetPhysicsEnabled(true); } catch { }
+                        }
                         // give-up guard: a genuinely full/mismatched rack slot rejects the
                         // store on EVERY tick, and the old code retried forever (field log:
                         // "rejected box id 252 ... retrying" every 30s all session). Once we
@@ -1463,8 +1570,7 @@ namespace CardShopCoop.Sync
                             // falls through the world unrecoverable; keep its current position.
                             if (!UnderMapPose(want))
                             {
-                                box.transform.SetPositionAndRotation(want.Pos, Quaternion.Euler(0f, want.Yaw, 0f));
-                                ObjMoveSync.SyncTagGroup(box.transform); // box price tags ride in their own group
+                                ApplyPhysicsPose(box, want.Pos, want.Yaw);
                             }
                         }
                         catch (Exception e) { CoopPlugin.Log.LogWarning("BoxSync store pin: " + e.Message); }
@@ -1525,6 +1631,10 @@ namespace CardShopCoop.Sync
                 // (box price tags live in a separate canvas group)
                 if (want.Carried)
                 {
+                    // Worker-held boxes are represented by a cosmetic clone on the
+                    // worker puppet; never reparent this synchronized gameplay box.
+                    if (want.HolderWorker >= 0 && CoopCore.Role == CoopRole.Client)
+                        NpcSync.SetWorkerBoxVisual(want.HolderWorker, true, want.IsBig, want.Type);
                     if (box.gameObject.activeSelf)
                     {
                         try { box.m_ItemCompartment.SetPriceTagVisibility(false); } catch { }
@@ -1606,23 +1716,7 @@ namespace CardShopCoop.Sync
                     if ((t.position - want.Pos).sqrMagnitude > 0.01f
                         || Mathf.Abs(Mathf.DeltaAngle(t.eulerAngles.y, want.Yaw)) > 3f)
                     {
-                        t.SetPositionAndRotation(want.Pos, Quaternion.Euler(0f, want.Yaw, 0f));
-                        ObjMoveSync.SyncTagGroup(t); // box price tags ride in their own group
-                        try
-                        {
-                            // kill local tumble and WAKE the body: a sleeping rigidbody
-                            // teleported mid-air hangs there frozen until poked. Use the
-                            // REAL body (m_Rigidbody), not GetComponentInChildren which can
-                            // return the kinematic rig-mesh child and skip the wake entirely.
-                            var rb = box.m_Rigidbody;
-                            if (rb != null && !rb.isKinematic)
-                            {
-                                rb.velocity = Vector3.zero;
-                                rb.angularVelocity = Vector3.zero;
-                                rb.WakeUp();
-                            }
-                        }
-                        catch { }
+                        ApplyPhysicsPose(box, want.Pos, want.Yaw);
                     }
                 }
             }
@@ -1650,6 +1744,7 @@ namespace CardShopCoop.Sync
                 bw.Write((byte)((e.IsBig ? 1 : 0) | (e.IsOpen ? 2 : 0) | (e.Carried ? 4 : 0) | (e.Settled ? 8 : 0) | (e.Stored ? 16 : 0)));
                 bw.Write(e.StoreShelf);
                 bw.Write(e.StoreComp);
+                bw.Write(e.HolderWorker);
                 bw.Write(e.Pos.x); bw.Write(e.Pos.y); bw.Write(e.Pos.z);
                 bw.Write(e.Yaw);
             }
@@ -1679,6 +1774,7 @@ namespace CardShopCoop.Sync
                 e.Stored = (f & 16) != 0;
                 e.StoreShelf = br.ReadByte();
                 e.StoreComp = br.ReadByte();
+                e.HolderWorker = br.ReadInt16();
                 e.Pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
                 e.Yaw = br.ReadSingle();
                 list.Add(e);

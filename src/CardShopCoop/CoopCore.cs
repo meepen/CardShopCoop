@@ -29,6 +29,40 @@ namespace CardShopCoop
     {
         public static CoopCore Instance { get; private set; }
         public static CoopRole Role { get; private set; } = CoopRole.None;
+
+        /// <summary>Called by mutation postfixes. The modules still coalesce their own
+        /// state into one snapshot; this only removes the normal polling latency.</summary>
+        public static void RequestImmediateObjectSync()
+        {
+            var core = Instance;
+            if (core == null || Role == CoopRole.None) return;
+            try
+            {
+                core._world.ForceNextTick();
+                core._cardShelves.ForceNextTick();
+                core._objMoves.ForceNextTick();
+                core._boxes.ForceBroadcastNextTick();
+                core._population.ForceNextTick();
+                core._cardBoxes.ForceNextTick();
+                core._furnBoxes.ForceNextTick();
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("Immediate sync request: " + e.Message); }
+        }
+
+        /// <summary>Host only: the host just sold/trashed a placed object, so its
+        /// ShelfManager list re-indexed and every client's roster is now misaligned. Force
+        /// the population broadcast out NEXT frame - before the ~0.75s content syncs can
+        /// ship shifted-index deltas - so clients reconcile their placed-object structure
+        /// (position-aware) and only then apply the content that follows. Without this the
+        /// client can keep the wrong shelf and every item/card on it repaints onto the wrong
+        /// physical shelf.</summary>
+        public void NotifyHostStructureChanged()
+        {
+            if (Role != CoopRole.Host || !InGameLevel()) return;
+            try { _population.ForceNextTick(); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("host structure change: " + e.Message); }
+        }
+
         /// <summary>True from the moment the guest joins until it returns to the title
         /// screen. The guest is standing in the HOST'S world; saving would overwrite the
         /// guest's own slot with the host's shop. This stays set through a mid-session
@@ -79,7 +113,6 @@ namespace CardShopCoop
         private string _lastShopNameSent;
         private float _shopNameTimer = -1.0f; // staggered phase (see _lightSyncTimer note)
         private float _npcSweepTimer = -1.3f;
-        private float _tradePromptTimer = -0.17f;
         public string PromptLine = "";
 
         // ---- invite code / UPnP (LAN hosting only) ----
@@ -233,6 +266,8 @@ namespace CardShopCoop
         private static readonly FieldInfo FiFinishLoading = typeof(LightManager).GetField("m_FinishLoading", BindingFlags.NonPublic | BindingFlags.Instance);
         private static readonly System.Reflection.MethodInfo MiLightInit = typeof(LightManager).GetMethod("Init", BindingFlags.NonPublic | BindingFlags.Instance);
         private static readonly System.Reflection.MethodInfo MiUpdateLightData = typeof(LightManager).GetMethod("UpdateLightTimeData", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly System.Reflection.MethodInfo MiEvaluateTimeClock = typeof(LightManager).GetMethod("EvaluateTimeClock", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly System.Reflection.MethodInfo MiEvaluateWorldUIBrightness = typeof(LightManager).GetMethod("EvaluateWorldUIBrightness", BindingFlags.NonPublic | BindingFlags.Instance);
         private float _lightSyncTimer = -2.3f;   // timers carry staggered phases so the
         private LightManager _lightManager;      // periodic broadcasts never bunch into
         private float _cardResyncTimer = -5.2f;  // one frame (the rhythmic-hitch bug)
@@ -248,6 +283,11 @@ namespace CardShopCoop
         private double _lastLicenseBuyTime = -999.0;
         private string _lastLightJson;
         private float _lightHeal;
+        private bool _lightForceResend;
+        private bool _observedShopLight;
+        private bool _observedNightLight;
+        private bool _observedSunlight;
+        private bool _observedLightState;
         private double _lastDayMirrorAt = -999.0;
         private int _lastLicenseHash;
         private float _licenseHeal;
@@ -257,7 +297,7 @@ namespace CardShopCoop
         private float _dt;
         private bool _syncActive;
         private Action _actNetPump, _actAvatars, _actWorld, _actCardShelves, _actObjMoves,
-            _actBoxes, _actPopulation, _actNpcPuppets, _actRegisterPrompt, _actNpcSweep,
+            _actBoxes, _actPopulation, _actNpcPuppets, _actNpcSweep,
             _actStateSend, _actNpcCollect, _actModules, _actCardPriceRetry,
             _actFrameCardWork;
         private CustomerManager _cmSweep;
@@ -387,10 +427,21 @@ namespace CardShopCoop
                 Send(1, MsgType.BoxRemoved, bw => { bw.Write(idx); Msg.WriteItemType(bw, (EItemType)type); });
             PopulationSync.OnClientStructureChanged = kind =>
             {
-                // a repaired/respawned card display starts empty locally; that emptiness
-                // is repair fallout, not a player action - never report it to the host
-                if (Role == CoopRole.Client && (kind == 2 || kind == 3))
+                if (Role != CoopRole.Client) return;
+                // The client's placed-object roster just changed (a shelf was removed or
+                // spawned). Every index-keyed mirror's baseline is now keyed against stale
+                // indexes, so read the structure back fresh instead of diffing against
+                // garbage. Repaired objects start with loader defaults; those defaults must
+                // not be reported as guest edits through any index-based mirror.
+                _world.Reset();
+                _objMoves.Reset();
+                if (kind == 2 || kind == 3 || kind == 14)
                     _cardShelves.InvalidateBaseline();
+                // container stations (card storage, cleansers, pack openers, box storage,
+                // donation boxes) and play tables are index-keyed too; their per-index
+                // mirrors/caches go stale the moment a machine/table of that kind shifts.
+                if (kind >= 9 && kind <= 13) _containers.Reset();
+                if (kind == 6) _tables.Reset();
             };
             _actCardPriceRetry = CardPriceRetryTick;
             _actFrameCardWork = FlushFrameCardWork;
@@ -414,7 +465,6 @@ namespace CardShopCoop
             };
             _actPopulation = () => { if (Role == CoopRole.Host) _population.HostTick(_dt, _syncActive); };
             _actNpcPuppets = () => _npcs.TickPuppets(_dt, InGameLevel());
-            _actRegisterPrompt = RegisterPromptTick;
             _actNpcSweep = NpcSweepTick;
             _actStateSend = StateSendTick;
             _actNpcCollect = NpcCollectTick;
@@ -429,6 +479,8 @@ namespace CardShopCoop
             _register.BroadcastCart = w => Broadcast(MsgType.RegisterCart, w);
             _staff.SendOp = w => Send(1, MsgType.StaffOp, w);
             _staff.BroadcastState = w => Broadcast(MsgType.StaffState, w);
+            _staff.SendToClient = (id, w) => Send(id, MsgType.StaffInteract, w);
+            _staff.BroadcastInteraction = w => Broadcast(MsgType.StaffInteract, w);
             _shopState.SendOp = w => Send(1, MsgType.ShopOp, w);
             _shopState.BroadcastState = w => Broadcast(MsgType.ShopState, w);
             _settings.SendOp = w => Send(1, MsgType.SettingsOp, w);
@@ -2226,25 +2278,6 @@ namespace CardShopCoop
             _register.ForceResend();
         }
 
-        private void RegisterPromptTick()
-        {
-            // Only the TRADE/sell-in prompt survives here: the register itself is pure vanilla
-            // (no hints, no serve key) - the manning player just clicks it and serves.
-            _tradePromptTimer += _dt;
-            if (_tradePromptTimer >= 0.5f && InGameLevel())
-            {
-                _tradePromptTimer -= 0.5f;
-                var tf = ResolvePlayer();
-                int near = tf != null ? Sync.RegisterServe.FindNearestCounter(tf.position, CoopPlugin.ServeReach.Value, quiet: true) : -1;
-                string prompt = _trades.PromptFor(near);
-                // walk-up hint for the collider-less "!" trade puppet, so the guest knows how
-                // to answer it; a walk-up trade is the rarer, time-limited event
-                if (prompt == null && Role == CoopRole.Client && _trades.AnyKnownOffer())
-                    prompt = $"a customer wants to trade - go to the counter and press {CoopPlugin.ServeKey.Value}";
-                PromptLine = prompt ?? "";
-            }
-        }
-
         private void NpcSweepTick()
         {
             // the shop-naming world trigger (and its "!" marker) is host-only; find it
@@ -2363,6 +2396,16 @@ namespace CardShopCoop
             return _playerTf;
         }
 
+        public static bool TryGetLocalPlayerPosition(out Vector3 position)
+        {
+            position = default(Vector3);
+            var core = Instance;
+            var player = core != null ? core.ResolvePlayer() : null;
+            if (player == null) return false;
+            position = player.position;
+            return true;
+        }
+
         // what the local player is carrying (private fields; the game has no public API)
         private static readonly FieldInfo FiHoldBox = HarmonyLib.AccessTools.Field(typeof(InteractionPlayerController), "m_CurrentHoldingBox");
         private static readonly FieldInfo FiHoldItemBox = HarmonyLib.AccessTools.Field(typeof(InteractionPlayerController), "m_CurrentHoldingItemBox");
@@ -2435,7 +2478,10 @@ namespace CardShopCoop
             if (_playerIpc == null) return 0;
             try
             {
-                if (IsAlive(FiHoldBox) || IsAlive(FiHoldItemBox) || IsAlive(FiHoldBoxShelf) || IsAlive(FiHoldBoxCard))
+                // The generic field is the only authoritative hold marker. The game does
+                // not clear the type-specific shelf/card fields when Q enters move-box
+                // mode, so consulting them creates a duplicate held visual.
+                if (IsAlive(FiHoldBox))
                 {
                     // describe the box (size + contents) so the avatar shows the real thing
                     if (FiHoldItemBox?.GetValue(_playerIpc) is InteractablePackagingBox_Item ib && ib != null)
@@ -4256,6 +4302,7 @@ namespace CardShopCoop
                     try { _cardBoxes.HostReleaseRemoteCarried(); } catch { }
                     try { _furnBoxes.HostReleaseRemoteCarried(); } catch { }
                     try { _register.HostReleaseConn(left); } catch { }
+                    try { _staff.HostReleaseConn(left); } catch { }
                     // and DROP any product still held for the departed guest: its charge
                     // is never coming, and the fail-open pump would otherwise deliver the
                     // product chargeless 1.5s from now. Its charge verdict goes too.
@@ -4362,7 +4409,6 @@ namespace CardShopCoop
             if (Role == CoopRole.Client)
             {
                 Guarded("npc-puppets", _actNpcPuppets);
-                Guarded("register-prompt", _actRegisterPrompt);
 
                 // chase any card price the host hasn't confirmed yet (the retry has its own
                 // 3s per-entry cooldown; this is just the polling cadence)
@@ -4616,12 +4662,14 @@ namespace CardShopCoop
                 }
             }
 
-            // full lighting-state sync: the sky phase runs on internal timers the clock
-            // sync can't correct (the "night at 11 AM" drift)
+            // lighting-state heal: normal light changes are event-driven; this slow fallback
+            // repairs scene-loads, unusual mods, or a missed change notification
             _lightSyncTimer += dt;
-            if (_lightSyncTimer >= 5f)
+            if (_lightSyncTimer >= 30f || _lightForceResend)
             {
-                _lightSyncTimer -= 5f;
+                bool forced = _lightForceResend;
+                _lightSyncTimer = forced ? 0f : _lightSyncTimer - 30f;
+                _lightForceResend = false;
                 try
                 {
                     if (_lightManager == null) _lightManager = FindObjectOfType<LightManager>();
@@ -4632,8 +4680,8 @@ namespace CardShopCoop
                         // the client CORRECTS ITS DRIFT only when a packet arrives - a pure
                         // changed-only gate silenced the corrector whenever the host's sky
                         // was static (pre-open mornings) and the joiner drifted to sunset
-                        _lightHeal += 5f;
-                        if (lightJson != _lastLightJson || _lightHeal >= 15f)
+                        _lightHeal += 30f;
+                        if (lightJson != _lastLightJson || _lightHeal >= 60f)
                         {
                             _lastLightJson = lightJson;
                             _lightHeal = 0f;
@@ -4832,8 +4880,59 @@ namespace CardShopCoop
                 }
                 catch { }
                 int day = CPlayerData.m_CurrentDay;
-                Broadcast(MsgType.DayTime, bw => { bw.Write(day); bw.Write(hour); bw.Write(min); });
+                float minFloat = min;
+                try { if (_lightManager != null && FiTimeMinFloat != null) minFloat = (float)FiTimeMinFloat.GetValue(_lightManager); }
+                catch { }
+                bool shopOnceOpen = CPlayerData.m_IsShopOnceOpen;
+                Broadcast(MsgType.DayTime, bw => { bw.Write(day); bw.Write(hour); bw.Write(min); bw.Write(minFloat); bw.Write(shopOnceOpen); });
             }
+        }
+
+        /// <summary>Causes the next host tick to immediately echo the authoritative lighting
+        /// state. Used after a forwarded switch request so clients do not wait for the normal
+        /// five-second lighting heartbeat.</summary>
+        public void ForceLightResend()
+        {
+            if (Role == CoopRole.Host)
+            {
+                _lightForceResend = true;
+                _lightSyncTimer = 0f;
+            }
+        }
+
+        /// <summary>Called by LightManager hooks after vanilla or a mod has refreshed its
+        /// lighting data. Direct SetActive changes have no setter to hook, so compare the
+        /// actual groups and request an immediate authoritative echo only when they change.</summary>
+        public void ObserveHostLightState(LightManager manager)
+        {
+            if (Role != CoopRole.Host || manager == null) return;
+            bool shop = manager.m_ShoplightGrp != null && manager.m_ShoplightGrp.activeSelf;
+            bool night = manager.m_NightlightGrp != null && manager.m_NightlightGrp.activeSelf;
+            bool sunlight = manager.m_SunlightGrp != null && manager.m_SunlightGrp.activeSelf;
+            if (!_observedLightState || shop != _observedShopLight || night != _observedNightLight || sunlight != _observedSunlight)
+            {
+                _observedShopLight = shop;
+                _observedNightLight = night;
+                _observedSunlight = sunlight;
+                _observedLightState = true;
+                ForceLightResend();
+            }
+        }
+
+        private static void ApplyClientLightSwitchModels(bool isOn)
+        {
+            try
+            {
+                var switches = FindObjectsOfType<InteractableLightSwitch>(true);
+                for (int i = 0; i < switches.Length; i++)
+                {
+                    var sw = switches[i];
+                    if (sw == null) continue;
+                    if (sw.m_SwitchOnModel != null) sw.m_SwitchOnModel.SetActive(isOn);
+                    if (sw.m_SwitchOffModel != null) sw.m_SwitchOffModel.SetActive(!isOn);
+                }
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("light-switch visual apply: " + e.Message); }
         }
 
         // ------------------------------------------------ message handling
@@ -5461,6 +5560,8 @@ namespace CardShopCoop
                         int day = br.ReadInt32();
                         int hour = br.ReadInt32();
                         int min = br.ReadInt32();
+                        float minFloat = br.ReadSingle();
+                        bool shopOnceOpen = br.ReadBoolean();
                         if (!_loggedTimeLink)
                         {
                             _loggedTimeLink = true;
@@ -5469,9 +5570,9 @@ namespace CardShopCoop
                         HostTimeLine = $"Day {day + 1}  {hour:00}:{min:00}"; // HUD shows day+1
                         bool dayChanged = day != CPlayerData.m_CurrentDay;
                         CPlayerData.m_CurrentDay = day;
-                        // The client clock only advances while the shop-open flag is set and
-                        // the day hasn't "ended"; both are cosmetic here, keep them permissive.
-                        CPlayerData.m_IsShopOnceOpen = true;
+                        // Match the host's clock gate. Forcing this true made a client advance
+                        // through a new morning while the host was still waiting to open shop.
+                        CPlayerData.m_IsShopOnceOpen = shopOnceOpen;
                         try
                         {
                             if (_lightManager == null) _lightManager = FindObjectOfType<LightManager>();
@@ -5489,6 +5590,13 @@ namespace CardShopCoop
                                     // cost us the day reset below.
                                     try { Sync.ReportSync.CloseClientReport(); }
                                     catch (Exception e) { CoopPlugin.Log.LogWarning("day change: closing stale report: " + e.Message); }
+                                    // If the guest was manning a register when the host ended
+                                    // the day, the host resolved that customer and the recap
+                                    // may never have opened on the joiner - leaving him frozen
+                                    // manning an empty station. Pull him off the register
+                                    // (full exit + claim release) no matter what.
+                                    try { Sync.RegisterSync.ForceExitManned(); }
+                                    catch (Exception e) { CoopPlugin.Log.LogWarning("day change: force-exit register: " + e.Message); }
                                     // Run the game's own new-day environment reset (skybox, GI,
                                     // 08:00 clock, morning music) and let exactly one
                                     // OnDayStarted through so the HUD/day label refresh.
@@ -5502,7 +5610,11 @@ namespace CardShopCoop
                                 {
                                     FiTimeHour?.SetValue(_lightManager, hour);
                                     FiTimeMin?.SetValue(_lightManager, min);
-                                    FiTimeMinFloat?.SetValue(_lightManager, (float)min);
+                                    FiTimeMinFloat?.SetValue(_lightManager, minFloat);
+                                    MiEvaluateTimeClock?.Invoke(_lightManager, null);
+                                    // EvaluateTimeClock deliberately raises the vanilla day-end
+                                    // event at 21:00. The event is blocked, but the flag must also
+                                    // stay clear so LightManager.Update does not freeze the mirror.
                                     FiHasDayEnded?.SetValue(_lightManager, false); // never freeze at closing
                                 }
                             }
@@ -6031,7 +6143,13 @@ namespace CardShopCoop
                 case MsgType.StaffOp:
                 {
                     if (Role != CoopRole.Host || !InGameLevel()) break;
-                    using (var br = Msg.Reader(msg.Payload)) _staff.HostApplyOp(br);
+                    using (var br = Msg.Reader(msg.Payload)) _staff.HostApplyOp(br, msg.ConnId);
+                    break;
+                }
+                case MsgType.StaffInteract:
+                {
+                    if (Role != CoopRole.Client || !InGameLevel()) break;
+                    using (var br = Msg.Reader(msg.Payload)) StaffSync.ClientInteractionMessage(br);
                     break;
                 }
                 case MsgType.StaffState:
@@ -6189,17 +6307,23 @@ namespace CardShopCoop
                             // "phase 4->0, drift 780min" two seconds before the mirror)
                             if (driftMin > 600) break;
                             if (Time.realtimeSinceStartupAsDouble - _lastDayMirrorAt < 10.0) break;
-                            // apply the SHOP-LIGHT bit surgically (cheap: just flips the group
-                            // + re-evaluates UI brightness) so a wall-switch toggle propagates
-                            // without a full lighting Init and its music/skybox churn. This is
-                            // the guest half of the light-switch sync (host runs ToggleShopLight
-                            // via the forwarded op; here we mirror the resulting state).
-                            try
+                            bool groupsDiffer = _lightManager.m_NightlightGrp == null
+                                || _lightManager.m_ShoplightGrp == null
+                                || _lightManager.m_SunlightGrp == null
+                                || _lightManager.m_NightlightGrp.activeSelf != data.m_IsNightLightOn
+                                || _lightManager.m_ShoplightGrp.activeSelf != data.m_IsShopLightOn
+                                || _lightManager.m_SunlightGrp.activeSelf != data.m_IsSunlightOn;
+
+                            // Apply every authoritative light group, not just the shop-light
+                            // switch. This also repairs mods that change the groups directly.
+                            if (groupsDiffer)
                             {
-                                if (LightManager.IsShopLightOn() != data.m_IsShopLightOn)
-                                    _lightManager.ToggleShopLight();
+                                _lightManager.m_NightlightGrp?.SetActive(data.m_IsNightLightOn);
+                                _lightManager.m_ShoplightGrp?.SetActive(data.m_IsShopLightOn);
+                                _lightManager.m_SunlightGrp?.SetActive(data.m_IsSunlightOn);
+                                MiEvaluateWorldUIBrightness?.Invoke(_lightManager, null);
                             }
-                            catch (Exception le) { CoopPlugin.Log.LogWarning("shop-light apply: " + le.Message); }
+                            ApplyClientLightSwitchModels(data.m_IsShopLightOn);
                             // re-run the game's own lighting restore only when the sky
                             // phase actually differs (avoids music/blend churn)
                             if (localIdx != data.m_TImeOfDayIndex || driftMin > 4)
@@ -6209,6 +6333,7 @@ namespace CardShopCoop
                                 MiLightInit?.Invoke(_lightManager, null);
                                 CoopPlugin.Log.LogInfo($"lighting re-synced (phase {localIdx}->{data.m_TImeOfDayIndex}, drift {driftMin}min)");
                             }
+                            FiHasDayEnded?.SetValue(_lightManager, false);
                         }
                         catch (Exception e) { CoopPlugin.Log.LogWarning("light apply: " + e.Message); }
                     }
@@ -6300,9 +6425,11 @@ namespace CardShopCoop
                         // host authority: never let a client's (possibly stale) move-request
                         // override an object the host is actively dragging - that echo is what
                         // snapped placed machines back to their old spot every guest tick
-                        _objMoves.ApplyRemote(entries, dropIfHostMoving: true);
-                        if (_net.ConnectionCount > 1) // see ShelfRequest note
-                            Broadcast(MsgType.ObjMoveDelta, bw => ObjMoveSync.WriteEntries(bw, entries));
+                        // Relay only poses the host actually accepted. Broadcasting the
+                        // original request made a rejected stale move teleport other guests.
+                        var accepted = _objMoves.ApplyRemote(entries, dropIfHostMoving: true);
+                        if (_net.ConnectionCount > 1 && accepted.Count > 0) // see ShelfRequest note
+                            Broadcast(MsgType.ObjMoveDelta, bw => ObjMoveSync.WriteEntries(bw, accepted));
                     }
                     break;
                 }

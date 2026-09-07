@@ -79,6 +79,7 @@ namespace CardShopCoop.Net
         GradedDigest = 71,     // both ways: graded-cert existence digest (album + hold + shelves + boxes + in-progress)
         RegisterCart = 72,     // host -> client: authoritative cart, prices, phase, and scanned slots
         RegisterOp = 73,       // client -> host: the manning player's register action (scan / payment / change / finish)
+        StaffInteract = 74,    // host -> client: worker interaction lease grant/release/denial
     }
 
     /// <summary>One received message, already reassembled from the wire.</summary>

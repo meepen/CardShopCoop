@@ -91,6 +91,13 @@ namespace CardShopCoop.Sync
             _sm = null;
         }
 
+        /// <summary>Request a same-frame scan after a vanilla inventory/shelf mutation.
+        /// The normal timer remains as a recovery heal.</summary>
+        public void ForceNextTick()
+        {
+            _timer = 0.75f;
+        }
+
         public void Tick(float dt, bool inGame)
         {
             if (!inGame) return;
@@ -344,7 +351,13 @@ namespace CardShopCoop.Sync
         {
             int curType = (int)comp.GetItemType();
             int cur = comp.GetItemCount();
-            if (cur == count && (curType == type || count == 0)) return;
+            // Truly identical: nothing to do. NOTE there is deliberately NO `|| count == 0`
+            // here - an EMPTY compartment still carries a LABEL (m_ItemType, shown on the
+            // tag even with 0 items), and clearing/setting that label is a real change the
+            // mirror must express. Treating every count==0 as "already the same" was why a
+            // coop player's right-click remove-label desynced: the far side was told
+            // (None,0) and kept its label forever (and the player's own copy toggled).
+            if (cur == count && curType == type) return;
 
             // same product, fewer items (a customer bought some): remove exactly the
             // difference - the full teardown/respawn for a 1-item sale was constant
@@ -368,6 +381,14 @@ namespace CardShopCoop.Sync
                 comp.SetCompartmentItemType((EItemType)type);
                 comp.CalculatePositionList();
                 comp.SpawnItem(count, spawnFromFront: true);
+            }
+            else if (curType != type)
+            {
+                // count 0 but the requested type differs: a LABEL change on an empty
+                // compartment (the item name/image on the tag stays up regardless of how
+                // many items are here). Clear/rebuild never touches m_ItemType, so set it
+                // explicitly - None hides the tag, a real type re-shows it with the image.
+                comp.SetCompartmentItemType((EItemType)type);
             }
         }
 

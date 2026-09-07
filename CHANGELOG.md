@@ -5,6 +5,35 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.0.54
+**Fixes: a coop player frozen if they were manning a register when the day ended.** No wire change.
+
+**What happened**
+- The guest was serving at a cashier counter when the host ended the day. The host resolved that customer, so there was nothing left to scan or pay — but nothing pulled the guest off the register.
+- The recap opens on the joiner by exiting register mode, but only partially: it cleared the player's cash-mode flag without releasing the co-op claim or the counter's `m_IsMannedByPlayer`, and if the recap never opened on the joiner at all (a race), he was left standing at a register whose customer was gone, with movement stopped and no way out — frozen.
+
+**What's fixed**
+- A proper register force-exit runs whenever the recap opens **and** whenever the day changes on the joiner: it calls the counter's vanilla exit (resets the movement stop, flags, NavMesh cut, `m_IsMannedByPlayer`) and releases the counter claim back to the host via the normal exit op, so a guest is never left manning an empty station past closing time.
+
+---
+
+## 1.0.53
+**Fixes: selling or trashing a shelf making everything shift onto the wrong shelves.** No wire change, so 1.0.53 talks to any existing 1.0.5x build — but both players should update so the host-side fix is live.
+
+**What happened**
+- When the host sold/trashed a shelf from the middle of a row, every shelf after it moved up one index in the game's lists, and the mod mirrors shelves by that index.
+- The client reconciled its furniture by "delete the last extra, then fix one mismatch," which can't tell which shelf actually vanished when shelves share a type — so it deleted the **wrong** one and kept the **wrong** one. Every item/card on the row then repainted onto the wrong physical shelf, permanently.
+- The mod has no hook for the host's own shelf removal, so nothing forced a quick re-sync either — the content syncs piped shifted-index updates to the client first.
+
+**What's fixed**
+- Furniture reconciliation now matches shelves by **type + position**, not list order, so a middle deletion removes exactly the shelf the host removed.
+- A host-side hook fires the moment a placed object is sold/trashed, forcing the roster to the client before the item/card syncs can send shifted-index updates.
+- The same fix covers containers (card storage, cleansers, pack openers, box storage, donation) and play tables, whose per-index mirrors also go stale when a machine is removed.
+
+**Fixes: shelf labels desyncing / a coop player not being able to remove one.** Right-clicking a shelf's price tag with the compartment empty clears its label (the item name/image shown even with no items). That change only flipped `m_ItemType` on the player's own copy - the item-stock mirror treated any "0 items" compartment as already-in-sync and kept the other side's label forever. The mirror now carries the label type on empty compartments too (and removing one fires instantly instead of waiting for the slow poll).
+
+---
+
 ## 1.0.44
 **Fixes $0.00 card prices on the joining player, and the empty collection binder and bulk-box lists that come with them.** Mostly hit Game Pass players. Both players must update.
 

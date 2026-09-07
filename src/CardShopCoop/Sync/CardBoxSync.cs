@@ -47,7 +47,9 @@ namespace CardShopCoop.Sync
             public float Yaw;
         }
 
-        private const int MaxBoxes = 16; // vanilla caps pending grading sets at 4
+        // Use a widened snapshot count so a large backlog cannot make the client
+        // destroy valid boxes merely because they are past a small prefix cap.
+        private const int MaxBoxes = 255;
         private const int MaxCards = 16; // vanilla sets carry up to 8 cards
 
         /// <summary>The live module instance, for the static Harmony patches.</summary>
@@ -113,6 +115,12 @@ namespace CardShopCoop.Sync
             _ipc = null;
         }
 
+        public void ForceNextTick()
+        {
+            _timer = 1.5f;
+            _lastHostHash = 0;
+        }
+
         public void ForceResend()
         {
             _lastHostHash = 0;
@@ -144,8 +152,8 @@ namespace CardShopCoop.Sync
                 {
                     Cards = null,
                     Carried = false,
-                    Pos = box.transform.position,
-                    Yaw = box.transform.eulerAngles.y,
+                    Pos = BoxSync.PhysicsPosition(box),
+                    Yaw = BoxSync.PhysicsRotation(box).eulerAngles.y,
                 });
                 released++;
             }
@@ -341,8 +349,14 @@ namespace CardShopCoop.Sync
                         CoopCore.WarnRefusedCard(cards[i], "card-box");
                         continue;
                     }
+                    // A grading-overhaul result carries an encoded grade. Register the
+                    // certificate before AddCard so GO's anti-cheat prefix accepts the
+                    // host-matured card instead of rewriting/rejecting it as an unknown
+                    // or duplicate certificate.
+                    if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
+                        Util.GradingInterop.Remember(cards[i]);
                     CPlayerData.AddCard(cards[i], 1); // mirrored by CardDelta
-                    if (cards[i].cardGrade == 10)
+                    if (Util.GradingInterop.Actual(cards[i].cardGrade) == 10)
                         CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained++;
                 }
                 AchievementManager.OnCheckGemMintCardCount(CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained);
@@ -439,10 +453,15 @@ namespace CardShopCoop.Sync
                 if (dead != null) foreach (int k in dead) _recentlyCollected.Remove(k);
             }
 
-            // shrink extras (from the end, so indices stay aligned)
-            for (int i = boxes.Count - 1; i >= hostList.Count; i--)
+            // A snapshot at the wire ceiling may be truncated; its absent tail is
+            // unknown and must not be destroyed. Only a complete snapshot authorizes
+            // population retirement.
+            if (hostList.Count < MaxBoxes)
             {
-                try { if (boxes[i] != null) boxes[i].OnDestroyed(); } catch { }
+                for (int i = boxes.Count - 1; i >= hostList.Count; i--)
+                {
+                    try { if (boxes[i] != null) boxes[i].OnDestroyed(); } catch { }
+                }
             }
             // grow / fix / update
             for (int i = 0; i < hostList.Count; i++)
@@ -663,8 +682,8 @@ namespace CardShopCoop.Sync
             {
                 Cards = SafeCards(box),
                 Carried = IsLocallyCarried(box),
-                Pos = box.transform.position,
-                Yaw = box.transform.eulerAngles.y,
+                        Pos = BoxSync.PhysicsPosition(box),
+                        Yaw = BoxSync.PhysicsRotation(box).eulerAngles.y,
             };
         }
 
@@ -692,14 +711,15 @@ namespace CardShopCoop.Sync
                     return;
                 }
                 SetBoxVisible(box, true);
-                var t = box.transform;
-                if ((t.position - want.Pos).sqrMagnitude > 0.01f
-                    || Mathf.Abs(Mathf.DeltaAngle(t.eulerAngles.y, want.Yaw)) > 3f)
+                var currentPos = BoxSync.PhysicsPosition(box);
+                var currentYaw = BoxSync.PhysicsRotation(box).eulerAngles.y;
+                if ((currentPos - want.Pos).sqrMagnitude > 0.01f
+                    || Mathf.Abs(Mathf.DeltaAngle(currentYaw, want.Yaw)) > 3f)
                 {
                     // card boxes have no price tag group (SpawnPriceTag is overridden
                     // empty), so a plain transform move carries everything: the stored
                     // card3ds are parented under m_StoredCardPosListGrp inside the box
-                    t.SetPositionAndRotation(want.Pos, Quaternion.Euler(0f, want.Yaw, 0f));
+                    BoxSync.ApplyPhysicsPose(box, want.Pos, want.Yaw);
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync apply: " + e.Message); }

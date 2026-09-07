@@ -561,7 +561,7 @@ namespace CardShopCoop.UI
         private void DrawClient(CoopCore core)
         {
             GUILayout.Label(PlayersLine(core), CoopTheme.Label);
-            GUILayout.Label($"<size=11>You're playing in the host's shop. At the register, click the customer's items to scan them, then click to take payment and give change ({CoopPlugin.ServeKey.Value} also works). Your own saves are protected.</size>",
+            GUILayout.Label("You're playing in the host's shop. Use the register and customers exactly like single-player. Your own saves are protected.",
                 CoopTheme.LabelWrap);
             if (GUILayout.Button("Wave  (" + CoopPlugin.EmoteKey.Value + ")", CoopTheme.ButtonSecondary)) core.SendEmote();
             if (GUILayout.Button("Leave session", CoopTheme.ButtonDanger)) core.Disconnect();

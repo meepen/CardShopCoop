@@ -31,6 +31,12 @@ namespace CardShopCoop.Sync
         /// never mistake a sync-applied change for a local click and re-forward it.</summary>
         public static bool ApplyingRemote;
 
+        public static void RequestLightToggle()
+        {
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return;
+            _instance?.SendOp?.Invoke(bw => { bw.Write(OpToggleLight); bw.Write((byte)0); });
+        }
+
         // private game methods we drive on the client to make the UI/meshes tell the truth
         private static readonly System.Reflection.MethodInfo MiBillEvaluateUI =
             AccessTools.Method(typeof(RentBillScreen), "EvaluateUI");
@@ -227,9 +233,9 @@ namespace CardShopCoop.Sync
         public static bool LightSwitchPrefix()
         {
             if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
-            // block the local-only toggle; forward it (the trailing byte satisfies HostApplyOp's
-            // op+arg read). The host echoes the flipped light back via LightState.
-            _instance?.SendOp?.Invoke(bw => { bw.Write(OpToggleLight); bw.Write((byte)0); });
+            // block the local-only toggle; forward it. The host echoes the authoritative
+            // result via LightState.
+            RequestLightToggle();
             return false;
         }
 
@@ -320,7 +326,10 @@ namespace CardShopCoop.Sync
                     case OpPayBill: HostPayBill(arg); break;
                     case OpUnlock: HostUnlock(arg); break;
                     case OpToggleSign: HostToggleSign(arg); break;
-                    case OpToggleLight: HostToggleLight(); break;
+                    case OpToggleLight:
+                        HostToggleLight();
+                        CoopCore.Instance?.ForceLightResend();
+                        break;
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ShopStateSync op " + op + ": " + e.Message); }

@@ -17,7 +17,10 @@ namespace CardShopCoop.Sync
     /// </summary>
     public class PopulationSync
     {
-        public const int KindCount = 15;
+        // 15 is the generic interactable-object list. It must be included because
+        // generic furniture is still a real placed object and is referenced by the
+        // furniture-box and move mirrors.
+        public const int KindCount = 16;
 
         /// <summary>Shared list resolver used by PopulationSync and ObjMoveSync so both
         /// always agree on what "kind 3, index 7" means.</summary>
@@ -40,6 +43,8 @@ namespace CardShopCoop.Sync
                 case 12: return sm.m_EmptyBoxStorageList;
                 case 13: return sm.m_BulkDonationBoxList;
                 case 14: return sm.m_TournamentPrizeShelfList;
+                case 15:
+                    return sm.m_InteractableObjectList;
                 default: return null;
             }
         }
@@ -74,6 +79,12 @@ namespace CardShopCoop.Sync
             _timer = -1.1f; // staggered phase vs the other snapshot engines
             _lastHash = 0;
             _heal = 0f;
+        }
+
+        public void ForceNextTick()
+        {
+            _timer = 3f;
+            _lastHash = 0;
         }
 
         private ShelfManager Sm()
@@ -158,29 +169,38 @@ namespace CardShopCoop.Sync
             var list = GetList(sm, kind);
             if (list == null) return;
 
-            // extras beyond the host's roster: remove from the end (game removal shifts lists)
-            int guard = 8;
-            while (list.Count > want.Count && guard-- > 0)
+            // Snapshot the live client objects once (non-null only, matching how the host
+            // serializes its roster).
+            var clientObjs = new List<InteractableObject>(list.Count);
+            for (int i = 0; i < list.Count; i++)
+                if (list[i] is InteractableObject o) clientObjs.Add(o);
+
+            // Roster COUNT differs = a real add/remove. Use type + nearest position to
+            // identify WHICH object is extra/missing: deleting a shelf out of the MIDDLE
+            // re-indexes every object after it, so "remove extras from the end" pairs the
+            // WRONG objects whenever shelves share a type - the client keeps the wrong shelf
+            // and deletes the right one, and every index-keyed content sync then repaints
+            // the wrong shelves forever. Positions are authoritative (both peers load the
+            // same save and ObjMoveSync keeps poses in step), so type + nearest position
+            // finds the true counterpart even after a middle removal.
+            if (clientObjs.Count != want.Count)
             {
-                var extra = list[list.Count - 1] as InteractableObject;
-                if (extra == null) { list.RemoveAt(list.Count - 1); continue; }
-                CoopPlugin.Log.LogInfo($"population: removing extra {extra.m_ObjectType} (kind {kind})");
-                extra.OnDestroyed();
-                OnClientStructureChanged?.Invoke(kind);
-                list = GetList(sm, kind);
+                ReconcileByPose(sm, kind, want, clientObjs);
+                return;
             }
 
-            // type mismatches mid-list: repair ONE per tick (each removal shifts indices;
-            // converges across ticks without ever mass-deleting on a glitch)
+            // Same count: NO structural change. Verify identities the way the old code
+            // did (repair one genuine type mismatch per tick) and never touch positions -
+            // the periodic heal and a mid-move object must not churn shelves merely because
+            // a pose momentarily differs.
             for (int i = 0; i < list.Count && i < want.Count; i++)
             {
                 var obj = list[i] as InteractableObject;
                 if (obj == null) continue;
                 // an object from a content pack only the HOST has: his id carries no name
                 // we know, so want[i].ObjType is a None sentinel that would mismatch
-                // whatever stands here and destroy it every tick. Leave the slot alone -
-                // one-sided packs are allowed, and a mirror we cannot build is not a
-                // licence to delete the joiner's furniture.
+                // whatever stands here. Leave the slot alone - one-sided packs are allowed,
+                // and a mirror we cannot build is not a licence to delete the joiner's furniture.
                 if (want[i].Unresolved) continue;
                 // compare on the correct identity per kind, or a wrong deco variant (whose
                 // m_ObjectType is always -1) could never be detected and repaired
@@ -193,31 +213,138 @@ namespace CardShopCoop.Sync
                     return; // re-align next tick
                 }
             }
+        }
 
-            // missing objects: spawn with the game's own save-load recipe (self-registers
-            // at the end of the list, keeping order identical to the host's)
-            guard = 8;
-            while (list.Count < want.Count && guard-- > 0)
+        /// <summary>Reconcile a kind whose roster count differs from the host's - a real
+        /// insert or (more importantly) a MIDDLE deletion that re-indexed the list. Matches
+        /// host entries to client objects by (objectType, nearest position) so the extra
+        /// object is the one actually removed, not merely "the last one".</summary>
+        private static void ReconcileByPose(ShelfManager sm, int kind, List<Entry> want,
+            List<InteractableObject> clientObjs)
+        {
+            var matchedClient = new bool[clientObjs.Count];
+            var matchedHost = new bool[want.Count];
+
+            // nearest-position matching among same-type peers: a true counterpart sits at
+            // ~identical position (d ~ 0), so a removed shelf's neighbour never steals its
+            // partner. TolSq is generous enough for float/save drift, tight enough that a
+            // genuinely-missing object (no counterpart) is still left unmatched.
+            const float TolSq = 1.0f;
+            for (int w = 0; w < want.Count; w++)
             {
-                var e = want[list.Count];
+                // an object from a content pack only the HOST has: his id carries no name
+                // we know, so ObjType is a None sentinel that would mismatch whatever stands
+                // here. One-sided packs are allowed; a mirror we cannot build is not a
+                // licence to delete the joiner's furniture - so protect the local object at
+                // this position by pose alone and neither spawn nor remove for it.
+                if (want[w].Unresolved)
+                {
+                    int best = -1;
+                    float bestDs = float.MaxValue;
+                    for (int c = 0; c < clientObjs.Count; c++)
+                    {
+                        if (matchedClient[c]) continue;
+                        float ds = (clientObjs[c].transform.position - want[w].Pos).sqrMagnitude;
+                        if (ds < bestDs) { bestDs = ds; best = c; }
+                    }
+                    if (best >= 0 && bestDs <= TolSq) matchedClient[best] = true;
+                    continue;
+                }
+                int b = -1;
+                float bDs = float.MaxValue;
+                for (int c = 0; c < clientObjs.Count; c++)
+                {
+                    if (matchedClient[c]) continue;
+                    // compare on the correct identity per kind, or a wrong deco variant
+                    // (whose m_ObjectType is always -1) could never be detected
+                    int curType = (kind == 5) ? (int)clientObjs[c].m_DecoObjectType : (int)clientObjs[c].m_ObjectType;
+                    if (curType != want[w].ObjType) continue;
+                    float ds = (clientObjs[c].transform.position - want[w].Pos).sqrMagnitude;
+                    if (ds < bDs) { bDs = ds; b = c; }
+                }
+                if (b >= 0 && bDs <= TolSq)
+                {
+                    matchedClient[b] = true;
+                    matchedHost[w] = true;
+                }
+            }
+
+            // client objects with no host counterpart are extras: remove them (bounded per
+            // tick so a glitch can't mass-delete in one frame; the next roster pass
+            // converges the remainder). Removing shifts the list, so re-resolve after each
+            // removal - but never destroy an object already pulled from the list, and NEVER
+            // yank an object the local player is actively dragging (its pose is transient,
+            // so it legitimately won't match a fixed host pose right now).
+            int guard = 8;
+            for (int c = clientObjs.Count - 1; c >= 0 && guard > 0; c--)
+            {
+                if (matchedClient[c]) continue;
+                var obj = clientObjs[c];
+                if (obj == null || !GetList(sm, kind).Contains(obj)) continue;
+                if (obj.GetIsMovingObject()) continue;
+                guard--;
+                CoopPlugin.Log.LogInfo($"population: removing unmatched {TypeName(kind, obj)} (kind {kind})");
+                obj.OnDestroyed();
+                OnClientStructureChanged?.Invoke(kind);
+            }
+
+            // host entries with no local counterpart are missing: spawn with the game's own
+            // save-load recipe (self-registers at the end of the list, keeping order
+            // identical to the host's).
+            guard = 8;
+            for (int w = 0; w < want.Count && guard > 0; w++)
+            {
+                var e = want[w];
+                if (e.Unresolved || matchedHost[w]) continue;
+                // if a same-type client object is being dragged (matched nothing above
+                // because its pose is transient), it is almost certainly this entry's
+                // counterpart - consume it as the match instead of spawning a duplicate.
+                if (TryClaimDragged(kind, clientObjs, matchedClient, e.ObjType)) continue;
                 // nothing to spawn for content we don't have installed: the id resolved to
-                // None, whose prefab lookup would fail anyway. Stop here rather than skip -
-                // the slot IS the identity every other sync keys on, so it cannot be filled
-                // by the next object along.
-                if (e.Unresolved) break;
+                // None, whose prefab lookup would fail anyway. Skip - the slot IS the
+                // identity every other sync keys on, so it cannot be filled by the next
+                // object along.
                 // decorations self-register into m_DecoObjectList via SpawnDecoObject; the
                 // generic SpawnInteractableObject would land them in the wrong list (and
                 // resolve a null prefab from EObjectType.None), so they never appeared
                 var spawned = (kind == 5)
                     ? ShelfManager.SpawnDecoObject((EDecoObject)e.ObjType)
                     : ShelfManager.SpawnInteractableObject((EObjectType)e.ObjType);
-                if (spawned == null) break;
+                if (spawned == null) continue;
+                guard--;
                 spawned.transform.SetPositionAndRotation(e.Pos, e.Rot);
-                CoopPlugin.Log.LogInfo($"population: spawned {(kind == 5 ? ((EDecoObject)e.ObjType).ToString() : ((EObjectType)e.ObjType).ToString())} (kind {kind})");
+                CoopPlugin.Log.LogInfo($"population: spawned {TypeName(kind, e.ObjType)} (kind {kind})");
                 OnClientStructureChanged?.Invoke(kind);
-                list = GetList(sm, kind);
             }
         }
+
+        /// <summary>If an unmatched client object of this type is being dragged by the
+        /// local player, mark it as this host entry's counterpart so we neither remove it
+        /// (the removal pass skips moving objects) nor spawn a duplicate for the same
+        /// physical object. Returns true if one was claimed.</summary>
+        private static bool TryClaimDragged(int kind, List<InteractableObject> clientObjs,
+            bool[] matchedClient, int objType)
+        {
+            if (clientObjs == null || matchedClient == null) return false;
+            for (int c = 0; c < clientObjs.Count; c++)
+            {
+                if (matchedClient[c]) continue;
+                var o = clientObjs[c];
+                if (o == null || !o.GetIsMovingObject()) continue;
+                int t = (kind == 5) ? (int)o.m_DecoObjectType : (int)o.m_ObjectType;
+                if (t == objType) { matchedClient[c] = true; return true; }
+            }
+            return false;
+        }
+
+        /// <summary>A placed object's identity as a string, for the reconcile logs. Kind 5
+        /// (decorations) carries m_DecoObjectType (m_ObjectType is always None there);
+        /// every other kind carries m_ObjectType.</summary>
+        private static string TypeName(int kind, InteractableObject obj)
+            => kind == 5 ? ((EDecoObject)obj.m_DecoObjectType).ToString() : ((EObjectType)obj.m_ObjectType).ToString();
+
+        private static string TypeName(int kind, int objType)
+            => kind == 5 ? ((EDecoObject)objType).ToString() : ((EObjectType)objType).ToString();
 
         // ---- wire ----
 

@@ -617,7 +617,7 @@ namespace CardShopCoop.Sync
             var cm = _customers;
             if (cm == null) return;
 
-            // stable gender pick per player name, so dad & son each keep a consistent look
+            // Stable gender pick per player name, so each remote player keeps a consistent look.
             int nameHash = 17;
             foreach (char c in av.Name) nameHash = nameHash * 31 + c;
             bool female = (nameHash & 1) == 1;

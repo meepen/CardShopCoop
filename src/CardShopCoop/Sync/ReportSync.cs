@@ -131,6 +131,11 @@ namespace CardShopCoop.Sync
             // host-event-fee coroutine on a joiner.
             Try(h, typeof(EndOfDayReportScreen), "OnPressGoNextDay",
                 prefix: new HarmonyMethod(typeof(ReportSync), nameof(NextDayBlockPrefix)));
+
+            // A forced client close can interrupt EndDayReportTextUI.UpdateLerp before it
+            // reaches its normal sound cleanup. Always clear the looping recap sound on close.
+            Try(h, typeof(EndOfDayReportScreen), "CloseScreen",
+                postfix: new HarmonyMethod(typeof(ReportSync), nameof(ClientReportClosedPostfix)));
         }
 
         private static void Try(Harmony h, Type type, string method,
@@ -439,11 +444,17 @@ namespace CardShopCoop.Sync
                         if (FiPhoneMode != null && (bool)FiPhoneMode.GetValue(pc)) return;
                     }
                     catch { }
-                    // vanilla ShowGoNextDayScreen exits register mode before opening
+                    // vanilla ShowGoNextDayScreen exits register mode before opening. The
+                    // bare OnExitCashCounterMode clears the IPC flag but leaves the counter's
+                    // m_IsMannedByPlayer and the co-op claim set, and on a joiner the recap
+                    // must also pull him off a register whose customer the host just resolved
+                    // - so do the FULL exit (vanilla OnPressEsc) and release the claim too.
                     try
                     {
                         if (FiCashMode != null && (bool)FiCashMode.GetValue(pc)) pc.OnExitCashCounterMode();
                     }
+                    catch { }
+                    try { Sync.RegisterSync.ForceExitManned(); }
                     catch { }
                 }
                 // SaveGameData inside OpenScreen is already no-op'd for joiners by
@@ -456,6 +467,13 @@ namespace CardShopCoop.Sync
                 s_haveOpenReport = true;
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync open screen: " + e.Message); }
+        }
+
+        public static void ClientReportClosedPostfix()
+        {
+            if (CoopCore.Role != CoopRole.Client) return;
+            try { SoundManager.SetEnableSound_CoinIncrease(false); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("report sound cleanup: " + e.Message); }
         }
 
         /// <summary>
@@ -475,6 +493,10 @@ namespace CardShopCoop.Sync
                 if (_screen == null) _screen = UnityEngine.Object.FindObjectOfType<EndOfDayReportScreen>();
                 if (_screen == null) return;
                 if (!EndOfDayReportScreen.IsActive()) return; // nothing open: don't file a phantom day
+
+                // Closing during the number lerp skips EndDayReportTextUI's normal cleanup,
+                // which otherwise leaves the looping coin-increase source enabled forever.
+                try { SoundManager.SetEnableSound_CoinIncrease(false); } catch { }
 
                 // Re-assert the report this screen actually displayed so a host that
                 // already moved on (and healed a reset report over us) can't make us

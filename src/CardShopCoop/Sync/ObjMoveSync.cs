@@ -60,6 +60,7 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, Pose> _candidate = new Dictionary<int, Pose>(); // settle window
         private ShelfManager _sm;
         private float _timer;
+        private bool _forceImmediate;
         private float _lastRejectLog = -999f; // throttle the identity-reject spam to ~1/5s
 
         public Action<List<Entry>> OnLocalChanges;
@@ -85,6 +86,7 @@ namespace CardShopCoop.Sync
             _candidate.Clear();
             _sm = null;
             _timer = -0.25f; // staggered phase vs the other snapshot engines
+            _forceImmediate = false;
         }
 
         private ShelfManager Sm()
@@ -99,6 +101,8 @@ namespace CardShopCoop.Sync
             _timer += dt;
             if (_timer < 1.0f) return;
             _timer -= 1.0f;
+            bool immediate = _forceImmediate;
+            _forceImmediate = false;
 
             List<Entry> changes = null;
             try
@@ -106,7 +110,7 @@ namespace CardShopCoop.Sync
                 var sm = Sm();
                 if (sm == null) return;
                 for (int kind = 0; kind < PopulationSync.KindCount; kind++)
-                    Walk(PopulationSync.GetList(sm, kind), kind, ref changes);
+                    Walk(PopulationSync.GetList(sm, kind), kind, ref changes, immediate);
             }
             catch (Exception e)
             {
@@ -117,7 +121,7 @@ namespace CardShopCoop.Sync
                 OnLocalChanges?.Invoke(changes);
         }
 
-        private void Walk(System.Collections.IList list, int kind, ref List<Entry> changes)
+        private void Walk(System.Collections.IList list, int kind, ref List<Entry> changes, bool immediate = false)
         {
             if (list == null) return;
             for (int i = 0; i < list.Count; i++)
@@ -155,13 +159,16 @@ namespace CardShopCoop.Sync
                     _sent[key] = new Pose { P = p, R = r, Valid = true };
                     continue;
                 }
-                // settle gate: only report once the pose repeats across two ticks
-                if (_candidate.TryGetValue(key, out var cand) && cand.Same(p, r))
+                // An explicit completed mutation is already settled by vanilla. Keep the
+                // two-sample gate for ordinary recovery polling.
+                if (immediate || (_candidate.TryGetValue(key, out var cand) && cand.Same(p, r)))
                 {
+                    if (changes == null) changes = new List<Entry>();
+                    // Do not advance the sent baseline until this entry is actually
+                    // queued; otherwise the 65th move in a batch is lost forever.
+                    if (changes.Count >= 64) continue;
                     _sent[key] = new Pose { P = p, R = r, Valid = true };
                     _candidate.Remove(key);
-                    if (changes == null) changes = new List<Entry>();
-                    if (changes.Count >= 64) return;
                     changes.Add(new Entry { Key = key, Type = TypeIdOf(obj, kind), Pos = p, Rot = r });
                 }
                 else
@@ -181,10 +188,11 @@ namespace CardShopCoop.Sync
         /// the HOST when applying a client's move-request: an object the host is currently
         /// dragging must NOT be yanked to the client's stale pose (the snap-back echo war) -
         /// the baseline is refreshed so Walk won't re-echo, but the object is left alone.</summary>
-        public void ApplyRemote(List<Entry> entries, bool dropIfHostMoving = false)
+        public List<Entry> ApplyRemote(List<Entry> entries, bool dropIfHostMoving = false)
         {
             var sm = Sm();
-            if (sm == null) return;
+            var accepted = new List<Entry>();
+            if (sm == null) return accepted;
             foreach (var e in entries)
             {
                 try
@@ -229,12 +237,22 @@ namespace CardShopCoop.Sync
                     if (io is InteractableAutoPackOpener) { try { _miOpenerSetUI?.Invoke(io, null); } catch { } }
                     _sent[e.Key] = new Pose { P = e.Pos, R = e.Rot, Valid = true };
                     _candidate.Remove(e.Key);
+                    accepted.Add(e);
                 }
                 catch (Exception ex)
                 {
                     CoopPlugin.Log.LogWarning($"ObjMoveSync apply {e.Key:X}: {ex.Message}");
                 }
             }
+            return accepted;
+        }
+
+        /// <summary>Run the settle check on the next co-op frame instead of waiting for
+        /// the one-second recovery poll. Objects still moving remain protected by Walk.</summary>
+        public void ForceNextTick()
+        {
+            _timer = 1.0f;
+            _forceImmediate = true;
         }
 
         // Price tags live in a SEPARATE canvas group (m_Shelf_WorldUIGrp) that the game
@@ -267,6 +285,16 @@ namespace CardShopCoop.Sync
             if (list == null || idx >= list.Count) return null;
             return list[idx] as Component;
         }
+
+        /// <summary>Resolves a placed-object wire key for the transient movement preview.
+        /// The returned object is only used as a local visual source; callers must not
+        /// mutate its gameplay state.</summary>
+        public static Component ResolveObjectByKey(int key)
+        {
+            var sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            return sm == null ? null : Resolve(sm, key);
+        }
+
 
         // ---- wire ----
 

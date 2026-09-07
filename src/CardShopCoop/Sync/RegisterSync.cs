@@ -145,6 +145,33 @@ namespace CardShopCoop.Sync
             return idx >= 0 && t._guestManned.ContainsKey(idx);
         }
 
+        /// <summary>Client: the local player was manning a register and must be moved off
+        /// it NOW - the day ended (or the recap opened beneath them) after the host
+        /// resolved this counter's customer, so there is nothing left to serve and the
+        /// guest was being left frozen manning an empty station. Runs the counter's vanilla
+        /// OnPressEsc so the IPC flags, movement stop, NavMesh cut and m_IsMannedByPlayer
+        /// are all cleared, and releases the co-op claim via the same OpExit the normal Esc
+        /// path sends. No-op when nobody is manning.</summary>
+        public static void ForceExitManned()
+        {
+            var t = _live;
+            if (t == null) return;
+            if (CoopCore.Role != CoopRole.Client || t._localManned < 0) return;
+            int idx = t._localManned;
+            var sm = t.Sm();
+            if (sm == null || idx >= sm.m_CashierCounterList.Count) return;
+            var counter = sm.m_CashierCounterList[idx];
+            if (counter == null) return;
+            try
+            {
+                // ManningExitPostfix (postfix on OnPressEsc) releases _localManned and
+                // forwards OpExit to the host so it stops counting this counter as the
+                // guest's.
+                counter.OnPressEsc();
+            }
+            catch (System.Exception e) { CoopPlugin.Log.LogWarning($"RegisterSync force exit {idx}: {e.Message}"); }
+        }
+
         /// <summary>Client: is this customer currently the register carrier (live at a counter)?</summary>
         public static bool IsCarrier(Customer c)
         {
@@ -862,9 +889,11 @@ namespace CardShopCoop.Sync
                 item.m_Mesh.enabled = true;
                 item.gameObject.SetActive(true);
                 item.m_Collider.enabled = true;
-                // kinematic: the deactivated carrier's vanilla bounds-check never runs here, so
-                // a real, gravity-driven item would slide off the counter. Scanning is unaffected.
-                if (item.m_Rigidbody != null) item.m_Rigidbody.isKinematic = true;
+                // Match Customer.OnCashierCounterQueueMoved: once the customer has placed
+                // the item on the counter it must be a real physics object. Keeping this
+                // kinematic made the client presentation differ from the host and prevented
+                // the item from settling/interacting naturally.
+                if (item.m_Rigidbody != null) item.m_Rigidbody.isKinematic = false;
                 item.m_InteractableScanItem.enabled = true;
                 item.m_InteractableScanItem.RegisterScanItem(carrier, counter.m_ScannedItemLerpPos);
                 carrier.m_ItemInBagList.Add(item);
@@ -902,7 +931,7 @@ namespace CardShopCoop.Sync
                 card.m_Card3dUI.gameObject.SetActive(true);
                 card.gameObject.SetActive(true);
                 card.m_Collider.enabled = true;
-                if (card.m_Rigidbody != null) card.m_Rigidbody.isKinematic = true;
+                if (card.m_Rigidbody != null) card.m_Rigidbody.isKinematic = false;
                 card.RegisterScanCard(carrier, counter.m_ScannedItemLerpPos);
                 carrier.m_CardInBagList.Add(card);
                 return card;
