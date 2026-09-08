@@ -50,10 +50,11 @@ namespace CardShopCoop.Sync
 
             try
             {
-                string url = TvInterop.IsPlayingStream ? TvInterop.StreamUrl : null;
-                string source = TvInterop.IsPlayingStream ? TvInterop.SourceUrl : null;
-                string title = TvInterop.IsPlayingStream ? TvInterop.StreamTitle : null;
-                string playlist = TvInterop.IsPlayingStream ? TvInterop.PlaylistUrl : null;
+                bool streaming = TvInterop.IsPlayingStream || TvInterop.IsFetching;
+                string url = streaming ? TvInterop.StreamUrl : null;
+                string source = streaming ? TvInterop.SourceUrl : null;
+                string title = streaming ? TvInterop.StreamTitle : null;
+                string playlist = streaming ? TvInterop.PlaylistUrl : null;
                 bool changed = source != _lastSource || url != _lastUrl || title != _lastTitle || playlist != _lastPlaylist
                     || TvInterop.IsLive != _lastLive || TvInterop.IsSegmentedVod != _lastSegmented
                     || TvInterop.Paused != _lastPaused || TvInterop.PoweredOff != _lastPowered

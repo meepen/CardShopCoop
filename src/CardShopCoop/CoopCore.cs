@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -246,7 +247,8 @@ namespace CardShopCoop
         private bool _observedNightLight;
         private bool _observedSunlight;
         private bool _observedLightState;
-        private double _lastDayMirrorAt = -999.0;
+        private bool _clientDayResetPending;
+        private bool _clientDayResetInFlight;
         private int _lastLicenseHash;
         private float _licenseHeal;
 
@@ -277,12 +279,16 @@ namespace CardShopCoop
         /// the game's own load-cleanup destroys objects and NOTHING destroyed in
         /// that window is a player action to forward.</summary>
         public static bool ClientReloading;
-        private float _reloadGrace;
-        /// <summary>The pre-scene-load slice of a reload: the OLD world is still live,
-        /// so client box reports would describe a world about to be torn down. Stale
-        /// reports can shrink host box contents - hold them until the new scene lands
-        /// (once the grace is armed, fresh reports flow again immediately).</summary>
-        private bool ClientPreloadHold => ClientReloading && _reloadGrace <= 0f;
+        private float _reloadStartedAt;
+        private int _reloadStartedFrame;
+        /// <summary>True for the entire borrowed-world load: the old world may still be
+        /// live before the scene changes, and the new world is only partially constructed
+        /// afterward. Hold client-side sync until ShelfManager reports completion.</summary>
+        // The game's ShelfManager owns the load completion signal.  Do not use a
+        // fixed grace period here: a large shop can legitimately take longer than
+        // ten seconds to instantiate, and releasing the hold while it is still
+        // rebuilding makes the guest compete with its own load on the main thread.
+        private bool ClientPreloadHold => ClientReloading;
         private readonly System.Collections.Generic.List<InMsg> _dispatchBuf
             = new System.Collections.Generic.List<InMsg>(64);
         private readonly MessageRouter _messageRouter = new MessageRouter();
@@ -1967,6 +1973,13 @@ namespace CardShopCoop
             ModulesReset();
             PromptLine = "";
             _lightManager = null;
+            // Unity stops scene-owned coroutines during a load. If that interrupted the
+            // mirrored morning reset, make it retry against the newly loaded manager.
+            if (_clientDayResetInFlight)
+            {
+                _clientDayResetInFlight = false;
+                _clientDayResetPending = true;
+            }
             _cmSweep = null;
             _cmSpray = null;
             _inventory = null;
@@ -1981,7 +1994,6 @@ namespace CardShopCoop
             _gradedAlertEverShown.Clear();
             _gradedAlertStanding.Clear();
             GradedAdoptOffers.Clear();
-            if (ClientReloading) _reloadGrace = 10f; // countdown starts once in-game
             _playerTf = null;
             _playerCamTf = null;
             _playerIpc = null;
@@ -2013,6 +2025,35 @@ namespace CardShopCoop
         {
             var gm = CSingleton<CGameManager>.Instance;
             return gm != null && gm.m_IsGameLevel;
+        }
+
+        /// <summary>
+        /// Ends the guest's load hold from the game's actual completion signal rather than
+        /// from a guessed number of seconds.  FindObjectOfType is deliberate here: asking
+        /// CSingleton&lt;ShelfManager&gt;.Instance during a scene transition can create a fake,
+        /// empty manager and make the readiness check lie.
+        /// </summary>
+        private bool TryFinishClientReload()
+        {
+            if (!InGameLevel()) return false;
+            if (Time.frameCount <= _reloadStartedFrame || Time.realtimeSinceStartup - _reloadStartedAt < 0.25f)
+                return false;
+
+            var shelfManager = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (shelfManager == null || !shelfManager.m_FinishLoadingObjectData)
+                return false;
+
+            float elapsed = Time.realtimeSinceStartup - _reloadStartedAt;
+            ClientReloading = false;
+            CoopPlugin.Log.LogInfo($"Join world load completed in {elapsed:F2}s; resuming co-op sync");
+
+            // A shop name that arrived while loading may have been painted onto a sign
+            // that the reload then rebuilt. Re-stamp it now that the real world is ready.
+            if (_shopSign != null && !string.IsNullOrEmpty(_lastShopNameApplied))
+            {
+                try { _shopSign.text = _lastShopNameApplied; } catch { }
+            }
+            return true;
         }
 
         // NEVER CSingleton<>.Instance for scene-lifetime managers (CGameManager above
@@ -4069,6 +4110,11 @@ namespace CardShopCoop
 
             AutoTick(Time.deltaTime);
 
+            // A day transition can arrive while the guest is changing scenes or has a
+            // report screen open. Retry once the actual game level is ready instead of
+            // permanently leaving the guest's sky behind.
+            TryStartClientDayReset();
+
             if (Input.GetKeyDown(CoopPlugin.UiToggleKey.Value))
                 _ui.Visible = !_ui.Visible;
             if (Role != CoopRole.None && Input.GetKeyDown(CoopPlugin.EmoteKey.Value) && !UI.CoopUI.TextFieldFocused)
@@ -4140,6 +4186,12 @@ namespace CardShopCoop
                 }
             }
 
+            // Once the borrowed-world load starts, leave gameplay messages queued and let
+            // vanilla finish constructing the scene without the mod walking its partial
+            // shelf/box lists.  BundleDone can set ClientReloading during the dispatch pass
+            // below; the second check after Dispatch handles that same-frame transition.
+            if (ClientReloading && !TryFinishClientReload()) return;
+
             // Drain with coalescing: after any hitch the backlog holds dozens of stale
             // full-state packets; applying each in one frame turns one slow frame into
             // a cascade. For snapshot types only the NEWEST per (type, sender) matters.
@@ -4185,6 +4237,7 @@ namespace CardShopCoop
                 try { Dispatch(_dispatchBuf[i]); }
                 catch (Exception e) { CoopPlugin.Log.LogError($"Dispatch {_dispatchBuf[i].Type}: {e}"); }
                 if (_net == null) break; // a Bye may have shut us down mid-drain
+                if (ClientReloading) break; // BundleDone started the borrowed-world load
             }
             // (a Bye already cleared the buffer in Shutdown, hence the >= Count branch)
             if (consumed >= _dispatchBuf.Count) _dispatchBuf.Clear();
@@ -4196,25 +4249,20 @@ namespace CardShopCoop
 
             // Every stage is individually armored: one failing subsystem must degrade
             // that feature only, never kill position sync for the whole session.
-            FlushPendingCardWork();
+            if (!ClientReloading) FlushPendingCardWork();
 
             _dt = dt;
-            if (ClientReloading && _reloadGrace > 0f && InGameLevel())
+            if (ClientReloading)
             {
-                _reloadGrace -= dt;
-                if (_reloadGrace <= 0f)
-                {
-                    ClientReloading = false;
-                    // FIX E2: a shop name that arrived mid-load may have been painted onto
-                    // a sign the reload then rebuilt - re-stamp it now that things settled.
-                    if (_shopSign != null && !string.IsNullOrEmpty(_lastShopNameApplied))
-                    {
-                        try { _shopSign.text = _lastShopNameApplied; } catch { }
-                    }
-                }
+                // Do not let the co-op tick walk partially-created shelves, boxes or
+                // machines while vanilla is rebuilding the borrowed world.  The incoming
+                // network queue is intentionally left untouched below; it will be applied
+                // after the game's own load-complete flag is raised.
+                if (!TryFinishClientReload()) return;
             }
             Guarded("avatars", _actAvatars);
-            _syncActive = Role != CoopRole.None && _net.ConnectionCount > 0 && InGameLevel();
+            _syncActive = Role != CoopRole.None && _net.ConnectionCount > 0 && InGameLevel()
+                && !ClientPreloadHold;
             Guarded("population", _actPopulation);
             Guarded("world", _actWorld);
             Guarded("cardshelves", _actCardShelves);
@@ -4496,7 +4544,12 @@ namespace CardShopCoop
                         {
                             _lastLightJson = lightJson;
                             _lightHeal = 0f;
-                            Broadcast(new LightStateMessage { LightJson = lightJson });
+                            Broadcast(new LightStateMessage
+                            {
+                                LightJson = lightJson,
+                                Day = CPlayerData.m_CurrentDay,
+                                HasDay = true,
+                            });
                         }
                     }
                 }
@@ -4699,6 +4752,42 @@ namespace CardShopCoop
         /// <summary>Causes the next host tick to immediately echo the authoritative lighting
         /// state. Used after a forwarded switch request so clients do not wait for the normal
         /// five-second lighting heartbeat.</summary>
+        private void TryStartClientDayReset()
+        {
+            if (Role != CoopRole.Client || !_clientDayResetPending || _clientDayResetInFlight)
+                return;
+            if (!InGameLevel() || MiDayReset == null)
+                return;
+            if (_lightManager == null) _lightManager = FindObjectOfType<LightManager>();
+            if (_lightManager == null)
+                return;
+
+            // Close client-only UI/state before the environment coroutine starts. These
+            // are intentionally best-effort; the reset itself must still be attempted.
+            try { Sync.ReportSync.CloseClientReport(); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("day change: closing stale report: " + e.Message); }
+            try { Sync.RegisterSync.ForceExitManned(); }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("day change: force-exit register: " + e.Message); }
+
+            _clientDayResetPending = false;
+            _clientDayResetInFlight = true;
+            Patches.GamePatches.AllowNextDayStarted = true;
+            _lightManager.StartCoroutine(ClientDayResetRoutine());
+        }
+
+        private IEnumerator ClientDayResetRoutine()
+        {
+            try
+            {
+                yield return (IEnumerator)MiDayReset.Invoke(_lightManager, null);
+            }
+            finally
+            {
+                _clientDayResetInFlight = false;
+                Patches.GamePatches.AllowNextDayStarted = false;
+            }
+        }
+
         public void ForceLightResend()
         {
             if (Role == CoopRole.Host)
@@ -5181,11 +5270,10 @@ namespace CardShopCoop
                     // OnDestroyed - if a world was live (rejoin, or solo save loaded
                     // while waiting for the invite) a 1.0.7 client forwarded all ~250
                     // as player trash actions, wiping the HOST's boxes (first field
-                    // report). Suppress until settled. Grace must reset to 0 here: a
-                    // leftover countdown from an aborted join would drain the flag
-                    // DURING the ~16s async load and the massacre would slip through
+                    // report). Suppress until vanilla reports that the world is settled.
                     ClientReloading = true;
-                    _reloadGrace = 0f;
+                    _reloadStartedAt = Time.realtimeSinceStartup;
+                    _reloadStartedFrame = Time.frameCount;
                     SaveTransfer.ApplyAndLoad(_pendingSave);
                     _pendingSave = null;
                     break;
@@ -5366,38 +5454,16 @@ namespace CardShopCoop
                         // Match the host's clock gate. Forcing this true made a client advance
                         // through a new morning while the host was still waiting to open shop.
                         CPlayerData.m_IsShopOnceOpen = shopOnceOpen;
+                        if (dayChanged)
+                            _clientDayResetPending = true;
                         try
                         {
                             if (_lightManager == null) _lightManager = FindObjectOfType<LightManager>();
                             if (_lightManager != null)
                             {
-                                if (dayChanged && InGameLevel() && MiDayReset != null)
+                        if (dayChanged || _clientDayResetPending || _clientDayResetInFlight)
                                 {
-                                    // FIX A-hook: the host advanced the day, so the end-of-day
-                                    // recap this joiner may still be reading is now STALE - and
-                                    // its fullscreen lock is what has his movement pinned. Close
-                                    // it FIRST (client-safe no-op when no report is open), so he
-                                    // walks into the new morning instead of being frozen in
-                                    // yesterday's numbers while the environment resets around
-                                    // him. Guarded on its own: a hiccup in the recap must never
-                                    // cost us the day reset below.
-                                    try { Sync.ReportSync.CloseClientReport(); }
-                                    catch (Exception e) { CoopPlugin.Log.LogWarning("day change: closing stale report: " + e.Message); }
-                                    // If the guest was manning a register when the host ended
-                                    // the day, the host resolved that customer and the recap
-                                    // may never have opened on the joiner - leaving him frozen
-                                    // manning an empty station. Pull him off the register
-                                    // (full exit + claim release) no matter what.
-                                    try { Sync.RegisterSync.ForceExitManned(); }
-                                    catch (Exception e) { CoopPlugin.Log.LogWarning("day change: force-exit register: " + e.Message); }
-                                    // Run the game's own new-day environment reset (skybox, GI,
-                                    // 08:00 clock, morning music) and let exactly one
-                                    // OnDayStarted through so the HUD/day label refresh.
-                                    Patches.GamePatches.AllowNextDayStarted = true;
-                                    _lastDayMirrorAt = Time.realtimeSinceStartupAsDouble;
-                                    _lightManager.StartCoroutine(
-                                        (System.Collections.IEnumerator)MiDayReset.Invoke(_lightManager, null));
-                                    CoopPlugin.Log.LogInfo($"Mirroring host day change -> Day {day}");
+                                    TryStartClientDayReset();
                                 }
                                 else
                                 {
@@ -5405,10 +5471,11 @@ namespace CardShopCoop
                                     FiTimeMin?.SetValue(_lightManager, min);
                                     FiTimeMinFloat?.SetValue(_lightManager, minFloat);
                                     MiEvaluateTimeClock?.Invoke(_lightManager, null);
-                                    // EvaluateTimeClock deliberately raises the vanilla day-end
-                                    // event at 21:00. The event is blocked, but the flag must also
-                                    // stay clear so LightManager.Update does not freeze the mirror.
-                                    FiHasDayEnded?.SetValue(_lightManager, false); // never freeze at closing
+                                    // Keep the guest's day-end latch identical to the host. When
+                                    // the authoritative clock is before closing, clear a stale
+                                    // local latch so the clock can resume normally.
+                                    if (hour < 21)
+                                        FiHasDayEnded?.SetValue(_lightManager, false);
                                 }
                             }
                         }
@@ -6116,19 +6183,27 @@ namespace CardShopCoop
                         if (data == null) break;
                         try
                         {
+                            // Reject an older heartbeat that was already queued before a
+                            // rollover. A newer day heartbeat is the fallback for a missed
+                            // DayTime packet and must schedule the same full environment reset.
+                            if (lightState.HasDay)
+                            {
+                                if (lightState.Day < CPlayerData.m_CurrentDay) break;
+                                if (lightState.Day > CPlayerData.m_CurrentDay)
+                                {
+                                    CPlayerData.m_CurrentDay = lightState.Day;
+                                    _clientDayResetPending = true;
+                                    TryStartClientDayReset();
+                                    break;
+                                }
+                            }
+                            if (_clientDayResetPending || _clientDayResetInFlight) break;
                             if (_lightManager == null) _lightManager = FindObjectOfType<LightManager>();
                             if (_lightManager == null) break;
                             int localIdx = FiTimeOfDayIdx?.GetValue(_lightManager) is int idx ? idx : -1;
                             int localHour = FiTimeHour?.GetValue(_lightManager) is int h ? h : -1;
                             int localMin = FiTimeMin?.GetValue(_lightManager) is int m2 ? m2 : 0;
                             int driftMin = Math.Abs((data.m_TimeHour * 60 + data.m_TimeMin) - (localHour * 60 + localMin));
-                            // a day ROLLOVER is not drift: the host's clock wrapped to
-                            // morning before our day mirror ran. Racing an Init against
-                            // the mirror's DelayUpdateEnv coroutine stomped the env
-                            // updater and froze the sky in daylight (field screenshot:
-                            // "phase 4->0, drift 780min" two seconds before the mirror)
-                            if (driftMin > 600) break;
-                            if (Time.realtimeSinceStartupAsDouble - _lastDayMirrorAt < 10.0) break;
                             bool groupsDiffer = _lightManager.m_NightlightGrp == null
                                 || _lightManager.m_ShoplightGrp == null
                                 || _lightManager.m_SunlightGrp == null

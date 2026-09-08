@@ -141,6 +141,10 @@ namespace CardShopCoop.Net.Messages
     public sealed class LightStateMessage : INetMessage
     {
         public string LightJson;
+        // LightTimeData has no day number, so carry it beside the payload. This lets the
+        // client distinguish a real rollover from a large clock delta at 21:00.
+        public int Day;
+        public bool HasDay;
         public MsgType Type { get { return MsgType.LightState; } }
     }
 

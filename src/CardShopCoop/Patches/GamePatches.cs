@@ -26,9 +26,6 @@ namespace CardShopCoop.Patches
         private static readonly FieldInfo FiRestockCart = AccessTools.Field(typeof(RestockItemScreen), "m_CartItemList");
         private static readonly FieldInfo FiScannerIndexes = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockIndexList");
         private static readonly FieldInfo FiScannerCounts = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockBoxCountList");
-        private static readonly FieldInfo FiLightDayEnded =
-            AccessTools.Field(typeof(LightManager), "m_HasDayEnded");
-
         public static void ApplyAll(Harmony h)
         {
             // Client saves always land in the co-op slot, never the player's own slots.
@@ -54,13 +51,13 @@ namespace CardShopCoop.Patches
             Try(h, typeof(Worker), "PlayWorkerActionAnim",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(WorkerActionPostfix)));
 
-            // The client's clock follows the host; its own day must never end.
+            // The client's clock follows the host; its own day-end event must never
+            // advance the local simulation or open a local recap.
             Try(h, typeof(CEventManager), "QueueEvent",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(DayEndBlockPrefix)));
 
             // ...and the joiner must never OPEN the day-end recap himself. The mirrored
-            // clock parks at 21:00, where LightManager.Update re-latches m_HasDayEnded true
-            // every frame (our DayTime mirror only clears it on the host's 2s beat), so a
+            // clock is allowed to latch m_HasDayEnded just like the host, but a
             // guest who presses Enter before the host does runs the whole vanilla
             // ShowGoNextDayScreen: local ShelfManager/WorkerManager.OnPressGoNextDay (staff
             // sent home, shelves swept on a mirror that owns neither) plus an
@@ -75,8 +72,6 @@ namespace CardShopCoop.Patches
             // route those client requests through the host as well.
             Try(h, typeof(LightManager), "ToggleShopLight",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(ClientLightTogglePrefix)));
-            Try(h, typeof(LightManager), "Update",
-                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ClientLightUpdatePostfix)));
             Try(h, typeof(LightManager), "ToggleShopLight",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(LightStateChangedPostfix)));
             Try(h, typeof(LightManager), "Init",
@@ -805,12 +800,6 @@ namespace CardShopCoop.Patches
         {
             if (CoopCore.Role == CoopRole.Host)
                 CoopCore.Instance?.NotifyHostStructureChanged();
-        }
-
-        public static void ClientLightUpdatePostfix(LightManager __instance)
-        {
-            if (CoopCore.Role == CoopRole.Client)
-                FiLightDayEnded?.SetValue(__instance, false);
         }
 
         public static void LightStateChangedPostfix(LightManager __instance)

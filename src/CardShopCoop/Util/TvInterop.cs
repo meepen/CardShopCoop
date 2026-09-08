@@ -149,6 +149,10 @@ namespace CardShopCoop.Util
                 }
                 else if (string.IsNullOrEmpty(sourceUrl) && string.IsNullOrEmpty(playlistUrl))
                 {
+                    // The host returned to local playback. Allow a later selection of the
+                    // same URL to launch again instead of being suppressed by the old memo.
+                    _launchedSource = null;
+                    _launchedPlaylistIndex = 0;
                     FiPlaying?.SetValue(null, false);
                     Invoke(VideoPlayer(master), "Stop");
                 }

@@ -980,7 +980,6 @@ namespace CardShopCoop.Sync
                     return;
                 }
                 SendOp?.Invoke(new ContainerOpMessage { Op = OpPackClaim, Index = (byte)idx });
-                Touch(KindPackOpener, idx);
             }
             else
             {
@@ -1026,7 +1025,12 @@ namespace CardShopCoop.Sync
                 if (_packMirrors.TryGetValue(message.Index, out var m))
                 {
                     m.Output.Clear();
-                    m.CollectClaimed = true;
+                    m.Processing = false;
+                    m.CurrentState = 0;
+                    m.OpenedCount = 0;
+                    m.StoredCount = 0;
+                    m.CollectClaimed = false;
+                    ApplyPackMirrorToMachine(p, m);
                 }
             }
             catch (Exception e)
