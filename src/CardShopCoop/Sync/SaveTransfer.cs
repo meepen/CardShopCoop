@@ -1,3 +1,4 @@
+using CardShopCoop.Net;
 using System;
 using System.IO;
 using System.Reflection;

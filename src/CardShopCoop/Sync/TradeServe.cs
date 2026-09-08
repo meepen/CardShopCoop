@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using HarmonyLib;
 using UnityEngine;
 
@@ -83,9 +84,9 @@ namespace CardShopCoop.Sync
         private const int MaxOffers = 32;
 
         /// <summary>Set by CoopCore: client -> host op (MsgType.TradeOp).</summary>
-        public Action<Action<BinaryWriter>> SendOp;
+        public Action<INetMessage> SendOp;
         /// <summary>Set by CoopCore: host -> clients state (MsgType.TradeState).</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
 
         private const byte OpAccept = 1;
         private const byte OpDecline = 2;
@@ -305,7 +306,7 @@ namespace CardShopCoop.Sync
                 if (!ReferenceEquals(kv.Value, __instance)) continue;
                 _live._pendingCounter = kv.Key;
                 _live._claimTimer = 999f;
-                _live.SendOp?.Invoke(bw => { bw.Write(OpScreen); bw.Write((byte)kv.Key); bw.Write(0f); });
+                _live.SendOp?.Invoke(new TradeOpMessage { Op = OpScreen, CounterIdx = (byte)kv.Key, Price = 0f });
                 return;
             }
         }
@@ -656,7 +657,7 @@ namespace CardShopCoop.Sync
                     }
                     CoopPlugin.Log.LogInfo($"TradeServe host: broadcasting {_hostBuf.Count} offer(s){summary}");
                 }
-                BroadcastState?.Invoke(WriteState);
+                BroadcastState?.Invoke(BuildState());
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe host: " + e.Message); }
         }
@@ -739,7 +740,7 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private void WriteState(BinaryWriter bw)
+        private TradeStateMessage BuildState()
         {
             // both-players-on-one-customer guard, host half: while the HOST has the
             // trade screen up (or is mid-trade), joiners must not open theirs
@@ -751,31 +752,35 @@ namespace CardShopCoop.Sync
                     || (cm.m_CustomerTradeCardScreen != null && cm.m_CustomerTradeCardScreen.IsScreenOpened()));
             }
             catch { }
-            bw.Write(hostBusy);
-            bw.Write(_resultSeq);
-            bw.Write(_result ?? "");
-            bw.Write((byte)_hostBuf.Count);
+            var msg = new TradeStateMessage
+            {
+                HostBusy = hostBusy,
+                ResultSeq = _resultSeq,
+                Result = _result ?? "",
+            };
             for (int i = 0; i < _hostBuf.Count; i++)
             {
                 var o = _hostBuf[i];
-                bw.Write(o.CounterIdx);
-                bw.Write((byte)((o.Known ? 1 : 0) | (o.Trading ? 2 : 0)));
-                bw.Write(o.CustomerIndex);
-                bw.Write(o.CustomerGeneration);
-                bw.Write(o.Position.x); bw.Write(o.Position.y); bw.Write(o.Position.z);
-                bw.Write(o.Yaw);
-                bw.Write(o.PriceSet);
-                bw.Write(o.LastPriceSet);
-                bw.Write(o.MaxDeclineCount);
-                bw.Write(o.DeclineCount);
-                if (o.Known)
+                msg.Offers.Add(new TradeOfferEntry
                 {
-                    Msg.WriteCard(bw, o.CardL);
-                    if (o.Trading) Msg.WriteCard(bw, o.CardR);
-                    else bw.Write(o.Price);
-                }
-                bw.Write(o.Remaining);
+                    CounterIdx = o.CounterIdx,
+                    Known = o.Known,
+                    Trading = o.Trading,
+                    CustomerIndex = o.CustomerIndex,
+                    CustomerGeneration = o.CustomerGeneration,
+                    Position = o.Position,
+                    Yaw = o.Yaw,
+                    PriceSet = o.PriceSet,
+                    LastPriceSet = o.LastPriceSet,
+                    MaxDeclineCount = o.MaxDeclineCount,
+                    DeclineCount = o.DeclineCount,
+                    CardL = o.Known ? o.CardL : null,
+                    CardR = (o.Known && o.Trading) ? o.CardR : null,
+                    Price = (o.Known && !o.Trading) ? o.Price : 0f,
+                    Remaining = o.Remaining,
+                });
             }
+            return msg;
         }
 
         private void Result(string text)
@@ -788,11 +793,11 @@ namespace CardShopCoop.Sync
 
         /// <summary>Host: a joiner answered a counter offer (accept carries the price
         /// the joiner's screen had set; decline/trade ops carry 0).</summary>
-        public void HostApplyOp(BinaryReader br)
+        public void HostApplyOp(TradeOpMessage message)
         {
-            byte op = br.ReadByte();
-            int idx = br.ReadByte();
-            float price = br.ReadSingle();
+            byte op = message.Op;
+            int idx = message.CounterIdx;
+            float price = message.Price;
             if (op == OpScreen)
             {
                 // joiner's screen-open claim (renewed ~2s; expiry is time-based so no
@@ -987,34 +992,34 @@ namespace CardShopCoop.Sync
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(TradeStateMessage message)
         {
-            _hostBusy = br.ReadBoolean();
-            byte seq = br.ReadByte();
-            string result = br.ReadString();
-            int count = br.ReadByte();
+            _hostBusy = message.HostBusy;
+            byte seq = message.ResultSeq;
+            string result = message.Result;
+            int count = message.Offers.Count;
             _offers.Clear();
             for (int i = 0; i < count; i++)
             {
-                var o = new Offer { CounterIdx = br.ReadByte() };
-                byte flags = br.ReadByte();
-                o.Known = (flags & 1) != 0;
-                o.Trading = (flags & 2) != 0;
-                o.CustomerIndex = br.ReadUInt16();
-                o.CustomerGeneration = br.ReadInt32();
-                o.Position = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
-                o.Yaw = br.ReadSingle();
-                o.PriceSet = br.ReadSingle();
-                o.LastPriceSet = br.ReadSingle();
-                o.MaxDeclineCount = br.ReadInt32();
-                o.DeclineCount = br.ReadInt32();
-                if (o.Known)
+                var e = message.Offers[i];
+                var o = new Offer
                 {
-                    o.CardL = Msg.ReadCard(br);
-                    if (o.Trading) o.CardR = Msg.ReadCard(br);
-                    else o.Price = br.ReadSingle();
-                }
-                o.Remaining = br.ReadSingle();
+                    CounterIdx = e.CounterIdx,
+                    Known = e.Known,
+                    Trading = e.Trading,
+                    CustomerIndex = e.CustomerIndex,
+                    CustomerGeneration = e.CustomerGeneration,
+                    Position = e.Position,
+                    Yaw = e.Yaw,
+                    PriceSet = e.PriceSet,
+                    LastPriceSet = e.LastPriceSet,
+                    MaxDeclineCount = e.MaxDeclineCount,
+                    DeclineCount = e.DeclineCount,
+                    CardL = e.Known ? e.CardL : null,
+                    CardR = (e.Known && e.Trading) ? e.CardR : null,
+                    Price = (e.Known && !e.Trading) ? e.Price : 0f,
+                    Remaining = e.Remaining,
+                };
                 _offers[o.CounterIdx] = o;
                 if (o.Known) PrepareCarrier(o);
                 else ReleaseCarrier(o.CounterIdx);
@@ -1154,7 +1159,7 @@ namespace CardShopCoop.Sync
         {
             _opThrottle = 0.5f;
             CoopPlugin.Log.LogInfo($"TradeServe client: sending {(op == OpAccept ? "accept" : "decline")} @ counter {idx}, price {price:F2}");
-            SendOp?.Invoke(bw => { bw.Write(op); bw.Write((byte)idx); bw.Write(price); });
+            SendOp?.Invoke(new TradeOpMessage { Op = op, CounterIdx = (byte)idx, Price = price });
             _offers.Remove(idx);
             if (CoopCore.Instance != null)
             {
@@ -1242,7 +1247,7 @@ namespace CardShopCoop.Sync
                 {
                     _claimTimer = 0f;
                     int pc = _pendingCounter;
-                    SendOp?.Invoke(bw => { bw.Write(OpScreen); bw.Write((byte)pc); bw.Write(0f); });
+                    SendOp?.Invoke(new TradeOpMessage { Op = OpScreen, CounterIdx = (byte)pc, Price = 0f });
                 }
                 var cm = Cm();
                 var screen = cm != null ? cm.m_CustomerTradeCardScreen : null;

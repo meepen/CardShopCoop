@@ -1,8 +1,10 @@
-﻿using BepInEx;
+using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
+using System;
 using System.Runtime.CompilerServices;
+using System.Reflection;
 using UnityEngine;
 
 namespace CardShopCoop
@@ -25,7 +27,7 @@ namespace CardShopCoop
     {
         public const string Guid = "com.zwhit.cardshopcoop";
         public const string Name = "CardShopCoop";
-        public const string Version = "1.0.54";
+        public const string Version = "1.0.60";
 
         public static ManualLogSource Log;
 
@@ -47,6 +49,15 @@ namespace CardShopCoop
         private void Awake()
         {
             Log = Logger;
+            try
+            {
+                Assembly.Load("Newtonsoft.Json");
+                Logger.LogInfo("network payload serializer: Newtonsoft.Json");
+            }
+            catch (Exception e)
+            {
+                Logger.LogError("network payload serializer unavailable: Newtonsoft.Json.dll is required (" + e.Message + ")");
+            }
             Util.FileLog.Init(Paths.GameRootPath);
             Logger.LogEvent += (_, e) => Util.FileLog.Write($"{e.Level,-7} {e.Data}");
 

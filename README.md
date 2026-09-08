@@ -31,6 +31,10 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
   readable rejections, automatic `enum_values.json` sync (backup + install + "restart
   and rejoin"), product-catalog diffing with plain-language warnings, refunds when an
   ordered product doesn't exist on the host.
+- **Optional RTCGO Custom TV sync**: shared YouTube/Twitch stream selection, pause/power,
+  playlist controls, and best-effort playback position. Mute and volume remain local to
+  each player; both PCs need the TV pack and working stream tools, and stream playback is
+  intentionally best-effort.
 - **Joiners risk nothing**: the joiner receives the host's save at join, plays in a
   dedicated scratch slot, and never writes their own saves.
 

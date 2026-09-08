@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using HarmonyLib;
 using UnityEngine;
 
@@ -65,10 +66,10 @@ namespace CardShopCoop.Sync
         public static GradingSync Instance;
 
         /// <summary>Set by CoopCore: client -> host op (MsgType.GradingOp).</summary>
-        public Action<Action<BinaryWriter>> SendOp;
+        public Action<INetMessage> SendOp;
 
         /// <summary>Set by CoopCore: host -> clients state (MsgType.GradingState).</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
 
         /// <summary>True while ClientApplyState rewrites the mirrored pending list, so
         /// no patch mistakes the authoritative copy for local player action.</summary>
@@ -82,7 +83,7 @@ namespace CardShopCoop.Sync
         // submission cap and it is NOT a wire bound: with Grading Overhaul the submit screen
         // holds up to 52 cards (GradingInterop.MaxSubmitSlots, which reads GO's own MAX_SLOTS).
         // Every count that decides how many cards actually move - the submit op, the
-        // host->guest GradingState broadcast (WriteState / ClientApplyInner) and the change
+        // host->guest GradingState broadcast (BuildState / ClientApplyInner) and the change
         // detector that gates it (ComputeHash) - reads MaxSubmitSlots. Using 8 in any of those
         // silently dropped every card past the eighth.
         private const int MaxSets = 8;
@@ -472,7 +473,7 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogWarning("GradingSync: no host link, submission cancelled");
                 return;
             }
-            inst.SendOp(bw =>
+            var gradOp = new GradingOpMessage
             {
                 // Widened from 0..3 to 0..255: Grading Overhaul cycles up to
                 // ServiceTierControlCenter.GetTierCount(company) tiers, which can exceed 4
@@ -486,14 +487,9 @@ namespace CardShopCoop.Sync
                 // out-of-range serviceLevel to Count-1 before that index runs (decompiled-grading
                 // :13971-13993), and a high tier only ever exists in a GO session - so no stray
                 // value can reach vanilla's raw indexer.
-                bw.Write((byte)Mathf.Clamp(serviceLevel, 0, 255));
-                // cap, not MaxSlots: with Grading Overhaul this is 52. The cap check above already
-                // guarantees picked.Count <= cap <= 255, so the Min/loop bound can no longer drop a
-                // card - it only keeps the byte cast provably safe.
-                bw.Write((byte)Mathf.Min(picked.Count, cap));
-                for (int i = 0; i < picked.Count && i < cap; i++)
-                    Msg.WriteCard(bw, picked[i]);
-                bw.Write(total); // client's fee view; host recomputes authoritatively
+                ServiceLevel = (byte)Mathf.Clamp(serviceLevel, 0, 255),
+                // client's fee view; host recomputes authoritatively
+                Total = total,
                 // WHICH grading company the guest was looking at. Without this the host had no
                 // way to stamp the submission as a Grading Overhaul job at all: GO records the
                 // company in an OnPressSubmitButton POSTFIX gated on the in-progress list already
@@ -508,8 +504,14 @@ namespace CardShopCoop.Sync
                 // 255 (GradingInterop.NoCompany) when GO is absent or unreadable - the host
                 // rejects it by the same allow-list test it applies to every other value, so a
                 // GO-absent session enrolls exactly as it always did.
-                bw.Write((byte)Mathf.Clamp(Util.GradingInterop.CurrentCompanyId, 0, 255));
-            });
+                CompanyId = (byte)Mathf.Clamp(Util.GradingInterop.CurrentCompanyId, 0, 255),
+            };
+            // cap, not MaxSlots: with Grading Overhaul this is 52. The cap check above already
+            // guarantees picked.Count <= cap <= 255, so the Min/loop bound can no longer drop a
+            // card - it only keeps the byte cast provably safe.
+            for (int i = 0; i < picked.Count && i < cap; i++)
+                gradOp.Cards.Add(picked[i]);
+            inst.SendOp(gradOp);
 
             SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
 
@@ -581,7 +583,7 @@ namespace CardShopCoop.Sync
                 if (hash == _lastHash && _heal < 15f) return;
                 _lastHash = hash;
                 _heal = 0f;
-                BroadcastState?.Invoke(bw => WriteState(bw, list));
+                BroadcastState?.Invoke(BuildState(list));
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync host: " + e.Message); }
         }
@@ -627,7 +629,7 @@ namespace CardShopCoop.Sync
             }
         }
 
-        public void HostApplyOp(BinaryReader br, int senderConn)
+        public void HostApplyOp(GradingOpMessage message, int senderConn)
         {
             // Widened from 0..3 to 0..255 to match the sender: Grading Overhaul's extra service
             // tiers (GetTierCount(company) can exceed 4) would otherwise be truncated here and the
@@ -637,7 +639,7 @@ namespace CardShopCoop.Sync
             // tier cannot crash vanilla in a GO session. In a GO-ABSENT session no legitimate
             // guest can produce a tier > 3, and the flat-recompute path below guards its raw
             // vanilla GetGradeCardServiceData call so a spoofed high tier can't throw there either.
-            int serviceLevel = Mathf.Clamp(br.ReadByte(), 0, 255);
+            int serviceLevel = Mathf.Clamp(message.ServiceLevel, 0, 255);
 
             // Card count. VALIDATED, never clamped - this used to be Min(count, 8), which meant a
             // guest submitting more than eight had the tail of his submission silently discarded
@@ -653,31 +655,29 @@ namespace CardShopCoop.Sync
             // decoding it threw that copy away with no refund, while every other reject path here
             // hands the cards back through ReturnRejectedCards.
             //
-            // Reading first is safe: `n` is a BYTE, so the loop is bounded at 255 iterations no
-            // matter what a crafted message claims - it cannot spin the reader. A payload too
-            // short for the count it advertises makes Msg.ReadCard throw, which lands in
-            // Dispatch's existing catch, and every op gets its OWN BinaryReader over its own
-            // payload (CoopCore, MsgType.GradingOp), so a half-consumed reader leaves no shared
-            // stream misaligned.
+            // Reading first is safe: the DTO's Deserialize already decoded the whole card blob (the
+            // count is a BYTE, so the loop is bounded at 255 iterations no matter what a crafted
+            // message claims - it cannot spin the reader; a payload too short for the count it
+            // advertises makes Msg.ReadCard throw during deserialize, which lands in Dispatch's
+            // existing catch). Every op carries its own payload, so nothing shared is misaligned.
             //
             // The cap is the HOST's: 8 without Grading Overhaul (unchanged legacy behavior), GO's
             // MAX_SLOTS with it. Version + PluginHash parity means a GO guest can only join a GO
             // host, so both ends agree on the number.
             int cap = Util.GradingInterop.MaxSubmitSlots;
-            int n = br.ReadByte();
-            var cards = new List<CardData>(n);
-            for (int i = 0; i < n; i++) cards.Add(Msg.ReadCard(br));
+            var cards = message.Cards;
+            int n = cards.Count;
             if (n > cap)
             {
                 CoopPlugin.Log.LogWarning($"GradingSync: malformed grading submission from conn {senderConn} (cardCount {n} > cap {cap}) - submission refused whole; returning its {cards.Count} cards to the shared binder so they are not destroyed");
                 if (CoopCore.Role == CoopRole.Host) ReturnRejectedCards(cards, senderConn);
                 return;
             }
-            float clientFee = br.ReadSingle(); // GO present: the REAL bill the guest saw; GO absent: client's flat view
+            float clientFee = message.Total; // GO present: the REAL bill the guest saw; GO absent: client's flat view
             // The grading company the guest's website was showing (GradingInterop.NoCompany=255
             // when he has no Grading Overhaul). Validated below before it is allowed to stamp
             // anything; see the enrollment block after the set is enrolled.
-            int companyId = br.ReadByte();
+            int companyId = message.CompanyId;
 
             if (CoopCore.Role != CoopRole.Host || cards.Count == 0) return;
 
@@ -901,7 +901,7 @@ namespace CardShopCoop.Sync
                 // used to be stated as "the trimmed set still displays correctly there", which
                 // only held while a set was <= 8 cards: the broadcast truncated every set to
                 // eight, so a longer job crossed the wire mutilated no matter what shape the host
-                // built. The wire now carries GradingInterop.MaxSubmitSlots (see WriteState).
+                // built. The wire now carries GradingInterop.MaxSubmitSlots (see BuildState).
                 // Moved below the list Add (it used to sit above): enrollment has to see
                 // the set already enrolled, and nothing between the two reads the list.
                 if (!enrolled)
@@ -937,27 +937,28 @@ namespace CardShopCoop.Sync
         /// <summary>Client: adopt the host's pending-submission list wholesale. The
         /// joiner never enrolls sets locally (submit is forwarded), so there is no
         /// local-edit-vs-echo race - the broadcast is simply the truth.</summary>
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(GradingStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(br); }
+            try { ClientApplyInner(message); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(GradingStateMessage message)
         {
-            int sets = Mathf.Min(br.ReadByte(), MaxSets);
+            int sets = Mathf.Min(message.Sets.Count, MaxSets);
             var list = new List<GradeCardSubmitSet>(sets);
             for (int i = 0; i < sets; i++)
             {
+                var se = message.Sets[i];
                 var set = new GradeCardSubmitSet
                 {
-                    // Int32 to match WriteState: a Grading Overhaul m_ServiceLevel is an encoded
+                    // Int32 to match BuildState: a Grading Overhaul m_ServiceLevel is an encoded
                     // (company, tier, jobId) value, not a 0..255 tier index.
-                    m_ServiceLevel = br.ReadInt32(),
-                    m_DayPassed = br.ReadByte(),
-                    m_MinutePassed = br.ReadSingle(),
+                    m_ServiceLevel = se.ServiceLevel,
+                    m_DayPassed = se.DayPassed,
+                    m_MinutePassed = se.MinutePassed,
                     m_CardDataList = new List<CardData>(MaxSlots),
                 };
                 // The vanilla status UI draws days-left as (m_ServiceDays - m_DayPassed) with
@@ -988,13 +989,13 @@ namespace CardShopCoop.Sync
                     }
                     catch { }
                 }
-                // Read bound = MaxSubmitSlots, the same number WriteState uses. An 8 here would
+                // Read bound = MaxSubmitSlots, the same number BuildState uses. An 8 here would
                 // STOP READING mid-set on any Grading Overhaul job longer than eight cards and
-                // leave the reader parked in the middle of that set's card blob, so every set
-                // after it decoded from garbage. Both ends agree on the number: Version +
-                // PluginHash parity means a GO guest can only ever join a GO host.
-                int n = Mathf.Min(br.ReadByte(), Util.GradingInterop.MaxSubmitSlots);
-                for (int j = 0; j < n; j++) set.m_CardDataList.Add(Msg.ReadCard(br));
+                // leave decoding the rest of the set's card blob from garbage. Both ends agree on
+                // the number: Version + PluginHash parity means a GO guest can only ever join a GO
+                // host.
+                int n = Mathf.Min(se.Cards.Count, Util.GradingInterop.MaxSubmitSlots);
+                for (int j = 0; j < n; j++) set.m_CardDataList.Add(se.Cards[j]);
                 // MaxSlots (8) is right HERE and only here: it is the vanilla SHAPE.
                 // GradedCardSetCheckStatusScreen repaints exactly m_CardDataList.Count
                 // panels; short lists would leave stale cards from the previous page. A set
@@ -1019,22 +1020,25 @@ namespace CardShopCoop.Sync
 
         // ---------------- wire / hash ----------------
 
-        private static void WriteState(BinaryWriter bw, List<GradeCardSubmitSet> list)
+        private static GradingStateMessage BuildState(List<GradeCardSubmitSet> list)
         {
+            var msg = new GradingStateMessage();
             int count = Mathf.Min(list.Count, MaxSets);
-            bw.Write((byte)count);
             for (int i = 0; i < count; i++)
             {
                 var set = list[i];
-                // Int32, NOT a clamped byte. With Grading Overhaul a live m_ServiceLevel is an
-                // ENCODED (company, tier, jobId) triple starting at 100000 (ServiceLevelCodec,
-                // decompiled-grading :5601) - every one of those truncated to 255 on the way out,
-                // so the guest's grading app rendered garbage for the HOST's own jobs long before
-                // any of this touched guest submissions. A tier index needed one byte; an encoded
-                // level needs the whole int.
-                bw.Write(set != null ? set.m_ServiceLevel : 0);
-                bw.Write((byte)Mathf.Clamp(set != null ? set.m_DayPassed : 0, 0, 255));
-                bw.Write(set != null ? set.m_MinutePassed : 0f);
+                var entry = new GradingSetEntry
+                {
+                    // Int32, NOT a clamped byte. With Grading Overhaul a live m_ServiceLevel is an
+                    // ENCODED (company, tier, jobId) triple starting at 100000 (ServiceLevelCodec,
+                    // decompiled-grading :5601) - every one of those truncated to 255 on the way out,
+                    // so the guest's grading app rendered garbage for the HOST's own jobs long before
+                    // any of this touched guest submissions. A tier index needed one byte; an encoded
+                    // level needs the whole int.
+                    ServiceLevel = set != null ? set.m_ServiceLevel : 0,
+                    DayPassed = (byte)Mathf.Clamp(set != null ? set.m_DayPassed : 0, 0, 255),
+                    MinutePassed = set != null ? set.m_MinutePassed : 0f,
+                };
                 var cards = set != null ? set.m_CardDataList : null;
                 // MaxSubmitSlots, NOT MaxSlots. A Grading Overhaul set legitimately holds up to
                 // 52 cards (enrolled sets are GO-trimmed to their real length, and the guest's
@@ -1043,13 +1047,14 @@ namespace CardShopCoop.Sync
                 // 30-card job and nothing else. The count still ships as a byte, and
                 // MaxSubmitSlots is itself bounded to 255, so the cast stays provably safe.
                 int n = cards != null ? Mathf.Min(cards.Count, Util.GradingInterop.MaxSubmitSlots) : 0;
-                bw.Write((byte)n);
                 for (int j = 0; j < n; j++)
-                    Msg.WriteCard(bw, cards[j] ?? new CardData());
+                    entry.Cards.Add(cards[j] ?? new CardData());
+                msg.Sets.Add(entry);
             }
+            return msg;
         }
 
-        /// <summary>Change detector over everything WriteState sends. m_MinutePassed is
+        /// <summary>Change detector over everything BuildState sends. m_MinutePassed is
         /// folded at hour granularity (LightManager bumps it +60 per game hour anyway),
         /// so the rebroadcast cadence is one per game hour, not per frame.</summary>
         private static int ComputeHash(List<GradeCardSubmitSet> list)
@@ -1065,7 +1070,7 @@ namespace CardShopCoop.Sync
                 hash = hash * 31 + (int)(set.m_MinutePassed / 60f);
                 var cards = set.m_CardDataList;
                 if (cards == null) continue;
-                // Same bound as WriteState. The change detector has to cover everything the wire
+                // Same bound as BuildState. The change detector has to cover everything the wire
                 // carries: hashing only the first eight cards of a 52-card set meant an edit past
                 // the eighth produced an IDENTICAL hash, so the rebroadcast never fired and the
                 // guest kept a stale set until the 15s heal timer happened to come round.

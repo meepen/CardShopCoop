@@ -57,8 +57,6 @@ namespace CardShopCoop.UI
         // is steady per-frame garbage. Styles/textures live in CoopTheme (built once, cached);
         // the HUD display strings - and the GUIContent wrappers the pills measure - are rebuilt
         // only when their source line changes.
-        private KeyCode _hintKeySeen;
-        private string _hintText; private GUIContent _hintGc;
         private string _errorSeen, _errorText; private GUIContent _errorGc;
         private string _enumRestoreMsg; // outcome line under the enum-lend notice
         private string _hostTimeSeen, _hostTimeText; private GUIContent _hostTimeGc;
@@ -88,16 +86,6 @@ namespace CardShopCoop.UI
                 // reset, closing the window right after typing left TextFieldFocused
                 // stuck TRUE and silently ate the serve key for the rest of the session
                 TextFieldFocused = false;
-                // little always-on hint (bottom-left)
-                if (_hintText == null || _hintKeySeen != CoopPlugin.UiToggleKey.Value)
-                {
-                    _hintKeySeen = CoopPlugin.UiToggleKey.Value;
-                    _hintText = $"<size=11><color=#9fd3ff>CardShopCoop: {_hintKeySeen} for co-op</color></size>";
-                    _hintGc = new GUIContent(_hintText);
-                }
-                Vector2 hintSize = CoopTheme.PillSize(CoopTheme.HudPill, _hintGc, 440f);
-                GUI.Label(new Rect(8f, Screen.height - hintSize.y - 6f, hintSize.x, hintSize.y), _hintGc, CoopTheme.HudPill);
-
                 if (core.ErrorLine.Length > 0)
                 {
                     if (core.ErrorLine != _errorSeen)
@@ -107,7 +95,7 @@ namespace CardShopCoop.UI
                         _errorGc = new GUIContent(_errorText);
                     }
                     Vector2 errSize = CoopTheme.PillSize(CoopTheme.HudPill, _errorGc, 660f);
-                    GUI.Label(new Rect(8f, Screen.height - hintSize.y - 6f - errSize.y - 6f, errSize.x, errSize.y),
+                    GUI.Label(new Rect(8f, Screen.height - errSize.y - 6f, errSize.x, errSize.y),
                         _errorGc, CoopTheme.HudPill);
                 }
             }

@@ -1,6 +1,8 @@
 using System;
 using System.Reflection;
 using CardShopCoop.Sync;
+using CardShopCoop.Net.Messages;
+using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 
@@ -17,6 +19,13 @@ namespace CardShopCoop.Patches
     /// </summary>
     public static class GamePatches
     {
+        // Set only while PopulationSync is recreating a host delivery locally. That
+        // spawn is a mirror operation, never a new purchase.
+        public static bool ApplyingMirrorPurchase;
+
+        private static readonly FieldInfo FiRestockCart = AccessTools.Field(typeof(RestockItemScreen), "m_CartItemList");
+        private static readonly FieldInfo FiScannerIndexes = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockIndexList");
+        private static readonly FieldInfo FiScannerCounts = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockBoxCountList");
         private static readonly FieldInfo FiLightDayEnded =
             AccessTools.Field(typeof(LightManager), "m_HasDayEnded");
 
@@ -33,6 +42,11 @@ namespace CardShopCoop.Patches
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(CustomerUpdatePrefix)));
             Try(h, typeof(Customer), "ActivateCustomer",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(CustomerActivatePrefix)));
+
+            // Customer.PopupText chooses and localizes the final phrase before calling
+            // ShowTextPopup. Relay at that boundary so no extra Random calls are needed.
+            Try(h, typeof(PricePopupSpawner), "ShowTextPopup",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(NpcSpeechPostfix)));
 
             // No local workers on the client either.
             Try(h, typeof(WorkerManager), "ActivateWorker",
@@ -86,6 +100,14 @@ namespace CardShopCoop.Patches
             // mirrored back by BoxSync) instead of as local phantoms.
             Try(h, typeof(RestockManager), "SpawnPackageBoxItemMultipleFrame",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(OrderPrefix)));
+            Try(h, typeof(RestockItemScreen), "EvaluateCartCheckout",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(RestockCheckoutPrefix)));
+            Try(h, typeof(ScannerRestockScreen), "EvaluateCartCheckout",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ScannerCheckoutPrefix)));
+            Try(h, typeof(FurnitureShopUIScreen), "EvaluateCartCheckout",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(FurnitureCheckoutPrefix)));
+            Try(h, typeof(RestockItemPanelUI), "OnPressPurchaseButton",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(LicenseCheckoutPrefix)));
 
             // The client is a pure box mirror. RestockManager.Update's out-of-bounds /
             // warehouse-lock sweep teleports stray boxes to an INDEPENDENT random spawn
@@ -257,6 +279,7 @@ namespace CardShopCoop.Patches
             TryModule("playtables", Sync.PlayTableSync.ApplyPatches, h);
             TryModule("cardboxes", Sync.CardBoxSync.ApplyPatches, h);
             TryModule("furnboxes", Sync.FurnBoxSync.ApplyPatches, h);
+            TryModule("tv", Sync.TvSync.ApplyPatches, h);
         }
 
         private static void TryModule(string name, Action<Harmony> apply, Harmony h)
@@ -279,7 +302,9 @@ namespace CardShopCoop.Patches
 
         public static bool BoxDestroyedPrefix(InteractablePackagingBox_Item __instance)
         {
-            if (!BoxSync.ApplyingRemote) BoxSync.LocalBoxDestroyed?.Invoke(__instance);
+            if (!BoxSync.ApplyingRemote
+                && !ContainerSync.ConsumeSuppressedStorageDestroy(__instance))
+                BoxSync.LocalBoxDestroyed?.Invoke(__instance);
             return true;
         }
 
@@ -323,21 +348,67 @@ namespace CardShopCoop.Patches
 
         public static bool FurnitureOrderPrefix(EObjectType objType, UnityEngine.Vector3 spawnPos, UnityEngine.Quaternion spawnRot)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
-            CoopCore.Instance?.ForwardFurniture((int)objType, spawnPos, spawnRot);
-            if (CoopCore.Instance != null)
-            {
-                CoopCore.Instance.RegisterLine = "furniture delivered at the host's shop";
-                CoopCore.Instance.RegisterLineTimer = 4f;
-            }
-            return false;
+            return true;
         }
 
         public static bool OrderPrefix(int restockIndex, int count)
         {
+            return true;
+        }
+
+        public static bool RestockCheckoutPrefix(RestockItemScreen __instance, float totalCost)
+        {
             if (CoopCore.Role != CoopRole.Client) return true;
-            CoopCore.Instance?.ForwardOrder(restockIndex, count);
-            return false; // no local phantom boxes; the host's delivery mirrors back
+            var cart = FiRestockCart?.GetValue(__instance) as Dictionary<int, int>;
+            var lines = new List<PurchaseLine>();
+            if (cart != null)
+                foreach (var p in cart)
+                {
+                    var rd = InventoryBase.GetRestockData(p.Key);
+                    if (rd != null) lines.Add(new PurchaseLine { ItemType = (int)rd.itemType, IsBig = rd.isBigBox, Name = rd.name ?? "", Count = p.Value });
+                }
+            CoopCore.Instance?.RequestPurchase(0, lines);
+            return false;
+        }
+
+        public static bool ScannerCheckoutPrefix(ScannerRestockScreen __instance, float totalCost)
+        {
+            if (CoopCore.Role != CoopRole.Client) return true;
+            var indexes = FiScannerIndexes?.GetValue(__instance) as List<int>;
+            var counts = FiScannerCounts?.GetValue(__instance) as List<int>;
+            var lines = new List<PurchaseLine>();
+            if (indexes != null && counts != null)
+                for (int i = 0; i < indexes.Count && i < counts.Count; i++)
+                {
+                    var rd = InventoryBase.GetRestockData(indexes[i]);
+                    if (rd != null) lines.Add(new PurchaseLine { ItemType = (int)rd.itemType, IsBig = rd.isBigBox, Name = rd.name ?? "", Count = counts[i] });
+                }
+            CoopCore.Instance?.RequestPurchase(0, lines);
+            return false;
+        }
+
+        public static bool FurnitureCheckoutPrefix(int index, float totalCost)
+        {
+            if (CoopCore.Role != CoopRole.Client) return true;
+            var fp = InventoryBase.GetFurniturePurchaseData(index);
+            if (fp != null)
+            {
+                var spawn = RestockManager.GetRandomPackageSpawnPos();
+                CoopCore.Instance?.RequestPurchase(1, new List<PurchaseLine> { new PurchaseLine { ItemType = (int)fp.objectType, Count = 1, Position = spawn.position, Rotation = spawn.rotation } });
+            }
+            return false;
+        }
+
+        public static bool LicenseCheckoutPrefix(RestockItemPanelUI __instance)
+        {
+            if (CoopCore.Role != CoopRole.Client) return true;
+            // m_Index is private in the game assembly; retrieve it without changing the UI.
+            var fi = AccessTools.Field(typeof(RestockItemPanelUI), "m_Index");
+            int index = fi != null ? (int)fi.GetValue(__instance) : -1;
+            var rd = index >= 0 ? InventoryBase.GetRestockData(index) : null;
+            if (rd != null)
+                CoopCore.Instance?.RequestPurchase(2, new List<PurchaseLine> { new PurchaseLine { ItemType = (int)rd.itemType, IsBig = rd.isBigBox, Name = rd.name ?? "", Count = 1 } });
+            return false;
         }
 
         private static readonly System.Reflection.FieldInfo FiOobTimer =
@@ -680,6 +751,31 @@ namespace CardShopCoop.Patches
         public static void WorkerActionPostfix(Worker __instance)
         {
             Sync.NpcSync.RecordWorkerAction(__instance);
+        }
+
+        public static void NpcSpeechPostfix(PricePopupSpawner __instance, string text,
+            float offsetUp, Transform followTransform)
+        {
+            if (CoopCore.Role != CoopRole.Host || __instance == null
+                || string.IsNullOrEmpty(text) || followTransform == null) return;
+            bool shown = false;
+            var popups = __instance.m_PricePopupList;
+            if (popups != null)
+                for (int i = 0; i < popups.Count; i++)
+                {
+                    var popup = popups[i];
+                    if (popup != null && popup.gameObject.activeSelf
+                        && popup.m_FollowTransform == followTransform
+                        && popup.m_Text != null && popup.m_Text.text == text)
+                    {
+                        shown = true;
+                        break;
+                    }
+                }
+            if (!shown) return;
+            if (Sync.NpcSync.TryGetCustomerSpeechSource(followTransform,
+                out ushort index, out int identity))
+                CoopCore.Instance?.ForwardNpcSpeech(index, identity, text, offsetUp);
         }
 
         /// <summary>Client only: the joiner never opens his own end-of-day recap. Vanilla

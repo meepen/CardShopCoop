@@ -1,3 +1,4 @@
+using CardShopCoop.Net;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -8,7 +9,7 @@ namespace CardShopCoop.Sync
     /// <summary>
     /// Mirrors the positions of placed objects (shelves, warehouse racks, card displays,
     /// combi shelves, cashier counters, decorations) between host and client. Identity is
-    /// the object's index in its ShelfManager list - the same scheme the stock syncs use.
+    /// the host-assigned object id - the same identity used by the stock syncs.
     /// A move is only broadcast once it SETTLES (same pose two ticks in a row), so a
     /// boxed-up shelf being carried around doesn't stream; it pops to its new spot on the
     /// other side when placed. Children (compartments, items, price tags) ride along.
@@ -17,7 +18,7 @@ namespace CardShopCoop.Sync
     {
         public struct Entry
         {
-            public int Key;      // kind<<24 | index
+            public int Key;      // kind<<24 | stableObjectId
             public int Type;     // identity: (int)m_ObjectType, or (int)m_DecoObjectType for
                                  // kind-5 decos (whose m_ObjectType is None) - same accessor
                                  // PopulationSync serializes. Carried so the receiver can
@@ -60,8 +61,11 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, Pose> _candidate = new Dictionary<int, Pose>(); // settle window
         private ShelfManager _sm;
         private float _timer;
+        private float _heal;
+        private const float HealInterval = 10f;
         private bool _forceImmediate;
         private float _lastRejectLog = -999f; // throttle the identity-reject spam to ~1/5s
+        private float _lastAcceptedLog = -999f;
 
         public Action<List<Entry>> OnLocalChanges;
 
@@ -86,7 +90,9 @@ namespace CardShopCoop.Sync
             _candidate.Clear();
             _sm = null;
             _timer = -0.25f; // staggered phase vs the other snapshot engines
+            _heal = 0f;
             _forceImmediate = false;
+            _lastAcceptedLog = -999f;
         }
 
         private ShelfManager Sm()
@@ -103,6 +109,13 @@ namespace CardShopCoop.Sync
             _timer -= 1.0f;
             bool immediate = _forceImmediate;
             _forceImmediate = false;
+            _heal += 1.0f;
+            bool heal = false;
+            if (_heal >= HealInterval)
+            {
+                _heal -= HealInterval;
+                heal = true;
+            }
 
             List<Entry> changes = null;
             try
@@ -110,7 +123,7 @@ namespace CardShopCoop.Sync
                 var sm = Sm();
                 if (sm == null) return;
                 for (int kind = 0; kind < PopulationSync.KindCount; kind++)
-                    Walk(PopulationSync.GetList(sm, kind), kind, ref changes, immediate);
+                    Walk(PopulationSync.GetList(sm, kind), kind, ref changes, immediate, heal);
             }
             catch (Exception e)
             {
@@ -121,14 +134,16 @@ namespace CardShopCoop.Sync
                 OnLocalChanges?.Invoke(changes);
         }
 
-        private void Walk(System.Collections.IList list, int kind, ref List<Entry> changes, bool immediate = false)
+        private void Walk(System.Collections.IList list, int kind, ref List<Entry> changes,
+            bool immediate = false, bool heal = false)
         {
             if (list == null) return;
             for (int i = 0; i < list.Count; i++)
             {
                 var obj = list[i] as Component;
                 if (obj == null || !obj.gameObject.activeInHierarchy) continue; // boxed/carried
-                int key = (kind << 24) | (i & 0xFFFF);
+                if (!PlacedObjectIdentity.TryMakeObjectKey(kind, obj as InteractableObject, out int key))
+                    continue;
                 // Never author a move for an object the game is actively moving (a drag in
                 // progress). On the guest there is nothing legitimate to report mid-drag, and
                 // reporting the pre-settle pose is exactly the packet that races the host's
@@ -142,7 +157,10 @@ namespace CardShopCoop.Sync
                 var r = obj.transform.rotation;
 
                 bool knownSent = _sent.TryGetValue(key, out var sent);
-                if (knownSent && sent.Same(p, r))
+                // Only the host emits periodic authoritative heals. A client must not
+                // turn a heal into a request for every placed object.
+                bool forceHeal = heal && !IsClientRole;
+                if (knownSent && sent.Same(p, r) && !forceHeal)
                 {
                     _candidate.Remove(key);
                     continue;
@@ -161,7 +179,7 @@ namespace CardShopCoop.Sync
                 }
                 // An explicit completed mutation is already settled by vanilla. Keep the
                 // two-sample gate for ordinary recovery polling.
-                if (immediate || (_candidate.TryGetValue(key, out var cand) && cand.Same(p, r)))
+                if (forceHeal || immediate || (_candidate.TryGetValue(key, out var cand) && cand.Same(p, r)))
                 {
                     if (changes == null) changes = new List<Entry>();
                     // Do not advance the sent baseline until this entry is actually
@@ -232,12 +250,20 @@ namespace CardShopCoop.Sync
                         _candidate.Remove(e.Key);
                         continue;
                     }
+                    var oldPos = t.position;
                     t.SetPositionAndRotation(e.Pos, e.Rot);
                     SyncTagGroup(t);
                     if (io is InteractableAutoPackOpener) { try { _miOpenerSetUI?.Invoke(io, null); } catch { } }
                     _sent[e.Key] = new Pose { P = e.Pos, R = e.Rot, Valid = true };
                     _candidate.Remove(e.Key);
                     accepted.Add(e);
+                    if (dropIfHostMoving && Time.realtimeSinceStartup - _lastAcceptedLog > 0.25f)
+                    {
+                        _lastAcceptedLog = Time.realtimeSinceStartup;
+                        CoopPlugin.Log.LogInfo($"ObjMoveSync: accepted guest move {e.Key:X} "
+                            + $"({oldPos.x:F2},{oldPos.y:F2},{oldPos.z:F2}) -> "
+                            + $"({e.Pos.x:F2},{e.Pos.y:F2},{e.Pos.z:F2})");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -280,10 +306,9 @@ namespace CardShopCoop.Sync
         private static Component Resolve(ShelfManager sm, int key)
         {
             int kind = key >> 24;
-            int idx = key & 0xFFFF;
-            var list = PopulationSync.GetList(sm, kind);
-            if (list == null || idx >= list.Count) return null;
-            return list[idx] as Component;
+            ushort id = PlacedObjectIdentity.ObjectIdFromObjectKey(key);
+            if (PopulationSync.GetList(sm, kind) == null) return null;
+            return PlacedObjectIdentity.TryResolve(sm, kind, id, out var obj) ? obj : null;
         }
 
         /// <summary>Resolves a placed-object wire key for the transient movement preview.
@@ -308,48 +333,6 @@ namespace CardShopCoop.Sync
         private static Util.EnumKind KindOf(int kind)
         {
             return kind == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
-        }
-
-        public static void WriteEntries(BinaryWriter bw, List<Entry> entries)
-        {
-            bw.Write((byte)entries.Count);
-            foreach (var e in entries)
-            {
-                bw.Write(e.Key);
-                // identity guard - append-only, safe on the 1.0.30-only wire. The kind for
-                // the translation rides in the key we just wrote.
-                bw.Write(Util.EnumMap.ToWire(KindOf(e.Key >> 24), e.Type));
-                bw.Write(e.Pos.x); bw.Write(e.Pos.y); bw.Write(e.Pos.z);
-                bw.Write(e.Rot.x); bw.Write(e.Rot.y); bw.Write(e.Rot.z); bw.Write(e.Rot.w);
-            }
-        }
-
-        public static List<Entry> ReadEntries(BinaryReader br)
-        {
-            int n = br.ReadByte();
-            var list = new List<Entry>(n);
-            for (int i = 0; i < n; i++)
-            {
-                int key = br.ReadInt32();
-                // matches WriteEntries order (both peers 1.0.30). Translated back to a
-                // LOCAL id so ApplyRemote's guard can compare it against a live object.
-                // TryFromWire, not FromWire: furniture from a pack only the sender has yields
-                // a None sentinel, and for kind-5 decos that sentinel is EDecoObject.None = 0 -
-                // a real, comparable value that can MATCH a local object and move the wrong
-                // decoration. Flagging it lets ApplyRemote drop the entry outright instead of
-                // trusting a guard it can silently pass.
-                int type;
-                bool unresolved = !Util.EnumMap.TryFromWire(KindOf(key >> 24), br.ReadInt32(), out type);
-                list.Add(new Entry
-                {
-                    Key = key,
-                    Type = type,
-                    Unresolved = unresolved,
-                    Pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
-                    Rot = new Quaternion(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
-                });
-            }
-            return list;
         }
     }
 }

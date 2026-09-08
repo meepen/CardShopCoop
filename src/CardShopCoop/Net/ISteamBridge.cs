@@ -71,7 +71,7 @@ namespace CardShopCoop.Net
         /// the host connection) into the transport this returns. Reorder these two and
         /// the callback fires against a null transport and the Steam path silently never
         /// connects - on the Steam build, where nobody is looking for it.</summary>
-        ICoopTransport CreateTransport(bool isHost, byte[] keepalive);
+        ICoopTransport CreateTransport(bool isHost, INetMessage keepalive);
 
         void Host(bool isPublic, string lobbyName, bool hasPassword);
         void Join(ulong lobbyId);

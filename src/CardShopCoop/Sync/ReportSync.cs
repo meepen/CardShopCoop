@@ -1,3 +1,5 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -32,7 +34,7 @@ namespace CardShopCoop.Sync
         /// mistake a sync write for local play.</summary>
         public static bool ApplyingRemote;
 
-        public Action<Action<BinaryWriter>> BroadcastState; // set by CoopCore: host -> clients
+        public Action<INetMessage> BroadcastState; // set by CoopCore: host -> clients
 
         private const float Interval = 2f;
         private const float HealEvery = 15f;
@@ -233,7 +235,7 @@ namespace CardShopCoop.Sync
                 var snap = s_openSnapshot;
                 try
                 {
-                    BroadcastState(bw => WriteState(bw, snap, openScreen: true));
+                    BroadcastState(BuildState(snap, openScreen: true));
                     _heal = 0f;
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync open: " + e.Message); }
@@ -256,7 +258,7 @@ namespace CardShopCoop.Sync
                 _lastHash = hash;
                 _heal = 0f;
                 var live = CPlayerData.m_GameReportDataCollect;
-                BroadcastState(bw => WriteState(bw, live, openScreen: false));
+                BroadcastState(BuildState(live, openScreen: false));
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync host: " + e.Message); }
         }
@@ -292,120 +294,128 @@ namespace CardShopCoop.Sync
             return h;
         }
 
-        private static void WriteState(BinaryWriter bw, GameReportDataCollect r, bool openScreen)
+        private static ReportStateMessage BuildState(GameReportDataCollect r, bool openScreen)
         {
-            bw.Write((byte)(openScreen ? 1 : 0));
-            bw.Write(r.customerVisited);
-            bw.Write(r.checkoutCount);
-            bw.Write(r.customerDisatisfied);
-            bw.Write(r.customerBoughtItem);
-            bw.Write(r.customerBoughtCard);
-            bw.Write(r.customerPlayed);
-            bw.Write(r.storeExpGained);
-            bw.Write(r.storeLevelGained);
-            bw.Write(r.itemAmountSold);
-            bw.Write(r.cardAmountSold);
-            bw.Write(r.totalPlayTableTime);
-            bw.Write(r.totalItemEarning);
-            bw.Write(r.totalCardEarning);
-            bw.Write(r.totalPlayTableEarning);
-            bw.Write(r.supplyCost);
-            bw.Write(r.upgradeCost);
-            bw.Write(r.employeeCost);
-            bw.Write(r.rentCost);
-            bw.Write(r.billCost);
-            bw.Write(r.cardPackOpened);
-            bw.Write(r.smellyCustomerCleaned);
-            bw.Write(r.manualCheckoutCount);
-            bw.Write(r.gemMintCardObtained);
+            var msg = new ReportStateMessage
+            {
+                OpenScreen = openScreen,
+                CustomerVisited = r.customerVisited,
+                CheckoutCount = r.checkoutCount,
+                CustomerDisatisfied = r.customerDisatisfied,
+                CustomerBoughtItem = r.customerBoughtItem,
+                CustomerBoughtCard = r.customerBoughtCard,
+                CustomerPlayed = r.customerPlayed,
+                StoreExpGained = r.storeExpGained,
+                StoreLevelGained = r.storeLevelGained,
+                ItemAmountSold = r.itemAmountSold,
+                CardAmountSold = r.cardAmountSold,
+                TotalPlayTableTime = r.totalPlayTableTime,
+                TotalItemEarning = r.totalItemEarning,
+                TotalCardEarning = r.totalCardEarning,
+                TotalPlayTableEarning = r.totalPlayTableEarning,
+                SupplyCost = r.supplyCost,
+                UpgradeCost = r.upgradeCost,
+                EmployeeCost = r.employeeCost,
+                RentCost = r.rentCost,
+                BillCost = r.billCost,
+                CardPackOpened = r.cardPackOpened,
+                SmellyCustomerCleaned = r.smellyCustomerCleaned,
+                ManualCheckoutCount = r.manualCheckoutCount,
+                GemMintCardObtained = r.gemMintCardObtained,
+            };
 
             // reviews: lifetime count doubles as a sequence number, so the client can
             // append exactly the ones it hasn't seen (list itself is capped at 50)
             var reviews = CPlayerData.m_CustomerReviewDataList;
-            bw.Write(CPlayerData.m_CustomerReviewCount);
-            bw.Write(CPlayerData.m_CustomerReviewScoreAverage);
+            msg.ReviewCount = CPlayerData.m_CustomerReviewCount;
+            msg.ReviewScoreAverage = CPlayerData.m_CustomerReviewScoreAverage;
             int n = Mathf.Min(reviews != null ? reviews.Count : 0, ReviewTail);
-            bw.Write((byte)n);
             for (int i = 0; i < n; i++)
             {
                 var rv = reviews[reviews.Count - n + i]; // oldest-first tail
-                bw.Write((int)rv.customerReviewType);
-                bw.Write((byte)Mathf.Clamp(rv.starLevel, 0, 255));
-                bw.Write((byte)Mathf.Clamp(rv.textSOGoodBadLevel, 0, 255));
-                bw.Write(rv.textSOIndex);
-                bw.Write(rv.day);
-                bw.Write((byte)Mathf.Clamp(rv.hour, 0, 255));
-                bw.Write((byte)Mathf.Clamp(rv.minute, 0, 255));
-                Net.Msg.WriteItemType(bw, rv.itemType); // modded ids travel as HOST ids
-                bw.Write(rv.customerName ?? "");
+                msg.Reviews.Add(new ReportReviewEntry
+                {
+                    CustomerReviewType = (int)rv.customerReviewType,
+                    StarLevel = (byte)Mathf.Clamp(rv.starLevel, 0, 255),
+                    TextSOGoodBadLevel = (byte)Mathf.Clamp(rv.textSOGoodBadLevel, 0, 255),
+                    TextSOIndex = rv.textSOIndex,
+                    Day = rv.day,
+                    Hour = (byte)Mathf.Clamp(rv.hour, 0, 255),
+                    Minute = (byte)Mathf.Clamp(rv.minute, 0, 255),
+                    ItemType = rv.itemType, // modded ids travel as HOST ids (translated by the DTO)
+                    CustomerName = rv.customerName ?? "",
+                });
             }
+            return msg;
         }
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(ReportStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(br); }
+            try { ClientApplyInner(message); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(ReportStateMessage message)
         {
-            bool openScreen = br.ReadByte() != 0;
+            bool openScreen = message.OpenScreen;
 
             var r = default(GameReportDataCollect);
-            r.customerVisited = br.ReadInt32();
-            r.checkoutCount = br.ReadInt32();
-            r.customerDisatisfied = br.ReadInt32();
-            r.customerBoughtItem = br.ReadInt32();
-            r.customerBoughtCard = br.ReadInt32();
-            r.customerPlayed = br.ReadInt32();
-            r.storeExpGained = br.ReadInt32();
-            r.storeLevelGained = br.ReadInt32();
-            r.itemAmountSold = br.ReadInt32();
-            r.cardAmountSold = br.ReadInt32();
-            r.totalPlayTableTime = br.ReadSingle();
-            r.totalItemEarning = br.ReadSingle();
-            r.totalCardEarning = br.ReadSingle();
-            r.totalPlayTableEarning = br.ReadSingle();
-            r.supplyCost = br.ReadSingle();
-            r.upgradeCost = br.ReadSingle();
-            r.employeeCost = br.ReadSingle();
-            r.rentCost = br.ReadSingle();
-            r.billCost = br.ReadSingle();
-            r.cardPackOpened = br.ReadInt32();
-            r.smellyCustomerCleaned = br.ReadInt32();
-            r.manualCheckoutCount = br.ReadInt32();
-            r.gemMintCardObtained = br.ReadInt32();
+            r.customerVisited = message.CustomerVisited;
+            r.checkoutCount = message.CheckoutCount;
+            r.customerDisatisfied = message.CustomerDisatisfied;
+            r.customerBoughtItem = message.CustomerBoughtItem;
+            r.customerBoughtCard = message.CustomerBoughtCard;
+            r.customerPlayed = message.CustomerPlayed;
+            r.storeExpGained = message.StoreExpGained;
+            r.storeLevelGained = message.StoreLevelGained;
+            r.itemAmountSold = message.ItemAmountSold;
+            r.cardAmountSold = message.CardAmountSold;
+            r.totalPlayTableTime = message.TotalPlayTableTime;
+            r.totalItemEarning = message.TotalItemEarning;
+            r.totalCardEarning = message.TotalCardEarning;
+            r.totalPlayTableEarning = message.TotalPlayTableEarning;
+            r.supplyCost = message.SupplyCost;
+            r.upgradeCost = message.UpgradeCost;
+            r.employeeCost = message.EmployeeCost;
+            r.rentCost = message.RentCost;
+            r.billCost = message.BillCost;
+            r.cardPackOpened = message.CardPackOpened;
+            r.smellyCustomerCleaned = message.SmellyCustomerCleaned;
+            r.manualCheckoutCount = message.ManualCheckoutCount;
+            r.gemMintCardObtained = message.GemMintCardObtained;
             // host truth replaces the joiner's near-zero local counters (his own pack
             // opens etc. are folded into the host numbers only where the host saw them;
             // m_GameReportDataCollectPermanent stays local so achievements keep their
             // per-player pacing)
             CPlayerData.m_GameReportDataCollect = r;
 
-            int totalCount = br.ReadInt32();
-            float average = br.ReadSingle();
-            int n = br.ReadByte();
+            int totalCount = message.ReviewCount;
+            float average = message.ReviewScoreAverage;
+            var entries = message.Reviews;
             var reviews = CPlayerData.m_CustomerReviewDataList;
             if (_reviewSeq < 0) _reviewSeq = CPlayerData.m_CustomerReviewCount; // join baseline = the save
-            int firstSeq = totalCount - n + 1; // sequence number of tail[0]
-            for (int i = 0; i < n; i++)
+            int firstSeq = totalCount - entries.Count + 1; // sequence number of tail[0]
+            for (int i = 0; i < entries.Count; i++)
             {
+                var e = entries[i];
                 var rv = new CustomerReviewData();
-                rv.customerReviewType = (ECustomerReviewType)br.ReadInt32();
-                rv.starLevel = br.ReadByte();
-                rv.textSOGoodBadLevel = br.ReadByte();
-                rv.textSOIndex = br.ReadInt32();
-                rv.day = br.ReadInt32();
-                rv.hour = br.ReadByte();
-                rv.minute = br.ReadByte();
-                // host id -> ours; a review about an item from a pack only the host has
-                // reads back as EItemType.None, which the phone's review row renders as
-                // no icon - the review text itself is unaffected
-                rv.itemType = Net.Msg.ReadItemType(br);
-                rv.customerName = br.ReadString();
+                rv.customerReviewType = (ECustomerReviewType)e.CustomerReviewType;
+                rv.starLevel = e.StarLevel;
+                rv.textSOGoodBadLevel = e.TextSOGoodBadLevel;
+                rv.textSOIndex = e.TextSOIndex;
+                rv.day = e.Day;
+                rv.hour = e.Hour;
+                rv.minute = e.Minute;
+                // host id -> ours (already translated by the DTO deserialize); a review about
+                // an item from a pack only the host has reads back as EItemType.None, which
+                // the phone's review row renders as no icon - the review text itself is
+                // unaffected
+                rv.itemType = e.ItemType;
+                rv.customerName = e.CustomerName;
                 if (firstSeq + i > _reviewSeq && reviews != null)
                     reviews.Add(rv); // in place: CustomerReviewManager aliases this list
             }

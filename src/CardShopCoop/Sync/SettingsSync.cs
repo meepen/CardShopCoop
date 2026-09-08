@@ -1,6 +1,7 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using HarmonyLib;
 using UnityEngine;
 
@@ -36,16 +37,12 @@ namespace CardShopCoop.Sync
         /// re-forward the very change we're applying.</summary>
         public static bool ApplyingRemote;
 
-        public Action<Action<BinaryWriter>> SendOp;         // set by CoopCore: client->host
-        public Action<Action<BinaryWriter>> BroadcastState; // set by CoopCore: host->clients
+        public Action<INetMessage> SendOp;         // set by CoopCore: client->host
+        public Action<INetMessage> BroadcastState; // set by CoopCore: host->clients
 
         private float _timer;
         private int _lastHash;
         private float _heal;
-        // snapshot is serialized once into a reusable buffer, hashed, and (when changed)
-        // written out verbatim - the hash can never drift from what actually ships
-        private readonly MemoryStream _stateMs = new MemoryStream(1024);
-        private BinaryWriter _stateBw;
 
         // NEVER CSingleton<>.Instance for these: touched while no real manager exists
         // (client reload loading screen, host mid-session save load - ?. does NOT
@@ -72,7 +69,6 @@ namespace CardShopCoop.Sync
         public SettingsSync()
         {
             Instance = this;
-            _stateBw = new BinaryWriter(_stateMs);
         }
 
         public void Reset()
@@ -101,43 +97,40 @@ namespace CardShopCoop.Sync
             _timer -= 1.5f;
             try
             {
-                _stateMs.SetLength(0);
-                _stateMs.Position = 0;
-                WriteState(_stateBw);
-                _stateBw.Flush();
-                int len = (int)_stateMs.Length;
-                byte[] buf = _stateMs.GetBuffer();
+                var msg = BuildStateMessage();
+                byte[] payload = WireCodec.Serialize(msg);
+                int len = payload.Length;
+                byte[] buf = payload;
                 int hash = 17;
                 for (int i = 0; i < len; i++) hash = hash * 31 + buf[i];
                 _heal += 1.5f;
                 if (hash == _lastHash && _heal < 15f) return;
                 _lastHash = hash;
                 _heal = 0f;
-                // Msg.Build invokes the writer synchronously, so the reusable buffer is safe
-                BroadcastState?.Invoke(bw => bw.Write(buf, 0, len));
+                BroadcastState?.Invoke(msg);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("SettingsSync host: " + e.Message); }
         }
 
-        public void HostApplyOp(BinaryReader br)
+        public void HostApplyOp(SettingsOpMessage message)
         {
-            byte op = br.ReadByte();
+            byte op = message.Op;
             try
             {
                 switch (op)
                 {
                     case OpBuyDeco:
                     {
-                        int cat = br.ReadByte();
-                        int idx = br.ReadInt32();
+                        int cat = message.Category;
+                        int idx = message.Index;
                         HostBuyDeco(cat, idx);
                         break;
                     }
                     case OpEquipDeco:
                     {
-                        int w = br.ReadInt32(); int wB = br.ReadInt32();
-                        int f = br.ReadInt32(); int fB = br.ReadInt32();
-                        int c = br.ReadInt32(); int cB = br.ReadInt32();
+                        int w = message.Wall; int wB = message.WallB;
+                        int f = message.Floor; int fB = message.FloorB;
+                        int c = message.Ceiling; int cB = message.CeilingB;
                         ApplyingRemote = true;
                         try { ApplyEquips(w, wB, f, fB, c, cB); }
                         finally { ApplyingRemote = false; }
@@ -145,11 +138,11 @@ namespace CardShopCoop.Sync
                     }
                     case OpGameEvent:
                     {
-                        int fmt = br.ReadInt32();
-                        // the wire already speaks our ids (we are the host, so this read
-                        // is the identity function) - it goes through the helper anyway so
-                        // the op's two ends stay visibly paired
-                        var exp = Net.Msg.ReadExpansion(br);
+                        int fmt = message.Index;
+                        // the DTO already translated the wire id (we are the host, so this is
+                        // the identity function); it goes through the helper anyway so the
+                        // op's two ends stay visibly paired
+                        var exp = message.Expansion;
                         // the vanilla confirm is exactly these two field writes
                         CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)fmt;
                         CPlayerData.m_PendingGameEventExpansionType = exp;
@@ -157,8 +150,8 @@ namespace CardShopCoop.Sync
                     }
                     case OpGameEventFee:
                     {
-                        int fmt = br.ReadInt32();
-                        float fee = br.ReadSingle();
+                        int fmt = message.Index;
+                        float fee = message.Fee;
                         if (fmt >= 0 && fmt < CPlayerData.m_SetGameEventPriceList.Count)
                         {
                             ApplyingRemote = true;
@@ -169,8 +162,8 @@ namespace CardShopCoop.Sync
                     }
                     case OpCashier:
                     {
-                        int idx = br.ReadByte();
-                        byte flags = br.ReadByte();
+                        int idx = message.CashierIndex;
+                        byte flags = message.CashierFlags;
                         var counters = Sm()?.m_CashierCounterList;
                         if (counters != null && idx < counters.Count && counters[idx] != null)
                         {
@@ -188,8 +181,8 @@ namespace CardShopCoop.Sync
                     }
                     case OpTableNumber:
                     {
-                        int idx = br.ReadByte();
-                        int number = br.ReadInt32();
+                        int idx = message.TableIndex;
+                        int number = message.TableNumber;
                         var tables = Sm()?.m_PlayTableList;
                         if (tables != null && idx < tables.Count && tables[idx] != null)
                         {
@@ -247,41 +240,41 @@ namespace CardShopCoop.Sync
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(SettingsStateMessage message)
         {
             ApplyingRemote = true;
             try
             {
                 // deco ownership (host list sizes rule; extra local entries keep their state)
-                ApplyBoolList(br, CPlayerData.m_UnlockedDecoWallList, CPlayerData.SetUnlockDecoWall);
-                ApplyBoolList(br, CPlayerData.m_UnlockedDecoFloorList, CPlayerData.SetUnlockDecoFloor);
-                ApplyBoolList(br, CPlayerData.m_UnlockedDecoCeilingList, CPlayerData.SetUnlockDecoCeiling);
+                ApplyBoolList(message.WallUnlocked, CPlayerData.m_UnlockedDecoWallList, CPlayerData.SetUnlockDecoWall);
+                ApplyBoolList(message.FloorUnlocked, CPlayerData.m_UnlockedDecoFloorList, CPlayerData.SetUnlockDecoFloor);
+                ApplyBoolList(message.CeilingUnlocked, CPlayerData.m_UnlockedDecoCeilingList, CPlayerData.SetUnlockDecoCeiling);
 
-                int w = br.ReadInt32(); int wB = br.ReadInt32();
-                int f = br.ReadInt32(); int fB = br.ReadInt32();
-                int c = br.ReadInt32(); int cB = br.ReadInt32();
+                int w = message.EquippedWallIndex; int wB = message.EquippedWallIndexB;
+                int f = message.EquippedFloorIndex; int fB = message.EquippedFloorIndexB;
+                int c = message.EquippedCeilingIndex; int cB = message.EquippedCeilingIndexB;
                 ApplyEquips(w, wB, f, fB, c, cB);
 
-                CPlayerData.m_GameEventFormat = (EGameEventFormat)br.ReadInt32();
-                CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)br.ReadInt32();
-                // host ids -> ours (see WriteState). A game event on an expansion only the
+                CPlayerData.m_GameEventFormat = (EGameEventFormat)message.GameEventFormat;
+                CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)message.PendingGameEventFormat;
+                // host ids -> ours (see the DTO). A game event on an expansion only the
                 // host has resolves to ECardExpansionType.None, which reads exactly like
                 // "no expansion picked yet" - the joiner's own packs are untouched
-                CPlayerData.m_GameEventExpansionType = Net.Msg.ReadExpansion(br);
-                CPlayerData.m_PendingGameEventExpansionType = Net.Msg.ReadExpansion(br);
-                int feeCount = br.ReadByte();
+                CPlayerData.m_GameEventExpansionType = message.GameEventExpansion;
+                CPlayerData.m_PendingGameEventExpansionType = message.PendingGameEventExpansion;
+                int feeCount = message.GameEventPrices.Count;
                 for (int i = 0; i < feeCount; i++)
                 {
-                    float fee = br.ReadSingle();
+                    float fee = message.GameEventPrices[i];
                     if (i < CPlayerData.m_SetGameEventPriceList.Count)
                         CPlayerData.m_SetGameEventPriceList[i] = fee;
                 }
 
                 var counters = Sm()?.m_CashierCounterList;
-                int cn = br.ReadByte();
+                int cn = message.CashierFlags.Count;
                 for (int i = 0; i < cn; i++)
                 {
-                    byte flags = br.ReadByte();
+                    byte flags = message.CashierFlags[i];
                     if (counters == null || i >= counters.Count || counters[i] == null) continue;
                     bool checkout = (flags & 1) != 0;
                     bool trade = (flags & 2) != 0;
@@ -291,10 +284,10 @@ namespace CardShopCoop.Sync
                 }
 
                 var tables = Sm()?.m_PlayTableList;
-                int tn = br.ReadByte();
+                int tn = message.TableNumbers.Count;
                 for (int i = 0; i < tn; i++)
                 {
-                    int number = br.ReadByte();
+                    int number = message.TableNumbers[i];
                     if (tables == null || i >= tables.Count || tables[i] == null) continue;
                     if (tables[i].GetTournamentPlayTableNumber() != number)
                         tables[i].SetTournamentPlayTableNumber(number);
@@ -306,12 +299,12 @@ namespace CardShopCoop.Sync
 
         // ---------------- shared apply ----------------
 
-        private static void ApplyBoolList(BinaryReader br, List<bool> local, Action<int, bool> setter)
+        private static void ApplyBoolList(List<bool> incoming, List<bool> local, Action<int, bool> setter)
         {
-            int n = br.ReadByte();
+            int n = incoming == null ? 0 : incoming.Count;
             for (int i = 0; i < n; i++)
             {
-                bool v = br.ReadBoolean();
+                bool v = incoming[i];
                 if (local != null && i < local.Count && local[i] != v) setter(i, v);
             }
         }
@@ -357,54 +350,52 @@ namespace CardShopCoop.Sync
 
         // ---------------- wire ----------------
 
-        private static void WriteState(BinaryWriter bw)
+        private static SettingsStateMessage BuildStateMessage()
         {
-            WriteBoolList(bw, CPlayerData.m_UnlockedDecoWallList);
-            WriteBoolList(bw, CPlayerData.m_UnlockedDecoFloorList);
-            WriteBoolList(bw, CPlayerData.m_UnlockedDecoCeilingList);
-            bw.Write(CPlayerData.m_EquippedWallDecoIndex);
-            bw.Write(CPlayerData.m_EquippedWallDecoIndexB);
-            bw.Write(CPlayerData.m_EquippedFloorDecoIndex);
-            bw.Write(CPlayerData.m_EquippedFloorDecoIndexB);
-            bw.Write(CPlayerData.m_EquippedCeilingDecoIndex);
-            bw.Write(CPlayerData.m_EquippedCeilingDecoIndexB);
+            var msg = new SettingsStateMessage();
+            CopyBools(CPlayerData.m_UnlockedDecoWallList, msg.WallUnlocked);
+            CopyBools(CPlayerData.m_UnlockedDecoFloorList, msg.FloorUnlocked);
+            CopyBools(CPlayerData.m_UnlockedDecoCeilingList, msg.CeilingUnlocked);
+            msg.EquippedWallIndex = CPlayerData.m_EquippedWallDecoIndex;
+            msg.EquippedWallIndexB = CPlayerData.m_EquippedWallDecoIndexB;
+            msg.EquippedFloorIndex = CPlayerData.m_EquippedFloorDecoIndex;
+            msg.EquippedFloorIndexB = CPlayerData.m_EquippedFloorDecoIndexB;
+            msg.EquippedCeilingIndex = CPlayerData.m_EquippedCeilingDecoIndex;
+            msg.EquippedCeilingIndexB = CPlayerData.m_EquippedCeilingDecoIndexB;
             // EGameEventFormat is a vanilla-only id space (identical on every PC) and
             // stays raw; the two ECardExpansionTypes are NOT - EPL mints modded ids into
             // that enum - so they travel as HOST ids like every other modded id
-            bw.Write((int)CPlayerData.m_GameEventFormat);
-            bw.Write((int)CPlayerData.m_PendingGameEventFormat);
-            Net.Msg.WriteExpansion(bw, CPlayerData.m_GameEventExpansionType);
-            Net.Msg.WriteExpansion(bw, CPlayerData.m_PendingGameEventExpansionType);
+            msg.GameEventFormat = (int)CPlayerData.m_GameEventFormat;
+            msg.PendingGameEventFormat = (int)CPlayerData.m_PendingGameEventFormat;
+            msg.GameEventExpansion = CPlayerData.m_GameEventExpansionType;
+            msg.PendingGameEventExpansion = CPlayerData.m_PendingGameEventExpansionType;
             var fees = CPlayerData.m_SetGameEventPriceList;
             int fn = Mathf.Min(fees.Count, 255);
-            bw.Write((byte)fn);
-            for (int i = 0; i < fn; i++) bw.Write(fees[i]);
+            for (int i = 0; i < fn; i++) msg.GameEventPrices.Add(fees[i]);
             var counters = Sm()?.m_CashierCounterList;
             int cn = counters == null ? 0 : Mathf.Min(counters.Count, 255);
-            bw.Write((byte)cn);
             for (int i = 0; i < cn; i++)
             {
                 // a destroyed slot reads as vanilla defaults (both enabled)
                 byte flags = 3;
                 if (counters[i] != null)
                     flags = (byte)((counters[i].CanCheckout() ? 1 : 0) | (counters[i].CanTradeCard() ? 2 : 0));
-                bw.Write(flags);
+                msg.CashierFlags.Add(flags);
             }
             var tables = Sm()?.m_PlayTableList;
             int tn = tables == null ? 0 : Mathf.Min(tables.Count, 255);
-            bw.Write((byte)tn);
             for (int i = 0; i < tn; i++)
             {
                 int num = tables[i] != null ? tables[i].GetTournamentPlayTableNumber() : 0;
-                bw.Write((byte)Mathf.Clamp(num, 0, 255)); // numbers never exceed the table count
+                msg.TableNumbers.Add((byte)Mathf.Clamp(num, 0, 255)); // numbers never exceed the table count
             }
+            return msg;
         }
 
-        private static void WriteBoolList(BinaryWriter bw, List<bool> list)
+        private static void CopyBools(List<bool> list, List<bool> into)
         {
             int n = list == null ? 0 : Mathf.Min(list.Count, 255);
-            bw.Write((byte)n);
-            for (int i = 0; i < n; i++) bw.Write(list[i]);
+            for (int i = 0; i < n; i++) into.Add(list[i]);
         }
 
         // ---------------- patches ----------------
@@ -463,7 +454,7 @@ namespace CardShopCoop.Sync
             if (inst?.SendOp != null)
             {
                 int c = cat;
-                inst.SendOp(bw => { bw.Write(OpBuyDeco); bw.Write((byte)c); bw.Write(shopDecoIndex); });
+                inst.SendOp(new SettingsOpMessage { Op = OpBuyDeco, Category = (byte)c, Index = shopDecoIndex });
             }
             if (CoopCore.Instance != null)
             {
@@ -478,15 +469,15 @@ namespace CardShopCoop.Sync
             if (ApplyingRemote || CoopCore.Role != CoopRole.Client) return;
             var inst = Instance;
             if (inst?.SendOp == null) return;
-            inst.SendOp(bw =>
+            inst.SendOp(new SettingsOpMessage
             {
-                bw.Write(OpEquipDeco);
-                bw.Write(CPlayerData.m_EquippedWallDecoIndex);
-                bw.Write(CPlayerData.m_EquippedWallDecoIndexB);
-                bw.Write(CPlayerData.m_EquippedFloorDecoIndex);
-                bw.Write(CPlayerData.m_EquippedFloorDecoIndexB);
-                bw.Write(CPlayerData.m_EquippedCeilingDecoIndex);
-                bw.Write(CPlayerData.m_EquippedCeilingDecoIndexB);
+                Op = OpEquipDeco,
+                Wall = CPlayerData.m_EquippedWallDecoIndex,
+                WallB = CPlayerData.m_EquippedWallDecoIndexB,
+                Floor = CPlayerData.m_EquippedFloorDecoIndex,
+                FloorB = CPlayerData.m_EquippedFloorDecoIndexB,
+                Ceiling = CPlayerData.m_EquippedCeilingDecoIndex,
+                CeilingB = CPlayerData.m_EquippedCeilingDecoIndexB,
             });
         }
 
@@ -495,13 +486,13 @@ namespace CardShopCoop.Sync
             if (ApplyingRemote || CoopCore.Role != CoopRole.Client) return;
             var inst = Instance;
             if (inst?.SendOp == null) return;
-            inst.SendOp(bw =>
+            inst.SendOp(new SettingsOpMessage
             {
-                bw.Write(OpGameEvent);
-                bw.Write((int)CPlayerData.m_PendingGameEventFormat); // vanilla ids: raw
+                Op = OpGameEvent,
+                Index = (int)CPlayerData.m_PendingGameEventFormat, // vanilla ids: raw
                 // ...but the expansion is a modded id space: send the HOST's id for the
                 // pack we picked, so the host schedules the event the joiner meant
-                Net.Msg.WriteExpansion(bw, CPlayerData.m_PendingGameEventExpansionType);
+                Expansion = CPlayerData.m_PendingGameEventExpansionType,
             });
         }
 
@@ -510,11 +501,11 @@ namespace CardShopCoop.Sync
             if (ApplyingRemote || CoopCore.Role != CoopRole.Client) return;
             var inst = Instance;
             if (inst?.SendOp == null) return;
-            inst.SendOp(bw =>
+            inst.SendOp(new SettingsOpMessage
             {
-                bw.Write(OpGameEventFee);
-                bw.Write((int)gameEventFormat);
-                bw.Write(price);
+                Op = OpGameEventFee,
+                Index = (int)gameEventFormat,
+                Fee = price,
             });
         }
 
@@ -528,7 +519,7 @@ namespace CardShopCoop.Sync
             int idx = counters.IndexOf(__instance);
             if (idx < 0 || idx > 254) return;
             byte flags = (byte)((__instance.CanCheckout() ? 1 : 0) | (__instance.CanTradeCard() ? 2 : 0));
-            inst.SendOp(bw => { bw.Write(OpCashier); bw.Write((byte)idx); bw.Write(flags); });
+            inst.SendOp(new SettingsOpMessage { Op = OpCashier, CashierIndex = (byte)idx, CashierFlags = flags });
         }
 
         public static void TableNumberPostfix(InteractablePlayTable __instance, int tableNumber)
@@ -540,7 +531,7 @@ namespace CardShopCoop.Sync
             if (tables == null) return;
             int idx = tables.IndexOf(__instance);
             if (idx < 0 || idx > 254) return;
-            inst.SendOp(bw => { bw.Write(OpTableNumber); bw.Write((byte)idx); bw.Write(tableNumber); });
+            inst.SendOp(new SettingsOpMessage { Op = OpTableNumber, TableIndex = (byte)idx, TableNumber = tableNumber });
         }
 
         private static void Try(Harmony h, Type type, string method,

@@ -1,3 +1,5 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -62,11 +64,11 @@ namespace CardShopCoop.Sync
         private static readonly FieldInfo FiCashCustomer = AccessTools.Field(typeof(InteractableCustomerCash), "m_CurrentCustomer");
 
         /// <summary>Set by CoopCore: client -> host op (MsgType.RegisterOp).</summary>
-        public System.Action<System.Action<BinaryWriter>> SendOp;
+        public System.Action<INetMessage> SendOp;
         /// <summary>Set by CoopCore: host -> clients observer state (MsgType.RegisterState).</summary>
-        public System.Action<System.Action<BinaryWriter>> BroadcastState;
+        public System.Action<INetMessage> BroadcastState;
         /// <summary>Set by CoopCore: host -> clients cart digest (MsgType.RegisterCart).</summary>
-        public System.Action<System.Action<BinaryWriter>> BroadcastCart;
+        public System.Action<INetMessage> BroadcastCart;
 
         // harmony prefixes are static; CoopCore owns the single instance
         private static RegisterSync _live;
@@ -87,7 +89,12 @@ namespace CardShopCoop.Sync
         private float _stateTimer;
         private readonly Dictionary<int, int> _guestManned = new Dictionary<int, int>(); // counter idx -> conn id
         private readonly Dictionary<int, int> _cartCustomer = new Dictionary<int, int>(); // counter idx -> customer instance
-        private readonly Dictionary<int, string> _cartSignature = new Dictionary<int, string>();
+        // Register state is latency-sensitive, but it does not need a full 250-counter
+        // reflection/string scan every render frame.  The hash is only a change detector;
+        // the authoritative cart is still serialized from live game state below.
+        private readonly Dictionary<int, int> _cartSignature = new Dictionary<int, int>();
+        private float _cartPollTimer;
+        private const float CartPollInterval = 0.12f;
 
         // ---------------- client ----------------
         private readonly Dictionary<int, Customer> _carrier = new Dictionary<int, Customer>();
@@ -104,6 +111,7 @@ namespace CardShopCoop.Sync
         public void Reset()
         {
             _stateTimer = 0f;
+            _cartPollTimer = 0f;
             _guestManned.Clear();
             _cartCustomer.Clear();
             _cartSignature.Clear();
@@ -123,6 +131,7 @@ namespace CardShopCoop.Sync
         {
             _cartCustomer.Clear(); // force fresh RegisterCart digests on the next host tick
             _cartSignature.Clear();
+            _cartPollTimer = CartPollInterval;
         }
 
         /// <summary>Host: a client disconnected - release whatever it was manning.</summary>
@@ -262,7 +271,7 @@ namespace CardShopCoop.Sync
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
             if (idx < 0) return;
             t._localManned = idx;
-            t.SendOp?.Invoke(bw => { bw.Write((byte)idx); bw.Write(OpEnter); });
+            t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpEnter });
             CoopPlugin.Log.LogDebug($"RegisterSync client: manned counter {idx}");
         }
 
@@ -276,7 +285,7 @@ namespace CardShopCoop.Sync
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
             if (idx < 0) return;
             t._localManned = -1;
-            t.SendOp?.Invoke(bw => { bw.Write((byte)idx); bw.Write(OpExit); });
+            t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpExit });
             CoopPlugin.Log.LogDebug($"RegisterSync client: left counter {idx}");
         }
 
@@ -302,11 +311,11 @@ namespace CardShopCoop.Sync
             if (!(FiChangeReady?.GetValue(__instance) is bool ready) || !ready) return true;
             double total = FiTotalScanned?.GetValue(__instance) is double d ? d : 0.0;
             CoopPlugin.Log.LogDebug($"RegisterSync client: finish counter {idx} card={isCard}");
-            t.SendOp?.Invoke(bw =>
+            t.SendOp?.Invoke(new RegisterOpMessage
             {
-                bw.Write((byte)idx);
-                bw.Write(isCard ? OpFinishCard : OpFinishCash);
-                if (isCard) bw.Write(total);
+                Index = (byte)idx,
+                Op = isCard ? OpFinishCard : OpFinishCash,
+                TotalAmount = total,
             });
             SuppressClientRegisterEvents = true;
             return true;
@@ -339,12 +348,12 @@ namespace CardShopCoop.Sync
             bool isCard = FiIsUsingCard?.GetValue(__instance) is bool c && c;
             double paid = FiPaidAmount?.GetValue(__instance) is double p ? p : 0.0;
             CoopPlugin.Log.LogDebug($"RegisterSync client: taking payment counter {idx} card={isCard} paid={paid}");
-            t.SendOp?.Invoke(bw =>
+            t.SendOp?.Invoke(new RegisterOpMessage
             {
-                bw.Write((byte)idx);
-                bw.Write(OpTakingPayment);
-                bw.Write(isCard);
-                bw.Write(paid);
+                Index = (byte)idx,
+                Op = OpTakingPayment,
+                IsCard = isCard,
+                PaidAmount = paid,
             });
         }
 
@@ -355,7 +364,7 @@ namespace CardShopCoop.Sync
             if (t == null || CoopCore.Role != CoopRole.Client || __instance == null || __instance.m_Item == null) return;
             if (!t._itemBag.TryGetValue(__instance.m_Item, out int k)) return;
             if (!t._itemCounter.TryGetValue(__instance.m_Item, out int idx)) return;
-            t.SendOp?.Invoke(bw => { bw.Write((byte)idx); bw.Write(OpScanItem); bw.Write((byte)k); });
+            t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpScanItem, BagIndex = (byte)k });
             CoopPlugin.Log.LogDebug($"RegisterSync client: scan item {k} @ {idx}");
         }
 
@@ -366,7 +375,7 @@ namespace CardShopCoop.Sync
             if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return;
             if (!t._cardBag.TryGetValue(__instance, out int k)) return;
             if (!t._cardCounter.TryGetValue(__instance, out int idx)) return;
-            t.SendOp?.Invoke(bw => { bw.Write((byte)idx); bw.Write(OpScanCard); bw.Write((byte)k); });
+            t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpScanCard, BagIndex = (byte)k });
             CoopPlugin.Log.LogDebug($"RegisterSync client: scan card {k} @ {idx}");
         }
 
@@ -383,7 +392,7 @@ namespace CardShopCoop.Sync
             int idx = sm.m_CashierCounterList.IndexOf(counter);
             if (idx < 0) return;
             bool isCard = __instance.m_IsCard;
-            t.SendOp?.Invoke(bw => { bw.Write((byte)idx); bw.Write(OpTookPayment); bw.Write(isCard); });
+            t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpTookPayment, IsCard = isCard });
             CoopPlugin.Log.LogDebug($"RegisterSync client: took payment @ {idx} card={isCard}");
         }
 
@@ -399,13 +408,13 @@ namespace CardShopCoop.Sync
             int idx = sm.m_CashierCounterList.IndexOf(__instance.m_CashierCounter);
             if (idx < 0 || !t._carrier.ContainsKey(idx)) return;
             double value = __instance.m_ValueDouble;
-            t.SendOp?.Invoke(bw =>
+            t.SendOp?.Invoke(new RegisterOpMessage
             {
-                bw.Write((byte)idx);
-                bw.Write(OpGiveChange);
-                bw.Write(__instance.m_Index);
-                bw.Write(value);
-                bw.Write(takingBack);
+                Index = (byte)idx,
+                Op = OpGiveChange,
+                ChangeIndex = __instance.m_Index,
+                ChangeValue = value,
+                TakingBack = takingBack,
             });
         }
 
@@ -414,82 +423,86 @@ namespace CardShopCoop.Sync
         {
             if (!inGame) return;
             _stateTimer += dt;
+            _cartPollTimer += dt;
             var sm = Sm();
             if (sm == null || sm.m_CashierCounterList == null) return;
 
             bool cartChanged = false;
-            for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
+            if (_cartPollTimer >= CartPollInterval)
             {
-                var counter = sm.m_CashierCounterList[i];
-                if (counter == null) continue;
-                int custId = counter.m_CurrentCustomer != null && counter.m_CurrentCustomer.m_IsActive
-                    ? counter.m_CurrentCustomer.GetInstanceID() : 0;
-                string signature = custId + "|" + (int)counter.m_CashierCounterState + "|"
-                    + (FiIsUsingCard?.GetValue(counter) is bool card && card ? "1" : "0") + "|"
-                    + (FiPaidAmount?.GetValue(counter) ?? 0.0).ToString() + "|"
-                    + ScanSignature(counter.m_CurrentCustomer);
-                if (_cartCustomer.TryGetValue(i, out int prev) && prev == custId
-                    && _cartSignature.TryGetValue(i, out var oldSignature) && oldSignature == signature) continue;
-                _cartCustomer[i] = custId;
-                _cartSignature[i] = signature;
-                cartChanged = true;
-            }
-            if (cartChanged) BroadcastCart?.Invoke(WriteCarts);
-
-            if (_stateTimer >= 0.5f)
-            {
-                _stateTimer -= 0.5f;
-                BroadcastState?.Invoke(WriteStates);
-            }
-        }
-
-        private void WriteCarts(BinaryWriter bw)
-        {
-            var sm = Sm();
-            using (var inner = new MemoryStream())
-            using (var w = new BinaryWriter(inner))
-            {
-                int count = 0;
+                _cartPollTimer -= CartPollInterval;
+                if (_cartPollTimer > CartPollInterval) _cartPollTimer = CartPollInterval;
                 for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
                 {
                     var counter = sm.m_CashierCounterList[i];
                     if (counter == null) continue;
-                    var cust = counter.m_CurrentCustomer;
-                    bool active = cust != null && cust.m_IsActive;
-
-                    w.Write((byte)i);
-                    w.Write(active ? cust.GetInstanceID() : 0); // opaque change token (0 = customer left)
-                    if (!active) { count++; continue; }
-                    w.Write((ushort)CustomerListIndex(cust)); // for the client's carrier pick + NpcSync suppression
-                    w.Write(NpcSync.GetCustomerGeneration(cust));
-                    w.Write(cust.m_CharacterCustom != null ? cust.m_CharacterCustom.CharacterName : "");
-                    w.Write((byte)counter.m_CashierCounterState);
-                    w.Write(FiIsUsingCard?.GetValue(counter) is bool card && card);
-                    w.Write(FiPaidAmount?.GetValue(counter) is double paid ? paid : 0.0);
-                    var items = cust.GetItemInBagList();
-                    w.Write((byte)items.Count);
-                    for (int k = 0; k < items.Count; k++)
-                    {
-                        Net.Msg.WriteItemType(w, items[k].GetItemType());
-                        w.Write(items[k].GetCurrentPrice());
-                    }
-                    for (int k = 0; k < items.Count; k++)
-                        w.Write(items[k].m_InteractableScanItem != null && !items[k].m_InteractableScanItem.IsNotScanned());
-                    var cards = cust.GetCardInBagList();
-                    w.Write((byte)cards.Count);
-                    for (int k = 0; k < cards.Count; k++)
-                    {
-                        Net.Msg.WriteCard(w, cards[k].m_Card3dUI.m_CardUI.GetCardData());
-                        w.Write(cards[k].GetCurrentPrice());
-                    }
-                    for (int k = 0; k < cards.Count; k++)
-                        w.Write(!cards[k].IsNotScanned());
-                    count++;
+                    int custId = counter.m_CurrentCustomer != null && counter.m_CurrentCustomer.m_IsActive
+                        ? counter.m_CurrentCustomer.GetInstanceID() : 0;
+                    int signature = CartSignature(counter, counter.m_CurrentCustomer, custId);
+                    if (_cartCustomer.TryGetValue(i, out int prev) && prev == custId
+                        && _cartSignature.TryGetValue(i, out var oldSignature) && oldSignature == signature) continue;
+                    _cartCustomer[i] = custId;
+                    _cartSignature[i] = signature;
+                    cartChanged = true;
                 }
-                if (count == 0) return;
-                bw.Write((byte)count);
-                bw.Write(inner.ToArray());
             }
+            if (cartChanged)
+            {
+                var cartMsg = WriteCarts();
+                if (cartMsg != null) BroadcastCart?.Invoke(cartMsg);
+            }
+
+            if (_stateTimer >= 0.5f)
+            {
+                _stateTimer -= 0.5f;
+                var stateMsg = WriteStates();
+                if (stateMsg != null) BroadcastState?.Invoke(stateMsg);
+            }
+        }
+
+        private RegisterCartMessage WriteCarts()
+        {
+            var sm = Sm();
+            var message = new RegisterCartMessage();
+            for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
+            {
+                var counter = sm.m_CashierCounterList[i];
+                if (counter == null) continue;
+                var cust = counter.m_CurrentCustomer;
+                bool active = cust != null && cust.m_IsActive;
+
+                var entry = new RegisterCartEntry
+                {
+                    Index = (byte)i,
+                    CustomerId = active ? cust.GetInstanceID() : 0, // opaque change token (0 = customer left)
+                };
+                if (!active) { message.Entries.Add(entry); continue; }
+                entry.CustomerIndex = (ushort)CustomerListIndex(cust); // for the client's carrier pick + NpcSync suppression
+                entry.CustomerGeneration = NpcSync.GetCustomerGeneration(cust);
+                entry.CharacterName = cust.m_CharacterCustom != null ? cust.m_CharacterCustom.CharacterName : "";
+                entry.State = (byte)counter.m_CashierCounterState;
+                    entry.IsCard = FiIsUsingCard?.GetValue(counter) is bool card && card;
+                    entry.PaidAmount = FiPaidAmount?.GetValue(counter) is double paid ? paid : 0.0;
+                    entry.TotalScanned = FiTotalScanned?.GetValue(counter) is double total ? total : 0.0;
+                var items = cust.GetItemInBagList();
+                for (int k = 0; k < items.Count; k++)
+                {
+                    entry.ItemTypes.Add(items[k].GetItemType());
+                        entry.ItemPrices.Add(EffectiveItemPrice(items[k]));
+                }
+                for (int k = 0; k < items.Count; k++)
+                    entry.ItemScanned.Add(items[k].m_InteractableScanItem != null && !items[k].m_InteractableScanItem.IsNotScanned());
+                var cards = cust.GetCardInBagList();
+                for (int k = 0; k < cards.Count; k++)
+                {
+                    entry.Cards.Add(cards[k].m_Card3dUI.m_CardUI.GetCardData());
+                    entry.CardPrices.Add(EffectiveCardPrice(cards[k]));
+                }
+                for (int k = 0; k < cards.Count; k++)
+                    entry.CardScanned.Add(!cards[k].IsNotScanned());
+                message.Entries.Add(entry);
+            }
+            return message.Entries.Count > 0 ? message : null;
         }
 
         private static int CustomerListIndex(Customer cust)
@@ -502,48 +515,83 @@ namespace CardShopCoop.Sync
             return 0;
         }
 
-        private static string ScanSignature(Customer cust)
+        private static float EffectiveItemPrice(Item item)
         {
-            if (cust == null) return "";
-            var result = new System.Text.StringBuilder();
-            var items = cust.GetItemInBagList();
-            for (int i = 0; i < items.Count; i++)
-                result.Append(items[i] != null && items[i].m_InteractableScanItem != null
-                    && !items[i].m_InteractableScanItem.IsNotScanned() ? '1' : '0');
-            result.Append('/');
-            var cards = cust.GetCardInBagList();
-            for (int i = 0; i < cards.Count; i++)
-                result.Append(cards[i] != null && !cards[i].IsNotScanned() ? '1' : '0');
-            return result.ToString();
+            if (item == null) return 0f;
+            float price = item.GetCurrentPrice();
+            return price > 0f ? price : CPlayerData.GetItemMarketPrice(item.GetItemType());
         }
 
-        private void WriteStates(BinaryWriter bw)
+        private static float EffectiveCardPrice(InteractableCard3d card)
         {
-            var sm = Sm();
-            using (var inner = new MemoryStream())
-            using (var w = new BinaryWriter(inner))
+            if (card == null || card.m_Card3dUI == null || card.m_Card3dUI.m_CardUI == null) return 0f;
+            float price = card.GetCurrentPrice();
+            return price > 0f ? price : CPlayerData.GetCardMarketPrice(card.m_Card3dUI.m_CardUI.GetCardData());
+        }
+
+        private static int CartSignature(InteractableCashierCounter counter, Customer cust, int custId)
+        {
+            unchecked
             {
-                int count = 0;
-                for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
+                int h = 17;
+                h = h * 31 + custId;
+                h = h * 31 + (int)counter.m_CashierCounterState;
+                h = h * 31 + ((FiIsUsingCard?.GetValue(counter) is bool card && card) ? 1 : 0);
+                h = h * 31 + (FiPaidAmount?.GetValue(counter)?.GetHashCode() ?? 0);
+                h = h * 31 + (FiTotalScanned?.GetValue(counter)?.GetHashCode() ?? 0);
+                if (cust == null) return h;
+            var items = cust.GetItemInBagList();
+                h = h * 31 + items.Count;
+                for (int i = 0; i < items.Count; i++)
                 {
-                    var counter = sm.m_CashierCounterList[i];
-                    if (counter == null) continue;
-                    byte manned = counter.IsMannedByPlayer() ? (byte)1 : (_guestManned.ContainsKey(i) ? (byte)2 : (byte)0);
-                    w.Write((byte)i);
-                    w.Write(manned);
-                    count++;
+                    h = h * 31 + (items[i] == null ? 0 : (int)items[i].GetItemType());
+                    h = h * 31 + (items[i] == null ? 0 : EffectiveItemPrice(items[i]).GetHashCode());
+                    h = h * 31 + (items[i] != null && items[i].m_InteractableScanItem != null
+                        && !items[i].m_InteractableScanItem.IsNotScanned() ? 1 : 0);
                 }
-                if (count == 0) return;
-                bw.Write((byte)count);
-                bw.Write(inner.ToArray());
+            var cards = cust.GetCardInBagList();
+                h = h * 31 + cards.Count;
+                for (int i = 0; i < cards.Count; i++)
+                {
+                    var data = cards[i] != null && cards[i].m_Card3dUI != null && cards[i].m_Card3dUI.m_CardUI != null
+                        ? cards[i].m_Card3dUI.m_CardUI.GetCardData() : null;
+                    if (data != null)
+                    {
+                        h = h * 31 + (int)data.expansionType;
+                        h = h * 31 + (int)data.monsterType;
+                        h = h * 31 + (int)data.borderType;
+                        h = h * 31 + (data.isFoil ? 1 : 0);
+                        h = h * 31 + (data.isDestiny ? 1 : 0);
+                        h = h * 31 + (data.isChampionCard ? 1 : 0);
+                        h = h * 31 + data.cardGrade;
+                        h = h * 31 + data.gradedCardIndex;
+                    }
+                    h = h * 31 + (cards[i] == null ? 0 : EffectiveCardPrice(cards[i]).GetHashCode());
+                    h = h * 31 + (cards[i] != null && !cards[i].IsNotScanned() ? 1 : 0);
+                }
+                return h;
             }
         }
 
-        // ---------------- host op application ----------------
-        public void HostApplyOp(BinaryReader br, int connId)
+        private RegisterStateMessage WriteStates()
         {
-            int idx = br.ReadByte();
-            byte op = br.ReadByte();
+            var sm = Sm();
+            var message = new RegisterStateMessage();
+            for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
+            {
+                var counter = sm.m_CashierCounterList[i];
+                if (counter == null) continue;
+                byte manned = counter.IsMannedByPlayer() ? (byte)1 : (_guestManned.ContainsKey(i) ? (byte)2 : (byte)0);
+                message.Entries.Add(new RegisterStateEntry { Index = (byte)i, Manned = manned });
+            }
+            return message.Entries.Count > 0 ? message : null;
+        }
+
+        // ---------------- host op application ----------------
+        public void HostApplyOp(RegisterOpMessage message, int connId)
+        {
+            int idx = message.Index;
+            byte op = message.Op;
             var sm = Sm();
             if (sm == null || idx >= sm.m_CashierCounterList.Count) return;
             var counter = sm.m_CashierCounterList[idx];
@@ -556,7 +604,8 @@ namespace CardShopCoop.Sync
                 _guestManned[idx] = connId;
                 try { counter.StopCurrentWorker(); } catch { }
                 _cartSignature.Remove(idx);
-                BroadcastCart?.Invoke(WriteCarts);
+                var cartMsg = WriteCarts();
+                if (cartMsg != null) BroadcastCart?.Invoke(cartMsg);
                 CoopPlugin.Log.LogDebug($"RegisterSync host: guest {connId} manned counter {idx}");
                 return;
             }
@@ -576,7 +625,7 @@ namespace CardShopCoop.Sync
             {
                 case OpScanItem:
                 {
-                    int k = br.ReadByte();
+                    int k = message.BagIndex;
                     var items = cust.GetItemInBagList();
                     if (k < 0 || k >= items.Count) return;
                     var item = items[k];
@@ -586,7 +635,7 @@ namespace CardShopCoop.Sync
                 }
                 case OpScanCard:
                 {
-                    int k = br.ReadByte();
+                    int k = message.BagIndex;
                     var cards = cust.GetCardInBagList();
                     if (k < 0 || k >= cards.Count) return;
                     var card = cards[k];
@@ -600,22 +649,21 @@ namespace CardShopCoop.Sync
                     // which selected payment, presented the real cash/card, and entered the
                     // vanilla TakingCash state. This notification is only a client-side
                     // convergence marker; never replace the customer flow with a manual state
-                    // write here.
-                    br.ReadBoolean();
-                    br.ReadDouble();
+                    // write here. (message.IsCard / message.PaidAmount are carried but the
+                    // host's flow is authoritative.)
                     break;
                 }
                 case OpTookPayment:
                 {
-                    br.ReadBoolean(); // host's customer/payment object is authoritative
+                    // host's customer/payment object is authoritative (message.IsCard carried but unused)
                     cust.m_CustomerCash.OnMouseButtonUp();
                     break;
                 }
                 case OpGiveChange:
                 {
-                    int buttonIndex = br.ReadInt32();
-                    double value = br.ReadDouble();
-                    bool takingBack = br.ReadBoolean();
+                    int buttonIndex = message.ChangeIndex;
+                    double value = message.ChangeValue;
+                    bool takingBack = message.TakingBack;
                     var money = counter.m_InteractableCounterMoneyChangeList;
                     if (buttonIndex < 0 || buttonIndex >= money.Count) return;
                     var button = money[buttonIndex];
@@ -631,7 +679,7 @@ namespace CardShopCoop.Sync
                 }
                 case OpFinishCard:
                 {
-                    double total = br.ReadDouble();
+                    double total = FiTotalScanned?.GetValue(counter) is double hostTotal ? hostTotal : 0.0;
                     counter.EvaluateCreditCard(total);
                     CoopPlugin.Log.LogDebug($"RegisterSync host: completed a card sale at counter {idx}");
                     break;
@@ -649,6 +697,7 @@ namespace CardShopCoop.Sync
             public byte State;
             public bool IsCard;
             public double PaidAmount;
+            public double TotalScanned;
             public List<EItemType> ItemTypes;
             public List<float> ItemPrices;
             public List<CardData> Cards;
@@ -659,13 +708,14 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Client: the host's authoritative cart for a counter - rebuild a real scannable bag.</summary>
-        public void ClientApplyCart(BinaryReader br)
+        public void ClientApplyCart(RegisterCartMessage message)
         {
-            int count = br.ReadByte();
-            for (int i = 0; i < count; i++)
+            var entries = message.Entries;
+            for (int i = 0; i < entries.Count; i++)
             {
-                int idx = br.ReadByte();
-                int cid = br.ReadInt32();
+                var entry = entries[i];
+                int idx = entry.Index;
+                int cid = entry.CustomerId;
                 if (cid == 0)
                 {
                     // customer left this counter - settle it (only if we were tracking it)
@@ -675,35 +725,22 @@ namespace CardShopCoop.Sync
                 }
                 var c = new Cart
                 {
-                    Index = (byte)idx,
-                    CustomerIndex = br.ReadUInt16(),
-                    CustomerGeneration = br.ReadInt32(),
-                    CharacterName = br.ReadString(),
-                    State = br.ReadByte(),
-                    IsCard = br.ReadBoolean(),
-                    PaidAmount = br.ReadDouble(),
-                    ItemTypes = new List<EItemType>(),
-                    ItemPrices = new List<float>(),
-                    Cards = new List<CardData>(),
-                    CardPrices = new List<float>(),
-                    ItemScanned = new List<bool>(),
-                    CardScanned = new List<bool>(),
+                    Index = entry.Index,
+                    CustomerIndex = entry.CustomerIndex,
+                    CustomerGeneration = entry.CustomerGeneration,
+                    CharacterName = entry.CharacterName,
+                    State = entry.State,
+                    IsCard = entry.IsCard,
+                    PaidAmount = entry.PaidAmount,
+                    TotalScanned = entry.TotalScanned,
+                    ItemTypes = entry.ItemTypes,
+                    ItemPrices = entry.ItemPrices,
+                    Cards = entry.Cards,
+                    CardPrices = entry.CardPrices,
+                    ItemScanned = entry.ItemScanned,
+                    CardScanned = entry.CardScanned,
                 };
-                int ni = br.ReadByte();
-                for (int k = 0; k < ni; k++)
-                {
-                    c.ItemTypes.Add(Net.Msg.ReadItemType(br));
-                    c.ItemPrices.Add(br.ReadSingle());
-                }
-                for (int k = 0; k < ni; k++) c.ItemScanned.Add(br.ReadBoolean());
-                int nc = br.ReadByte();
-                for (int k = 0; k < nc; k++)
-                {
-                    c.Cards.Add(Net.Msg.ReadCard(br));
-                    c.CardPrices.Add(br.ReadSingle());
-                }
-                for (int k = 0; k < nc; k++) c.CardScanned.Add(br.ReadBoolean());
-                c.ScanSignature = BuildScanSignature(c.ItemScanned, c.CardScanned);
+                c.ScanSignature = BuildCartSignature(c);
                 ApplyCart(c, cid);
             }
         }
@@ -718,11 +755,28 @@ namespace CardShopCoop.Sync
             // counter's cart broadcast must never reset a sale in progress elsewhere
             if (_cartGen.TryGetValue(c.Index, out int prev) && prev == cid)
             {
+                if (!CartContentsMatch(c))
+                {
+                    // The first snapshot can arrive while the host is still moving the
+                    // customer's bag onto the counter. Rebuild only before local scanning
+                    // starts; never destroy a live partial sale to chase a stale snapshot.
+                    if (counter.m_CashierCounterState == ECashierCounterState.ScanningItem
+                        && LocalScanCount(counter) == 0)
+                    {
+                        CoopPlugin.Log.LogDebug($"RegisterSync client: rebuilding incomplete cart {c.Index}");
+                        Teardown(c.Index);
+                        ApplyCart(c, cid);
+                        return;
+                    }
+                    CoopPlugin.Log.LogWarning($"RegisterSync client: cart contents differ during active sale at counter {c.Index}; preserving local bag");
+                }
+                ApplyCartPrices(c);
                 if (!_cartScanSignature.TryGetValue(c.Index, out var oldScan) || oldScan != c.ScanSignature)
                 {
                     ApplyScannedItems(c);
                     _cartScanSignature[c.Index] = c.ScanSignature;
                 }
+                ApplyAuthoritativeTotal(c);
                 ApplyAuthoritativePhase(c);
                 ApplyAuthoritativePayment(c);
                 return;
@@ -794,17 +848,68 @@ namespace CardShopCoop.Sync
                 }
             }
             ApplyScannedItems(c);
+            ApplyAuthoritativeTotal(c);
             ApplyAuthoritativePhase(c);
             ApplyAuthoritativePayment(c);
         }
 
-        private static string BuildScanSignature(List<bool> items, List<bool> cards)
+        private static string BuildCartSignature(Cart c)
         {
             var result = new System.Text.StringBuilder();
-            if (items != null) for (int i = 0; i < items.Count; i++) result.Append(items[i] ? '1' : '0');
+            for (int i = 0; i < c.ItemTypes.Count; i++)
+            {
+                result.Append((int)c.ItemTypes[i]).Append(':')
+                    .Append(i < c.ItemPrices.Count ? c.ItemPrices[i].ToString("R") : "0").Append(':')
+                    .Append(i < c.ItemScanned.Count && c.ItemScanned[i] ? '1' : '0').Append(';');
+            }
             result.Append('/');
-            if (cards != null) for (int i = 0; i < cards.Count; i++) result.Append(cards[i] ? '1' : '0');
+            for (int i = 0; i < c.Cards.Count; i++)
+            {
+                var data = c.Cards[i];
+                if (data != null)
+                    result.Append((int)data.expansionType).Append(':').Append((int)data.monsterType).Append(':')
+                        .Append((int)data.borderType).Append(':').Append(data.isFoil ? '1' : '0')
+                        .Append(data.isDestiny ? '1' : '0').Append(data.isChampionCard ? '1' : '0')
+                        .Append(':').Append(data.cardGrade).Append(':').Append(data.gradedCardIndex);
+                result.Append(':').Append(i < c.CardPrices.Count ? c.CardPrices[i].ToString("R") : "0").Append(':')
+                    .Append(i < c.CardScanned.Count && c.CardScanned[i] ? '1' : '0').Append(';');
+            }
             return result.ToString();
+        }
+
+        private bool CartContentsMatch(Cart c)
+        {
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return false;
+            var items = customer.GetItemInBagList();
+            if (items.Count != c.ItemTypes.Count) return false;
+            for (int i = 0; i < items.Count; i++)
+                if (items[i] == null || items[i].GetItemType() != c.ItemTypes[i]) return false;
+            var cards = customer.GetCardInBagList();
+            if (cards.Count != c.Cards.Count) return false;
+            for (int i = 0; i < cards.Count; i++)
+                if (cards[i] == null || cards[i].m_Card3dUI == null || cards[i].m_Card3dUI.m_CardUI == null
+                    || !cards[i].m_Card3dUI.m_CardUI.GetCardData().IsSameCardDataType(c.Cards[i])) return false;
+            return true;
+        }
+
+        private void ApplyCartPrices(Cart c)
+        {
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return;
+            var items = customer.GetItemInBagList();
+            for (int i = 0; i < items.Count && i < c.ItemPrices.Count; i++)
+                if (items[i] != null) items[i].SetCurrentPrice(c.ItemPrices[i]);
+            var cards = customer.GetCardInBagList();
+            for (int i = 0; i < cards.Count && i < c.CardPrices.Count; i++)
+                if (cards[i] != null) cards[i].SetCurrentPrice(c.CardPrices[i]);
+        }
+
+        private static int LocalScanCount(InteractableCashierCounter counter)
+        {
+            var screen = FiCashScreen?.GetValue(counter) as UI_CashCounterScreen;
+            if (screen == null) return 0;
+            int count = 0;
+            foreach (var pair in screen.GetItemScannedListDict()) count += pair.Value;
+            return count;
         }
 
         private void ApplyScannedItems(Cart c)
@@ -821,6 +926,25 @@ namespace CardShopCoop.Sync
                     cards[i].OnMouseButtonUp();
         }
 
+        private void ApplyAuthoritativeTotal(Cart c)
+        {
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return;
+            var sm = Sm();
+            if (sm == null || c.Index >= sm.m_CashierCounterList.Count) return;
+            var counter = sm.m_CashierCounterList[c.Index];
+            if (counter == null) return;
+            FiTotalScanned?.SetValue(counter, c.TotalScanned);
+            FiCustTotal?.SetValue(customer, (float)c.TotalScanned);
+            var screen = FiCashScreen?.GetValue(counter) as UI_CashCounterScreen;
+            if (screen != null)
+            {
+                bool ready = FiChangeReady?.GetValue(counter) is bool changeReady && changeReady;
+                double paid = FiPaidAmount?.GetValue(counter) is double customerPaid ? customerPaid : 0.0;
+                double change = FiCurrentMoneyChange?.GetValue(counter) is double currentChange ? currentChange : 0.0;
+                screen.UpdateMoneyChangeAmount(ready, paid, c.TotalScanned, change);
+            }
+        }
+
         private void ApplyAuthoritativePhase(Cart c)
         {
             if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return;
@@ -830,6 +954,8 @@ namespace CardShopCoop.Sync
             if (counter == null) return;
             var state = (ECashierCounterState)c.State;
             if (state != ECashierCounterState.ScanningItem) return;
+            if ((int)counter.m_CashierCounterState > (int)ECashierCounterState.ScanningItem)
+                return;
             FiIsUsingCard?.SetValue(counter, false);
             FiStartGivingChange?.SetValue(counter, false);
             FiChangeReady?.SetValue(counter, false);
@@ -963,13 +1089,13 @@ namespace CardShopCoop.Sync
 
         /// <summary>Client: observer state broadcast - values the manning gate only. (The
         /// register visuals come from the real RegisterCart reconstruction, so no fake mirror.)</summary>
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(RegisterStateMessage message)
         {
-            int count = br.ReadByte();
-            for (int i = 0; i < count; i++)
+            var entries = message.Entries;
+            for (int i = 0; i < entries.Count; i++)
             {
-                byte idx = br.ReadByte();
-                byte manned = br.ReadByte();
+                byte idx = entries[i].Index;
+                byte manned = entries[i].Manned;
                 if (manned != 0) _mannedBy[idx] = manned;
                 else _mannedBy.Remove(idx);
             }

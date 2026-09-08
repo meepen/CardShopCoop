@@ -1,3 +1,5 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -49,10 +51,12 @@ namespace CardShopCoop.Sync
             public int WireType;  // host's (int)EObjectType of the BOXED object
             public int NameHash;  // Fnv of its enum name - survives modded int drift
             public byte Kind;     // PopulationSync kind, or GenericKind, or Unresolved
-            public int ObjIndex;  // index in that kind list
+            public int ObjIndex;  // stable placed-object id (field name retained for wire shape)
             public Vector3 Pos;   // box transform
             public float Yaw;
             public bool Carried;  // in someone's hands: position is transient
+            // 0=free, 1=host/local player, 2=remote client, 3=worker.
+            public byte OwnerKind;
         }
 
         // Keep the count wide enough that a busy shop cannot silently lose the tail of
@@ -72,10 +76,10 @@ namespace CardShopCoop.Sync
         public static Func<InteractablePackagingBox_Shelf, bool> IsLocallyCarried = _ => false;
 
         /// <summary>Set by CoopCore: client -> host op (MsgType.FurnBoxOp).</summary>
-        public Action<Action<BinaryWriter>> SendOp;
+        public Action<INetMessage> SendOp;
 
         /// <summary>Set by CoopCore: host -> clients state (MsgType.FurnBoxState).</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
 
         /// <summary>True while sync code itself boxes/unboxes/destroys, so the patches
         /// don't mistake reconciliation for player action.</summary>
@@ -130,8 +134,15 @@ namespace CardShopCoop.Sync
         private double _suppressBoxUp;     // client: kind indices shifted (local sell); no NEW box-ups until the echo re-aligns
         private readonly Dictionary<InteractableObject, byte> _kindCache
             = new Dictionary<InteractableObject, byte>();                                 // which kind list an object lives in never changes
+        private readonly List<ushort> _reportIds = new List<ushort>();
+        private readonly List<Entry> _reportEntries = new List<Entry>();
         private Dictionary<int, int> _nameToType;                                         // Fnv(enum name) -> local int, built lazily
         private float _timer;
+        // Carry transitions only need network-scale responsiveness. A 10 Hz poll preserves
+        // immediate pickup/drop ownership while removing the full furniture-box scan from
+        // every render frame.
+        private float _carryPollTimer;
+        private const float CarryPollInterval = 0.10f;
         private int _lastHostHash;
         private float _hostHeal;
         private RestockManager _rm;
@@ -156,6 +167,7 @@ namespace CardShopCoop.Sync
             _clientById.Clear();
             _clientIdOf.Clear();
             _nextId = 1;
+            _carryPollTimer = 0f;
             _recentlyUnpacked.Clear();
             _kindCache.Clear();
             _suppressBoxUp = 0.0;
@@ -304,24 +316,34 @@ namespace CardShopCoop.Sync
         public void HostTick(float dt, bool inGame)
         {
             if (!inGame || Rm() == null) return;
+            _carryPollTimer += dt;
             // carry transitions broadcast IMMEDIATELY - a box that still looks
             // on-the-floor invites another player to grab it too
             bool force = false;
+            bool pollCarry = _carryPollTimer >= CarryPollInterval;
+            if (pollCarry)
+            {
+                _carryPollTimer -= CarryPollInterval;
+                if (_carryPollTimer > CarryPollInterval) _carryPollTimer = CarryPollInterval;
+            }
             try
             {
-                var scan = LiveBoxes();
-                for (int i = 0; i < scan.Count; i++)
+                if (pollCarry)
                 {
-                    var box = scan[i];
-                    if (box == null) continue;
-                    if (IsLocallyCarried(box))
+                    var scan = LiveBoxes();
+                    for (int i = 0; i < scan.Count; i++)
                     {
-                        if (_hostCarriedLastTick.Add(box)) force = true;
-                    }
-                    else if (_hostCarriedLastTick.Remove(box))
-                    {
-                        force = true;
-                        _hostRecentlyReleased[box] = Time.realtimeSinceStartupAsDouble;
+                        var box = scan[i];
+                        if (box == null) continue;
+                        if (IsLocallyCarried(box))
+                        {
+                            if (_hostCarriedLastTick.Add(box)) force = true;
+                        }
+                        else if (_hostCarriedLastTick.Remove(box))
+                        {
+                            force = true;
+                            _hostRecentlyReleased[box] = Time.realtimeSinceStartupAsDouble;
+                        }
                     }
                 }
             }
@@ -351,6 +373,7 @@ namespace CardShopCoop.Sync
                         Pos = BoxSync.PhysicsPosition(box),
                         Yaw = BoxSync.PhysicsRotation(box).eulerAngles.y,
                         Carried = IsLocallyCarried(box) || _remoteCarried.Contains(box),
+                        OwnerKind = IsLocallyCarried(box) ? (byte)1 : (_remoteCarried.Contains(box) ? (byte)2 : (byte)0),
                     });
                 }
                 // skip identical snapshots (deliveries sit still until collected); a
@@ -362,6 +385,7 @@ namespace CardShopCoop.Sync
                     hash = hash * 31 + e.WireType;
                     hash = hash * 31 + (e.Kind << 16 | (e.ObjIndex & 0xFFFF));
                     hash = hash * 31 + (e.Carried ? 1 : 0);
+                    hash = hash * 31 + e.OwnerKind;
                     hash = hash * 31 + (int)(e.Pos.x * 8f);
                     hash = hash * 31 + (int)(e.Pos.z * 8f);
                 }
@@ -370,40 +394,44 @@ namespace CardShopCoop.Sync
                 _lastHostHash = hash;
                 _hostHeal = 0f;
                 var snap = list;
-                BroadcastState?.Invoke(bw => WriteEntries(bw, snap));
+                var entries = new List<FurnBoxEntry>(snap.Count);
+                for (int i = 0; i < snap.Count; i++) entries.Add(ToWire(snap[i]));
+                BroadcastState?.Invoke(new FurnBoxStateMessage { Entries = entries });
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync host: " + e.Message); }
         }
 
         /// <summary>Host: dispatch a client op (report / place / removed).</summary>
-        public void HostApplyOp(BinaryReader br, int connId)
+        public void HostApplyOp(FurnBoxOpMessage message, int connId)
         {
             if (CoopCore.Role != CoopRole.Host) return;
-                byte kind = br.ReadByte();
+            byte kind = message.Op;
             switch (kind)
             {
-                case OpReport: HostApplyReport(br); break;
-                case OpPlace: HostApplyPlace(br); break;
-                case OpRemoved: HostApplyRemoved(br, connId); break;
+                case OpReport: HostApplyReport(message); break;
+                case OpPlace: HostApplyPlace(message); break;
+                case OpRemoved: HostApplyRemoved(message, connId); break;
                 default:
                     CoopPlugin.Log.LogWarning($"FurnBoxSync: unknown op {kind}");
                     break;
             }
         }
 
-        private void HostApplyReport(BinaryReader br)
+        private void HostApplyReport(FurnBoxOpMessage message)
         {
-            int n = Mathf.Min(br.ReadUInt16(), MaxBoxes);
+            var report = message.Report;
+            int n = Mathf.Min(report.Count, MaxBoxes);
             var boxes = LiveBoxes();
             double now = Time.realtimeSinceStartupAsDouble;
             for (int i = 0; i < n; i++)
             {
-                ushort id = br.ReadUInt16();
-                int wireType = br.ReadInt32();
-                int nameHash = br.ReadInt32();
-                bool carried = br.ReadBoolean();
-                var pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
-                float yaw = br.ReadSingle();
+                var entry = report[i];
+                ushort id = entry.Id;
+                int wireType = entry.WireType;
+                int nameHash = entry.NameHash;
+                bool carried = entry.Carried;
+                var pos = entry.Position;
+                float yaw = entry.Yaw;
                 if (!_hostById.TryGetValue(id, out var box) || box == null) continue;
                 // the stable id is authoritative; type remains a corruption guard
                 if (!BoxedTypeMatches(box, wireType, nameHash)) continue;
@@ -429,13 +457,13 @@ namespace CardShopCoop.Sync
         /// subclass OnPlacedMovedObject overrides (play table tutorial hooks, nav cut
         /// refresh, box destroy via EmptyBoxShelf + OnDestroyed) all included - so
         /// PopulationSync/ObjMoveSync mirror the placed object to everyone.</summary>
-        private void HostApplyPlace(BinaryReader br)
+        private void HostApplyPlace(FurnBoxOpMessage message)
         {
-            ushort id = br.ReadUInt16();
-            int wireType = br.ReadInt32();
-            int nameHash = br.ReadInt32();
-            var pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
-            float yaw = br.ReadSingle();
+            ushort id = message.Id;
+            int wireType = message.WireType;
+            int nameHash = message.NameHash;
+            var pos = message.Position;
+            float yaw = message.Yaw;
 
             _hostById.TryGetValue(id, out var box);
             if (box != null && !BoxedTypeMatches(box, wireType, nameHash)) box = null;
@@ -457,11 +485,11 @@ namespace CardShopCoop.Sync
             _lastHostHash = 0;
         }
 
-        private void HostApplyRemoved(BinaryReader br, int connId)
+        private void HostApplyRemoved(FurnBoxOpMessage message, int connId)
         {
-            ushort id = br.ReadUInt16();
-            int wireType = br.ReadInt32();
-            int nameHash = br.ReadInt32();
+            ushort id = message.Id;
+            int wireType = message.WireType;
+            int nameHash = message.NameHash;
             // shared budget with item/card boxes: a reloading client's world-teardown
             // echoes ALL THREE box lists as removals in one burst - and each furn-box
             // removal would take its boxed FURNITURE with it
@@ -523,9 +551,11 @@ namespace CardShopCoop.Sync
         /// (it already exists here - PopulationSync mirrors it, hidden or not); boxing
         /// it up is the game's own save-load recipe (BoxUpObject(holdBox: false), the
         /// exact call ShelfManager's loader uses for isBoxed save entries).</summary>
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(FurnBoxStateMessage message)
         {
-            var hostList = ReadEntries(br);
+            var entries = message.Entries;
+            var hostList = new List<Entry>(entries.Count);
+            for (int i = 0; i < entries.Count; i++) hostList.Add(ToEntry(entries[i]));
             ApplyingRemote = true;
             try { ClientApplyInner(hostList); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync apply: " + e.Message); }
@@ -546,10 +576,10 @@ namespace CardShopCoop.Sync
             {
                 var obj = ResolveEntryObject(hostList[i]);
                 wantedObjs.Add(obj);
-                // a generic (kind-15) entry can NEVER resolve by (kind,index) - it's outside
-                // PopulationSync's mirror - so letting it clear allResolved permanently
-                // vetoed retirement of EVERY typed box. Exempt it from the veto.
-                if (obj == null && hostList[i].Kind != GenericKind) allResolved = false;
+                // Every furniture object, including generic kind 15 objects, is
+                // mirrored by PopulationSync. Never fabricate a second object+box
+                // while waiting for that roster to arrive.
+                if (obj == null) allResolved = false;
             }
 
             // vanished entries: replay what the host did. Last seen CARRIED means a
@@ -567,10 +597,6 @@ namespace CardShopCoop.Sync
                     var box = live[i];
                     if (box == null) continue;
                     var boxed = BoxedObject(box);
-                    // generic boxes aren't index-mirrored, so their absence from the snapshot
-                    // can't be distinguished from index divergence - never retire them (a
-                    // stale ghost box is the acceptable lesser evil vs. destroying live furniture)
-                    if (boxed != null && boxed.m_IsGenericObject) continue;
                     bool wanted = false;
                     for (int j = 0; j < wantedObjs.Count; j++)
                         if (ReferenceEquals(wantedObjs[j], boxed) && boxed != null) { wanted = true; break; }
@@ -613,38 +639,9 @@ namespace CardShopCoop.Sync
                 var obj = wantedObjs[i];
                 if (obj == null)
                 {
-                    // generic-list objects are OUTSIDE PopulationSync's mirror: fall
-                    // back to the full purchase recipe (spawns object + box; the coin
-                    // was charged in FurnitureShopUIScreen, never here)
-                    if (want.Kind == GenericKind && now - _suppressBoxUp >= 6.0)
-                    {
-                        // kind 15 can't resolve by (kind,index) - it's outside PopulationSync's
-                        // mirror - so a naive fallback spawned a NEW duplicate object+box on
-                        // every heal (~10s). Dedup against the live box population by type +
-                        // position: if we already fallback-spawned a matching box near here,
-                        // don't spawn another.
-                        bool already = false;
-                        var liveBoxes = LiveBoxes();
-                        for (int b = 0; b < liveBoxes.Count; b++)
-                        {
-                            var lb = liveBoxes[b];
-                            if (lb == null) continue;
-                            if (!BoxedTypeMatches(lb, want.WireType, want.NameHash)) continue;
-                            var bp = lb.transform.position;
-                            float dx = bp.x - want.Pos.x, dz = bp.z - want.Pos.z;
-                            if (dx * dx + dz * dz <= 1.0f) { already = true; break; }
-                        }
-                        if (!already)
-                        {
-                            try
-                            {
-                                ShelfManager.SpawnInteractableObjectInPackageBox(
-                                    (EObjectType)ResolveObjType(want.WireType, want.NameHash),
-                                    want.Pos, Quaternion.Euler(0f, want.Yaw, 0f));
-                            }
-                            catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync spawn: " + e.Message); }
-                        }
-                    }
+                    // PopulationSync owns creation of every placed object, including
+                    // generic kind 15. Waiting is safe; spawning here created duplicate
+                    // objects during the normal population/furniture ordering window.
                     continue;
                 }
                 var box = obj.GetIsBoxedUp() ? obj.GetPackagingBoxShelf() : null;
@@ -702,22 +699,32 @@ namespace CardShopCoop.Sync
             // carry transitions are detected EVERY FRAME and reported immediately -
             // the periodic diff alone left pickups/set-downs invisible for seconds,
             // long enough for someone else to try grabbing the same box
+            _carryPollTimer += dt;
             bool force = false;
+            bool pollCarry = _carryPollTimer >= CarryPollInterval;
+            if (pollCarry)
+            {
+                _carryPollTimer -= CarryPollInterval;
+                if (_carryPollTimer > CarryPollInterval) _carryPollTimer = CarryPollInterval;
+            }
             try
             {
-                var scan = LiveBoxes();
-                for (int i = 0; i < scan.Count; i++)
+                if (pollCarry)
                 {
-                    var box = scan[i];
-                    if (box == null) continue;
-                    if (IsLocallyCarried(box))
+                    var scan = LiveBoxes();
+                    for (int i = 0; i < scan.Count; i++)
                     {
-                        if (_carriedLastTick.Add(box)) force = true; // pickup transition
-                    }
-                    else if (_carriedLastTick.Remove(box))
-                    {
-                        force = true; // set-down transition
-                        _recentlyReleased[box] = Time.realtimeSinceStartupAsDouble;
+                        var box = scan[i];
+                        if (box == null) continue;
+                        if (IsLocallyCarried(box))
+                        {
+                            if (_carriedLastTick.Add(box)) force = true; // pickup transition
+                        }
+                        else if (_carriedLastTick.Remove(box))
+                        {
+                            force = true; // set-down transition
+                            _recentlyReleased[box] = Time.realtimeSinceStartupAsDouble;
+                        }
                     }
                 }
             }
@@ -730,8 +737,12 @@ namespace CardShopCoop.Sync
                 var boxes = LiveBoxes();
                 bool changed = force;
                 double nowT = Time.realtimeSinceStartupAsDouble;
-                var idxList = new List<ushort>(boxes.Count);
-                var entryList = new List<Entry>(boxes.Count);
+                _reportIds.Clear();
+                _reportEntries.Clear();
+                if (_reportIds.Capacity < boxes.Count) _reportIds.Capacity = boxes.Count;
+                if (_reportEntries.Capacity < boxes.Count) _reportEntries.Capacity = boxes.Count;
+                var idxList = _reportIds;
+                var entryList = _reportEntries;
                 for (int i = 0; i < boxes.Count && entryList.Count < MaxBoxes; i++)
                 {
                     var box = boxes[i];
@@ -770,21 +781,21 @@ namespace CardShopCoop.Sync
                 }
                 if (changed && SendOp != null)
                 {
-                    SendOp(bw =>
+                    var report = new List<FurnBoxReportEntry>(entryList.Count);
+                    for (int i = 0; i < entryList.Count; i++)
                     {
-                        bw.Write(OpReport);
-            bw.Write((ushort)Mathf.Min(entryList.Count, MaxBoxes));
-                        for (int i = 0; i < entryList.Count; i++)
+                        var e = entryList[i];
+                        report.Add(new FurnBoxReportEntry
                         {
-                            var e = entryList[i];
-                            bw.Write(idxList[i]);
-                            bw.Write(e.WireType);
-                            bw.Write(e.NameHash);
-                            bw.Write(e.Carried);
-                            bw.Write(e.Pos.x); bw.Write(e.Pos.y); bw.Write(e.Pos.z);
-                            bw.Write(e.Yaw);
-                        }
-                    });
+                            Id = idxList[i],
+                            WireType = e.WireType,
+                            NameHash = e.NameHash,
+                            Carried = e.Carried,
+                            Position = e.Pos,
+                            Yaw = e.Yaw,
+                        });
+                    }
+                    SendOp(new FurnBoxOpMessage { Op = OpReport, Report = report });
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync client: " + e.Message); }
@@ -808,14 +819,14 @@ namespace CardShopCoop.Sync
                 float yaw = obj.transform.eulerAngles.y;
                 int wireType = _lastApplied.TryGetValue(box, out var last)
                     ? last.WireType : (int)obj.m_ObjectType; // echo the HOST's int back
-                SendOp(bw =>
+                SendOp(new FurnBoxOpMessage
                 {
-                    bw.Write(OpPlace);
-                    bw.Write(boxId);
-                    bw.Write(wireType);
-                    bw.Write(Fnv(obj.m_ObjectType.ToString()));
-                    bw.Write(pos.x); bw.Write(pos.y); bw.Write(pos.z);
-                    bw.Write(yaw);
+                    Op = OpPlace,
+                    Id = boxId,
+                    WireType = wireType,
+                    NameHash = Fnv(obj.m_ObjectType.ToString()),
+                    Position = pos,
+                    Yaw = yaw,
                 });
             }
             _recentlyUnpacked[obj] = Time.realtimeSinceStartupAsDouble;
@@ -861,12 +872,12 @@ namespace CardShopCoop.Sync
             _suppressBoxUp = Time.realtimeSinceStartupAsDouble;
             int wireType = last.WireType != 0 ? last.WireType : (int)obj.m_ObjectType;
             int nameHash = Fnv(obj.m_ObjectType.ToString());
-            SendOp?.Invoke(bw =>
+            SendOp?.Invoke(new FurnBoxOpMessage
             {
-                bw.Write(OpRemoved);
-                bw.Write(boxId);
-                bw.Write(wireType);
-                bw.Write(nameHash);
+                Op = OpRemoved,
+                Id = boxId,
+                WireType = wireType,
+                NameHash = nameHash,
             });
         }
 
@@ -978,7 +989,14 @@ namespace CardShopCoop.Sync
             {
                 var list = KindList(sm, cached);
                 int i = list?.IndexOf(obj) ?? -1;
-                if (i >= 0) { kind = cached; idx = i; return true; }
+                if (i >= 0)
+                {
+                    if (CoopCore.Role == CoopRole.Host) idx = PlacedObjectIdentity.AssignHost(obj);
+                    else if (!PlacedObjectIdentity.TryGet(obj, out ushort knownId)) return false;
+                    else idx = knownId;
+                    kind = cached;
+                    return true;
+                }
                 _kindCache.Remove(obj); // moved lists? rescan below
             }
             for (byte k = 0; k <= GenericKind; k++)
@@ -986,9 +1004,11 @@ namespace CardShopCoop.Sync
                 var list = KindList(sm, k);
                 int i = list?.IndexOf(obj) ?? -1;
                 if (i < 0) continue;
+                if (CoopCore.Role == CoopRole.Host) idx = PlacedObjectIdentity.AssignHost(obj);
+                else if (!PlacedObjectIdentity.TryGet(obj, out ushort knownId)) continue;
+                else idx = knownId;
                 _kindCache[obj] = k;
                 kind = k;
-                idx = i;
                 return true;
             }
             return false;
@@ -1000,9 +1020,8 @@ namespace CardShopCoop.Sync
             var sm = Sm();
             if (sm == null) return null;
             var list = KindList(sm, e.Kind);
-            if (list == null || e.ObjIndex < 0 || e.ObjIndex >= list.Count) return null;
-            var obj = list[e.ObjIndex] as InteractableObject;
-            if (obj == null) return null;
+            if (list == null || e.ObjIndex <= 0 || e.ObjIndex > ushort.MaxValue) return null;
+            if (!PlacedObjectIdentity.TryResolve(sm, e.Kind, (ushort)e.ObjIndex, out var obj)) return null;
             // type gate: the roster may be mid-repair; boxing the wrong object is the
             // one mistake this module must never make
             int localType = ResolveObjType(e.WireType, e.NameHash);
@@ -1054,43 +1073,37 @@ namespace CardShopCoop.Sync
 
         // ---------------- wire ----------------
 
-        private static void WriteEntries(BinaryWriter bw, List<Entry> entries)
+        private static Entry ToEntry(FurnBoxEntry e)
         {
-            bw.Write((ushort)Mathf.Min(entries.Count, MaxBoxes));
-            for (int i = 0; i < entries.Count && i < MaxBoxes; i++)
+            return new Entry
             {
-                var e = entries[i];
-                bw.Write(e.Id);
-                bw.Write(e.WireType);
-                bw.Write(e.NameHash);
-                bw.Write(e.Kind);
-                bw.Write((ushort)Mathf.Clamp(e.ObjIndex, 0, ushort.MaxValue));
-                bw.Write(e.Pos.x); bw.Write(e.Pos.y); bw.Write(e.Pos.z);
-                bw.Write(e.Yaw);
-                bw.Write((byte)(e.Carried ? 1 : 0));
-            }
+                Id = e.Id,
+                WireType = e.WireType,
+                NameHash = e.NameHash,
+                Kind = e.Kind,
+                ObjIndex = e.ObjIndex,
+                Pos = e.Position,
+                Yaw = e.Yaw,
+                Carried = e.Carried,
+                OwnerKind = e.OwnerKind,
+            };
         }
 
-        private static List<Entry> ReadEntries(BinaryReader br)
+        private static FurnBoxEntry ToWire(Entry e)
         {
-            int n = Mathf.Min(br.ReadUInt16(), MaxBoxes);
-            var list = new List<Entry>(n);
-            for (int i = 0; i < n; i++)
+            return new FurnBoxEntry
             {
-                var e = new Entry
-                {
-                    Id = br.ReadUInt16(),
-                    WireType = br.ReadInt32(),
-                    NameHash = br.ReadInt32(),
-                    Kind = br.ReadByte(),
-                    ObjIndex = br.ReadUInt16(),
-                    Pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
-                    Yaw = br.ReadSingle(),
-                };
-                e.Carried = (br.ReadByte() & 1) != 0;
-                list.Add(e);
-            }
-            return list;
+                Id = e.Id,
+                WireType = e.WireType,
+                NameHash = e.NameHash,
+                Kind = e.Kind,
+                ObjIndex = e.ObjIndex,
+                Position = e.Pos,
+                Yaw = e.Yaw,
+                Carried = e.Carried,
+                OwnerKind = e.OwnerKind,
+            };
         }
+
     }
 }

@@ -1,3 +1,5 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -48,7 +50,7 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Set by CoopCore: host -> clients state broadcast (MsgType.TableState).</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
 
         private float _timer;
         private int _lastHash;
@@ -136,7 +138,7 @@ namespace CardShopCoop.Sync
                 if (hash == _lastHash && _heal < HealInterval) return;
                 _lastHash = hash;
                 _heal = 0f;
-                BroadcastState?.Invoke(bw => WriteState(bw, tables, count));
+                BroadcastState?.Invoke(BuildState(tables, count));
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("PlayTableSync host: " + e.Message); }
         }
@@ -154,9 +156,9 @@ namespace CardShopCoop.Sync
             };
         }
 
-        private static void WriteState(BinaryWriter bw, List<InteractablePlayTable> tables, int count)
+        private static TableStateMessage BuildState(List<InteractablePlayTable> tables, int count)
         {
-            bw.Write((byte)count);
+            var msg = new TableStateMessage();
             for (int i = 0; i < count; i++)
             {
                 var table = tables[i];
@@ -164,59 +166,64 @@ namespace CardShopCoop.Sync
                 int seats = sets != null ? Mathf.Min(sets.Count, MaxSeats) : 0;
                 // fixed format: 2 + seats*(1|13) bytes - a vanilla 2-seat table is at
                 // most 28 bytes, far under the MaxTableBytes budget by construction
-                bw.Write((byte)i);
-                bw.Write((byte)seats);
+                var entry = new TableEntry { Index = (byte)i };
                 for (int s = 0; s < seats; s++)
                 {
                     var st = HostSeat(sets[s]);
-                    bw.Write(st.Active);
-                    if (!st.Active) continue;
-                    // the three set pieces are EItemTypes, one of the id spaces
-                    // EnhancedPrefabLoader mints custom ids into - so they travel as
-                    // HOST ids like every other modded id (identity below the modded
-                    // floor, and identity here anyway: only the host writes this)
-                    Net.Msg.WriteItemType(bw, (EItemType)st.PlayMat);
-                    Net.Msg.WriteItemType(bw, (EItemType)st.DeckBox);
-                    Net.Msg.WriteItemType(bw, (EItemType)st.Comic);
+                    var seat = new TableSeatEntry { Active = st.Active };
+                    if (st.Active)
+                    {
+                        // the three set pieces are EItemTypes, one of the id spaces
+                        // EnhancedPrefabLoader mints custom ids into - so they travel as
+                        // HOST ids like every other modded id (identity below the modded
+                        // floor, and identity here anyway: only the host writes this)
+                        seat.PlayMat = (EItemType)st.PlayMat;
+                        seat.DeckBox = (EItemType)st.DeckBox;
+                        seat.Comic = (EItemType)st.Comic;
+                    }
+                    entry.Seats.Add(seat);
                 }
+                msg.Tables.Add(entry);
             }
+            return msg;
         }
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(TableStateMessage message)
         {
-            try { ClientApplyInner(br); }
+            try { ClientApplyInner(message); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("PlayTableSync apply: " + e.Message); }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(TableStateMessage message)
         {
             var sm = Sm();
             var tables = sm != null ? sm.m_PlayTableList : null;
-            int count = br.ReadByte();
-            for (int i = 0; i < count; i++)
+            for (int i = 0; i < message.Tables.Count; i++)
             {
-                int tableIdx = br.ReadByte();
-                int seats = br.ReadByte();
+                var entry = message.Tables[i];
+                int tableIdx = entry.Index;
+                var seats = entry.Seats;
                 InteractablePlayTable table =
                     (tables != null && tableIdx < tables.Count) ? tables[tableIdx] : null;
                 // the JOINER may be playing the minigame at this table right now -
                 // never stomp their own session's props (covers m_IsPlayerOccupied too)
                 bool skipTable = table == null || table.GetHasStartPlayerPlayCard();
                 var sets = (!skipTable) ? table.m_TableGameItemSetList : null;
-                for (int s = 0; s < seats; s++)
+                for (int s = 0; s < seats.Count; s++)
                 {
-                    var st = new SeatState { Active = br.ReadBoolean() };
+                    var se = seats[s];
+                    var st = new SeatState { Active = se.Active };
                     if (st.Active)
                     {
-                        // host ids -> ours, so ApplySeat below can cast straight to a
-                        // LOCAL EItemType. A set piece from a pack only the host has
-                        // resolves to EItemType.None and simply paints no mesh - the
-                        // seat is still shown, one-sided packs are allowed
-                        st.PlayMat = (int)Net.Msg.ReadItemType(br);
-                        st.DeckBox = (int)Net.Msg.ReadItemType(br);
-                        st.Comic = (int)Net.Msg.ReadItemType(br);
+                        // host ids -> ours (already translated by the DTO deserialize), so
+                        // ApplySeat below can cast straight to a LOCAL EItemType. A set piece
+                        // from a pack only the host has resolves to EItemType.None and simply
+                        // paints no mesh - the seat is still shown, one-sided packs are allowed
+                        st.PlayMat = (int)se.PlayMat;
+                        st.DeckBox = (int)se.DeckBox;
+                        st.Comic = (int)se.Comic;
                     }
                     if (skipTable || sets == null || s >= sets.Count) continue;
                     ApplySeat(tableIdx, s, sets[s], st);

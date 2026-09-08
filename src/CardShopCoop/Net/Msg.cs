@@ -80,51 +80,116 @@ namespace CardShopCoop.Net
         RegisterCart = 72,     // host -> client: authoritative cart, prices, phase, and scanned slots
         RegisterOp = 73,       // client -> host: the manning player's register action (scan / payment / change / finish)
         StaffInteract = 74,    // host -> client: worker interaction lease grant/release/denial
+        ContainerBoxTake = 75, // host -> client: empty-box take result (storage index + BoxSync id, 0 = rejected)
+        CardBoxCollectResult = 76, // host -> client: graded-box collect accepted/rejected
+        NpcSpeech = 77,      // host -> client: customer speech bubble
+        TvState = 78,        // host -> client: shared RTCGO stream state
+        TvOp = 79,           // client -> host: RTCGO stream control request
+        ContainerPackClaim = 80, // host -> client: authoritative auto-opener claim result
+        PurchaseRequest = 81,    // client -> host: atomic purchase request
     }
 
-    /// <summary>One received message, already reassembled from the wire.</summary>
+    /// <summary>One received message, already reassembled and decoded from the wire.
+    /// Transports never expose stream fragments to callers.</summary>
     public struct InMsg
     {
         public int ConnId;
         public MsgType Type;
-        public byte[] Payload;
+        public INetMessage Message;
     }
 
-    /// <summary>Builders/parsers for message payloads. Wire format per frame:
-    /// [int32 payloadLen+1][byte MsgType][payload]. All little-endian via BinaryWriter.</summary>
+    /// <summary>Frame builders/parsers. Wire format per frame:
+    /// [int32 payloadLen+1][byte MsgType][UTF-8 JSON payload].</summary>
     public static class Msg
     {
-        // One builder per thread, reused forever: Build runs ~30x/second in a session
-        // (15Hz states + engine deltas) and a fresh MemoryStream+writer per message was
-        // a steady GC drip that only existed while connected.
-        [ThreadStatic] private static MemoryStream _buildMs;
-        [ThreadStatic] private static BinaryWriter _buildBw;
+        public const int FrameHeaderSize = 4;
+        public const int TypeSize = 1;
+        public const int MinimumFrameSize = FrameHeaderSize + TypeSize;
+        public const int MaxFrameSize = 64 * 1024 * 1024;
+         public const int WireVersion = 6;
 
-        public static byte[] Build(MsgType type, Action<BinaryWriter> write = null)
+        /// <summary>
+        /// Decodes one complete wire frame. This is the only protocol-framing entry
+        /// point used by transports. TCP and Steam both hand this method a complete
+        /// frame and receive the same result, so neither transport knows about the
+        /// message-type byte or payload layout.
+        /// </summary>
+        public static bool TryDecodeFrame(byte[] frame, int offset, int count, int connId,
+            int maxFrame, out InMsg message)
         {
-            if (_buildMs == null)
+            message = default(InMsg);
+            if (frame == null || offset < 0 || count < MinimumFrameSize
+                || offset > frame.Length - count) return false;
+
+            int declared = BitConverter.ToInt32(frame, offset);
+            if (declared < TypeSize || declared > maxFrame) return false;
+            if (declared + FrameHeaderSize != count) return false;
+
+            int payloadLength = declared - TypeSize;
+            var payload = new byte[payloadLength];
+            if (payloadLength > 0)
+                Buffer.BlockCopy(frame, offset + FrameHeaderSize + TypeSize,
+                    payload, 0, payloadLength);
+
+            message = new InMsg
             {
-                _buildMs = new MemoryStream(4096);
-                _buildBw = new BinaryWriter(_buildMs);
+                ConnId = connId,
+                Type = (MsgType)frame[offset + FrameHeaderSize]
+            };
+            // Decode centrally. A malformed or unknown DTO is DROPPED (return false) so a
+            // single bad frame can never unwind a transport pump thread - the same fail-safe
+            // the transport used to get from the switch's per-message try/catch. Unknown
+            // message types are logged once per type by MessageRegistry.
+            try
+            {
+                message.Message = MessageRegistry.Deserialize(message.Type, payload);
             }
-            var ms = _buildMs;
-            var bw = _buildBw;
-            ms.SetLength(0);
-            ms.Position = 0;
-            bw.Write(0);              // frame length placeholder
-            bw.Write((byte)type);
-            write?.Invoke(bw);
-            bw.Flush();
-            long end = ms.Position;
-            ms.Position = 0;
-            bw.Write((int)(end - 4)); // bytes after the length field
-            bw.Flush();
-            return ms.ToArray();      // the one remaining copy: transports own the array
+            catch
+            {
+                return false;
+            }
+            return true;
         }
 
-        public static BinaryReader Reader(byte[] payload)
+        /// <summary>Reads exactly one complete frame from a stream. The stream
+        /// implementation only supplies bytes; all frame-size validation and frame
+        /// assembly lives here.</summary>
+        public static byte[] ReadFrame(Stream stream, int maxFrame)
         {
-            return new BinaryReader(new MemoryStream(payload, writable: false));
+            if (stream == null) throw new ArgumentNullException("stream");
+            var header = new byte[FrameHeaderSize];
+            ReadExact(stream, header, 0, header.Length);
+            int declared = BitConverter.ToInt32(header, 0);
+            if (declared < TypeSize || declared > maxFrame)
+                throw new IOException("Bad frame length " + declared);
+
+            var frame = new byte[FrameHeaderSize + declared];
+            Buffer.BlockCopy(header, 0, frame, 0, header.Length);
+            ReadExact(stream, frame, FrameHeaderSize, declared);
+            return frame;
+        }
+
+        private static void ReadExact(Stream stream, byte[] buffer, int offset, int count)
+        {
+            int read = 0;
+            while (read < count)
+            {
+                int n = stream.Read(buffer, offset + read, count - read);
+                if (n <= 0) throw new IOException("Connection closed");
+                read += n;
+            }
+        }
+
+        /// <summary>Returns the type from a complete outbound frame without making
+        /// callers depend on the wire offset. Used only for transport scheduling.</summary>
+        public static bool TryGetType(byte[] frame, out MsgType type)
+        {
+            type = default(MsgType);
+            if (frame == null || frame.Length < MinimumFrameSize) return false;
+            int declared = BitConverter.ToInt32(frame, 0);
+            if (declared < TypeSize || declared + FrameHeaderSize != frame.Length) return false;
+            type = (MsgType)frame[FrameHeaderSize];
+            return true;
         }
 
         /// <summary>World/bundle transfers are gzipped: the EPL sidecar json compresses
@@ -150,79 +215,5 @@ namespace CardShopCoop.Net
             }
         }
 
-        // ------------------------------------------------------------ typed enum wire helpers
-        //
-        // EVERY modded enum id that crosses the wire MUST go through one of these, and never
-        // through a raw bw.Write((int)someEnum) / (SomeEnum)br.ReadInt32(). They are the single
-        // enforcement point for the session's id contract:
-        //
-        //   THE WIRE SPEAKS THE HOST'S IDS. Only a CLIENT translates (Util.EnumMap); the host
-        //   translates nothing, and every id below EnumMap's modded floor - i.e. all vanilla
-        //   content - passes through untouched, so vanilla traffic cannot be affected by any of
-        //   this. A modded id with no counterpart on the receiving PC becomes that enum's None
-        //   sentinel, which the existing skip paths refuse; one-sided content packs are allowed
-        //   and must never be "fixed" by zeroing or dropping the message.
-        //
-        // Enums NOT listed here are vanilla-only id spaces (identical on every PC) and are
-        // deliberately written raw - adding a helper for one would be pure ceremony.
-        //
-        //   TRANSLATE EXACTLY ONCE, AT THE WIRE BOUNDARY. Util.EnumMap.ToWire/FromWire are
-        //   called ONLY from these Msg.Read*/Write* helpers, plus the handful of explicit
-        //   EnumMap.TryFromWire branch sites that must know whether an id resolved. NEVER
-        //   from Sync\ code (or any other consumer) on a value that has already been parsed:
-        //   everything handed to the Sync layer is LOCAL ids. Translating a second time
-        //   remaps an already-local modded id into a different item or into None, and that is
-        //   exactly how the AvatarManager UpdateState / ShowPackOpen double-translations
-        //   happened. If a Sync method needs the raw wire id, it must read it itself.
-
-        public static void WriteItemType(BinaryWriter bw, EItemType v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.ItemType, (int)v)); }
-        public static EItemType ReadItemType(BinaryReader br) { return (EItemType)Util.EnumMap.FromWire(Util.EnumKind.ItemType, br.ReadInt32()); }
-
-        public static void WriteObjType(BinaryWriter bw, EObjectType v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.ObjectType, (int)v)); }
-        public static EObjectType ReadObjType(BinaryReader br) { return (EObjectType)Util.EnumMap.FromWire(Util.EnumKind.ObjectType, br.ReadInt32()); }
-
-        public static void WriteDecoType(BinaryWriter bw, EDecoObject v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.DecoObject, (int)v)); }
-        public static EDecoObject ReadDecoType(BinaryReader br) { return (EDecoObject)Util.EnumMap.FromWire(Util.EnumKind.DecoObject, br.ReadInt32()); }
-
-        public static void WriteExpansion(BinaryWriter bw, ECardExpansionType v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.CardExpansion, (int)v)); }
-        public static ECardExpansionType ReadExpansion(BinaryReader br) { return (ECardExpansionType)Util.EnumMap.FromWire(Util.EnumKind.CardExpansion, br.ReadInt32()); }
-
-        public static void WriteMonsterType(BinaryWriter bw, EMonsterType v) { bw.Write(Util.EnumMap.ToWire(Util.EnumKind.MonsterType, (int)v)); }
-        public static EMonsterType ReadMonsterType(BinaryReader br) { return (EMonsterType)Util.EnumMap.FromWire(Util.EnumKind.MonsterType, br.ReadInt32()); }
-
-        /// <summary>Shared CardData wire format (used by CardDelta, CardShelfDelta, CardPriceSet).</summary>
-        public static void WriteCard(BinaryWriter bw, CardData card)
-        {
-            WriteExpansion(bw, card.expansionType);
-            WriteMonsterType(bw, card.monsterType);
-            // borderType is VANILLA and stays raw ON PURPOSE. ECardBorderType is not one of the
-            // enums EnhancedPrefabLoader mints custom ids into (ModParity.ModdedEnumTypeNames:
-            // EObjectType, EDecoObject, EItemType, ECardExpansionType, ERarity,
-            // ECollectionPackType), so its ids are identical on every PC and translating it
-            // could only ever introduce a bug. Do not "fix" this line.
-            bw.Write((int)card.borderType);
-            bw.Write(card.isFoil);
-            bw.Write(card.isDestiny);
-            bw.Write(card.isChampionCard);
-            bw.Write(card.isNew);
-            bw.Write(card.cardGrade);
-            bw.Write(card.gradedCardIndex);
-        }
-
-        public static CardData ReadCard(BinaryReader br)
-        {
-            return new CardData
-            {
-                expansionType = ReadExpansion(br),
-                monsterType = ReadMonsterType(br),
-                borderType = (ECardBorderType)br.ReadInt32(), // vanilla - see WriteCard
-                isFoil = br.ReadBoolean(),
-                isDestiny = br.ReadBoolean(),
-                isChampionCard = br.ReadBoolean(),
-                isNew = br.ReadBoolean(),
-                cardGrade = br.ReadInt32(),
-                gradedCardIndex = br.ReadInt32(),
-            };
-        }
     }
 }

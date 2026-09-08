@@ -14,13 +14,13 @@ namespace CardShopCoop.Net
         ConcurrentQueue<int> Disconnects { get; }
         ConcurrentQueue<int> Connects { get; }
 
-        void Send(int connId, byte[] frame);
-        void Broadcast(byte[] frame);
+        void Send(int connId, INetMessage message);
+        void Broadcast(INetMessage message);
 
         /// <summary>Fast lane for transient state (positions, NPC batches): may be sent
         /// unreliably and never delays behind bulk transfers. TCP treats it as Send.</summary>
-        void SendTransient(int connId, byte[] frame);
-        void BroadcastTransient(byte[] frame);
+        void SendTransient(int connId, INetMessage message);
+        void BroadcastTransient(INetMessage message);
         int ConnectionCount { get; }
         double SecondsSinceLastRecv(int connId);
         List<int> ConnIds();

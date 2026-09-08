@@ -1,3 +1,4 @@
+using CardShopCoop.Net;
 using UnityEngine;
 
 namespace CardShopCoop.Sync

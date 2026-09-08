@@ -5,6 +5,7 @@ using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 
 namespace CardShopCoop.Sync
 {
@@ -32,7 +33,7 @@ namespace CardShopCoop.Sync
             AccessTools.Field(typeof(TournamentPrizeShelf), "m_ScreenMesh");
 
         /// <summary>Set by CoopCore: host -> clients state broadcast.</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
 
         /// <summary>True while ClientApplyState writes CPlayerData.m_TournamentData, so
         /// no patch mistakes the authoritative copy for a local scheduling action.</summary>
@@ -134,7 +135,7 @@ namespace CardShopCoop.Sync
                 if (hash == _lastHash && _heal < 15f) return;
                 _lastHash = hash;
                 _heal = 0f;
-                BroadcastState?.Invoke(bw => WriteState(bw, td));
+                BroadcastState?.Invoke(BuildState(td));
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TournamentSync host: " + e.Message); }
         }
@@ -144,37 +145,37 @@ namespace CardShopCoop.Sync
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(TournamentStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(br); }
+            try { ClientApplyInner(message); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TournamentSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(TournamentStateMessage message)
         {
             var td = CPlayerData.m_TournamentData;
             if (td == null) { CPlayerData.m_TournamentData = td = new TournamentData(); }
 
-            byte flags = br.ReadByte();
+            byte flags = message.Flags;
             td.m_IsHostingTournament = (flags & 1) != 0;
             bool wasDay = td.m_IsTournamentDay;
             bool wasOver = td.m_IsTournamentDayOver;
             td.m_IsTournamentDay = (flags & 2) != 0;
             td.m_IsTournamentDayOver = (flags & 4) != 0;
-            td.m_TournamentMaxPlayerCount = br.ReadInt32();
-            td.m_TournamentSignedUpCustomerCount = br.ReadInt32();
-            td.m_TournamentFinishedCurrentRoundCustomerCount = br.ReadInt32();
-            td.m_TournamentCurrentRound = br.ReadInt32();
-            td.m_TournamentMaxRound = br.ReadInt32();
-            td.m_TournamentFee = br.ReadSingle();
-            td.m_TournamentTotalValue = br.ReadSingle();
+            td.m_TournamentMaxPlayerCount = message.MaxPlayerCount;
+            td.m_TournamentSignedUpCustomerCount = message.SignedUpCustomerCount;
+            td.m_TournamentFinishedCurrentRoundCustomerCount = message.FinishedCurrentRoundCustomerCount;
+            td.m_TournamentCurrentRound = message.CurrentRound;
+            td.m_TournamentMaxRound = message.MaxRound;
+            td.m_TournamentFee = message.Fee;
+            td.m_TournamentTotalValue = message.TotalValue;
 
             // prize catalog: mutate the vanilla 4-slot list in place so screens that
             // index m_PrizeDataList[i] never see it shorter than they expect
             if (td.m_PrizeDataList == null) td.m_PrizeDataList = new List<TournamentPrizeDataList>();
-            int lists = br.ReadByte();
+            int lists = message.PrizeSlots.Count;
             while (td.m_PrizeDataList.Count < lists)
                 td.m_PrizeDataList.Add(new TournamentPrizeDataList { m_PrizeDataList = new List<TournamentPrizeData>() });
             for (int i = 0; i < lists; i++)
@@ -182,36 +183,39 @@ namespace CardShopCoop.Sync
                 var slot = td.m_PrizeDataList[i];
                 if (slot.m_PrizeDataList == null) slot.m_PrizeDataList = new List<TournamentPrizeData>();
                 slot.m_PrizeDataList.Clear();
-                int entries = br.ReadByte();
-                for (int j = 0; j < entries; j++)
+                var dtoSlot = message.PrizeSlots[i];
+                for (int j = 0; j < dtoSlot.Prizes.Count; j++)
                 {
+                    var pe = dtoSlot.Prizes[j];
                     var p = new TournamentPrizeData();
-                    if (br.ReadBoolean()) p.m_CardData = Msg.ReadCard(br);
-                    // host id -> ours; a prize from a pack only the host has becomes
-                    // EItemType.None and the prize slot just shows nothing, which is
-                    // what an unresolvable prize did before translation existed
-                    p.m_ItemType = Msg.ReadItemType(br);
-                    p.m_Count = br.ReadInt32();
+                    if (pe.HasCard) p.m_CardData = pe.Card;
+                    // host id -> ours (already translated by the DTO deserialize); a prize
+                    // from a pack only the host has becomes EItemType.None and the prize slot
+                    // just shows nothing, which is what an unresolvable prize did before
+                    // translation existed
+                    p.m_ItemType = pe.ItemType;
+                    p.m_Count = pe.Count;
                     slot.m_PrizeDataList.Add(p);
                 }
             }
 
             // bracket digest
-            int n = br.ReadByte();
+            int n = message.Bracket.Count;
             var digest = new List<PairingEntry>(n);
             for (int i = 0; i < n; i++)
             {
+                var be = message.Bracket[i];
                 var e = new PairingEntry();
-                e.SortedIndex = br.ReadByte();
-                e.ModelIndex = br.ReadInt32();
-                byte f = br.ReadByte();
+                e.SortedIndex = be.SortedIndex;
+                e.ModelIndex = be.ModelIndex;
+                byte f = be.Flags;
                 e.IsFemale = (f & 1) != 0;
                 e.IsWin = (f & 2) != 0;
                 e.HasResult = (f & 4) != 0;
-                e.WinCount = br.ReadInt32();
-                e.WinPoints = br.ReadInt32();
-                e.OMW = br.ReadInt32();
-                e.OOMW = br.ReadInt32();
+                e.WinCount = be.WinCount;
+                e.WinPoints = be.WinPoints;
+                e.OMW = be.OMW;
+                e.OOMW = be.OOMW;
                 digest.Add(e);
             }
 
@@ -306,38 +310,44 @@ namespace CardShopCoop.Sync
 
         // ---------------- wire / hash ----------------
 
-        private static void WriteState(BinaryWriter bw, TournamentData td)
+        private static TournamentStateMessage BuildState(TournamentData td)
         {
-            bw.Write((byte)((td.m_IsHostingTournament ? 1 : 0)
-                          | (td.m_IsTournamentDay ? 2 : 0)
-                          | (td.m_IsTournamentDayOver ? 4 : 0)));
-            bw.Write(td.m_TournamentMaxPlayerCount);
-            bw.Write(td.m_TournamentSignedUpCustomerCount);
-            bw.Write(td.m_TournamentFinishedCurrentRoundCustomerCount);
-            bw.Write(td.m_TournamentCurrentRound);
-            bw.Write(td.m_TournamentMaxRound);
-            bw.Write(td.m_TournamentFee);
-            bw.Write(td.m_TournamentTotalValue);
+            var msg = new TournamentStateMessage
+            {
+                Flags = (byte)((td.m_IsHostingTournament ? 1 : 0)
+                             | (td.m_IsTournamentDay ? 2 : 0)
+                             | (td.m_IsTournamentDayOver ? 4 : 0)),
+                MaxPlayerCount = td.m_TournamentMaxPlayerCount,
+                SignedUpCustomerCount = td.m_TournamentSignedUpCustomerCount,
+                FinishedCurrentRoundCustomerCount = td.m_TournamentFinishedCurrentRoundCustomerCount,
+                CurrentRound = td.m_TournamentCurrentRound,
+                MaxRound = td.m_TournamentMaxRound,
+                Fee = td.m_TournamentFee,
+                TotalValue = td.m_TournamentTotalValue,
+            };
 
             var lists = td.m_PrizeDataList;
             int lc = lists != null ? Mathf.Min(lists.Count, 8) : 0;
-            bw.Write((byte)lc);
             for (int i = 0; i < lc; i++)
             {
+                var slot = new TournamentPrizeSlot();
                 var inner = lists[i] != null ? lists[i].m_PrizeDataList : null;
                 int ec = inner != null ? Mathf.Min(inner.Count, 64) : 0;
-                bw.Write((byte)ec);
                 for (int j = 0; j < ec; j++)
                 {
                     var p = inner[j];
                     bool hasCard = p != null && p.m_CardData != null;
-                    bw.Write(hasCard);
-                    if (hasCard) Msg.WriteCard(bw, p.m_CardData);
-                    // item prizes are EItemTypes (a modded id space) - the card above
-                    // already goes through the WriteCard chokepoint
-                    Msg.WriteItemType(bw, p != null ? p.m_ItemType : (EItemType)0);
-                    bw.Write(p != null ? p.m_Count : 0);
+                    slot.Prizes.Add(new TournamentPrizeEntry
+                    {
+                        HasCard = hasCard,
+                        Card = hasCard ? p.m_CardData : null,
+                        // item prizes are EItemTypes (a modded id space) - the card above
+                        // already goes through the WriteCard chokepoint
+                        ItemType = p != null ? p.m_ItemType : (EItemType)0,
+                        Count = p != null ? p.m_Count : 0,
+                    });
                 }
+                msg.PrizeSlots.Add(slot);
             }
 
             // bracket digest straight from the host's live sorted list (the same list
@@ -345,30 +355,32 @@ namespace CardShopCoop.Sync
             var cm = Cm();
             var sorted = cm != null ? cm.m_TournamentSortedCustomerList : null;
             int n = sorted != null ? Mathf.Min(sorted.Count, 64) : 0;
-            bw.Write((byte)n);
             for (int i = 0; i < n; i++)
             {
                 var c = sorted[i];
                 var ctd = c != null ? c.GetCustomerTournamentData() : null;
                 if (ctd == null)
                 {
-                    bw.Write((byte)0); bw.Write(0); bw.Write((byte)0);
-                    bw.Write(0); bw.Write(0); bw.Write(0); bw.Write(0);
+                    msg.Bracket.Add(new TournamentBracketEntry());
                     continue;
                 }
-                bw.Write((byte)Mathf.Clamp(ctd.m_TournamentCustomerSortedIndex, 0, 255));
-                bw.Write(c.GetCustomerModelIndex());
-                bw.Write((byte)((c.m_IsFemale ? 1 : 0)
-                              | (ctd.m_IsTournamentWin ? 2 : 0)
-                              | (ctd.m_HasRegisteredTournamentResult ? 4 : 0)));
-                bw.Write(ctd.m_TournamentWinCount);
-                bw.Write(ctd.m_TournamentWinPoints);
-                bw.Write(ctd.m_TournamentOMW);
-                bw.Write(ctd.m_TournamentOOMW);
+                msg.Bracket.Add(new TournamentBracketEntry
+                {
+                    SortedIndex = (byte)Mathf.Clamp(ctd.m_TournamentCustomerSortedIndex, 0, 255),
+                    ModelIndex = c.GetCustomerModelIndex(),
+                    Flags = (byte)((c.m_IsFemale ? 1 : 0)
+                                 | (ctd.m_IsTournamentWin ? 2 : 0)
+                                 | (ctd.m_HasRegisteredTournamentResult ? 4 : 0)),
+                    WinCount = ctd.m_TournamentWinCount,
+                    WinPoints = ctd.m_TournamentWinPoints,
+                    OMW = ctd.m_TournamentOMW,
+                    OOMW = ctd.m_TournamentOOMW,
+                });
             }
+            return msg;
         }
 
-        /// <summary>Change detector over everything WriteState sends. The host also folds
+        /// <summary>Change detector over everything BuildState sends. The host also folds
         /// in the live bracket; the client re-derives the same shape from the payload.</summary>
         private static int ComputeHash(TournamentData td)
         {

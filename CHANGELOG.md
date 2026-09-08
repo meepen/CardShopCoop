@@ -5,6 +5,59 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## Unreleased
+**Hardens register price synchronization for co-op clients.** Wire protocol 3; both players must update.
+
+## 1.0.60
+**Fixes warehouse shelf and stored-box pose desyncs.** Both players must update.
+
+- Placed-object positions now receive a periodic authoritative heal, so a lost or
+  rejected guest shelf move cannot leave the rack permanently out of sync.
+- Stored item boxes identify their warehouse shelf by the host-assigned shelf identity
+  instead of relying solely on re-indexable warehouse-list positions.
+
+- Register cart snapshots now carry the host's authoritative scanned total and effective fallback prices.
+- Cart change detection includes item/card identity and prices, and incomplete initial carts can self-heal before scanning starts.
+- Client register snapshots no longer regress an in-progress payment/change phase.
+- Card checkout completion uses the host's authoritative total instead of trusting the client's total.
+
+## 1.0.58
+**Internal wire refactor — protocol version 2. Both players must update.**
+
+- Every protocol message is now a strongly-typed DTO owned by `Net/Messages`, with the
+  wire layout implemented in each DTO's `Serialize`/`Deserialize`.
+- A single `MessageRegistry` decodes frames; `MessageRouter` dispatches typed messages by
+  handler with declared role/scene/delivery policies.
+- Transport layers (TCP + Steam) no longer inspect protocol bytes; they only reassemble and
+  decode complete frames through the shared codec.
+- Added a wire-protocol version byte to the handshake; peers on a different protocol are
+  rejected with a clear message.
+- Subsystem `Apply`/`Send` APIs consume/emit DTOs instead of raw reader/writer callbacks.
+
+---
+
+## 1.0.56
+**Fixes shelf desync after adding or removing placed objects.** Both players must update.
+
+- Placed objects now receive host-assigned session IDs in the population roster.
+- Shelf stock, card displays, movement, and furniture-box references use those IDs instead
+  of re-indexable `ShelfManager` list positions.
+- Population reconciliation still uses position only to bootstrap a newly loaded object,
+  then binds it to the host identity.
+
+---
+
+## 1.0.55
+**Fixes empty-box storage interaction for coop clients.** Both players must update.
+
+- Taking a box now uses a host-assigned BoxSync ID and automatically places the authoritative
+  mirrored box in the requesting player's hands.
+- Storing a box is host-validated and atomic, so a full or stale storage cannot destroy the
+  authoritative loose box.
+- Added request/accept/reject diagnostics and protection against rapid duplicate take requests.
+
+---
+
 ## 1.0.54
 **Fixes: a coop player frozen if they were manning a register when the day ended.** No wire change.
 

@@ -1,3 +1,4 @@
+using CardShopCoop.Net;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -34,7 +35,7 @@ namespace CardShopCoop.Sync
             }
 
             using (var ms = new MemoryStream())
-            using (var bw = new BinaryWriter(ms))
+            using (var bw = new NetWriter(ms))
             {
                 bw.Write(files.Count);
                 foreach (string f in files)
@@ -58,7 +59,7 @@ namespace CardShopCoop.Sync
             var renameRx = new Regex($@"(?<=_|Release){hostSlot}(?=_|\.|$)");
             int applied = 0, skipped = 0;
 
-            using (var br = new BinaryReader(new MemoryStream(bundle, writable: false)))
+            using (var br = new NetReader(new MemoryStream(bundle, writable: false)))
             {
                 int count = br.ReadInt32();
                 for (int i = 0; i < count; i++)

@@ -1,3 +1,5 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -44,10 +46,10 @@ namespace CardShopCoop.Sync
         /// (present or future) mistakes an echo for a local action.</summary>
         public static bool ApplyingRemote;
 
-        public Action<Action<BinaryWriter>> SendOp;         // set by CoopCore: client->host
-        public Action<Action<BinaryWriter>> BroadcastState; // set by CoopCore: host->clients
-        public Action<int, Action<BinaryWriter>> SendToClient;
-        public Action<Action<BinaryWriter>> BroadcastInteraction;
+        public Action<INetMessage> SendOp;         // set by CoopCore: client->host
+        public Action<INetMessage> BroadcastState; // set by CoopCore: host->clients
+        public Action<int, INetMessage> SendToClient;
+        public Action<INetMessage> BroadcastInteraction;
 
         // HireWorkerPanelUI keeps its identity and guards private; read them instead of
         // duplicating fee/level math that a game update could drift away from
@@ -204,7 +206,7 @@ namespace CardShopCoop.Sync
                     CoopPlugin.Log.LogWarning("StaffSync: hire pressed but SendOp not wired - ignored");
                     return false;
                 }
-                self.SendOp(bw => { bw.Write(OpHire); bw.Write(index); });
+                self.SendOp(new StaffOpMessage { Op = OpHire, Index = index });
                 SoundManager.GenericConfirm();
                 if (CoopCore.Instance != null)
                 {
@@ -227,17 +229,21 @@ namespace CardShopCoop.Sync
             try
             {
                 var d = worker.GetWorkerSaveData();
-                Instance.SendOp(bw =>
+                Instance.SendOp(new StaffOpMessage
                 {
-                    bw.Write(OpUpdate); bw.Write(worker.m_WorkerIndex);
-                    bw.Write((byte)d.primaryTask); bw.Write((byte)d.secondaryTask); bw.Write((byte)d.workerTask);
-                    bw.Write(d.isFillShelfWithoutLabel); bw.Write(d.isRoundUpPrice); bw.Write(d.isAvoidSetCardPrice);
-                    bw.Write(d.isRoundUpCardPrice); bw.Write(d.isAvoidSetCardPriceWhileRestock);
-                    bw.Write(d.setPriceMultiplier); bw.Write(d.setCardPriceMultiplier);
-                    var packs = d.cardPackItemTypeEnabledList;
-                    int pn = packs == null ? 0 : Math.Min(255, packs.Count);
-                    bw.Write((byte)pn);
-                    for (int i = 0; i < pn; i++) bw.Write(packs[i]);
+                    Op = OpUpdate,
+                    Index = worker.m_WorkerIndex,
+                    PrimaryTask = (byte)d.primaryTask,
+                    SecondaryTask = (byte)d.secondaryTask,
+                    WorkerTask = (byte)d.workerTask,
+                    FillNoLabel = d.isFillShelfWithoutLabel,
+                    RoundUpPrice = d.isRoundUpPrice,
+                    AvoidSetCardPrice = d.isAvoidSetCardPrice,
+                    RoundUpCardPrice = d.isRoundUpCardPrice,
+                    AvoidSetCardPriceRestock = d.isAvoidSetCardPriceWhileRestock,
+                    PriceMult = d.setPriceMultiplier,
+                    CardPriceMult = d.setCardPriceMultiplier,
+                    PackTypes = d.cardPackItemTypeEnabledList,
                 });
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("StaffSync update send: " + e.Message); }
@@ -257,7 +263,7 @@ namespace CardShopCoop.Sync
             if (CoopCore.Role != CoopRole.Client) return true;
             var worker = WorkerFrom(FiInteractWorker, __instance);
             if (worker == null || Instance?.SendOp == null) return false;
-            Instance.SendOp(bw => { bw.Write(OpBonus); bw.Write(worker.m_WorkerIndex); });
+            Instance.SendOp(new StaffOpMessage { Op = OpBonus, Index = worker.m_WorkerIndex });
             return false;
         }
 
@@ -266,7 +272,7 @@ namespace CardShopCoop.Sync
             if (CoopCore.Role != CoopRole.Client) return true;
             var worker = WorkerFrom(FiInteractWorker, __instance);
             if (worker == null || Instance?.SendOp == null) return false;
-            Instance.SendOp(bw => { bw.Write(OpFire); bw.Write(worker.m_WorkerIndex); });
+            Instance.SendOp(new StaffOpMessage { Op = OpFire, Index = worker.m_WorkerIndex });
             try { worker.OnPressStopInteract(); __instance.CloseScreen(); } catch { }
             return false;
         }
@@ -284,11 +290,7 @@ namespace CardShopCoop.Sync
             if (Instance?.SendOp == null) return false;
             Vector3 pos;
             if (!CoopCore.TryGetLocalPlayerPosition(out pos)) return false;
-            Instance.SendOp(bw =>
-            {
-                bw.Write(OpBeginInteract); bw.Write(index);
-                bw.Write(pos.x); bw.Write(pos.y); bw.Write(pos.z);
-            });
+            Instance.SendOp(new StaffOpMessage { Op = OpBeginInteract, Index = index, Position = pos });
             return false;
         }
 
@@ -319,14 +321,14 @@ namespace CardShopCoop.Sync
         private static void ReleaseClientWorker(int index)
         {
             if (!ClientWorkerLease.Remove(index)) return;
-            Instance?.SendOp?.Invoke(bw => { bw.Write(OpEndInteract); bw.Write(index); });
+            Instance?.SendOp?.Invoke(new StaffOpMessage { Op = OpEndInteract, Index = index });
         }
 
-        public static void ClientInteractionMessage(BinaryReader br)
+        public static void ClientInteractionMessage(StaffInteractMessage message)
         {
-            int index = br.ReadInt32();
-            bool granted = br.ReadBoolean();
-            bool occupied = br.ReadBoolean();
+            int index = message.Index;
+            bool granted = message.Granted;
+            bool occupied = message.Occupied;
             ClientWorkerBusy[index] = occupied;
             if (!occupied) ClientWorkerLease.Remove(index);
             if (!granted) return;
@@ -359,29 +361,28 @@ namespace CardShopCoop.Sync
 
         // ---------------- host ----------------
 
-        public void HostApplyOp(BinaryReader br, int connId)
+        public void HostApplyOp(StaffOpMessage message, int connId)
         {
-            byte op = br.ReadByte();
+            byte op = message.Op;
             switch (op)
             {
                 case OpHire:
-                    HostHire(br.ReadInt32());
+                    HostHire(message.Index);
                     break;
                 case OpUpdate:
-                    HostUpdate(br, connId);
+                    HostUpdate(message, connId);
                     break;
                 case OpBonus:
-                    HostBonus(br.ReadInt32(), connId);
+                    HostBonus(message.Index, connId);
                     break;
                 case OpFire:
-                    HostFire(br.ReadInt32(), connId);
+                    HostFire(message.Index, connId);
                     break;
                 case OpBeginInteract:
-                    HostBeginInteraction(br.ReadInt32(), connId,
-                        new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
+                    HostBeginInteraction(message.Index, connId, message.Position);
                     break;
                 case OpEndInteract:
-                    HostEndInteraction(br.ReadInt32(), connId);
+                    HostEndInteraction(message.Index, connId);
                     break;
                 default:
                     CoopPlugin.Log.LogWarning("StaffSync: unknown op " + op);
@@ -399,12 +400,12 @@ namespace CardShopCoop.Sync
         private void SendInteraction(int connId, int index, bool granted, bool occupied)
         {
             if (connId <= 0) return;
-            SendToClient?.Invoke(connId, bw => { bw.Write(index); bw.Write(granted); bw.Write(occupied); });
+            SendToClient?.Invoke(connId, new StaffInteractMessage { Index = index, Granted = granted, Occupied = occupied });
         }
 
         private void BroadcastInteractionState(int index, bool occupied)
         {
-            BroadcastInteraction?.Invoke(bw => { bw.Write(index); bw.Write(false); bw.Write(occupied); });
+            BroadcastInteraction?.Invoke(new StaffInteractMessage { Index = index, Granted = false, Occupied = occupied });
         }
 
         private bool HostBeginInteraction(int index, int connId, Vector3 playerPosition)
@@ -452,9 +453,9 @@ namespace CardShopCoop.Sync
             foreach (int index in release) HostEndInteraction(index, connId);
         }
 
-        private void HostUpdate(BinaryReader br, int connId)
+        private void HostUpdate(StaffOpMessage message, int connId)
         {
-            int index = br.ReadInt32();
+            int index = message.Index;
             if (!_workerLeaseOwner.TryGetValue(index, out int leaseOwner) || leaseOwner != connId) return;
             var wm = Wm();
             if (wm == null || index < 0 || index >= wm.m_WorkerDataList.Count) return;
@@ -462,16 +463,16 @@ namespace CardShopCoop.Sync
             if (workers == null || index >= workers.Count || workers[index] == null) return;
             var w = workers[index];
             if (!CPlayerData.GetIsWorkerHired(index)) return;
-            var primary = (EWorkerTask)br.ReadByte();
-            var secondary = (EWorkerTask)br.ReadByte();
-            var task = (EWorkerTask)br.ReadByte();
-            bool fill = br.ReadBoolean(), round = br.ReadBoolean(), avoid = br.ReadBoolean();
-            bool cardRound = br.ReadBoolean(), cardAvoid = br.ReadBoolean();
-            float mult = Mathf.Clamp(br.ReadSingle(), 0f, 10f);
-            float cardMult = Mathf.Clamp(br.ReadSingle(), 0f, 10f);
-            int pn = Math.Min(255, (int)br.ReadByte());
+            var primary = (EWorkerTask)message.PrimaryTask;
+            var secondary = (EWorkerTask)message.SecondaryTask;
+            var task = (EWorkerTask)message.WorkerTask;
+            bool fill = message.FillNoLabel, round = message.RoundUpPrice, avoid = message.AvoidSetCardPrice;
+            bool cardRound = message.RoundUpCardPrice, cardAvoid = message.AvoidSetCardPriceRestock;
+            float mult = Mathf.Clamp(message.PriceMult, 0f, 10f);
+            float cardMult = Mathf.Clamp(message.CardPriceMult, 0f, 10f);
+            int pn = message.PackTypes == null ? 0 : Math.Min(message.PackTypes.Count, 255);
             var packs = new bool[pn];
-            for (int i = 0; i < pn; i++) packs[i] = br.ReadBoolean();
+            for (int i = 0; i < pn; i++) packs[i] = message.PackTypes[i];
             if ((int)primary < 0 || ((int)primary > 6 && primary != EWorkerTask.GoBackHome)) return;
             if ((int)secondary < 0 || ((int)secondary > 6 && secondary != EWorkerTask.GoBackHome)) return;
             w.SetRestockShelfWithNoLabel(fill);
@@ -579,7 +580,9 @@ namespace CardShopCoop.Sync
                 _lastHash = hash;
                 _heal = 0f;
                 var list = _buf; // serialized synchronously by Msg.Build; safe to close over
-                BroadcastState?.Invoke(bw => WriteState(bw, list));
+                var entries = new List<StaffEntry>(list.Count);
+                for (int i = 0; i < list.Count; i++) entries.Add(ToStaffEntry(list[i]));
+                BroadcastState?.Invoke(new StaffStateMessage { Entries = entries });
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("StaffSync host: " + e.Message); }
         }
@@ -663,22 +666,22 @@ namespace CardShopCoop.Sync
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(StaffStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(br); }
+            try { ClientApplyInner(message); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("StaffSync client: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(StaffStateMessage message)
         {
-            int n = br.ReadByte();
+            int n = message.Entries.Count;
             bool rosterChanged = false;
             var saved = CPlayerData.m_WorkerSaveDataList;
             for (int i = 0; i < n; i++)
             {
-                var e = ReadEntry(br);
+                var e = message.Entries[i];
                 if (i < CPlayerData.m_IsWorkerHired.Count && CPlayerData.GetIsWorkerHired(i) != e.Hired)
                 {
                     // roster only - no ActivateWorker: real workers stay suppressed on the
@@ -751,73 +754,31 @@ namespace CardShopCoop.Sync
                 | (e.AvoidSetCardPriceRestock ? 128 : 0));
         }
 
-        private static void WriteState(BinaryWriter bw, List<Entry> list)
+        /// <summary>Map the internal entry snapshot onto the wire DTO's entry shape.
+        /// The two structs carry the same fields; only the type name differs.</summary>
+        private static StaffEntry ToStaffEntry(Entry e)
         {
-            bw.Write((byte)Mathf.Min(list.Count, MaxWorkers));
-            for (int i = 0; i < list.Count && i < MaxWorkers; i++)
+            return new StaffEntry
             {
-                var e = list[i];
-                bw.Write(PackFlags(e));
-                if (!e.HasData) continue;
-                bw.Write(e.PrimaryTask);
-                bw.Write(e.SecondaryTask);
-                bw.Write(e.WorkerTask);
-                bw.Write(e.CurrentState);
-                bw.Write(e.GoingHome);
-                bw.Write(e.BonusCount);
-                bw.Write(e.PriceMult);
-                bw.Write(e.CardPriceMult);
-                int pn = e.PackTypes != null ? Mathf.Min(e.PackTypes.Count, 255) : 0;
-                bw.Write((byte)pn);
-                for (int k = 0; k < pn; k += 8)
-                {
-                    byte b = 0;
-                    for (int bit = 0; bit < 8 && k + bit < pn; bit++)
-                        if (e.PackTypes[k + bit]) b |= (byte)(1 << bit);
-                    bw.Write(b);
-                }
-                int en = e.ExpList != null ? Mathf.Min(e.ExpList.Count, 255) : 0;
-                bw.Write((byte)en);
-                for (int k = 0; k < en; k++) bw.Write(e.ExpList[k]);
-            }
-        }
-
-        private static Entry ReadEntry(BinaryReader br)
-        {
-            byte f = br.ReadByte();
-            var e = new Entry
-            {
-                Hired = (f & 1) != 0,
-                HasData = (f & 2) != 0,
-                BonusBoosted = (f & 4) != 0,
-                FillNoLabel = (f & 8) != 0,
-                RoundUpPrice = (f & 16) != 0,
-                RoundUpCardPrice = (f & 32) != 0,
-                AvoidSetCardPrice = (f & 64) != 0,
-                AvoidSetCardPriceRestock = (f & 128) != 0,
+                Hired = e.Hired,
+                HasData = e.HasData,
+                PrimaryTask = e.PrimaryTask,
+                SecondaryTask = e.SecondaryTask,
+                WorkerTask = e.WorkerTask,
+                CurrentState = e.CurrentState,
+                GoingHome = e.GoingHome,
+                BonusCount = e.BonusCount,
+                BonusBoosted = e.BonusBoosted,
+                FillNoLabel = e.FillNoLabel,
+                RoundUpPrice = e.RoundUpPrice,
+                RoundUpCardPrice = e.RoundUpCardPrice,
+                AvoidSetCardPrice = e.AvoidSetCardPrice,
+                AvoidSetCardPriceRestock = e.AvoidSetCardPriceRestock,
+                PriceMult = e.PriceMult,
+                CardPriceMult = e.CardPriceMult,
+                PackTypes = e.PackTypes,
+                ExpList = e.ExpList,
             };
-            if (!e.HasData) return e;
-            e.PrimaryTask = br.ReadByte();
-            e.SecondaryTask = br.ReadByte();
-            e.WorkerTask = br.ReadByte();
-            e.CurrentState = br.ReadByte();
-            e.GoingHome = br.ReadBoolean();
-            e.BonusCount = br.ReadByte();
-            e.PriceMult = br.ReadSingle();
-            e.CardPriceMult = br.ReadSingle();
-            int pn = br.ReadByte();
-            var packs = new List<bool>(pn);
-            for (int k = 0; k < pn; k += 8)
-            {
-                byte b = br.ReadByte();
-                for (int bit = 0; bit < 8 && k + bit < pn; bit++)
-                    packs.Add((b & (1 << bit)) != 0);
-            }
-            e.PackTypes = packs;
-            int en = br.ReadByte();
-            e.ExpList = new List<int>(en);
-            for (int k = 0; k < en; k++) e.ExpList.Add(br.ReadInt32());
-            return e;
         }
     }
 }

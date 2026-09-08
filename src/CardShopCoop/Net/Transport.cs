@@ -18,7 +18,7 @@ namespace CardShopCoop.Net
     /// </summary>
     public class Transport : ICoopTransport
     {
-        private const int MaxFrame = 64 * 1024 * 1024; // save files are ~4 MB; hard cap for sanity
+        private const int MaxFrame = Msg.MaxFrameSize; // save files are ~4 MB; hard cap for sanity
 
         public ConcurrentQueue<InMsg> Incoming { get; } = new ConcurrentQueue<InMsg>();
         public ConcurrentQueue<int> Disconnects { get; } = new ConcurrentQueue<int>();
@@ -29,12 +29,26 @@ namespace CardShopCoop.Net
         public double TimeoutSeconds => 60.0;
 
         // TCP is already low-latency and ordered; the fast lane is just the normal lane
-        public void SendTransient(int connId, byte[] frame) { Send(connId, frame); }
-        public void BroadcastTransient(byte[] frame) { Broadcast(frame); }
+        public void Send(int connId, INetMessage message)
+        {
+            SendFrame(connId, NetMessageCodec.Encode(message));
+        }
+        public void Broadcast(INetMessage message)
+        {
+            BroadcastFrame(NetMessageCodec.Encode(message));
+        }
+        public void SendTransient(int connId, INetMessage message)
+        {
+            SendFrame(connId, NetMessageCodec.Encode(message));
+        }
+        public void BroadcastTransient(INetMessage message)
+        {
+            BroadcastFrame(NetMessageCodec.Encode(message));
+        }
 
         /// <summary>Frame sent by a transport-owned thread every 2s per connection.
         /// Keeps the link alive even while Unity's main thread is frozen in a scene load.</summary>
-        public byte[] KeepaliveFrame;
+        public INetMessage KeepaliveMessage;
 
         private TcpListener _listener;
         private Thread _acceptThread;
@@ -142,9 +156,9 @@ namespace CardShopCoop.Net
                 while (_running && conn.Alive)
                 {
                     Thread.Sleep(2000);
-                    var frame = KeepaliveFrame;
-                    if (frame == null || !conn.Alive) continue;
-                    conn.SendQueue.Enqueue(frame);
+                    var message = KeepaliveMessage;
+                    if (message == null || !conn.Alive) continue;
+                    conn.SendQueue.Enqueue(NetMessageCodec.Encode(message));
                     conn.SendSignal.Set();
                 }
             }) { IsBackground = true, Name = "CoopKeepalive" + conn.Id }.Start();
@@ -175,22 +189,17 @@ namespace CardShopCoop.Net
 
         private void ReadLoop(Conn conn)
         {
-            var lenBuf = new byte[4];
-            var typeBuf = new byte[1];
             try
             {
                 while (_running && conn.Alive)
                 {
-                    ReadExact(conn.Stream, lenBuf, 4);
-                    int frameLen = BitConverter.ToInt32(lenBuf, 0);
-                    if (frameLen < 1 || frameLen > MaxFrame)
-                        throw new IOException("Bad frame length " + frameLen);
-                    // MsgType byte and payload read separately: one allocation, no copy
-                    ReadExact(conn.Stream, typeBuf, 1);
-                    var payload = new byte[frameLen - 1];
-                    ReadExact(conn.Stream, payload, frameLen - 1);
+                    // Reassemble the entire protocol frame before decoding it. The
+                    // stream supplies bytes; Msg owns protocol framing.
+                    var frame = Msg.ReadFrame(conn.Stream, MaxFrame);
                     conn.LastRecvTicksUtc = DateTime.UtcNow.Ticks;
-                    Incoming.Enqueue(new InMsg { ConnId = conn.Id, Type = (MsgType)typeBuf[0], Payload = payload });
+                    if (!Msg.TryDecodeFrame(frame, 0, frame.Length, conn.Id, MaxFrame, out var message))
+                        throw new IOException("Bad message frame");
+                    Incoming.Enqueue(message);
                 }
             }
             catch
@@ -200,20 +209,9 @@ namespace CardShopCoop.Net
             DropConn(conn.Id);
         }
 
-        private static void ReadExact(NetworkStream s, byte[] buf, int count)
-        {
-            int off = 0;
-            while (off < count)
-            {
-                int n = s.Read(buf, off, count - off);
-                if (n <= 0) throw new IOException("Connection closed");
-                off += n;
-            }
-        }
-
         /// <summary>Never blocks the caller: enqueues for the connection's writer thread.
         /// A write failure surfaces there as a disconnect, not here.</summary>
-        public void Send(int connId, byte[] frame)
+        private void SendFrame(int connId, byte[] frame)
         {
             Conn conn;
             lock (_connsLock) { if (!_conns.TryGetValue(connId, out conn)) return; }
@@ -222,11 +220,11 @@ namespace CardShopCoop.Net
             conn.SendSignal.Set();
         }
 
-        public void Broadcast(byte[] frame)
+        private void BroadcastFrame(byte[] frame)
         {
             List<int> ids;
             lock (_connsLock) { ids = new List<int>(_conns.Keys); }
-            foreach (int id in ids) Send(id, frame);
+            foreach (int id in ids) SendFrame(id, frame);
         }
 
         public int ConnectionCount

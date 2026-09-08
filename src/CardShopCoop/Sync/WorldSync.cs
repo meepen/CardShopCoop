@@ -1,3 +1,4 @@
+using CardShopCoop.Net;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -20,7 +21,7 @@ namespace CardShopCoop.Sync
     {
         public struct Entry
         {
-            public int Key;   // kind<<24 | shelfIdx<<8 | compIdx
+            public int Key;   // kind<<24 | stableObjectId<<8 | compIdx
             public int Type;  // EItemType
             public int Count;
         }
@@ -74,10 +75,8 @@ namespace CardShopCoop.Sync
             return _sm;
         }
 
-        private static int Key(int kind, int shelf, int comp)
-        {
-            return (kind << 24) | ((shelf & 0xFFFF) << 8) | (comp & 0xFF);
-        }
+        private static bool TryKey(int kind, InteractableObject obj, int comp, out int key)
+            => PlacedObjectIdentity.TryMakeCompartmentKey(kind, obj, comp, out key);
 
         public void Reset()
         {
@@ -117,7 +116,7 @@ namespace CardShopCoop.Sync
                     if (shelf == null) continue;
                     var comps = shelf.GetItemCompartmentList();
                     for (int j = 0; j < comps.Count; j++)
-                        Visit(Key(0, i, j), comps[j], ref changes);
+                        if (TryKey(0, shelf, j, out int key)) Visit(key, comps[j], ref changes);
                 }
                 // warehouse racks (kind 1) are deliberately NOT walked: their compartment
                 // "count" is a STORED-BOX tally (AddBox/RemoveBox), not loose items, and
@@ -134,7 +133,7 @@ namespace CardShopCoop.Sync
                     if (combi == null) continue;
                     var comps = combi.GetItemCompartmentList();
                     for (int j = 0; j < comps.Count; j++)
-                        Visit(Key(3, i, j), comps[j], ref changes);
+                        if (TryKey(3, combi, j, out int key)) Visit(key, comps[j], ref changes);
                 }
                 for (int i = 0; i < sm.m_TournamentPrizeShelfList.Count; i++)
                 {
@@ -142,7 +141,7 @@ namespace CardShopCoop.Sync
                     if (prize == null) continue;
                     var comps = prize.GetItemCompartmentList();
                     for (int j = 0; j < comps.Count; j++)
-                        Visit(Key(14, i, j), comps[j], ref changes);
+                        if (TryKey(14, prize, j, out int key)) Visit(key, comps[j], ref changes);
                 }
             }
             catch (Exception e)
@@ -309,30 +308,14 @@ namespace CardShopCoop.Sync
         private static ShelfCompartment Resolve(ShelfManager sm, int key)
         {
             int kind = key >> 24;
-            int shelfIdx = (key >> 8) & 0xFFFF;
+            ushort objectId = PlacedObjectIdentity.ObjectIdFromCompartmentKey(key);
             int compIdx = key & 0xFF;
-            if (kind == 0)
-            {
-                if (shelfIdx >= sm.m_ShelfList.Count) return null;
-                var comps = sm.m_ShelfList[shelfIdx]?.GetItemCompartmentList();
-                return comps != null && compIdx < comps.Count ? comps[compIdx] : null;
-            }
-            if (kind == 3)
-            {
-                if (shelfIdx >= sm.m_CardItemCombiShelfList.Count) return null;
-                var comps = sm.m_CardItemCombiShelfList[shelfIdx]?.GetItemCompartmentList();
-                return comps != null && compIdx < comps.Count ? comps[compIdx] : null;
-            }
-            if (kind == 14)
-            {
-                if (shelfIdx >= sm.m_TournamentPrizeShelfList.Count) return null;
-                var comps = sm.m_TournamentPrizeShelfList[shelfIdx]?.GetItemCompartmentList();
-                return comps != null && compIdx < comps.Count ? comps[compIdx] : null;
-            }
-            // kind 1 (warehouse racks): never resolved - stored-box tallies are not
-            // item counts (see the walk comment). Old peers may still send them;
-            // returning null makes the apply a harmless no-op.
-            return null;
+            if (!PlacedObjectIdentity.TryResolve(sm, kind, objectId, out var obj)) return null;
+            List<ShelfCompartment> comps = null;
+            if (kind == 0) comps = (obj as Shelf)?.GetItemCompartmentList();
+            else if (kind == 3 || kind == 14)
+                comps = (obj as CardItemCombiShelf)?.GetItemCompartmentList();
+            return comps != null && compIdx < comps.Count ? comps[compIdx] : null;
         }
 
         private static readonly FieldInfo FiStoredItemList =
@@ -419,38 +402,6 @@ namespace CardShopCoop.Sync
 
         // ---- wire format ----
 
-        public static void WriteEntries(BinaryWriter bw, List<Entry> entries)
-        {
-            bw.Write((ushort)entries.Count);
-            foreach (var e in entries)
-            {
-                bw.Write(e.Key);
-                // EItemType crosses the wire in the HOST's id space (Msg.WriteItemType). A
-                // client's modded ids are a permutation of the host's, so the raw int here
-                // used to put someone else's product on the shelf; below the modded floor
-                // this is the identity function, so vanilla stock is untouched.
-                Net.Msg.WriteItemType(bw, (EItemType)e.Type);
-                bw.Write((ushort)Math.Max(0, Math.Min(e.Count, ushort.MaxValue)));
-            }
-        }
-
-        public static List<Entry> ReadEntries(BinaryReader br)
-        {
-            int n = br.ReadUInt16();
-            var list = new List<Entry>(n);
-            for (int i = 0; i < n; i++)
-                list.Add(new Entry
-                {
-                    Key = br.ReadInt32(),
-                    // back into OUR id space (identity on the host and on every vanilla id).
-                    // A modded type this PC has no counterpart for arrives as EItemType.None -
-                    // ApplyRemote skips those instead of clearing the compartment.
-                    Type = (int)Net.Msg.ReadItemType(br),
-                    Count = br.ReadUInt16(),
-                });
-            return list;
-        }
-
         // ---- full-state heal (FIX D-latent) ----
 
         /// <summary>
@@ -472,7 +423,7 @@ namespace CardShopCoop.Sync
         /// through ApplyRemote already, so no separate full-state flag byte is required - a
         /// full-state broadcast IS just a ShelfDelta carrying every compartment.
         /// </summary>
-        public void BuildFullState(BinaryWriter bw)
+        public List<Entry> BuildFullState()
         {
             var all = new List<Entry>();
             try
@@ -481,33 +432,44 @@ namespace CardShopCoop.Sync
                 if (sm != null)
                 {
                     for (int i = 0; i < sm.m_ShelfList.Count; i++)
-                        CollectComps(all, sm.m_ShelfList[i]?.GetItemCompartmentList(), 0, i);
+                    {
+                        var shelf = sm.m_ShelfList[i];
+                        CollectComps(all, shelf?.GetItemCompartmentList(), 0, shelf);
+                    }
                     for (int i = 0; i < sm.m_CardItemCombiShelfList.Count; i++)
-                        CollectComps(all, sm.m_CardItemCombiShelfList[i]?.GetItemCompartmentList(), 3, i);
+                    {
+                        var combi = sm.m_CardItemCombiShelfList[i];
+                        CollectComps(all, combi?.GetItemCompartmentList(), 3, combi);
+                    }
                     for (int i = 0; i < sm.m_TournamentPrizeShelfList.Count; i++)
-                        CollectComps(all, sm.m_TournamentPrizeShelfList[i]?.GetItemCompartmentList(), 14, i);
+                    {
+                        var prize = sm.m_TournamentPrizeShelfList[i];
+                        CollectComps(all, prize?.GetItemCompartmentList(), 14, prize);
+                    }
                 }
             }
             catch (Exception e)
             {
                 CoopPlugin.Log.LogWarning("WorldSync full-state build: " + e.Message);
             }
-            WriteEntries(bw, all);
+            return all;
         }
 
-        private static void CollectComps(List<Entry> into, List<ShelfCompartment> comps, int kind, int shelfIdx)
+        private static void CollectComps(List<Entry> into, List<ShelfCompartment> comps, int kind,
+            InteractableObject shelf)
         {
             if (comps == null) return;
             for (int j = 0; j < comps.Count; j++)
             {
                 var comp = comps[j];
                 if (comp == null) continue;
-                into.Add(new Entry
-                {
-                    Key = Key(kind, shelfIdx, j),
-                    Type = (int)comp.GetItemType(),
-                    Count = comp.GetItemCount(),
-                });
+                if (TryKey(kind, shelf, j, out int key))
+                    into.Add(new Entry
+                    {
+                        Key = key,
+                        Type = (int)comp.GetItemType(),
+                        Count = comp.GetItemCount(),
+                    });
             }
         }
 
@@ -521,9 +483,9 @@ namespace CardShopCoop.Sync
         /// so an absent key only means an index the host doesn't have either. Reuses ReadEntries,
         /// so it decodes an identical wire shape to a ShelfDelta.
         /// </summary>
-        public void ApplyFullState(BinaryReader br)
+        public void ApplyFullState(List<Entry> entries)
         {
-            ApplyRemote(ReadEntries(br));
+            ApplyRemote(entries);
         }
     }
 }

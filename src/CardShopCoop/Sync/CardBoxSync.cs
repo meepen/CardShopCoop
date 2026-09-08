@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using HarmonyLib;
 using UnityEngine;
 
@@ -41,6 +42,7 @@ namespace CardShopCoop.Sync
     {
         public struct Entry
         {
+            public int Id;
             public List<CardData> Cards; // immutable identity of the box
             public bool Carried;         // in someone's hands: position is transient
             public Vector3 Pos;
@@ -60,10 +62,13 @@ namespace CardShopCoop.Sync
         public static Func<InteractablePackagingBox_Card, bool> IsLocallyCarried = _ => false;
 
         /// <summary>Set by CoopCore: client -> host op (MsgType.CardBoxOp).</summary>
-        public Action<Action<BinaryWriter>> SendOp;
+        public Action<INetMessage> SendOp;
 
         /// <summary>Set by CoopCore: host -> clients state (MsgType.CardBoxState).</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
+
+        /// <summary>Set by CoopCore: host -> requesting client collect result.</summary>
+        public Action<int, INetMessage> SendToClient;
 
         /// <summary>True while sync code itself destroys/spawns boxes, so the
         /// OnDestroyed patch doesn't mistake reconciliation for player action.</summary>
@@ -86,6 +91,8 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, double> _recentlyReleased = new Dictionary<int, double>(); // client: ignore stale carried echoes
         private readonly Dictionary<int, double> _locallyTouched = new Dictionary<int, double>();   // client: my recent moves beat stale echoes
         private readonly Dictionary<int, double> _recentlyCollected = new Dictionary<int, double>(); // client: cardsHash -> time; stale pre-collect snapshots must not resurrect the box
+        private readonly Dictionary<InteractablePackagingBox_Card, int> _hostIds = new Dictionary<InteractablePackagingBox_Card, int>();
+        private int _nextHostId = 1;
         private float _timer;
         private int _lastHostHash;
         private float _hostHeal;
@@ -108,6 +115,8 @@ namespace CardShopCoop.Sync
             _recentlyReleased.Clear();
             _locallyTouched.Clear();
             _recentlyCollected.Clear();
+            _hostIds.Clear();
+            _nextHostId = 1;
             _timer = -8.4f; // staggered phase vs the other snapshot engines
             _lastHostHash = 0;
             _hostHeal = 0f;
@@ -254,6 +263,7 @@ namespace CardShopCoop.Sync
                 {
                     if (boxes[i] == null) continue;
                     var e = Snapshot(boxes[i]);
+                    e.Id = HostId(boxes[i]);
                     if (_remoteCarried.Contains(i)) e.Carried = true; // a client holds it
                     list.Add(e);
                 }
@@ -271,37 +281,41 @@ namespace CardShopCoop.Sync
                 _lastHostHash = hash;
                 _hostHeal = 0f;
                 var snap = list;
-                BroadcastState?.Invoke(bw => WriteEntries(bw, snap));
+                var entries = new List<CardBoxEntry>(snap.Count);
+                for (int i = 0; i < snap.Count; i++) entries.Add(ToWire(snap[i]));
+                BroadcastState?.Invoke(new CardBoxStateMessage { Entries = entries });
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync host: " + e.Message); }
         }
 
         /// <summary>Host: dispatch a client op (report / collect / removed).</summary>
-        public void HostApplyOp(BinaryReader br, int connId)
+        public void HostApplyOp(CardBoxOpMessage message, int connId)
         {
             if (CoopCore.Role != CoopRole.Host) return;
-            byte kind = br.ReadByte();
+            byte kind = message.Op;
             switch (kind)
             {
-                case OpReport: HostApplyReport(br); break;
-                case OpCollect: HostApplyCollect(br); break;
-                case OpRemoved: HostApplyRemoved(br, connId); break;
+                case OpReport: HostApplyReport(message); break;
+                case OpCollect: HostApplyCollect(message, connId); break;
+                case OpRemoved: HostApplyRemoved(message, connId); break;
                 default:
                     CoopPlugin.Log.LogWarning($"CardBoxSync: unknown op {kind}");
                     break;
             }
         }
 
-        private void HostApplyReport(BinaryReader br)
+        private void HostApplyReport(CardBoxOpMessage message)
         {
-            int n = Mathf.Min(br.ReadByte(), MaxBoxes);
+            var report = message.Report;
+            int n = Mathf.Min(report.Count, MaxBoxes);
             var boxes = LiveBoxes();
             for (int i = 0; i < n; i++)
             {
-                int cardCount = br.ReadByte();
-                bool carried = br.ReadBoolean();
-                var pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
-                float yaw = br.ReadSingle();
+                var entry = report[i];
+                int cardCount = entry.CardCount;
+                bool carried = entry.Carried;
+                var pos = entry.Position;
+                float yaw = entry.Yaw;
                 if (i >= boxes.Count || boxes[i] == null) continue;
                 var box = boxes[i];
                 // identity must match: indices may have shifted between snapshot and report
@@ -320,17 +334,30 @@ namespace CardShopCoop.Sync
         /// itself, and the CardDelta mirror carries every AddCard to the joiner, so
         /// BOTH binders receive them - plus the grade-10 report counter and the two
         /// achievement checks, then the box despawns and the mirror follows.</summary>
-        private void HostApplyCollect(BinaryReader br)
+        private void HostApplyCollect(CardBoxOpMessage message, int connId)
         {
-            int index = br.ReadByte();
-            int cardCount = br.ReadByte();
-            int cardsHash = br.ReadInt32();
+            int boxId = message.BoxId;
+            int cardCount = message.CardCount;
+            int cardsHash = message.CardsHash;
 
-            var box = FindBox(index, cardCount, cardsHash);
+            var box = FindBoxById(boxId);
             if (box == null)
             {
-                CoopPlugin.Log.LogWarning("CardBoxSync: collect for unknown/mismatched box - ignored");
-                return; // nothing consumed; the next snapshot re-aligns the joiner
+                var live = LiveBoxes();
+                var identities = new List<string>(live.Count);
+                for (int i = 0; i < live.Count; i++)
+                {
+                    var candidate = live[i];
+                    if (candidate == null) continue;
+                    var candidateCards = SafeCards(candidate);
+                    identities.Add(HostId(candidate) + "@" + i + ":" + candidateCards.Count + "/" + HashCards(candidateCards));
+                }
+                CoopPlugin.Log.LogWarning("CardBoxSync: collect for unknown/mismatched box - ignored"
+                    + " (requested id " + boxId + ":" + cardCount + "/" + cardsHash
+                    + ", live [" + string.Join(",", identities.ToArray()) + "])");
+                SendCollectRejected(connId, boxId, cardCount, cardsHash);
+                ForceResend();
+                return; // explicit rejection lets the client restore its mirror immediately
             }
             if (IsLocallyCarried(box)) return; // host is holding it: let him open it himself
 
@@ -372,15 +399,40 @@ namespace CardShopCoop.Sync
             ForceResend();          // the joiner's mirror updates on the next tick
         }
 
-        private void HostApplyRemoved(BinaryReader br, int connId)
+        /// <summary>Tell the client that its optimistic local despawn was rejected. The
+        /// following forced snapshot contains the still-live host box and recreates it.</summary>
+        private void SendCollectRejected(int connId, int boxId, int cardCount, int cardsHash)
         {
-            int index = br.ReadByte();
-            int cardCount = br.ReadByte();
-            int cardsHash = br.ReadInt32();
+            SendToClient?.Invoke(connId, new CardBoxCollectResultMessage
+            {
+                BoxId = boxId,
+                CardCount = (byte)cardCount,
+                CardsHash = cardsHash,
+            });
+        }
+
+        /// <summary>Client: undo stale-snapshot protection for a collect the host did not
+        /// accept. Otherwise even a forced authoritative snapshot can be ignored as the
+        /// pre-collect echo.</summary>
+        public void ClientApplyCollectRejected(CardBoxCollectResultMessage message)
+        {
+            int boxId = message.BoxId;
+            int cardCount = message.CardCount;
+            int cardsHash = message.CardsHash;
+            _recentlyCollected.Remove(cardsHash);
+            CoopPlugin.Log.LogWarning("CardBoxSync: host rejected collect; restoring the authoritative box"
+                + " (id " + boxId + ", " + cardCount + "/" + cardsHash + ")");
+        }
+
+        private void HostApplyRemoved(CardBoxOpMessage message, int connId)
+        {
+            int boxId = message.BoxId;
+            int cardCount = message.CardCount;
+            int cardsHash = message.CardsHash;
             // shared budget with item/furn boxes: a reloading client's world-teardown
             // echoes ALL THREE box lists as removals in one burst
             if (BoxSync.RemovalFlooded(connId, "card-box")) return;
-            var box = FindBox(index, cardCount, cardsHash);
+            var box = FindBoxById(boxId);
             if (box == null || IsLocallyCarried(box)) return;
             ApplyingRemote = true;
             try { box.OnDestroyed(); }
@@ -411,15 +463,39 @@ namespace CardShopCoop.Sync
             return null;
         }
 
+        private InteractablePackagingBox_Card FindBoxById(int id)
+        {
+            if (id <= 0) return null;
+            var boxes = LiveBoxes();
+            for (int i = 0; i < boxes.Count; i++)
+            {
+                var box = boxes[i];
+                if (box != null && HostId(box) == id) return box;
+            }
+            return null;
+        }
+
+        private int HostId(InteractablePackagingBox_Card box)
+        {
+            if (box == null) return 0;
+            if (_hostIds.TryGetValue(box, out int id)) return id;
+            id = _nextHostId++;
+            if (id <= 0) id = _nextHostId++;
+            _hostIds[box] = id;
+            return id;
+        }
+
         // ---------------- client ----------------
 
         /// <summary>Client: reconcile the live card-box population to the host's
         /// snapshot. Spawns go through RestockManager.SpawnPackageBoxCard with the
         /// EXACT broadcast CardData list (UpdateCardData stores it as-is; grades were
         /// rolled host-side in OnDayStarted, never here).</summary>
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(CardBoxStateMessage message)
         {
-            var hostList = ReadEntries(br);
+            var entries = message.Entries;
+            var hostList = new List<Entry>(entries.Count);
+            for (int i = 0; i < entries.Count; i++) hostList.Add(ToEntry(entries[i]));
             ApplyingRemote = true;
             try { ClientApplyInner(hostList); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync apply: " + e.Message); }
@@ -560,19 +636,19 @@ namespace CardShopCoop.Sync
                 }
                 if (changed && SendOp != null)
                 {
-                    SendOp(bw =>
+                    var report = new List<CardBoxReportEntry>(Mathf.Min(list.Count, MaxBoxes));
+                    for (int i = 0; i < list.Count && i < MaxBoxes; i++)
                     {
-                        bw.Write(OpReport);
-                        bw.Write((byte)Mathf.Min(list.Count, MaxBoxes));
-                        for (int i = 0; i < list.Count && i < MaxBoxes; i++)
+                        var e = list[i];
+                        report.Add(new CardBoxReportEntry
                         {
-                            var e = list[i];
-                            bw.Write((byte)Mathf.Min(e.Cards != null ? e.Cards.Count : 0, MaxCards));
-                            bw.Write(e.Carried);
-                            bw.Write(e.Pos.x); bw.Write(e.Pos.y); bw.Write(e.Pos.z);
-                            bw.Write(e.Yaw);
-                        }
-                    });
+                            CardCount = (byte)Mathf.Min(e.Cards != null ? e.Cards.Count : 0, MaxCards),
+                            Carried = e.Carried,
+                            Position = e.Pos,
+                            Yaw = e.Yaw,
+                        });
+                    }
+                    SendOp(new CardBoxOpMessage { Op = OpReport, Report = report });
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync client: " + e.Message); }
@@ -595,12 +671,13 @@ namespace CardShopCoop.Sync
             }
             int hash = HashCards(cards);
             int count = cards.Count;
-            SendOp(bw =>
+            int boxId = idx < _lastApplied.Count ? _lastApplied[idx].Id : 0;
+            SendOp(new CardBoxOpMessage
             {
-                bw.Write(OpCollect);
-                bw.Write((byte)Mathf.Clamp(idx, 0, 255));
-                bw.Write((byte)Mathf.Min(count, MaxCards));
-                bw.Write(hash);
+                Op = OpCollect,
+                BoxId = boxId,
+                CardCount = (byte)Mathf.Min(count, MaxCards),
+                CardsHash = hash,
             });
             _recentlyCollected[hash] = Time.realtimeSinceStartupAsDouble;
 
@@ -659,18 +736,18 @@ namespace CardShopCoop.Sync
             var cards = SafeCards(box);
             int hash = HashCards(cards);
             int count = cards.Count;
+            int boxId = idx < _lastApplied.Count ? _lastApplied[idx].Id : 0;
             if (idx < _lastApplied.Count) _lastApplied.RemoveAt(idx);
             _carriedLastTick.Clear();
             _locallyTouched.Clear();
             _recentlyReleased.Clear();
             _recentlyCollected[hash] = Time.realtimeSinceStartupAsDouble;
-            int sendIdx = idx;
-            SendOp?.Invoke(bw =>
+            SendOp?.Invoke(new CardBoxOpMessage
             {
-                bw.Write(OpRemoved);
-                bw.Write((byte)Mathf.Clamp(sendIdx, 0, 255));
-                bw.Write((byte)Mathf.Min(count, MaxCards));
-                bw.Write(hash);
+                Op = OpRemoved,
+                BoxId = boxId,
+                CardCount = (byte)Mathf.Min(count, MaxCards),
+                CardsHash = hash,
             });
         }
 
@@ -680,6 +757,7 @@ namespace CardShopCoop.Sync
         {
             return new Entry
             {
+                Id = 0,
                 Cards = SafeCards(box),
                 Carried = IsLocallyCarried(box),
                         Pos = BoxSync.PhysicsPosition(box),
@@ -754,45 +832,35 @@ namespace CardShopCoop.Sync
 
         // ---------------- wire / hash ----------------
 
-        private static void WriteEntries(BinaryWriter bw, List<Entry> entries)
+        private static Entry ToEntry(CardBoxEntry e)
         {
-            bw.Write((byte)Mathf.Min(entries.Count, MaxBoxes));
-            for (int i = 0; i < entries.Count && i < MaxBoxes; i++)
+            return new Entry
             {
-                var e = entries[i];
-                int n = e.Cards != null ? Mathf.Min(e.Cards.Count, MaxCards) : 0;
-                bw.Write((byte)n);
-                for (int j = 0; j < n; j++)
-                    Msg.WriteCard(bw, e.Cards[j] ?? new CardData());
-                bw.Write(e.Pos.x); bw.Write(e.Pos.y); bw.Write(e.Pos.z);
-                bw.Write(e.Yaw);
-                bw.Write(e.Carried);
-            }
+                Id = e.Id,
+                Cards = e.Cards,
+                Carried = e.Carried,
+                Pos = e.Position,
+                Yaw = e.Yaw,
+            };
         }
 
-        private static List<Entry> ReadEntries(BinaryReader br)
+        private static CardBoxEntry ToWire(Entry e)
         {
-            int count = Mathf.Min(br.ReadByte(), MaxBoxes);
-            var list = new List<Entry>(count);
-            for (int i = 0; i < count; i++)
+            return new CardBoxEntry
             {
-                int n = Mathf.Min(br.ReadByte(), MaxCards);
-                var cards = new List<CardData>(n);
-                for (int j = 0; j < n; j++) cards.Add(Msg.ReadCard(br));
-                var e = new Entry
-                {
-                    Cards = cards,
-                    Pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
-                    Yaw = br.ReadSingle(),
-                    Carried = br.ReadBoolean(),
-                };
-                list.Add(e);
-            }
-            return list;
+                Id = e.Id,
+                Cards = e.Cards,
+                Position = e.Pos,
+                Yaw = e.Yaw,
+                Carried = e.Carried,
+            };
         }
 
         /// <summary>Identity hash of a box's contents. Deliberately excludes isNew and
-        /// gradedCardIndex (volatile bookkeeping the two sides may disagree on).</summary>
+        /// gradedCardIndex (volatile bookkeeping the two sides may disagree on).
+        /// Grading Overhaul temporarily decodes an encoded cardGrade while card UI code
+        /// runs, so identity must use its registry-backed encoded value rather than the
+        /// transient visible 1-10 grade.</summary>
         private static int HashCards(List<CardData> cards)
         {
             int h = 17;
@@ -806,9 +874,20 @@ namespace CardShopCoop.Sync
                 h = h * 31 + (int)c.expansionType;
                 h = h * 31 + (int)c.borderType;
                 h = h * 31 + ((c.isFoil ? 1 : 0) | (c.isDestiny ? 2 : 0) | (c.isChampionCard ? 4 : 0));
-                h = h * 31 + c.cardGrade;
+                h = h * 31 + CanonicalGrade(c);
             }
             return h;
+        }
+
+        /// <summary>Return the stable wire/identity grade. Grading Overhaul's card UI can
+        /// temporarily expose the actual 1-10 grade through CardData.cardGrade even though
+        /// the certificate-bearing encoded value remains in its registry.</summary>
+        private static int CanonicalGrade(CardData card)
+        {
+            if (card == null) return 0;
+            return Util.GradingInterop.Present
+                ? Util.GradingInterop.Encoded(card)
+                : card.cardGrade;
         }
 
         private static bool SameCards(List<CardData> a, List<CardData> b)

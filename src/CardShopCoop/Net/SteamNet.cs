@@ -9,8 +9,8 @@ namespace CardShopCoop.Net
     /// <summary>
     /// Steam P2P transport: friends-list invites, no IPs, no port forwarding. Rides the
     /// game's own Steamworks.NET (initialized and pumped by its Heathen integration).
-    /// Uses classic ISteamNetworking P2P with relay fallback (Msg.Build's 4-byte length
-    /// prefix is kept for wire compatibility and stripped on receive). Two outgoing lanes:
+    /// Uses classic ISteamNetworking P2P with relay fallback (the protocol codec owns the
+    /// 4-byte length prefix). Two outgoing lanes:
     /// transients (UnreliableNoDelay, newest-wins, dropped on refusal) drain before the
     /// stall-retried reliable lane, so a clogged bulk transfer can never delay position
     /// updates. All Steam calls happen in PumpMainThread; Send()/SendTransient() from
@@ -24,7 +24,7 @@ namespace CardShopCoop.Net
         public ConcurrentQueue<int> Disconnects { get; } = new ConcurrentQueue<int>();
         public ConcurrentQueue<int> Connects { get; } = new ConcurrentQueue<int>();
 
-        public byte[] KeepaliveFrame;
+        public INetMessage KeepaliveMessage;
         public double TimeoutSeconds => 180.0; // keepalives freeze with the main thread
 
         private readonly bool _isHost;
@@ -121,28 +121,48 @@ namespace CardShopCoop.Net
             AddPeer(host);
         }
 
-        public void Send(int connId, byte[] frame)
+        private void SendFrame(int connId, byte[] frame)
         {
             _reliableOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = frame });
         }
 
+        public void Send(int connId, INetMessage message)
+        {
+            SendFrame(connId, NetMessageCodec.Encode(message));
+        }
+
         /// <summary>Main thread only: iterates _peers directly to avoid a per-call snapshot.</summary>
-        public void Broadcast(byte[] frame)
+        private void BroadcastFrame(byte[] frame)
         {
             foreach (var kv in _peers)
                 _reliableOutbox.Enqueue(new Outgoing { ConnId = kv.Key, Frame = frame });
         }
 
-        public void SendTransient(int connId, byte[] frame)
+        public void Broadcast(INetMessage message)
+        {
+            BroadcastFrame(NetMessageCodec.Encode(message));
+        }
+
+        private void SendTransientFrame(int connId, byte[] frame)
         {
             _transientOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = frame });
         }
 
+        public void SendTransient(int connId, INetMessage message)
+        {
+            SendTransientFrame(connId, NetMessageCodec.Encode(message));
+        }
+
         /// <summary>Main thread only: iterates _peers directly to avoid a per-call snapshot.</summary>
-        public void BroadcastTransient(byte[] frame)
+        private void BroadcastTransientFrame(byte[] frame)
         {
             foreach (var kv in _peers)
                 _transientOutbox.Enqueue(new Outgoing { ConnId = kv.Key, Frame = frame });
+        }
+
+        public void BroadcastTransient(INetMessage message)
+        {
+            BroadcastTransientFrame(NetMessageCodec.Encode(message));
         }
 
         public void PumpMainThread()
@@ -159,7 +179,9 @@ namespace CardShopCoop.Net
             _newestTransient.Clear();
             while (_transientOutbox.TryDequeue(out var tr))
             {
-                byte msgType = tr.Frame[4]; // MsgType byte follows the 4-byte length prefix
+                if (!Msg.TryGetType(tr.Frame, out MsgType transientType))
+                    continue; // malformed outbound data must not affect lane scheduling
+                byte msgType = (byte)transientType;
                 // CHUNKED transients carry a DIFFERENT slice of data per frame, so
                 // newest-wins coalescing (right for a single replaceable state like
                 // PlayerState) would drop every chunk but the last. NpcState splits a
@@ -228,11 +250,12 @@ namespace CardShopCoop.Net
 
             // ---- keepalive ----
             _keepaliveTimer += Time.unscaledDeltaTime;
-            if (_keepaliveTimer >= 2f && KeepaliveFrame != null && _peers.Count > 0)
+            if (_keepaliveTimer >= 2f && KeepaliveMessage != null && _peers.Count > 0)
             {
                 _keepaliveTimer = 0f;
+                var frame = NetMessageCodec.Encode(KeepaliveMessage);
                 foreach (var kv in _peers)
-                    SteamNetworking.SendP2PPacket(kv.Value, KeepaliveFrame, (uint)KeepaliveFrame.Length,
+                    SteamNetworking.SendP2PPacket(kv.Value, frame, (uint)frame.Length,
                         EP2PSend.k_EP2PSendReliable, Channel);
             }
 
@@ -242,7 +265,7 @@ namespace CardShopCoop.Net
                 if (size > _readBuf.Length) _readBuf = new byte[size];
                 if (!SteamNetworking.ReadP2PPacket(_readBuf, (uint)_readBuf.Length, out uint msgSize, out CSteamID remote, Channel))
                     break;
-                if (msgSize < 5) continue;
+                if (msgSize < Msg.MinimumFrameSize) continue;
 
                 if (!_ids.TryGetValue(remote, out int cid))
                 {
@@ -252,11 +275,9 @@ namespace CardShopCoop.Net
                 }
                 _lastRecv[cid] = Time.realtimeSinceStartupAsDouble;
 
-                int frameLen = BitConverter.ToInt32(_readBuf, 0);
-                if (frameLen != (int)msgSize - 4 || frameLen < 1) continue;
-                var payload = new byte[frameLen - 1];
-                Buffer.BlockCopy(_readBuf, 5, payload, 0, frameLen - 1);
-                Incoming.Enqueue(new InMsg { ConnId = cid, Type = (MsgType)_readBuf[4], Payload = payload });
+                if (Msg.TryDecodeFrame(_readBuf, 0, (int)msgSize, cid,
+                    Msg.MaxFrameSize, out var message))
+                    Incoming.Enqueue(message);
             }
         }
 
@@ -584,9 +605,9 @@ namespace CardShopCoop.Net
 
         public bool SteamAvailable() { return _lobby.SteamAvailable(); }
 
-        public ICoopTransport CreateTransport(bool isHost, byte[] keepalive)
+        public ICoopTransport CreateTransport(bool isHost, INetMessage keepalive)
         {
-            _tx = new SteamTransport(isHost) { KeepaliveFrame = keepalive };
+            _tx = new SteamTransport(isHost) { KeepaliveMessage = keepalive };
             return _tx;
         }
 

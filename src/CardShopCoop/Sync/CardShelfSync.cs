@@ -19,7 +19,7 @@ namespace CardShopCoop.Sync
     {
         public struct Entry
         {
-            public int Key; // kind<<24 | shelfIdx<<8 | compIdx  (kind: 2 card shelf, 3 combi)
+            public int Key; // kind<<24 | stableObjectId<<8 | compIdx
             public bool Occupied;
             public CardData Card; // valid when Occupied
         }
@@ -129,7 +129,7 @@ namespace CardShopCoop.Sync
                 {
                     var comp = comps[j];
                     if (comp == null) continue;
-                    int key = (kind << 24) | ((i & 0xFFFF) << 8) | (j & 0xFF);
+                    if (!PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key)) continue;
                     // unreadable (a card is there but its pooled UI is culled/detached)
                     // is NOT empty - misreporting it as empty wipes the other side
                     if (!TryReadSlot(comp, out CardData card)) continue;
@@ -225,12 +225,10 @@ namespace CardShopCoop.Sync
         private static InteractableCardCompartment Resolve(ShelfManager sm, int key)
         {
             int kind = key >> 24;
-            int shelfIdx = (key >> 8) & 0xFFFF;
+            ushort objectId = PlacedObjectIdentity.ObjectIdFromCompartmentKey(key);
             int compIdx = key & 0xFF;
-            CardShelf shelf = null;
-            if (kind == 2 && shelfIdx < sm.m_CardShelfList.Count) shelf = sm.m_CardShelfList[shelfIdx];
-            else if (kind == 3 && shelfIdx < sm.m_CardItemCombiShelfList.Count) shelf = sm.m_CardItemCombiShelfList[shelfIdx];
-            else if (kind == 14 && shelfIdx < sm.m_TournamentPrizeShelfList.Count) shelf = sm.m_TournamentPrizeShelfList[shelfIdx];
+            if (!PlacedObjectIdentity.TryResolve(sm, kind, objectId, out var obj)) return null;
+            var shelf = obj as CardShelf;
             if (shelf == null) return null;
             var comps = shelf.GetCardCompartmentList();
             return compIdx < comps.Count ? comps[compIdx] : null;
@@ -295,40 +293,17 @@ namespace CardShopCoop.Sync
                 {
                     var comp = comps[j];
                     if (comp == null || !TryReadSlot(comp, out CardData card)) continue;
-                    into.Add(new Entry
-                    {
-                        Key = (kind << 24) | ((i & 0xFFFF) << 8) | (j & 0xFF),
-                        Occupied = card != null,
-                        Card = card,
-                    });
+                    if (PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key))
+                        into.Add(new Entry
+                        {
+                            Key = key,
+                            Occupied = card != null,
+                            Card = card,
+                        });
                 }
             }
         }
 
         // ---- wire format ----
-
-        public static void WriteEntries(BinaryWriter bw, List<Entry> entries)
-        {
-            bw.Write((ushort)entries.Count);
-            foreach (var e in entries)
-            {
-                bw.Write(e.Key);
-                bw.Write(e.Occupied);
-                if (e.Occupied) Msg.WriteCard(bw, e.Card);
-            }
-        }
-
-        public static List<Entry> ReadEntries(BinaryReader br)
-        {
-            int n = br.ReadUInt16();
-            var list = new List<Entry>(n);
-            for (int i = 0; i < n; i++)
-            {
-                var e = new Entry { Key = br.ReadInt32(), Occupied = br.ReadBoolean() };
-                if (e.Occupied) e.Card = Msg.ReadCard(br);
-                list.Add(e);
-            }
-            return list;
-        }
     }
 }

@@ -1,3 +1,5 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -31,7 +33,7 @@ namespace CardShopCoop.Sync
         /// these tables can tell a sync write from a local one.</summary>
         public static bool ApplyingRemote;
 
-        public Action<Action<BinaryWriter>> BroadcastState; // set by CoopCore: host -> clients
+        public Action<INetMessage> BroadcastState; // set by CoopCore: host -> clients
 
         private const float Interval = 2f;
         private const float HealEvery = 20f; // ~32KB per snapshot; keep the heal slow
@@ -149,59 +151,63 @@ namespace CardShopCoop.Sync
                 if (hash == _lastHash && _heal < HealEvery) return;
                 _lastHash = hash;
                 _heal = 0f;
-                BroadcastState(WriteState);
+                BroadcastState(BuildState());
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("MarketSync host: " + e.Message); }
         }
 
-        private static void WriteState(BinaryWriter bw)
+        private static MarketStateMessage BuildState()
         {
             var modded = EplModdedItemTypes(); // empty when the bridge is inactive
-            bw.Write(s_rollGen); // history-append stamp: post-roll broadcasts only
-            WritePercents(bw, CPlayerData.m_ItemPricePercentChangeList, modded);
-            WriteMarket(bw, CPlayerData.m_GenCardMarketPriceList);
-            WriteMarket(bw, CPlayerData.m_GenCardMarketPriceListDestiny);
-            WriteMarket(bw, CPlayerData.m_GenCardMarketPriceListGhost);
-            WriteMarket(bw, CPlayerData.m_GenCardMarketPriceListGhostBlack);
-            WriteMarket(bw, CPlayerData.m_GenCardMarketPriceListMegabot);
-            WriteMarket(bw, CPlayerData.m_GenCardMarketPriceListFantasyRPG);
-            WriteMarket(bw, CPlayerData.m_GenCardMarketPriceListCatJob);
+            var msg = new MarketStateMessage
+            {
+                RollGen = s_rollGen, // history-append stamp: post-roll broadcasts only
+            };
+            FillPercents(msg.ItemPricePercentChangeList, CPlayerData.m_ItemPricePercentChangeList, modded);
+            FillMarket(msg.GenCardMarketPriceList, CPlayerData.m_GenCardMarketPriceList);
+            FillMarket(msg.GenCardMarketPriceListDestiny, CPlayerData.m_GenCardMarketPriceListDestiny);
+            FillMarket(msg.GenCardMarketPriceListGhost, CPlayerData.m_GenCardMarketPriceListGhost);
+            FillMarket(msg.GenCardMarketPriceListGhostBlack, CPlayerData.m_GenCardMarketPriceListGhostBlack);
+            FillMarket(msg.GenCardMarketPriceListMegabot, CPlayerData.m_GenCardMarketPriceListMegabot);
+            FillMarket(msg.GenCardMarketPriceListFantasyRPG, CPlayerData.m_GenCardMarketPriceListFantasyRPG);
+            FillMarket(msg.GenCardMarketPriceListCatJob, CPlayerData.m_GenCardMarketPriceListCatJob);
             // game-event rows are raw prices, not clamped percents - full floats
-            WriteFloats(bw, CPlayerData.m_SetGameEventPriceList);
-            WriteFloats(bw, CPlayerData.m_GeneratedGameEventPriceList);
-            WriteFloats(bw, CPlayerData.m_GameEventPricePercentChangeList);
-            WriteSparseFloats(bw, CPlayerData.m_GeneratedMarketPriceList, modded, s_eplGenMarket);
-            WriteSparseFloats(bw, CPlayerData.m_GeneratedCostPriceList, modded, s_eplGenCost);
-            WriteSparseFloats(bw, CPlayerData.m_AverageItemCostList, modded, s_eplAvgCost);
+            FillFloats(msg.SetGameEventPriceList, CPlayerData.m_SetGameEventPriceList);
+            FillFloats(msg.GeneratedGameEventPriceList, CPlayerData.m_GeneratedGameEventPriceList);
+            FillFloats(msg.GameEventPricePercentChangeList, CPlayerData.m_GameEventPricePercentChangeList);
+            FillSparse(msg.GeneratedMarketPriceList, CPlayerData.m_GeneratedMarketPriceList, modded, s_eplGenMarket);
+            FillSparse(msg.GeneratedCostPriceList, CPlayerData.m_GeneratedCostPriceList, modded, s_eplGenCost);
+            FillSparse(msg.AverageItemCostList, CPlayerData.m_AverageItemCostList, modded, s_eplAvgCost);
+            return msg;
         }
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(MarketStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(br); }
+            try { ClientApplyInner(message); }
             catch (Exception e) { CoopPlugin.Log.LogWarning("MarketSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(MarketStateMessage message)
         {
-            int rollGen = br.ReadInt32();
-            ReadPercentsInto(br, CPlayerData.m_ItemPricePercentChangeList);
-            ReadMarketInto(br, CPlayerData.m_GenCardMarketPriceList);
-            ReadMarketInto(br, CPlayerData.m_GenCardMarketPriceListDestiny);
-            ReadMarketInto(br, CPlayerData.m_GenCardMarketPriceListGhost);
-            ReadMarketInto(br, CPlayerData.m_GenCardMarketPriceListGhostBlack);
-            ReadMarketInto(br, CPlayerData.m_GenCardMarketPriceListMegabot);
-            ReadMarketInto(br, CPlayerData.m_GenCardMarketPriceListFantasyRPG);
-            ReadMarketInto(br, CPlayerData.m_GenCardMarketPriceListCatJob);
-            ReadFloatsInto(br, CPlayerData.m_SetGameEventPriceList);
-            ReadFloatsInto(br, CPlayerData.m_GeneratedGameEventPriceList);
-            ReadFloatsInto(br, CPlayerData.m_GameEventPricePercentChangeList);
-            ReadSparseFloatsInto(br, CPlayerData.m_GeneratedMarketPriceList, ModdedGenMarket);
-            ReadSparseFloatsInto(br, CPlayerData.m_GeneratedCostPriceList, ModdedGenCost);
-            ReadSparseFloatsInto(br, CPlayerData.m_AverageItemCostList, ModdedAvgCost);
+            int rollGen = message.RollGen;
+            ReadPercentsInto(message.ItemPricePercentChangeList, CPlayerData.m_ItemPricePercentChangeList);
+            ReadMarketInto(message.GenCardMarketPriceList, CPlayerData.m_GenCardMarketPriceList);
+            ReadMarketInto(message.GenCardMarketPriceListDestiny, CPlayerData.m_GenCardMarketPriceListDestiny);
+            ReadMarketInto(message.GenCardMarketPriceListGhost, CPlayerData.m_GenCardMarketPriceListGhost);
+            ReadMarketInto(message.GenCardMarketPriceListGhostBlack, CPlayerData.m_GenCardMarketPriceListGhostBlack);
+            ReadMarketInto(message.GenCardMarketPriceListMegabot, CPlayerData.m_GenCardMarketPriceListMegabot);
+            ReadMarketInto(message.GenCardMarketPriceListFantasyRPG, CPlayerData.m_GenCardMarketPriceListFantasyRPG);
+            ReadMarketInto(message.GenCardMarketPriceListCatJob, CPlayerData.m_GenCardMarketPriceListCatJob);
+            ReadFloatsInto(message.SetGameEventPriceList, CPlayerData.m_SetGameEventPriceList);
+            ReadFloatsInto(message.GeneratedGameEventPriceList, CPlayerData.m_GeneratedGameEventPriceList);
+            ReadFloatsInto(message.GameEventPricePercentChangeList, CPlayerData.m_GameEventPricePercentChangeList);
+            ReadSparseFloatsInto(message.GeneratedMarketPriceList, CPlayerData.m_GeneratedMarketPriceList, ModdedGenMarket);
+            ReadSparseFloatsInto(message.GeneratedCostPriceList, CPlayerData.m_GeneratedCostPriceList, ModdedGenCost);
+            ReadSparseFloatsInto(message.AverageItemCostList, CPlayerData.m_AverageItemCostList, ModdedAvgCost);
 
             // Replay the vanilla once-per-day history append AFTER the day's values are
             // in, so the graph gains the same last point the host's did. The first
@@ -231,66 +237,62 @@ namespace CardShopCoop.Sync
         // only non-zero entries ship, as (index, pct) pairs - a dense send both
         // truncated past 65535 (modded items never synced) and wasted ~128KB per roll.
         // Vanilla values come off the raw list; modded values off the EPL bridge.
-        private static void WritePercents(BinaryWriter bw, List<float> list, List<int> modded)
+        private static void FillPercents(List<MarketPercentEntry> out_list, List<float> list, List<int> modded)
         {
             int vanilla = VanillaWalkCount(list);
-            int nonZero = 0;
-            for (int i = 0; i < vanilla; i++) if (list[i] != 0f) nonZero++;
             var moddedVals = CollectModded(modded, s_eplPctChange);
-            bw.Write(nonZero + moddedVals.Count);
             for (int i = 0; i < vanilla; i++)
                 if (list[i] != 0f)
                 {
-                    // the index IS an EItemType; below the modded floor WriteItemType is the
-                    // identity, so this whole vanilla half is byte-for-byte what it always was
-                    Net.Msg.WriteItemType(bw, (EItemType)i);
-                    bw.Write((short)Mathf.Clamp(Mathf.RoundToInt(list[i] * 100f), short.MinValue, short.MaxValue));
+                    // the index IS an EItemType; below the modded floor WriteItemType (invoked
+                    // by the DTO Serialize) is the identity, so this whole vanilla half is
+                    // byte-for-byte what it always was
+                    out_list.Add(new MarketPercentEntry
+                    {
+                        ItemType = (EItemType)i,
+                        Percent = (short)Mathf.Clamp(Mathf.RoundToInt(list[i] * 100f), short.MinValue, short.MaxValue),
+                    });
                 }
             for (int k = 0; k < moddedVals.Count; k++)
             {
-                Net.Msg.WriteItemType(bw, (EItemType)moddedVals[k].Key);
-                bw.Write((short)Mathf.Clamp(Mathf.RoundToInt(moddedVals[k].Value * 100f), short.MinValue, short.MaxValue));
+                out_list.Add(new MarketPercentEntry
+                {
+                    ItemType = (EItemType)moddedVals[k].Key,
+                    Percent = (short)Mathf.Clamp(Mathf.RoundToInt(moddedVals[k].Value * 100f), short.MinValue, short.MaxValue),
+                });
             }
         }
 
         // Generated base prices are FULL floats keyed by raw itemType (the >= 200k
         // modded id space), non-zero entries only. Unlike percents, absent entries keep
         // their local value - the host may legitimately have gaps we filled at join.
-        private static void WriteSparseFloats(BinaryWriter bw, List<float> list, List<int> modded, PropertyInfo eplField)
+        private static void FillSparse(List<MarketSparseEntry> out_list, List<float> list, List<int> modded, PropertyInfo eplField)
         {
             int vanilla = VanillaWalkCount(list);
-            int nonZero = 0;
-            for (int i = 0; i < vanilla; i++) if (list[i] != 0f) nonZero++;
             var moddedVals = CollectModded(modded, eplField);
-            bw.Write(nonZero + moddedVals.Count);
             for (int i = 0; i < vanilla; i++)
                 if (list[i] != 0f)
                 {
-                    Net.Msg.WriteItemType(bw, (EItemType)i); // identity below the modded floor
-                    bw.Write(list[i]);
+                    out_list.Add(new MarketSparseEntry { ItemType = (EItemType)i, Value = list[i] }); // identity below the modded floor
                 }
             for (int k = 0; k < moddedVals.Count; k++)
             {
-                Net.Msg.WriteItemType(bw, (EItemType)moddedVals[k].Key);
-                bw.Write(moddedVals[k].Value);
+                out_list.Add(new MarketSparseEntry { ItemType = (EItemType)moddedVals[k].Key, Value = moddedVals[k].Value });
             }
         }
 
-        private static void ReadSparseFloatsInto(BinaryReader br, List<float> list, Action<int, float> moddedWrite)
+        private static void ReadSparseFloatsInto(List<MarketSparseEntry> entries, List<float> list, Action<int, float> moddedWrite)
         {
-            int n = br.ReadInt32();
-            for (int k = 0; k < n; k++)
+            for (int k = 0; k < entries.Count; k++)
             {
-                int wire = br.ReadInt32();
-                float v = br.ReadSingle(); // always consume the wire bytes
-                // host id -> ours. TryFromWire rather than the raw value because the row we
-                // write to is CHOSEN by this number: an unmappable modded id (a content pack
-                // only the host has) has no row here at all, and writing it anywhere - the
-                // None sentinel's row included - would park the host's price on the wrong
-                // item. Dropping it is the harmless case for a sparse table: absent entries
-                // keep their local value by design (see WriteSparseFloats).
-                int i;
-                if (!Util.EnumMap.TryFromWire(Util.EnumKind.ItemType, wire, out i)) continue;
+                // host id -> ours. The DTO's deserialize already translated the wire id via
+                // FromWire; an unmappable modded id (a content pack only the host has) has no
+                // row here at all and collapsed to the None sentinel (-1) - refusing it rather
+                // than writing anywhere would park the host's price on the wrong item. Dropping
+                // it is the harmless case for a sparse table: absent entries keep their local
+                // value by design (see FillSparse).
+                int i = (int)entries[k].ItemType;
+                float v = entries[k].Value;
                 if (list == null || i < 0 || i > 500000) continue;
                 if (i >= VanillaItemTypes && EplMarketBridge())
                 {
@@ -305,7 +307,7 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private static void ReadPercentsInto(BinaryReader br, List<float> list)
+        private static void ReadPercentsInto(List<MarketPercentEntry> entries, List<float> list)
         {
             if (list != null)
                 for (int i = 0; i < list.Count; i++) list[i] = 0f; // absent = no change rolled
@@ -328,15 +330,14 @@ namespace CardShopCoop.Sync
                     EplSetFloat(modded[k], s_eplPctChange, 0f);
                 }
             }
-            int n = br.ReadInt32();
-            for (int k = 0; k < n; k++)
+            for (int k = 0; k < entries.Count; k++)
             {
-                int wire = br.ReadInt32();
-                float v = br.ReadInt16() / 100f; // always consume the wire bytes
-                // host id -> ours; an unmappable modded id has no local row to write (see
-                // ReadSparseFloatsInto) and its percent stays whatever the skip above left
-                int i;
-                if (!Util.EnumMap.TryFromWire(Util.EnumKind.ItemType, wire, out i)) continue;
+                // host id -> ours (already translated during the DTO deserialize; an unmappable
+                // modded id collapsed to the None sentinel and is refused by the range check
+                // below, leaving whatever the zeroing pass above wrote - see
+                // ReadSparseFloatsInto)
+                int i = (int)entries[k].ItemType;
+                float v = entries[k].Percent / 100f;
                 if (list == null || i < 0 || i > 500000) continue;
                 if (i >= VanillaItemTypes && EplMarketBridge())
                 {
@@ -348,29 +349,29 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private static void WriteMarket(BinaryWriter bw, List<MarketPrice> list)
+        private static void FillMarket(List<MarketCardEntry> out_list, List<MarketPrice> list)
         {
             int n = Mathf.Min(list?.Count ?? 0, ushort.MaxValue);
-            bw.Write((ushort)n);
             for (int i = 0; i < n; i++)
             {
-                float v = list[i] != null ? list[i].pricePercentChangeList : 0f;
-                bw.Write((short)Mathf.Clamp(Mathf.RoundToInt(v * 100f), short.MinValue, short.MaxValue));
-                // The card BASE, for the same reason the item bases ride along above: a save
-                // whose card price block failed to restore leaves every base at 0, and the
-                // percent alone multiplies 0 into $0.00 cards forever. Full float - unlike the
-                // percent these are raw prices with no game clamp.
-                bw.Write(list[i] != null ? list[i].generatedMarketPrice : 0f);
+                out_list.Add(new MarketCardEntry
+                {
+                    Percent = (short)Mathf.Clamp(Mathf.RoundToInt((list[i] != null ? list[i].pricePercentChangeList : 0f) * 100f), short.MinValue, short.MaxValue),
+                    // The card BASE, for the same reason the item bases ride along above: a save
+                    // whose card price block failed to restore leaves every base at 0, and the
+                    // percent alone multiplies 0 into $0.00 cards forever. Full float - unlike the
+                    // percent these are raw prices with no game clamp.
+                    GeneratedMarketPrice = list[i] != null ? list[i].generatedMarketPrice : 0f,
+                });
             }
         }
 
-        private static void ReadMarketInto(BinaryReader br, List<MarketPrice> list)
+        private static void ReadMarketInto(List<MarketCardEntry> entries, List<MarketPrice> list)
         {
-            int n = br.ReadUInt16();
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < entries.Count; i++)
             {
-                float v = br.ReadInt16() / 100f;
-                float gen = br.ReadSingle(); // always consume: a shorter local list must not desync the rest of the stream
+                float v = entries[i].Percent / 100f;
+                float gen = entries[i].GeneratedMarketPrice;
                 if (list != null && i < list.Count && list[i] != null)
                 {
                     list[i].pricePercentChangeList = v; // in place: consumers hold the object
@@ -381,19 +382,17 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private static void WriteFloats(BinaryWriter bw, List<float> list)
+        private static void FillFloats(List<float> out_list, List<float> list)
         {
             int n = Mathf.Min(list?.Count ?? 0, ushort.MaxValue);
-            bw.Write((ushort)n);
-            for (int i = 0; i < n; i++) bw.Write(list[i]);
+            for (int i = 0; i < n; i++) out_list.Add(list[i]);
         }
 
-        private static void ReadFloatsInto(BinaryReader br, List<float> list)
+        private static void ReadFloatsInto(List<float> entries, List<float> list)
         {
-            int n = br.ReadUInt16();
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < entries.Count; i++)
             {
-                float v = br.ReadSingle();
+                float v = entries[i];
                 if (list != null && i < list.Count) list[i] = v;
             }
         }

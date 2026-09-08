@@ -1,5 +1,6 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System.Collections.Generic;
-using System.IO;
 using UnityEngine;
 
 namespace CardShopCoop.Sync
@@ -71,9 +72,8 @@ namespace CardShopCoop.Sync
         private CustomerManager _cm;
         private float _sendTimer;
         private float _nameRefreshIn;
-        private MemoryStream _sendMs;
-        private BinaryWriter _sendBw;
         private int _chunkCount;
+        private NpcStateMessage _currentChunk;
         private readonly Dictionary<int, string> _sentNames = new Dictionary<int, string>();
         private readonly Dictionary<int, int> _sentIdentities = new Dictionary<int, int>();
         private readonly Dictionary<int, int> _customerGenerations = new Dictionary<int, int>();
@@ -100,6 +100,7 @@ namespace CardShopCoop.Sync
             public Vector3 PrevRenderedPos;
             public float RenderYaw;
             public float AnimSpeed;
+            public float AppliedAnimSpeed = float.NaN;
             public int GrabSequence;
             public bool KeepPuppetVisible;
         }
@@ -128,7 +129,7 @@ namespace CardShopCoop.Sync
 
         /// <summary>Host only. Serializes active NPCs into one or more NpcState payloads,
         /// each under the Steam unreliable packet limit (null when not due / nothing).</summary>
-        public List<byte[]> HostCollect(float dt)
+        public List<NpcStateMessage> HostCollect(float dt)
         {
             _live = this;
             _sendTimer += dt;
@@ -146,13 +147,7 @@ namespace CardShopCoop.Sync
                 _nameRefreshIn = NameRefreshInterval;
             }
 
-            if (_sendMs == null)
-            {
-                _sendMs = new MemoryStream(1280);
-                _sendBw = new BinaryWriter(_sendMs);
-            }
-
-            var chunks = new List<byte[]>(1);
+            var chunks = new List<NpcStateMessage>(1);
             float hostTime = Time.unscaledTime;
             BeginChunk(hostTime);
 
@@ -226,27 +221,22 @@ namespace CardShopCoop.Sync
 
         private void BeginChunk(float hostTime)
         {
-            _sendMs.SetLength(0); // also rewinds Position; one stream reused across all chunks
-            _sendBw.Write(hostTime);
-            _sendBw.Write((byte)0); // count placeholder at offset 4
             _chunkCount = 0;
+            _currentChunk = new NpcStateMessage { HostTime = hostTime };
         }
 
-        private void FlushChunk(List<byte[]> chunks)
+        private void FlushChunk(List<NpcStateMessage> chunks)
         {
             if (_chunkCount == 0) return;
-            _sendBw.Flush();
-            _sendMs.Position = 4;
-            _sendMs.WriteByte((byte)_chunkCount);
-            chunks.Add(_sendMs.ToArray());
+            chunks.Add(_currentChunk);
             _chunkCount = 0;
         }
 
-        private void WriteEntry(List<byte[]> chunks, float hostTime, byte kind, ushort index,
+        private void WriteEntry(List<NpcStateMessage> chunks, float hostTime, byte kind, ushort index,
             string charName, Transform t, float moveSpeed, NpcFlags flags,
             int identity = 0, int actionSequence = 0, byte actionKind = 0, Animator speedFromAnim = null)
         {
-            if (_sendMs.Position >= ChunkSoftLimit || _chunkCount == byte.MaxValue)
+            if (_chunkCount == byte.MaxValue)
             {
                 FlushChunk(chunks);
                 BeginChunk(hostTime);
@@ -261,19 +251,38 @@ namespace CardShopCoop.Sync
             if (sendName) _sentNames[key] = charName;
             _sentIdentities[key] = identity;
 
-            _sendBw.Write(kind);
-            _sendBw.Write(index);
-            _sendBw.Write(identity);
-            _sendBw.Write((byte)(sendName ? 1 : 0));
-            if (sendName) _sendBw.Write(charName);
             var p = t.position;
-            _sendBw.Write(p.x); _sendBw.Write(p.y); _sendBw.Write(p.z);
-            _sendBw.Write(t.eulerAngles.y);
-            _sendBw.Write(moveSpeed);
-            _sendBw.Write((byte)flags);
-            _sendBw.Write(actionSequence);
-            _sendBw.Write(actionKind);
+
+            // Build the strongly-typed DTO entry for the chunk this becomes.
+            _currentChunk.Entries.Add(new NpcEntry
+            {
+                Kind = kind,
+                Index = index,
+                Identity = identity,
+                HasName = sendName,
+                CharName = sendName ? charName : null,
+                Position = p,
+                Yaw = t.eulerAngles.y,
+                Speed = moveSpeed,
+                Flags = (byte)flags,
+                ActionSequence = actionSequence,
+                ActionKind = actionKind,
+            });
             _chunkCount++;
+
+            // JSON is the wire payload now, so measure the actual DTO instead of maintaining
+            // a second binary size meter. If this entry pushed a non-empty chunk over the soft
+            // limit, move it to a fresh chunk; a single oversized entry is still sent intact.
+            if (_chunkCount > 1 && WireCodec.Serialize(_currentChunk).Length > ChunkSoftLimit)
+            {
+                var last = _currentChunk.Entries[_currentChunk.Entries.Count - 1];
+                _currentChunk.Entries.RemoveAt(_currentChunk.Entries.Count - 1);
+                _chunkCount--;
+                FlushChunk(chunks);
+                BeginChunk(hostTime);
+                _currentChunk.Entries.Add(last);
+                _chunkCount = 1;
+            }
         }
 
         private int GetGrabSequence(int index, ECustomerState state)
@@ -452,6 +461,7 @@ namespace CardShopCoop.Sync
             public float RenderYaw;
             public Vector3 PrevRenderedPos;
             public float AnimSpeed;
+            public float AppliedAnimSpeed = float.NaN;
             public int GrabSequence;
             public Transform HoldBox;
             public GameObject BoxProp;
@@ -538,6 +548,49 @@ namespace CardShopCoop.Sync
             return generation;
         }
 
+        /// <summary>Host-side lookup used by the speech relay. Customer transforms are
+        /// stable for the lifetime of a pooled customer, while the list index plus
+        /// generation identifies the current incarnation on clients.</summary>
+        public static bool TryGetCustomerSpeechSource(Transform transform, out ushort index, out int identity)
+        {
+            index = 0;
+            identity = 0;
+            if (_live == null || transform == null) return false;
+            if (_live._cm == null) _live._cm = Object.FindObjectOfType<CustomerManager>();
+            var list = _live._cm != null ? _live._cm.GetCustomerList() : null;
+            if (list == null) return false;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var customer = list[i];
+                if (customer == null || customer.transform != transform) continue;
+                index = (ushort)i;
+                identity = GetCustomerGeneration(customer);
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>Client-only: show a host-selected customer speech bubble over the
+        /// corresponding visible representation. Missing puppets are intentionally ignored;
+        /// speech is cosmetic and should not keep stale references alive.</summary>
+        public void ShowSpeech(NpcSpeechMessage message, bool inGame)
+        {
+            if (!inGame || message == null || string.IsNullOrEmpty(message.Text)) return;
+            if (message.Kind != KindCustomer) return;
+            int key = (message.Kind << 16) | message.Index;
+            Transform anchor = null;
+            if (_existing.TryGetValue(message.Index, out var existing)
+                && existing.Generation == message.Identity && existing.Customer != null)
+                anchor = existing.Customer.transform;
+            else if (_puppets.TryGetValue(key, out var puppet)
+                && puppet.HasIdentity && puppet.Identity == message.Identity && puppet.Go != null)
+                anchor = puppet.Go.transform;
+            if (anchor == null) return;
+            var spawner = CSingleton<PricePopupSpawner>.Instance;
+            if (spawner == null) return;
+            spawner.ShowTextPopup(message.Text, message.OffsetUp, anchor);
+        }
+
         public static void DetachExistingCustomer(int index, Customer customer)
         {
             if (_live == null) return;
@@ -591,10 +644,11 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Client only. Apply one received NpcState batch.</summary>
-        public void ApplyBatch(BinaryReader br, bool inGame)
+        public void ApplyBatch(NpcStateMessage message, bool inGame)
         {
-            float hostTime = br.ReadSingle();
-            int count = br.ReadByte();
+            float hostTime = message.HostTime;
+            var entries = message.Entries;
+            int count = entries.Count;
 
             // map host time onto the local timeline; low-pass the offset so per-packet
             // network jitter cannot corrupt snapshot spacing (snap on init / big jumps)
@@ -613,17 +667,18 @@ namespace CardShopCoop.Sync
 
             for (int n = 0; n < count; n++)
             {
-                byte kind = br.ReadByte();
-                ushort index = br.ReadUInt16();
-                int identity = br.ReadInt32();
-                bool hasName = (br.ReadByte() & 1) != 0;
-                string charName = hasName ? br.ReadString() : null;
-                var pos = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
-                float yaw = br.ReadSingle();
-                float speed = br.ReadSingle();
-                var flags = (NpcFlags)br.ReadByte();
-                int actionSequence = br.ReadInt32();
-                byte actionKind = br.ReadByte();
+                var ent = entries[n];
+                byte kind = ent.Kind;
+                ushort index = ent.Index;
+                int identity = ent.Identity;
+                bool hasName = ent.HasName;
+                string charName = ent.CharName;
+                var pos = ent.Position;
+                float yaw = ent.Yaw;
+                float speed = ent.Speed;
+                var flags = (NpcFlags)ent.Flags;
+                int actionSequence = ent.ActionSequence;
+                byte actionKind = ent.ActionKind;
                 if (!inGame) continue; // consume the payload, render nothing yet
 
                 int key = (kind << 16) | index;
@@ -844,7 +899,11 @@ namespace CardShopCoop.Sync
 
                 if (p.Anim != null)
                 {
-                    try { p.Anim.SetFloat(HashMoveSpeed, p.AnimSpeed); } catch { }
+                    if (float.IsNaN(p.AppliedAnimSpeed)
+                        || Mathf.Abs(p.AppliedAnimSpeed - p.AnimSpeed) > 0.01f)
+                    {
+                        try { p.Anim.SetFloat(HashMoveSpeed, p.AnimSpeed); p.AppliedAnimSpeed = p.AnimSpeed; } catch { }
+                    }
                 }
                 if ((int)p.Flags != p.AppliedFlags)
                 {
@@ -897,11 +956,17 @@ namespace CardShopCoop.Sync
                 mirror.PrevRenderedPos = newPos;
                 mirror.AnimSpeed = Mathf.Lerp(mirror.AnimSpeed, rendered, existingSpeedBlend);
                 if (mirror.AnimSpeed < 0.05f) mirror.AnimSpeed = 0f;
-                if (mirror.Customer.m_Anim != null)
+                if (mirror.Customer.m_Anim != null
+                    && (float.IsNaN(mirror.AppliedAnimSpeed)
+                        || Mathf.Abs(mirror.AppliedAnimSpeed - mirror.AnimSpeed) > 0.01f))
+                {
                     mirror.Customer.m_Anim.SetFloat(HashMoveSpeed, mirror.AnimSpeed);
+                    mirror.AppliedAnimSpeed = mirror.AnimSpeed;
+                }
                 if ((int)mirror.Flags != mirror.AppliedFlags)
                 {
                     ApplyExistingFlags(mirror.Customer, mirror.Flags, mirror.AnimSpeed);
+                    mirror.AppliedAnimSpeed = mirror.AnimSpeed;
                     mirror.AppliedFlags = (int)mirror.Flags;
                 }
             }
