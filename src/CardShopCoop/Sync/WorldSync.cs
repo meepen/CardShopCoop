@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using CardShopCoop.Net;
 using System;
 using System.Collections.Generic;
@@ -53,6 +54,7 @@ namespace CardShopCoop.Sync
         /// type IS resolvable), so say it once per compartment or a mismatched-pack shop is
         /// undiagnosable.</summary>
         private readonly HashSet<int> _clampWarned = new HashSet<int>();
+        private readonly HashSet<string> _snapshotErrors = new HashSet<string>();
         private readonly Dictionary<WarehouseShelf, List<ShelfCompartment>> _whComps
             = new Dictionary<WarehouseShelf, List<ShelfCompartment>>();
         private float _timer;
@@ -61,7 +63,7 @@ namespace CardShopCoop.Sync
         public Action<List<Entry>> OnLocalChanges;
 
         private static readonly FieldInfo FiWarehouseComps =
-            AccessTools.Field(typeof(WarehouseShelf), "m_ItemCompartmentList");
+            ReflectionSurface.RequiredField(typeof(WarehouseShelf), "m_ItemCompartmentList");
 
         // NEVER CSingleton<ShelfManager>.Instance: if touched before the game scene
         // exists (e.g. deltas arriving during the client's loading screen) it silently
@@ -85,6 +87,7 @@ namespace CardShopCoop.Sync
             _resolvable.Clear(); // a different host/save can mean a different content-pack set
             _clamped.Clear();    // ...and different shelves, so a remembered clamp means nothing
             _clampWarned.Clear();
+            _snapshotErrors.Clear();
             _whComps.Clear();
             _timer = 0.35f; // staggered phase: engines must not all walk on the same frame
             _sm = null;
@@ -105,6 +108,7 @@ namespace CardShopCoop.Sync
             _timer -= 0.75f; // keep the phase; reset-to-zero drifts back into alignment
 
             List<Entry> changes = null;
+            bool sawError = false;
             try
             {
                 var sm = ResolveShelfManager();
@@ -114,9 +118,16 @@ namespace CardShopCoop.Sync
                 {
                     var shelf = sm.m_ShelfList[i];
                     if (shelf == null) continue;
-                    var comps = shelf.GetItemCompartmentList();
-                    for (int j = 0; j < comps.Count; j++)
-                        if (TryKey(0, shelf, j, out int key)) Visit(key, comps[j], ref changes);
+                    try
+                    {
+                        var comps = shelf.GetItemCompartmentList();
+                        for (int j = 0; j < comps.Count; j++)
+                        {
+                            try { if (TryKey(0, shelf, j, out int key)) Visit(key, comps[j], ref changes); }
+                            catch (Exception e) { sawError = true; LogSnapshotError("shelf " + i + " compartment " + j, e); }
+                        }
+                    }
+                    catch (Exception e) { sawError = true; LogSnapshotError("shelf " + i, e); }
                 }
                 // warehouse racks (kind 1) are deliberately NOT walked: their compartment
                 // "count" is a STORED-BOX tally (AddBox/RemoveBox), not loose items, and
@@ -131,27 +142,48 @@ namespace CardShopCoop.Sync
                 {
                     var combi = sm.m_CardItemCombiShelfList[i];
                     if (combi == null) continue;
-                    var comps = combi.GetItemCompartmentList();
-                    for (int j = 0; j < comps.Count; j++)
-                        if (TryKey(3, combi, j, out int key)) Visit(key, comps[j], ref changes);
+                    try
+                    {
+                        var comps = combi.GetItemCompartmentList();
+                        for (int j = 0; j < comps.Count; j++)
+                        {
+                            try { if (TryKey(3, combi, j, out int key)) Visit(key, comps[j], ref changes); }
+                            catch (Exception e) { sawError = true; LogSnapshotError("combi shelf " + i + " compartment " + j, e); }
+                        }
+                    }
+                    catch (Exception e) { sawError = true; LogSnapshotError("combi shelf " + i, e); }
                 }
                 for (int i = 0; i < sm.m_TournamentPrizeShelfList.Count; i++)
                 {
                     var prize = sm.m_TournamentPrizeShelfList[i];
                     if (prize == null) continue;
-                    var comps = prize.GetItemCompartmentList();
-                    for (int j = 0; j < comps.Count; j++)
-                        if (TryKey(14, prize, j, out int key)) Visit(key, comps[j], ref changes);
+                    try
+                    {
+                        var comps = prize.GetItemCompartmentList();
+                        for (int j = 0; j < comps.Count; j++)
+                        {
+                            try { if (TryKey(14, prize, j, out int key)) Visit(key, comps[j], ref changes); }
+                            catch (Exception e) { sawError = true; LogSnapshotError("prize shelf " + i + " compartment " + j, e); }
+                        }
+                    }
+                    catch (Exception e) { sawError = true; LogSnapshotError("prize shelf " + i, e); }
                 }
             }
             catch (Exception e)
             {
-                CoopPlugin.Log.LogWarning("WorldSync snapshot: " + e.Message);
+                sawError = true;
+                LogSnapshotError("snapshot", e);
                 return;
             }
 
-            if (changes != null && changes.Count > 0)
+            if (!sawError && changes != null && changes.Count > 0)
                 OnLocalChanges?.Invoke(changes);
+        }
+
+        private void LogSnapshotError(string item, Exception e)
+        {
+            if (_snapshotErrors.Add(item))
+                CoopPlugin.Log.LogWarning("WorldSync snapshot item " + item + ": " + e.Message);
         }
 
         private void Visit(int key, ShelfCompartment comp, ref List<Entry> changes)
@@ -319,7 +351,7 @@ namespace CardShopCoop.Sync
         }
 
         private static readonly FieldInfo FiStoredItemList =
-            AccessTools.Field(typeof(ShelfCompartment), "m_StoredItemList");
+            ReflectionSurface.RequiredField(typeof(ShelfCompartment), "m_StoredItemList");
 
         /// <summary>
         /// Set a compartment to exactly (type, count). IMPORTANT: ShelfCompartment.SpawnItem

@@ -82,7 +82,8 @@ namespace CardShopCoop.Net.Messages
     // [byte count][count x entry]
     //   entry = (byte index, int customerId) then, when customerId != 0:
     //     (ushort customerIndex, int customerGeneration, string characterName,
-//      byte state, bool isCard, double paidAmount, double totalScanned,
+    //      byte state, bool isCard, double paidAmount, double totalScanned,
+    //      float customerTotalScanned,
     //      byte itemCount, (EItemType, float price) x itemCount, bool scanned x itemCount,
     //      byte cardCount, (CardData, float price) x cardCount, bool scanned x cardCount).
 
@@ -109,6 +110,7 @@ namespace CardShopCoop.Net.Messages
         public bool IsCard;
         public double PaidAmount;
         public double TotalScanned;
+        public float CustomerTotalScanned;
         public System.Collections.Generic.List<EItemType> ItemTypes = new System.Collections.Generic.List<EItemType>();
         public System.Collections.Generic.List<float> ItemPrices = new System.Collections.Generic.List<float>();
         public System.Collections.Generic.List<bool> ItemScanned = new System.Collections.Generic.List<bool>();

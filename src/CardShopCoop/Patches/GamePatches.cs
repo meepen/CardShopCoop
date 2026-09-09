@@ -28,6 +28,14 @@ namespace CardShopCoop.Patches
         private static readonly FieldInfo FiScannerCounts = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockBoxCountList");
         public static void ApplyAll(Harmony h)
         {
+            // The CMF camera reads Mouse X/Y directly from its own CameraMouseInput
+            // component. InteractionPlayerController.EnterUIMode disables the game's
+            // secondary camera controller, but cannot stop this independent input path.
+            Try(h, typeof(CMF.CameraMouseInput), "GetHorizontalCameraInput",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(CameraInputPrefix)));
+            Try(h, typeof(CMF.CameraMouseInput), "GetVerticalCameraInput",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(CameraInputPrefix)));
+
             // Client saves always land in the co-op slot, never the player's own slots.
             Try(h, typeof(CGameManager), "SaveGameData",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(SaveGuardPrefix)));
@@ -281,6 +289,16 @@ namespace CardShopCoop.Patches
         {
             try { apply(h); }
             catch (Exception e) { CoopPlugin.Log.LogWarning($"Module patches failed ({name}): {e.Message}"); }
+        }
+
+        /// <summary>Suppress the CMF camera's raw mouse/gamepad look input while
+        /// the co-op window owns modal UI mode. Returning false prevents the original
+        /// method from reading the input axis at all.</summary>
+        public static bool CameraInputPrefix(ref float __result)
+        {
+            if (!CoopCore.WindowBlocksInput) return true;
+            __result = 0f;
+            return false;
         }
 
         public static void ReduceCardIndexPostfix(int index, ECardExpansionType expansionType, bool isDestiny, int reduceAmount)
@@ -796,8 +814,14 @@ namespace CardShopCoop.Patches
         /// <summary>Spawning a delivery creates and registers the placed object before the
         /// furniture box is opened. Force the population snapshot immediately so a client
         /// cannot receive shelf/card contents for an object that it has not created yet.</summary>
-        public static void FurnitureSpawnPostfix()
+        public static void FurnitureSpawnPostfix(EObjectType objType, UnityEngine.Vector3 spawnPos,
+            UnityEngine.Quaternion spawnRot)
         {
+            // SpawnInteractableObjectInPackageBox first creates the furniture at (0,0,0),
+            // boxes it there, and only then moves the BOX Transform to spawnPos. Unity does
+            // not reliably move a non-kinematic Rigidbody when its Transform is assigned this
+            // way. Align the real body before any population/furniture snapshot can observe it.
+            FurnBoxSync.AlignJustSpawnedBox(objType, spawnPos, spawnRot);
             if (CoopCore.Role == CoopRole.Host)
                 CoopCore.Instance?.NotifyHostStructureChanged();
         }

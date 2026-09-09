@@ -12,10 +12,11 @@ namespace CardShopCoop.Util
     public static class TvInterop
     {
         private const string AssemblyName = "RTCGOCustomScripts";
-        private static readonly Type T = ModParity.ResolveType("Scripts.VideoPlayerController", AssemblyName);
+        private static readonly Type T = ReflectionSurface.OptionalType("Scripts.VideoPlayerController", AssemblyName);
         private const BindingFlags F = BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
         private static readonly FieldInfo FiEnrolled = Field("enrolledTVs");
+        private static readonly FieldInfo FiSharedVideoIndex = Field("sharedVideoIndex");
         private static readonly FieldInfo FiStreamUrl = Field("activeStreamUrl");
         private static readonly FieldInfo FiStreamTitle = Field("activeStreamTitle");
         private static readonly FieldInfo FiPlaylistUrl = Field("activePlaylistUrl");
@@ -34,6 +35,9 @@ namespace CardShopCoop.Util
         private static readonly MethodInfo MiChangeUrl = Method("ChangeToUrl", typeof(string), typeof(string));
         private static readonly MethodInfo MiPlaylist = Method("PlayPlaylistItem", typeof(int));
         private static readonly MethodInfo MiStream = Method("StreamYouTube", typeof(string));
+        private static readonly MethodInfo MiQualityChoice = Method("OnQualityChoice", typeof(bool));
+        private static readonly MethodInfo MiChangeVideo = Method("ChangeVideo", typeof(int));
+        private static readonly MethodInfo MiBroadcastChange = Method("BroadcastChange", typeof(int));
         private static readonly MethodInfo MiTogglePause = Method("ToggleGlobalPause");
         private static readonly MethodInfo MiRemotePower = Method("RemotePower");
         private static readonly MethodInfo MiUnfreeze = Method("UnfreezeGame");
@@ -41,6 +45,7 @@ namespace CardShopCoop.Util
         private static string _sourceUrl;
         private static string _launchedSource;
         private static int _launchedPlaylistIndex;
+        private static bool _enrollmentRequested;
 
         public static bool Present
         {
@@ -58,8 +63,8 @@ namespace CardShopCoop.Util
 
         public static bool ApplyingRemote;
 
-        private static FieldInfo Field(string name) => T == null ? null : T.GetField(name, F);
-        private static MethodInfo Method(string name, params Type[] args) => T == null ? null : AccessTools.Method(T, name, args);
+        private static FieldInfo Field(string name) => ReflectionSurface.OptionalField(T, name);
+        private static MethodInfo Method(string name, params Type[] args) => ReflectionSurface.OptionalMethod(T, name, args);
 
         private static object Get(FieldInfo field)
         {
@@ -98,6 +103,10 @@ namespace CardShopCoop.Util
 
         public static bool IsPlaylist => !string.IsNullOrEmpty(PlaylistUrl);
         public static string SourceUrl => _sourceUrl;
+        public static int EnrolledCount
+        {
+            get { return (FiEnrolled?.GetValue(null) as IList)?.Count ?? 0; }
+        }
 
         public static void RecordSourceUrl(string url)
         {
@@ -110,10 +119,12 @@ namespace CardShopCoop.Util
             _sourceUrl = null;
             _launchedSource = null;
             _launchedPlaylistIndex = 0;
+            _enrollmentRequested = false;
         }
 
         public static bool ApplyState(string sourceUrl, string url, string title, string playlistUrl, bool live,
-            bool segmented, int playlistIndex, double position, bool paused, bool powered, bool shuffle)
+            bool segmented, int playlistIndex, double position, bool paused, bool powered, bool shuffle,
+            bool barrier, bool resume, int generation)
         {
             if (!Present) return false;
             var master = Master();
@@ -127,10 +138,8 @@ namespace CardShopCoop.Util
                 FiStreamTitle?.SetValue(null, title);
                 FiPlaylistUrl?.SetValue(null, playlistUrl);
                 FiPlaylistIndex?.SetValue(null, playlistIndex);
-                FiPaused?.SetValue(null, paused);
                 FiPowered?.SetValue(null, powered);
                 FiShuffle?.SetValue(null, shuffle);
-                FiLastTime?.SetValue(null, position);
 
                 bool newPlaylistItem = !string.IsNullOrEmpty(playlistUrl)
                     && string.Equals(oldSource, sourceUrl, StringComparison.Ordinal)
@@ -143,29 +152,35 @@ namespace CardShopCoop.Util
                     // locally so each player gets its own valid direct media URL.
                     _launchedSource = sourceUrl;
                     _launchedPlaylistIndex = playlistIndex;
-                    CoopPlugin.Log.LogInfo("TV client resolving shared stream locally: " + sourceUrl);
-                    FiPlaying?.SetValue(null, true);
-                    ((MonoBehaviour)master).StartCoroutine((IEnumerator)MiStream.Invoke(master, new object[] { sourceUrl }));
+                    if (EnrolledCount > 0)
+                    {
+                        CoopPlugin.Log.LogInfo("TV client injecting shared stream through RTCGO quality selection: " + sourceUrl);
+                        FiPendingUrl?.SetValue(null, sourceUrl);
+                        ApplyingRemote = true;
+                        try { MiQualityChoice?.Invoke(master, new object[] { false }); }
+                        finally { ApplyingRemote = false; }
+                    }
+                    else
+                    {
+                        _launchedSource = null;
+                        _launchedPlaylistIndex = 0;
+                    }
                 }
                 else if (string.IsNullOrEmpty(sourceUrl) && string.IsNullOrEmpty(playlistUrl))
                 {
                     // The host returned to local playback. Allow a later selection of the
                     // same URL to launch again instead of being suppressed by the old memo.
+                    bool wasStreaming = !string.IsNullOrEmpty(_launchedSource) || _launchedPlaylistIndex != 0;
                     _launchedSource = null;
                     _launchedPlaylistIndex = 0;
-                    FiPlaying?.SetValue(null, false);
-                    Invoke(VideoPlayer(master), "Stop");
+                    if (wasStreaming)
+                    {
+                        MiBroadcastChange?.Invoke(master, new object[] { Get(FiSharedVideoIndex, 0) });
+                    }
                 }
 
-                var vp = VideoPlayer(master);
-                if (vp != null && !live && position >= 0.0)
-                {
-                    bool prepared = GetProperty<bool>(vp, "isPrepared");
-                    double time = GetProperty<double>(vp, "time");
-                    if (prepared && Math.Abs(time - position) > 1.0) SetProperty(vp, "time", position);
-                    if (paused || powered) Invoke(vp, "Pause");
-                    else if (prepared) Invoke(vp, "Play");
-                }
+                SetSharedPaused(barrier || paused || powered);
+                if (resume) ResumePlayback();
                 return true;
             }
             catch (Exception e)
@@ -177,10 +192,61 @@ namespace CardShopCoop.Util
         }
 
         public static bool ApplyHostState(string sourceUrl, string url, string title, string playlistUrl, bool live,
-            bool segmented, int playlistIndex, double position, bool paused, bool powered, bool shuffle)
+            bool segmented, int playlistIndex, double position, bool paused, bool powered, bool shuffle,
+            bool barrier, bool resume, int generation)
         {
             return ApplyState(sourceUrl, url, title, playlistUrl, live, segmented, playlistIndex,
-                position, paused, powered, shuffle);
+                position, paused, powered, shuffle, barrier, resume, generation);
+        }
+
+        public static void SetSharedPaused(bool paused)
+        {
+            bool changed = Paused != paused;
+            if (changed && MiTogglePause != null)
+                MiTogglePause.Invoke(Master(), null);
+            if (Paused != paused) FiPaused?.SetValue(null, paused);
+        }
+
+        public static void SetSharedPausedForPrepare(bool paused)
+        {
+            FiPaused?.SetValue(null, paused);
+        }
+
+        public static void ResumePlayback() { ResumePlaybackThroughMod(); }
+
+        public static bool IsStreamCandidate(object instance)
+        {
+            if (instance == null || !IsPlayingStream) return false;
+            var master = Master();
+            return ReferenceEquals(master, instance);
+        }
+
+        public static bool IsMainPreparedPlayer(object instance, object source)
+        {
+            return IsStreamCandidate(instance) && ReferenceEquals(VideoPlayer(instance as Component), source);
+        }
+
+        public static void PausePreparedStream(object instance)
+        {
+            if (!IsStreamCandidate(instance)) return;
+            SetSharedPaused(true);
+        }
+
+        public static void ResumePlaybackThroughMod()
+        {
+            SetSharedPaused(false);
+        }
+
+        public static void EnsureClientEnrollment()
+        {
+            if (CoopCore.Role != CoopRole.Client || !Present || EnrolledCount > 0
+                || IsPlayingStream || IsFetching || _enrollmentRequested) return;
+            var master = Master();
+            if (master == null || MiChangeVideo == null) return;
+            _enrollmentRequested = true;
+            int index = Get(FiSharedVideoIndex, 0);
+            CoopPlugin.Log.LogInfo("TV client initializing local playback for RTCGO enrollment");
+            MiChangeVideo.Invoke(master, new object[] { index });
         }
 
         public static void StreamStartedPostfix(string url)
@@ -247,12 +313,12 @@ namespace CardShopCoop.Util
 
         private static object VideoPlayer(Component master)
         {
-            return master == null ? null : master.GetType().GetField("m_VideoPlayer", F)?.GetValue(master);
+            return master == null ? null : ReflectionSurface.OptionalField(master.GetType(), "m_VideoPlayer")?.GetValue(master);
         }
 
         private static TVal GetProperty<TVal>(object target, string name)
         {
-            try { return (TVal)target.GetType().GetProperty(name, F).GetValue(target, null); }
+            try { return (TVal)ReflectionSurface.OptionalProperty(target.GetType(), name).GetValue(target, null); }
             catch { return default(TVal); }
         }
 
@@ -264,7 +330,7 @@ namespace CardShopCoop.Util
         private static void Invoke(object target, string name)
         {
             if (target == null) return;
-            target.GetType().GetMethod(name, F, null, Type.EmptyTypes, null)?.Invoke(target, null);
+            ReflectionSurface.OptionalMethod(target.GetType(), name)?.Invoke(target, null);
         }
     }
 }

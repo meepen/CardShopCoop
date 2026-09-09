@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Messages;
 using System.Collections.Generic;
@@ -46,22 +47,22 @@ namespace CardShopCoop.Sync
         public const byte OpFinishCard = 9;
 
         // ---- reflection: InteractableCashierCounter privates ----
-        private static readonly FieldInfo FiIsUsingCard = AccessTools.Field(typeof(InteractableCashierCounter), "m_IsUsingCard");
-        private static readonly FieldInfo FiPaidAmount = AccessTools.Field(typeof(InteractableCashierCounter), "m_CustomerPaidAmount");
-        private static readonly FieldInfo FiTotalScanned = AccessTools.Field(typeof(InteractableCashierCounter), "m_TotalScannedItemCost");
-        private static readonly FieldInfo FiCashScreen = AccessTools.Field(typeof(InteractableCashierCounter), "m_UICashCounterScreen");
-        private static readonly FieldInfo FiCreditScreen = AccessTools.Field(typeof(InteractableCashierCounter), "m_UICreditCardScreen");
-        private static readonly FieldInfo FiChangeReady = AccessTools.Field(typeof(InteractableCashierCounter), "m_IsChangeReady");
-        private static readonly FieldInfo FiStartGivingChange = AccessTools.Field(typeof(InteractableCashierCounter), "m_IsStartGivingChange");
-        private static readonly FieldInfo FiCurrentMoneyChange = AccessTools.Field(typeof(InteractableCashierCounter), "m_CurrentMoneyChangeValue");
-        private static readonly FieldInfo FiTooMuchChange = AccessTools.Field(typeof(InteractableCashierCounter), "m_TooMuchChangeGiven");
+        private static readonly FieldInfo FiIsUsingCard = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_IsUsingCard");
+        private static readonly FieldInfo FiPaidAmount = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_CustomerPaidAmount");
+        private static readonly FieldInfo FiTotalScanned = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_TotalScannedItemCost");
+        private static readonly FieldInfo FiCashScreen = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_UICashCounterScreen");
+        private static readonly FieldInfo FiCreditScreen = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_UICreditCardScreen");
+        private static readonly FieldInfo FiChangeReady = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_IsChangeReady");
+        private static readonly FieldInfo FiStartGivingChange = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_IsStartGivingChange");
+        private static readonly FieldInfo FiCurrentMoneyChange = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_CurrentMoneyChangeValue");
+        private static readonly FieldInfo FiTooMuchChange = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_TooMuchChangeGiven");
         // ---- reflection: Customer privates ----
-        private static readonly FieldInfo FiScannedCount = AccessTools.Field(typeof(Customer), "m_ItemScannedCount");
-        private static readonly FieldInfo FiCustTotal = AccessTools.Field(typeof(Customer), "m_TotalScannedItemCost");
-        private static readonly FieldInfo FiQueueCounter = AccessTools.Field(typeof(Customer), "m_CurrentQueueCashierCounter");
-        private static readonly MethodInfo MiEvaluateFinish = AccessTools.Method(typeof(Customer), "EvaluateFinishScanItem");
+        private static readonly FieldInfo FiScannedCount = ReflectionSurface.RequiredField(typeof(Customer), "m_ItemScannedCount");
+        private static readonly FieldInfo FiCustTotal = ReflectionSurface.RequiredField(typeof(Customer), "m_TotalScannedItemCost");
+        private static readonly FieldInfo FiQueueCounter = ReflectionSurface.RequiredField(typeof(Customer), "m_CurrentQueueCashierCounter");
+        private static readonly MethodInfo MiEvaluateFinish = ReflectionSurface.RequiredMethod(typeof(Customer), "EvaluateFinishScanItem");
         // ---- reflection: InteractableCustomerCash privates ----
-        private static readonly FieldInfo FiCashCustomer = AccessTools.Field(typeof(InteractableCustomerCash), "m_CurrentCustomer");
+        private static readonly FieldInfo FiCashCustomer = ReflectionSurface.RequiredField(typeof(InteractableCustomerCash), "m_CurrentCustomer");
 
         /// <summary>Set by CoopCore: client -> host op (MsgType.RegisterOp).</summary>
         public System.Action<INetMessage> SendOp;
@@ -77,6 +78,17 @@ namespace CardShopCoop.Sync
         public static bool ApplyingAuthoritativePayment;
 
         public RegisterSync() { _live = this; }
+
+        /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
+        public static void ClearLive()
+        {
+            _live = null;
+            AllowClientCustomerLifecycle = false;
+            SuppressClientRegisterEvents = false;
+            ApplyingAuthoritativePayment = false;
+        }
+
+        public static void ActivateLive(RegisterSync instance) { _live = instance; }
 
         private ShelfManager _sm;
         private ShelfManager Sm()
@@ -107,6 +119,7 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, int> _cartGen = new Dictionary<int, int>();        // counter idx -> applied customer token
         private readonly Dictionary<int, string> _cartScanSignature = new Dictionary<int, string>();
         private readonly Dictionary<int, int> _sourceIndex = new Dictionary<int, int>();    // counter idx -> served customer list index
+        private readonly Dictionary<int, double> _authoritativeTotal = new Dictionary<int, double>();
 
         public void Reset()
         {
@@ -120,6 +133,7 @@ namespace CardShopCoop.Sync
             _cartGen.Clear();
             _cartScanSignature.Clear();
             _sourceIndex.Clear();
+            _authoritativeTotal.Clear();
             AllowClientCustomerLifecycle = false;
             SuppressClientRegisterEvents = false;
             ApplyingAuthoritativePayment = false;
@@ -214,6 +228,8 @@ namespace CardShopCoop.Sync
                 postfix: new HarmonyMethod(typeof(RegisterSync), nameof(TakePaymentPostfix)));
             Try(h, typeof(Customer), "EvaluateFinishScanItem",
                 prefix: new HarmonyMethod(typeof(RegisterSync), nameof(EvaluateFinishPrefix)));
+            Try(h, typeof(InteractableCashierCounter), "EvaluateCreditCard",
+                prefix: new HarmonyMethod(typeof(RegisterSync), nameof(EvaluateCreditCardPrefix)));
             Try(h, typeof(InteractableCounterMoneyChange), "OnMouseButtonUp",
                 postfix: new HarmonyMethod(typeof(RegisterSync), nameof(GiveChangeAddPostfix)));
             Try(h, typeof(InteractableCounterMoneyChange), "OnRightMouseButtonUp",
@@ -225,7 +241,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"RegisterSync: patch target missing: {type.Name}.{method}");
@@ -331,6 +347,24 @@ namespace CardShopCoop.Sync
             if (CoopCore.Role != CoopRole.Client || __instance == null) return true;
             var t = _live;
             return t == null || !t._carrier.ContainsValue(__instance);
+        }
+
+        /// <summary>Client: validate a manually entered card payment against the host's
+        /// authoritative scanned total, rather than the client's locally accumulated card
+        /// total. The vanilla card screen calls EvaluateCreditCard directly.</summary>
+        public static void EvaluateCreditCardPrefix(InteractableCashierCounter __instance, ref double value)
+        {
+            var t = _live;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return;
+            var sm = t.Sm();
+            if (sm == null) return;
+            int idx = sm.m_CashierCounterList.IndexOf(__instance);
+            if (idx < 0 || !t._carrier.ContainsKey(idx)) return;
+            if (!t._authoritativeTotal.TryGetValue(idx, out double total)) return;
+
+            // Preserve the amount entered by the player; only replace the expected
+            // checkout total used by vanilla's validation.
+            FiTotalScanned?.SetValue(__instance, total);
         }
 
         /// <summary>Client: the counter just entered TakingCash - forward the payment roll the game made.</summary>
@@ -484,6 +518,8 @@ namespace CardShopCoop.Sync
                     entry.IsCard = FiIsUsingCard?.GetValue(counter) is bool card && card;
                     entry.PaidAmount = FiPaidAmount?.GetValue(counter) is double paid ? paid : 0.0;
                     entry.TotalScanned = FiTotalScanned?.GetValue(counter) is double total ? total : 0.0;
+                    entry.CustomerTotalScanned = FiCustTotal?.GetValue(cust) is float customerTotal
+                        ? customerTotal : (float)entry.TotalScanned;
                 var items = cust.GetItemInBagList();
                 for (int k = 0; k < items.Count; k++)
                 {
@@ -698,6 +734,7 @@ namespace CardShopCoop.Sync
             public bool IsCard;
             public double PaidAmount;
             public double TotalScanned;
+            public float CustomerTotalScanned;
             public List<EItemType> ItemTypes;
             public List<float> ItemPrices;
             public List<CardData> Cards;
@@ -733,6 +770,7 @@ namespace CardShopCoop.Sync
                     IsCard = entry.IsCard,
                     PaidAmount = entry.PaidAmount,
                     TotalScanned = entry.TotalScanned,
+                    CustomerTotalScanned = entry.CustomerTotalScanned,
                     ItemTypes = entry.ItemTypes,
                     ItemPrices = entry.ItemPrices,
                     Cards = entry.Cards,
@@ -776,9 +814,9 @@ namespace CardShopCoop.Sync
                     ApplyScannedItems(c);
                     _cartScanSignature[c.Index] = c.ScanSignature;
                 }
-                ApplyAuthoritativeTotal(c);
-                ApplyAuthoritativePhase(c);
                 ApplyAuthoritativePayment(c);
+                ApplyAuthoritativePhase(c);
+                ApplyAuthoritativeTotal(c);
                 return;
             }
             _cartGen[c.Index] = cid;
@@ -848,9 +886,9 @@ namespace CardShopCoop.Sync
                 }
             }
             ApplyScannedItems(c);
-            ApplyAuthoritativeTotal(c);
-            ApplyAuthoritativePhase(c);
             ApplyAuthoritativePayment(c);
+            ApplyAuthoritativePhase(c);
+            ApplyAuthoritativeTotal(c);
         }
 
         private static string BuildCartSignature(Cart c)
@@ -933,8 +971,9 @@ namespace CardShopCoop.Sync
             if (sm == null || c.Index >= sm.m_CashierCounterList.Count) return;
             var counter = sm.m_CashierCounterList[c.Index];
             if (counter == null) return;
+            _authoritativeTotal[c.Index] = c.TotalScanned;
             FiTotalScanned?.SetValue(counter, c.TotalScanned);
-            FiCustTotal?.SetValue(customer, (float)c.TotalScanned);
+            FiCustTotal?.SetValue(customer, c.CustomerTotalScanned);
             var screen = FiCashScreen?.GetValue(counter) as UI_CashCounterScreen;
             if (screen != null)
             {
@@ -942,6 +981,18 @@ namespace CardShopCoop.Sync
                 double paid = FiPaidAmount?.GetValue(counter) is double customerPaid ? customerPaid : 0.0;
                 double change = FiCurrentMoneyChange?.GetValue(counter) is double currentChange ? currentChange : 0.0;
                 screen.UpdateMoneyChangeAmount(ready, paid, c.TotalScanned, change);
+
+                // The game updates these labels from the client's local card scan total.
+                // Card totals are accumulated through a float on the game side, so that
+                // local value can differ from the host's authoritative total. Keep the
+                // labels synchronized with the networked total instead. Setting the text
+                // does not change visibility; the large total remains hidden until the
+                // vanilla payment phase calls ShowScaledUpTotalCost().
+                string totalText = GameInstance.GetPriceString(c.TotalScanned);
+                if (screen.m_TotalItemListCostText != null)
+                    screen.m_TotalItemListCostText.text = totalText;
+                if (screen.m_ScaledUpTotalText != null)
+                    screen.m_ScaledUpTotalText.text = totalText;
             }
         }
 
@@ -1155,6 +1206,7 @@ namespace CardShopCoop.Sync
             _carrier.Remove(idx);
             _cartGen.Remove(idx);
             _cartScanSignature.Remove(idx);
+            _authoritativeTotal.Remove(idx);
             if (_sourceIndex.TryGetValue(idx, out int src))
             {
                 _sourceIndex.Remove(idx);
@@ -1193,6 +1245,7 @@ namespace CardShopCoop.Sync
             _carrier.Clear();
             _cartGen.Clear();
             _sourceIndex.Clear();
+            _authoritativeTotal.Clear();
             _itemBag.Clear();
             _itemCounter.Clear();
             _cardBag.Clear();

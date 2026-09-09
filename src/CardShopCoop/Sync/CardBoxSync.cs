@@ -92,6 +92,7 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, double> _locallyTouched = new Dictionary<int, double>();   // client: my recent moves beat stale echoes
         private readonly Dictionary<int, double> _recentlyCollected = new Dictionary<int, double>(); // client: cardsHash -> time; stale pre-collect snapshots must not resurrect the box
         private readonly Dictionary<InteractablePackagingBox_Card, int> _hostIds = new Dictionary<InteractablePackagingBox_Card, int>();
+        private readonly HashSet<int> _snapshotErrors = new HashSet<int>();
         private int _nextHostId = 1;
         private float _timer;
         private int _lastHostHash;
@@ -116,6 +117,7 @@ namespace CardShopCoop.Sync
             _locallyTouched.Clear();
             _recentlyCollected.Clear();
             _hostIds.Clear();
+            _snapshotErrors.Clear();
             _nextHostId = 1;
             _timer = -8.4f; // staggered phase vs the other snapshot engines
             _lastHostHash = 0;
@@ -259,14 +261,24 @@ namespace CardShopCoop.Sync
             {
                 var boxes = LiveBoxes();
                 var list = new List<Entry>(Mathf.Min(boxes.Count, MaxBoxes));
+                bool sawError = false;
                 for (int i = 0; i < boxes.Count && list.Count < MaxBoxes; i++)
                 {
                     if (boxes[i] == null) continue;
-                    var e = Snapshot(boxes[i]);
-                    e.Id = HostId(boxes[i]);
-                    if (_remoteCarried.Contains(i)) e.Carried = true; // a client holds it
-                    list.Add(e);
+                    try
+                    {
+                        var e = Snapshot(boxes[i]);
+                        e.Id = HostId(boxes[i]);
+                        if (_remoteCarried.Contains(i)) e.Carried = true; // a client holds it
+                        list.Add(e);
+                    }
+                    catch (Exception e)
+                    {
+                        sawError = true;
+                        if (_snapshotErrors.Add(i)) CoopPlugin.Log.LogWarning($"CardBoxSync snapshot box {i}: {e.Message}");
+                    }
                 }
+                if (sawError) return; // do not broadcast an incomplete authoritative list
                 int hash = 17;
                 for (int i = 0; i < list.Count; i++)
                 {

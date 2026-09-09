@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Messages;
 using System;
@@ -62,17 +63,17 @@ namespace CardShopCoop.Sync
 
         // client UI state we must read before opening a fullscreen lock
         private static readonly System.Reflection.FieldInfo FiIsLerping =
-            AccessTools.Field(typeof(EndOfDayReportScreen), "m_IsLerpingNumber");
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_IsLerpingNumber");
         // ...and the screen's own input latch, which we have to hand back the way OpenScreen
         // expects it (see CloseClientReport)
         private static readonly System.Reflection.FieldInfo FiHoldingMouseDown =
-            AccessTools.Field(typeof(EndOfDayReportScreen), "m_IsHoldingMouseDown");
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_IsHoldingMouseDown");
         private static readonly System.Reflection.FieldInfo FiMouseDownTime =
-            AccessTools.Field(typeof(EndOfDayReportScreen), "m_MouseDownTime");
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_MouseDownTime");
         private static readonly System.Reflection.FieldInfo FiPhoneMode =
-            AccessTools.Field(typeof(InteractionPlayerController), "m_IsPhoneScreenMode");
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsPhoneScreenMode");
         private static readonly System.Reflection.FieldInfo FiCashMode =
-            AccessTools.Field(typeof(InteractionPlayerController), "m_IsCashCounterMode");
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsCashCounterMode");
 
         private float _timer;
         private int _lastHash;
@@ -145,7 +146,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"Patch target missing: {type.Name}.{method}");

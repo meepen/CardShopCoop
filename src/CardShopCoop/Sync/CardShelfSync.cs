@@ -55,6 +55,7 @@ namespace CardShopCoop.Sync
 
         private readonly Dictionary<int, SlotState> _last = new Dictionary<int, SlotState>();
         private readonly Dictionary<int, double> _locallyChanged = new Dictionary<int, double>();
+        private readonly HashSet<string> _snapshotErrors = new HashSet<string>();
         private float _timer;
         private ShelfManager _sm;
 
@@ -70,6 +71,7 @@ namespace CardShopCoop.Sync
         {
             _last.Clear();
             _locallyChanged.Clear();
+            _snapshotErrors.Clear();
             _timer = 0.1f; // staggered phase vs the other snapshot engines
             _sm = null;
         }
@@ -101,58 +103,59 @@ namespace CardShopCoop.Sync
             _timer -= 0.9f;
 
             List<Entry> changes = null;
+            bool sawError = false;
             try
             {
                 var sm = Sm();
                 if (sm == null) return;
-                Walk(sm.m_CardShelfList, 2, ref changes);
-                Walk(sm.m_CardItemCombiShelfList, 3, ref changes);
-                Walk(sm.m_TournamentPrizeShelfList, 14, ref changes); // prize cards on display
+                Walk(sm.m_CardShelfList, 2, ref changes, ref sawError);
+                Walk(sm.m_CardItemCombiShelfList, 3, ref changes, ref sawError);
+                Walk(sm.m_TournamentPrizeShelfList, 14, ref changes, ref sawError); // prize cards on display
             }
             catch (Exception e)
             {
-                CoopPlugin.Log.LogWarning("CardShelfSync snapshot: " + e.Message);
+                LogSnapshotError("snapshot", e);
                 return;
             }
-            if (changes != null && changes.Count > 0)
+            if (!sawError && changes != null && changes.Count > 0)
                 OnLocalChanges?.Invoke(changes);
         }
 
-        private void Walk<T>(List<T> shelves, int kind, ref List<Entry> changes) where T : CardShelf
+        private void Walk<T>(List<T> shelves, int kind, ref List<Entry> changes, ref bool sawError) where T : CardShelf
         {
             for (int i = 0; i < shelves.Count; i++)
             {
                 var shelf = shelves[i];
                 if (shelf == null || !shelf.gameObject.activeInHierarchy) continue; // boxed/carried
-                var comps = shelf.GetCardCompartmentList();
+                List<InteractableCardCompartment> comps;
+                try { comps = shelf.GetCardCompartmentList(); }
+                catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i, e); continue; }
                 for (int j = 0; j < comps.Count; j++)
                 {
-                    var comp = comps[j];
-                    if (comp == null) continue;
-                    if (!PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key)) continue;
-                    // unreadable (a card is there but its pooled UI is culled/detached)
-                    // is NOT empty - misreporting it as empty wipes the other side
-                    if (!TryReadSlot(comp, out CardData card)) continue;
-                    bool occupied = card != null;
-
-                    if (_last.TryGetValue(key, out var st))
+                    try
                     {
-                        if (st.Occupied == occupied && (!occupied || st.Matches(card)))
-                            continue;
+                        var comp = comps[j];
+                        if (comp == null) continue;
+                        if (!PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key)) continue;
+                        if (!TryReadSlot(comp, out CardData card)) continue;
+                        bool occupied = card != null;
+                        if (_last.TryGetValue(key, out var st) && st.Occupied == occupied && (!occupied || st.Matches(card))) continue;
+                        if (!_last.ContainsKey(key) && IsClientRole) { _last[key] = SlotState.From(card); continue; }
+                        if (changes == null) changes = new List<Entry>();
+                        if (changes.Count >= 128) return;
+                        _last[key] = SlotState.From(card);
+                        if (IsClientRole) _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
+                        changes.Add(new Entry { Key = key, Occupied = occupied, Card = card });
                     }
-                    else if (IsClientRole)
-                    {
-                        _last[key] = SlotState.From(card); // adopt silently, never report
-                        continue;
-                    }
-
-                    if (changes == null) changes = new List<Entry>();
-                    if (changes.Count >= 128) return; // rest next tick
-                    _last[key] = SlotState.From(card);
-                    if (IsClientRole) _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
-                    changes.Add(new Entry { Key = key, Occupied = occupied, Card = card });
+                    catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i + ":" + j, e); }
                 }
             }
+        }
+
+        private void LogSnapshotError(string item, Exception e)
+        {
+            if (_snapshotErrors.Add(item))
+                CoopPlugin.Log.LogWarning("CardShelfSync snapshot item " + item + ": " + e.Message);
         }
 
         /// <summary>Remove a displayed card the way the vanilla purchase path does:

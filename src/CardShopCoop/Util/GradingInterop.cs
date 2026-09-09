@@ -38,18 +38,18 @@ namespace CardShopCoop.Util
         // STATIC INITIALIZER: it runs the first time anything touches GradingInterop, and with
         // the bare walk that was one guaranteed ReflectionTypeLoadException in the log of every
         // Game Pass session that ever synced a card. See Util.ModParity.ResolveType.
-        private static readonly Type TReg = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.EncodedGradeRegistry", GradingAssembly);
-        private static readonly Type THelper = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.Helper", GradingAssembly);
+        private static readonly Type TReg = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.EncodedGradeRegistry", GradingAssembly);
+        private static readonly Type THelper = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.Helper", GradingAssembly);
 
         // void RememberForExternalMod(CardData, int) - public static, decompiled :5900
         private static readonly MethodInfo MiRemember = TReg == null ? null
-            : AccessTools.Method(TReg, "RememberForExternalMod", new[] { typeof(CardData), typeof(int) });
+            : ReflectionSurface.OptionalMethod(TReg, "RememberForExternalMod", new[] { typeof(CardData), typeof(int) });
         // int GetEncodedOrCurrent(CardData) - public static, decompiled :5929
         private static readonly MethodInfo MiGetEncoded = TReg == null ? null
-            : AccessTools.Method(TReg, "GetEncodedOrCurrent", new[] { typeof(CardData) });
+            : ReflectionSurface.OptionalMethod(TReg, "GetEncodedOrCurrent", new[] { typeof(CardData) });
         // int GetActualGrade(int) - public static, decompiled :15993
         private static readonly MethodInfo MiActual = THelper == null ? null
-            : AccessTools.Method(THelper, "GetActualGrade", new[] { typeof(int) });
+            : ReflectionSurface.OptionalMethod(THelper, "GetActualGrade", new[] { typeof(int) });
 
         // ------------------------------------------------------------------
         // JOB ENROLLMENT bridge (GradingSync.HostApplyOp).
@@ -65,15 +65,15 @@ namespace CardShopCoop.Util
         // exact chain by reflection for a wire-born set.
         // ------------------------------------------------------------------
 
-        private static readonly Type TTheme = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingWebsiteThemeController", GradingAssembly);
+        private static readonly Type TTheme = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.GradingWebsiteThemeController", GradingAssembly);
         /// <summary>GO's GradingCompany enum (decompiled :1036 - Cardinals, Custom, PSA, Beckett).
         /// Resolved, never hard-coded: a future GO reorder must show up as a decode mismatch,
         /// not as silently mis-stamped jobs. <see cref="LogCompanyEnum"/> prints it once.</summary>
-        private static readonly Type TCompany = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingCompany", GradingAssembly);
-        private static readonly Type TJobRegistry = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingJobCompanyRegistry", GradingAssembly);
-        private static readonly Type TPreRoll = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.PreRollManager", GradingAssembly);
-        private static readonly Type TCodec = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.ServiceLevelCodec", GradingAssembly);
-        private static readonly Type TConfig = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.ConfigSettings", GradingAssembly);
+        private static readonly Type TCompany = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.GradingCompany", GradingAssembly);
+        private static readonly Type TJobRegistry = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.GradingJobCompanyRegistry", GradingAssembly);
+        private static readonly Type TPreRoll = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.PreRollManager", GradingAssembly);
+        private static readonly Type TCodec = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.ServiceLevelCodec", GradingAssembly);
+        private static readonly Type TConfig = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.ConfigSettings", GradingAssembly);
 
         // GradingCompany CurrentWebsiteCompany { get; private set; } - decompiled :4108.
         // Read RAW. GO's own recording postfixes read exactly this property with no fallback
@@ -81,31 +81,31 @@ namespace CardShopCoop.Util
         // ConfigSettings.ActiveCompanyProfile when the raw value is Cardinals, and copying that
         // fallback here would stamp jobs with a company the recorder never saw.
         private static readonly PropertyInfo PiCurrentCompany = TTheme == null ? null
-            : AccessTools.Property(TTheme, "CurrentWebsiteCompany");
+            : ReflectionSurface.OptionalProperty(TTheme, "CurrentWebsiteCompany");
         // private static readonly GradingCompany[] AllowedCompanies - decompiled :4017.
         // The website can only ever select these three; Custom (=1) is the internal cheat skin.
         private static readonly FieldInfo FiAllowed = TTheme == null ? null
-            : AccessTools.Field(TTheme, "AllowedCompanies");
+            : ReflectionSurface.OptionalField(TTheme, "AllowedCompanies");
         // public static ConfigEntry<bool> UseCheatsWebsite - decompiled :9585.
         private static readonly FieldInfo FiUseCheats = TConfig == null ? null
-            : AccessTools.Field(TConfig, "UseCheatsWebsite");
+            : ReflectionSurface.OptionalField(TConfig, "UseCheatsWebsite");
 
         private static readonly MethodInfo MiOnJobSubmitted = (TJobRegistry == null || TCompany == null) ? null
-            : AccessTools.Method(TJobRegistry, "OnJobSubmitted",
+            : ReflectionSurface.OptionalMethod(TJobRegistry, "OnJobSubmitted",
                 new[] { typeof(GradeCardSubmitSet), TCompany, typeof(bool), TCompany });
         private static readonly MethodInfo MiNextJobId = TPreRoll == null ? null
-            : AccessTools.Method(TPreRoll, "GetNextJobId", Type.EmptyTypes);
+            : ReflectionSurface.OptionalMethod(TPreRoll, "GetNextJobId", Type.EmptyTypes);
         private static readonly MethodInfo MiPreRoll = (TPreRoll == null || TCompany == null) ? null
-            : AccessTools.Method(TPreRoll, "PreRollOnSubmit",
+            : ReflectionSurface.OptionalMethod(TPreRoll, "PreRollOnSubmit",
                 new[] { typeof(GradeCardSubmitSet), TCompany, typeof(bool), typeof(int) });
         // int Encode(GradingCompany, int tierIndex, int jobId) - decompiled :5574. The class is
         // INTERNAL, so this is unreachable without reflection even though the method is public.
         // Overloaded (a 2-arg Encode exists at :5553), hence the explicit signature.
         private static readonly MethodInfo MiEncode = (TCodec == null || TCompany == null) ? null
-            : AccessTools.Method(TCodec, "Encode", new[] { TCompany, typeof(int), typeof(int) });
+            : ReflectionSurface.OptionalMethod(TCodec, "Encode", new[] { TCompany, typeof(int), typeof(int) });
         // bool TryDecode(int, out GradingCompany, out int) - decompiled :5604 (also overloaded).
         private static readonly MethodInfo MiTryDecode = (TCodec == null || TCompany == null) ? null
-            : AccessTools.Method(TCodec, "TryDecode",
+            : ReflectionSurface.OptionalMethod(TCodec, "TryDecode",
                 new[] { typeof(int), TCompany.MakeByRefType(), typeof(int).MakeByRefType() });
 
         /// <summary>Sentinel written on the wire when GO is absent or the company is unreadable.
@@ -353,7 +353,7 @@ namespace CardShopCoop.Util
         // back to the literal 52 read off that decompile if the field ever walks away.
         // ------------------------------------------------------------------
 
-        private static readonly Type TSlotExpansion = ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingSlotExpansionPatches", GradingAssembly);
+        private static readonly Type TSlotExpansion = ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.GradingSlotExpansionPatches", GradingAssembly);
 
         /// <summary>Vanilla's submit-set slot count. Also the shape every vanilla
         /// GradeCardSubmitSet carries, so it stays the pad target for un-enrolled sets.</summary>
@@ -378,7 +378,7 @@ namespace CardShopCoop.Util
                 string how = "GO 3.4.2 decompile literal (MAX_SLOTS unreadable)";
                 try
                 {
-                    var fi = TSlotExpansion == null ? null : AccessTools.Field(TSlotExpansion, "MAX_SLOTS");
+                    var fi = TSlotExpansion == null ? null : ReflectionSurface.OptionalField(TSlotExpansion, "MAX_SLOTS");
                     if (fi != null && fi.IsLiteral && fi.FieldType == typeof(int))
                     {
                         int raw = Convert.ToInt32(fi.GetRawConstantValue());
@@ -441,22 +441,22 @@ namespace CardShopCoop.Util
         // deliberately zeroes the cert on the way out, so it is useless here; the internal one is
         // reachable by reflection all the same.
         private static readonly MethodInfo MiDecodeFull = (THelper == null || TCompany == null) ? null
-            : AccessTools.Method(THelper, "DecodeGradeFull",
+            : ReflectionSurface.OptionalMethod(THelper, "DecodeGradeFull",
                 new[] { typeof(int), TCompany.MakeByRefType(), typeof(int).MakeByRefType(), typeof(int).MakeByRefType() });
         // public static bool IsCheatFlagged(int) - decompiled-grading :16005 (encoded >= 1e9).
         private static readonly MethodInfo MiIsCheat = THelper == null ? null
-            : AccessTools.Method(THelper, "IsCheatFlagged", new[] { typeof(int) });
+            : ReflectionSurface.OptionalMethod(THelper, "IsCheatFlagged", new[] { typeof(int) });
 
         // GO's cert store. The class is public but every member below is INTERNAL, so this is
         // reflection-only even though nothing about it is private.
         //  - bool HasCertBinding(GradingCompany, int)            - decompiled-grading :644
         //  - bool IsCertBoundToCard(GradingCompany, int, CardData) - decompiled-grading :600
         private static readonly Type TSaveMgr =
-            ModParity.ResolveType("TCGCardShopSimulator.GradingOverhaul.GradingOverhaulSaveManager", GradingAssembly);
+            ReflectionSurface.OptionalType("TCGCardShopSimulator.GradingOverhaul.GradingOverhaulSaveManager", GradingAssembly);
         private static readonly MethodInfo MiHasBinding = (TSaveMgr == null || TCompany == null) ? null
-            : AccessTools.Method(TSaveMgr, "HasCertBinding", new[] { TCompany, typeof(int) });
+            : ReflectionSurface.OptionalMethod(TSaveMgr, "HasCertBinding", new[] { TCompany, typeof(int) });
         private static readonly MethodInfo MiIsBoundTo = (TSaveMgr == null || TCompany == null) ? null
-            : AccessTools.Method(TSaveMgr, "IsCertBoundToCard", new[] { TCompany, typeof(int), typeof(CardData) });
+            : ReflectionSurface.OptionalMethod(TSaveMgr, "IsCertBoundToCard", new[] { TCompany, typeof(int), typeof(CardData) });
 
         /// <summary>THE CERT AUTHORITY REFUSAL, and the reason <see cref="Remember"/> can decline
         /// to register a card that arrived over the wire.
@@ -488,6 +488,12 @@ namespace CardShopCoop.Util
         /// <summary>(company, cert) keys this session has already printed the full refusal
         /// paragraph for - see the memo note inside <see cref="CertFreeForCard"/>.</summary>
         private static readonly HashSet<long> _refusalWarned = new HashSet<long>();
+
+        /// <summary>Forget per-session refusal diagnostics when a world/session ends.</summary>
+        public static void Reset()
+        {
+            _refusalWarned.Clear();
+        }
 
         private static bool CertFreeForCard(CardData card)
         {

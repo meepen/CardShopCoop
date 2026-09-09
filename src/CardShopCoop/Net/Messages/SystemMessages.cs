@@ -26,6 +26,7 @@ namespace CardShopCoop.Net.Messages
         public byte[] EnumBlob = new byte[0];
         public string GameVersion;
         public string UnityVersion;
+        public ulong SteamId;
 
         public MsgType Type { get { return MsgType.Hello; } }
 
@@ -45,6 +46,7 @@ namespace CardShopCoop.Net.Messages
         public byte SelfId;
         public byte[] HostEnumBlob = new byte[0];
         public byte[] HostCardsBlob = new byte[0];
+        public ulong SteamId;
 
         public MsgType Type { get { return MsgType.Welcome; } }
 

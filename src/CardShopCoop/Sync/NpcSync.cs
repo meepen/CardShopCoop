@@ -87,6 +87,14 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, ExistingCustomer> _existing = new Dictionary<int, ExistingCustomer>();
         private static NpcSync _live;
 
+        /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
+        public static void ClearLive()
+        {
+            _live = null;
+        }
+
+        public static void ActivateLive(NpcSync instance) { _live = instance; }
+
         private sealed class ExistingCustomer
         {
             public Customer Customer;
@@ -107,7 +115,9 @@ namespace CardShopCoop.Sync
 
         public void Reset()
         {
-            _live = this;
+            // Shutdown clears the pointer before resetting instance state. Do not resurrect it
+            // while late Harmony callbacks can still arrive during teardown.
+            if (CoopCore.Role != CoopRole.None && !CoopCore.IsTearingDown) _live = this;
             _cm = null;
             _sendTimer = 0f;
             _nameRefreshIn = 0f;

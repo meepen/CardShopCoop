@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Messages;
 using System;
@@ -91,17 +92,68 @@ namespace CardShopCoop.Sync
         private const byte OpRemoved = 2; // joiner sold/trashed a box (object dies too)
 
         private static readonly FieldInfo FiBoxedObject =
-            AccessTools.Field(typeof(InteractablePackagingBox_Shelf), "m_BoxedObject");
+            ReflectionSurface.RequiredField(typeof(InteractablePackagingBox_Shelf), "m_BoxedObject");
         private static readonly FieldInfo FiMovingValid =
-            AccessTools.Field(typeof(InteractableObject), "m_IsMovingObjectValidState");
+            ReflectionSurface.RequiredField(typeof(InteractableObject), "m_IsMovingObjectValidState");
         private static readonly FieldInfo FiGenericList =
-            AccessTools.Field(typeof(ShelfManager), "m_InteractableObjectList");
+            ReflectionSurface.RequiredField(typeof(ShelfManager), "m_InteractableObjectList");
         // BoxUpObject hides the cashier counter's world screens and only the mover's
         // OnStartMoveObject re-shows them - a headless remote placement must do it here
         private static readonly FieldInfo FiCounterScreen =
-            AccessTools.Field(typeof(InteractableCashierCounter), "m_UICashCounterScreen");
+            ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_UICashCounterScreen");
         private static readonly FieldInfo FiCreditScreen =
-            AccessTools.Field(typeof(InteractableCashierCounter), "m_UICreditCardScreen");
+            ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_UICreditCardScreen");
+
+        /// <summary>
+        /// The game's furniture-delivery spawn routine moves the box Transform after creating
+        /// it, but does not move the box Rigidbody. The body can therefore remain at the
+        /// construction position (usually the origin) while the visible box is at the delivery
+        /// point. FurnBoxSync reads the body as authoritative, so repair that mismatch at the
+        /// spawn boundary before the first snapshot is allowed to leave this machine.
+        /// </summary>
+        public static void AlignJustSpawnedBox(EObjectType objType, Vector3 position, Quaternion rotation)
+        {
+            try
+            {
+                var boxes = LiveBoxes();
+                for (int i = boxes.Count - 1; i >= 0; i--)
+                {
+                    var box = boxes[i];
+                    if (box == null || BoxedObject(box) == null
+                        || BoxedObject(box).m_ObjectType != objType) continue;
+
+                    // The newly-created box is appended to the list. Reverse order avoids
+                    // accidentally repairing an older same-type delivery at the same location.
+                    var rb = box.m_Rigidbody;
+                    if (rb != null)
+                    {
+                        rb.position = position;
+                        rb.rotation = rotation;
+                        rb.velocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                        if (!rb.isKinematic) rb.WakeUp();
+                    }
+                    else box.transform.SetPositionAndRotation(position, rotation);
+                    return;
+                }
+                CoopPlugin.Log.LogWarning($"FurnBoxSync: could not find newly spawned {objType} delivery box to align its Rigidbody");
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning($"FurnBoxSync: failed to align spawned {objType} box: {e.Message}");
+            }
+        }
+
+        private static bool IsSanePose(Vector3 position)
+        {
+            // Reject NaN/Infinity and clearly impossible poses. Do not impose a tight shop
+            // rectangle: expanded rooms and future maps may legitimately exceed the vanilla
+            // bounds. The y floor is the important protection against boxes falling forever.
+            return !float.IsNaN(position.x) && !float.IsNaN(position.y) && !float.IsNaN(position.z)
+                && !float.IsInfinity(position.x) && !float.IsInfinity(position.y) && !float.IsInfinity(position.z)
+                && position.y >= -2f && position.y <= 100f
+                && Mathf.Abs(position.x) <= 1000f && Mathf.Abs(position.z) <= 1000f;
+        }
 
         // boxes are stable components, so trackers key by REFERENCE - unlike BoxSync's
         // index keys there is nothing to clear when the list shifts (same semantics,
@@ -120,15 +172,14 @@ namespace CardShopCoop.Sync
             = new HashSet<InteractablePackagingBox_Shelf>();                              // host: own-carry transitions
         private readonly Dictionary<InteractablePackagingBox_Shelf, double> _hostRecentlyReleased
             = new Dictionary<InteractablePackagingBox_Shelf, double>();                   // host: just set it down; stale client reports must not stomp it
-        private readonly Dictionary<InteractablePackagingBox_Shelf, ushort> _hostIds
-            = new Dictionary<InteractablePackagingBox_Shelf, ushort>();
-        private readonly Dictionary<ushort, InteractablePackagingBox_Shelf> _hostById
-            = new Dictionary<ushort, InteractablePackagingBox_Shelf>();
-        private ushort _nextId = 1;
-        private readonly Dictionary<ushort, InteractablePackagingBox_Shelf> _clientById
-            = new Dictionary<ushort, InteractablePackagingBox_Shelf>();
-        private readonly Dictionary<InteractablePackagingBox_Shelf, ushort> _clientIdOf
-            = new Dictionary<InteractablePackagingBox_Shelf, ushort>();
+        private readonly BoxIdentityMap<InteractablePackagingBox_Shelf> _hostIdentity
+            = new BoxIdentityMap<InteractablePackagingBox_Shelf>();
+        private readonly BoxIdentityMap<InteractablePackagingBox_Shelf> _clientIdentity
+            = new BoxIdentityMap<InteractablePackagingBox_Shelf>();
+        private Dictionary<InteractablePackagingBox_Shelf, ushort> _hostIds { get { return _hostIdentity.IdOf; } }
+        private Dictionary<ushort, InteractablePackagingBox_Shelf> _hostById { get { return _hostIdentity.ById; } }
+        private Dictionary<ushort, InteractablePackagingBox_Shelf> _clientById { get { return _clientIdentity.ById; } }
+        private Dictionary<InteractablePackagingBox_Shelf, ushort> _clientIdOf { get { return _clientIdentity.IdOf; } }
         private readonly Dictionary<InteractableObject, double> _recentlyUnpacked
             = new Dictionary<InteractableObject, double>();                               // client: I placed it; the echo must not re-box it
         private double _suppressBoxUp;     // client: kind indices shifted (local sell); no NEW box-ups until the echo re-aligns
@@ -153,6 +204,15 @@ namespace CardShopCoop.Sync
             Instance = this;
         }
 
+        /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
+        public static void ClearLive()
+        {
+            Instance = null;
+            ApplyingRemote = false;
+        }
+
+        public static void ActivateLive(FurnBoxSync instance) { Instance = instance; }
+
         public void Reset()
         {
             _lastApplied.Clear();
@@ -162,11 +222,8 @@ namespace CardShopCoop.Sync
             _locallyTouched.Clear();
             _hostCarriedLastTick.Clear();
             _hostRecentlyReleased.Clear();
-            _hostIds.Clear();
-            _hostById.Clear();
-            _clientById.Clear();
-            _clientIdOf.Clear();
-            _nextId = 1;
+            _hostIdentity.Clear();
+            _clientIdentity.Clear();
             _carryPollTimer = 0f;
             _recentlyUnpacked.Clear();
             _kindCache.Clear();
@@ -233,12 +290,7 @@ namespace CardShopCoop.Sync
 
         private ushort HostIdFor(InteractablePackagingBox_Shelf box)
         {
-            if (_hostIds.TryGetValue(box, out var id)) return id;
-            do { id = _nextId++; if (_nextId == 0) _nextId = 1; }
-            while (id == 0 || _hostById.ContainsKey(id));
-            _hostIds[box] = id;
-            _hostById[id] = box;
-            return id;
+            return _hostIdentity.GetOrAssign(box);
         }
 
         private static bool InGameLevel()
@@ -297,7 +349,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"Patch target missing: {type.Name}.{method}");
@@ -363,6 +415,12 @@ namespace CardShopCoop.Sync
                     var obj = BoxedObject(box);
                     if (obj == null) continue; // mid-unpack this frame; next tick has truth
                     if (!TryFindObjKey(obj, out byte kind, out int objIdx)) continue;
+                    var boxPos = BoxSync.PhysicsPosition(box);
+                    if (!IsSanePose(boxPos))
+                    {
+                        CoopPlugin.Log.LogWarning($"FurnBoxSync host: refusing invalid delivery-box pose for {obj.m_ObjectType}: {boxPos}");
+                        continue;
+                    }
                     list.Add(new Entry
                     {
                         Id = HostIdFor(box),
@@ -370,7 +428,7 @@ namespace CardShopCoop.Sync
                         NameHash = Fnv(obj.m_ObjectType.ToString()),
                         Kind = kind,
                         ObjIndex = objIdx,
-                        Pos = BoxSync.PhysicsPosition(box),
+                        Pos = boxPos,
                         Yaw = BoxSync.PhysicsRotation(box).eulerAngles.y,
                         Carried = IsLocallyCarried(box) || _remoteCarried.Contains(box),
                         OwnerKind = IsLocallyCarried(box) ? (byte)1 : (_remoteCarried.Contains(box) ? (byte)2 : (byte)0),
@@ -433,6 +491,11 @@ namespace CardShopCoop.Sync
                 var pos = entry.Position;
                 float yaw = entry.Yaw;
                 if (!_hostById.TryGetValue(id, out var box) || box == null) continue;
+                if (!IsSanePose(pos))
+                {
+                    CoopPlugin.Log.LogWarning($"FurnBoxSync host: rejected invalid client pose for box {id}: {pos}");
+                    continue;
+                }
                 // the stable id is authoritative; type remains a corruption guard
                 if (!BoxedTypeMatches(box, wireType, nameHash)) continue;
                 if (IsLocallyCarried(box)) continue; // never stomp a box in the host's hands
@@ -893,6 +956,11 @@ namespace CardShopCoop.Sync
                 if (carried)
                 {
                     HideBox(box);
+                    return;
+                }
+                if (!IsSanePose(pos))
+                {
+                    CoopPlugin.Log.LogWarning($"FurnBoxSync: ignored invalid remote delivery-box pose {pos}");
                     return;
                 }
                 ShowBox(box);

@@ -18,6 +18,47 @@ namespace CardShopCoop.Sync
     /// </summary>
     public static class SidecarTransfer
     {
+        private static bool TryGetSafePath(string root, string rel, out string full)
+        {
+            full = null;
+            if (string.IsNullOrEmpty(rel) || Path.IsPathRooted(rel) || rel.IndexOf(':') >= 0)
+                return false;
+
+            string[] parts = rel.Split(new[] { '/', '\\' }, StringSplitOptions.None);
+            foreach (string part in parts)
+                if (part == "..") return false;
+
+            string normalizedRoot = Path.GetFullPath(root);
+            if (!normalizedRoot.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
+                normalizedRoot += Path.DirectorySeparatorChar;
+            full = Path.GetFullPath(Path.Combine(normalizedRoot, rel.Replace('/', Path.DirectorySeparatorChar)));
+            return full.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void RejectUnsafe(string rel)
+        {
+            CoopPlugin.Log.LogWarning("sidecar: rejecting unsafe path '" + rel + "'");
+        }
+
+        public static void ApplyBundleAsync(byte[] bundle, int hostSlot, int clientSlot,
+            Action completed, Action<Exception> failed)
+        {
+            string root = Application.persistentDataPath;
+            new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    ApplyBundle(bundle, hostSlot, clientSlot, root);
+                    CoopCore.EnqueueMainThread(completed);
+                }
+                catch (Exception e)
+                {
+                    CoopPlugin.Log.LogError("coop: sidecar apply worker failed: " + e);
+                    CoopCore.EnqueueMainThread(() => failed(e));
+                }
+            }) { IsBackground = true, Name = "CoopSidecarApply" }.Start();
+        }
+
         public static byte[] BuildBundle(int hostSlot)
         {
             string root = Application.persistentDataPath;
@@ -55,7 +96,12 @@ namespace CardShopCoop.Sync
         public static void ApplyBundle(byte[] bundle, int hostSlot, int clientSlot)
         {
             if (bundle == null || bundle.Length < 4) return;
-            string root = Application.persistentDataPath;
+            ApplyBundle(bundle, hostSlot, clientSlot, Application.persistentDataPath);
+        }
+
+        private static void ApplyBundle(byte[] bundle, int hostSlot, int clientSlot, string root)
+        {
+            if (bundle == null || bundle.Length < 4) return;
             var renameRx = new Regex($@"(?<=_|Release){hostSlot}(?=_|\.|$)");
             int applied = 0, skipped = 0;
 
@@ -68,6 +114,12 @@ namespace CardShopCoop.Sync
                     int len = br.ReadInt32();
                     byte[] data = br.ReadBytes(len);
 
+                    if (!TryGetSafePath(root, rel, out string originalPath))
+                    {
+                        RejectUnsafe(rel);
+                        skipped++;
+                        continue;
+                    }
                     string dir = Path.GetDirectoryName(rel) ?? "";
                     string name = Path.GetFileName(rel);
 
@@ -77,11 +129,11 @@ namespace CardShopCoop.Sync
                         // DIFFERENT existing registry would scramble the modded items in the
                         // client's own solo saves, so only install it where none exists yet
                         // (the fresh second-PC case, which is the one that matters).
-                        string target = Path.Combine(root, dir, name);
+                        string target = originalPath;
                         if (!File.Exists(target))
                         {
                             Directory.CreateDirectory(Path.GetDirectoryName(target));
-                            File.WriteAllBytes(target, data);
+                            AtomicWrite(target, data);
                             applied++;
                         }
                         else if (!BytesEqual(File.ReadAllBytes(target), data))
@@ -96,11 +148,17 @@ namespace CardShopCoop.Sync
                     }
 
                     string newName = renameRx.Replace(name, clientSlot.ToString());
-                    string path = Path.Combine(root, dir, newName);
+                    string rewrittenRel = string.IsNullOrEmpty(dir) ? newName : Path.Combine(dir, newName);
+                    if (!TryGetSafePath(root, rewrittenRel, out string path))
+                    {
+                        RejectUnsafe(rel);
+                        skipped++;
+                        continue;
+                    }
                     Directory.CreateDirectory(Path.GetDirectoryName(path));
                     if (File.Exists(path) && !File.Exists(path + ".coopbak"))
                         File.Copy(path, path + ".coopbak"); // one-time backup of whatever was there
-                    File.WriteAllBytes(path, data);
+                    AtomicWrite(path, data);
                     applied++;
                 }
             }
@@ -112,6 +170,21 @@ namespace CardShopCoop.Sync
             if (a.Length != b.Length) return false;
             for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
             return true;
+        }
+
+        private static void AtomicWrite(string path, byte[] data)
+        {
+            string temp = path + ".cooptmp." + Guid.NewGuid().ToString("N");
+            try
+            {
+                File.WriteAllBytes(temp, data);
+                if (File.Exists(path)) File.Replace(temp, path, null);
+                else File.Move(temp, path);
+            }
+            finally
+            {
+                if (File.Exists(temp)) File.Delete(temp);
+            }
         }
     }
 }

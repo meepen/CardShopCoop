@@ -293,8 +293,8 @@ namespace CardShopCoop.Sync
                 // value by design (see FillSparse).
                 int i = (int)entries[k].ItemType;
                 float v = entries[k].Value;
-                if (list == null || i < 0 || i > 500000) continue;
-                if (i >= VanillaItemTypes && EplMarketBridge())
+                if (!TryResolveIndex(list, i, out bool modded)) continue;
+                if (modded)
                 {
                     // raw writes up here are shadow rows the game never reads (the
                     // woven accessors serve EPL save data instead) - the original
@@ -338,8 +338,8 @@ namespace CardShopCoop.Sync
                 // ReadSparseFloatsInto)
                 int i = (int)entries[k].ItemType;
                 float v = entries[k].Percent / 100f;
-                if (list == null || i < 0 || i > 500000) continue;
-                if (i >= VanillaItemTypes && EplMarketBridge())
+                if (!TryResolveIndex(list, i, out bool modded)) continue;
+                if (modded)
                 {
                     EplSetFloat(i, s_eplPctChange, v);
                     continue;
@@ -415,8 +415,6 @@ namespace CardShopCoop.Sync
         // modded ids >= 200000, which resolve identically on every machine, unlike
         // its alternate [129, 129+modCount) index space, which is ordered by the
         // LOCALLY installed mod set and would cross-assign prices between machines.
-        private const int VanillaItemTypes = 129; // EPL's hardcoded woven boundary
-
         private static bool s_eplProbed;
         private static object s_eplSaveMgr;    // EplServices.SaveDataManager (created once, never reassigned)
         private static MethodInfo s_eplTryGet; // TryGetSaveData<EItemType, ItemSaveData>(key, out data)
@@ -476,7 +474,51 @@ namespace CardShopCoop.Sync
         private static int VanillaWalkCount(List<float> list)
         {
             int n = list?.Count ?? 0;
-            return EplMarketBridge() ? Mathf.Min(n, VanillaItemTypes) : n;
+            return EplMarketBridge() ? Mathf.Min(n, VanillaItemTypeCount()) : n;
+        }
+
+        private static int VanillaItemTypeCount()
+        {
+            int max = -1;
+            Array values = Enum.GetValues(typeof(EItemType));
+            for (int i = 0; i < values.Length; i++)
+            {
+                int value = Convert.ToInt32(values.GetValue(i));
+                if (value >= 0 && value < 200000 && value > max) max = value;
+            }
+            return max + 1;
+        }
+
+        private static bool TryResolveIndex(List<float> list, int index, out bool modded)
+        {
+            modded = false;
+            if (list == null || index < 0 || index > 500000)
+            {
+                WarnInvalidIndex(index);
+                return false;
+            }
+            if (!EplMarketBridge())
+            {
+                if (index >= list.Count) WarnInvalidIndex(index);
+                return index < list.Count;
+            }
+            int vanilla = VanillaItemTypeCount();
+            if (index < vanilla)
+            {
+                if (index >= list.Count) WarnInvalidIndex(index);
+                return index < list.Count;
+            }
+            modded = EplSaveData(index) != null;
+            if (!modded) WarnInvalidIndex(index);
+            return modded;
+        }
+
+        private static readonly HashSet<int> s_warnedInvalidIndexes = new HashSet<int>();
+
+        private static void WarnInvalidIndex(int index)
+        {
+            if (s_warnedInvalidIndexes.Add(index))
+                CoopPlugin.Log.LogWarning($"MarketSync: skipped out-of-range or unresolved item index {index}");
         }
 
         /// <summary>Raw itemType ints of EPL's modded items (ItemLibrary.ItemData keys);

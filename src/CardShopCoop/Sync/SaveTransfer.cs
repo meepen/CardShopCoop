@@ -417,6 +417,71 @@ namespace CardShopCoop.Sync
                   "no error at all. Load into your shop fully, then retry.", path);
         }
 
+        /// <summary>Apply filesystem changes away from Unity's update thread. The object
+        /// injection and scene transition are deliberately marshalled back to the main thread:
+        /// JsonUtility and CGameManager are Unity/game APIs and are not thread-safe.</summary>
+        public static void ApplyAndLoadAsync(byte[] saveBytes, Action completed, Action<Exception> failed)
+        {
+            if (saveBytes == null || saveBytes.Length == 0)
+                throw new ArgumentException("Received save payload is empty", nameof(saveBytes));
+
+            string root = Application.persistentDataPath;
+            string basePath = Path.Combine(root, "savedGames_Release" + CoopSlot);
+            string slotPath = basePath + ".json";
+            string backupPath = Path.Combine(root, "savedGames_ReleaseBackupFile" + CoopSlot + ".json");
+            new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    TryDelete(basePath + ".gd");
+                    TryDelete(slotPath);
+                    TryDelete(backupPath);
+                    if (File.Exists(basePath + ".gd") || File.Exists(slotPath) || File.Exists(backupPath))
+                        throw new IOException("A previous co-op save could not be cleared");
+                    File.WriteAllBytes(slotPath, saveBytes);
+                    CoopCore.EnqueueMainThread(() =>
+                    {
+                        try
+                        {
+                            InjectAndForceLoad(saveBytes);
+                            completed?.Invoke();
+                        }
+                        catch (Exception e)
+                        {
+                            CoopPlugin.Log.LogError("coop: received world main-thread apply failed: " + e);
+                            failed?.Invoke(e);
+                        }
+                    });
+                }
+                catch (Exception e)
+                {
+                    CoopPlugin.Log.LogError("coop: save apply worker failed: " + e);
+                    CoopCore.EnqueueMainThread(() => failed?.Invoke(e));
+                }
+            }) { IsBackground = true, Name = "CoopSaveApply" }.Start();
+        }
+
+        private static void InjectAndForceLoad(byte[] saveBytes)
+        {
+            var gm = CSingleton<CGameManager>.Instance;
+            gm.m_ForceNoCloudSaveLoad = true;
+            bool injected = false;
+            string json = new UTF8Encoding(false).GetString(saveBytes)
+                .TrimStart('\uFEFF', ' ', '\r', '\n', '\t');
+            if (json.StartsWith("{", StringComparison.Ordinal))
+            {
+                var fld = typeof(CSaveLoad).GetField("m_SavedGame",
+                    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                if (fld != null)
+                {
+                    object world = JsonUtility.FromJson(json, fld.FieldType);
+                    if (world != null) { fld.SetValue(null, world); injected = true; }
+                }
+            }
+            CoopPlugin.Log.LogInfo($"Coop save received ({saveBytes.Length / 1024} KB){(injected ? " [in-memory]" : "")}, loading world...");
+            ForceLoadSlot(CoopSlot);
+        }
+
         /// <summary>Client: apply the received world into the co-op slot and load it.
         ///
         /// GAME PASS FALLBACK: writing savedGames_Release&lt;CoopSlot&gt;.json is not enough on the

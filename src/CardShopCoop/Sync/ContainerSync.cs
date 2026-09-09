@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Messages;
 using System;
@@ -80,33 +81,33 @@ namespace CardShopCoop.Sync
 
         // private game state this module must read/write (no public accessors exist)
         private static readonly FieldInfo FiPoIsProcessing =
-            AccessTools.Field(typeof(InteractableAutoPackOpener), "m_IsProcessing");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoPackOpener), "m_IsProcessing");
         private static readonly FieldInfo FiPoOpenTimer =
-            AccessTools.Field(typeof(InteractableAutoPackOpener), "m_PackOpenTimer");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoPackOpener), "m_PackOpenTimer");
         private static readonly FieldInfo FiPoOpenedCount =
-            AccessTools.Field(typeof(InteractableAutoPackOpener), "m_PackOpenedCount");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoPackOpener), "m_PackOpenedCount");
         private static readonly FieldInfo FiPoUI =
-            AccessTools.Field(typeof(InteractableAutoPackOpener), "m_AutoCardOpenerUI");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoPackOpener), "m_AutoCardOpenerUI");
         private static readonly FieldInfo FiEbCount =
-            AccessTools.Field(typeof(InteractableEmptyBoxStorage), "m_StoredBoxCount");
+            ReflectionSurface.RequiredField(typeof(InteractableEmptyBoxStorage), "m_StoredBoxCount");
         private static readonly FieldInfo FiEbMax =
-            AccessTools.Field(typeof(InteractableEmptyBoxStorage), "m_MaxStoredBoxCount");
+            ReflectionSurface.RequiredField(typeof(InteractableEmptyBoxStorage), "m_MaxStoredBoxCount");
         private static readonly MethodInfo MiEbEval =
-            AccessTools.Method(typeof(InteractableEmptyBoxStorage), "EvaluateStoredBoxStackHeight");
+            ReflectionSurface.RequiredMethod(typeof(InteractableEmptyBoxStorage), "EvaluateStoredBoxStackHeight");
         private static readonly FieldInfo FiClTurnedOn =
-            AccessTools.Field(typeof(InteractableAutoCleanser), "m_IsTurnedOn");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoCleanser), "m_IsTurnedOn");
         private static readonly FieldInfo FiClNeedRefill =
-            AccessTools.Field(typeof(InteractableAutoCleanser), "m_IsNeedRefill");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoCleanser), "m_IsNeedRefill");
         private static readonly FieldInfo FiClCooldown =
-            AccessTools.Field(typeof(InteractableAutoCleanser), "m_IsSprayOnCooldown");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoCleanser), "m_IsSprayOnCooldown");
         private static readonly FieldInfo FiClTimer =
-            AccessTools.Field(typeof(InteractableAutoCleanser), "m_Timer");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoCleanser), "m_Timer");
         // the cleanser is the only container whose count is stored independently of its
         // list (every other one derives from m_StoredItemList.Count), and vanilla indexes
         // the list with it - so the reconcile has to be able to force the two back into
         // agreement rather than trust either one. See ApplyCleanserState.
         private static readonly FieldInfo FiClItemAmount =
-            AccessTools.Field(typeof(InteractableAutoCleanser), "m_ItemAmount");
+            ReflectionSurface.RequiredField(typeof(InteractableAutoCleanser), "m_ItemAmount");
 
         /// <summary>Client's copy of a pack opener's host-side truth. Kept OUTSIDE the
         /// game object because the machine's own fields must stay inert (see class doc).</summary>
@@ -208,6 +209,16 @@ namespace CardShopCoop.Sync
                 return h;
             };
         }
+
+        /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
+        public static void ClearLive()
+        {
+            Instance = null;
+            ApplyingRemote = false;
+            _suppressedStorageDestroy = null;
+        }
+
+        public static void ActivateLive(ContainerSync instance) { Instance = instance; }
 
         public void Reset()
         {
@@ -318,6 +329,7 @@ namespace CardShopCoop.Sync
             {
                 var sm = Sm();
                 if (sm == null) return;
+                bool sawError = false;
                 _heal += TickInterval;
                 if (_heal >= HealInterval)
                 {
@@ -326,22 +338,40 @@ namespace CardShopCoop.Sync
                     _lastHash.Clear();
                 }
                 _dirty.Clear();
-                CollectKind(sm, KindCardStorage, _hashCardStorage);
-                CollectKind(sm, KindDonation, _hashDonation);
-                CollectKind(sm, KindPackOpener, _hashPackOpener);
-                CollectKind(sm, KindBoxStorage, _hashBoxStorage);
-                CollectKind(sm, KindCleanser, _hashCleanser);
-                if (_dirty.Count == 0) return;
+                CollectKind(sm, KindCardStorage, _hashCardStorage, ref sawError);
+                CollectKind(sm, KindDonation, _hashDonation, ref sawError);
+                CollectKind(sm, KindPackOpener, _hashPackOpener, ref sawError);
+                CollectKind(sm, KindBoxStorage, _hashBoxStorage, ref sawError);
+                CollectKind(sm, KindCleanser, _hashCleanser, ref sawError);
+                if (_dirty.Count == 0)
+                {
+                    if (sawError) ForceResend();
+                    return;
+                }
                 var dirty = new List<int>(_dirty); // snapshot for the closure
                 var records = new List<ContainerRecord>(dirty.Count);
                 for (int i = 0; i < dirty.Count; i++)
-                    records.Add(BuildRecord(dirty[i] >> 8, dirty[i] & 0xFF));
+                {
+                    int key = dirty[i];
+                    try { records.Add(BuildRecord(key >> 8, key & 0xFF)); }
+                    catch (Exception e)
+                    {
+                        sawError = true;
+                        _lastHash.Remove(key); // retry this record on the next tick
+                        CoopPlugin.Log.LogWarning($"ContainerSync snapshot record {key >> 8}:{key & 0xFF}: {e.Message}");
+                    }
+                }
+                if (sawError)
+                {
+                    ForceResend();
+                    return; // never label the remaining records as a complete snapshot
+                }
                 BroadcastState?.Invoke(new ContainerStateMessage { Records = records });
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ContainerSync host: " + e.Message); }
         }
 
-        private void CollectKind(ShelfManager sm, int kind, Func<object, int> hashFn)
+        private void CollectKind(ShelfManager sm, int kind, Func<object, int> hashFn, ref bool sawError)
         {
             var list = PopulationSync.GetList(sm, kind);
             if (list == null) return;
@@ -350,7 +380,13 @@ namespace CardShopCoop.Sync
                 if (list[i] == null) continue;
                 int h;
                 try { h = hashFn(list[i]); }
-                catch { continue; }
+                catch (Exception e)
+                {
+                    sawError = true;
+                    CoopPlugin.Log.LogWarning($"ContainerSync snapshot record {kind}:{i}: {e.Message}");
+                    _lastHash.Remove((kind << 8) | i);
+                    continue;
+                }
                 int key = (kind << 8) | i;
                 if (_lastHash.TryGetValue(key, out int prev) && prev == h) continue;
                 _lastHash[key] = h;
@@ -698,6 +734,7 @@ namespace CardShopCoop.Sync
         public void ClientApplyState(ContainerStateMessage message)
         {
             var records = message.Records;
+            bool sawError = false;
             for (int r = 0; r < records.Count; r++)
             {
                 var rec = records[r];
@@ -786,15 +823,19 @@ namespace CardShopCoop.Sync
                             break;
                         }
                         default:
-                            return; // unknown kind: cannot know its length, stop parsing
+                            sawError = true;
+                            CoopPlugin.Log.LogWarning($"ContainerSync apply unknown kind {kind} at record {r}");
+                            continue;
                     }
                 }
                 catch (Exception e)
                 {
                     CoopPlugin.Log.LogWarning($"ContainerSync apply kind {kind}: {e.Message}");
-                    return; // stream position is unreliable after a mid-record throw
+                    sawError = true;
+                    continue; // records are already materialized; later records remain safe
                 }
             }
+            if (sawError) ForceResend();
         }
 
         private void ApplyContent(int kind, int idx, List<CompactCardDataAmount> cards,
@@ -1494,7 +1535,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"Patch target missing: {type.Name}.{method}");

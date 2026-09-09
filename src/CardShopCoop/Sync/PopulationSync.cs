@@ -73,6 +73,7 @@ namespace CardShopCoop.Sync
 
         private ShelfManager _sm;
         private float _timer;
+        private readonly HashSet<string> _snapshotErrors = new HashSet<string>();
         private int _lastHash;
         private float _heal;
 
@@ -81,11 +82,14 @@ namespace CardShopCoop.Sync
         /// <summary>Fired when reconciliation destroys or spawns an object of a kind -
         /// other syncs' index baselines for that kind are stale from this moment.</summary>
         public static Action<int> OnClientStructureChanged;
+        private static readonly HashSet<int> s_ambiguousWarnings = new HashSet<int>();
 
         public void Reset()
         {
             PlacedObjectIdentity.Reset();
+            s_ambiguousWarnings.Clear();
             _sm = null;
+            _snapshotErrors.Clear();
             _timer = -1.1f; // staggered phase vs the other snapshot engines
             _lastHash = 0;
             _heal = 0f;
@@ -117,6 +121,7 @@ namespace CardShopCoop.Sync
                 // identity (counts + types) and skip the heavy build when unchanged,
                 // with a slow heal so a client that missed one still converges
                 int hash = 17;
+                bool sawError = false;
                 for (int kind = 0; kind < KindCount; kind++)
                 {
                     var list = GetList(sm, kind);
@@ -125,15 +130,19 @@ namespace CardShopCoop.Sync
                     if (list != null)
                         for (int i = 0; i < n; i++)
                             if (list[i] is InteractableObject obj)
-                                // decorations (kind 5) have m_ObjectType == None(-1); their
-                                // real identity is m_DecoObjectType, so hash THAT or a deco
-                                // add/remove that preserves count never re-broadcasts
-                                hash = hash * 31 + PlacedObjectIdentity.AssignHost(obj)
-                                    + ((kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType)
-                                    + (IsBoxed(obj) ? 1 : 0)
-                                    + (IsBoxed(obj) ? Mathf.RoundToInt(ObjectPose(obj).x * 8f) : 0)
-                                    + (IsBoxed(obj) ? Mathf.RoundToInt(ObjectPose(obj).z * 8f) : 0);
+                            {
+                                try
+                                {
+                                    hash = hash * 31 + PlacedObjectIdentity.AssignHost(obj)
+                                        + ((kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType)
+                                        + (IsBoxed(obj) ? 1 : 0)
+                                        + (IsBoxed(obj) ? Mathf.RoundToInt(ObjectPose(obj).x * 8f) : 0)
+                                        + (IsBoxed(obj) ? Mathf.RoundToInt(ObjectPose(obj).z * 8f) : 0);
+                                }
+                                catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i, e); }
+                            }
                 }
+                if (sawError) return; // retry the complete roster on the next cadence
                 _heal += 3f;
                 if (hash == _lastHash && _heal < 30f) return;
                 _lastHash = hash;
@@ -149,18 +158,19 @@ namespace CardShopCoop.Sync
                         {
                             var obj = list[i] as InteractableObject;
                             if (obj == null) continue;
-                            entries.Add(new Entry
-                            {
-                                Id = PlacedObjectIdentity.AssignHost(obj),
-                                // kind 5 = decorations: serialize the deco enum, not the -1
-                                // m_ObjectType, so the guest can actually spawn them
-                                ObjType = (kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType,
-                                Pos = obj.transform.position,
-                                Rot = obj.transform.rotation,
-                            });
-                            var entry = entries[entries.Count - 1];
+                            Entry entry = default(Entry);
+                            bool entryAdded = false;
                             try
                             {
+                                entries.Add(new Entry
+                                {
+                                    Id = PlacedObjectIdentity.AssignHost(obj),
+                                    ObjType = (kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType,
+                                    Pos = obj.transform.position,
+                                    Rot = obj.transform.rotation,
+                                });
+                                entry = entries[entries.Count - 1];
+                                entryAdded = true;
                                 if (obj.GetIsBoxedUp() && obj.GetPackagingBoxShelf() != null)
                                 {
                                     entry.IsBoxed = true;
@@ -168,18 +178,21 @@ namespace CardShopCoop.Sync
                                     entry.BoxedRot = obj.GetPackagingBoxShelf().transform.rotation;
                                 }
                             }
-                            catch (Exception e)
-                            {
-                                CoopPlugin.Log.LogWarning("population: failed to read boxed pose: " + e.Message);
-                            }
-                            entries[entries.Count - 1] = entry;
+                            catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i, e); }
+                            if (entryAdded) entries[entries.Count - 1] = entry;
                         }
                     }
                     all.Add(entries);
                 }
-                OnHostSnapshot?.Invoke(all);
+                if (!sawError) OnHostSnapshot?.Invoke(all);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("PopulationSync host: " + e.Message); }
+        }
+
+        private void LogSnapshotError(string item, Exception e)
+        {
+            if (_snapshotErrors.Add(item))
+                CoopPlugin.Log.LogWarning("PopulationSync snapshot item " + item + ": " + e.Message);
         }
 
         /// <summary>Client: make each object list match the host's roster.</summary>
@@ -282,15 +295,11 @@ namespace CardShopCoop.Sync
                 // this position by pose alone and neither spawn nor remove for it.
                 if (want[w].Unresolved)
                 {
-                    int best = -1;
-                    float bestDs = float.MaxValue;
-                    for (int c = 0; c < clientObjs.Count; c++)
-                    {
-                        if (matchedClient[c]) continue;
-                        if (IsBoxed(clientObjs[c]) != want[w].IsBoxed) continue;
-                        float ds = (ObjectPose(clientObjs[c]) - MatchPose(want[w])).sqrMagnitude;
-                        if (ds < bestDs) { bestDs = ds; best = c; }
-                    }
+                    int best = FindUniquePoseMatch(kind, clientObjs, matchedClient, want[w], -1);
+                    if (best == -2) { AbortAmbiguous(kind); return; }
+                    float bestDs = best >= 0
+                        ? (ObjectPose(clientObjs[best]) - MatchPose(want[w])).sqrMagnitude
+                        : float.MaxValue;
                     if (best >= 0 && bestDs <= TolSq)
                     {
                         matchedClient[best] = true;
@@ -300,7 +309,6 @@ namespace CardShopCoop.Sync
                     continue;
                 }
                 int b = -1;
-                float bDs = float.MaxValue;
                 for (int c = 0; c < clientObjs.Count; c++)
                 {
                     if (matchedClient[c]) continue;
@@ -310,19 +318,16 @@ namespace CardShopCoop.Sync
                         break;
                     }
                 }
-                if (b >= 0) bDs = 0f;
-                for (int c = 0; c < clientObjs.Count; c++)
+                if (b < 0)
                 {
-                    if (matchedClient[c]) continue;
-                    if (b >= 0) break;
-                    // compare on the correct identity per kind, or a wrong deco variant
-                    // (whose m_ObjectType is always -1) could never be detected
-                    int curType = (kind == 5) ? (int)clientObjs[c].m_DecoObjectType : (int)clientObjs[c].m_ObjectType;
-                    if (curType != want[w].ObjType) continue;
-                    if (IsBoxed(clientObjs[c]) != want[w].IsBoxed) continue;
-                    float ds = (ObjectPose(clientObjs[c]) - MatchPose(want[w])).sqrMagnitude;
-                    if (ds < bDs) { bDs = ds; b = c; }
+                    b = FindUniquePoseMatch(kind, clientObjs, matchedClient, want[w], want[w].ObjType);
+                    if (b == -2) { AbortAmbiguous(kind); return; }
                 }
+                // An existing stable identity wins even if the object is being moved.
+                float bDs = b >= 0 && PlacedObjectIdentity.TryGet(clientObjs[b], out ushort matchedId)
+                    && matchedId == want[w].Id
+                    ? 0f
+                    : b >= 0 ? (ObjectPose(clientObjs[b]) - MatchPose(want[w])).sqrMagnitude : float.MaxValue;
                 if (b >= 0 && bDs <= TolSq)
                 {
                     matchedClient[b] = true;
@@ -444,6 +449,50 @@ namespace CardShopCoop.Sync
                 catch { }
             }
             return obj != null ? obj.transform.position : Vector3.zero;
+        }
+
+        // Returns -2 when two candidates are equally near.  Greedy tie-breaking is unsafe:
+        // the subsequent unmatched pass could destroy the twin that the host meant to keep.
+        private static int FindUniquePoseMatch(int kind, List<InteractableObject> clientObjs,
+            bool[] matchedClient, Entry want, int requiredType)
+        {
+            const float TieEpsilon = 0.0001f;
+            int best = -1;
+            float bestDs = float.MaxValue;
+            bool tied = false;
+            for (int c = 0; c < clientObjs.Count; c++)
+            {
+                if (matchedClient[c]) continue;
+                var obj = clientObjs[c];
+                if (obj == null || IsBoxed(obj) != want.IsBoxed) continue;
+                if (requiredType >= 0)
+                {
+                    int curType = kind == 5 ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType;
+                    if (curType != requiredType) continue;
+                }
+                float ds = (ObjectPose(obj) - MatchPose(want)).sqrMagnitude;
+                if (ds < bestDs - TieEpsilon)
+                {
+                    best = c;
+                    bestDs = ds;
+                    tied = false;
+                }
+                else if (Mathf.Abs(ds - bestDs) <= TieEpsilon)
+                {
+                    tied = true;
+                }
+            }
+            if (tied && best >= 0 && bestDs <= 1.0f) return -2;
+            return best;
+        }
+
+        private static void AbortAmbiguous(int kind)
+        {
+            if (s_ambiguousWarnings.Add(kind))
+                CoopPlugin.Log.LogWarning($"population: ambiguous kind {kind} position match; preserving objects and re-baselining index mirrors");
+            // Re-baseline index consumers, but do not destroy or bind anything until a fresh
+            // roster disambiguates the candidates.
+            OnClientStructureChanged?.Invoke(kind);
         }
 
         private static Vector3 MatchPose(Entry entry)

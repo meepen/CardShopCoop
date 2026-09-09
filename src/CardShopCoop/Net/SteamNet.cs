@@ -378,8 +378,11 @@ namespace CardShopCoop.Net
                 LobbyId = new CSteamID(e.m_ulSteamIDLobby);
                 SteamMatchmaking.SetLobbyData(LobbyId, "coopmod", "cardshopcoop");
                 SteamMatchmaking.SetLobbyData(LobbyId, "coopver", CoopPlugin.Version);
+                string ownerName = CoopCore.Instance == null
+                    ? CoopPlugin.PlayerName.Value
+                    : CoopCore.Instance.EffectivePlayerName;
                 SteamMatchmaking.SetLobbyData(LobbyId, "name",
-                    string.IsNullOrEmpty(_pendingName) ? (CoopPlugin.PlayerName.Value + "'s shop") : _pendingName);
+                    string.IsNullOrEmpty(_pendingName) ? (ownerName + "'s shop") : _pendingName);
                 SteamMatchmaking.SetLobbyData(LobbyId, "pw", _pendingHasPw ? "1" : "0");
                 OnLobbyCreated?.Invoke(LobbyId);
             });
@@ -604,6 +607,41 @@ namespace CardShopCoop.Net
         }
 
         public bool SteamAvailable() { return _lobby.SteamAvailable(); }
+
+        public string LocalPersonaName
+        {
+            get
+            {
+                try { return SteamAvailable() ? (SteamFriends.GetPersonaName() ?? "") : ""; }
+                catch { return ""; }
+            }
+        }
+
+        public ulong LocalSteamId
+        {
+            get
+            {
+                try
+                {
+                    if (!SteamAvailable()) return 0;
+                    return SteamUser.GetSteamID().m_SteamID;
+                }
+                catch { return 0; }
+            }
+        }
+
+        public string FriendNickname(ulong steamId)
+        {
+            if (steamId == 0) return "";
+            try
+            {
+                if (!SteamAvailable()) return "";
+                var friend = new CSteamID(steamId);
+                if (!SteamFriends.HasFriend(friend, EFriendFlags.k_EFriendFlagImmediate)) return "";
+                return SteamFriends.GetFriendPersonaName(friend) ?? "";
+            }
+            catch { return ""; }
+        }
 
         public ICoopTransport CreateTransport(bool isHost, INetMessage keepalive)
         {

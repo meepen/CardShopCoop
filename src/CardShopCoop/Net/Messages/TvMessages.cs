@@ -17,6 +17,9 @@ namespace CardShopCoop.Net.Messages
         public bool Paused;
         public bool PoweredOff;
         public bool Shuffle;
+        public bool Barrier;
+        public bool Resume;
+        public int Generation;
 
         public MsgType Type { get { return MsgType.TvState; } }
     }

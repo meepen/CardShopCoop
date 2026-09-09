@@ -87,6 +87,8 @@ namespace CardShopCoop.Net
         TvOp = 79,           // client -> host: RTCGO stream control request
         ContainerPackClaim = 80, // host -> client: authoritative auto-opener claim result
         PurchaseRequest = 81,    // client -> host: atomic purchase request
+        PlayerModelRequest = 82, // client -> host: this player's appearance
+        PlayerModelState = 83,   // host -> clients: authoritative appearance roster
     }
 
     /// <summary>One received message, already reassembled and decoded from the wire.
@@ -96,6 +98,8 @@ namespace CardShopCoop.Net
         public int ConnId;
         public MsgType Type;
         public INetMessage Message;
+        // Local-only dispatch bookkeeping; never serialized.
+        public byte DispatchAttempts;
     }
 
     /// <summary>Frame builders/parsers. Wire format per frame:
@@ -106,7 +110,7 @@ namespace CardShopCoop.Net
         public const int TypeSize = 1;
         public const int MinimumFrameSize = FrameHeaderSize + TypeSize;
         public const int MaxFrameSize = 64 * 1024 * 1024;
-         public const int WireVersion = 6;
+         public const int WireVersion = 7;
 
         /// <summary>
         /// Decodes one complete wire frame. This is the only protocol-framing entry

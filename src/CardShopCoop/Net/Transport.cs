@@ -48,11 +48,15 @@ namespace CardShopCoop.Net
 
         /// <summary>Frame sent by a transport-owned thread every 2s per connection.
         /// Keeps the link alive even while Unity's main thread is frozen in a scene load.</summary>
-        public INetMessage KeepaliveMessage;
+        // Volatile publishes replacements to the keepalive workers. Workers snapshot this
+        // reference once per tick and never retain it across a transport teardown.
+        public volatile INetMessage KeepaliveMessage;
 
         private TcpListener _listener;
         private Thread _acceptThread;
         private volatile bool _running;
+        private readonly List<Thread> _threads = new List<Thread>();
+        private readonly object _threadsLock = new object();
 
         private readonly Dictionary<int, Conn> _conns = new Dictionary<int, Conn>();
         private readonly object _connsLock = new object();
@@ -67,10 +71,12 @@ namespace CardShopCoop.Net
             public NetworkStream Stream;
             public Thread ReadThread;
             public Thread WriteThread;
+            public Thread KeepaliveThread;
             // Single writer thread drains this, so frames stay atomic on the wire
             // without a write lock; keepalives are just another queued frame.
             public readonly ConcurrentQueue<byte[]> SendQueue = new ConcurrentQueue<byte[]>();
             public readonly AutoResetEvent SendSignal = new AutoResetEvent(false);
+            public readonly AutoResetEvent KeepaliveSignal = new AutoResetEvent(false);
             public volatile bool Alive = true;
             public long LastRecvTicksUtc = DateTime.UtcNow.Ticks;
         }
@@ -85,26 +91,47 @@ namespace CardShopCoop.Net
             _listener.Start();
             IsListening = true;
             _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "CoopAccept" };
+            TrackThread(_acceptThread);
             _acceptThread.Start();
         }
 
         private void AcceptLoop()
         {
+            var listener = _listener;
             while (_running)
             {
                 TcpClient tcp;
-                try { tcp = _listener.AcceptTcpClient(); }
-                catch { break; } // listener stopped
+                try { tcp = listener.AcceptTcpClient(); }
+                catch (Exception e)
+                {
+                    // Stopping the listener is the normal way out of AcceptTcpClient. A
+                    // different exception while this listener is still current is not.
+                    if (_running && ReferenceEquals(listener, _listener))
+                        CoopPlugin.Log.LogWarning("CoopAccept: " + e.Message);
+                    break;
+                }
+                if (!_running || !ReferenceEquals(listener, _listener))
+                {
+                    try { tcp.Close(); } catch { }
+                    break;
+                }
                 ConfigureSocket(tcp);
                 var conn = new Conn { Tcp = tcp, Stream = tcp.GetStream() };
                 lock (_connsLock)
                 {
+                    if (!_running)
+                    {
+                        try { tcp.Close(); } catch { }
+                        break;
+                    }
                     conn.Id = _nextConnId++;
                     _conns[conn.Id] = conn;
                 }
                 conn.ReadThread = new Thread(() => ReadLoop(conn)) { IsBackground = true, Name = "CoopRead" + conn.Id };
+                TrackThread(conn.ReadThread);
                 conn.ReadThread.Start();
                 conn.WriteThread = new Thread(() => WriteLoop(conn)) { IsBackground = true, Name = "CoopWrite" + conn.Id };
+                TrackThread(conn.WriteThread);
                 conn.WriteThread.Start();
                 StartKeepalive(conn);
                 Connects.Enqueue(conn.Id);
@@ -130,8 +157,10 @@ namespace CardShopCoop.Net
             var conn = new Conn { Id = 1, Tcp = tcp, Stream = tcp.GetStream() };
             lock (_connsLock) { _conns[1] = conn; }
             conn.ReadThread = new Thread(() => ReadLoop(conn)) { IsBackground = true, Name = "CoopRead1" };
+            TrackThread(conn.ReadThread);
             conn.ReadThread.Start();
             conn.WriteThread = new Thread(() => WriteLoop(conn)) { IsBackground = true, Name = "CoopWrite1" };
+            TrackThread(conn.WriteThread);
             conn.WriteThread.Start();
             StartKeepalive(conn);
             return conn.Id;
@@ -151,17 +180,28 @@ namespace CardShopCoop.Net
 
         private void StartKeepalive(Conn conn)
         {
-            new Thread(() =>
+            var thread = new Thread(() =>
             {
                 while (_running && conn.Alive)
                 {
-                    Thread.Sleep(2000);
+                    // Stop() signals this separately from the writer signal so teardown
+                    // does not have to wait for the two-second keepalive interval.
+                    conn.KeepaliveSignal.WaitOne(2000);
+                    if (!_running || !conn.Alive) break;
                     var message = KeepaliveMessage;
-                    if (message == null || !conn.Alive) continue;
+                    if (message == null) continue;
                     conn.SendQueue.Enqueue(NetMessageCodec.Encode(message));
                     conn.SendSignal.Set();
                 }
-            }) { IsBackground = true, Name = "CoopKeepalive" + conn.Id }.Start();
+            }) { IsBackground = true, Name = "CoopKeepalive" + conn.Id };
+            conn.KeepaliveThread = thread;
+            TrackThread(thread);
+            thread.Start();
+        }
+
+        private void TrackThread(Thread thread)
+        {
+            lock (_threadsLock) _threads.Add(thread);
         }
 
         /// <summary>Drains the connection's send queue; the only thread that writes to
@@ -180,9 +220,12 @@ namespace CardShopCoop.Net
                     conn.Stream.Write(frame, 0, frame.Length);
                 }
             }
-            catch
+            catch (Exception e)
             {
-                // fallthrough to disconnect
+                if (_running && conn.Alive)
+                    CoopPlugin.Log.LogWarning("CoopWrite" + conn.Id + ": " + e.Message);
+                else
+                    CoopPlugin.Log.LogInfo("CoopWrite" + conn.Id + ": closed during shutdown");
             }
             DropConn(conn.Id);
         }
@@ -202,11 +245,27 @@ namespace CardShopCoop.Net
                     Incoming.Enqueue(message);
                 }
             }
-            catch
+            catch (Exception e)
             {
-                // fallthrough to disconnect
+                if (IsMalformedFrame(e))
+                    CoopPlugin.Log.LogWarning("CoopRead" + conn.Id + ": " + e.Message);
+                else if (!_running || !conn.Alive || IsNormalReadClose(e))
+                    CoopPlugin.Log.LogInfo("CoopRead" + conn.Id + ": connection closed");
+                else
+                    CoopPlugin.Log.LogWarning("CoopRead" + conn.Id + ": " + e.Message);
             }
             DropConn(conn.Id);
+        }
+
+        private static bool IsNormalReadClose(Exception e)
+        {
+            return e is ObjectDisposedException
+                || (e is IOException && string.Equals(e.Message, "Connection closed", StringComparison.Ordinal));
+        }
+
+        private static bool IsMalformedFrame(Exception e)
+        {
+            return e is IOException && string.Equals(e.Message, "Bad message frame", StringComparison.Ordinal);
         }
 
         /// <summary>Never blocks the caller: enqueues for the connection's writer thread.
@@ -261,6 +320,7 @@ namespace CardShopCoop.Net
             if (!conn.Alive) return;
             conn.Alive = false;
             try { conn.SendSignal.Set(); } catch { } // wake the writer so it can exit
+            try { conn.KeepaliveSignal.Set(); } catch { } // wake keepalive during teardown
             try { conn.Stream?.Close(); } catch { }
             try { conn.Tcp?.Close(); } catch { }
             Disconnects.Enqueue(connId);
@@ -275,6 +335,31 @@ namespace CardShopCoop.Net
             List<int> ids;
             lock (_connsLock) { ids = new List<int>(_conns.Keys); }
             foreach (int id in ids) DropConn(id);
+
+            // Stop all connections before joining: closing the stream unblocks readers,
+            // and SendSignal wakes writers. Join the acceptor first because it owns the
+            // connection thread creation path.
+            JoinThread(_acceptThread);
+            List<Thread> threads;
+            lock (_threadsLock) threads = new List<Thread>(_threads);
+            foreach (var thread in threads)
+                if (thread != _acceptThread) JoinThread(thread);
+            lock (_threadsLock) _threads.RemoveAll(t => !t.IsAlive);
+            _acceptThread = null;
+        }
+
+        private static void JoinThread(Thread thread)
+        {
+            if (thread == null || thread == Thread.CurrentThread || !thread.IsAlive) return;
+            try
+            {
+                if (!thread.Join(1500))
+                    CoopPlugin.Log.LogWarning(thread.Name + ": did not stop within 1500ms");
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning(thread.Name + ": join failed: " + e.Message);
+            }
         }
 
         public void Dispose() { Stop(); }

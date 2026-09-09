@@ -12,12 +12,15 @@ namespace CardShopCoop.Sync
     /// and best-effort stream position cross the wire.</summary>
     public sealed class TvSync
     {
-        private const byte Next = 1, Previous = 2, Pause = 3, Power = 4, Shuffle = 5, Seek = 6, Open = 7;
+        private const byte Next = 1, Previous = 2, Pause = 3, Power = 4, Shuffle = 5, Seek = 6, Open = 7, Ready = 8;
         private const float Interval = 1f;
         private const float HealEvery = 15f;
+        private const float BarrierTimeout = 10f;
+        private static TvSync Active;
 
         public Action<INetMessage> SendOp;
         public Action<INetMessage> BroadcastState;
+        public Func<int> PeerCount;
         private float _timer;
         private float _heal;
         private string _lastUrl;
@@ -26,6 +29,14 @@ namespace CardShopCoop.Sync
         private string _lastPlaylist;
         private bool _lastLive, _lastSegmented, _lastPaused, _lastPowered, _lastShuffle;
         private int _lastPlaylistIndex;
+        private bool _barrier, _hostReady, _resumePulse;
+        private float _barrierAge;
+        private int _generation;
+        private readonly System.Collections.Generic.HashSet<int> _readyPeers = new System.Collections.Generic.HashSet<int>();
+        private int _clientGeneration = -1;
+        private bool _clientBarrier, _clientReported;
+
+        public TvSync() { Active = this; }
 
         public void Reset()
         {
@@ -36,6 +47,9 @@ namespace CardShopCoop.Sync
             _lastSource = null;
             _lastLive = _lastSegmented = _lastPaused = _lastPowered = _lastShuffle = false;
             _lastPlaylistIndex = 0;
+            _barrier = _hostReady = _resumePulse = false;
+            _barrierAge = 0f; _generation = 0; _readyPeers.Clear();
+            _clientGeneration = -1; _clientBarrier = _clientReported = false;
         }
 
         public void ForceResend() { _heal = HealEvery; }
@@ -45,6 +59,7 @@ namespace CardShopCoop.Sync
             if (!inGame || !TvInterop.Present || BroadcastState == null) return;
             _timer += dt;
             _heal += dt;
+            if (_barrier) _barrierAge += dt;
             if (_timer < Interval) return;
             _timer -= Interval;
 
@@ -59,6 +74,31 @@ namespace CardShopCoop.Sync
                     || TvInterop.IsLive != _lastLive || TvInterop.IsSegmentedVod != _lastSegmented
                     || TvInterop.Paused != _lastPaused || TvInterop.PoweredOff != _lastPowered
                     || TvInterop.Shuffle != _lastShuffle || TvInterop.PlaylistIndex != _lastPlaylistIndex;
+                if (source != _lastSource && !string.IsNullOrEmpty(source))
+                {
+                    _generation++;
+                    _barrier = true; _hostReady = false; _barrierAge = 0f; _readyPeers.Clear();
+                    TvInterop.SetSharedPaused(true);
+                    changed = true;
+                    CoopPlugin.Log.LogInfo("TV load barrier started (generation " + _generation + ")");
+                }
+                int peers = PeerCount == null ? 0 : Math.Max(0, PeerCount());
+                if (_barrier && ((_hostReady && _readyPeers.Count >= peers) || _barrierAge >= BarrierTimeout))
+                {
+                    if (_barrierAge >= BarrierTimeout && _readyPeers.Count < peers)
+                        CoopPlugin.Log.LogWarning("TV load barrier timed out; resuming with " + _readyPeers.Count + "/" + peers + " clients ready");
+                    _barrier = false; _resumePulse = true;
+                    TvInterop.ResumePlayback();
+                    changed = true;
+                    CoopPlugin.Log.LogInfo("TV load barrier completed (generation " + _generation + ")");
+                }
+                if (_barrier && string.IsNullOrEmpty(source))
+                {
+                    _barrier = false; _hostReady = false; _readyPeers.Clear(); _resumePulse = false;
+                    TvInterop.ResumePlayback();
+                    changed = true;
+                    CoopPlugin.Log.LogInfo("TV load barrier cancelled because the host returned to local playback");
+                }
                 if (!changed && _heal < HealEvery && TvInterop.IsLive) return;
 
                 _lastSource = source; _lastUrl = url; _lastTitle = title; _lastPlaylist = playlist;
@@ -73,24 +113,77 @@ namespace CardShopCoop.Sync
                     IsLive = TvInterop.IsLive, IsSegmentedVod = TvInterop.IsSegmentedVod,
                     IsPlaylist = !string.IsNullOrEmpty(playlist), PlaylistIndex = TvInterop.PlaylistIndex,
                     Position = TvInterop.Position, Paused = TvInterop.Paused,
-                    PoweredOff = TvInterop.PoweredOff, Shuffle = TvInterop.Shuffle
+                    PoweredOff = TvInterop.PoweredOff, Shuffle = TvInterop.Shuffle,
+                    Barrier = _barrier, Resume = _resumePulse, Generation = _generation
                 });
+                _resumePulse = false;
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TvSync host: " + e.Message); }
         }
 
-        public void HostApplyOp(TvOpMessage message)
+        public void HostApplyOp(TvOpMessage message, int senderId)
         {
             if (!TvInterop.Present || message == null) return;
+            if (message.Op == Ready)
+            {
+                if (_barrier && (int)message.Value == _generation) _readyPeers.Add(senderId);
+                return;
+            }
             TvInterop.HostApply(message.Op, message.Url, message.Title, message.Value);
         }
 
         public void ClientApplyState(TvStateMessage message)
         {
             if (!TvInterop.Present || message == null) return;
+            if (message.Generation != _clientGeneration)
+            {
+                _clientGeneration = message.Generation;
+                _clientReported = false;
+            }
+            _clientBarrier = message.Barrier;
             TvInterop.ApplyHostState(message.SourceUrl, message.StreamUrl, message.StreamTitle, message.PlaylistUrl,
                 message.IsLive, message.IsSegmentedVod, message.PlaylistIndex, message.Position,
-                message.Paused, message.PoweredOff, message.Shuffle);
+                message.Paused, message.PoweredOff, message.Shuffle,
+                message.Barrier, message.Resume, message.Generation);
+        }
+
+        public void ClientTick(float dt, bool inGame)
+        {
+            if (!inGame || !TvInterop.Present) return;
+            TvInterop.EnsureClientEnrollment();
+        }
+
+        public static void LocalPreparedPrefix(object __instance, object source)
+        {
+            Active?.BeforeLocalPrepared(__instance, source);
+        }
+
+        public static void LocalPreparedPostfix(object __instance, object source)
+        {
+            Active?.OnLocalPrepared(__instance, source);
+        }
+
+        private void BeforeLocalPrepared(object instance, object source)
+        {
+            bool active = CoopCore.Role == CoopRole.Host ? _barrier : _clientBarrier;
+            if (active && TvInterop.IsMainPreparedPlayer(instance, source))
+                TvInterop.SetSharedPausedForPrepare(false);
+        }
+
+        private void OnLocalPrepared(object instance, object source)
+        {
+            bool active = CoopCore.Role == CoopRole.Host ? _barrier : _clientBarrier;
+            if (!active || !TvInterop.IsMainPreparedPlayer(instance, source)) return;
+            TvInterop.PausePreparedStream(instance);
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                _hostReady = true;
+            }
+            else if (CoopCore.Role == CoopRole.Client && !_clientReported)
+            {
+                _clientReported = true;
+                Send(Ready, value: _clientGeneration);
+            }
         }
 
         private static void Send(byte op, string url = null, string title = null, double value = 0)
@@ -119,6 +212,7 @@ namespace CardShopCoop.Sync
         public static bool ClientQualityChoicePrefix(bool download)
         {
             if (CoopCore.Role != CoopRole.Client || !TvInterop.Present) return true;
+            if (TvInterop.ApplyingRemote) return true;
             string url = TvInterop.PendingUrl;
             if (string.IsNullOrWhiteSpace(url)) return true;
             TvInterop.FinishQualitySelection();
@@ -133,6 +227,8 @@ namespace CardShopCoop.Sync
             Try(h, "OnQualityChoice", new HarmonyMethod(typeof(TvSync), nameof(ClientQualityChoicePrefix)));
             Try(h, "StreamYouTube", null,
                 postfix: new HarmonyMethod(typeof(TvInterop), nameof(TvInterop.StreamStartedPostfix)));
+            Try(h, "OnLocalPrepared", new HarmonyMethod(typeof(TvSync), nameof(LocalPreparedPrefix)),
+                postfix: new HarmonyMethod(typeof(TvSync), nameof(LocalPreparedPostfix)));
             Try(h, "RemotePlayPause", new HarmonyMethod(typeof(TvSync), nameof(ClientPausePrefix)));
             Try(h, "RemoteNext", new HarmonyMethod(typeof(TvSync), nameof(ClientNextPrefix)));
             Try(h, "RemotePrev", new HarmonyMethod(typeof(TvSync), nameof(ClientPreviousPrefix)));

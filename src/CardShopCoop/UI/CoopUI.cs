@@ -27,7 +27,27 @@ namespace CardShopCoop.UI
         private string _inviteField = "";
         private bool _inviteCopied;
         private string _inviteSeen;
+        private bool _passwordCopied;
+        private string _passwordSeen;
         private string _lanPwField = "";
+        private bool _characterOpen = true;
+        private bool _characterTab;
+        private Vector2 _characterScroll;
+        private bool _characterSnapshotReady;
+        private bool _characterFemale;
+        private readonly List<string> _presetNames = new List<string>();
+        private int _presetSelection;
+        private readonly List<int> _presetSelectionBuffer = new List<int>(1) { 0 };
+        private int _characterSnapshotGeneration = -1;
+        private CC.CharacterCustomization _characterCustomizer;
+        private readonly List<List<string>> _hairOptions = new List<List<string>>();
+        private readonly List<int> _hairSelections = new List<int>();
+        private readonly List<List<string>> _apparelOptions = new List<List<string>>();
+        private readonly List<List<string>> _apparelNames = new List<List<string>>();
+        private readonly List<int> _apparelSelections = new List<int>();
+        private readonly List<int> _apparelMaterials = new List<int>();
+        private readonly List<string> _floatNames = new List<string>();
+        private readonly List<float> _floatValues = new List<float>();
 
         // LATCHED COPIES OF THE INVITE FIELDS, and the reason they exist is IMGUI's two-pass
         // model rather than anything about threads. GUILayout matches the Layout pass against
@@ -76,7 +96,7 @@ namespace CardShopCoop.UI
         {
             CoopTheme.EnsureBuilt();
             if (_ipField == null) _ipField = CoopPlugin.LastJoinIP.Value;
-            if (_nameField == null) _nameField = CoopPlugin.PlayerName.Value;
+            if (_nameField == null) _nameField = core.EffectivePlayerName;
 
             // ---- HUD overlays (outside the window) ----
             if (!Visible)
@@ -137,7 +157,11 @@ namespace CardShopCoop.UI
                         _registerGc, CoopTheme.HudPillBig);
                 }
             }
-            if (!Visible) return;
+            if (!Visible)
+            {
+                core.SetCharacterPreview(false);
+                return;
+            }
 
             CoopTheme.DrawWindowShadow(_win); // soft drop shadow behind the window (screen space)
             _win = GUILayout.Window(867530, _win, id => WindowFn(core, net), "", CoopTheme.Window);
@@ -158,6 +182,17 @@ namespace CardShopCoop.UI
                 GUILayout.FlexibleSpace();
                 GUILayout.EndHorizontal();
                 GUILayout.Label(core.ErrorLine, CoopTheme.LabelDanger);
+            }
+
+            DrawTabs(core);
+            core.SetCharacterPreview(_characterTab && CoopCore.Role != CoopRole.None);
+            if (_characterTab && CoopCore.Role != CoopRole.None)
+            {
+                DrawCharacterSelector(core);
+                string characterFocused = GUI.GetNameOfFocusedControl();
+                TextFieldFocused = characterFocused != null && characterFocused.StartsWith("coop_");
+                GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
+                return;
             }
 
             // The restore OUTCOME lives out here, NOT inside the lend block below. A successful
@@ -218,6 +253,243 @@ namespace CardShopCoop.UI
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
         }
 
+        private void DrawTabs(CoopCore core)
+        {
+            GUILayout.BeginHorizontal();
+            GUI.enabled = _characterTab;
+            if (GUILayout.Button("SESSION", CoopTheme.ButtonSecondary, GUILayout.Width(92f)))
+                _characterTab = false;
+            GUI.enabled = CoopCore.Role != CoopRole.None && !_characterTab;
+            if (GUILayout.Button("CHARACTER", CoopTheme.ButtonPrimary, GUILayout.Width(108f)))
+                _characterTab = true;
+            GUI.enabled = true;
+            GUILayout.FlexibleSpace();
+            GUILayout.EndHorizontal();
+            GUILayout.Space(4f);
+        }
+
+        private void DrawCharacterSelector(CoopCore core)
+        {
+            if (Event.current.type == EventType.Layout
+                && (!_characterSnapshotReady || _characterSnapshotGeneration != core.PlayerModelGeneration))
+            {
+                var model = core.GetLocalPlayerModel();
+                _characterFemale = model.Female;
+                _presetNames.Clear();
+                _presetNames.AddRange(core.GetLocalPresetNames());
+                _presetSelection = _presetNames.FindIndex(x => x == (_characterFemale ? "Female" : "Male") + model.ModelIndex);
+                if (_presetSelection < 0) _presetSelection = 0;
+                _presetSelectionBuffer[0] = _presetSelection;
+                _characterCustomizer = core.GetLocalCustomization();
+                CacheWardrobeControls();
+                _characterSnapshotReady = true;
+                _characterSnapshotGeneration = core.PlayerModelGeneration;
+            }
+            if (!_characterSnapshotReady) return;
+
+            float editorHeight = Mathf.Clamp(Screen.height - 190f, 260f, 560f);
+            _characterScroll = GUILayout.BeginScrollView(_characterScroll, false, true,
+                GUILayout.Height(editorHeight));
+            GUILayout.BeginVertical(CoopTheme.SectionBox);
+            GUILayout.BeginHorizontal();
+            CoopTheme.Chip("MY CHARACTER", CoopTheme.ChipInfo);
+            GUILayout.FlexibleSpace();
+            _characterOpen = GUILayout.Toggle(_characterOpen, _characterOpen ? "▲" : "▼", CoopTheme.Toggle, GUILayout.Width(28f));
+            GUILayout.EndHorizontal();
+            if (_characterOpen)
+            {
+                GUILayout.BeginHorizontal();
+                GUI.enabled = core.CanUndoPlayerModel;
+                if (GUILayout.Button("Undo", CoopTheme.ButtonSecondary, GUILayout.Width(58f))) core.UndoPlayerModel();
+                GUI.enabled = core.CanRedoPlayerModel;
+                if (GUILayout.Button("Redo", CoopTheme.ButtonSecondary, GUILayout.Width(58f))) core.RedoPlayerModel();
+                GUI.enabled = true;
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Gender", CoopTheme.Label, GUILayout.Width(56f));
+                if (GUILayout.Button(_characterFemale ? "Female" : "Male", CoopTheme.ButtonSecondary))
+                {
+                    _characterFemale = !_characterFemale;
+                    core.SetLocalPlayerModel(_characterFemale, 0);
+                }
+                GUILayout.EndHorizontal();
+                if (_presetNames.Count > 0)
+                {
+                    DrawCycleRow("Preset", _presetNames, _presetSelectionBuffer, 0,
+                        () => { _presetSelection = _presetSelectionBuffer[0]; core.ApplyLocalPreset(_presetNames[_presetSelection]); });
+                }
+                else GUILayout.Label("No presets found for this gender.", CoopTheme.LabelDimWrap);
+
+                DrawWardrobeControls(core);
+            }
+            GUILayout.EndVertical();
+            GUILayout.EndScrollView();
+            GUILayout.Space(4f);
+        }
+
+        private void CacheWardrobeControls()
+        {
+            _hairOptions.Clear();
+            _hairSelections.Clear();
+            _apparelOptions.Clear();
+            _apparelNames.Clear();
+            _apparelSelections.Clear();
+            _apparelMaterials.Clear();
+            _floatNames.Clear();
+            _floatValues.Clear();
+            if (_characterCustomizer == null) return;
+            var data = _characterCustomizer.StoredCharacterData;
+            if (data == null) return;
+
+            for (int slot = 0; slot < _characterCustomizer.HairTables.Count; slot++)
+            {
+                var options = new List<string> { "None" };
+                var table = _characterCustomizer.HairTables[slot];
+                if (table != null && table.Hairstyles != null)
+                    foreach (var hair in table.Hairstyles) options.Add(hair.Name ?? "(unnamed)");
+                _hairOptions.Add(options);
+                string current = slot < data.HairNames.Count ? data.HairNames[slot] : "";
+                int selected = options.FindIndex(x => x == current);
+                _hairSelections.Add(selected < 0 ? 0 : selected);
+            }
+
+            for (int slot = 0; slot < _characterCustomizer.ApparelTables.Count; slot++)
+            {
+                var options = new List<string> { "Nude" };
+                var names = new List<string> { "" };
+                var table = _characterCustomizer.ApparelTables[slot];
+                if (table != null && table.Items != null)
+                    foreach (var item in table.Items)
+                    {
+                        options.Add(string.IsNullOrEmpty(item.DisplayName) ? (item.Name ?? "(unnamed)") : item.DisplayName);
+                        names.Add(item.Name ?? "");
+                    }
+                _apparelOptions.Add(options);
+                _apparelNames.Add(names);
+                string current = slot < data.ApparelNames.Count ? data.ApparelNames[slot] : "";
+                int selected = names.IndexOf(current);
+                _apparelSelections.Add(string.IsNullOrEmpty(current) ? 0 : (selected < 1 ? 0 : selected));
+                _apparelMaterials.Add(slot < data.ApparelMaterials.Count ? Mathf.Max(0, data.ApparelMaterials[slot]) : 0);
+            }
+
+            if (data.FloatProperties != null)
+                foreach (var property in data.FloatProperties)
+                {
+                    if (property == null || string.IsNullOrEmpty(property.propertyName)) continue;
+                    _floatNames.Add(property.propertyName);
+                    _floatValues.Add(property.floatValue);
+                }
+        }
+
+        private void DrawWardrobeControls(CoopCore core)
+        {
+            if (_characterCustomizer == null) return;
+            if (_hairOptions.Count > 0 || _apparelOptions.Count > 0)
+                GUILayout.Label("WARDROBE", CoopTheme.SectionHeader);
+            for (int slot = 0; slot < _hairOptions.Count; slot++)
+                DrawCycleRow("Hair " + (slot + 1), _hairOptions[slot], _hairSelections, slot,
+                    () => ApplyHair(core, slot));
+            for (int slot = 0; slot < _apparelOptions.Count; slot++)
+            {
+                string label = _characterCustomizer.ApparelTables[slot] != null
+                    && !string.IsNullOrEmpty(_characterCustomizer.ApparelTables[slot].Label)
+                    ? _characterCustomizer.ApparelTables[slot].Label : "Apparel " + (slot + 1);
+                DrawCycleRow(label, _apparelOptions[slot], _apparelSelections, slot,
+                    () => ApplyApparel(core, slot));
+                if (_apparelSelections[slot] > 0)
+                {
+                    var table = _characterCustomizer.ApparelTables[slot];
+                    int itemIndex = _apparelSelections[slot] - 1;
+                    int materialCount = table != null && itemIndex < table.Items.Count
+                        && table.Items[itemIndex].Materials != null ? table.Items[itemIndex].Materials.Count : 0;
+                    if (materialCount > 1)
+                        DrawNumberRow("Material", materialCount, _apparelMaterials, slot,
+                            () => ApplyApparel(core, slot));
+                }
+            }
+            for (int i = 0; i < _floatNames.Count; i++)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(_floatNames[i], CoopTheme.LabelDim, GUILayout.Width(130f));
+                float min = (_floatNames[i] == "Height" || _floatNames[i] == "Width") ? 0.5f : 0f;
+                float max = (_floatNames[i] == "Height" || _floatNames[i] == "Width") ? 1.5f : 1f;
+                float value = GUILayout.HorizontalSlider(_floatValues[i], min, max);
+                GUILayout.Label(value.ToString("0.00"), CoopTheme.LabelDim, GUILayout.Width(36f));
+                GUILayout.EndHorizontal();
+                if (!Mathf.Approximately(value, _floatValues[i]))
+                {
+                    _floatValues[i] = value;
+                    var prop = new CC.CC_Property { propertyName = _floatNames[i], floatValue = value };
+                    _characterCustomizer.setFloatProperty(prop, true);
+                    core.CommitLocalCustomization();
+                }
+            }
+        }
+
+        private void DrawCycleRow(string label, List<string> options, List<int> selections, int index,
+            Action apply)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, CoopTheme.LabelDim, GUILayout.Width(86f));
+            if (GUILayout.Button("<", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
+            {
+                selections[index] = (selections[index] + options.Count - 1) % options.Count;
+                apply();
+            }
+            GUILayout.Label(options[selections[index]], CoopTheme.Label, GUILayout.ExpandWidth(true));
+            if (GUILayout.Button(">", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
+            {
+                selections[index] = (selections[index] + 1) % options.Count;
+                apply();
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawNumberRow(string label, int count, List<int> values, int index, Action apply)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, CoopTheme.LabelDim, GUILayout.Width(86f));
+            if (GUILayout.Button("<", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
+            {
+                values[index] = (values[index] + count - 1) % count;
+                apply();
+            }
+            GUILayout.Label((values[index] + 1).ToString(), CoopTheme.Label, GUILayout.ExpandWidth(true));
+            if (GUILayout.Button(">", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
+            {
+                values[index] = (values[index] + 1) % count;
+                apply();
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        private void ApplyHair(CoopCore core, int slot)
+        {
+            if (_characterCustomizer == null) return;
+            if (_hairSelections[slot] == 0)
+                core.ClearLocalHair(slot);
+            else
+            {
+                _characterCustomizer.setHairByName(_hairOptions[slot][_hairSelections[slot]], slot);
+                core.CommitLocalCustomization();
+            }
+        }
+
+        private void ApplyApparel(CoopCore core, int slot)
+        {
+            if (_characterCustomizer == null) return;
+            if (_apparelSelections[slot] == 0)
+                core.ClearLocalApparel(slot);
+            else
+            {
+                string name = _apparelNames[slot][_apparelSelections[slot]];
+                int material = Mathf.Max(0, _apparelMaterials[slot]);
+                _characterCustomizer.setApparelByName(name, slot, material);
+                core.CommitLocalCustomization();
+            }
+        }
+
         /// <summary>Status chip (colored by state) + the raw StatusLine kept verbatim beside it
         /// (people paste that line into bug reports).</summary>
         private void DrawStatusRow(CoopCore core, ICoopTransport net)
@@ -272,12 +544,20 @@ namespace CardShopCoop.UI
 
             GUILayout.BeginHorizontal();
             GUILayout.Label("Your name:", CoopTheme.Label, GUILayout.Width(72f));
-            GUI.SetNextControlName("coop_name");
-            string newName = GUILayout.TextField(_nameField, 16, CoopTheme.TextField);
-            if (newName != _nameField)
+            if (core.UsingSteamPersona)
             {
-                _nameField = newName;
-                if (newName.Trim().Length > 0) CoopPlugin.PlayerName.Value = newName.Trim();
+                GUILayout.Label(core.EffectivePlayerName, CoopTheme.TextField, GUILayout.Width(160f));
+                GUILayout.Label("(from Steam)", CoopTheme.LabelDim);
+            }
+            else
+            {
+                GUI.SetNextControlName("coop_name");
+                string newName = GUILayout.TextField(_nameField, 16, CoopTheme.TextField);
+                if (newName != _nameField)
+                {
+                    _nameField = newName;
+                    if (newName.Trim().Length > 0) CoopPlugin.PlayerName.Value = newName.Trim();
+                }
             }
             GUILayout.EndHorizontal();
 
@@ -506,8 +786,25 @@ namespace CardShopCoop.UI
             // read it. It sits here, under the code, because that is where it already lives:
             // anyone who used the code has supplied it without knowing it exists.
             if (!string.IsNullOrEmpty(_invPassword))
-                GUILayout.Label($"<size=11>session password: <b>{_invPassword}</b>  (already inside the invite code - only needed if they type your IP by hand)</size>",
-                    CoopTheme.LabelWrap);
+            {
+                if (_invPassword != _passwordSeen)
+                {
+                    _passwordSeen = _invPassword;
+                    _passwordCopied = false;
+                }
+                GUILayout.BeginHorizontal();
+                GUILayout.Label($"<size=11>session password: <b>{_invPassword}</b></size>", CoopTheme.LabelDim,
+                    GUILayout.ExpandWidth(true));
+                if (GUILayout.Button(_passwordCopied ? "Copied!" : "Copy password", CoopTheme.ButtonSecondary,
+                    GUILayout.Width(108f)))
+                {
+                    GUIUtility.systemCopyBuffer = _invPassword;
+                    _passwordCopied = true;
+                }
+                GUILayout.EndHorizontal();
+                GUILayout.Label("<size=11>(already inside the invite code - only needed if they type your IP by hand)</size>",
+                    CoopTheme.LabelDimWrap);
+            }
 
             // Say plainly what a LAN-only code is and isn't. It is NOT a failure - it is the
             // code that has always worked for the PC in the next room - so it is worded as a

@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using CardShopCoop.Net;
 using System;
 using System.Collections.Generic;
@@ -58,19 +59,19 @@ namespace CardShopCoop.Sync
         public static Func<InteractablePackagingBox_Item, bool> IsLocallyCarried = _ => false;
 
         private static readonly System.Reflection.MethodInfo MiSetOpenClose =
-            AccessTools.Method(typeof(InteractablePackagingBox_Item), "SetOpenCloseBox");
+            ReflectionSurface.RequiredMethod(typeof(InteractablePackagingBox_Item), "SetOpenCloseBox");
         private static readonly System.Reflection.FieldInfo FiAmountToSpawn =
-            AccessTools.Field(typeof(InteractablePackagingBox_Item), "m_ItemAmountToSpawn");
+            ReflectionSurface.RequiredField(typeof(InteractablePackagingBox_Item), "m_ItemAmountToSpawn");
         private static readonly System.Reflection.FieldInfo FiStoredList =
-            AccessTools.Field(typeof(ShelfCompartment), "m_StoredItemList");
+            ReflectionSurface.RequiredField(typeof(ShelfCompartment), "m_StoredItemList");
         // protected on InteractableObject; true while ANY holder (player or WORKER)
         // carries the box - the player-only IsLocallyCarried guard left worker-held
         // boxes unprotected, so guest reports teleported boxes out of the restocker's
         // hands and broke its bring-boxes-inside loop (field report)
         private static readonly System.Reflection.FieldInfo FiBeingHold =
-            AccessTools.Field(typeof(InteractableObject), "m_IsBeingHold");
+            ReflectionSurface.RequiredField(typeof(InteractableObject), "m_IsBeingHold");
         private static readonly System.Reflection.FieldInfo FiWorkerHoldBox =
-            AccessTools.Field(typeof(Worker), "m_CurrentHoldItemBox");
+            ReflectionSurface.RequiredField(typeof(Worker), "m_CurrentHoldItemBox");
         // private on InteractablePackagingBox_Item (NOT InteractableObject): gates the
         // worker restock candidate filters via CanWorkerTakeBox() (= !m_PreventWorkerTakeBox,
         // decompiled InteractablePackagingBox_Item ~337-340). The worker filters
@@ -82,7 +83,7 @@ namespace CardShopCoop.Sync
         // drives IsValidObject / hold state on other host paths and stomping it here
         // would fight them.
         private static readonly System.Reflection.FieldInfo FiPreventWorkerTake =
-            AccessTools.Field(typeof(InteractablePackagingBox_Item), "m_PreventWorkerTakeBox");
+            ReflectionSurface.RequiredField(typeof(InteractablePackagingBox_Item), "m_PreventWorkerTakeBox");
 
         private static bool IsBeingHeld(InteractablePackagingBox_Item box)
         {
@@ -193,11 +194,10 @@ namespace CardShopCoop.Sync
         private double _lastCapSkipLog;
 
         // host: id assignment + per-client state
-        private readonly Dictionary<InteractablePackagingBox_Item, ushort> _hostIds =
-            new Dictionary<InteractablePackagingBox_Item, ushort>();
-        private readonly Dictionary<ushort, InteractablePackagingBox_Item> _hostById =
-            new Dictionary<ushort, InteractablePackagingBox_Item>();
-        private ushort _nextId = 1; // 0 = "unassigned"
+        private readonly BoxIdentityMap<InteractablePackagingBox_Item> _hostIdentity =
+            new BoxIdentityMap<InteractablePackagingBox_Item>();
+        private Dictionary<InteractablePackagingBox_Item, ushort> _hostIds { get { return _hostIdentity.IdOf; } }
+        private Dictionary<ushort, InteractablePackagingBox_Item> _hostById { get { return _hostIdentity.ById; } }
         private readonly HashSet<ushort> _remoteCarried = new HashSet<ushort>();    // host: client-held boxes
         private readonly HashSet<ushort> _hostCarriedLastTick = new HashSet<ushort>();
         private readonly Dictionary<ushort, double> _hostRecentlyReleased = new Dictionary<ushort, double>(); // host: just set it down; stale client reports must not stomp it
@@ -239,6 +239,15 @@ namespace CardShopCoop.Sync
             Instance = this;
         }
 
+        /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
+        public static void ClearLive()
+        {
+            Instance = null;
+            ApplyingRemote = false;
+        }
+
+        public static void ActivateLive(BoxSync instance) { Instance = instance; }
+
         public void Reset()
         {
             _lastApplied.Clear();
@@ -256,9 +265,7 @@ namespace CardShopCoop.Sync
             foreach (var id in _remoteCarried)
                 if (_hostById.TryGetValue(id, out var carried) && carried != null)
                     SetHostWorkerLock(carried, false);
-            _hostIds.Clear();
-            _hostById.Clear();
-            _nextId = 1;
+            _hostIdentity.Clear();
             _carryPollTimer = 0f;
             _remoteCarried.Clear();
             _remoteReleased.Clear(); // a reused id must not inherit a prior session's ownership window
@@ -734,12 +741,7 @@ namespace CardShopCoop.Sync
 
         private ushort HostIdFor(InteractablePackagingBox_Item box)
         {
-            if (_hostIds.TryGetValue(box, out ushort id)) return id;
-            do { id = _nextId++; if (_nextId == 0) _nextId = 1; }
-            while (id == 0 || _hostById.ContainsKey(id));
-            _hostIds[box] = id;
-            _hostById[id] = box;
-            return id;
+            return _hostIdentity.GetOrAssign(box);
         }
 
         /// <summary>Assign (or retrieve) the authoritative id for a newly-created host box

@@ -15,6 +15,7 @@ namespace CardShopCoop.Net.Messages
     {
         public byte Id;
         public string Name;
+        public ulong SteamId;
     }
 
     [NetworkMessage(MsgType.CoinSet, Policy = MessagePolicy.ClientOnly)]
@@ -107,5 +108,33 @@ namespace CardShopCoop.Net.Messages
         public byte SenderId;
         public PlayerStateMessage State = new PlayerStateMessage();
         public MsgType Type { get { return MsgType.RelayState; } }
+    }
+
+    [NetworkMessage(MsgType.PlayerModelRequest, Policy = MessagePolicy.HostOnly)]
+    public sealed class PlayerModelRequestMessage : INetMessage
+    {
+        public bool Female;
+        public int ModelIndex;
+        // Json for CC_CharacterData. Kept as a string so absent/newer wardrobe fields
+        // remain forward-compatible with older game builds.
+        public string CustomizationJson;
+        public MsgType Type { get { return MsgType.PlayerModelRequest; } }
+    }
+
+    [NetworkMessage(MsgType.PlayerModelState, Policy = MessagePolicy.ClientOnly)]
+    public sealed class PlayerModelStateMessage : INetMessage
+    {
+        public readonly System.Collections.Generic.List<PlayerModelEntry> Entries =
+            new System.Collections.Generic.List<PlayerModelEntry>();
+        public MsgType Type { get { return MsgType.PlayerModelState; } }
+    }
+
+    public sealed class PlayerModelEntry
+    {
+        // 0 is the host; client ids are the host's canonical connection ids.
+        public byte Id;
+        public bool Female;
+        public int ModelIndex;
+        public string CustomizationJson;
     }
 }

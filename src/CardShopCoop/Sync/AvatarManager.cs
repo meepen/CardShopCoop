@@ -1,6 +1,9 @@
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
+using Newtonsoft.Json;
 using UnityEngine;
 
 namespace CardShopCoop.Sync
@@ -9,7 +12,9 @@ namespace CardShopCoop.Sync
     /// Renders remote players by cloning the game's own customer prefab. The clone is
     /// dressed with the game's real wardrobe pipeline (Customer.RandomizeCharacterMesh ->
     /// CharacterCustomization.Initialize) and then stripped of all AI/physics so it's a
-    /// pure network puppet. Gender and outfit follow from the player's name, the Animator
+    /// pure network puppet. A host-authoritative appearance choice supplies gender, model,
+    /// and optional CC customization data; unconfigured players retain the name-based fallback.
+    /// The Animator
     /// keeps the game's own walk cycle ("MoveSpeed"), and a simple box prop + the
     /// "IsHoldingBox" pose show when the remote player is carrying something.
     /// </summary>
@@ -68,6 +73,10 @@ namespace CardShopCoop.Sync
             public bool HasState;
             public bool HoldingBoxPose;    // last value pushed to the animator, to skip redundant SetBool
             public bool HoldingBoxPoseSet;
+            public bool HasModel;
+            public bool Female;
+            public int ModelIndex;
+            public string CustomizationJson;
         }
 
         private const int SnapBufferSize = 4;
@@ -87,6 +96,12 @@ namespace CardShopCoop.Sync
 
         private readonly Dictionary<int, RemoteAvatar> _avatars = new Dictionary<int, RemoteAvatar>();
         private bool _loggedAnimParams;
+        private GameObject _editorHolder;
+        private CC.CharacterCustomization _editorCustomization;
+        private bool _editorFemale;
+        private GameObject _previewBody;
+        private CC.CharacterCustomization _previewCustomization;
+        private string _previewSignature;
 
         public void SetName(int connId, string name)
         {
@@ -102,6 +117,358 @@ namespace CardShopCoop.Sync
             {
                 _avatars[connId] = new RemoteAvatar { Name = name };
             }
+        }
+
+        public void SetModel(int connId, bool female, int modelIndex, string customizationJson)
+        {
+            if (!_avatars.TryGetValue(connId, out var av))
+            {
+                av = new RemoteAvatar();
+                _avatars[connId] = av;
+            }
+            modelIndex = Mathf.Max(0, modelIndex);
+            bool changed = !av.HasModel || av.Female != female || av.ModelIndex != modelIndex
+                || av.CustomizationJson != customizationJson;
+            av.HasModel = true;
+            av.Female = female;
+            av.ModelIndex = modelIndex;
+            av.CustomizationJson = customizationJson;
+            if (changed && av.Go != null)
+            {
+                // Rebuild only on an explicit appearance change. All movement/hold state is
+                // retained in RemoteAvatar and the next Tick reconstructs its visuals.
+                ReleaseHeld(av);
+                DestroyBody(av);
+                av.Go = null;
+                av.Anim = null;
+                av.EverPositioned = false;
+            }
+        }
+
+        public PlayerModelEntry CaptureLocalModel(Transform root)
+        {
+            var result = new PlayerModelEntry { Female = false, ModelIndex = 0, CustomizationJson = null };
+            var custom = FindCustomization(root);
+            if (custom == null) return result;
+            string name = custom.CharacterName ?? "";
+            result.Female = name.StartsWith("Female", System.StringComparison.OrdinalIgnoreCase);
+            int parsed;
+            int prefixLength = result.Female ? 6 : 4;
+            if (name.Length > prefixLength && int.TryParse(name.Substring(prefixLength), out parsed))
+                result.ModelIndex = Mathf.Max(0, parsed);
+            if (custom.StoredCharacterData != null)
+                result.CustomizationJson = JsonConvert.SerializeObject(custom.StoredCharacterData);
+            return result;
+        }
+
+        public PlayerModelEntry CaptureLocalModel(CC.CharacterCustomization custom, bool female, int modelIndex)
+        {
+            var result = new PlayerModelEntry
+            {
+                Female = female,
+                ModelIndex = Mathf.Max(0, modelIndex),
+                CustomizationJson = null
+            };
+            if (custom != null && custom.StoredCharacterData != null)
+                result.CustomizationJson = JsonConvert.SerializeObject(custom.StoredCharacterData);
+            return result;
+        }
+
+        public void ApplyLocalModel(Transform root, PlayerModelEntry model)
+        {
+            var custom = FindCustomization(root);
+            ApplyLocalModel(custom, model);
+        }
+
+        public void ApplyLocalModel(CC.CharacterCustomization custom, PlayerModelEntry model)
+        {
+            if (custom == null || model == null) return;
+            try
+            {
+                custom.CharacterName = (model.Female ? "Female" : "Male") + Mathf.Max(0, model.ModelIndex);
+                custom.Initialize();
+                if (!string.IsNullOrEmpty(model.CustomizationJson))
+                {
+                    var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(model.CustomizationJson);
+                    if (data != null)
+                    {
+                        NormalizeCharacterData(custom, data);
+                        custom.StoredCharacterData = data;
+                        if (!TryApplyCharacterData(custom, data, "local model"))
+                            model.CustomizationJson = null;
+                        else
+                            ClearEmptyWardrobeSlots(custom, data);
+                    }
+                }
+                if (string.IsNullOrEmpty(model.CustomizationJson))
+                    ClearAllApparel(custom);
+            }
+            catch (System.Exception e)
+            {
+                // Appearance data is user/session state, never a reason to fail a join or
+                // abort the world snapshot. Initialize has already selected the safe default.
+                model.CustomizationJson = null;
+                CoopPlugin.Log.LogWarning("Local character model was reset after invalid appearance data: " + e.Message);
+                try { custom.Initialize(); }
+                catch (System.Exception resetError)
+                {
+                    CoopPlugin.Log.LogWarning("Default character model could not be initialized: " + resetError.Message);
+                }
+            }
+        }
+
+        private static void NormalizeCharacterData(CC.CharacterCustomization custom, CC.CC_CharacterData data)
+        {
+            if (data.Blendshapes == null) data.Blendshapes = new List<CC.CC_Property>();
+            if (data.TextureProperties == null) data.TextureProperties = new List<CC.CC_Property>();
+            if (data.FloatProperties == null) data.FloatProperties = new List<CC.CC_Property>();
+            if (data.ColorProperties == null) data.ColorProperties = new List<CC.CC_Property>();
+
+            int hairSlots = custom.HairTables != null ? custom.HairTables.Count : 0;
+            int apparelSlots = custom.ApparelTables != null ? custom.ApparelTables.Count : 0;
+            NormalizeList(data.HairNames, hairSlots, "", value => data.HairNames = value);
+            NormalizeList(data.HairColor, hairSlots, () => new CC.CC_Property(), value => data.HairColor = value);
+            NormalizeList(data.ApparelNames, apparelSlots, "", value => data.ApparelNames = value);
+            NormalizeList(data.ApparelMaterials, apparelSlots, 0, value => data.ApparelMaterials = value);
+        }
+
+        private static void NormalizeList<T>(List<T> source, int count, T fill, System.Action<List<T>> assign)
+        {
+            var list = source ?? new List<T>();
+            if (list.Count > count) list.RemoveRange(count, list.Count - count);
+            while (list.Count < count) list.Add(fill);
+            assign(list);
+        }
+
+        private static void NormalizeList<T>(List<T> source, int count, System.Func<T> fill, System.Action<List<T>> assign)
+        {
+            var list = source ?? new List<T>();
+            if (list.Count > count) list.RemoveRange(count, list.Count - count);
+            while (list.Count < count) list.Add(fill());
+            assign(list);
+        }
+
+        private static bool TryApplyCharacterData(CC.CharacterCustomization custom, CC.CC_CharacterData data, string context)
+        {
+            try
+            {
+                custom.ApplyCharacterVars(data);
+                return true;
+            }
+            catch (System.Exception e)
+            {
+                CoopPlugin.Log.LogWarning("Character appearance reset during " + context + ": " + e.Message);
+                try { custom.Initialize(); }
+                catch (System.Exception resetError)
+                {
+                    CoopPlugin.Log.LogWarning("Character appearance default reset failed: " + resetError.Message);
+                }
+                return false;
+            }
+        }
+
+        private static void ClearEmptyWardrobeSlots(CC.CharacterCustomization custom, CC.CC_CharacterData data)
+        {
+            if (custom == null || data == null) return;
+            for (int slot = 0; slot < custom.HairTables.Count; slot++)
+                if (slot >= data.HairNames.Count || string.IsNullOrEmpty(data.HairNames[slot]))
+                    ClearHairOverlay(custom, slot);
+            for (int slot = 0; slot < custom.ApparelTables.Count; slot++)
+                if (slot >= data.ApparelNames.Count || string.IsNullOrEmpty(data.ApparelNames[slot]))
+                    ClearApparelOverlay(custom, slot);
+        }
+
+        private static void ClearAllApparel(CC.CharacterCustomization custom)
+        {
+            if (custom == null || custom.ApparelTables == null) return;
+            for (int slot = 0; slot < custom.ApparelTables.Count; slot++)
+                ClearApparelOverlay(custom, slot);
+        }
+
+        private static void ClearHairOverlay(CC.CharacterCustomization custom, int slot)
+        {
+            if (custom == null || slot < 0 || slot >= custom.HairTables.Count) return;
+            var field = typeof(CC.CharacterCustomization).GetField("HairObjects",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
+            if (objects != null && slot < objects.Count && objects[slot] != null)
+            {
+                Object.Destroy(objects[slot]);
+                objects[slot] = null;
+            }
+            if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.HairNames.Count)
+                custom.StoredCharacterData.HairNames[slot] = "";
+        }
+
+        private static void ClearApparelOverlay(CC.CharacterCustomization custom, int slot)
+        {
+            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count) return;
+            var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
+            if (objects != null && slot < objects.Count && objects[slot] != null)
+            {
+                Object.Destroy(objects[slot]);
+                objects[slot] = null;
+            }
+            if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.ApparelNames.Count)
+            {
+                custom.StoredCharacterData.ApparelNames[slot] = "";
+                if (slot < custom.StoredCharacterData.ApparelMaterials.Count)
+                    custom.StoredCharacterData.ApparelMaterials[slot] = 0;
+            }
+        }
+
+        public List<CC.CC_Property> GetLocalBlendshapes(Transform root)
+        {
+            var custom = FindCustomization(root);
+            if (custom == null || custom.StoredCharacterData == null)
+                return new List<CC.CC_Property>();
+            return custom.StoredCharacterData.Blendshapes ?? new List<CC.CC_Property>();
+        }
+
+        public List<CC.CC_Property> GetBlendshapes(CC.CharacterCustomization custom)
+        {
+            if (custom == null || custom.StoredCharacterData == null)
+                return new List<CC.CC_Property>();
+            return custom.StoredCharacterData.Blendshapes ?? new List<CC.CC_Property>();
+        }
+
+        public CC.CharacterCustomization GetLocalCustomization(Transform root)
+        {
+            return FindCustomization(root);
+        }
+
+        public CC.CharacterCustomization GetEditorCustomization(bool female)
+        {
+            if (_editorCustomization != null && _editorFemale == female) return _editorCustomization;
+            if (_editorHolder != null) Object.DestroyImmediate(_editorHolder);
+            _editorCustomization = null;
+            if (_customers == null) _customers = Object.FindObjectOfType<CustomerManager>();
+            if (_customers == null) return null;
+            var prefab = female ? _customers.m_CustomerFemalePrefab : _customers.m_CustomerPrefab;
+            if (prefab == null) return null;
+            _editorHolder = new GameObject("CoopCharacterEditorTemplate");
+            _editorHolder.SetActive(false);
+            var clone = Object.Instantiate(prefab.gameObject, _editorHolder.transform);
+            var customer = clone.GetComponent<Customer>();
+            _editorCustomization = customer != null
+                ? customer.m_CharacterCustom
+                : clone.GetComponentInChildren<CC.CharacterCustomization>(true);
+            _editorFemale = female;
+            if (_editorCustomization != null)
+            {
+                _editorCustomization.CharacterName = (female ? "Female" : "Male") + "0";
+                _editorCustomization.Initialize();
+                CoopPlugin.Log.LogInfo($"character editor template: {(female ? "female" : "male")}, hair slots={_editorCustomization.HairTables.Count}, apparel slots={_editorCustomization.ApparelTables.Count}, presets={(_editorCustomization.Presets != null && _editorCustomization.Presets.Presets != null ? _editorCustomization.Presets.Presets.Count : 0)}");
+            }
+            return _editorCustomization;
+        }
+
+        public List<CC.CC_Property> GetBlendshapes(Transform root, bool female)
+        {
+            return GetBlendshapes(GetEditorCustomization(female));
+        }
+
+        public bool SetLocalBlendshape(Transform root, string propertyName, float value)
+        {
+            var custom = FindCustomization(root);
+            if (custom == null || string.IsNullOrEmpty(propertyName)) return false;
+            custom.setBlendshapeByName(propertyName, Mathf.Clamp01(value));
+            return true;
+        }
+
+        public bool SetBlendshape(CC.CharacterCustomization custom, string propertyName, float value)
+        {
+            if (custom == null || string.IsNullOrEmpty(propertyName)) return false;
+            custom.setBlendshapeByName(propertyName, Mathf.Clamp01(value));
+            return true;
+        }
+
+        public bool ClearLocalHair(Transform root, int slot)
+        {
+            var custom = FindCustomization(root);
+            if (custom == null || slot < 0 || slot >= custom.HairTables.Count) return false;
+            var field = typeof(CC.CharacterCustomization).GetField("HairObjects",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
+            if (objects != null && slot < objects.Count && objects[slot] != null)
+            {
+                Object.Destroy(objects[slot]);
+                objects[slot] = null;
+            }
+            if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.HairNames.Count)
+                custom.StoredCharacterData.HairNames[slot] = "";
+            return true;
+        }
+
+        public bool ClearHair(CC.CharacterCustomization custom, int slot)
+        {
+            if (custom == null || slot < 0 || slot >= custom.HairTables.Count) return false;
+            var field = typeof(CC.CharacterCustomization).GetField("HairObjects",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
+            if (objects != null && slot < objects.Count && objects[slot] != null)
+            {
+                Object.Destroy(objects[slot]);
+                objects[slot] = null;
+            }
+            if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.HairNames.Count)
+                custom.StoredCharacterData.HairNames[slot] = "";
+            return true;
+        }
+
+        public bool ClearLocalApparel(Transform root, int slot)
+        {
+            var custom = FindCustomization(root);
+            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count) return false;
+            var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
+            if (objects != null && slot < objects.Count && objects[slot] != null)
+            {
+                Object.Destroy(objects[slot]);
+                objects[slot] = null;
+            }
+            if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.ApparelNames.Count)
+                custom.StoredCharacterData.ApparelNames[slot] = "";
+            return true;
+        }
+
+        public bool ClearApparel(CC.CharacterCustomization custom, int slot)
+        {
+            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count) return false;
+            var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
+            if (objects != null && slot < objects.Count && objects[slot] != null)
+            {
+                Object.Destroy(objects[slot]);
+                objects[slot] = null;
+            }
+            if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.ApparelNames.Count)
+                custom.StoredCharacterData.ApparelNames[slot] = "";
+            return true;
+        }
+
+        private static CC.CharacterCustomization FindCustomization(Transform root)
+        {
+            if (root == null) return null;
+            var found = root.GetComponentInChildren<CC.CharacterCustomization>(true);
+            if (found != null) return found;
+            found = root.GetComponentInParent<CC.CharacterCustomization>();
+            if (found != null) return found;
+            // Some game builds keep the visual body beside, rather than below, the CMF
+            // walker. Resolve the nearest customization once the selector is opened.
+            var all = Object.FindObjectsOfType<CC.CharacterCustomization>(true);
+            float best = 9f;
+            for (int i = 0; i < all.Length; i++)
+            {
+                if (all[i] == null) continue;
+                float distance = (all[i].transform.position - root.position).sqrMagnitude;
+                if (distance < best) { best = distance; found = all[i]; }
+            }
+            return found;
         }
 
         public void UpdateState(int connId, Vector3 pos, float yaw, float speed, byte holdState,
@@ -216,6 +583,96 @@ namespace CardShopCoop.Sync
                 DestroyBody(av);
             }
             _avatars.Clear();
+            if (_editorHolder != null) Object.Destroy(_editorHolder);
+            _editorHolder = null;
+            _editorCustomization = null;
+            DestroyPreview();
+        }
+
+        public void UpdatePreview(PlayerModelEntry model, Transform player, Transform camera, bool visible)
+        {
+            if (!visible || model == null || player == null || camera == null)
+            {
+                DestroyPreview();
+                return;
+            }
+
+            string signature = (model.Female ? "F" : "M") + model.ModelIndex + ":" + (model.CustomizationJson ?? "");
+            if (_previewBody == null || _previewSignature != signature)
+            {
+                DestroyPreview();
+                SpawnPreview(model);
+                _previewSignature = signature;
+            }
+            if (_previewBody == null) return;
+            Vector3 forward = camera.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude < 0.001f) forward = player.forward;
+            forward.Normalize();
+            Vector3 position = player.position + forward * 1.6f;
+            position.y = player.position.y;
+            _previewBody.transform.position = position;
+            Vector3 towardPlayer = player.position - position;
+            towardPlayer.y = 0f;
+            if (towardPlayer.sqrMagnitude > 0.001f)
+                _previewBody.transform.rotation = Quaternion.LookRotation(towardPlayer.normalized, Vector3.up);
+        }
+
+        public void DestroyPreview()
+        {
+            if (_previewBody != null) Object.Destroy(_previewBody);
+            _previewBody = null;
+            _previewCustomization = null;
+            _previewSignature = null;
+        }
+
+        private void SpawnPreview(PlayerModelEntry model)
+        {
+            if (_customers == null) _customers = Object.FindObjectOfType<CustomerManager>();
+            if (_customers == null) return;
+            var prefab = model.Female ? _customers.m_CustomerFemalePrefab : _customers.m_CustomerPrefab;
+            if (prefab == null) return;
+            var holder = new GameObject("CoopCharacterPreviewHolder_tmp");
+            holder.SetActive(false);
+            var clone = Object.Instantiate(prefab.gameObject, holder.transform);
+            clone.transform.SetParent(null, false);
+            clone.SetActive(true);
+            Object.Destroy(holder);
+
+            var customer = clone.GetComponent<Customer>();
+            _previewCustomization = customer != null ? customer.m_CharacterCustom
+                : clone.GetComponentInChildren<CC.CharacterCustomization>(true);
+            if (_previewCustomization != null)
+            {
+                _previewCustomization.CharacterName = (model.Female ? "Female" : "Male") + Mathf.Max(0, model.ModelIndex);
+                _previewCustomization.Initialize();
+                if (!string.IsNullOrEmpty(model.CustomizationJson))
+                {
+                    var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(model.CustomizationJson);
+                    if (data != null)
+                    {
+                        NormalizeCharacterData(_previewCustomization, data);
+                        _previewCustomization.StoredCharacterData = data;
+                        if (TryApplyCharacterData(_previewCustomization, data, "character preview"))
+                            ClearEmptyWardrobeSlots(_previewCustomization, data);
+                    }
+                }
+                else
+                    ClearAllApparel(_previewCustomization);
+            }
+
+            foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
+            {
+                if (mb == null) continue;
+                string name = mb.GetType().Name;
+                if (name == "CopyPose" || name == "BlendshapeManager" || name == "ScaleCharacter"
+                    || name == "CharacterCustomization" || name == "TransformBone" || name == "MipBiasAdjust") continue;
+                Object.DestroyImmediate(mb);
+            }
+            foreach (var col in clone.GetComponentsInChildren<Collider>(true)) Object.DestroyImmediate(col);
+            foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true)) Object.DestroyImmediate(rb);
+            clone.name = "CoopCharacterPreview";
+            _previewBody = clone;
         }
 
         /// <summary>Materials are assets, not scene objects: the instanced cube tint from
@@ -623,6 +1080,11 @@ namespace CardShopCoop.Sync
             foreach (char c in av.Name) nameHash = nameHash * 31 + c;
             bool female = (nameHash & 1) == 1;
             var prefab = female ? cm.m_CustomerFemalePrefab : cm.m_CustomerPrefab;
+            if (av.HasModel)
+            {
+                female = av.Female;
+                prefab = female ? cm.m_CustomerFemalePrefab : cm.m_CustomerPrefab;
+            }
             if (prefab == null) prefab = cm.m_CustomerPrefab != null ? cm.m_CustomerPrefab : cm.m_CustomerFemalePrefab;
             if (prefab == null) return;
 
@@ -640,7 +1102,28 @@ namespace CardShopCoop.Sync
             var cust = clone.GetComponent<Customer>();
             try
             {
-                if (cust != null) cust.RandomizeCharacterMesh(); // game's own wardrobe pipeline
+                if (cust != null)
+                {
+                    if (av.HasModel)
+                    {
+                        cust.m_CharacterCustom.CharacterName = (female ? "Female" : "Male") + av.ModelIndex;
+                        cust.m_CharacterCustom.Initialize();
+                        if (!string.IsNullOrEmpty(av.CustomizationJson))
+                        {
+                            var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(av.CustomizationJson);
+                            if (data != null)
+                            {
+                                NormalizeCharacterData(cust.m_CharacterCustom, data);
+                                cust.m_CharacterCustom.StoredCharacterData = data;
+                                if (TryApplyCharacterData(cust.m_CharacterCustom, data, "remote avatar"))
+                                    ClearEmptyWardrobeSlots(cust.m_CharacterCustom, data);
+                            }
+                        }
+                        else
+                            ClearAllApparel(cust.m_CharacterCustom);
+                    }
+                    else cust.RandomizeCharacterMesh(); // game's own wardrobe pipeline
+                }
             }
             catch (System.Exception e)
             {

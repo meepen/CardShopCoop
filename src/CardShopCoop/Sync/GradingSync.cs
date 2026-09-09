@@ -91,9 +91,9 @@ namespace CardShopCoop.Sync
         private const float DeliveryFee = 10f; // GradedCardSubmitSelectScreen.EvaluateTotalCost
 
         private static readonly FieldInfo FiShowingAlpha =
-            AccessTools.Field(typeof(GradedCardSubmitSelectScreen), "m_IsShowingCanvasGrpAlpha");
+            Util.ReflectionSurface.RequiredField(typeof(GradedCardSubmitSelectScreen), "m_IsShowingCanvasGrpAlpha");
         private static readonly FieldInfo FiHidingAlpha =
-            AccessTools.Field(typeof(GradedCardSubmitSelectScreen), "m_IsHidingCanvasGrpAlpha");
+            Util.ReflectionSurface.RequiredField(typeof(GradedCardSubmitSelectScreen), "m_IsHidingCanvasGrpAlpha");
         // The on-screen bill. Vanilla EvaluateTotalCost writes it as (10 + m_CostPerCard*n);
         // Grading Overhaul's EvaluateTotalCost prefix REPLACES that and writes the real
         // per-value fee (deliveryFee + sum(marketValue * tier.FeeMultiplier)) into this same
@@ -101,7 +101,7 @@ namespace CardShopCoop.Sync
         // _fiServiceTotalCost.SetValue at :14378). Whatever the guest SEES on the submit screen
         // lives here, so reading it forwards GO's actual number instead of the vanilla-flat guess.
         private static readonly FieldInfo FiServiceTotalCost =
-            AccessTools.Field(typeof(GradedCardSubmitSelectScreen), "m_ServiceTotalCost");
+            Util.ReflectionSurface.RequiredField(typeof(GradedCardSubmitSelectScreen), "m_ServiceTotalCost");
 
         /// <summary>Grading Overhaul's own submit validator,
         /// GradingSubmit_CompanyValidation_Patch.Prefix(GradedCardSubmitSelectScreen)
@@ -120,7 +120,7 @@ namespace CardShopCoop.Sync
                     "TCGCardShopSimulator.GradingOverhaul.GradingSubmit_CompanyValidation_Patch",
                     Util.GradingInterop.GradingAssembly);
                 return t == null ? null
-                    : AccessTools.Method(t, "Prefix", new[] { typeof(GradedCardSubmitSelectScreen) });
+                    : Util.ReflectionSurface.OptionalMethod(t, "Prefix", new[] { typeof(GradedCardSubmitSelectScreen) });
             }
             catch { return null; }
         }
@@ -197,6 +197,15 @@ namespace CardShopCoop.Sync
         {
             Instance = this;
         }
+
+        /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
+        public static void ClearLive()
+        {
+            Instance = null;
+            ApplyingRemote = false;
+        }
+
+        public static void ActivateLive(GradingSync instance) { Instance = instance; }
 
         public void Reset()
         {
@@ -302,7 +311,7 @@ namespace CardShopCoop.Sync
                 var t = Util.ModParity.ResolveType(
                     "TCGCardShopSimulator.GradingOverhaul.CompanyStamp_RestockManager_OnDayStartedPatch",
                     Util.GradingInterop.GradingAssembly);
-                var m = t == null ? null : AccessTools.Method(t, "Prefix", Type.EmptyTypes);
+                var m = t == null ? null : Util.ReflectionSurface.OptionalMethod(t, "Prefix", Type.EmptyTypes);
                 if (m == null)
                 {
                     // Present separates "GO is not installed" (normal - there is nothing to block)
@@ -352,7 +361,7 @@ namespace CardShopCoop.Sync
             }
             catch (Exception e)
             {
-                CoopPlugin.Log.LogWarning("GradingSync submit: " + e.Message);
+                CoopPlugin.Log.LogError("coop: grading client submit failed; the screen was left open so its cards can be returned: " + e);
             }
             // never fall through to vanilla on the client: it would charge the mirrored
             // wallet (forwarded as a second contribution) AND strand the set locally.
@@ -552,7 +561,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = Util.ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"Patch target missing: {type.Name}.{method}");
@@ -623,10 +632,104 @@ namespace CardShopCoop.Sync
                     CoopCore.WarnRefusedCard(cards[i], "grade-return");
                     continue;
                 }
-                if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
-                    Util.GradingInterop.Remember(cards[i]);
-                CPlayerData.AddCard(cards[i], 1);
+                try
+                {
+                    if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
+                        Util.GradingInterop.Remember(cards[i]);
+                    CPlayerData.AddCard(cards[i], 1);
+                }
+                catch (Exception e)
+                {
+                    // Restoration is a recovery operation, so one bad card must not prevent
+                    // the remaining cards from being returned. Include its complete wire
+                    // identity: this is the last useful trace if the host cannot represent it.
+                    CoopPlugin.Log.LogError($"coop: grading card restore failed (conn {senderConn}, card {CardIdentity(cards[i])}); card may be lost: {e}");
+                }
             }
+        }
+
+        private static string CardIdentity(CardData card)
+        {
+            if (card == null) return "<null>";
+            return $"monster={card.monsterType}, expansion={card.expansionType}, border={card.borderType}, grade={card.cardGrade}, foil={card.isFoil}, destiny={card.isDestiny}, champion={card.isChampionCard}";
+        }
+
+        private static void CompensateSubmission(List<CardData> cards, GradeCardSubmitSet set,
+            bool coinQueued, float total, float reportSupplyCost, float permanentSupplyCost,
+            bool reportMutated, bool permanentReportMutated, int senderConn, Exception failure)
+        {
+            CoopPlugin.Log.LogError($"coop: grading submission transaction failed (conn {senderConn}, cards {cards.Count}, chargeQueued={coinQueued}, total={total:F2}); compensating: {failure}");
+
+            if (set != null && CPlayerData.m_GradeCardInProgressList != null)
+            {
+                if (CPlayerData.m_GradeCardInProgressList.Remove(set))
+                    CoopPlugin.Log.LogInfo($"GradingSync: removed half-created grading set while compensating conn {senderConn}");
+            }
+
+            if (reportMutated)
+                CPlayerData.m_GameReportDataCollect.supplyCost = reportSupplyCost;
+            if (permanentReportMutated)
+                CPlayerData.m_GameReportDataCollectPermanent.supplyCost = permanentSupplyCost;
+
+            ReturnRejectedCards(cards, senderConn);
+
+            if (coinQueued)
+            {
+                CoopPlugin.Log.LogInfo($"GradingSync: queuing compensating coin credit {total:F2} for conn {senderConn}");
+                try
+                {
+                    CEventManager.QueueEvent(new CEventPlayer_AddCoin(total));
+                }
+                catch (Exception e)
+                {
+                    CoopPlugin.Log.LogError($"coop: compensating coin credit failed (conn {senderConn}, amount {total:F2}); wallet may remain charged: {e}");
+                }
+            }
+        }
+
+        private static bool TryEnrollGoJob(GradeCardSubmitSet set, int companyId, int serviceLevel)
+        {
+            if (!Util.GradingInterop.Present || !Util.GradingInterop.CanEnroll)
+                return false;
+            if (!Util.GradingInterop.IsAllowedCompany(companyId))
+            {
+                CoopPlugin.Log.LogInfo($"GradingSync: no GO enrollment - wire company {companyId} is not a website-selectable GradingCompany");
+                return false;
+            }
+
+            try
+            {
+                bool useCheats = Util.GradingInterop.HostUseCheatsWebsite;
+                bool registered = Util.GradingInterop.RegisterJobCompany(set, companyId, useCheats);
+                int jobId = Util.GradingInterop.NextJobId();
+                int encoded = jobId > 0 ? Util.GradingInterop.EncodeServiceLevel(companyId, serviceLevel, jobId) : 0;
+                if (encoded == 0 && jobId > 0)
+                    encoded = 100000 + jobId * 10000 + companyId * 1000 + Mathf.Clamp(serviceLevel, 0, 999);
+
+                if (encoded > 0
+                    && Util.GradingInterop.TryDecodeServiceLevel(encoded, out int backCompany, out int backTier)
+                    && backCompany == companyId && backTier == serviceLevel)
+                {
+                    set.m_ServiceLevel = encoded;
+                    // A failure here can occur after GO has burned certs. Keep the set as a
+                    // degraded vanilla job, matching the old behavior, rather than charging
+                    // and then losing the submission while attempting to undo GO's store.
+                    Util.GradingInterop.PreRollJob(set, companyId, useCheats, jobId);
+                    CoopPlugin.Log.LogInfo($"GradingSync: enrolled guest submission as a Grading Overhaul job - company {Util.GradingInterop.CompanyName(companyId)}, tier {serviceLevel}, jobId {jobId} (serviceLevel {encoded})");
+                    return true;
+                }
+
+                CoopPlugin.Log.LogWarning($"GradingSync: GO service-level encode failed round-trip (company {companyId}, tier {serviceLevel}, jobId {jobId}, encoded {encoded}) - keeping the raw tier"
+                    + (registered ? "; company registry entry stands" : "; company registry entry also failed"));
+            }
+            catch (Exception e)
+            {
+                // Do not leave an encoded level behind when pre-roll or a later GO step
+                // fails; that would make the fallback look like a valid GO job at maturation.
+                set.m_ServiceLevel = serviceLevel;
+                CoopPlugin.Log.LogError($"coop: GO grading enrollment failed after the submission was accepted (company {companyId}, tier {serviceLevel}); keeping a degraded vanilla job: {e}");
+            }
+            return false;
         }
 
         public void HostApplyOp(GradingOpMessage message, int senderConn)
@@ -681,6 +784,13 @@ namespace CardShopCoop.Sync
 
             if (CoopCore.Role != CoopRole.Host || cards.Count == 0) return;
 
+            GradeCardSubmitSet set = null;
+            bool coinQueued = false;
+            bool reportMutated = false;
+            bool permanentReportMutated = false;
+            float reportSupplyCost = 0f;
+            float permanentSupplyCost = 0f;
+            float total = 0f;
             try
             {
                 // ---- content-parity gate (before ANY charge, enrollment or set construction) ----
@@ -722,8 +832,8 @@ namespace CardShopCoop.Sync
                 var inv = Inv();
                 if (inv == null)
                 {
-                    // same outcome as the old fee-lookup failure, minus the fake manager
-                    CoopPlugin.Log.LogWarning("GradingSync: no InventoryBase (world loading?) - submission dropped");
+                    CoopPlugin.Log.LogWarning($"GradingSync: no InventoryBase (world loading?) - submission dropped; returning {cards.Count} cards");
+                    ReturnRejectedCards(cards, senderConn);
                     return;
                 }
                 // Decide what to actually charge the host wallet.
@@ -738,7 +848,6 @@ namespace CardShopCoop.Sync
                 //     indexer throwing on one of GO's out-of-vanilla-range tiers.
                 //   GO absent: the guest ran the vanilla-flat model, so recompute it authoritatively
                 //     (unchanged legacy behavior) and warn on any mismatch.
-                float total;
                 if (Util.GradingInterop.Present)
                 {
                     if (float.IsNaN(clientFee) || float.IsInfinity(clientFee) || clientFee < 0f)
@@ -795,12 +904,19 @@ namespace CardShopCoop.Sync
                 // carries the card data forward through grading.
 
                 // the vanilla submit body (GradedCardSubmitSelectScreen.OnPressSubmitButton)
+                // Snapshot the report values before the first mutation. If any later operation
+                // throws, restoring these fields keeps the economic/report transaction whole.
+                reportSupplyCost = CPlayerData.m_GameReportDataCollect.supplyCost;
+                permanentSupplyCost = CPlayerData.m_GameReportDataCollectPermanent.supplyCost;
                 PriceChangeManager.AddTransaction(0f - total, ETransactionType.GradingFee, serviceLevel);
                 CPlayerData.m_GameReportDataCollect.supplyCost -= total;
+                reportMutated = true;
                 CPlayerData.m_GameReportDataCollectPermanent.supplyCost -= total;
+                permanentReportMutated = true;
                 CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(total));
+                coinQueued = true;
 
-                var set = new GradeCardSubmitSet
+                set = new GradeCardSubmitSet
                 {
                     m_ServiceLevel = serviceLevel,
                     m_DayPassed = 0,
@@ -812,84 +928,10 @@ namespace CardShopCoop.Sync
                 set.m_CardDataList.AddRange(cards);
                 CPlayerData.m_GradeCardInProgressList.Add(set);
 
-                // ---- Grading Overhaul job enrollment (the field-bug fix) ----
-                // GO turns a plain submission into one of ITS jobs in an OnPressSubmitButton
-                // postfix (GradingJobSubmissionRegistryPatch, decompiled-grading
-                // Grading Overhaul.decompiled.cs :12866-12895) that is gated on
-                // m_GradeCardInProgressList.Contains(m_CurrentGradeCardSubmitSet). A set the host
-                // built from the wire is in the list but is not the host's scratch set, so that
-                // gate is never satisfied and the postfix never ran for a guest's submission:
-                // at maturation GO's TryDecode failed on the bare tier AND its registry lookup
-                // missed (the registry is reference-keyed on the LOCAL submit set), so GO handed
-                // the job back to vanilla grading - the guest paid a Grading Overhaul bill and
-                // got vanilla grades. Replay GO's chain here, in GO's order, for this set.
-                //
-                // Strictly after the slots/wallet rejection above and after the list Add: the
-                // registry, the jobId counter and the pre-roll all mutate GO's persistent state
-                // (PreRollOnSubmit burns a cert per card, :5399), so nothing may run until the
-                // submission is definitely accepted, and GO stamps a set that is already enrolled.
-                bool enrolled = false;
-                if (Util.GradingInterop.Present && Util.GradingInterop.CanEnroll)
-                {
-                    if (!Util.GradingInterop.IsAllowedCompany(companyId))
-                    {
-                        // Includes the GO-absent guest's 255 sentinel, a value outside the enum,
-                        // and Custom (=1) - a real member, but GO's internal cheat skin that the
-                        // website never offers (AllowedCompanies, :4017). The job stays vanilla
-                        // rather than being enrolled under a company no website could have picked.
-                        CoopPlugin.Log.LogInfo($"GradingSync: no GO enrollment - wire company {companyId} is not a website-selectable GradingCompany");
-                    }
-                    else
-                    {
-                        // (a) useCheats is the HOST's setting, not the submitter's - see
-                        // GradingInterop.HostUseCheatsWebsite for why (fake cards land in the
-                        // shared album, so the album's owner decides).
-                        bool useCheats = Util.GradingInterop.HostUseCheatsWebsite;
-
-                        // (b) register company + cheat flag against the set instance
-                        bool registered = Util.GradingInterop.RegisterJobCompany(set, companyId, useCheats);
-
-                        // (c) claim a job id
-                        int jobId = Util.GradingInterop.NextJobId();
-
-                        // (d) encode (company, tier, jobId) into m_ServiceLevel - this is what
-                        // GO's maturation decodes FIRST (:8007) and what makes the guest's
-                        // grading app show the right company and tier for the job.
-                        int encoded = jobId > 0 ? Util.GradingInterop.EncodeServiceLevel(companyId, serviceLevel, jobId) : 0;
-                        if (encoded == 0 && jobId > 0)
-                        {
-                            // ServiceLevelCodec is internal and its Encode could not be invoked.
-                            // Its V2 layout is a literal (decompiled :5601) - reproduce it and let
-                            // the round-trip below decide whether it is actually usable.
-                            encoded = 100000 + jobId * 10000 + companyId * 1000 + Mathf.Clamp(serviceLevel, 0, 999);
-                        }
-
-                        // MANDATORY round-trip. m_ServiceLevel is the field the whole grading UI
-                        // and the maturation path read; writing a value GO cannot decode is worse
-                        // than leaving the raw tier, because it turns a wrong-grade bug into a
-                        // wrong-everything bug. Only a verified encode is written.
-                        if (encoded > 0
-                            && Util.GradingInterop.TryDecodeServiceLevel(encoded, out int backCompany, out int backTier)
-                            && backCompany == companyId && backTier == serviceLevel)
-                        {
-                            set.m_ServiceLevel = encoded;
-
-                            // (e) pre-roll the grades and burn the certs, as GO does at :12891.
-                            Util.GradingInterop.PreRollJob(set, companyId, useCheats, jobId);
-
-                            enrolled = true;
-                            CoopPlugin.Log.LogInfo($"GradingSync: enrolled guest submission as a Grading Overhaul job - company {Util.GradingInterop.CompanyName(companyId)}, tier {serviceLevel}, jobId {jobId} (serviceLevel {encoded})");
-                        }
-                        else
-                        {
-                            // Registry alone still lets GO take the job (maturation falls back to
-                            // TryGetJobCompany at :8009), so a failed encode is a degraded result,
-                            // not a lost one - but the guest's app will show vanilla tier text.
-                            CoopPlugin.Log.LogWarning($"GradingSync: GO service-level encode failed round-trip (company {companyId}, tier {serviceLevel}, jobId {jobId}, encoded {encoded}) - keeping the raw tier"
-                                + (registered ? "; company registry entry stands" : "; company registry entry also failed"));
-                        }
-                    }
-                }
+                // Enrollment is intentionally isolated: GO can burn certificates before a
+                // reflection/codec failure. Its established fallback is a degraded vanilla
+                // job, which is safe because the core fee/list mutation is already consistent.
+                bool enrolled = TryEnrollGoJob(set, companyId, serviceLevel);
 
                 // Pad to vanilla's 8 slots ONLY when this stayed a vanilla job. GO's chain ends by
                 // trimming every empty slot off an enrolled set (TrimEmptyCards, :12936), and its
@@ -929,7 +971,14 @@ namespace CardShopCoop.Sync
                 }
                 catch { }
             }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync op: " + e.Message); }
+            catch (Exception e)
+            {
+                if (CoopCore.Role == CoopRole.Host)
+                    CompensateSubmission(cards, set, coinQueued, total,
+                        reportSupplyCost, permanentSupplyCost, reportMutated, permanentReportMutated, senderConn, e);
+                else
+                    CoopPlugin.Log.LogError($"coop: grading op failed outside host role (conn {senderConn}): {e}");
+            }
         }
 
         // ---------------- client ----------------

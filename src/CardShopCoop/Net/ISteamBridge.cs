@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -65,6 +66,16 @@ namespace CardShopCoop.Net
         /// <summary>Is the Steam CLIENT running? (The assembly being present is a
         /// separate question, already answered by this object being non-null.)</summary>
         bool SteamAvailable();
+
+        /// <summary>Local Steam persona, or an empty string when unavailable.</summary>
+        string LocalPersonaName { get; }
+
+        /// <summary>Local Steam identity, or zero when Steam is unavailable.</summary>
+        ulong LocalSteamId { get; }
+
+        /// <summary>Local nickname for a Steam friend, or an empty string when the
+        /// friend is not known locally or Steam is unavailable.</summary>
+        string FriendNickname(ulong steamId);
 
         /// <summary>Build the Steam P2P transport. MUST be called BEFORE Host()/Join():
         /// the lobby callbacks inside the bridge write the lobby id (and, on the client,
@@ -237,10 +248,8 @@ namespace CardShopCoop.Net
                     var t = GameAssembly()?.GetType("CPlayerData");
                     if (t != null)
                     {
-                        const BindingFlags f = BindingFlags.Static | BindingFlags.Public |
-                                               BindingFlags.NonPublic;
-                        _saveIndexField = t.GetField("m_SaveIndex", f);
-                        _saveCycleField = t.GetField("m_SaveCycle", f);
+                        _saveIndexField = ReflectionSurface.OptionalField(t, "m_SaveIndex");
+                        _saveCycleField = ReflectionSurface.OptionalField(t, "m_SaveCycle");
                     }
                 }
                 if (_saveIndexField == null || _saveCycleField == null) return false;

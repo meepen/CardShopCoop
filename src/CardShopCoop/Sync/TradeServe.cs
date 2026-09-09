@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -95,36 +96,44 @@ namespace CardShopCoop.Sync
         // harmony prefixes are static; CoopCore owns the single instance
         private static TradeServe _live;
 
+        /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
+        public static void ClearLive()
+        {
+            _live = null;
+        }
+
+        public static void ActivateLive(TradeServe instance) { _live = instance; }
+
         public TradeServe() { _live = this; }
 
         // ---- reflection: Customer privates (verified against decompiled/Customer.cs)
-        private static readonly FieldInfo FiTradeData = AccessTools.Field(typeof(Customer), "m_CustomerTradeData");
-        private static readonly FieldInfo FiTradeCounter = AccessTools.Field(typeof(Customer), "m_CurrentTradeCardCashierCounter");
-        private static readonly FieldInfo FiHasTraded = AccessTools.Field(typeof(Customer), "m_HasTradedCard");
-        private static readonly FieldInfo FiCustTimer = AccessTools.Field(typeof(Customer), "m_Timer");
-        private static readonly FieldInfo FiCustTimerMax = AccessTools.Field(typeof(Customer), "m_TimerMax");
-        private static readonly FieldInfo FiPausing = AccessTools.Field(typeof(Customer), "m_IsPausingAction");
-        private static readonly MethodInfo MiDetermine = AccessTools.Method(typeof(Customer), "DetermineShopAction");
+        private static readonly FieldInfo FiTradeData = ReflectionSurface.RequiredField(typeof(Customer), "m_CustomerTradeData");
+        private static readonly FieldInfo FiTradeCounter = ReflectionSurface.RequiredField(typeof(Customer), "m_CurrentTradeCardCashierCounter");
+        private static readonly FieldInfo FiHasTraded = ReflectionSurface.RequiredField(typeof(Customer), "m_HasTradedCard");
+        private static readonly FieldInfo FiCustTimer = ReflectionSurface.RequiredField(typeof(Customer), "m_Timer");
+        private static readonly FieldInfo FiCustTimerMax = ReflectionSurface.RequiredField(typeof(Customer), "m_TimerMax");
+        private static readonly FieldInfo FiPausing = ReflectionSurface.RequiredField(typeof(Customer), "m_IsPausingAction");
+        private static readonly MethodInfo MiDetermine = ReflectionSurface.RequiredMethod(typeof(Customer), "DetermineShopAction");
 
         // ---- reflection: CustomerTradeCardScreen privates
-        private static readonly FieldInfo FiScrTrading = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_IsTrading");
-        private static readonly FieldInfo FiScrAccepted = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_HasAccepted");
-        private static readonly FieldInfo FiScrPriceSet = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_PriceSet");
-        private static readonly FieldInfo FiScrLastPrice = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_LastPriceSet");
-        private static readonly FieldInfo FiScrAsk = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_SellCardAskPrice");
-        private static readonly FieldInfo FiScrMarket = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_SellCardMarketPrice");
-        private static readonly FieldInfo FiScrMaxDecline = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_MaxDeclineCount");
-        private static readonly FieldInfo FiScrDecline = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_DeclineCount");
-        private static readonly FieldInfo FiScrCardL = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_CardData_L");
-        private static readonly FieldInfo FiScrCardR = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_CardData_R");
+        private static readonly FieldInfo FiScrTrading = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_IsTrading");
+        private static readonly FieldInfo FiScrAccepted = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_HasAccepted");
+        private static readonly FieldInfo FiScrPriceSet = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_PriceSet");
+        private static readonly FieldInfo FiScrLastPrice = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_LastPriceSet");
+        private static readonly FieldInfo FiScrAsk = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_SellCardAskPrice");
+        private static readonly FieldInfo FiScrMarket = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_SellCardMarketPrice");
+        private static readonly FieldInfo FiScrMaxDecline = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_MaxDeclineCount");
+        private static readonly FieldInfo FiScrDecline = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_DeclineCount");
+        private static readonly FieldInfo FiScrCardL = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_CardData_L");
+        private static readonly FieldInfo FiScrCardR = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_CardData_R");
 
         // ---- reflection: UIScreenBase privates (verified against decompiled/UIScreenBase.cs)
         // used ONLY by the S2 hard-teardown path, which mirrors base.OnCloseScreen when the
         // vanilla close chain threw before it (m_IsScreenOpen protected bool ~line 15,
         // m_ScreenGroup public GameObject ~line 5). Cached on the screen's runtime type
         // (CustomerTradeCardScreen), AccessTools walks the base hierarchy to find them.
-        private static readonly FieldInfo FiScrIsOpen = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_IsScreenOpen");
-        private static readonly FieldInfo FiScrGroup = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_ScreenGroup");
+        private static readonly FieldInfo FiScrIsOpen = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_IsScreenOpen");
+        private static readonly FieldInfo FiScrGroup = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_ScreenGroup");
 
         private struct Offer
         {
@@ -452,7 +461,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"Patch target missing: {type.Name}.{method}");
