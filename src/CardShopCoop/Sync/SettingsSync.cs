@@ -43,6 +43,7 @@ namespace CardShopCoop.Sync
         private float _timer;
         private int _lastHash;
         private float _heal;
+        private bool _hasHash;
 
         // NEVER CSingleton<>.Instance for these: touched while no real manager exists
         // (client reload loading screen, host mid-session save load - ?. does NOT
@@ -76,6 +77,7 @@ namespace CardShopCoop.Sync
             _timer = -2.6f; // staggered phase vs the other snapshot engines
             _lastHash = 0;
             _heal = 0f;
+            _hasHash = false;
             ApplyingRemote = false;
             _sm = null;
             _inv = null;
@@ -85,6 +87,7 @@ namespace CardShopCoop.Sync
         {
             _lastHash = 0;
             _heal = 15f;
+            _hasHash = false;
         }
 
         // ---------------- host ----------------
@@ -97,16 +100,13 @@ namespace CardShopCoop.Sync
             _timer -= 1.5f;
             try
             {
-                var msg = BuildStateMessage();
-                byte[] payload = WireCodec.Serialize(msg);
-                int len = payload.Length;
-                byte[] buf = payload;
-                int hash = 17;
-                for (int i = 0; i < len; i++) hash = hash * 31 + buf[i];
+                int hash = HashState();
                 _heal += 1.5f;
-                if (hash == _lastHash && _heal < 15f) return;
+                if (_hasHash && hash == _lastHash && _heal < 15f) return;
                 _lastHash = hash;
+                _hasHash = true;
                 _heal = 0f;
+                var msg = BuildStateMessage();
                 BroadcastState?.Invoke(msg);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("SettingsSync host: " + e.Message); }
@@ -390,6 +390,51 @@ namespace CardShopCoop.Sync
                 msg.TableNumbers.Add((byte)Mathf.Clamp(num, 0, 255)); // numbers never exceed the table count
             }
             return msg;
+        }
+
+        private static int HashState()
+        {
+            int h = 17;
+            HashBools(ref h, CPlayerData.m_UnlockedDecoWallList);
+            HashBools(ref h, CPlayerData.m_UnlockedDecoFloorList);
+            HashBools(ref h, CPlayerData.m_UnlockedDecoCeilingList);
+            h = h * 31 + CPlayerData.m_EquippedWallDecoIndex;
+            h = h * 31 + CPlayerData.m_EquippedWallDecoIndexB;
+            h = h * 31 + CPlayerData.m_EquippedFloorDecoIndex;
+            h = h * 31 + CPlayerData.m_EquippedFloorDecoIndexB;
+            h = h * 31 + CPlayerData.m_EquippedCeilingDecoIndex;
+            h = h * 31 + CPlayerData.m_EquippedCeilingDecoIndexB;
+            h = h * 31 + (int)CPlayerData.m_GameEventFormat;
+            h = h * 31 + (int)CPlayerData.m_PendingGameEventFormat;
+            h = h * 31 + (int)CPlayerData.m_GameEventExpansionType;
+            h = h * 31 + (int)CPlayerData.m_PendingGameEventExpansionType;
+            var fees = CPlayerData.m_SetGameEventPriceList;
+            int fn = fees == null ? 0 : Mathf.Min(fees.Count, 255);
+            h = h * 31 + fn;
+            for (int i = 0; i < fn; i++) h = h * 31 + fees[i].GetHashCode();
+            var counters = Sm()?.m_CashierCounterList;
+            int cn = counters == null ? 0 : Mathf.Min(counters.Count, 255);
+            h = h * 31 + cn;
+            for (int i = 0; i < cn; i++)
+            {
+                byte flags = 3;
+                if (counters[i] != null)
+                    flags = (byte)((counters[i].CanCheckout() ? 1 : 0) | (counters[i].CanTradeCard() ? 2 : 0));
+                h = h * 31 + flags;
+            }
+            var tables = Sm()?.m_PlayTableList;
+            int tn = tables == null ? 0 : Mathf.Min(tables.Count, 255);
+            h = h * 31 + tn;
+            for (int i = 0; i < tn; i++)
+                h = h * 31 + (tables[i] == null ? 0 : Mathf.Clamp(tables[i].GetTournamentPlayTableNumber(), 0, 255));
+            return h;
+        }
+
+        private static void HashBools(ref int hash, List<bool> list)
+        {
+            int n = list == null ? 0 : Mathf.Min(list.Count, 255);
+            hash = hash * 31 + n;
+            for (int i = 0; i < n; i++) hash = hash * 31 + (list[i] ? 1 : 0);
         }
 
         private static void CopyBools(List<bool> list, List<bool> into)

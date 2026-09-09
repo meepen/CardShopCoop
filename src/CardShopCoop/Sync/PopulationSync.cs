@@ -72,6 +72,8 @@ namespace CardShopCoop.Sync
         }
 
         private ShelfManager _sm;
+        private readonly Dictionary<InteractableObject, int> _idsThisTick
+            = new Dictionary<InteractableObject, int>();
         private float _timer;
         private readonly HashSet<string> _snapshotErrors = new HashSet<string>();
         private int _lastHash;
@@ -99,6 +101,7 @@ namespace CardShopCoop.Sync
         {
             _timer = 3f;
             _lastHash = 0;
+            _idsThisTick.Clear();
         }
 
         private ShelfManager Sm()
@@ -117,6 +120,7 @@ namespace CardShopCoop.Sync
             {
                 var sm = Sm();
                 if (sm == null) return;
+                _idsThisTick.Clear();
                 // population changes a handful of times per session; hash the cheap
                 // identity (counts + types) and skip the heavy build when unchanged,
                 // with a slow heal so a client that missed one still converges
@@ -133,7 +137,9 @@ namespace CardShopCoop.Sync
                             {
                                 try
                                 {
-                                    hash = hash * 31 + PlacedObjectIdentity.AssignHost(obj)
+                                    int id = PlacedObjectIdentity.AssignHost(obj);
+                                    _idsThisTick[obj] = id;
+                                    hash = hash * 31 + id
                                         + ((kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType)
                                         + (IsBoxed(obj) ? 1 : 0)
                                         + (IsBoxed(obj) ? Mathf.RoundToInt(ObjectPose(obj).x * 8f) : 0)
@@ -164,7 +170,7 @@ namespace CardShopCoop.Sync
                             {
                                 entries.Add(new Entry
                                 {
-                                    Id = PlacedObjectIdentity.AssignHost(obj),
+                                    Id = (ushort)(_idsThisTick.TryGetValue(obj, out int id) ? id : PlacedObjectIdentity.AssignHost(obj)),
                                     ObjType = (kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType,
                                     Pos = obj.transform.position,
                                     Rot = obj.transform.rotation,

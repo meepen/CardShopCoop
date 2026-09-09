@@ -26,6 +26,11 @@ namespace CardShopCoop.Patches
         private static readonly FieldInfo FiRestockCart = AccessTools.Field(typeof(RestockItemScreen), "m_CartItemList");
         private static readonly FieldInfo FiScannerIndexes = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockIndexList");
         private static readonly FieldInfo FiScannerCounts = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockBoxCountList");
+        private static RestockItemScreen _pendingRestockScreen;
+        private static ScannerRestockScreen _pendingScannerScreen;
+        private static readonly FieldInfo FiScannerPage = AccessTools.Field(typeof(ScannerRestockScreen), "m_PageIndex");
+        private static readonly MethodInfo MiScannerPage = AccessTools.Method(typeof(ScannerRestockScreen), "EvaluatePanelUIPage");
+        private static readonly MethodInfo MiScannerTotals = AccessTools.Method(typeof(ScannerRestockScreen), "UpdateTotalCostAndBoxCount");
         public static void ApplyAll(Harmony h)
         {
             // The CMF camera reads Mouse X/Y directly from its own CameraMouseInput
@@ -372,6 +377,8 @@ namespace CardShopCoop.Patches
         public static bool RestockCheckoutPrefix(RestockItemScreen __instance, float totalCost)
         {
             if (CoopCore.Role != CoopRole.Client) return true;
+            _pendingRestockScreen = __instance;
+            _pendingScannerScreen = null;
             var cart = FiRestockCart?.GetValue(__instance) as Dictionary<int, int>;
             var lines = new List<PurchaseLine>();
             if (cart != null)
@@ -387,6 +394,8 @@ namespace CardShopCoop.Patches
         public static bool ScannerCheckoutPrefix(ScannerRestockScreen __instance, float totalCost)
         {
             if (CoopCore.Role != CoopRole.Client) return true;
+            _pendingScannerScreen = __instance;
+            _pendingRestockScreen = null;
             var indexes = FiScannerIndexes?.GetValue(__instance) as List<int>;
             var counts = FiScannerCounts?.GetValue(__instance) as List<int>;
             var lines = new List<PurchaseLine>();
@@ -398,6 +407,40 @@ namespace CardShopCoop.Patches
                 }
             CoopCore.Instance?.RequestPurchase(0, lines);
             return false;
+        }
+
+        /// <summary>Called only after the host accepted this client's restock purchase.
+        /// Do the UI-only portion of vanilla checkout locally; charging, spawning, and XP
+        /// remain host-owned. The pending screen is captured when this client clicked buy,
+        /// preventing another client's purchase from affecting this UI.</summary>
+        public static void ClientPurchaseAccepted(byte kind)
+        {
+            if (CoopCore.Role != CoopRole.Client || kind != 0) return;
+            var restock = _pendingRestockScreen;
+            if (restock != null)
+            {
+                var cart = FiRestockCart?.GetValue(restock) as Dictionary<int, int>;
+                if (cart != null)
+                {
+                    cart.Clear();
+                    if (restock.m_RestockItemCheckoutScreen != null)
+                        restock.m_RestockItemCheckoutScreen.UpdateData(restock, cart, false);
+                }
+            }
+
+            var scanner = _pendingScannerScreen;
+            if (scanner != null)
+            {
+                var indexes = FiScannerIndexes?.GetValue(scanner) as List<int>;
+                var counts = FiScannerCounts?.GetValue(scanner) as List<int>;
+                if (indexes != null) indexes.Clear();
+                if (counts != null) counts.Clear();
+                FiScannerPage?.SetValue(scanner, 0);
+                MiScannerPage?.Invoke(scanner, new object[] { 0 });
+                MiScannerTotals?.Invoke(scanner, null);
+            }
+            _pendingRestockScreen = null;
+            _pendingScannerScreen = null;
         }
 
         public static bool FurnitureCheckoutPrefix(int index, float totalCost)

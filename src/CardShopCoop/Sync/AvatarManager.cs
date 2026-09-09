@@ -102,6 +102,7 @@ namespace CardShopCoop.Sync
         private GameObject _previewBody;
         private CC.CharacterCustomization _previewCustomization;
         private string _previewSignature;
+        private const string ApparelTintPrefix = "CardShopCoop.ApparelTint.";
 
         public void SetName(int connId, string name)
         {
@@ -250,13 +251,25 @@ namespace CardShopCoop.Sync
 
         private static bool TryApplyCharacterData(CC.CharacterCustomization custom, CC.CC_CharacterData data, string context)
         {
+            var savedApparelTints = data.ColorProperties != null
+                ? data.ColorProperties.FindAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal))
+                : new List<CC.CC_Property>();
             try
             {
+                if (data.ColorProperties != null)
+                    data.ColorProperties.RemoveAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal));
                 custom.ApplyCharacterVars(data);
+                if (data.ColorProperties != null) data.ColorProperties.AddRange(savedApparelTints);
+                ApplyStoredApparelTints(custom, savedApparelTints);
                 return true;
             }
             catch (System.Exception e)
             {
+                if (data.ColorProperties != null)
+                {
+                    data.ColorProperties.RemoveAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal));
+                    data.ColorProperties.AddRange(savedApparelTints);
+                }
                 CoopPlugin.Log.LogWarning("Character appearance reset during " + context + ": " + e.Message);
                 try { custom.Initialize(); }
                 catch (System.Exception resetError)
@@ -264,6 +277,29 @@ namespace CardShopCoop.Sync
                     CoopPlugin.Log.LogWarning("Character appearance default reset failed: " + resetError.Message);
                 }
                 return false;
+            }
+        }
+
+        private static void ApplyStoredApparelTints(CC.CharacterCustomization custom, List<CC.CC_Property> tints)
+        {
+            if (custom == null || tints == null) return;
+            foreach (var tint in tints)
+            {
+                if (tint == null || !int.TryParse(tint.propertyName.Substring(ApparelTintPrefix.Length), out int slot)) continue;
+                Color color;
+                if (!ColorUtility.TryParseHtmlString("#" + tint.stringValue, out color)) continue;
+                var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
+                if (objects == null || slot < 0 || slot >= objects.Count || objects[slot] == null) continue;
+                foreach (var renderer in objects[slot].GetComponentsInChildren<Renderer>(true))
+                    foreach (var material in renderer.materials)
+                    {
+                        material.SetColor("_Tint", color);
+                        material.SetColor("_Tint_R", color);
+                        material.SetColor("_Tint_G", color);
+                        material.SetColor("_Tint_B", color);
+                    }
             }
         }
 
@@ -311,12 +347,27 @@ namespace CardShopCoop.Sync
                 Object.Destroy(objects[slot]);
                 objects[slot] = null;
             }
+            ResetApparelMask(custom, slot);
             if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.ApparelNames.Count)
             {
                 custom.StoredCharacterData.ApparelNames[slot] = "";
                 if (slot < custom.StoredCharacterData.ApparelMaterials.Count)
                     custom.StoredCharacterData.ApparelMaterials[slot] = 0;
             }
+        }
+
+        private static void ResetApparelMask(CC.CharacterCustomization custom, int slot)
+        {
+            if (custom == null || custom.ApparelTables == null || slot < 0 || slot >= custom.ApparelTables.Count)
+                return;
+            var table = custom.ApparelTables[slot];
+            if (table == null || string.IsNullOrEmpty(table.MaskProperty)) return;
+
+            // Apparel applies its mask to the base body material. Removing only the
+            // apparel mesh leaves the old mask behind, which makes the nude body render
+            // as holes. A solid white texture restores the body's fully visible state.
+            custom.setTextureProperty(new CC.CC_Property { propertyName = table.MaskProperty },
+                save: false, t: Texture2D.whiteTexture);
         }
 
         public List<CC.CC_Property> GetLocalBlendshapes(Transform root)
@@ -385,6 +436,50 @@ namespace CardShopCoop.Sync
             return true;
         }
 
+        public bool SetHairColor(CC.CharacterCustomization custom, int slot, Color color)
+        {
+            if (custom == null || slot < 0 || custom.HairTables == null || slot >= custom.HairTables.Count
+                || custom.StoredCharacterData == null) return false;
+            custom.setHairColor(new CC.CC_Property { propertyName = "_Hair_Color" }, color, slot, save: true);
+            return true;
+        }
+
+        public Color GetHairColor(CC.CharacterCustomization custom, int slot)
+        {
+            if (custom == null || custom.StoredCharacterData == null || slot < 0
+                || custom.StoredCharacterData.HairColor == null || slot >= custom.StoredCharacterData.HairColor.Count)
+                return Color.white;
+            Color color;
+            return ColorUtility.TryParseHtmlString("#" + custom.StoredCharacterData.HairColor[slot].stringValue, out color)
+                ? color : Color.white;
+        }
+
+        public bool SetApparelTint(CC.CharacterCustomization custom, int slot, Color color)
+        {
+            if (custom == null || custom.StoredCharacterData == null || slot < 0
+                || custom.ApparelTables == null || slot >= custom.ApparelTables.Count) return false;
+            var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
+            if (objects == null || slot >= objects.Count || objects[slot] == null) return false;
+            foreach (var renderer in objects[slot].GetComponentsInChildren<Renderer>(true))
+                foreach (var material in renderer.materials)
+                {
+                    material.SetColor("_Tint", color);
+                    material.SetColor("_Tint_R", color);
+                    material.SetColor("_Tint_G", color);
+                    material.SetColor("_Tint_B", color);
+                }
+            string propertyName = ApparelTintPrefix + slot;
+            string value = ColorUtility.ToHtmlStringRGBA(color);
+            var properties = custom.StoredCharacterData.ColorProperties;
+            if (properties == null) custom.StoredCharacterData.ColorProperties = properties = new List<CC.CC_Property>();
+            var saved = properties.Find(p => p != null && p.propertyName == propertyName);
+            if (saved == null) properties.Add(new CC.CC_Property { propertyName = propertyName, stringValue = value });
+            else saved.stringValue = value;
+            return true;
+        }
+
         public bool ClearLocalHair(Transform root, int slot)
         {
             var custom = FindCustomization(root);
@@ -430,6 +525,7 @@ namespace CardShopCoop.Sync
                 Object.Destroy(objects[slot]);
                 objects[slot] = null;
             }
+            ResetApparelMask(custom, slot);
             if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.ApparelNames.Count)
                 custom.StoredCharacterData.ApparelNames[slot] = "";
             return true;
@@ -446,6 +542,7 @@ namespace CardShopCoop.Sync
                 Object.Destroy(objects[slot]);
                 objects[slot] = null;
             }
+            ResetApparelMask(custom, slot);
             if (custom.StoredCharacterData != null && slot < custom.StoredCharacterData.ApparelNames.Count)
                 custom.StoredCharacterData.ApparelNames[slot] = "";
             return true;
@@ -1214,9 +1311,23 @@ namespace CardShopCoop.Sync
             prop.SetActive(false);
             av.HoldProp = prop;
 
-            av.NameTag = MakeTag(clone.transform, av.Name, 2.25f, Color.white);
-            av.EmoteTag = MakeTag(clone.transform, "", 2.55f, new Color(1f, 0.85f, 0.2f));
+            float heightFactor = GetCharacterHeightFactor(cust != null ? cust.m_CharacterCustom : null);
+            av.NameTag = MakeTag(clone.transform, av.Name, 2.25f * heightFactor, Color.white);
+            av.EmoteTag = MakeTag(clone.transform, "", 2.55f * heightFactor, new Color(1f, 0.85f, 0.2f));
             CoopPlugin.Log.LogInfo($"Spawned co-op avatar for '{av.Name}' ({(female ? "female" : "male")} model)");
+        }
+
+        private static float GetCharacterHeightFactor(CC.CharacterCustomization custom)
+        {
+            if (custom == null || custom.StoredCharacterData == null
+                || custom.StoredCharacterData.FloatProperties == null)
+                return 1f;
+            foreach (var property in custom.StoredCharacterData.FloatProperties)
+            {
+                if (property == null || property.propertyName != "Height") continue;
+                return Mathf.Clamp(property.floatValue, 0.5f, 1.5f);
+            }
+            return 1f;
         }
 
         private static void TrySpawnBinder(RemoteAvatar av)

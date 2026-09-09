@@ -89,6 +89,8 @@ namespace CardShopCoop.Net
         PurchaseRequest = 81,    // client -> host: atomic purchase request
         PlayerModelRequest = 82, // client -> host: this player's appearance
         PlayerModelState = 83,   // host -> clients: authoritative appearance roster
+        PurchaseResult = 84,     // host -> requesting client: purchase outcome
+        PlayerIntent = 85,       // client -> host: single-shot interaction intent
     }
 
     /// <summary>One received message, already reassembled and decoded from the wire.
@@ -110,7 +112,7 @@ namespace CardShopCoop.Net
         public const int TypeSize = 1;
         public const int MinimumFrameSize = FrameHeaderSize + TypeSize;
         public const int MaxFrameSize = 64 * 1024 * 1024;
-         public const int WireVersion = 7;
+         public const int WireVersion = 8;
 
         /// <summary>
         /// Decodes one complete wire frame. This is the only protocol-framing entry

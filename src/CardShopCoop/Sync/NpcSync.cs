@@ -40,6 +40,7 @@ namespace CardShopCoop.Sync
         /// <summary>Names normally go out only on change; a periodic full refresh covers
         /// late joiners and name packets lost on the unreliable channel.</summary>
         private const float NameRefreshInterval = 5f;
+        private int _chunkJsonLength;
 
         // string-keyed animator calls hash the name on every call; cache the ids once
         private static readonly int HashMoveSpeed = Animator.StringToHash("MoveSpeed");
@@ -233,6 +234,7 @@ namespace CardShopCoop.Sync
         {
             _chunkCount = 0;
             _currentChunk = new NpcStateMessage { HostTime = hostTime };
+            _chunkJsonLength = WireCodec.Serialize(_currentChunk).Length - 2; // remove []
         }
 
         private void FlushChunk(List<NpcStateMessage> chunks)
@@ -264,7 +266,7 @@ namespace CardShopCoop.Sync
             var p = t.position;
 
             // Build the strongly-typed DTO entry for the chunk this becomes.
-            _currentChunk.Entries.Add(new NpcEntry
+            var entry = new NpcEntry
             {
                 Kind = kind,
                 Index = index,
@@ -277,21 +279,27 @@ namespace CardShopCoop.Sync
                 Flags = (byte)flags,
                 ActionSequence = actionSequence,
                 ActionKind = actionKind,
-            });
+            };
+            int entryLength = WireCodec.SerializeObject(entry).Length;
+            _currentChunk.Entries.Add(entry);
             _chunkCount++;
+            int addedLength = entryLength + (_chunkCount > 1 ? 1 : 0);
+            _chunkJsonLength += addedLength;
 
             // JSON is the wire payload now, so measure the actual DTO instead of maintaining
             // a second binary size meter. If this entry pushed a non-empty chunk over the soft
             // limit, move it to a fresh chunk; a single oversized entry is still sent intact.
-            if (_chunkCount > 1 && WireCodec.Serialize(_currentChunk).Length > ChunkSoftLimit)
+            if (_chunkCount > 1 && _chunkJsonLength > ChunkSoftLimit)
             {
                 var last = _currentChunk.Entries[_currentChunk.Entries.Count - 1];
                 _currentChunk.Entries.RemoveAt(_currentChunk.Entries.Count - 1);
+                _chunkJsonLength -= addedLength;
                 _chunkCount--;
                 FlushChunk(chunks);
                 BeginChunk(hostTime);
                 _currentChunk.Entries.Add(last);
                 _chunkCount = 1;
+                _chunkJsonLength += entryLength;
             }
         }
 

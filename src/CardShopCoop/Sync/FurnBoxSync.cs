@@ -132,6 +132,10 @@ namespace CardShopCoop.Sync
                         rb.velocity = Vector3.zero;
                         rb.angularVelocity = Vector3.zero;
                         if (!rb.isKinematic) rb.WakeUp();
+                        // ShelfManager moves the box Transform after spawning it, but Unity
+                        // can leave a dynamic Rigidbody at the construction position until a
+                        // later physics step. Commit both representations before snapshots.
+                        box.transform.SetPositionAndRotation(position, rotation);
                     }
                     else box.transform.SetPositionAndRotation(position, rotation);
                     return;
@@ -540,7 +544,11 @@ namespace CardShopCoop.Sync
             if (obj == null) return;
 
             ApplyingRemote = true;
-            try { PlaceFromBox(obj, pos, yaw); }
+            try
+            {
+                PlaceFromBox(obj, pos, yaw, message.IsVertical ? message.Rotation : Quaternion.identity,
+                    message.IsVertical, message.IsWarehouseWall, message.VerticalSnapWallIndex);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync place apply: " + e.Message); }
             finally { ApplyingRemote = false; }
             ForgetBox(box);
@@ -781,6 +789,7 @@ namespace CardShopCoop.Sync
                         if (box == null) continue;
                         if (IsLocallyCarried(box))
                         {
+                            BoxSync.CancelRemoteMotion(box);
                             if (_carriedLastTick.Add(box)) force = true; // pickup transition
                         }
                         else if (_carriedLastTick.Remove(box))
@@ -810,6 +819,7 @@ namespace CardShopCoop.Sync
                 {
                     var box = boxes[i];
                     if (box == null || !_lastApplied.TryGetValue(box, out var last)) continue;
+                    if (BoxSync.IsRemoteMotion(box)) continue; // don't echo interpolation as a guest move
                     Entry rep = last;
                     if (IsLocallyCarried(box))
                     {
@@ -872,26 +882,16 @@ namespace CardShopCoop.Sync
         {
             bool hasId = _clientIdOf.TryGetValue(box, out ushort boxId);
             if (SendOp == null)
-            {
                 CoopPlugin.Log.LogWarning("FurnBoxSync: no host link, placing locally only");
-            }
-            else
-            {
-                if (!hasId) return;
-                var pos = obj.transform.position; pos.y = 0f; // vanilla flattens on place
-                float yaw = obj.transform.eulerAngles.y;
-                int wireType = _lastApplied.TryGetValue(box, out var last)
-                    ? last.WireType : (int)obj.m_ObjectType; // echo the HOST's int back
-                SendOp(new FurnBoxOpMessage
-                {
-                    Op = OpPlace,
-                    Id = boxId,
-                    WireType = wireType,
-                    NameHash = Fnv(obj.m_ObjectType.ToString()),
-                    Position = pos,
-                    Yaw = yaw,
-                });
-            }
+            else if (!hasId) return;
+
+            // Replay vanilla first. For vertical furniture this is important: the game
+            // determines the locked-room wall and snap index in OnPlacedMovedObject from
+            // the last wall hit. The transform is also captured after vanilla has finished
+            // its final wall-facing calculation, rather than flattening every object to y=0.
+            bool isVertical = obj.m_IsDecorationVertical;
+            int wireType = _lastApplied.TryGetValue(box, out var last)
+                ? last.WireType : (int)obj.m_ObjectType; // echo the HOST's int back
             _recentlyUnpacked[obj] = Time.realtimeSinceStartupAsDouble;
             _lastApplied.Remove(box);
             _clientIdOf.Remove(box);
@@ -899,11 +899,30 @@ namespace CardShopCoop.Sync
             _carriedLastTick.Remove(box);
             _recentlyReleased.Remove(box);
             _locallyTouched.Remove(box);
-            // replay the vanilla confirm (prefix passes through under ApplyingRemote):
-            // exits move mode, re-enables colliders, destroys the local box mirror
+
             ApplyingRemote = true;
             try { obj.PlaceMovedObject(); }
             finally { ApplyingRemote = false; }
+
+            if (SendOp != null)
+            {
+                var pos = obj.transform.position;
+                var rotation = obj.transform.rotation;
+                if (!isVertical) pos.y = 0f; // retain vanilla floor semantics explicitly
+                SendOp(new FurnBoxOpMessage
+                {
+                    Op = OpPlace,
+                    Id = boxId,
+                    WireType = wireType,
+                    NameHash = Fnv(obj.m_ObjectType.ToString()),
+                    Position = pos,
+                    Yaw = rotation.eulerAngles.y,
+                    IsVertical = isVertical,
+                    Rotation = rotation,
+                    IsWarehouseWall = obj.GetIsVerticalSnapToWarehouseWall(),
+                    VerticalSnapWallIndex = obj.GetVerticalSnapWallIndex(),
+                });
+            }
         }
 
         /// <summary>A furniture box died to LOCAL gameplay (sell confirm / trash bin),
@@ -969,7 +988,7 @@ namespace CardShopCoop.Sync
                 if ((currentPos - pos).sqrMagnitude > 0.01f
                     || Mathf.Abs(Mathf.DeltaAngle(currentYaw, yaw)) > 3f)
                 {
-                    BoxSync.ApplyPhysicsPose(box, pos, yaw);
+                    BoxSync.ScheduleRemoteMotion(box, pos, yaw);
                     try
                     {
                         // a sleeping rigidbody teleported mid-air hangs there frozen. Use the
@@ -1007,12 +1026,19 @@ namespace CardShopCoop.Sync
         /// in move mode: activate it (OnPressOpenBox's job), pass the validity gate,
         /// then the REAL PlaceMovedObject so every subclass override runs and the box
         /// retires itself (EmptyBoxShelf + OnDestroyed). Caller holds ApplyingRemote.</summary>
-        private static void PlaceFromBox(InteractableObject obj, Vector3 pos, float yaw)
+        private static void PlaceFromBox(InteractableObject obj, Vector3 pos, float yaw,
+            Quaternion rotation, bool isVertical, bool isWarehouseWall, int verticalSnapWallIndex)
         {
             obj.gameObject.SetActive(true);
-            obj.transform.SetPositionAndRotation(pos, Quaternion.Euler(0f, yaw, 0f));
+            obj.transform.SetPositionAndRotation(pos,
+                isVertical ? rotation : Quaternion.Euler(0f, yaw, 0f));
             FiMovingValid?.SetValue(obj, true);
             obj.PlaceMovedObject();
+            // A headless remote placement has no raycast hit transform, so vanilla's
+            // vertical OnPlacedMovedObject branch cannot populate the locked-room
+            // blocker/index. Apply the state captured from the client's real placement.
+            if (isVertical)
+                obj.SetVerticalSnapToWarehouseWall(isWarehouseWall, verticalSnapWallIndex);
             // the counter's world screens are re-shown only by the mover's
             // OnStartMoveObject, which a headless placement never runs
             if (obj is InteractableCashierCounter)

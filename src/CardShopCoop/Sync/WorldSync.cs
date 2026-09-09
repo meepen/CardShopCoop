@@ -58,6 +58,9 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<WarehouseShelf, List<ShelfCompartment>> _whComps
             = new Dictionary<WarehouseShelf, List<ShelfCompartment>>();
         private float _timer;
+        private const float BaseScanInterval = 0.75f;
+        private const float MaxQuietScanInterval = 3.0f;
+        private float _scanInterval = BaseScanInterval;
 
         /// <summary>Fired with locally-originated changes (host: broadcast; client: request).</summary>
         public Action<List<Entry>> OnLocalChanges;
@@ -90,6 +93,7 @@ namespace CardShopCoop.Sync
             _snapshotErrors.Clear();
             _whComps.Clear();
             _timer = 0.35f; // staggered phase: engines must not all walk on the same frame
+            _scanInterval = BaseScanInterval;
             _sm = null;
         }
 
@@ -97,15 +101,16 @@ namespace CardShopCoop.Sync
         /// The normal timer remains as a recovery heal.</summary>
         public void ForceNextTick()
         {
-            _timer = 0.75f;
+            _scanInterval = BaseScanInterval;
+            _timer = _scanInterval;
         }
 
         public void Tick(float dt, bool inGame)
         {
             if (!inGame) return;
             _timer += dt;
-            if (_timer < 0.75f) return;
-            _timer -= 0.75f; // keep the phase; reset-to-zero drifts back into alignment
+            if (_timer < _scanInterval) return;
+            _timer -= _scanInterval; // keep the phase; reset-to-zero drifts back into alignment
 
             List<Entry> changes = null;
             bool sawError = false;
@@ -177,7 +182,12 @@ namespace CardShopCoop.Sync
             }
 
             if (!sawError && changes != null && changes.Count > 0)
+            {
+                _scanInterval = BaseScanInterval;
                 OnLocalChanges?.Invoke(changes);
+            }
+            else if (!sawError)
+                _scanInterval = Math.Min(MaxQuietScanInterval, _scanInterval * 1.25f);
         }
 
         private void LogSnapshotError(string item, Exception e)

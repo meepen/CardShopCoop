@@ -156,6 +156,7 @@ namespace CardShopCoop
         private readonly GradingSync _grading = new GradingSync();
         private readonly TradeServe _trades = new TradeServe();
         private readonly PlayTableSync _tables = new PlayTableSync();
+        private readonly PlayerIntentBus _intents = new PlayerIntentBus();
         private readonly StaffSync _staff = new StaffSync();
         private readonly ShopStateSync _shopState = new ShopStateSync();
         private readonly SettingsSync _settings = new SettingsSync();
@@ -347,6 +348,7 @@ namespace CardShopCoop
         /// backlog in one frame is the hitch itself; the remainder keeps its order and waits.</summary>
         private const int DispatchBudget = 256;
         private const byte MaxDispatchRetries = 3;
+        private const int MainThreadActionBudget = 64;
 
         private sealed class MainThreadWork
         {
@@ -465,6 +467,7 @@ namespace CardShopCoop
                 ApplyPlayerModelState(message));
             _messageRouter.Register<EconContributionMessage>((context, message) => ApplyEconomyContribution(context.ConnectionId, message));
             _messageRouter.Register<PurchaseRequestMessage>((context, message) => ApplyPurchaseRequest(context.ConnectionId, message));
+            _messageRouter.Register<PurchaseResultMessage>((context, message) => ApplyPurchaseResult(message));
             _messageRouter.Register<SprayHitMessage>((context, message) => ApplySprayHit(message));
             _messageRouter.Register<GradedRemoveMessage>((context, message) => ApplyGradedRemove(context.ConnectionId, message));
             _ui = new UI.CoopUI();
@@ -591,6 +594,8 @@ namespace CardShopCoop
             _trades.SendOp = Send(1);
             _trades.BroadcastState = Broadcast;
             _tables.BroadcastState = Broadcast;
+            _tables.RegisterIntents(_intents);
+            _intents.SendOp = Send(1);
             _register.SendOp = Send(1);
             _register.BroadcastState = Broadcast;
             _register.BroadcastCart = Broadcast;
@@ -2188,6 +2193,7 @@ namespace CardShopCoop
             _localPlayerModel = _avatars.CaptureLocalModel(custom, _localPlayerModel.Female, _localPlayerModel.ModelIndex);
             _localPlayerModelReady = true;
             _lastCommittedPlayerModel = ClonePlayerModel(_localPlayerModel);
+            PlayerModelGeneration++;
             QueueLocalModelSave();
             SubmitLocalPlayerModel();
         }
@@ -2286,6 +2292,16 @@ namespace CardShopCoop
         public void ClearLocalApparel(int slot)
         {
             if (_avatars.ClearApparel(GetLocalCustomization(), slot)) CommitLocalCustomization();
+        }
+
+        public void SetLocalHairColor(int slot, Color color)
+        {
+            if (_avatars.SetHairColor(GetLocalCustomization(), slot, color)) CommitLocalCustomization();
+        }
+
+        public void SetLocalApparelTint(int slot, Color color)
+        {
+            if (_avatars.SetApparelTint(GetLocalCustomization(), slot, color)) CommitLocalCustomization();
         }
 
         public void SetLocalModelSlider(string propertyName, float value)
@@ -2513,6 +2529,10 @@ namespace CardShopCoop
                 _containers.ClientTick(); // retry container clicks waiting for population identity
                 _cardBoxes.ClientTick(_dt, inGame && !ClientPreloadHold); // carried transitions + box moves
                 _furnBoxes.ClientTick(_dt, inGame && !ClientPreloadHold);
+                // Box trajectories are cosmetic client prediction only. Their endpoints are
+                // still host-authored; this makes throw/drop/set-down reconciliation readable
+                // instead of teleporting the remote copy.
+                BoxSync.TickRemoteMotions(_dt);
                 // content mods register their products SECONDS after the scene loads
                 // (and per-save: a host mid-tutorial has none yet) - keep re-digesting
                 // as our catalog changes so the comparison never goes stale
@@ -4635,7 +4655,8 @@ namespace CardShopCoop
 
         private void Update()
         {
-            while (_mainThread.TryDequeue(out var act))
+            int actionsRun = 0;
+            while (actionsRun++ < MainThreadActionBudget && _mainThread.TryDequeue(out var act))
             {
                 act();
             }
@@ -5189,11 +5210,17 @@ namespace CardShopCoop
                     if (full != null && full.Count > 0)
                     {
                         var fullMessage = new ShelfDeltaMessage { Entries = full };
-                        // Hash the serialized payload bytes to change-gate (the client handler
-                        // routes ShelfDelta through ApplyRemote regardless).
+                        // Hash the actual state fields. Serializing the complete shelf payload
+                        // merely to decide whether it changed created a large allocation every
+                        // 12 seconds in otherwise idle shops.
                         int h = 17;
-                        var payload = WireCodec.Serialize(fullMessage);
-                        for (int i = 0; i < payload.Length; i++) h = h * 31 + payload[i];
+                        for (int i = 0; i < full.Count; i++)
+                        {
+                            var e = full[i];
+                            h = h * 31 + e.Key;
+                            h = h * 31 + e.Type;
+                            h = h * 31 + e.Count;
+                        }
                         _stockResyncHeal += 12f;
                         if (h != _lastStockResyncHash || _stockResyncHeal >= 36f)
                         {
@@ -6837,6 +6864,12 @@ namespace CardShopCoop
                     if (msg.Message is TableStateMessage tableState) _tables.ClientApplyState(tableState);
                     break;
                 }
+                case MsgType.PlayerIntent:
+                {
+                    if (Role != CoopRole.Host || !InGameLevel()) break;
+                    if (msg.Message is PlayerIntentMessage intent) _intents.HostApplyOp(intent);
+                    break;
+                }
                 case MsgType.LightState:
                 {
                     if (Role != CoopRole.Client || !InGameLevel()) break;
@@ -7275,13 +7308,16 @@ namespace CardShopCoop
             if (Role != CoopRole.Host || request == null || request.Lines == null || request.Lines.Count == 0) return;
             if (request.Kind > 2) { CoopPlugin.Log.LogWarning($"purchase request from conn {connectionId} has invalid kind {request.Kind}"); return; }
 
+            Action<bool, string> result = (success, text) =>
+                Send(connectionId, new PurchaseResultMessage { Kind = request.Kind, Success = success, Text = text });
+
             var resolved = new List<int>(request.Lines.Count);
             var linePrices = new List<double>(request.Lines.Count);
             double total = 0.0;
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 var line = request.Lines[i];
-                if (line == null || line.Count <= 0) { Send(connectionId, new ToastMessage { Text = "purchase cancelled - invalid request" }); return; }
+                if (line == null || line.Count <= 0) { result(false, "purchase cancelled - invalid request"); return; }
                 int index = -1;
                 float price = 0f;
                 try
@@ -7319,7 +7355,7 @@ namespace CardShopCoop
                 }
                 if (index < 0)
                 {
-                    Send(connectionId, new ToastMessage { Text = "purchase cancelled - the item is not in the host's catalog" });
+                    result(false, "purchase cancelled - the item is not in the host's catalog");
                     return;
                 }
                 resolved.Add(index);
@@ -7327,7 +7363,7 @@ namespace CardShopCoop
                 if (double.IsNaN(linePrice) || double.IsInfinity(linePrice))
                 {
                     CoopPlugin.Log.LogWarning($"purchase preflight produced invalid price for conn {connectionId}, line {i}");
-                    Send(connectionId, new ToastMessage { Text = "purchase cancelled - the host returned an invalid price" });
+                    result(false, "purchase cancelled - the host returned an invalid price");
                     return;
                 }
                 linePrices.Add(linePrice);
@@ -7338,7 +7374,7 @@ namespace CardShopCoop
             if (total > available + 0.0001)
             {
                 CoopPlugin.Log.LogInfo($"purchase from conn {connectionId} declined: need {total:F2}, available {available:F2}");
-                Send(connectionId, new ToastMessage { Text = "not enough money - the purchase was cancelled" });
+                result(false, "not enough money - the purchase was cancelled");
                 return;
             }
 
@@ -7393,14 +7429,24 @@ namespace CardShopCoop
 
             if (failures.Count == 0)
             {
-                Send(connectionId, new ToastMessage { Text = "purchase accepted" });
+                result(true, "purchase accepted");
             }
             else
             {
                 string detail = string.Join(", ", failures);
                 string chargeNote = charged ? $" charged ${deliveredTotal:F0}" : " (not charged)";
-                Send(connectionId, new ToastMessage { Text = $"purchase partially completed - {detail}; delivered items{chargeNote}" });
+                result(false, $"purchase partially completed - {detail}; delivered items{chargeNote}");
             }
+        }
+
+        private void ApplyPurchaseResult(PurchaseResultMessage result)
+        {
+            if (Role != CoopRole.Client || result == null) return;
+            if (result.Success)
+                Patches.GamePatches.ClientPurchaseAccepted(result.Kind);
+            RegisterLine = result.Text ?? "";
+            RegisterLineTimer = 8f;
+            CoopPlugin.Log.LogInfo("host says: " + RegisterLine);
         }
 
         private void ApplyEconomyContribution(int connectionId, EconContributionMessage message)

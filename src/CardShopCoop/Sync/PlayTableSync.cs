@@ -36,6 +36,8 @@ namespace CardShopCoop.Sync
         private const int MaxTables = 250;         // wire: table count is a byte
         private const int MaxSeats = 8;            // vanilla tables have 2; hard cap
         private const int MaxTableBytes = 250;     // per-table budget (fixed format stays ~28B)
+        private const byte IntentKindPlayTable = 1;
+        private const byte IntentKickTable = 1;
 
         private struct SeatState
         {
@@ -51,6 +53,8 @@ namespace CardShopCoop.Sync
 
         /// <summary>Set by CoopCore: host -> clients state broadcast (MsgType.TableState).</summary>
         public Action<INetMessage> BroadcastState;
+        public static PlayTableSync Active;
+        private static PlayerIntentBus _intents;
 
         private float _timer;
         private int _lastHash;
@@ -62,18 +66,35 @@ namespace CardShopCoop.Sync
         // does not re-run SpecificSetup (it re-randomizes deckbox/comic positions
         // every call - reapplying unchanged data would make the props jump around)
         private readonly Dictionary<int, SeatState> _applied = new Dictionary<int, SeatState>();
+        private readonly Dictionary<int, bool> _occupied = new Dictionary<int, bool>();
 
-        // no SendOp / HostApplyOp: TableState is host->client only, the joiner never
-        // edits a customer match. ApplyPatches is a no-op kept for the module
-        // contract: pure visuals need no vanilla paths blocked and charge no money.
+        // TableState remains host->client-only. The kick is a separate single-shot intent;
+        // the joiner never edits the local mirror or charges money.
+        public PlayTableSync() { Active = this; }
+
+        public void RegisterIntents(PlayerIntentBus bus)
+        {
+            if (bus == null) throw new ArgumentNullException("bus");
+            _intents = bus;
+            bus.Register(IntentKindPlayTable, IntentKickTable, HostKickTable);
+        }
+
         public static void ApplyPatches(Harmony h)
         {
+            var original = AccessTools.Method(typeof(InteractablePlayTable), "StartMoveObject");
+            if (original == null)
+            {
+                CoopPlugin.Log.LogWarning("PlayTableSync patch target missing: InteractablePlayTable.StartMoveObject");
+                return;
+            }
+            h.Patch(original, prefix: new HarmonyMethod(typeof(PlayTableSync), nameof(StartMoveObjectPrefix)));
         }
 
         public void Reset()
         {
             ClearMirrors();
             _applied.Clear();
+            _occupied.Clear();
             _timer = -7.6f; // staggered phase vs the other snapshot engines
             _lastHash = 0;
             _heal = 0f;
@@ -121,6 +142,7 @@ namespace CardShopCoop.Sync
                     var table = tables[i];
                     hash = hash * 31 + (table == null ? 0 : 1);
                     if (table == null) continue;
+                    hash = hash * 31 + (table.GetCurrentPlayerCount() > 0 ? 1 : 0);
                     var sets = table.m_TableGameItemSetList;
                     int seats = sets != null ? Mathf.Min(sets.Count, MaxSeats) : 0;
                     for (int s = 0; s < seats; s++)
@@ -167,6 +189,7 @@ namespace CardShopCoop.Sync
                 // fixed format: 2 + seats*(1|13) bytes - a vanilla 2-seat table is at
                 // most 28 bytes, far under the MaxTableBytes budget by construction
                 var entry = new TableEntry { Index = (byte)i };
+                entry.Occupied = table != null && table.GetCurrentPlayerCount() > 0;
                 for (int s = 0; s < seats; s++)
                 {
                     var st = HostSeat(sets[s]);
@@ -204,6 +227,7 @@ namespace CardShopCoop.Sync
             {
                 var entry = message.Tables[i];
                 int tableIdx = entry.Index;
+                _occupied[tableIdx] = entry.Occupied;
                 var seats = entry.Seats;
                 InteractablePlayTable table =
                     (tables != null && tableIdx < tables.Count) ? tables[tableIdx] : null;
@@ -230,6 +254,55 @@ namespace CardShopCoop.Sync
                 }
             }
         }
+
+        public static bool StartMoveObjectPrefix(InteractablePlayTable __instance)
+        {
+            if (CoopCore.Role != CoopRole.Client || __instance == null) return true;
+            if (__instance.GetHasStartPlayerPlayCard()) return true;
+            if (!__instance.GetIsTournamentPlayTable() && Active != null
+                && Active.IsOccupied(__instance))
+            {
+                var sm = Active.Sm();
+                int index = sm != null && sm.m_PlayTableList != null
+                    ? sm.m_PlayTableList.IndexOf(__instance) : -1;
+                if (index >= 0 && index <= 255)
+                {
+                    if (_intents != null && _intents.TrySend(IntentKindPlayTable, IntentKickTable, (byte)index))
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        private bool IsOccupied(InteractablePlayTable table)
+        {
+            Sm();
+            int index = _sm != null && _sm.m_PlayTableList != null
+                ? _sm.m_PlayTableList.IndexOf(table) : -1;
+            if (index >= 0 && _occupied.TryGetValue(index, out var occupied)) return occupied;
+            return false;
+        }
+
+        private void HostKickTable(PlayerIntentMessage message)
+        {
+            if (CoopCore.Role != CoopRole.Host) return;
+            var sm = Sm();
+            if (sm == null || sm.m_PlayTableList == null || message.Target >= sm.m_PlayTableList.Count)
+                return;
+            var table = sm.m_PlayTableList[message.Target];
+            if (table == null || table.GetIsTournamentPlayTable() || table.GetCurrentPlayerCount() <= 0)
+                return;
+            if (StopTableGame == null)
+            {
+                CoopPlugin.Log.LogError("PlayTableSync: InteractablePlayTable.StopTableGame was not found");
+                return;
+            }
+            CoopPlugin.Log.LogInfo($"PlayTableSync: client requested kick for table {message.Target}");
+            StopTableGame.Invoke(table, null);
+        }
+
+        private static readonly System.Reflection.MethodInfo StopTableGame =
+            AccessTools.Method(typeof(InteractablePlayTable), "StopTableGame");
 
         private void ApplySeat(int tableIdx, int seat, TableGameItemSet set, SeatState want)
         {

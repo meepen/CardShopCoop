@@ -613,10 +613,13 @@ namespace CardShopCoop.Sync
                 {
                     if (i < boxes.Count && boxes[i] != null)
                     {
+                        if (BoxSync.IsRemoteMotion(boxes[i]))
+                            continue; // interpolation is host reconciliation, not local intent
                         // while I'M carrying it: tell the host (so his copy hides) but
                         // keep reporting the last settled position
                         if (IsLocallyCarried(boxes[i]))
                         {
+                            BoxSync.CancelRemoteMotion(boxes[i]);
                             var held = _lastApplied[i];
                             held.Carried = true;
                             if (_carriedLastTick.Add(i)) changed = true; // pickup transition
@@ -809,7 +812,7 @@ namespace CardShopCoop.Sync
                     // card boxes have no price tag group (SpawnPriceTag is overridden
                     // empty), so a plain transform move carries everything: the stored
                     // card3ds are parented under m_StoredCardPosListGrp inside the box
-                    BoxSync.ApplyPhysicsPose(box, want.Pos, want.Yaw);
+                    BoxSync.ScheduleRemoteMotion(box, want.Pos, want.Yaw);
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync apply: " + e.Message); }

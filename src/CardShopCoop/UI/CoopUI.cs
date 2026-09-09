@@ -42,10 +42,17 @@ namespace CardShopCoop.UI
         private CC.CharacterCustomization _characterCustomizer;
         private readonly List<List<string>> _hairOptions = new List<List<string>>();
         private readonly List<int> _hairSelections = new List<int>();
+        private readonly List<Color> _hairColors = new List<Color>();
         private readonly List<List<string>> _apparelOptions = new List<List<string>>();
         private readonly List<List<string>> _apparelNames = new List<List<string>>();
         private readonly List<int> _apparelSelections = new List<int>();
         private readonly List<int> _apparelMaterials = new List<int>();
+        private readonly List<Color> _apparelColors = new List<Color>();
+        private int _colorEditorKind = -1;
+        private int _colorEditorSlot = -1;
+        private Texture2D _svPickerTexture;
+        private Texture2D _huePickerTexture;
+        private float _pickerTextureHue = -1f;
         private readonly List<string> _floatNames = new List<string>();
         private readonly List<float> _floatValues = new List<float>();
 
@@ -332,10 +339,12 @@ namespace CardShopCoop.UI
         {
             _hairOptions.Clear();
             _hairSelections.Clear();
+            _hairColors.Clear();
             _apparelOptions.Clear();
             _apparelNames.Clear();
             _apparelSelections.Clear();
             _apparelMaterials.Clear();
+            _apparelColors.Clear();
             _floatNames.Clear();
             _floatValues.Clear();
             if (_characterCustomizer == null) return;
@@ -352,6 +361,7 @@ namespace CardShopCoop.UI
                 string current = slot < data.HairNames.Count ? data.HairNames[slot] : "";
                 int selected = options.FindIndex(x => x == current);
                 _hairSelections.Add(selected < 0 ? 0 : selected);
+                _hairColors.Add(ReadHairColor(data, slot));
             }
 
             for (int slot = 0; slot < _characterCustomizer.ApparelTables.Count; slot++)
@@ -371,6 +381,7 @@ namespace CardShopCoop.UI
                 int selected = names.IndexOf(current);
                 _apparelSelections.Add(string.IsNullOrEmpty(current) ? 0 : (selected < 1 ? 0 : selected));
                 _apparelMaterials.Add(slot < data.ApparelMaterials.Count ? Mathf.Max(0, data.ApparelMaterials[slot]) : 0);
+                _apparelColors.Add(ReadApparelTint(data, slot));
             }
 
             if (data.FloatProperties != null)
@@ -388,14 +399,16 @@ namespace CardShopCoop.UI
             if (_hairOptions.Count > 0 || _apparelOptions.Count > 0)
                 GUILayout.Label("WARDROBE", CoopTheme.SectionHeader);
             for (int slot = 0; slot < _hairOptions.Count; slot++)
-                DrawCycleRow("Hair " + (slot + 1), _hairOptions[slot], _hairSelections, slot,
+                DrawCycleColorRow("Hair " + (slot + 1), _hairOptions[slot], _hairSelections, slot,
+                    _hairColors[slot], 0, slot, color => { _hairColors[slot] = color; core.SetLocalHairColor(slot, color); },
                     () => ApplyHair(core, slot));
             for (int slot = 0; slot < _apparelOptions.Count; slot++)
             {
                 string label = _characterCustomizer.ApparelTables[slot] != null
                     && !string.IsNullOrEmpty(_characterCustomizer.ApparelTables[slot].Label)
                     ? _characterCustomizer.ApparelTables[slot].Label : "Apparel " + (slot + 1);
-                DrawCycleRow(label, _apparelOptions[slot], _apparelSelections, slot,
+                DrawCycleColorRow(label, _apparelOptions[slot], _apparelSelections, slot,
+                    _apparelColors[slot], 1, slot, color => { _apparelColors[slot] = color; core.SetLocalApparelTint(slot, color); },
                     () => ApplyApparel(core, slot));
                 if (_apparelSelections[slot] > 0)
                 {
@@ -444,6 +457,141 @@ namespace CardShopCoop.UI
                 apply();
             }
             GUILayout.EndHorizontal();
+        }
+
+        private void DrawCycleColorRow(string label, List<string> options, List<int> selections, int index,
+            Color color, int kind, int slot, Action<Color> applyColor, Action applySelection)
+        {
+            bool expanded = _colorEditorKind == kind && _colorEditorSlot == slot;
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, CoopTheme.LabelDim, GUILayout.Width(86f));
+            if (GUILayout.Button("<", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
+            {
+                selections[index] = (selections[index] + options.Count - 1) % options.Count;
+                applySelection();
+            }
+            GUILayout.Label(options[selections[index]], CoopTheme.Label, GUILayout.ExpandWidth(true));
+            if (GUILayout.Button(">", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
+            {
+                selections[index] = (selections[index] + 1) % options.Count;
+                applySelection();
+            }
+            Color previous = GUI.backgroundColor;
+            GUI.backgroundColor = color;
+            if (GUILayout.Button(" ", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
+            {
+                _colorEditorKind = expanded ? -1 : kind;
+                _colorEditorSlot = expanded ? -1 : slot;
+            }
+            GUI.backgroundColor = previous;
+            GUILayout.EndHorizontal();
+            if (!expanded) return;
+
+            Color.RGBToHSV(color, out float hue, out float saturation, out float value);
+            DrawColorPicker(ref hue, ref saturation, ref value, applyColor);
+        }
+
+        private void DrawColorPicker(ref float hue, ref float saturation, ref float value, Action<Color> applyColor)
+        {
+            EnsureColorPickerTextures();
+            if (!Mathf.Approximately(_pickerTextureHue, hue))
+                RebuildSaturationValueTexture(hue);
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Color", CoopTheme.LabelDim, GUILayout.Width(86f));
+            Rect svRect = GUILayoutUtility.GetRect(150f, 92f, GUILayout.Width(150f), GUILayout.Height(92f));
+            Rect hueRect = GUILayoutUtility.GetRect(18f, 92f, GUILayout.Width(18f), GUILayout.Height(92f));
+            GUI.DrawTexture(svRect, _svPickerTexture, ScaleMode.StretchToFill, false);
+            GUI.DrawTexture(hueRect, _huePickerTexture, ScaleMode.StretchToFill, false);
+            DrawPickerMarker(new Rect(svRect.x + saturation * svRect.width - 4f,
+                svRect.y + (1f - value) * svRect.height - 4f, 8f, 8f), Color.white);
+            DrawPickerMarker(new Rect(hueRect.x - 2f, hueRect.y + (1f - hue) * hueRect.height - 2f,
+                hueRect.width + 4f, 4f), Color.black);
+            GUILayout.EndHorizontal();
+
+            Event e = Event.current;
+            Vector2 mousePosition = GUIUtility.GUIToScreenPoint(e.mousePosition);
+            Vector2 svScreenPosition = GUIUtility.GUIToScreenPoint(svRect.position);
+            Vector2 hueScreenPosition = GUIUtility.GUIToScreenPoint(hueRect.position);
+            Rect svScreenRect = new Rect(svScreenPosition.x, svScreenPosition.y, svRect.width, svRect.height);
+            Rect hueScreenRect = new Rect(hueScreenPosition.x, hueScreenPosition.y, hueRect.width, hueRect.height);
+            bool changed = false;
+            if (e.type == EventType.MouseDown || e.type == EventType.MouseDrag)
+            {
+                if (svScreenRect.Contains(mousePosition))
+                {
+                    saturation = Mathf.Clamp01((mousePosition.x - svScreenRect.x) / svScreenRect.width);
+                    value = Mathf.Clamp01(1f - (mousePosition.y - svScreenRect.y) / svScreenRect.height);
+                    changed = true;
+                    e.Use();
+                }
+                else if (hueScreenRect.Contains(mousePosition))
+                {
+                    hue = Mathf.Clamp01(1f - (mousePosition.y - hueScreenRect.y) / hueScreenRect.height);
+                    changed = true;
+                    e.Use();
+                }
+            }
+            if (changed) applyColor(Color.HSVToRGB(hue, saturation, value));
+        }
+
+        private void EnsureColorPickerTextures()
+        {
+            if (_svPickerTexture == null)
+            {
+                _svPickerTexture = new Texture2D(96, 64, TextureFormat.RGBA32, false);
+                _svPickerTexture.wrapMode = TextureWrapMode.Clamp;
+            }
+            if (_huePickerTexture == null)
+            {
+                _huePickerTexture = new Texture2D(1, 96, TextureFormat.RGBA32, false);
+                _huePickerTexture.wrapMode = TextureWrapMode.Clamp;
+                for (int y = 0; y < 96; y++)
+                    _huePickerTexture.SetPixel(0, y, Color.HSVToRGB(1f - y / 95f, 1f, 1f));
+                _huePickerTexture.Apply();
+            }
+        }
+
+        private void RebuildSaturationValueTexture(float hue)
+        {
+            _pickerTextureHue = hue;
+            for (int y = 0; y < 64; y++)
+                for (int x = 0; x < 96; x++)
+                    _svPickerTexture.SetPixel(x, y, Color.HSVToRGB(hue, x / 95f, y / 63f));
+            _svPickerTexture.Apply();
+        }
+
+        private static void DrawPickerMarker(Rect rect, Color color)
+        {
+            Color previous = GUI.color;
+            GUI.color = color;
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = previous;
+        }
+
+        private static Color ReadHairColor(CC.CC_CharacterData data, int slot)
+        {
+            if (data != null && data.HairColor != null && slot >= 0 && slot < data.HairColor.Count)
+            {
+                Color color;
+                if (ColorUtility.TryParseHtmlString("#" + data.HairColor[slot].stringValue, out color)) return color;
+            }
+            return Color.white;
+        }
+
+        private static Color ReadApparelTint(CC.CC_CharacterData data, int slot)
+        {
+            if (data != null && data.ColorProperties != null)
+            {
+                string key = "CardShopCoop.ApparelTint." + slot;
+                foreach (var property in data.ColorProperties)
+                {
+                    if (property == null || property.propertyName != key) continue;
+                    Color color;
+                    if (ColorUtility.TryParseHtmlString("#" + property.stringValue, out color)) return color;
+                }
+            }
+            return Color.white;
         }
 
         private void DrawNumberRow(string label, int count, List<int> values, int index, Action apply)

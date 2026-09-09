@@ -33,7 +33,18 @@ namespace CardShopCoop.Net
         public static byte[] Serialize(INetMessage message)
         {
             if (message == null) throw new ArgumentNullException("message");
-            return Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message, message.GetType(), WireSettings.Settings));
+            return SerializeObject(message, message.GetType());
+        }
+
+        public static byte[] SerializeObject(object value)
+        {
+            if (value == null) throw new ArgumentNullException("value");
+            return SerializeObject(value, value.GetType());
+        }
+
+        private static byte[] SerializeObject(object value, Type type)
+        {
+            return Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(value, type, WireSettings.Settings));
         }
 
         public static INetMessage Deserialize(Type type, byte[] payload)

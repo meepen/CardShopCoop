@@ -16,6 +16,17 @@ namespace CardShopCoop.Net.Messages
         public MsgType Type { get { return MsgType.PurchaseRequest; } }
     }
 
+    /// <summary>Host -> the client that requested a purchase. The result is addressed by
+    /// the transport connection, so a successful purchase only clears that client's UI cart.</summary>
+    [NetworkMessage(MsgType.PurchaseResult, Policy = MessagePolicy.ClientOnly)]
+    public sealed class PurchaseResultMessage : INetMessage
+    {
+        public byte Kind;
+        public bool Success;
+        public string Text = "";
+        public MsgType Type { get { return MsgType.PurchaseResult; } }
+    }
+
     public sealed class PurchaseLine
     {
         public int ItemType;
@@ -197,6 +208,7 @@ namespace CardShopCoop.Net.Messages
     public sealed class TableEntry
     {
         public byte Index;
+        public bool Occupied;
         public List<TableSeatEntry> Seats = new List<TableSeatEntry>();
     }
 
@@ -207,6 +219,23 @@ namespace CardShopCoop.Net.Messages
         public EItemType PlayMat;
         public EItemType DeckBox;
         public EItemType Comic;
+    }
+
+    /// <summary>Client -> host: a single-shot interaction against shared game state.
+    /// Domains own the meaning of Kind/Action; the host always resolves and validates the
+    /// target before invoking the registered handler.</summary>
+    [NetworkMessage(MsgType.PlayerIntent, Policy = MessagePolicy.HostOnly)]
+    public sealed class PlayerIntentMessage : INetMessage
+    {
+        public byte Kind;
+        public byte Action;
+        public byte Target;
+        public int ObjectKey;
+        public float FloatA;
+        public int IntA;
+        public string Json;
+
+        public MsgType Type { get { return MsgType.PlayerIntent; } }
     }
 
     // ----------------------------------------------------------------- Grading

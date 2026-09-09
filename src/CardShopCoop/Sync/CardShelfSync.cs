@@ -57,6 +57,9 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, double> _locallyChanged = new Dictionary<int, double>();
         private readonly HashSet<string> _snapshotErrors = new HashSet<string>();
         private float _timer;
+        private const float BaseScanInterval = 0.9f;
+        private const float MaxQuietScanInterval = 3.0f;
+        private float _scanInterval = BaseScanInterval;
         private ShelfManager _sm;
 
         public Action<List<Entry>> OnLocalChanges;
@@ -73,6 +76,7 @@ namespace CardShopCoop.Sync
             _locallyChanged.Clear();
             _snapshotErrors.Clear();
             _timer = 0.1f; // staggered phase vs the other snapshot engines
+            _scanInterval = BaseScanInterval;
             _sm = null;
         }
 
@@ -86,7 +90,8 @@ namespace CardShopCoop.Sync
 
         public void ForceNextTick()
         {
-            _timer = 0.9f;
+            _scanInterval = BaseScanInterval;
+            _timer = _scanInterval;
         }
 
         private ShelfManager Sm()
@@ -99,8 +104,8 @@ namespace CardShopCoop.Sync
         {
             if (!active) return;
             _timer += dt;
-            if (_timer < 0.9f) return;
-            _timer -= 0.9f;
+            if (_timer < _scanInterval) return;
+            _timer -= _scanInterval;
 
             List<Entry> changes = null;
             bool sawError = false;
@@ -118,7 +123,12 @@ namespace CardShopCoop.Sync
                 return;
             }
             if (!sawError && changes != null && changes.Count > 0)
+            {
+                _scanInterval = BaseScanInterval;
                 OnLocalChanges?.Invoke(changes);
+            }
+            else if (!sawError)
+                _scanInterval = Math.Min(MaxQuietScanInterval, _scanInterval * 1.25f);
         }
 
         private void Walk<T>(List<T> shelves, int kind, ref List<Entry> changes, ref bool sawError) where T : CardShelf

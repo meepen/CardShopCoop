@@ -303,6 +303,13 @@ namespace CardShopCoop.Net.Messages
         public bool Carried;     // OpReport entry
         public Vector3 Position; // OpPlace / OpReport entry
         public float Yaw;        // OpPlace / OpReport entry
+        // Vertical (wall-mounted) furniture cannot be reconstructed from a floor
+        // position plus yaw. OpPlace carries the final placement pose and the
+        // vertical-room snap metadata produced by vanilla placement.
+        public bool IsVertical;
+        public Quaternion Rotation = Quaternion.identity;
+        public bool IsWarehouseWall;
+        public int VerticalSnapWallIndex = -1;
 
         public MsgType Type { get { return MsgType.FurnBoxOp; } }
 

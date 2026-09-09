@@ -85,6 +85,87 @@ namespace CardShopCoop.Sync
         private static readonly System.Reflection.FieldInfo FiPreventWorkerTake =
             ReflectionSurface.RequiredField(typeof(InteractablePackagingBox_Item), "m_PreventWorkerTakeBox");
 
+        // Remote boxes do not run a second networked physics simulation.  They glide from
+        // their last known pose to the host-confirmed pose, then are committed atomically.
+        // Keeping this shared by item/card/furniture boxes is important: otherwise each box
+        // family develops a different prediction/reconciliation rule.
+        private sealed class RemoteMotion
+        {
+            public Vector3 From;
+            public Vector3 To;
+            public float FromYaw;
+            public float ToYaw;
+            public float Age;
+            public float Duration;
+        }
+
+        private static readonly Dictionary<InteractablePackagingBox, RemoteMotion> RemoteMotions
+            = new Dictionary<InteractablePackagingBox, RemoteMotion>();
+
+        public static void ResetRemoteMotions() { RemoteMotions.Clear(); }
+
+        public static bool IsRemoteMotion(InteractablePackagingBox box)
+        {
+            return box != null && RemoteMotions.ContainsKey(box);
+        }
+
+        public static void CancelRemoteMotion(InteractablePackagingBox box)
+        {
+            if (box != null) RemoteMotions.Remove(box);
+        }
+
+        /// <summary>Schedule a visual-only reconciliation to an authoritative host pose.
+        /// Carrying clients remain predicted locally; callers must invoke this only after the
+        /// host has said the box is visible/not carried.</summary>
+        public static void ScheduleRemoteMotion(InteractablePackagingBox box, Vector3 position, float yaw)
+        {
+            if (CoopCore.Role != CoopRole.Client || box == null) return;
+            var from = PhysicsPosition(box);
+            var fromYaw = PhysicsRotation(box).eulerAngles.y;
+            float distance = Vector3.Distance(from, position);
+            if (distance < 0.05f && Mathf.Abs(Mathf.DeltaAngle(fromYaw, yaw)) < 2f)
+            {
+                RemoteMotions.Remove(box);
+                ApplyPhysicsPose(box, position, yaw);
+                return;
+            }
+            RemoteMotions[box] = new RemoteMotion
+            {
+                From = from, To = position, FromYaw = fromYaw, ToYaw = yaw,
+                Age = 0f, Duration = Mathf.Clamp(0.18f + distance * 0.06f, 0.18f, 0.45f)
+            };
+        }
+
+        /// <summary>Advance client-only cosmetic box motion. The target remains the host's
+        /// settled pose; prediction never changes authority.</summary>
+        public static void TickRemoteMotions(float dt)
+        {
+            if (RemoteMotions.Count == 0) return;
+            var finished = new List<InteractablePackagingBox>();
+            foreach (var pair in RemoteMotions)
+            {
+                var box = pair.Key;
+                var motion = pair.Value;
+                if (box == null || !box.gameObject.activeInHierarchy) { finished.Add(box); continue; }
+                motion.Age += Mathf.Max(0f, dt);
+                float t = Mathf.Clamp01(motion.Age / motion.Duration);
+                float eased = t * t * (3f - 2f * t);
+                Vector3 p = Vector3.Lerp(motion.From, motion.To, eased);
+                // A small arc makes a remote throw/drop read as motion rather than a teleport,
+                // while the final endpoint is still exactly the host's authoritative pose.
+                p.y += Mathf.Sin(t * Mathf.PI) * Mathf.Min(0.35f, 0.1f + Vector3.Distance(motion.From, motion.To) * 0.08f);
+                ApplyPhysicsPose(box, p, Mathf.LerpAngle(motion.FromYaw, motion.ToYaw, eased));
+                if (t >= 1f) finished.Add(box);
+            }
+            for (int i = 0; i < finished.Count; i++)
+            {
+                var box = finished[i];
+                if (box != null && RemoteMotions.TryGetValue(box, out var motion))
+                    ApplyPhysicsPose(box, motion.To, motion.ToYaw);
+                RemoteMotions.Remove(box);
+            }
+        }
+
         private static bool IsBeingHeld(InteractablePackagingBox_Item box)
         {
             try { return FiBeingHold?.GetValue(box) is bool b && b; } catch { return false; }
@@ -208,6 +289,9 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<ushort, double> _remoteReleased = new Dictionary<ushort, double>();
 
         private float _timer;
+        private const float BaseHostScanInterval = 1.5f;
+        private const float MaxQuietHostScanInterval = 3.0f;
+        private float _hostScanInterval = BaseHostScanInterval;
         // Carry transitions are latency-sensitive, not render-sensitive. Polling this at
         // 10 Hz keeps pickup/drop propagation below a frame of noticeable delay while
         // avoiding an all-box reflection scan on every Update.
@@ -244,6 +328,7 @@ namespace CardShopCoop.Sync
         {
             Instance = null;
             ApplyingRemote = false;
+            ResetRemoteMotions();
         }
 
         public static void ActivateLive(BoxSync instance) { Instance = instance; }
@@ -274,6 +359,7 @@ namespace CardShopCoop.Sync
             _remWindowStart.Clear();
             _remWindowCount.Clear();
             _timer = -0.6f; // staggered phase vs the other snapshot engines
+            _hostScanInterval = BaseHostScanInterval;
             _lastHostHash = 0;
             _hostHeal = 0f;
             _rm = null;
@@ -289,6 +375,7 @@ namespace CardShopCoop.Sync
             // drop any closure over a prior session's id maps so the ghost-eviction probe
             // can't fire against stale state before the next ClientApply re-wires it
             HostLocationOf = _ => default(HostBoxWhere);
+            ResetRemoteMotions();
         }
 
         /// <summary>Force the next HostTick to broadcast the loose-box population immediately,
@@ -296,8 +383,9 @@ namespace CardShopCoop.Sync
         /// (e.g. an empty-box dispense) spawns a box that must reach the guest promptly.</summary>
         public void ForceBroadcastNextTick()
         {
+            _hostScanInterval = BaseHostScanInterval;
             _lastHostHash = 0;
-            _timer = 1.5f;
+            _timer = _hostScanInterval;
         }
 
         private RestockManager Rm()
@@ -359,6 +447,11 @@ namespace CardShopCoop.Sync
                         rb.angularVelocity = Vector3.zero;
                         rb.WakeUp();
                     }
+                    // The vanilla game and its raycasts read Transform immediately, while
+                    // Unity may defer copying a dynamic Rigidbody pose until FixedUpdate.
+                    // Write both representations in this one commit so a box cannot exist at
+                    // two clickable locations for a frame.
+                    box.transform.SetPositionAndRotation(position, rotation);
                 }
                 else box.transform.SetPositionAndRotation(position, rotation);
             }
@@ -864,8 +957,8 @@ namespace CardShopCoop.Sync
             }
             catch { }
             _timer += dt;
-            if (!force && _timer < 1.5f) return;
-            if (_timer >= 1.5f) _timer -= 1.5f;
+            if (!force && _timer < _hostScanInterval) return;
+            if (_timer >= _hostScanInterval) _timer -= _hostScanInterval;
             if (force) _lastHostHash = 0; // transitions bypass the unchanged-gate
             try
             {
@@ -923,7 +1016,14 @@ namespace CardShopCoop.Sync
                     hash = hash * 31 + (int)(e.Pos.z * 8f);
                 }
                 _hostHeal += 1.5f;
-                if (hash == _lastHostHash && _hostHeal < 10f) return;
+                bool changed = hash != _lastHostHash;
+                if (!changed && _hostHeal < 10f)
+                {
+                    _hostScanInterval = Math.Min(MaxQuietHostScanInterval, _hostScanInterval * 1.25f);
+                    return;
+                }
+                _hostScanInterval = changed ? BaseHostScanInterval
+                    : Math.Min(MaxQuietHostScanInterval, _hostScanInterval * 1.25f);
                 _lastHostHash = hash;
                 if (_hostHeal >= 10f) HostPruneDead(); // slow housekeeping on the heal beat
                 _hostHeal = 0f;
@@ -1427,6 +1527,11 @@ namespace CardShopCoop.Sync
                     if (box == null)
                         continue; // dead/unmapped locally: nothing local to report; a trash is settled by the separate BoxRemoved message
 
+                    // A host-confirmed drop is being rendered by the shared cosmetic
+                    // reconciler. Do not mistake its intermediate arc for a new client edit.
+                    if (IsRemoteMotion(box))
+                        continue;
+
                     bool touchedRecently = _locallyTouched.TryGetValue(truth.Id, out double tch) && nowT - tch < 6.0;
                     bool justReleased = _recentlyReleased.TryGetValue(truth.Id, out double rr) && nowT - rr < 6.0;
 
@@ -1435,6 +1540,7 @@ namespace CardShopCoop.Sync
                     // the pickup/set-down transitions themselves force a send (see above).
                     if (IsLocallyCarried(box))
                     {
+                        CancelRemoteMotion(box);
                         var held = truth;
                         held.Carried = true;
                         held.Stored = false; // just took it off a rack: a stale stored flag would keep the host's copy slotted
@@ -1610,7 +1716,7 @@ namespace CardShopCoop.Sync
                             if (atRequestedSlot)
                             {
                                 if (want.Settled && !UnderMapPose(want))
-                                    ApplyPhysicsPose(box, want.Pos, want.Yaw);
+                                    ApplyPhysicsPose(box, want.Pos, want.Yaw); // rack transform owns the slot; no loose-box glide
                                 return; // membership is correct; pose is now authoritative too
                             }
 
@@ -1860,11 +1966,11 @@ namespace CardShopCoop.Sync
                 if (applyPosition && !want.Carried && !want.Stored && !boxStoredNow && !UnderMapPose(want))
                 {
                     var t = box.transform;
-                    if ((t.position - want.Pos).sqrMagnitude > 0.01f
-                        || Mathf.Abs(Mathf.DeltaAngle(t.eulerAngles.y, want.Yaw)) > 3f)
-                    {
-                        ApplyPhysicsPose(box, want.Pos, want.Yaw);
-                    }
+                        if ((t.position - want.Pos).sqrMagnitude > 0.01f
+                            || Mathf.Abs(Mathf.DeltaAngle(t.eulerAngles.y, want.Yaw)) > 3f)
+                        {
+                            ScheduleRemoteMotion(box, want.Pos, want.Yaw);
+                        }
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("BoxSync apply: " + e.Message); }
