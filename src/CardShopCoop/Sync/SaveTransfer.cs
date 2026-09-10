@@ -453,7 +453,8 @@ namespace CardShopCoop.Sync
         /// <summary>Apply filesystem changes away from Unity's update thread. The object
         /// injection and scene transition are deliberately marshalled back to the main thread:
         /// JsonUtility and CGameManager are Unity/game APIs and are not thread-safe.</summary>
-        public static void ApplyAndLoadAsync(byte[] saveBytes, Action completed, Action<Exception> failed)
+        public static void ApplyAndLoadAsync(byte[] saveBytes, int sessionGen,
+            Action completed, Action<Exception> failed)
         {
             if (saveBytes == null || saveBytes.Length == 0)
                 throw new ArgumentException("Received save payload is empty", nameof(saveBytes));
@@ -466,14 +467,32 @@ namespace CardShopCoop.Sync
             {
                 try
                 {
-                    TryDelete(basePath + ".gd");
-                    TryDelete(slotPath);
-                    TryDelete(backupPath);
-                    if (File.Exists(basePath + ".gd") || File.Exists(slotPath) || File.Exists(backupPath))
-                        throw new IOException("A previous co-op save could not be cleared");
-                    File.WriteAllBytes(slotPath, saveBytes);
-                    CoopCore.EnqueueMainThread(() =>
+                    lock (CoopCore.JoinTransferLock)
                     {
+                        if (!CoopCore.IsSessionGeneration(sessionGen))
+                        {
+                            CoopPlugin.Log.LogInfo("coop: stale save apply discarded before disk write");
+                            return;
+                        }
+                        TryDelete(basePath + ".gd");
+                        TryDelete(slotPath);
+                        TryDelete(backupPath);
+                        if (File.Exists(basePath + ".gd") || File.Exists(slotPath) || File.Exists(backupPath))
+                            throw new IOException("A previous co-op save could not be cleared");
+                        File.WriteAllBytes(slotPath, saveBytes);
+                    }
+                    if (!CoopCore.IsSessionGeneration(sessionGen))
+                    {
+                        CoopPlugin.Log.LogInfo("coop: stale save apply discarded before load");
+                        return;
+                    }
+                    CoopCore.TryEnqueueMainThread(() =>
+                    {
+                        if (!CoopCore.IsSessionGeneration(sessionGen))
+                        {
+                            CoopPlugin.Log.LogInfo("coop: stale save load callback discarded");
+                            return;
+                        }
                         try
                         {
                             InjectAndForceLoad(saveBytes);
@@ -489,7 +508,12 @@ namespace CardShopCoop.Sync
                 catch (Exception e)
                 {
                     CoopPlugin.Log.LogError("coop: save apply worker failed: " + e);
-                    CoopCore.EnqueueMainThread(() => failed?.Invoke(e));
+                    if (CoopCore.IsSessionGeneration(sessionGen))
+                        CoopCore.TryEnqueueMainThread(() =>
+                        {
+                            if (CoopCore.IsSessionGeneration(sessionGen))
+                                failed?.Invoke(e);
+                        });
                 }
             })
             {

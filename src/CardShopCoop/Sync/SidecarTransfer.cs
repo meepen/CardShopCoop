@@ -41,7 +41,7 @@ namespace CardShopCoop.Sync
             CoopPlugin.Log.LogWarning("sidecar: rejecting unsafe path '" + rel + "'");
         }
 
-        public static void ApplyBundleAsync(byte[] bundle, int hostSlot, int clientSlot,
+        public static void ApplyBundleAsync(byte[] bundle, int hostSlot, int clientSlot, int sessionGen,
             Action completed, Action<Exception> failed)
         {
             string root = Application.persistentDataPath;
@@ -49,13 +49,31 @@ namespace CardShopCoop.Sync
             {
                 try
                 {
-                    ApplyBundle(bundle, hostSlot, clientSlot, root);
-                    CoopCore.EnqueueMainThread(completed);
+                    lock (CoopCore.JoinTransferLock)
+                    {
+                        if (!CoopCore.IsSessionGeneration(sessionGen))
+                        {
+                            CoopPlugin.Log.LogInfo("coop: stale sidecar apply discarded before disk write");
+                            return;
+                        }
+                        ApplyBundle(bundle, hostSlot, clientSlot, root);
+                    }
+                    if (CoopCore.IsSessionGeneration(sessionGen))
+                        CoopCore.TryEnqueueMainThread(() =>
+                        {
+                            if (CoopCore.IsSessionGeneration(sessionGen))
+                                completed?.Invoke();
+                        });
                 }
                 catch (Exception e)
                 {
                     CoopPlugin.Log.LogError("coop: sidecar apply worker failed: " + e);
-                    CoopCore.EnqueueMainThread(() => failed(e));
+                    if (CoopCore.IsSessionGeneration(sessionGen))
+                        CoopCore.TryEnqueueMainThread(() =>
+                        {
+                            if (CoopCore.IsSessionGeneration(sessionGen))
+                                failed(e);
+                        });
                 }
             })
             {

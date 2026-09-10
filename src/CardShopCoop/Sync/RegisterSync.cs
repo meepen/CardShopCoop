@@ -163,6 +163,8 @@ namespace CardShopCoop.Sync
                     drop.Add(kv.Key);
             foreach (int idx in drop)
                 _guestManned.Remove(idx);
+            if (drop.Count > 0)
+                BroadcastStateNow();
         }
 
         /// <summary>Host: is this counter claimed by a guest? (worker + host-serve gate)</summary>
@@ -693,9 +695,23 @@ namespace CardShopCoop.Sync
                 if (counter == null)
                     continue;
                 byte manned = counter.IsMannedByPlayer() ? (byte)1 : (_guestManned.ContainsKey(i) ? (byte)2 : (byte)0);
-                message.Entries.Add(new RegisterStateEntry { Index = (byte)i, Manned = manned });
+                int owner = manned == 2 && _guestManned.TryGetValue(i, out int guestOwner)
+                    ? guestOwner : 0;
+                message.Entries.Add(new RegisterStateEntry
+                {
+                    Index = (byte)i,
+                    Manned = manned,
+                    OwnerConnId = owner
+                });
             }
             return message.Entries.Count > 0 ? message : null;
+        }
+
+        private void BroadcastStateNow()
+        {
+            var state = WriteStates();
+            if (state != null)
+                BroadcastState?.Invoke(state);
         }
 
         // ---------------- host op application ----------------
@@ -713,10 +729,17 @@ namespace CardShopCoop.Sync
             if (op == OpEnter)
             {
                 if (counter.IsMannedByPlayer())
+                {
+                    BroadcastStateNow();
                     return;                       // host player already there
+                }
                 if (_guestManned.TryGetValue(idx, out int owner) && owner != connId)
+                {
+                    BroadcastStateNow();
                     return; // another guest owns it
+                }
                 _guestManned[idx] = connId;
+                BroadcastStateNow();
                 try
                 {
                     counter.StopCurrentWorker();
@@ -733,6 +756,7 @@ namespace CardShopCoop.Sync
             {
                 if (_guestManned.TryGetValue(idx, out int owner) && owner == connId)
                     _guestManned.Remove(idx);
+                BroadcastStateNow();
                 CoopPlugin.Log.LogDebug($"RegisterSync host: guest {connId} left counter {idx}");
                 return;
             }
@@ -1271,11 +1295,11 @@ namespace CardShopCoop.Sync
             if (cm != null)
             {
                 var list = cm.GetCustomerList();
-                if (customerIndex < list.Count && list[customerIndex] != null && !_carrier.ContainsValue(list[customerIndex]))
+                if (customerIndex < list.Count && IsCarrierAvailable(list[customerIndex]))
                     carrier = list[customerIndex];
                 if (carrier == null)
                     for (int i = 0; i < list.Count; i++)
-                        if (list[i] != null && !_carrier.ContainsValue(list[i]))
+                        if (IsCarrierAvailable(list[i]))
                         {
                             carrier = list[i];
                             break;
@@ -1283,6 +1307,12 @@ namespace CardShopCoop.Sync
             }
             _carrier[idx] = carrier;
             return carrier;
+        }
+
+        private bool IsCarrierAvailable(Customer customer)
+        {
+            return customer != null && !_carrier.ContainsValue(customer)
+                && !NpcSync.IsExistingCustomer(customer);
         }
 
         /// <summary>Client: observer state broadcast - values the manning gate only. (The
@@ -1294,10 +1324,17 @@ namespace CardShopCoop.Sync
             {
                 byte idx = entries[i].Index;
                 byte manned = entries[i].Manned;
+                int owner = entries[i].OwnerConnId;
                 if (manned != 0)
                     _mannedBy[idx] = manned;
                 else
                     _mannedBy.Remove(idx);
+                if (manned != 0 && _localManned == idx
+                    && !(manned == 2 && owner == CoopCore.LocalConnectionId))
+                {
+                    CoopPlugin.Log.LogInfo($"RegisterSync client: counter {idx} claim rejected; releasing local station");
+                    ForceExitManned();
+                }
             }
         }
 

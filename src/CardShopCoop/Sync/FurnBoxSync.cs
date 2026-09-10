@@ -454,22 +454,11 @@ namespace CardShopCoop.Sync
             }
             catch { }
             _timer += dt;
-            bool transient = false;
-            var cadenceBoxes = LiveBoxes();
-            for (int i = 0; i < cadenceBoxes.Count; i++)
-            {
-                var b = cadenceBoxes[i];
-                if (b != null && (b.GetIsMovingObject() || (b.m_Rigidbody != null && !b.m_Rigidbody.IsSleeping())))
-                {
-                    transient = true;
-                    break;
-                }
-            }
-            float cadence = transient ? 0.05f : Period;
+            float cadence = Period;
             if (!force && _timer < cadence)
                 return;
             if (_timer >= cadence)
-                _timer -= cadence;
+                _timer = 0f;
             if (force)
                 _lastHostHash = 0; // transitions bypass the unchanged-gate
             try

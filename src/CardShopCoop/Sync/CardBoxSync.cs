@@ -275,18 +275,10 @@ namespace CardShopCoop.Sync
             if (!inGame || Rm() == null)
                 return;
             _timer += dt;
-            bool transient = false;
-            var cadenceBoxes = LiveBoxes();
-            for (int i = 0; i < cadenceBoxes.Count; i++)
-                if (cadenceBoxes[i] != null && (cadenceBoxes[i].GetIsMovingObject() || (cadenceBoxes[i].m_Rigidbody != null && !cadenceBoxes[i].m_Rigidbody.IsSleeping())))
-                {
-                    transient = true;
-                    break;
-                }
-            float cadence = transient ? 0.05f : 1.5f;
+            float cadence = 1.5f;
             if (_timer < cadence)
                 return;
-            _timer -= cadence;
+            _timer = 0f;
             try
             {
                 var boxes = LiveBoxes();

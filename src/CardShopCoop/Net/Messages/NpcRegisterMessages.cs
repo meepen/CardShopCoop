@@ -91,6 +91,7 @@ namespace CardShopCoop.Net.Messages
     {
         public byte Index;
         public byte Manned;
+        public int OwnerConnId;
     }
 
     // ---- RegisterCart ---------------------------------------------------------

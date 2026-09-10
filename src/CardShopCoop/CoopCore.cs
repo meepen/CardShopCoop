@@ -224,6 +224,25 @@ namespace CardShopCoop
         /// re-hosts inside the resolve window (which is SECONDS long) gets the dead session's
         /// address and port presented as this session's ready code.</summary>
         private int _inviteGen;
+        private int _sessionGen;
+
+        internal static readonly object JoinTransferLock = new object();
+
+        internal static int SessionGeneration
+        {
+            get
+            {
+                var core = Instance;
+                return core == null ? -1 : System.Threading.Volatile.Read(ref core._sessionGen);
+            }
+        }
+
+        internal static bool IsSessionGeneration(int generation)
+        {
+            var core = Instance;
+            return core != null && generation >= 0
+                && System.Threading.Volatile.Read(ref core._sessionGen) == generation;
+        }
 
         private readonly ConcurrentQueue<Action> _mainThread = new ConcurrentQueue<Action>();
         private UI.CoopUI _ui;
@@ -364,6 +383,7 @@ namespace CardShopCoop
         public static bool ClientReloading;
         private float _reloadStartedAt;
         private int _reloadStartedFrame;
+        private bool _clientWorldArrived;
         /// <summary>True for the entire borrowed-world load: the old world may still be
         /// live before the scene changes, and the new world is only partially constructed
         /// afterward. Hold client-side sync until ShelfManager reports completion.</summary>
@@ -950,6 +970,14 @@ namespace CardShopCoop
         }
 
         private int _selfId = -1; // our connId on the host, from Welcome
+        internal static int LocalConnectionId
+        {
+            get
+            {
+                var core = Instance;
+                return core == null ? -1 : core._selfId;
+            }
+        }
         private readonly HashSet<int> _relayIds = new HashSet<int>(); // other clients we render
 
         private void OnLocalPackOpened(CEventPlayer_OnOpenCardPack evt)
@@ -976,6 +1004,12 @@ namespace CardShopCoop
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
+            if (ClientReloading && scene.name != "Title")
+            {
+                _clientWorldArrived = true;
+                _reloadStartedAt = Time.realtimeSinceStartup;
+                _reloadStartedFrame = Time.frameCount;
+            }
             PlayerModelGeneration++;
             _avatars.Clear();
             _world.Reset();
@@ -1396,6 +1430,8 @@ namespace CardShopCoop
         {
             if (!InGameLevel())
                 return false;
+            if (!_clientWorldArrived)
+                return false;
             if (Time.frameCount <= _reloadStartedFrame || Time.realtimeSinceStartup - _reloadStartedAt < 0.25f)
                 return false;
 
@@ -1405,6 +1441,7 @@ namespace CardShopCoop
 
             float elapsed = Time.realtimeSinceStartup - _reloadStartedAt;
             ClientReloading = false;
+            _clientWorldArrived = false;
             CoopPlugin.Log.LogInfo($"Join world load completed in {elapsed:F2}s; resuming co-op sync");
 
             // A shop name that arrived while loading may have been painted onto a sign
@@ -2926,12 +2963,15 @@ namespace CardShopCoop
             if (Net.NetHelpers.HasMapping)
                 new Thread(Net.NetHelpers.RemoveMapping) { IsBackground = true, Name = "CoopUnmap" }.Start();
             Interlocked.Increment(ref _inviteGen); // a resolve still in flight belongs to a dead session
+            Interlocked.Increment(ref _sessionGen); // invalidate workers from this session
             InviteStatus = InviteState.Off;
             InviteCodeText = null;
             InviteReason = null;
             PortForwardState = 0;
             Application.runInBackground = false; // back to the game's normal behavior
             Role = CoopRole.None;
+            ClientReloading = false;
+            _clientWorldArrived = false;
             IsTearingDown = false;
             // Only clear the save guard if we're NOT in a level - i.e. a join that failed at
             // the title before loading the host's world. A mid-session disconnect leaves the
@@ -4222,6 +4262,9 @@ namespace CardShopCoop
                         var bundle = _bundleBuf != null ? _bundleBuf.ToArray() : new byte[0];
                         _bundleBuf = null;
                         _worldRequested = true;
+                        int transferGen = SessionGeneration;
+                        byte[] saveBytes = _pendingSave;
+                        _pendingSave = null;
                         StatusLine = "World received - loading...";
                         // GRADING OVERHAUL'S CERT STORE IS IN THAT BUNDLE, and its replacement is the
                         // single most consequential thing the sidecar does that nobody can see. GO
@@ -4251,7 +4294,7 @@ namespace CardShopCoop
                             Shutdown("bad sidecar download");
                             break;
                         }
-                        SidecarTransfer.ApplyBundleAsync(bundle, _hostSlot, SaveTransfer.CoopSlot,
+                        SidecarTransfer.ApplyBundleAsync(bundle, _hostSlot, SaveTransfer.CoopSlot, transferGen,
                             () =>
                             {
                                 if (FileStamp(goStore) != goBefore)
@@ -4259,15 +4302,14 @@ namespace CardShopCoop
                                         + goStore + " - your own SOLO save slots are untouched, but graded cards in THIS co-op slot are now judged "
                                         + "against the host's burned serials and cert bindings, and any this PC issued itself can be flagged FAKE on the next load. "
                                         + "The previous file was kept once as .coopbak beside it.");
-                                SaveTransfer.ApplyAndLoadAsync(_pendingSave,
-                                    () => _pendingSave = null,
+                                SaveTransfer.ApplyAndLoadAsync(saveBytes, transferGen,
+                                    () => { },
                                     e =>
                                     {
                                         ErrorLine = "Could not apply the received world: " + e.Message;
                                         CoopPlugin.Log.LogError("coop: world apply failed: " + e);
                                         Shutdown("world apply failed");
                                     });
-                                _pendingSave = null;
                             },
                             e =>
                             {
@@ -4282,6 +4324,7 @@ namespace CardShopCoop
                         // as player trash actions, wiping the HOST's boxes (first field
                         // report). Suppress until vanilla reports that the world is settled.
                         ClientReloading = true;
+                        _clientWorldArrived = false;
                         _reloadStartedAt = Time.realtimeSinceStartup;
                         _reloadStartedFrame = Time.frameCount;
                         break;

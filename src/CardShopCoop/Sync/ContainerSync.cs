@@ -514,7 +514,13 @@ namespace CardShopCoop.Sync
                         rec.Timer = p != null ? (FiPoOpenTimer?.GetValue(p) as float? ?? 0f) : 0f;
                         rec.OpenedCount = p != null ? p.GetPackOpenedCount() : 0;
                         rec.Cards = p?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
-                        rec.CurrentState = p != null ? p.m_CurrentState : 0;
+                        // Vanilla leaves m_CurrentState at 0 when a worker (or a full
+                        // hopper) starts the machine through AddItem. The UI is still
+                        // processing in that case, so advertise the effective state
+                        // rather than the stale implementation detail.
+                        rec.CurrentState = p != null && p.GetIsProcessing()
+                            ? ((stored?.Count ?? 0) > 0 ? 1 : 2)
+                            : 0;
                         rec.CollectClaimed = _packClaimOwner.ContainsKey((kind << 8) | idx);
                         break;
                     }
@@ -1015,7 +1021,10 @@ namespace CardShopCoop.Sync
                 }
                 FiPoIsProcessing?.SetValue(p, m.Processing); // drives the Collect tooltip
                 FiPoOpenedCount?.SetValue(p, m.OpenedCount);
-                p.m_CurrentState = m.CurrentState;
+                // Keep the client object coherent with the state that vanilla's UI
+                // actually represents. In particular, AddItem auto-starts a full
+                // machine without setting m_CurrentState to 1.
+                p.m_CurrentState = EffectivePackState(m);
                 UpdatePackMirrorDisplay(p, m);
             }
             finally { ApplyingRemote = false; }
@@ -1028,14 +1037,15 @@ namespace CardShopCoop.Sync
         {
             if (p == null || m == null || !(FiPoUI?.GetValue(p) is AutoCardOpenerUI ui))
                 return;
-            if (m.CurrentState == 1 && m.StoredCount > 0)
+            int state = EffectivePackState(m);
+            if (state == 1)
             {
                 ui.SetUIState(1);
                 ui.UpdateProcessingFillBar(1f - (float)m.StoredCount / p.m_MaxPackCount);
                 ui.UpdateProcessingTimeLeftText(
                     Mathf.Max(0f, p.m_PackOpenTime * m.StoredCount - m.Timer));
             }
-            else if (m.CurrentState == 2 || m.Processing)
+            else if (state == 2)
             {
                 ui.SetUIState(2);
             }
@@ -1044,6 +1054,16 @@ namespace CardShopCoop.Sync
                 ui.SetUIState(0);
                 ui.UpdatePackCountText(m.StoredCount, p.m_MaxPackCount);
             }
+        }
+
+        /// <summary>Returns the state represented by the authoritative machine fields.
+        /// Vanilla auto-starts a full opener from AddItem without updating
+        /// m_CurrentState, so that field cannot be used as the source of truth.</summary>
+        private static int EffectivePackState(PackMirror mirror)
+        {
+            if (mirror == null || !mirror.Processing)
+                return 0;
+            return mirror.StoredCount > 0 ? 1 : 2;
         }
 
         private void ApplyCleanserState(int idx, InteractableAutoCleanser c, bool on, bool needRefill,

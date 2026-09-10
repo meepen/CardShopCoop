@@ -61,10 +61,19 @@ namespace CardShopCoop
         {
             if (action == null)
                 return;
+            if (!TryEnqueueMainThread(action))
+                throw new InvalidOperationException("CoopCore is not running");
+        }
+
+        internal static bool TryEnqueueMainThread(Action action)
+        {
+            if (action == null)
+                return false;
             var core = Instance;
             if (core == null)
-                throw new InvalidOperationException("CoopCore is not running");
+                return false;
             core.QueueMainThread("external-main-thread", action, false);
+            return true;
         }
 
         /// <summary>Host: relay a customer speech bubble after vanilla has actually

@@ -14,6 +14,10 @@ Both players must update.
   quick-serve key was removed so the guest sees and uses the same checkout screen as the host.
 - Added shared register carts, TV state, purchase results, player models, movement previews,
   NPC speech, and atomic purchase handling for a more complete shared shop.
+- Fixed join-world loading so synchronization stays paused until the newly received shop has
+  actually finished loading, including slow save and mod-data writes.
+- Fixed stale join work after disconnects, simultaneous register claims, and retained customer
+  mirrors being reused by a later checkout.
 - Replaced the old binary payload plumbing with validated JSON messages and centralized routing.
   Reliable state and transient movement traffic remain separate, and malformed payloads are now
   logged and discarded without taking down the connection.
