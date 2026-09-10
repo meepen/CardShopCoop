@@ -18,7 +18,7 @@ services:
       RUN_AS_ROOT: "false"
     volumes:
       - ../game:/game:ro
-      - runner-nuget:/home/runner/.nuget/packages
+      - runner-nuget:/home/runner/.nuget
 
 volumes:
   runner-nuget:
