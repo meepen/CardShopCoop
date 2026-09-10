@@ -1,3 +1,5 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -34,6 +36,8 @@ namespace CardShopCoop.Sync
         private const int MaxTables = 250;         // wire: table count is a byte
         private const int MaxSeats = 8;            // vanilla tables have 2; hard cap
         private const int MaxTableBytes = 250;     // per-table budget (fixed format stays ~28B)
+        private const byte IntentKindPlayTable = 1;
+        private const byte IntentKickTable = 1;
 
         private struct SeatState
         {
@@ -48,7 +52,9 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Set by CoopCore: host -> clients state broadcast (MsgType.TableState).</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
+        public static PlayTableSync Active;
+        private static PlayerIntentBus _intents;
 
         private float _timer;
         private int _lastHash;
@@ -60,18 +66,39 @@ namespace CardShopCoop.Sync
         // does not re-run SpecificSetup (it re-randomizes deckbox/comic positions
         // every call - reapplying unchanged data would make the props jump around)
         private readonly Dictionary<int, SeatState> _applied = new Dictionary<int, SeatState>();
+        private readonly Dictionary<int, bool> _occupied = new Dictionary<int, bool>();
 
-        // no SendOp / HostApplyOp: TableState is host->client only, the joiner never
-        // edits a customer match. ApplyPatches is a no-op kept for the module
-        // contract: pure visuals need no vanilla paths blocked and charge no money.
+        // TableState remains host->client-only. The kick is a separate single-shot intent;
+        // the joiner never edits the local mirror or charges money.
+        public PlayTableSync()
+        {
+            Active = this;
+        }
+
+        public void RegisterIntents(PlayerIntentBus bus)
+        {
+            if (bus == null)
+                throw new ArgumentNullException("bus");
+            _intents = bus;
+            bus.Register(IntentKindPlayTable, IntentKickTable, HostKickTable);
+        }
+
         public static void ApplyPatches(Harmony h)
         {
+            var original = AccessTools.Method(typeof(InteractablePlayTable), "StartMoveObject");
+            if (original == null)
+            {
+                CoopPlugin.Log.LogWarning("PlayTableSync patch target missing: InteractablePlayTable.StartMoveObject");
+                return;
+            }
+            h.Patch(original, prefix: new HarmonyMethod(typeof(PlayTableSync), nameof(StartMoveObjectPrefix)));
         }
 
         public void Reset()
         {
             ClearMirrors();
             _applied.Clear();
+            _occupied.Clear();
             _timer = -7.6f; // staggered phase vs the other snapshot engines
             _lastHash = 0;
             _heal = 0f;
@@ -87,7 +114,8 @@ namespace CardShopCoop.Sync
 
         private ShelfManager Sm()
         {
-            if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
@@ -95,14 +123,17 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < Cadence) return;
+            if (_timer < Cadence)
+                return;
             _timer -= Cadence;
             try
             {
                 var sm = Sm();
-                if (sm == null) return;
+                if (sm == null)
+                    return;
                 var tables = sm.m_PlayTableList;
 
                 // every table rides every broadcast (per-seat inactive flags clear the
@@ -118,14 +149,17 @@ namespace CardShopCoop.Sync
                 {
                     var table = tables[i];
                     hash = hash * 31 + (table == null ? 0 : 1);
-                    if (table == null) continue;
+                    if (table == null)
+                        continue;
+                    hash = hash * 31 + (table.GetCurrentPlayerCount() > 0 ? 1 : 0);
                     var sets = table.m_TableGameItemSetList;
                     int seats = sets != null ? Mathf.Min(sets.Count, MaxSeats) : 0;
                     for (int s = 0; s < seats; s++)
                     {
                         var st = HostSeat(sets[s]);
                         hash = hash * 31 + (st.Active ? 1 : 0);
-                        if (!st.Active) continue;
+                        if (!st.Active)
+                            continue;
                         hash = hash * 31 + st.PlayMat;
                         hash = hash * 31 + st.DeckBox;
                         hash = hash * 31 + st.Comic;
@@ -133,17 +167,19 @@ namespace CardShopCoop.Sync
                 }
 
                 _heal += Cadence;
-                if (hash == _lastHash && _heal < HealInterval) return;
+                if (hash == _lastHash && _heal < HealInterval)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
-                BroadcastState?.Invoke(bw => WriteState(bw, tables, count));
+                BroadcastState?.Invoke(BuildState(tables, count));
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("PlayTableSync host: " + e.Message); }
         }
 
         private static SeatState HostSeat(TableGameItemSet set)
         {
-            if (set == null || !set.gameObject.activeSelf) return default;
+            if (set == null || !set.gameObject.activeSelf)
+                return default;
             var data = set.m_TableGameItemSetData;
             return new SeatState
             {
@@ -154,9 +190,9 @@ namespace CardShopCoop.Sync
             };
         }
 
-        private static void WriteState(BinaryWriter bw, List<InteractablePlayTable> tables, int count)
+        private static TableStateMessage BuildState(List<InteractablePlayTable> tables, int count)
         {
-            bw.Write((byte)count);
+            var msg = new TableStateMessage();
             for (int i = 0; i < count; i++)
             {
                 var table = tables[i];
@@ -164,69 +200,134 @@ namespace CardShopCoop.Sync
                 int seats = sets != null ? Mathf.Min(sets.Count, MaxSeats) : 0;
                 // fixed format: 2 + seats*(1|13) bytes - a vanilla 2-seat table is at
                 // most 28 bytes, far under the MaxTableBytes budget by construction
-                bw.Write((byte)i);
-                bw.Write((byte)seats);
+                var entry = new TableEntry { Index = (byte)i };
+                entry.Occupied = table != null && table.GetCurrentPlayerCount() > 0;
                 for (int s = 0; s < seats; s++)
                 {
                     var st = HostSeat(sets[s]);
-                    bw.Write(st.Active);
-                    if (!st.Active) continue;
-                    // the three set pieces are EItemTypes, one of the id spaces
-                    // EnhancedPrefabLoader mints custom ids into - so they travel as
-                    // HOST ids like every other modded id (identity below the modded
-                    // floor, and identity here anyway: only the host writes this)
-                    Net.Msg.WriteItemType(bw, (EItemType)st.PlayMat);
-                    Net.Msg.WriteItemType(bw, (EItemType)st.DeckBox);
-                    Net.Msg.WriteItemType(bw, (EItemType)st.Comic);
+                    var seat = new TableSeatEntry { Active = st.Active };
+                    if (st.Active)
+                    {
+                        // the three set pieces are EItemTypes, one of the id spaces
+                        // EnhancedPrefabLoader mints custom ids into - so they travel as
+                        // HOST ids like every other modded id (identity below the modded
+                        // floor, and identity here anyway: only the host writes this)
+                        seat.PlayMat = (EItemType)st.PlayMat;
+                        seat.DeckBox = (EItemType)st.DeckBox;
+                        seat.Comic = (EItemType)st.Comic;
+                    }
+                    entry.Seats.Add(seat);
                 }
+                msg.Tables.Add(entry);
             }
+            return msg;
         }
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(TableStateMessage message)
         {
-            try { ClientApplyInner(br); }
+            try
+            {
+                ClientApplyInner(message);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("PlayTableSync apply: " + e.Message); }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(TableStateMessage message)
         {
             var sm = Sm();
             var tables = sm != null ? sm.m_PlayTableList : null;
-            int count = br.ReadByte();
-            for (int i = 0; i < count; i++)
+            for (int i = 0; i < message.Tables.Count; i++)
             {
-                int tableIdx = br.ReadByte();
-                int seats = br.ReadByte();
+                var entry = message.Tables[i];
+                int tableIdx = entry.Index;
+                _occupied[tableIdx] = entry.Occupied;
+                var seats = entry.Seats;
                 InteractablePlayTable table =
                     (tables != null && tableIdx < tables.Count) ? tables[tableIdx] : null;
                 // the JOINER may be playing the minigame at this table right now -
                 // never stomp their own session's props (covers m_IsPlayerOccupied too)
                 bool skipTable = table == null || table.GetHasStartPlayerPlayCard();
                 var sets = (!skipTable) ? table.m_TableGameItemSetList : null;
-                for (int s = 0; s < seats; s++)
+                for (int s = 0; s < seats.Count; s++)
                 {
-                    var st = new SeatState { Active = br.ReadBoolean() };
+                    var se = seats[s];
+                    var st = new SeatState { Active = se.Active };
                     if (st.Active)
                     {
-                        // host ids -> ours, so ApplySeat below can cast straight to a
-                        // LOCAL EItemType. A set piece from a pack only the host has
-                        // resolves to EItemType.None and simply paints no mesh - the
-                        // seat is still shown, one-sided packs are allowed
-                        st.PlayMat = (int)Net.Msg.ReadItemType(br);
-                        st.DeckBox = (int)Net.Msg.ReadItemType(br);
-                        st.Comic = (int)Net.Msg.ReadItemType(br);
+                        // host ids -> ours (already translated by the DTO deserialize), so
+                        // ApplySeat below can cast straight to a LOCAL EItemType. A set piece
+                        // from a pack only the host has resolves to EItemType.None and simply
+                        // paints no mesh - the seat is still shown, one-sided packs are allowed
+                        st.PlayMat = (int)se.PlayMat;
+                        st.DeckBox = (int)se.DeckBox;
+                        st.Comic = (int)se.Comic;
                     }
-                    if (skipTable || sets == null || s >= sets.Count) continue;
+                    if (skipTable || sets == null || s >= sets.Count)
+                        continue;
                     ApplySeat(tableIdx, s, sets[s], st);
                 }
             }
         }
 
+        public static bool StartMoveObjectPrefix(InteractablePlayTable __instance)
+        {
+            if (CoopCore.Role != CoopRole.Client || __instance == null)
+                return true;
+            if (__instance.GetHasStartPlayerPlayCard())
+                return true;
+            if (!__instance.GetIsTournamentPlayTable() && Active != null
+                && Active.IsOccupied(__instance))
+            {
+                var sm = Active.Sm();
+                int index = sm != null && sm.m_PlayTableList != null
+                    ? sm.m_PlayTableList.IndexOf(__instance) : -1;
+                if (index >= 0 && index <= 255)
+                {
+                    if (_intents != null && _intents.TrySend(IntentKindPlayTable, IntentKickTable, (byte)index))
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        private bool IsOccupied(InteractablePlayTable table)
+        {
+            Sm();
+            int index = _sm != null && _sm.m_PlayTableList != null
+                ? _sm.m_PlayTableList.IndexOf(table) : -1;
+            if (index >= 0 && _occupied.TryGetValue(index, out var occupied))
+                return occupied;
+            return false;
+        }
+
+        private void HostKickTable(PlayerIntentMessage message)
+        {
+            if (CoopCore.Role != CoopRole.Host)
+                return;
+            var sm = Sm();
+            if (sm == null || sm.m_PlayTableList == null || message.Target >= sm.m_PlayTableList.Count)
+                return;
+            var table = sm.m_PlayTableList[message.Target];
+            if (table == null || table.GetIsTournamentPlayTable() || table.GetCurrentPlayerCount() <= 0)
+                return;
+            if (StopTableGame == null)
+            {
+                CoopPlugin.Log.LogError("PlayTableSync: InteractablePlayTable.StopTableGame was not found");
+                return;
+            }
+            CoopPlugin.Log.LogInfo($"PlayTableSync: client requested kick for table {message.Target}");
+            StopTableGame.Invoke(table, null);
+        }
+
+        private static readonly System.Reflection.MethodInfo StopTableGame =
+            AccessTools.Method(typeof(InteractablePlayTable), "StopTableGame");
+
         private void ApplySeat(int tableIdx, int seat, TableGameItemSet set, SeatState want)
         {
-            if (set == null) return;
+            if (set == null)
+                return;
             int key = (tableIdx << 8) | seat;
             if (_applied.TryGetValue(key, out var have) && have.Same(want)
                 && set.gameObject.activeSelf == want.Active)
@@ -266,19 +367,22 @@ namespace CardShopCoop.Sync
         /// live minigame table is never in _applied (skipped at apply time).</summary>
         private void ClearMirrors()
         {
-            if (_applied.Count == 0) return;
+            if (_applied.Count == 0)
+                return;
             var sm = _sm; // cached only - never FindObjectOfType during teardown
             var tables = sm != null ? sm.m_PlayTableList : null;
             if (tables != null)
             {
                 foreach (var kv in _applied)
                 {
-                    if (!kv.Value.Active) continue;
+                    if (!kv.Value.Active)
+                        continue;
                     int tableIdx = kv.Key >> 8;
                     int seat = kv.Key & 0xFF;
                     try
                     {
-                        if (tableIdx >= tables.Count || tables[tableIdx] == null) continue;
+                        if (tableIdx >= tables.Count || tables[tableIdx] == null)
+                            continue;
                         var sets = tables[tableIdx].m_TableGameItemSetList;
                         if (sets != null && seat < sets.Count && sets[seat] != null)
                             sets[seat].gameObject.SetActive(false);

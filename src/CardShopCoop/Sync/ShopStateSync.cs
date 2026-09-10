@@ -1,3 +1,5 @@
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.IO;
 using HarmonyLib;
@@ -31,6 +33,13 @@ namespace CardShopCoop.Sync
         /// never mistake a sync-applied change for a local click and re-forward it.</summary>
         public static bool ApplyingRemote;
 
+        public static void RequestLightToggle()
+        {
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return;
+            _instance?.SendOp?.Invoke(new ShopOpMessage { Op = OpToggleLight, Arg = 0 });
+        }
+
         // private game methods we drive on the client to make the UI/meshes tell the truth
         private static readonly System.Reflection.MethodInfo MiBillEvaluateUI =
             AccessTools.Method(typeof(RentBillScreen), "EvaluateUI");
@@ -49,8 +58,8 @@ namespace CardShopCoop.Sync
         private static readonly System.Reflection.FieldInfo FiSgFinish =
             AccessTools.Field(typeof(TutorialSubGroup), "m_IsTaskFinish");
 
-        public Action<Action<BinaryWriter>> SendOp;         // set by CoopCore: client -> host
-        public Action<Action<BinaryWriter>> BroadcastState; // set by CoopCore: host -> clients
+        public Action<INetMessage> SendOp;         // set by CoopCore: client -> host
+        public Action<INetMessage> BroadcastState; // set by CoopCore: host -> clients
 
         private float _timer;
         private int _lastHash;
@@ -66,7 +75,8 @@ namespace CardShopCoop.Sync
 
         private UnlockRoomManager Urm()
         {
-            if (_urm == null) _urm = UnityEngine.Object.FindObjectOfType<UnlockRoomManager>();
+            if (_urm == null)
+                _urm = UnityEngine.Object.FindObjectOfType<UnlockRoomManager>();
             return _urm;
         }
 
@@ -183,17 +193,30 @@ namespace CardShopCoop.Sync
 
         private static bool PayBillPrefix(byte billType, bool forcePay)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             // forcePay only comes from the (blocked) accrual auto-pay; never forward it
             if (!forcePay)
-                _instance?.SendOp?.Invoke(bw => { bw.Write(OpPayBill); bw.Write(billType); });
+                _instance?.SendOp?.Invoke(new ShopOpMessage { Op = OpPayBill, Arg = billType });
             return false;
         }
 
-        public static bool PayRentPrefix(bool forcePay) { return PayBillPrefix((byte)EBillType.Rent, forcePay); }
-        public static bool PayElectricPrefix(bool forcePay) { return PayBillPrefix((byte)EBillType.Electric, forcePay); }
-        public static bool PaySalaryPrefix(bool forcePay) { return PayBillPrefix((byte)EBillType.Employee, forcePay); }
-        public static bool PayAllPrefix() { return PayBillPrefix(0, forcePay: false); }
+        public static bool PayRentPrefix(bool forcePay)
+        {
+            return PayBillPrefix((byte)EBillType.Rent, forcePay);
+        }
+        public static bool PayElectricPrefix(bool forcePay)
+        {
+            return PayBillPrefix((byte)EBillType.Electric, forcePay);
+        }
+        public static bool PaySalaryPrefix(bool forcePay)
+        {
+            return PayBillPrefix((byte)EBillType.Employee, forcePay);
+        }
+        public static bool PayAllPrefix()
+        {
+            return PayBillPrefix(0, forcePay: false);
+        }
 
         public static bool BillAccrualPrefix()
         {
@@ -202,41 +225,47 @@ namespace CardShopCoop.Sync
 
         public static bool RoomCheckoutPrefix(bool isShopB)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             byte kind = isShopB ? (byte)1 : (byte)0;
-            _instance?.SendOp?.Invoke(bw => { bw.Write(OpUnlock); bw.Write(kind); });
+            _instance?.SendOp?.Invoke(new ShopOpMessage { Op = OpUnlock, Arg = kind });
             return false;
         }
 
         public static bool UnlockShopBPrefix()
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             // the vanilla body screens level/owned/coins itself; re-checked host-side
-            if (CPlayerData.m_IsWarehouseRoomUnlocked) return true; // let it show 'owned'
-            _instance?.SendOp?.Invoke(bw => { bw.Write(OpUnlock); bw.Write((byte)2); });
+            if (CPlayerData.m_IsWarehouseRoomUnlocked)
+                return true; // let it show 'owned'
+            _instance?.SendOp?.Invoke(new ShopOpMessage { Op = OpUnlock, Arg = 2 });
             return false;
         }
 
         public static bool OpenSignPrefix()
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
-            _instance?.SendOp?.Invoke(bw => { bw.Write(OpToggleSign); bw.Write((byte)0); });
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
+            _instance?.SendOp?.Invoke(new ShopOpMessage { Op = OpToggleSign, Arg = 0 });
             return false;
         }
 
         public static bool LightSwitchPrefix()
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
-            // block the local-only toggle; forward it (the trailing byte satisfies HostApplyOp's
-            // op+arg read). The host echoes the flipped light back via LightState.
-            _instance?.SendOp?.Invoke(bw => { bw.Write(OpToggleLight); bw.Write((byte)0); });
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
+            // block the local-only toggle; forward it. The host echoes the authoritative
+            // result via LightState.
+            RequestLightToggle();
             return false;
         }
 
         public static bool WarehouseSignPrefix()
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
-            _instance?.SendOp?.Invoke(bw => { bw.Write(OpToggleSign); bw.Write((byte)1); });
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
+            _instance?.SendOp?.Invoke(new ShopOpMessage { Op = OpToggleSign, Arg = 1 });
             return false;
         }
 
@@ -244,9 +273,11 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame || BroadcastState == null) return;
+            if (!inGame || BroadcastState == null)
+                return;
             _timer += dt;
-            if (_timer < 1f) return;
+            if (_timer < 1f)
+                return;
             _timer -= 1f;
             try
             {
@@ -271,56 +302,63 @@ namespace CardShopCoop.Sync
                     foreach (var td in tutList)
                         hash = hash * 31 + ((int)td.tutorialTaskCondition * 397) + (int)(td.value * 100f);
                 _heal += 1f;
-                if (hash == _lastHash && _heal < 15f) return;
+                if (hash == _lastHash && _heal < 15f)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
-                BroadcastState(WriteState);
+                BroadcastState(BuildStateMessage());
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ShopStateSync host: " + e.Message); }
         }
 
-        private static void WriteState(BinaryWriter bw)
+        private static ShopStateMessage BuildStateMessage()
         {
-            for (EBillType t = EBillType.Rent; t <= EBillType.Employee; t++)
-            {
-                var bill = CPlayerData.GetBill(t);
-                bw.Write(bill.billDayPassed);
-                bw.Write(bill.amountToPay);
-            }
-            bw.Write(CPlayerData.m_UnlockRoomCount);
-            bw.Write(CPlayerData.m_UnlockWarehouseRoomCount);
-            bw.Write(CPlayerData.m_IsWarehouseRoomUnlocked);
-            bw.Write(CPlayerData.m_IsShopOpen);
-            bw.Write(CPlayerData.m_IsWarehouseDoorClosed);
-
-            // tutorial/task progression: host-only until now, so the guest's task panel
-            // stuck on "Set the shop sign to OPEN" (and every later task) forever. Ship
-            // the host's authoritative task snapshot; the guest replays it. APPEND-ONLY
-            // (read in the same order at the end of ClientApplyInner).
+            var msg = new ShopStateMessage();
+            var rent = CPlayerData.GetBill(EBillType.Rent);
+            msg.Rent.DayPassed = rent.billDayPassed;
+            msg.Rent.AmountToPay = rent.amountToPay;
+            var electric = CPlayerData.GetBill(EBillType.Electric);
+            msg.Electric.DayPassed = electric.billDayPassed;
+            msg.Electric.AmountToPay = electric.amountToPay;
+            var employee = CPlayerData.GetBill(EBillType.Employee);
+            msg.Employee.DayPassed = employee.billDayPassed;
+            msg.Employee.AmountToPay = employee.amountToPay;
+            msg.UnlockRoomCount = CPlayerData.m_UnlockRoomCount;
+            msg.UnlockWarehouseRoomCount = CPlayerData.m_UnlockWarehouseRoomCount;
+            msg.IsWarehouseRoomUnlocked = CPlayerData.m_IsWarehouseRoomUnlocked;
+            msg.IsShopOpen = CPlayerData.m_IsShopOpen;
+            msg.IsWarehouseDoorClosed = CPlayerData.m_IsWarehouseDoorClosed;
+            msg.TutorialIndex = CPlayerData.m_TutorialIndex;
             var tut = CPlayerData.m_TutorialDataList;
-            bw.Write(CPlayerData.m_TutorialIndex);
-            bw.Write(tut != null ? tut.Count : 0);
             if (tut != null)
                 foreach (var td in tut)
-                {
-                    bw.Write((int)td.tutorialTaskCondition);
-                    bw.Write(td.value);
-                }
+                    msg.Tutorials.Add(new ShopTutorialEntry { Condition = (int)td.tutorialTaskCondition, Value = td.value });
+            return msg;
         }
 
-        public void HostApplyOp(BinaryReader br)
+        public void HostApplyOp(ShopOpMessage message)
         {
-            if (CoopCore.Role != CoopRole.Host) return;
-            byte op = br.ReadByte();
-            byte arg = br.ReadByte();
+            if (CoopCore.Role != CoopRole.Host)
+                return;
+            byte op = message.Op;
+            byte arg = message.Arg;
             try
             {
                 switch (op)
                 {
-                    case OpPayBill: HostPayBill(arg); break;
-                    case OpUnlock: HostUnlock(arg); break;
-                    case OpToggleSign: HostToggleSign(arg); break;
-                    case OpToggleLight: HostToggleLight(); break;
+                    case OpPayBill:
+                        HostPayBill(arg);
+                        break;
+                    case OpUnlock:
+                        HostUnlock(arg);
+                        break;
+                    case OpToggleSign:
+                        HostToggleSign(arg);
+                        break;
+                    case OpToggleLight:
+                        HostToggleLight();
+                        CoopCore.Instance?.ForceLightResend();
+                        break;
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ShopStateSync op " + op + ": " + e.Message); }
@@ -332,7 +370,8 @@ namespace CardShopCoop.Sync
         private void HostToggleLight()
         {
             var lm = CSingleton<LightManager>.Instance;
-            if (lm != null) lm.ToggleShopLight();
+            if (lm != null)
+                lm.ToggleShopLight();
         }
 
         private void HostPayBill(byte billType)
@@ -347,10 +386,18 @@ namespace CardShopCoop.Sync
             // log, report bookkeeping, SetBill. A double-clicked op no-ops on the re-run.
             switch (billType)
             {
-                case 0: screen.OnPressPayAllBill(); break;
-                case (byte)EBillType.Rent: screen.OnPressPayRentBill(); break;
-                case (byte)EBillType.Electric: screen.OnPressPayElectricBill(); break;
-                case (byte)EBillType.Employee: screen.OnPressPaySalaryBill(); break;
+                case 0:
+                    screen.OnPressPayAllBill();
+                    break;
+                case (byte)EBillType.Rent:
+                    screen.OnPressPayRentBill();
+                    break;
+                case (byte)EBillType.Electric:
+                    screen.OnPressPayElectricBill();
+                    break;
+                case (byte)EBillType.Employee:
+                    screen.OnPressPaySalaryBill();
+                    break;
             }
         }
 
@@ -362,15 +409,20 @@ namespace CardShopCoop.Sync
             // have open. Cost/eligibility are recomputed from HOST state so a stale
             // joiner UI can neither underpay nor double-buy.
             var urm = Urm();
-            if (urm == null) return;
-            if (CSingleton<CGameManager>.Instance != null && CSingleton<CGameManager>.Instance.m_IsPrologue) return;
+            if (urm == null)
+                return;
+            if (CSingleton<CGameManager>.Instance != null && CSingleton<CGameManager>.Instance.m_IsPrologue)
+                return;
 
             if (kind == 2) // shop lot B
             {
-                if (CPlayerData.m_IsWarehouseRoomUnlocked) return;
+                if (CPlayerData.m_IsWarehouseRoomUnlocked)
+                    return;
                 float price = urm.m_ShopB_UnlockPrice;
-                if (CPlayerData.m_ShopLevel + 1 < urm.m_ShopB_UnlockLevelRequired) return;
-                if (CPlayerData.m_CoinAmountDouble < (double)price) return;
+                if (CPlayerData.m_ShopLevel + 1 < urm.m_ShopB_UnlockLevelRequired)
+                    return;
+                if (CPlayerData.m_CoinAmountDouble < (double)price)
+                    return;
                 PriceChangeManager.AddTransaction(0f - price, ETransactionType.ShopExpansion, 1, -1);
                 CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(price));
                 urm.SetUnlockWarehouseRoom(isUnlocked: true);
@@ -382,11 +434,14 @@ namespace CardShopCoop.Sync
             }
             else if (kind == 1) // next warehouse room
             {
-                if (!CPlayerData.m_IsWarehouseRoomUnlocked) return; // lot B must exist first
+                if (!CPlayerData.m_IsWarehouseRoomUnlocked)
+                    return; // lot B must exist first
                 int index = CPlayerData.m_UnlockWarehouseRoomCount;
-                if (index >= urm.m_LockedWarehouseRoomBlockerList.Count) return;
+                if (index >= urm.m_LockedWarehouseRoomBlockerList.Count)
+                    return;
                 float cost = CPlayerData.GetUnlockWarehouseRoomCost(index);
-                if (CPlayerData.m_CoinAmountDouble < (double)cost) return;
+                if (CPlayerData.m_CoinAmountDouble < (double)cost)
+                    return;
                 PriceChangeManager.AddTransaction(0f - cost, ETransactionType.ShopExpansion, 0, index);
                 CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(cost));
                 urm.StartUnlockNextWarehouseRoom();
@@ -398,9 +453,11 @@ namespace CardShopCoop.Sync
             else // next shop room
             {
                 int index = CPlayerData.m_UnlockRoomCount;
-                if (index >= urm.m_LockedRoomBlockerList.Count) return;
+                if (index >= urm.m_LockedRoomBlockerList.Count)
+                    return;
                 float cost = CPlayerData.GetUnlockShopRoomCost(index);
-                if (CPlayerData.m_CoinAmountDouble < (double)cost) return;
+                if (CPlayerData.m_CoinAmountDouble < (double)cost)
+                    return;
                 PriceChangeManager.AddTransaction(0f - cost, ETransactionType.ShopExpansion, 1, index);
                 CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(cost));
                 urm.StartUnlockNextRoom();
@@ -412,8 +469,10 @@ namespace CardShopCoop.Sync
             // vanilla defers this by a second from the screen; immediate is equivalent
             try
             {
-                if (_shelfMgr == null) _shelfMgr = UnityEngine.Object.FindObjectOfType<ShelfManager>();
-                if (_shelfMgr != null) _shelfMgr.SaveInteractableObjectData();
+                if (_shelfMgr == null)
+                    _shelfMgr = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                if (_shelfMgr != null)
+                    _shelfMgr.SaveInteractableObjectData();
             }
             catch { }
         }
@@ -426,34 +485,54 @@ namespace CardShopCoop.Sync
             if (which == 0)
             {
                 var sign = OpenSign();
-                if (sign != null) sign.OnMouseButtonUp();
+                if (sign != null)
+                    sign.OnMouseButtonUp();
             }
             else
             {
                 var sign = WarehouseSign();
-                if (sign != null) sign.OnMouseButtonUp();
+                if (sign != null)
+                    sign.OnMouseButtonUp();
             }
         }
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(ShopStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(br); }
+            try
+            {
+                ClientApplyInner(message);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ShopStateSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(ShopStateMessage message)
         {
             // bills: dumb data copy - the fields are public and GetBill creates the
             // record when missing, so the joiner's phone reads exactly the host's dues
             bool billsChanged = false;
             for (EBillType t = EBillType.Rent; t <= EBillType.Employee; t++)
             {
-                int day = br.ReadInt32();
-                float amount = br.ReadSingle();
+                int day;
+                float amount;
+                if (t == EBillType.Rent)
+                {
+                    day = message.Rent.DayPassed;
+                    amount = message.Rent.AmountToPay;
+                }
+                else if (t == EBillType.Electric)
+                {
+                    day = message.Electric.DayPassed;
+                    amount = message.Electric.AmountToPay;
+                }
+                else
+                {
+                    day = message.Employee.DayPassed;
+                    amount = message.Employee.AmountToPay;
+                }
                 var bill = CPlayerData.GetBill(t);
                 if (bill.billDayPassed != day || bill.amountToPay != amount)
                 {
@@ -462,23 +541,23 @@ namespace CardShopCoop.Sync
                     billsChanged = true;
                 }
             }
-            int wantRooms = br.ReadInt32();
-            int wantWarehouseRooms = br.ReadInt32();
-            bool wantShopB = br.ReadBoolean();
-            bool wantShopOpen = br.ReadBoolean();
-            bool wantWarehouseClosed = br.ReadBoolean();
+            int wantRooms = message.UnlockRoomCount;
+            int wantWarehouseRooms = message.UnlockWarehouseRoomCount;
+            bool wantShopB = message.IsWarehouseRoomUnlocked;
+            bool wantShopOpen = message.IsShopOpen;
+            bool wantWarehouseClosed = message.IsWarehouseDoorClosed;
 
             // tutorial snapshot (appended last in WriteState) - read here in wire order,
             // apply after the rest of the state below
-            int tutIndex = br.ReadInt32();
-            int tutN = br.ReadInt32();
+            int tutIndex = message.TutorialIndex;
+            int tutN = message.Tutorials.Count;
             var incomingTut = new System.Collections.Generic.List<TutorialData>();
             for (int i = 0; i < tutN && i < 4096; i++)
             {
                 var td = new TutorialData
                 {
-                    tutorialTaskCondition = (ETutorialTaskCondition)br.ReadInt32(),
-                    value = br.ReadSingle(),
+                    tutorialTaskCondition = (ETutorialTaskCondition)message.Tutorials[i].Condition,
+                    value = message.Tutorials[i].Value,
                 };
                 incomingTut.Add(td);
             }
@@ -487,8 +566,16 @@ namespace CardShopCoop.Sync
             {
                 // repaint the totals if the screen happens to be open, and keep the
                 // phone's red bill badge honest either way
-                try { MiBillEvaluateUI?.Invoke(_billScreen, null); } catch { }
-                try { MiBillNotification?.Invoke(_billScreen, null); } catch { }
+                try
+                {
+                    MiBillEvaluateUI?.Invoke(_billScreen, null);
+                }
+                catch { }
+                try
+                {
+                    MiBillNotification?.Invoke(_billScreen, null);
+                }
+                catch { }
             }
 
             // unlocks: the manager methods are pure world changes (blocker off, door
@@ -516,7 +603,10 @@ namespace CardShopCoop.Sync
                 if (unlocksChanged || nowT - _lastRoomRepaint > 60.0)
                 {
                     _lastRoomRepaint = nowT;
-                    try { MiRoomInit?.Invoke(urm, null); }
+                    try
+                    {
+                        MiRoomInit?.Invoke(urm, null);
+                    }
                     catch (Exception e) { CoopPlugin.Log.LogWarning("room repaint: " + e.Message); }
                 }
             }
@@ -527,14 +617,29 @@ namespace CardShopCoop.Sync
             {
                 CPlayerData.m_IsShopOpen = wantShopOpen;
                 var sign = OpenSign();
-                if (sign != null) { try { MiOpenSignMesh?.Invoke(sign, null); } catch { } }
+                if (sign != null)
+                {
+                    try
+                    {
+                        MiOpenSignMesh?.Invoke(sign, null);
+                    }
+                    catch { }
+                }
             }
             if (CPlayerData.m_IsWarehouseDoorClosed != wantWarehouseClosed)
             {
                 CPlayerData.m_IsWarehouseDoorClosed = wantWarehouseClosed;
                 var sign = WarehouseSign();
-                if (sign != null) { try { MiWarehouseSignMesh?.Invoke(sign, null); } catch { } }
-                else if (urm != null) urm.EvaluateWarehouseRoomOpenClose(); // entry gate still must move
+                if (sign != null)
+                {
+                    try
+                    {
+                        MiWarehouseSignMesh?.Invoke(sign, null);
+                    }
+                    catch { }
+                }
+                else if (urm != null)
+                    urm.EvaluateWarehouseRoomOpenClose(); // entry gate still must move
             }
 
             ApplyTutorial(tutIndex, incomingTut);
@@ -552,8 +657,13 @@ namespace CardShopCoop.Sync
             if (same)
                 for (int i = 0; i < incoming.Count; i++)
                     if (cur[i].tutorialTaskCondition != incoming[i].tutorialTaskCondition
-                        || Mathf.Abs(cur[i].value - incoming[i].value) > 0.001f) { same = false; break; }
-            if (same) return;
+                        || Mathf.Abs(cur[i].value - incoming[i].value) > 0.001f)
+                    {
+                        same = false;
+                        break;
+                    }
+            if (same)
+                return;
 
             if (CPlayerData.m_TutorialDataList == null)
                 CPlayerData.m_TutorialDataList = new System.Collections.Generic.List<TutorialData>();
@@ -562,22 +672,28 @@ namespace CardShopCoop.Sync
             CPlayerData.m_TutorialIndex = tutIndex;
 
             var tm = UnityEngine.Object.FindObjectOfType<TutorialManager>(); // NOT CSingleton (fake-manager trap)
-            if (tm == null || tm.m_TutorialSubGroupList == null) return;
+            if (tm == null || tm.m_TutorialSubGroupList == null)
+                return;
             foreach (var sg in tm.m_TutorialSubGroupList)
             {
-                if (sg == null) continue;
+                if (sg == null)
+                    continue;
                 try
                 {
                     FiSgCurrent?.SetValue(sg, 0f);
                     FiSgFinish?.SetValue(sg, false);
-                    if (sg.m_TutorialData != null) sg.m_TutorialData.value = 0f;
+                    if (sg.m_TutorialData != null)
+                        sg.m_TutorialData.value = 0f;
                     // only the subgroup whose condition matches actually consumes each value
                     for (int i = 0; i < incoming.Count; i++)
                         sg.AddTaskValue(incoming[i].value, incoming[i].tutorialTaskCondition);
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("tutorial subgroup apply: " + e.Message); }
             }
-            try { tm.EvaluateTaskVisibility(); }
+            try
+            {
+                tm.EvaluateTaskVisibility();
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("tutorial visibility: " + e.Message); }
         }
     }
