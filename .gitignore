@@ -9,5 +9,7 @@ diag/
 # dist/ holds personal deployment kits and release packaging - releases ship
 # via GitHub Releases and Nexus, not the source tree
 dist/
+self-hosted-runner/game/
+self-hosted-runner/.env
 tools/coop-vanilla-profile.ps1
 decompiled-grading/
