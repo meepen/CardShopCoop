@@ -22,6 +22,7 @@ echo "Downloading TCG Card Shop Simulator (Steam App ID 3070070)..."
 docker run --rm -it \
   -v "$GAME_DIR:/game" \
   cm2network/steamcmd:latest \
+  bash /home/steam/steamcmd/steamcmd.sh \
   +@sSteamCmdForcePlatformType windows \
   +force_install_dir /game \
   +login "$STEAM_USERNAME" \
