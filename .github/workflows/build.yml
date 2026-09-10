@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 30
     env:
       CARDSHOP_GAMEPATH: /game
-      NUGET_PACKAGES: /home/runner/.nuget/packages
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -45,7 +45,7 @@ jobs:
           fi
 
       - name: Restore
-        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode
+        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode --configfile NuGet.Config
 
       - name: Build and package
         run: dotnet build src/CardShopCoop/CardShopCoop.csproj -c Release -p:Deploy=false -p:Package=true --no-restore

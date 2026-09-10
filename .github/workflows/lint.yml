@@ -25,7 +25,7 @@ jobs:
           cache-dependency-path: src/CardShopCoop/packages.lock.json
 
       - name: Restore project metadata
-        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode
+        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode --configfile NuGet.Config
 
       # Formatting does not require the proprietary game assemblies.
       - name: Verify formatting
