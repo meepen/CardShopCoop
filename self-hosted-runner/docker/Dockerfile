@@ -14,4 +14,7 @@ ENV DOTNET_ROOT=/usr/share/dotnet \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1
 
+RUN mkdir -p /home/runner/.nuget \
+ && chown -R runner:runner /home/runner/.nuget
+
 USER runner
