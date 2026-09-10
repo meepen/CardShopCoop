@@ -10,7 +10,8 @@ are assumed to already be installed.
 ## Install game references
 
 The installer interactively logs into Steam, downloads the Windows game files, and installs
-BepInEx 5.4.23 x64:
+BepInEx 5.4.23 x64 and caches the Steam login session locally in the ignored `steam/`
+directory:
 
 ```bash
 bash install-game.sh

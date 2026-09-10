@@ -3,14 +3,15 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 GAME_DIR="$ROOT_DIR/game"
-BEPINEX_VERSION="5.4.23.0"
-BEPINEX_URL="https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_x64_${BEPINEX_VERSION}.zip"
+BEPINEX_VERSION="5.4.23.5"
+BEPINEX_URL="https://github.com/BepInEx/BepInEx/releases/download/v${BEPINEX_VERSION}/BepInEx_win_x64_${BEPINEX_VERSION}.zip"
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
 command -v unzip >/dev/null || { echo "unzip is required" >&2; exit 1; }
 
 mkdir -p "$GAME_DIR"
+mkdir -p "$ROOT_DIR/steam"
 printf 'Steam username: '
 read -r STEAM_USERNAME
 if [[ -z "$STEAM_USERNAME" ]]; then
@@ -21,6 +22,7 @@ fi
 echo "Downloading TCG Card Shop Simulator (Steam App ID 3070070)..."
 docker run --rm -it \
   -v "$GAME_DIR:/game" \
+  -v "$ROOT_DIR/steam:/home/steam/Steam" \
   cm2network/steamcmd:latest \
   bash /home/steam/steamcmd/steamcmd.sh \
   +@sSteamCmdForcePlatformType windows \
