@@ -17,8 +17,8 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
-    <ManagedPath>$(GamePath)\Card Shop Simulator_Data\Managed</ManagedPath>
-    <BepInExPath>$(GamePath)\BepInEx\core</BepInExPath>
+    <ManagedPath>$(GamePath)/Card Shop Simulator_Data/Managed</ManagedPath>
+    <BepInExPath>$(GamePath)/BepInEx/core</BepInExPath>
   </PropertyGroup>
 
   <ItemGroup>
@@ -104,7 +104,7 @@
   </Target>
 
   <Target Name="DeployToPlugins" AfterTargets="Build" Condition="'$(Deploy)' == 'true'">
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GamePath)\BepInEx\plugins\CardShopCoop" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GamePath)/BepInEx/plugins/CardShopCoop" />
   </Target>
 
   <Target Name="Package" AfterTargets="Build" Condition="'$(Package)' == 'true'">
@@ -113,8 +113,8 @@
       <PackageZip>$(OutputPath)$(AssemblyName)-$(CardShopCoopVersion).zip</PackageZip>
     </PropertyGroup>
     <RemoveDir Directories="$(PackageDirectory)" />
-    <MakeDir Directories="$(PackageDirectory)\$(AssemblyName)" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageDirectory)\$(AssemblyName)" />
+    <MakeDir Directories="$(PackageDirectory)/$(AssemblyName)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageDirectory)/$(AssemblyName)" />
     <ZipDirectory SourceDirectory="$(PackageDirectory)" DestinationFile="$(PackageZip)" Overwrite="true" />
   </Target>
 
