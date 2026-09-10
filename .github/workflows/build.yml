@@ -59,7 +59,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -71,7 +71,14 @@ jobs:
           name: plugin-package
           path: dist
 
-      - name: Create GitHub release
+      - name: Create stable GitHub release
+        if: ${{ !contains(github.ref_name, '-') }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release create "${{ github.ref_name }}" dist/*.zip --repo meepen/CardShopCoop --title "${{ github.ref_name }}" --generate-notes
+
+      - name: Create prerelease GitHub release
+        if: ${{ contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" dist/*.zip --repo meepen/CardShopCoop --title "${{ github.ref_name }}" --generate-notes --prerelease
