@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using HarmonyLib;
 using UnityEngine;
+using CardShopCoop.Net.Messages;
 
 namespace CardShopCoop.Sync
 {
@@ -367,9 +368,14 @@ namespace CardShopCoop.Sync
         private float _hostHeal;
         private readonly List<Entry> _reportBuf = new List<Entry>();
         private RestockManager _rm;
+        private float _previewTimer;
+        private const float PreviewSendInterval = 1f / 12f;
+        private readonly HashSet<ushort> _movingLastTick = new HashSet<ushort>();
+        private readonly HashSet<ushort> _movingTransitions = new HashSet<ushort>();
 
         public Action<List<Entry>> OnHostSnapshot;   // host: broadcast
         public Action<List<Entry>> OnClientChanges;  // client: request
+        public Action<BoxMovePreviewMessage> SendPreview; // transient placement pose
         public Action<int, int> OnLocalRemoved;      // client: (id, type) I trashed a box
         /// <summary>Called after a host snapshot creates a new client-side box. ContainerSync
         /// uses this to claim an acknowledged empty-box take and put that exact mirror in the
@@ -430,6 +436,9 @@ namespace CardShopCoop.Sync
             _remoteReleased.Clear(); // a reused id must not inherit a prior session's ownership window
             _hostCarriedLastTick.Clear();
             _hostRecentlyReleased.Clear();
+            _previewTimer = 0f;
+            _movingLastTick.Clear();
+            _movingTransitions.Clear();
             _remWindowStart.Clear();
             _remWindowCount.Clear();
             _timer = -0.6f; // staggered phase vs the other snapshot engines
@@ -457,6 +466,11 @@ namespace CardShopCoop.Sync
         /// (e.g. an empty-box dispense) spawns a box that must reach the guest promptly.</summary>
         public void ForceBroadcastNextTick()
         {
+            if (CoopCore.Role == CoopRole.Client)
+            {
+                _timer = 0f;
+                return;
+            }
             _hostScanInterval = BaseHostScanInterval;
             _lastHostHash = 0;
             _timer = _hostScanInterval;
@@ -1391,6 +1405,56 @@ namespace CardShopCoop.Sync
             _lastHostHash = 0;
         }
 
+        /// <summary>Placement-mode poses use the transient lane. This avoids making the
+        /// host serialize and broadcast the complete box population for every drag update.</summary>
+        public void ApplyRemotePreview(BoxMovePreviewMessage message, int connId)
+        {
+            if (message == null || message.BoxId <= 0)
+                return;
+            ushort id = (ushort)message.BoxId;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                if (!_hostById.TryGetValue(id, out var box) || box == null)
+                    return;
+                if (_remoteOwner.TryGetValue(id, out var owner) && owner != 0 && owner != connId)
+                    return;
+                if (IsLocallyCarried(box) || IsBeingHeld(box))
+                    return;
+                if (message.Phase == 2)
+                {
+                    // The stop packet contains the final preview pose. Commit it before
+                    // releasing the remote lease so a reliable release report arriving
+                    // after this transient packet cannot leave the host one frame behind.
+                    box.SetPhysicsEnabled(true);
+                    ApplyPhysicsPose(box, message.Pos, message.Yaw);
+                    _remoteMoving.Remove(id);
+                    _remoteOwner.Remove(id);
+                    SetHostWorkerLock(box, false);
+                    return;
+                }
+                _remoteMoving.Add(id);
+                _remoteCarried.Remove(id);
+                _remoteOwner[id] = connId;
+                SetHostWorkerLock(box, true);
+                box.SetPhysicsEnabled(false);
+                ApplyPhysicsPose(box, message.Pos, message.Yaw);
+                return;
+            }
+            if (CoopCore.Role != CoopRole.Client || !_byId.TryGetValue(id, out var mirror) || mirror == null)
+                return;
+            if (IsLocallyCarried(mirror) || mirror.GetIsMovingObject())
+                return;
+            if (message.Phase == 2)
+            {
+                CancelRemoteMotion(mirror);
+                return;
+            }
+            if (!mirror.gameObject.activeSelf)
+                mirror.gameObject.SetActive(true);
+            mirror.SetPhysicsEnabled(false);
+            ScheduleRemoteMotion(mirror, message.Pos, message.Yaw);
+        }
+
         private static readonly Dictionary<int, double> _remWindowStart = new Dictionary<int, double>();
         private static readonly Dictionary<int, int> _remWindowCount = new Dictionary<int, int>();
 
@@ -1843,6 +1907,7 @@ namespace CardShopCoop.Sync
             // the periodic diff alone left pickups/set-downs invisible for seconds,
             // long enough for someone else to try grabbing the same box
             bool force = false;
+            _movingTransitions.Clear();
             try
             {
                 foreach (var kv in _idOf)
@@ -1859,9 +1924,45 @@ namespace CardShopCoop.Sync
                         force = true; // set-down transition
                         _recentlyReleased[kv.Value] = Time.realtimeSinceStartupAsDouble;
                     }
+                    bool moving = kv.Key.GetIsMovingObject();
+                    if (moving != _movingLastTick.Contains(kv.Value))
+                    {
+                        _movingTransitions.Add(kv.Value);
+                        force = true;
+                        if (SendPreview != null)
+                            SendPreview(new BoxMovePreviewMessage
+                            {
+                                Phase = moving ? (byte)0 : (byte)2,
+                                BoxId = kv.Value,
+                                SourceId = CoopCore.Role == CoopRole.Host ? 0 : 1,
+                                Pos = kv.Key.transform.position,
+                                Yaw = kv.Key.transform.eulerAngles.y,
+                            });
+                        if (moving)
+                            _movingLastTick.Add(kv.Value);
+                        else
+                            _movingLastTick.Remove(kv.Value);
+                    }
                 }
             }
             catch { }
+            _previewTimer -= dt;
+            if (_previewTimer <= 0f)
+            {
+                _previewTimer = PreviewSendInterval;
+                foreach (var kv in _idOf)
+                {
+                    if (kv.Key != null && kv.Key.GetIsMovingObject() && SendPreview != null)
+                        SendPreview(new BoxMovePreviewMessage
+                        {
+                            Phase = 1,
+                            BoxId = kv.Value,
+                            SourceId = CoopCore.Role == CoopRole.Host ? 0 : 1,
+                            Pos = kv.Key.transform.position,
+                            Yaw = kv.Key.transform.eulerAngles.y,
+                        });
+                }
+            }
             _timer += dt;
             bool transient = false;
             foreach (var kv in _idOf)
@@ -1874,7 +1975,7 @@ namespace CardShopCoop.Sync
             if (!force && _timer < cadence)
                 return;
             if (_timer >= cadence)
-                _timer -= cadence;
+                _timer = 0f;
             try
             {
                 bool changed = force;
@@ -1951,6 +2052,8 @@ namespace CardShopCoop.Sync
                     if (truth.Carried && !justReleased)
                         continue;
 
+                    if (box.GetIsMovingObject() && !_movingTransitions.Contains(truth.Id))
+                        continue; // ongoing placement is transient, not a reliable box report
                     var now = Snapshot(box);
                     now.Id = truth.Id;
                     bool differs = Differs(now, truth);
@@ -1963,7 +2066,7 @@ namespace CardShopCoop.Sync
                     // tick, a recent local edit still in the window, or a set-down/take we're
                     // confirming. An untouched box whose mirror already matches the applied
                     // truth is dropped (no lagging-count re-report -> no host refill).
-                    if (differs || touchedRecently || justReleased || now.InFlight || now.Moving)
+                    if (differs || touchedRecently || justReleased || (now.InFlight && _movingTransitions.Contains(truth.Id)))
                     {
                         list.Add(now);
                         if (justReleased)

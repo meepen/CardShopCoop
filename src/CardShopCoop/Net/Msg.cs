@@ -91,6 +91,7 @@ namespace CardShopCoop.Net
         PlayerIntent = 85,       // client -> host: single-shot interaction intent
         EconDelta = 86,          // host -> clients: replay a vanilla money/XP HUD delta
         MovePreview = 87,        // peers: transient furniture placement preview
+        BoxMovePreview = 88,     // peers: transient item-box placement preview
     }
 
     /// <summary>One received message, already reassembled and decoded from the wire.

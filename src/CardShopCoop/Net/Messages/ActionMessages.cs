@@ -53,6 +53,23 @@ namespace CardShopCoop.Net.Messages
         }
     }
 
+    [NetworkMessage(MsgType.BoxMovePreview, Delivery = Delivery.Transient)]
+    public sealed class BoxMovePreviewMessage : INetMessage
+    {
+        public byte Phase; // 0 = start, 1 = update, 2 = stop
+        public int BoxId;
+        public int SourceId;
+        public Vector3 Pos;
+        public float Yaw;
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.BoxMovePreview;
+            }
+        }
+    }
+
     [NetworkMessage(MsgType.SprayHit, Policy = MessagePolicy.HostOnlyInGame)]
     public sealed class SprayHitMessage : INetMessage
     {
