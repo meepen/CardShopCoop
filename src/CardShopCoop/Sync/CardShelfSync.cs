@@ -67,6 +67,13 @@ namespace CardShopCoop.Sync
         private float _scanInterval = BaseScanInterval;
         private ShelfManager _sm;
 
+        // Time-sliced scan state: the walk is spread over frames, budget in SHELVES.
+        private readonly ListScanCursor _cursor = new ListScanCursor { Budget = 12 };
+        private System.Collections.IList[] _groups;
+        private bool _scanning;
+        private List<Entry> _scanChanges;
+        private bool _sawError;
+
         public Action<List<Entry>> OnLocalChanges;
 
         /// <summary>Client role: adopt unknown slots silently instead of reporting them
@@ -83,6 +90,10 @@ namespace CardShopCoop.Sync
             _timer = 0.1f; // staggered phase vs the other snapshot engines
             _scanInterval = BaseScanInterval;
             _sm = null;
+            _scanning = false;
+            _groups = null;
+            _scanChanges = null;
+            _cursor.Reset();
         }
 
         /// <summary>The local display structure changed under us (population repair
@@ -111,78 +122,92 @@ namespace CardShopCoop.Sync
             if (!active)
                 return;
             _timer += dt;
-            if (_timer < _scanInterval)
-                return;
-            _timer -= _scanInterval;
-
-            List<Entry> changes = null;
-            bool sawError = false;
-            try
+            if (!_scanning)
             {
+                if (_timer < _scanInterval)
+                    return;
+                _timer -= _scanInterval;
                 var sm = Sm();
                 if (sm == null)
                     return;
-                Walk(sm.m_CardShelfList, 2, ref changes, ref sawError);
-                Walk(sm.m_CardItemCombiShelfList, 3, ref changes, ref sawError);
-                Walk(sm.m_TournamentPrizeShelfList, 14, ref changes, ref sawError); // prize cards on display
+                if (_groups == null || _groups.Length != 3)
+                    _groups = new System.Collections.IList[3];
+                _groups[0] = sm.m_CardShelfList;
+                _groups[1] = sm.m_CardItemCombiShelfList;
+                _groups[2] = sm.m_TournamentPrizeShelfList;
+                _cursor.Reset();
+                _scanning = true;
+                _scanChanges = null;
+                _sawError = false;
+            }
+            try
+            {
+                _cursor.Scan(_groups, VisitCardShelf);
             }
             catch (Exception e)
             {
+                _sawError = true;
                 LogSnapshotError("snapshot", e);
+                _scanning = false;
                 return;
             }
-            if (!sawError && changes != null && changes.Count > 0)
+            if (_cursor.Done)
             {
-                _scanInterval = BaseScanInterval;
-                OnLocalChanges?.Invoke(changes);
+                _scanning = false;
+                if (!_sawError && _scanChanges != null && _scanChanges.Count > 0)
+                {
+                    _scanInterval = BaseScanInterval;
+                    OnLocalChanges?.Invoke(_scanChanges);
+                }
+                else if (!_sawError)
+                {
+                    _scanInterval = Math.Min(MaxQuietScanInterval, _scanInterval * 1.25f);
+                }
             }
-            else if (!sawError)
-                _scanInterval = Math.Min(MaxQuietScanInterval, _scanInterval * 1.25f);
         }
 
-        private void Walk<T>(List<T> shelves, int kind, ref List<Entry> changes, ref bool sawError) where T : CardShelf
+        /// <summary>Visit one card shelf (kind 2, 3 or 14) and all of its card slots.</summary>
+        private void VisitCardShelf(object item, int group, int index)
         {
-            for (int i = 0; i < shelves.Count; i++)
+            var shelf = item as CardShelf;
+            if (shelf == null || !shelf.gameObject.activeInHierarchy)
+                return; // boxed/carried
+            int kind = group == 0 ? 2 : (group == 1 ? 3 : 14);
+            List<InteractableCardCompartment> comps;
+            try
             {
-                var shelf = shelves[i];
-                if (shelf == null || !shelf.gameObject.activeInHierarchy)
-                    continue; // boxed/carried
-                List<InteractableCardCompartment> comps;
+                comps = shelf.GetCardCompartmentList();
+            }
+            catch (Exception e) { _sawError = true; LogSnapshotError(kind + ":" + index, e); return; }
+            for (int j = 0; j < comps.Count; j++)
+            {
                 try
                 {
-                    comps = shelf.GetCardCompartmentList();
-                }
-                catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i, e); continue; }
-                for (int j = 0; j < comps.Count; j++)
-                {
-                    try
+                    var comp = comps[j];
+                    if (comp == null)
+                        continue;
+                    if (!PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key))
+                        continue;
+                    if (!TryReadSlot(comp, out CardData card))
+                        continue;
+                    bool occupied = card != null;
+                    if (_last.TryGetValue(key, out var st) && st.Occupied == occupied && (!occupied || st.Matches(card)))
+                        continue;
+                    if (!_last.ContainsKey(key) && IsClientRole)
                     {
-                        var comp = comps[j];
-                        if (comp == null)
-                            continue;
-                        if (!PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key))
-                            continue;
-                        if (!TryReadSlot(comp, out CardData card))
-                            continue;
-                        bool occupied = card != null;
-                        if (_last.TryGetValue(key, out var st) && st.Occupied == occupied && (!occupied || st.Matches(card)))
-                            continue;
-                        if (!_last.ContainsKey(key) && IsClientRole)
-                        {
-                            _last[key] = SlotState.From(card);
-                            continue;
-                        }
-                        if (changes == null)
-                            changes = new List<Entry>();
-                        if (changes.Count >= 128)
-                            return;
                         _last[key] = SlotState.From(card);
-                        if (IsClientRole)
-                            _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
-                        changes.Add(new Entry { Key = key, Occupied = occupied, Card = card });
+                        continue;
                     }
-                    catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i + ":" + j, e); }
+                    if (_scanChanges == null)
+                        _scanChanges = new List<Entry>();
+                    if (_scanChanges.Count >= 128)
+                        continue; // leave un-recorded; picked up next scan
+                    _last[key] = SlotState.From(card);
+                    if (IsClientRole)
+                        _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
+                    _scanChanges.Add(new Entry { Key = key, Occupied = occupied, Card = card });
                 }
+                catch (Exception e) { _sawError = true; LogSnapshotError(kind + ":" + index + ":" + j, e); }
             }
         }
 

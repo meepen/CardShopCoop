@@ -170,6 +170,8 @@ namespace CardShopCoop.Net.Messages
     {
         public Vector3 Position;
         public float Yaw;
+        public Vector3 CameraPosition;
+        public Quaternion CameraRotation;
         public float Speed;
         public byte Hold;
         public System.Collections.Generic.List<int> HoldTypes;

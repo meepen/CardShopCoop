@@ -193,17 +193,10 @@ namespace CardShopCoop.Patches
             Try(h, typeof(ShelfManager), "SpawnInteractableObjectInPackageBox",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(FurnitureSpawnPostfix)));
 
-            // Furniture SELL is host-only for now (money-printer guard). On the guest,
-            // InteractionPlayerController.ConfirmSellFurniture credits the SHARED wallet via
-            // CEventPlayer_AddCoin(price/2) - which our DayEndBlockPrefix forwards to the host
-            // as a real coin gain - then destroys only the GUEST-side box. The host never sees
-            // that box (FurnBoxSync finds no match), so the real furniture survives while the
-            // wallet is credited = a repeatable printer. ConfirmSellFurniture only sees
-            // m_CurrentHoldingBoxShelf (whatever boxed furniture the guest is holding) and can't
-            // tell a host-placed shelf from a guest-bought-but-unplaced one, so we block ALL
-            // guest furniture sells; the toast explains. Host selling is untouched (Role check).
+            // Guest furniture sales are forwarded to the host, which resolves the boxed object,
+            // credits the shared wallet once, and destroys the authoritative furniture.
             Try(h, typeof(InteractionPlayerController), "ConfirmSellFurniture",
-                prefix: new HarmonyMethod(typeof(GamePatches), nameof(SellFurnitureBlockPrefix)));
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(SellFurniturePrefix)));
 
             // Deco placement is forwarded to the host after the local pending placement is
             // recorded, so the guest's inventory can be restored if authoritative placement
@@ -213,7 +206,8 @@ namespace CardShopCoop.Patches
             Try(h, typeof(InteractableObject), "PlaceMovedObject",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(DecoPlacedPostfix)));
             Try(h, typeof(InteractableObject), "BoxUpObject",
-                prefix: new HarmonyMethod(typeof(GamePatches), nameof(DecoBoxUpPrefix)));
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(DecoBoxUpPrefix)),
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
 
             // Handheld deodorant spray: the guest's hold-spray loop only ever hits the
             // LOCAL customer list - inert puppets on a client - so a guest could never
@@ -233,16 +227,16 @@ namespace CardShopCoop.Patches
             Try(h, typeof(ShelfManager), "DisableMoveObjectPreviewMode",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(DisablePreviewGuardPrefix)));
 
-            // Furniture placement is authoritative only after it settles, but the visual
-            // placement ghost is safe to stream independently because receivers render a
-            // detached cosmetic mesh rather than moving their real mirrored object.
+            // Furniture placement (R/opening a furniture box) is authoritative only after it
+            // settles, but its visual placement ghost is safe to stream independently because
+            // receivers render a detached cosmetic mesh rather than moving their real mirror.
+            // Q is deliberately excluded: InteractablePackagingBox.StartMoveObject is the
+            // box's held-but-in-place mode, not furniture placement.
             Try(h, typeof(InteractableObject), "StartMoveObject",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(MovePreviewStartPostfix)));
-            // These overrides call base.StartMoveObject, so patching them too would emit a
-            // duplicate Stop/Start sequence for one drag. Packaging boxes are different: their
-            // override owns the complete move setup and never calls the base implementation.
-            Try(h, typeof(InteractablePackagingBox), "StartMoveObject",
-                postfix: new HarmonyMethod(typeof(GamePatches), nameof(MovePreviewStartPostfix)));
+            // Do not patch InteractablePackagingBox.StartMoveObject: that override is Q mode
+            // (held-but-in-place box movement), not furniture placement. Furniture placement
+            // starts the boxed InteractableObject above when the player opens the box.
             Try(h, typeof(ShelfManager), "SetMoveObjectPreviewModelValidState",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(MovePreviewValidPostfix)));
             Try(h, typeof(ShelfManager), "DisableMoveObjectPreviewMode",
@@ -268,11 +262,11 @@ namespace CardShopCoop.Patches
             // change, so the next co-op frame reads authoritative state.
             Try(h, typeof(InteractableObject), "PlaceMovedObject",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
-            Try(h, typeof(InteractablePackagingBox_Item), "StartHoldBox",
+            Try(h, typeof(InteractablePackagingBox), "StartHoldBox",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
-            Try(h, typeof(InteractablePackagingBox_Item), "ThrowBox",
-                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
-            Try(h, typeof(InteractablePackagingBox_Item), "DropBox",
+            Try(h, typeof(InteractablePackagingBox), "ThrowBox",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ThrowMutationPostfix)));
+            Try(h, typeof(InteractablePackagingBox), "DropBox",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
             // While held, the game's visible box root follows the hand but its
             // Rigidbody can remain at the old spawn pose. Align the shared base
@@ -350,8 +344,8 @@ namespace CardShopCoop.Patches
             TryModule("trades", Sync.TradeServe.ApplyPatches, h);
             TryModule("register", Sync.RegisterSync.ApplyPatches, h);
             TryModule("playtables", Sync.PlayTableSync.ApplyPatches, h);
-            TryModule("cardboxes", Sync.CardBoxSync.ApplyPatches, h);
-            TryModule("furnboxes", Sync.FurnBoxSync.ApplyPatches, h);
+            TryModule("cardboxes", Sync.CardBoxOps.ApplyPatches, h);
+            TryModule("furnboxes", Sync.FurnitureBoxOps.ApplyPatches, h);
             TryModule("tv", Sync.TvSync.ApplyPatches, h);
         }
 
@@ -390,9 +384,9 @@ namespace CardShopCoop.Patches
 
         public static bool BoxDestroyedPrefix(InteractablePackagingBox_Item __instance)
         {
-            if (!BoxSync.ApplyingRemote
+            if (!BoxShared.ApplyingRemote
                 && !ContainerSync.ConsumeSuppressedStorageDestroy(__instance))
-                BoxSync.LocalBoxDestroyed?.Invoke(__instance);
+                BoxShared.LocalBoxDestroyed?.Invoke(__instance);
             return true;
         }
 
@@ -434,11 +428,22 @@ namespace CardShopCoop.Patches
                 CoopCore.RequestImmediateObjectSync();
         }
 
+        public static void ThrowMutationPostfix(InteractablePackagingBox __instance)
+        {
+            // A throw is a Held -> Free release carrying the rigidbody's own velocity. The
+            // impulse is not in Rigidbody.velocity until the next FixedUpdate, so mark it and
+            // force a prompt box tick; the engine defers the release report until it is real.
+            BoxPlacement.MarkThrow(__instance);
+            CoopCore.Instance?.Boxes?.MarkBoxDirty(__instance);
+            CoopCore.Instance?.Boxes?.ForceNextTick();
+            ObjectMutationPostfix();
+        }
+
         public static void AlignBoxBodyPrefix(InteractablePackagingBox __instance)
         {
             if (CoopCore.Role == CoopRole.None || __instance == null)
                 return;
-            BoxSync.AlignHeldBody(__instance);
+            BoxPlacement.AlignHeldBody(__instance);
         }
 
         public static bool ApplyingRemoteLicense;
@@ -702,22 +707,16 @@ namespace CardShopCoop.Patches
             return false;
         }
 
-        /// <summary>Client only: block the guest from selling any boxed furniture. The vanilla
-        /// ConfirmSellFurniture would fire CEventPlayer_AddCoin(price/2) into the SHARED wallet
-        /// (forwarded to the host as a real gain) and then destroy only the guest-side box, which
-        /// the host never mirrors - so the furniture survives while the wallet is paid = a
-        /// repeatable money printer. Returning false BEFORE the coin event stops the printer.
-        /// We can't distinguish a host-placed shelf from a guest-bought-unplaced one here (the
-        /// method only sees m_CurrentHoldingBoxShelf), so this blocks all guest furniture sells;
-        /// the toast tells the guest to ask the host. Host is unaffected (Role check). Same
-        /// block+toast idiom as RenamerBlockPrefix.</summary>
-        public static bool SellFurnitureBlockPrefix()
+        /// <summary>Host keeps vanilla selling. A guest sale is handled by FurnitureBoxOps before
+        /// vanilla can emit its local shared-wallet coin event.</summary>
+        public static bool SellFurniturePrefix(InteractionPlayerController __instance)
         {
             if (CoopCore.Role != CoopRole.Client)
                 return true;
-            if (CoopCore.Instance != null)
+            if (!FurnitureBoxOps.ClientSell(__instance)
+                && CoopCore.Instance != null)
             {
-                CoopCore.Instance.RegisterLine = "selling furniture is host-only for now - ask the host";
+                CoopCore.Instance.RegisterLine = "couldn't sell furniture - try again";
                 CoopCore.Instance.RegisterLineTimer = 3f;
             }
             return false;
@@ -1098,7 +1097,7 @@ namespace CardShopCoop.Patches
             // boxes it there, and only then moves the BOX Transform to spawnPos. Unity does
             // not reliably move a non-kinematic Rigidbody when its Transform is assigned this
             // way. Align the real body before any population/furniture snapshot can observe it.
-            FurnBoxSync.AlignJustSpawnedBox(objType, spawnPos, spawnRot);
+            FurnitureBoxOps.AlignJustSpawnedBox(objType, spawnPos, spawnRot);
             if (CoopCore.Role == CoopRole.Host)
                 CoopCore.Instance?.NotifyHostStructureChanged();
         }

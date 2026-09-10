@@ -44,6 +44,11 @@ namespace CardShopCoop.Sync
             public Vector3 Velocity;      // measured between packets, only used when the buffer runs dry
             public float LastStateTime;   // Time.time when TargetPos arrived
             public float TargetYaw;
+            public Vector3 CameraPosition;
+            public Quaternion CameraRotation = Quaternion.identity;
+            public Vector3 PreviousCameraPosition;
+            public Quaternion PreviousCameraRotation = Quaternion.identity;
+            public bool HasCamera;
             public float NetSpeed;
             public byte HoldState;
             // actual EItemTypes being carried, already LOCAL ids: the translation happened
@@ -624,6 +629,7 @@ namespace CardShopCoop.Sync
         }
 
         public void UpdateState(int connId, Vector3 pos, float yaw, float speed, byte holdState,
+            Vector3 cameraPosition = default(Vector3), Quaternion cameraRotation = default(Quaternion),
             List<int> holdTypes = null, List<CardData> holdCards = null)
         {
             if (!_avatars.TryGetValue(connId, out var av))
@@ -641,9 +647,22 @@ namespace CardShopCoop.Sync
             }
             else
                 av.Velocity = Vector3.zero;
+            if (av.HasCamera)
+            {
+                av.PreviousCameraPosition = av.CameraPosition;
+                av.PreviousCameraRotation = av.CameraRotation;
+            }
+            else
+            {
+                av.PreviousCameraPosition = cameraPosition;
+                av.PreviousCameraRotation = cameraRotation;
+            }
             av.LastStateTime = now;
             av.TargetPos = pos;
             av.TargetYaw = yaw;
+            av.CameraPosition = cameraPosition;
+            av.CameraRotation = cameraRotation == default(Quaternion) ? Quaternion.identity : cameraRotation;
+            av.HasCamera = cameraRotation != default(Quaternion);
             av.NetSpeed = speed;
             av.HoldState = holdState;
             // THE HOLD PAYLOAD IS ALREADY IN LOCAL IDS: CoopCore.ReadHoldPayload built it
@@ -704,6 +723,20 @@ namespace CardShopCoop.Sync
                 av.Go.transform.position = pos;
                 av.EverPositioned = true;
             }
+        }
+
+        public bool TryGetPlacementCamera(int connId, out Vector3 position, out Quaternion rotation)
+        {
+            if (_avatars.TryGetValue(connId, out var avatar) && avatar.HasState && avatar.HasCamera)
+            {
+                float t = Mathf.Clamp01((Time.time - avatar.LastStateTime) / (1f / 15f));
+                position = Vector3.Lerp(avatar.PreviousCameraPosition, avatar.CameraPosition, t);
+                rotation = Quaternion.Slerp(avatar.PreviousCameraRotation, avatar.CameraRotation, t);
+                return true;
+            }
+            position = default(Vector3);
+            rotation = Quaternion.identity;
+            return false;
         }
 
         public void ShowEmote(int connId)

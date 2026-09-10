@@ -775,7 +775,7 @@ namespace CardShopCoop.Util
         ///  - m_GradedCardInventoryList, the album - CardDelta / GradedRemove.
         ///  - m_GradeCardInProgressList, jobs at the grader - GradingSync's pending-list mirror.
         ///  - card shelves and card/item combi shelves - CardShelfSync.
-        ///  - card packaging (graded-return) boxes - CardBoxSync.
+        ///  - card packaging (graded-return) boxes - CardBoxOps.
         ///  - card storage shelves, bulk donation boxes, auto pack openers - ContainerSync.
         ///
         /// THE FIVE WORLD CLASSES ARE READ LIVE, never from CPlayerData's save-time snapshot
@@ -950,7 +950,7 @@ namespace CardShopCoop.Util
         /// NEVER CSingleton&lt;ShelfManager&gt;.Instance: that getter CREATES an empty fake
         /// manager when the real one does not exist yet and the fake then shadows the real one for
         /// the rest of the session (the 1.0.11 store-mirror field report; the same warning is
-        /// written out at Sync/BoxSync.cs and Sync/WorldSync.cs). Unity's fake-null makes this
+        /// written out at Sync/ItemBoxFamily.cs and Sync/WorldSync.cs). Unity's fake-null makes this
         /// cache self-invalidating across a scene change, so there is nothing to reset.</summary>
         private static ShelfManager _shelfMgr;
         private static ShelfManager Shelves()

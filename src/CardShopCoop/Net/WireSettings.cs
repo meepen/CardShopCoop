@@ -30,7 +30,6 @@ namespace CardShopCoop.Net
             settings.Converters.Add(new Vector3Converter());
             settings.Converters.Add(new QuaternionConverter());
             settings.Converters.Add(new WorldEntryConverter());
-            settings.Converters.Add(new BoxEntryConverter());
             settings.Converters.Add(new ObjMoveEntryConverter());
             settings.Converters.Add(new PopulationStateConverter());
             settings.Converters.Add(new PlayerStateConverter());

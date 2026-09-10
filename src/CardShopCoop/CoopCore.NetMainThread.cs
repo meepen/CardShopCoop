@@ -106,8 +106,9 @@ namespace CardShopCoop
                 case MsgType.ShelfRequest:
                 case MsgType.CardShelfRequest:
                 case MsgType.ObjMoveRequest:
-                case MsgType.BoxRequest:
-                case MsgType.BoxRemoved:
+                case MsgType.BoxUpdate:
+                case MsgType.BoxCollect:
+                case MsgType.FurnitureBoxOp:
                 case MsgType.ItemPriceContrib:
                 case MsgType.LicenseUnlock:
                 case MsgType.StaffOp:
@@ -116,8 +117,6 @@ namespace CardShopCoop
                 case MsgType.ContainerOp:
                 case MsgType.GradingOp:
                 case MsgType.TradeOp:
-                case MsgType.CardBoxOp:
-                case MsgType.FurnBoxOp:
                 case MsgType.RegisterOp:
                 case MsgType.TvOp:
                 case MsgType.EconContrib:
@@ -147,8 +146,10 @@ namespace CardShopCoop
                 case MsgType.ObjMoveRequest:
                     _objMoves.ForceNextTick();
                     break;
-                case MsgType.BoxRequest:
-                    _boxes.ForceBroadcastNextTick();
+                case MsgType.BoxUpdate:
+                case MsgType.BoxCollect:
+                case MsgType.FurnitureBoxOp:
+                    _boxEngine?.ForceNextTick();
                     break;
                 case MsgType.RegisterOp:
                     _register.ForceResend();
@@ -170,12 +171,6 @@ namespace CardShopCoop
                     break;
                 case MsgType.TradeOp:
                     _trades.ForceResend();
-                    break;
-                case MsgType.CardBoxOp:
-                    _cardBoxes.ForceResend();
-                    break;
-                case MsgType.FurnBoxOp:
-                    _furnBoxes.ForceResend();
                     break;
                 case MsgType.TvOp:
                     _tv.ForceResend();

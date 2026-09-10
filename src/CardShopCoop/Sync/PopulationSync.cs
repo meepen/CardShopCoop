@@ -95,6 +95,16 @@ namespace CardShopCoop.Sync
         private int _lastHash;
         private float _heal;
 
+        // Time-sliced scan state: the roster is built in two passes (hash, then build),
+        // each spread over frames so a large shop never walks everything in one frame.
+        private readonly ListScanCursor _cursor = new ListScanCursor { Budget = 48 };
+        private IList[] _groups;
+        private bool _scanning;
+        private bool _building;
+        private int _scanHash;
+        private bool _sawError;
+        private List<List<Entry>> _all;
+
         public Action<List<List<Entry>>> OnHostSnapshot;
 
         /// <summary>Fired when reconciliation destroys or spawns an object of a kind -
@@ -111,6 +121,11 @@ namespace CardShopCoop.Sync
             _timer = -1.1f; // staggered phase vs the other snapshot engines
             _lastHash = 0;
             _heal = 0f;
+            _scanning = false;
+            _building = false;
+            _groups = null;
+            _all = null;
+            _cursor.Reset();
         }
 
         public void ForceNextTick()
@@ -118,6 +133,7 @@ namespace CardShopCoop.Sync
             _timer = 3f;
             _lastHash = 0;
             _idsThisTick.Clear();
+            _scanning = false;
         }
 
         private ShelfManager Sm()
@@ -132,92 +148,110 @@ namespace CardShopCoop.Sync
             if (!active)
                 return;
             _timer += dt;
-            if (_timer < 3f)
-                return;
-            _timer -= 3f;
-            try
+            if (!_scanning)
             {
+                if (_timer < 3f)
+                    return;
+                _timer -= 3f;
                 var sm = Sm();
                 if (sm == null)
                     return;
+                if (_groups == null || _groups.Length != KindCount)
+                    _groups = new IList[KindCount];
+                for (int k = 0; k < KindCount; k++)
+                    _groups[k] = GetList(sm, k);
                 _idsThisTick.Clear();
-                // population changes a handful of times per session; hash the cheap
-                // identity (counts + types) and skip the heavy build when unchanged,
-                // with a slow heal so a client that missed one still converges
-                int hash = 17;
-                bool sawError = false;
-                for (int kind = 0; kind < KindCount; kind++)
-                {
-                    var list = GetList(sm, kind);
-                    int n = list?.Count ?? 0;
-                    hash = hash * 31 + n;
-                    if (list != null)
-                        for (int i = 0; i < n; i++)
-                            if (list[i] is InteractableObject obj)
-                            {
-                                try
-                                {
-                                    int id = PlacedObjectIdentity.AssignHost(obj);
-                                    _idsThisTick[obj] = id;
-                                    hash = hash * 31 + id
-                                        + ((kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType)
-                                        + (IsBoxed(obj) ? 1 : 0)
-                                        + (IsBoxed(obj) ? Mathf.RoundToInt(ObjectPose(obj).x * 8f) : 0)
-                                        + (IsBoxed(obj) ? Mathf.RoundToInt(ObjectPose(obj).z * 8f) : 0);
-                                }
-                                catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i, e); }
-                            }
-                }
-                if (sawError)
-                    return; // retry the complete roster on the next cadence
-                _heal += 3f;
-                if (hash == _lastHash && _heal < 30f)
-                    return;
-                _lastHash = hash;
-                _heal = 0f;
-                var all = new List<List<Entry>>(KindCount);
-                for (int kind = 0; kind < KindCount; kind++)
-                {
-                    var list = GetList(sm, kind);
-                    var entries = new List<Entry>(list?.Count ?? 0);
-                    if (list != null)
-                    {
-                        for (int i = 0; i < list.Count; i++)
-                        {
-                            var obj = list[i] as InteractableObject;
-                            if (obj == null)
-                                continue;
-                            Entry entry = default(Entry);
-                            bool entryAdded = false;
-                            try
-                            {
-                                entries.Add(new Entry
-                                {
-                                    Id = (ushort)(_idsThisTick.TryGetValue(obj, out int id) ? id : PlacedObjectIdentity.AssignHost(obj)),
-                                    ObjType = (kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType,
-                                    Pos = obj.transform.position,
-                                    Rot = obj.transform.rotation,
-                                });
-                                entry = entries[entries.Count - 1];
-                                entryAdded = true;
-                                if (obj.GetIsBoxedUp() && obj.GetPackagingBoxShelf() != null)
-                                {
-                                    entry.IsBoxed = true;
-                                    entry.BoxedPos = obj.GetPackagingBoxShelf().transform.position;
-                                    entry.BoxedRot = obj.GetPackagingBoxShelf().transform.rotation;
-                                }
-                            }
-                            catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i, e); }
-                            if (entryAdded)
-                                entries[entries.Count - 1] = entry;
-                        }
-                    }
-                    all.Add(entries);
-                }
-                if (!sawError)
-                    OnHostSnapshot?.Invoke(all);
+                _scanHash = 17;
+                _sawError = false;
+                _building = false;
+                _cursor.Reset();
+                _scanning = true;
             }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("PopulationSync host: " + e.Message); }
+            try
+            {
+                if (!_building)
+                {
+                    // Pass 1: cheap identity hash + id assignment. No heavy build unless it changed.
+                    _cursor.Scan(_groups, HashVisit);
+                    if (!_cursor.Done)
+                        return;
+                    if (_sawError)
+                    {
+                        _scanning = false; // retry the complete roster on the next cadence
+                        return;
+                    }
+                    _heal += 3f;
+                    if (_scanHash == _lastHash && _heal < 30f)
+                    {
+                        _scanning = false;
+                        return;
+                    }
+                    _lastHash = _scanHash;
+                    _heal = 0f;
+                    _all = new List<List<Entry>>(KindCount);
+                    for (int k = 0; k < KindCount; k++)
+                        _all.Add(new List<Entry>(_groups[k]?.Count ?? 0));
+                    _building = true;
+                    _cursor.Reset();
+                }
+                // Pass 2: build the roster, one slice per frame.
+                _cursor.Scan(_groups, BuildVisit);
+                if (_cursor.Done)
+                {
+                    _scanning = false;
+                    if (!_sawError)
+                        OnHostSnapshot?.Invoke(_all);
+                }
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("PopulationSync host: " + e.Message);
+                _scanning = false;
+            }
+        }
+
+        private void HashVisit(object item, int kind, int index)
+        {
+            var obj = item as InteractableObject;
+            if (obj == null)
+                return;
+            try
+            {
+                int id = PlacedObjectIdentity.AssignHost(obj);
+                _idsThisTick[obj] = id;
+                bool boxed = IsBoxed(obj);
+                _scanHash = _scanHash * 31 + id
+                    + ((kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType)
+                    + (boxed ? 1 : 0)
+                    + (boxed ? Mathf.RoundToInt(ObjectPose(obj).x * 8f) : 0)
+                    + (boxed ? Mathf.RoundToInt(ObjectPose(obj).z * 8f) : 0);
+            }
+            catch (Exception e) { _sawError = true; LogSnapshotError(kind + ":" + index, e); }
+        }
+
+        private void BuildVisit(object item, int kind, int index)
+        {
+            var obj = item as InteractableObject;
+            if (obj == null)
+                return;
+            try
+            {
+                var entry = new Entry
+                {
+                    Id = (ushort)(_idsThisTick.TryGetValue(obj, out int id) ? id : PlacedObjectIdentity.AssignHost(obj)),
+                    ObjType = (kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType,
+                    Pos = obj.transform.position,
+                    Rot = obj.transform.rotation,
+                };
+                if (obj.GetIsBoxedUp() && obj.GetPackagingBoxShelf() != null)
+                {
+                    entry.IsBoxed = true;
+                    entry.BoxedPos = obj.GetPackagingBoxShelf().transform.position;
+                    entry.BoxedRot = obj.GetPackagingBoxShelf().transform.rotation;
+                }
+                _all[kind].Add(entry);
+            }
+            catch (Exception e) { _sawError = true; LogSnapshotError(kind + ":" + index, e); }
         }
 
         private void LogSnapshotError(string item, Exception e)
@@ -300,10 +334,23 @@ namespace CardShopCoop.Sync
                 // compare on the correct identity per kind, or a wrong deco variant (whose
                 // m_ObjectType is always -1) could never be detected and repaired
                 int cur = (kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType;
-                if (cur != want[i].ObjType || IsBoxed(obj) != want[i].IsBoxed)
+                if (cur != want[i].ObjType)
                 {
-                    CoopPlugin.Log.LogInfo($"population: repairing index {i} (kind {kind}): {cur}/{IsBoxed(obj)} -> {want[i].ObjType}/{want[i].IsBoxed}");
+                    BoxShared.DebugLog("population", $"population: repairing index {i} (kind {kind}): {cur} -> {want[i].ObjType}");
                     obj.OnDestroyed();
+                    OnClientStructureChanged?.Invoke(kind);
+                    return; // re-align next tick
+                }
+                // Same count and type, but boxed<->placed differs: the host placed a boxed
+                // object (or boxed a placed one). That is not a structural change, so apply
+                // the transition explicitly or the client keeps the stale boxed mirror.
+                if (IsBoxed(obj) != want[i].IsBoxed)
+                {
+                    BoxShared.DebugLog("population", $"population: boxed state index {i} (kind {kind}) {IsBoxed(obj)} -> {want[i].IsBoxed}");
+                    if (want[i].IsBoxed)
+                        FurnitureBoxOps.BoxUpPlacedObject(obj);
+                    else
+                        FurnitureBoxOps.PlaceBoxedObject(obj, want[i].Pos, want[i].Rot);
                     OnClientStructureChanged?.Invoke(kind);
                     return; // re-align next tick
                 }
@@ -383,6 +430,16 @@ namespace CardShopCoop.Sync
                     PlacedObjectIdentity.Bind(clientObjs[b], want[w].Id);
                     if (kind == 5)
                         CardShopCoop.Patches.GamePatches.AdoptPendingDeco(clientObjs[b]);
+                    if (IsBoxed(clientObjs[b]) != want[w].IsBoxed)
+                    {
+                        BoxShared.DebugLog("population", $"population: boxed transition id {want[w].Id} (kind {kind}) {IsBoxed(clientObjs[b])} -> {want[w].IsBoxed}");
+                        if (want[w].IsBoxed)
+                            FurnitureBoxOps.BoxUpPlacedObject(clientObjs[b]);
+                        else
+                            FurnitureBoxOps.PlaceBoxedObject(clientObjs[b], want[w].Pos, want[w].Rot);
+                        OnClientStructureChanged?.Invoke(kind);
+                        return; // re-align next tick
+                    }
                 }
             }
 
@@ -403,7 +460,7 @@ namespace CardShopCoop.Sync
                 if (obj.GetIsMovingObject())
                     continue;
                 guard--;
-                CoopPlugin.Log.LogInfo($"population: removing unmatched {TypeName(kind, obj)} (kind {kind})");
+                BoxShared.DebugLog("population", $"population: removing unmatched {TypeName(kind, obj)} (kind {kind})");
                 obj.OnDestroyed();
                 OnClientStructureChanged?.Invoke(kind);
             }
@@ -433,7 +490,7 @@ namespace CardShopCoop.Sync
                 // boxed-delivery recipe. SpawnInteractableObject alone creates a
                 // visible object at Vector3.zero; the real game moves only the box
                 // after BoxUpObject, so reproducing that sequence avoids the
-                // appear-at-origin -> disappear race with FurnBoxSync.
+                // appear-at-origin -> disappear race with the furniture box ops.
                 InteractableObject spawned;
                 if (e.IsBoxed && kind != 5)
                 {
@@ -458,7 +515,7 @@ namespace CardShopCoop.Sync
                 if (!e.IsBoxed)
                     spawned.transform.SetPositionAndRotation(e.Pos, e.Rot);
                 PlacedObjectIdentity.Bind(spawned, e.Id);
-                CoopPlugin.Log.LogInfo($"population: spawned {TypeName(kind, e.ObjType)} (kind {kind})");
+                BoxShared.DebugLog("population", $"population: spawned {TypeName(kind, e.ObjType)} (kind {kind})");
                 OnClientStructureChanged?.Invoke(kind);
             }
         }

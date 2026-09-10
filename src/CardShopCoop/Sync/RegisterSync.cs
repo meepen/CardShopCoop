@@ -1330,7 +1330,7 @@ namespace CardShopCoop.Sync
                 else
                     _mannedBy.Remove(idx);
                 if (manned != 0 && _localManned == idx
-                    && !(manned == 2 && owner == CoopCore.LocalConnectionId))
+                    && !(manned == 2 && PlayerRegistry.IsLocalConnection(owner)))
                 {
                     CoopPlugin.Log.LogInfo($"RegisterSync client: counter {idx} claim rejected; releasing local station");
                     ForceExitManned();

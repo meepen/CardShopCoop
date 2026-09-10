@@ -60,49 +60,6 @@ namespace CardShopCoop.Net.Messages
         }
     }
 
-    [NetworkMessage(MsgType.BoxState, Policy = MessagePolicy.ClientOnly)]
-    public sealed class BoxStateMessage : INetMessage
-    {
-        public List<BoxSync.Entry> Entries = new List<BoxSync.Entry>();
-        public MsgType Type
-        {
-            get
-            {
-                return MsgType.BoxState;
-            }
-        }
-    }
-
-    [NetworkMessage(MsgType.BoxRequest, Policy = MessagePolicy.HostOnly)]
-    public sealed class BoxRequestMessage : INetMessage
-    {
-        public List<BoxSync.Entry> Entries = new List<BoxSync.Entry>();
-        public MsgType Type
-        {
-            get
-            {
-                return MsgType.BoxRequest;
-            }
-        }
-    }
-
-    // Guest trashed a loose box: client -> host, keyed by the box's stable id + its type
-    // (the host refuses a removal unless the wire type matches the tracked box's type, so
-    // the id has to be in LOCAL terms - Msg.ReadItemType does that translation).
-    [NetworkMessage(MsgType.BoxRemoved, Policy = MessagePolicy.HostOnly)]
-    public sealed class BoxRemovedMessage : INetMessage
-    {
-        public int Index;
-        public EItemType ItemType;
-        public MsgType Type
-        {
-            get
-            {
-                return MsgType.BoxRemoved;
-            }
-        }
-    }
-
     // Placed-object population roster, one list per kind: host -> client. Deferred entirely
     // to PopulationSync's writer/reader so the nested (list-of-lists) layout stays identical.
     [NetworkMessage(MsgType.PopState, Policy = MessagePolicy.ClientOnly)]

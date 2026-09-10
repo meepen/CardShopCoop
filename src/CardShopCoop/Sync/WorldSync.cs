@@ -90,6 +90,14 @@ namespace CardShopCoop.Sync
         private static bool TryKey(int kind, InteractableObject obj, int comp, out int key)
             => PlacedObjectIdentity.TryMakeCompartmentKey(kind, obj, comp, out key);
 
+        // Time-sliced scan state: the whole-world walk is spread over frames. The budget is in
+        // SHELVES; each shelf's (few) compartments ride with it.
+        private readonly ListScanCursor _cursor = new ListScanCursor { Budget = 12 };
+        private System.Collections.IList[] _groups;
+        private bool _scanning;
+        private List<Entry> _scanChanges;
+        private bool _sawError;
+
         public void Reset()
         {
             _last.Clear();
@@ -102,6 +110,10 @@ namespace CardShopCoop.Sync
             _timer = 0.35f; // staggered phase: engines must not all walk on the same frame
             _scanInterval = BaseScanInterval;
             _sm = null;
+            _scanning = false;
+            _groups = null;
+            _scanChanges = null;
+            _cursor.Reset();
         }
 
         /// <summary>Request a same-frame scan after a vanilla inventory/shelf mutation.
@@ -117,102 +129,75 @@ namespace CardShopCoop.Sync
             if (!inGame)
                 return;
             _timer += dt;
-            if (_timer < _scanInterval)
-                return;
-            _timer -= _scanInterval; // keep the phase; reset-to-zero drifts back into alignment
-
-            List<Entry> changes = null;
-            bool sawError = false;
-            try
+            if (!_scanning)
             {
+                if (_timer < _scanInterval)
+                    return;
+                _timer -= _scanInterval; // keep the phase; reset-to-zero drifts back into alignment
                 var sm = ResolveShelfManager();
                 if (sm == null)
                     return;
-
-                for (int i = 0; i < sm.m_ShelfList.Count; i++)
-                {
-                    var shelf = sm.m_ShelfList[i];
-                    if (shelf == null)
-                        continue;
-                    try
-                    {
-                        var comps = shelf.GetItemCompartmentList();
-                        for (int j = 0; j < comps.Count; j++)
-                        {
-                            try
-                            {
-                                if (TryKey(0, shelf, j, out int key))
-                                    Visit(key, comps[j], ref changes);
-                            }
-                            catch (Exception e) { sawError = true; LogSnapshotError("shelf " + i + " compartment " + j, e); }
-                        }
-                    }
-                    catch (Exception e) { sawError = true; LogSnapshotError("shelf " + i, e); }
-                }
-                // warehouse racks (kind 1) are deliberately NOT walked: their compartment
-                // "count" is a STORED-BOX tally (AddBox/RemoveBox), not loose items, and
-                // applying it through the item path spawned phantom item meshes into the
-                // rack, stomped the compartment type, and threw the recurring
-                // "apply 1000102: Index was out of range" (CalculatePositionList against
-                // the rack's few physical slots). BoxSync owns racks via Stored entries.
-                // combi card shelves and tournament prize shelves carry ITEM compartments
-                // too (the bottom half) - they live in their own manager lists, so the
-                // walks above never saw them
-                for (int i = 0; i < sm.m_CardItemCombiShelfList.Count; i++)
-                {
-                    var combi = sm.m_CardItemCombiShelfList[i];
-                    if (combi == null)
-                        continue;
-                    try
-                    {
-                        var comps = combi.GetItemCompartmentList();
-                        for (int j = 0; j < comps.Count; j++)
-                        {
-                            try
-                            {
-                                if (TryKey(3, combi, j, out int key))
-                                    Visit(key, comps[j], ref changes);
-                            }
-                            catch (Exception e) { sawError = true; LogSnapshotError("combi shelf " + i + " compartment " + j, e); }
-                        }
-                    }
-                    catch (Exception e) { sawError = true; LogSnapshotError("combi shelf " + i, e); }
-                }
-                for (int i = 0; i < sm.m_TournamentPrizeShelfList.Count; i++)
-                {
-                    var prize = sm.m_TournamentPrizeShelfList[i];
-                    if (prize == null)
-                        continue;
-                    try
-                    {
-                        var comps = prize.GetItemCompartmentList();
-                        for (int j = 0; j < comps.Count; j++)
-                        {
-                            try
-                            {
-                                if (TryKey(14, prize, j, out int key))
-                                    Visit(key, comps[j], ref changes);
-                            }
-                            catch (Exception e) { sawError = true; LogSnapshotError("prize shelf " + i + " compartment " + j, e); }
-                        }
-                    }
-                    catch (Exception e) { sawError = true; LogSnapshotError("prize shelf " + i, e); }
-                }
+                if (_groups == null || _groups.Length != 3)
+                    _groups = new System.Collections.IList[3];
+                _groups[0] = sm.m_ShelfList;
+                _groups[1] = sm.m_CardItemCombiShelfList;
+                _groups[2] = sm.m_TournamentPrizeShelfList;
+                _cursor.Reset();
+                _scanning = true;
+                _scanChanges = null;
+                _sawError = false;
+            }
+            try
+            {
+                _cursor.Scan(_groups, VisitShelf);
             }
             catch (Exception e)
             {
-                sawError = true;
+                _sawError = true;
                 LogSnapshotError("snapshot", e);
+                _scanning = false;
                 return;
             }
-
-            if (!sawError && changes != null && changes.Count > 0)
+            if (_cursor.Done)
             {
-                _scanInterval = BaseScanInterval;
-                OnLocalChanges?.Invoke(changes);
+                _scanning = false;
+                if (!_sawError && _scanChanges != null && _scanChanges.Count > 0)
+                {
+                    _scanInterval = BaseScanInterval;
+                    OnLocalChanges?.Invoke(_scanChanges);
+                }
+                else if (!_sawError)
+                {
+                    _scanInterval = Math.Min(MaxQuietScanInterval, _scanInterval * 1.25f);
+                }
             }
-            else if (!sawError)
-                _scanInterval = Math.Min(MaxQuietScanInterval, _scanInterval * 1.25f);
+        }
+
+        /// <summary>Visit one shelf (kind 0, 3 or 14) and all of its item compartments.</summary>
+        private void VisitShelf(object item, int group, int index)
+        {
+            var shelf = item as Shelf;
+            if (shelf == null)
+                return;
+            int kind = group == 0 ? 0 : (group == 1 ? 3 : 14);
+            // warehouse racks (kind 1) are deliberately NOT walked here: their compartment
+            // "count" is a STORED-BOX tally (AddBox/RemoveBox), not loose items, and applying
+            // it through the item path spawned phantom item meshes into the rack. The item box
+            // family owns racks via stored entries.
+            try
+            {
+                var comps = shelf.GetItemCompartmentList();
+                for (int j = 0; j < comps.Count; j++)
+                {
+                    try
+                    {
+                        if (TryKey(kind, shelf, j, out int key))
+                            Visit(key, comps[j]);
+                    }
+                    catch (Exception e) { _sawError = true; LogSnapshotError("shelf " + index + " compartment " + j, e); }
+                }
+            }
+            catch (Exception e) { _sawError = true; LogSnapshotError("shelf " + index, e); }
         }
 
         private void LogSnapshotError(string item, Exception e)
@@ -221,7 +206,7 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogWarning("WorldSync snapshot item " + item + ": " + e.Message);
         }
 
-        private void Visit(int key, ShelfCompartment comp, ref List<Entry> changes)
+        private void Visit(int key, ShelfCompartment comp)
         {
             if (comp == null)
                 return;
@@ -247,9 +232,9 @@ namespace CardShopCoop.Sync
                 _last[key] = new CompState { Type = type, Count = count };
                 return;
             }
-            if (changes == null)
-                changes = new List<Entry>();
-            if (changes.Count >= 512)
+            if (_scanChanges == null)
+                _scanChanges = new List<Entry>();
+            if (_scanChanges.Count >= 512)
                 return; // leave un-recorded; picked up next tick
             _last[key] = new CompState { Type = type, Count = count };
             // a guest's change is only a REQUEST: it has to round-trip to the host before it
@@ -257,7 +242,7 @@ namespace CardShopCoop.Sync
             // heal, built before our request landed) can't roll the placement back under us.
             if (CoopCore.Role == CoopRole.Client)
                 _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
-            changes.Add(new Entry { Key = key, Type = type, Count = count });
+            _scanChanges.Add(new Entry { Key = key, Type = type, Count = count });
         }
 
         /// <summary>Apply authoritative states (client) or requested states (host).</summary>

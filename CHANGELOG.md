@@ -5,6 +5,51 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.2.0
+**Guest furniture selling and box movement now work safely and stay synchronized.**
+
+- Guests can sell boxed furniture, and the host removes the same authoritative furniture for both
+  players.
+- Guests can box up placed furniture without creating a guest-only copy; the host now owns that
+  box lifecycle too.
+- Boxes held by one player are now hidden and protected from pickup by everyone else, preventing
+  multi-player carry desyncs.
+- Item boxes placed with Q can now be picked up normally by the other player after they are set
+  down.
+- Boxes opened for furniture placement stay hidden from other players until placement is complete.
+- Furniture placement previews show the furniture being placed instead of a stray delivery box.
+- Invalid, stale, busy, or last-cashier-counter sale requests are rejected without creating money.
+- Remote furniture previews now match the game's normal placement preview, including alignment and
+  multi-part rendering, layers, and transparent-material rendering.
+- Box pickup, drop, and furniture box-up changes now reach the other player immediately through the
+  existing synchronization messages instead of waiting for the normal polling interval.
+- Remote players see furniture boxes disappear as soon as someone picks them up.
+- Q-mode box movement uses the holder's camera state smoothly on both sides.
+- Throws reproduce the game's launch impulse on the receiving side instead of dropping at the
+  thrower's feet.
+- Box ownership and movement now travel as a single authoritative value instead of several
+  separate flags that could disagree. This fixes rare cases where a box could stay invisible,
+  remain stuck in move mode, or appear owned by the wrong player after a throw, a drop, or a
+  disconnect.
+
+Both players must update.
+
+---
+
+## 1.1.1
+**Fixes framerate drops for players watching someone move furniture.**
+
+- Remote furniture previews no longer repeatedly scan the whole shop while another player is
+  carrying furniture in placement mode.
+- Preview cleanup now releases temporary materials correctly, preventing repeated move previews
+  from gradually increasing memory use.
+- Newly purchased furniture now appears on clients immediately when the host places it for the
+  first time, instead of appearing only after the host moves it again.
+
+Both players must update.
+
+---
+
 ## 1.1.0
 **A safer, fuller co-op session with the game's real register and a more reliable network.**
 Both players must update.

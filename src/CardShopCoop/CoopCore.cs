@@ -52,7 +52,7 @@ namespace CardShopCoop
             }
         }
         public static CoopRole Role { get; private set; } = CoopRole.None;
-        private static double _lastImmediateObjectSync;
+        private static int _lastImmediateObjectSyncFrame = -1;
 
         /// <summary>Called by mutation postfixes. The modules still coalesce their own
         /// state into one snapshot; this only removes the normal polling latency.</summary>
@@ -63,21 +63,19 @@ namespace CardShopCoop
                 return;
             // Several vanilla methods can participate in one gameplay action (for example
             // removing an item updates both the compartment and the box). Coalesce those
-            // callbacks into one sync pass; a 100 ms ceiling is still far below the normal
-            // snapshot cadence and avoids repeatedly arming every scanner in one burst.
-            double now = Time.realtimeSinceStartupAsDouble;
-            if (now - _lastImmediateObjectSync < 0.10)
+            // callbacks from one vanilla action into one sync pass. A frame boundary is the
+            // right coalescing unit here: it merges the several internal mutations made by
+            // one pickup/box-up while never delaying a distinct action for 100 ms.
+            if (_lastImmediateObjectSyncFrame == Time.frameCount)
                 return;
-            _lastImmediateObjectSync = now;
+            _lastImmediateObjectSyncFrame = Time.frameCount;
             try
             {
                 core._world.ForceNextTick();
                 core._cardShelves.ForceNextTick();
                 core._objMoves.ForceNextTick();
-                core._boxes.ForceBroadcastNextTick();
+                core._boxEngine?.ForceNextTick();
                 core._population.ForceNextTick();
-                core._cardBoxes.ForceNextTick();
-                core._furnBoxes.ForceNextTick();
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("Immediate sync request: " + e.Message); }
         }
@@ -176,7 +174,6 @@ namespace CardShopCoop
         private readonly CardShelfSync _cardShelves = new CardShelfSync();
         private readonly ObjMoveSync _objMoves = new ObjMoveSync();
         private readonly MovePreviewSync _movePreview = new MovePreviewSync();
-        private readonly BoxSync _boxes = new BoxSync();
         private readonly PopulationSync _population = new PopulationSync();
 
         // domain sync modules (v0.15): each owns one game system end-to-end and talks
@@ -193,8 +190,10 @@ namespace CardShopCoop
         private readonly ContainerSync _containers = new ContainerSync();
         private readonly TournamentSync _tournament = new TournamentSync();
         private readonly TvSync _tv = new TvSync();
-        private readonly CardBoxSync _cardBoxes = new CardBoxSync();
-        private readonly FurnBoxSync _furnBoxes = new FurnBoxSync();
+        private readonly ItemBoxFamily _itemBoxFamily = new ItemBoxFamily();
+        private readonly CardBoxFamily _cardBoxFamily = new CardBoxFamily();
+        private readonly FurnitureBoxFamily _furnBoxFamily = new FurnitureBoxFamily();
+        private BoxEngine _boxEngine;
         private readonly Sync.RegisterSync _register = new Sync.RegisterSync();
         private string _lastShopNameSent;
         private float _shopNameTimer = -1.0f; // staggered phase (see _lightSyncTimer note)
@@ -299,7 +298,7 @@ namespace CardShopCoop
         {
             try
             {
-                action();
+                Util.PerfProbe.Measure(stage, action);
             }
             catch (Exception e)
             {
@@ -508,20 +507,7 @@ namespace CardShopCoop
             };
             _population.OnHostSnapshot = all =>
                 Broadcast(new PopStateMessage { Entries = all });
-            _boxes.OnHostSnapshot = list =>
-                Broadcast(new BoxStateMessage { Entries = list });
-            _boxes.OnClientChanges = list =>
-                Send(1, new BoxRequestMessage { Entries = list });
-            _boxes.SendPreview = message =>
-            {
-                if (_net == null)
-                    return;
-                if (Role == CoopRole.Host)
-                    _net.BroadcastTransient(message);
-                else if (Role == CoopRole.Client)
-                    _net.SendTransient(1, message);
-            };
-            BoxSync.IsLocallyCarried = box =>
+            ItemBoxFamily.IsLocallyCarried = box =>
             {
                 if (_playerIpc == null || box == null)
                     return false;
@@ -540,36 +526,15 @@ namespace CardShopCoop
                 }
                 catch { return false; }
             };
-            CardBoxSync.IsLocallyCarried = box =>
-            {
-                if (_playerIpc == null || box == null)
-                    return false;
-                try
-                {
-                    // card boxes land in BOTH the generic hold field and the card-box
-                    // field (OnEnterHoldBoxMode); reuse the per-frame cached reads
-                    if (_heldBoxFrame != Time.frameCount)
-                    {
-                        _heldBoxFrame = Time.frameCount;
-                        _heldBoxA = FiHoldItemBox?.GetValue(_playerIpc);
-                        _heldBoxB = FiHoldBox?.GetValue(_playerIpc);
-                        _heldBoxC = FiHoldBoxCard?.GetValue(_playerIpc);
-                    }
-                    return ReferenceEquals(_heldBoxC, box) || ReferenceEquals(_heldBoxB, box);
-                }
-                catch { return false; }
-            };
-            BoxSync.LocalBoxDestroyed = box =>
+            BoxShared.LocalBoxDestroyed = box =>
             {
                 if (IsTearingDown || !InGameLevel() || ClientReloading)
                     return;
                 if (Role == CoopRole.Client)
-                    _boxes.NotifyLocalDestroyed(box);
+                    _boxEngine?.ClientNotifyLocalDestroyed(box);
                 else if (Role == CoopRole.Host)
-                    _boxes.HostNotifyLocalDestroyed();
+                    _boxEngine?.HostNotifyLocalDestroyed(box);
             };
-            _boxes.OnLocalRemoved = (idx, type) =>
-                Send(1, new BoxRemovedMessage { Index = idx, ItemType = (EItemType)type });
             PopulationSync.OnClientStructureChanged = kind =>
             {
                 if (Role != CoopRole.Client)
@@ -599,7 +564,7 @@ namespace CardShopCoop
                 // Population reconciliation removes/inserts list elements, so every
                 // index-keyed mirror needs an immediate authoritative snapshot rather than
                 // waiting for its normal heal interval.
-                _cardBoxes.ForceResend();
+                _boxEngine?.ForceNextTick();
                 _register.ForceResend();
             };
             _actCardPriceRetry = CardPriceRetryTick;
@@ -626,9 +591,10 @@ namespace CardShopCoop
             _actBoxes = () =>
             {
                 if (Role == CoopRole.Host)
-                    _boxes.HostTick(_dt, _syncActive);
+                    _boxEngine.HostTick(_dt, _syncActive);
                 else if (Role == CoopRole.Client)
-                    _boxes.ClientTick(_dt, _syncActive && !ClientPreloadHold);
+                    _boxEngine.ClientTick(_dt, _syncActive && !ClientPreloadHold);
+                BoxPlacement.TickVanillaPlacement(_dt);
             };
             _actNpcPuppets = () => _npcs.TickPuppets(_dt, InGameLevel());
             _actNpcSweep = NpcSweepTick;
@@ -657,20 +623,16 @@ namespace CardShopCoop
             _report.BroadcastState = Broadcast;
             _containers.SendOp = Send(1);
             _containers.BroadcastState = Broadcast;
-            _containers.RequestBoxResync = () => _boxes.ForceBroadcastNextTick();
+            _containers.RequestBoxResync = () => _boxEngine?.ForceNextTick();
             _containers.SendToClient = Send;
             _containers.HoldClientBox = TryHoldClientBox;
-            _boxes.OnClientBoxCreated = (box, entry) => _containers.TryAutoHoldTakenBox(box, entry);
             _tournament.BroadcastState = Broadcast;
             _tv.SendOp = Send(1);
             _tv.BroadcastState = Broadcast;
             _tv.PeerCount = () => _net == null ? 0 : _net.ConnectionCount;
-            _cardBoxes.SendOp = Send(1);
-            _cardBoxes.BroadcastState = Broadcast;
-            _cardBoxes.SendToClient = Send;
-            _furnBoxes.SendOp = Send(1);
-            _furnBoxes.BroadcastState = Broadcast;
-            FurnBoxSync.IsLocallyCarried = box =>
+
+            FurnitureBoxOps.SendOp = Send(1);
+            FurnitureBoxOps.IsLocallyCarried = box =>
             {
                 if (_playerIpc == null || box == null)
                     return false;
@@ -689,6 +651,43 @@ namespace CardShopCoop
                 }
                 catch { return false; }
             };
+
+            _boxEngine = new BoxEngine(new IBoxFamily[]
+            {
+                _itemBoxFamily, _cardBoxFamily, _furnBoxFamily,
+            });
+            _boxEngine.SendSnapshot = snap => Broadcast(snap);
+            _boxEngine.SendUpdate = update => Send(1, update);
+            _boxEngine.OnClientBoxSpawned = box => _containers.TryAutoHoldTakenBox(box);
+            _boxEngine.LocalHeld = () =>
+            {
+                if (_playerIpc == null)
+                    return null;
+                try
+                {
+                    return FiHoldBox?.GetValue(_playerIpc) as InteractablePackagingBox;
+                }
+                catch { return null; }
+            };
+            CardBoxFamily.IsLocallyCarried = box =>
+            {
+                if (_playerIpc == null || box == null)
+                    return false;
+                try
+                {
+                    if (_heldBoxFrame != Time.frameCount)
+                    {
+                        _heldBoxFrame = Time.frameCount;
+                        _heldBoxB = FiHoldBox?.GetValue(_playerIpc);
+                        _heldBoxC = FiHoldBoxCard?.GetValue(_playerIpc);
+                    }
+                    return ReferenceEquals(_heldBoxC, box) || ReferenceEquals(_heldBoxB, box);
+                }
+                catch { return false; }
+            };
+            CardBoxOps.IsLocallyCarried = CardBoxFamily.IsLocallyCarried;
+            CardBoxOps.SendCollect = msg => Send(1, msg);
+            CardBoxOps.SendResult = (connId, msg) => Send(connId, msg);
             _actModules = ModulesTick;
             SceneManager.sceneLoaded += OnSceneLoaded;
 
@@ -969,6 +968,8 @@ namespace CardShopCoop
             Broadcast(roster);
         }
 
+        internal BoxEngine Boxes => _boxEngine;
+
         private int _selfId = -1; // our connId on the host, from Welcome
         internal static int LocalConnectionId
         {
@@ -1017,7 +1018,7 @@ namespace CardShopCoop
             _cardShelves.Reset();
             _objMoves.Reset();
             _movePreview.Reset();
-            _boxes.Reset();
+            _boxEngine?.Reset();
             _population.Reset();
             ModulesReset();
             _lightManager = null;
@@ -1488,8 +1489,7 @@ namespace CardShopCoop
                 _report.HostTick(_dt, inGame); // per-frame: its report-open flag fires outside the timer
                 _containers.HostTick(_dt, inGame);
                 _tournament.HostTick(_dt, inGame);
-                _cardBoxes.HostTick(_dt, inGame);
-                _furnBoxes.HostTick(_dt, inGame);
+
                 _register.HostTick(_dt, inGame);
                 _tv.HostTick(_dt, inGame);
             }
@@ -1498,12 +1498,11 @@ namespace CardShopCoop
                 _tv.ClientTick(_dt, inGame);
                 _trades.ClientTick(_dt, inGame); // offer countdown + accept/decline keys
                 _containers.ClientTick(_dt, inGame && !ClientPreloadHold); // mirror opener presentation + retry container clicks
-                _cardBoxes.ClientTick(_dt, inGame && !ClientPreloadHold); // carried transitions + box moves
-                _furnBoxes.ClientTick(_dt, inGame && !ClientPreloadHold);
+
                 // Box trajectories are cosmetic client prediction only. Their endpoints are
                 // still host-authored; this makes throw/drop/set-down reconciliation readable
                 // instead of teleporting the remote copy.
-                BoxSync.TickRemoteMotions(_dt);
+                BoxPlacement.TickRemoteMotions(_dt);
                 // content mods register their products SECONDS after the scene loads
                 // (and per-save: a host mid-tutorial has none yet) - keep re-digesting
                 // as our catalog changes so the comparison never goes stale
@@ -1564,8 +1563,7 @@ namespace CardShopCoop
             _report.Reset();
             _containers.Reset();
             _tournament.Reset();
-            _cardBoxes.Reset();
-            _furnBoxes.Reset();
+            _boxEngine?.Reset();
             _register.Reset();
             _tv.Reset();
         }
@@ -1576,9 +1574,8 @@ namespace CardShopCoop
             NpcSync.ActivateLive(_npcs);
             TradeServe.ActivateLive(_trades);
             RegisterSync.ActivateLive(_register);
-            BoxSync.ActivateLive(_boxes);
             ContainerSync.ActivateLive(_containers);
-            FurnBoxSync.ActivateLive(_furnBoxes);
+
             GradingSync.ActivateLive(_grading);
         }
 
@@ -1587,9 +1584,10 @@ namespace CardShopCoop
             NpcSync.ClearLive();
             TradeServe.ClearLive();
             RegisterSync.ClearLive();
-            BoxSync.ClearLive();
+            BoxShared.ApplyingRemote = false;
+            BoxPlacement.Reset();
             ContainerSync.ClearLive();
-            FurnBoxSync.ClearLive();
+
             GradingSync.ClearLive();
             Util.GradingInterop.Reset();
         }
@@ -1606,8 +1604,7 @@ namespace CardShopCoop
             _report.ForceResend();
             _containers.ForceResend();
             _tournament.ForceResend();
-            _cardBoxes.ForceResend();
-            _furnBoxes.ForceResend();
+            _boxEngine?.RequestFullSnapshot();
             _register.ForceResend();
             _tv.ForceResend();
         }
@@ -1690,11 +1687,14 @@ namespace CardShopCoop
             _hasLastPos = true;
             float yaw = _playerCamTf != null ? _playerCamTf.eulerAngles.y
                 : (Camera.main != null ? Camera.main.transform.eulerAngles.y : playerTf.eulerAngles.y);
+            Transform camera = _playerCamTf != null ? _playerCamTf : Camera.main != null ? Camera.main.transform : null;
             byte hold = ComputeHoldState();
             BroadcastTransient(new PlayerStateMessage
             {
                 Position = pos,
                 Yaw = yaw,
+                CameraPosition = camera != null ? camera.position : pos,
+                CameraRotation = camera != null ? camera.rotation : Quaternion.Euler(0f, yaw, 0f),
                 Speed = speed,
                 Hold = hold,
                 HoldTypes = hold == 3 ? null : new List<int>(_holdTypesBuf),
@@ -1809,7 +1809,7 @@ namespace CardShopCoop
 
         /// <summary>Client-side half of an acknowledged empty-box take. Reuse the game's own
         /// StartHoldBox recipe so the controller enters HoldingBoxState, the box physics are
-        /// disabled, and the normal carry report reaches the host on the next BoxSync tick.</summary>
+        /// disabled, and the normal carry report reaches the host on the next box-engine tick.</summary>
         private static bool TryHoldClientBox(InteractablePackagingBox_Item box)
         {
             if (Role != CoopRole.Client || box == null)
@@ -1827,9 +1827,9 @@ namespace CardShopCoop
                 if (FiIsHoldBoxMode?.GetValue(ipc) is bool held && held)
                     return false;
                 box.StartHoldBox(isPlayer: true, ipc.m_HoldItemPos);
-                // BoxSync caches the controller's held-box fields for the current frame.
+                // CoopCore caches the controller's held-box fields for the current frame.
                 // Invalidate that cache because this handoff changes those fields inside the
-                // BoxState reconciliation callback itself.
+                // snapshot apply itself.
                 core._heldBoxFrame = -1;
                 return true;
             }
@@ -2919,7 +2919,7 @@ namespace CardShopCoop
             _cardShelves.Reset();
             _objMoves.Reset();
             _movePreview.Reset();
-            _boxes.Reset();
+            _boxEngine?.Reset();
             _population.Reset();
             ModulesReset();
             _lastShopNameSent = null;
@@ -3146,17 +3146,7 @@ namespace CardShopCoop
                     // re-asserts its carry on its next ~0.5s report).
                     try
                     {
-                        _boxes.HostReleaseConn(left);
-                    }
-                    catch { }
-                    try
-                    {
-                        _cardBoxes.HostReleaseRemoteCarried();
-                    }
-                    catch { }
-                    try
-                    {
-                        _furnBoxes.HostReleaseRemoteCarried();
+                        _boxEngine?.HostReleaseConn(left);
                     }
                     catch { }
                     try
@@ -3221,7 +3211,7 @@ namespace CardShopCoop
                 {
                     var t = _dispatchBuf[i].Type;
                     if (t != MsgType.PlayerState && t != MsgType.RegisterState
-                        && t != MsgType.RegisterCart && t != MsgType.BoxState && t != MsgType.PopState)
+                        && t != MsgType.RegisterCart && t != MsgType.BoxSnapshot && t != MsgType.PopState)
                         continue;
                     long key = ((long)t << 32) | (uint)_dispatchBuf[i].ConnId;
                     if (!_dispatchSeen.Add(key))
@@ -4637,12 +4627,36 @@ namespace CardShopCoop
                         }
                         break;
                     }
-                case MsgType.BoxState:
+                case MsgType.BoxUpdate:
+                    {
+                        if (Role != CoopRole.Host || !InGameLevel())
+                            break;
+                        if (msg.Message is BoxUpdateMessage boxUpdate)
+                            _boxEngine.HostApplyUpdate(boxUpdate, msg.ConnId);
+                        break;
+                    }
+                case MsgType.BoxSnapshot:
                     {
                         if (Role != CoopRole.Client || !InGameLevel())
                             break;
-                        if (msg.Message is BoxStateMessage boxState)
-                            _boxes.ClientApply(boxState.Entries);
+                        if (msg.Message is BoxSnapshotMessage boxSnap)
+                            _boxEngine.ClientApplySnapshot(boxSnap);
+                        break;
+                    }
+                case MsgType.BoxCollect:
+                    {
+                        if (Role != CoopRole.Host || !InGameLevel())
+                            break;
+                        if (msg.Message is BoxCollectMessage boxCollect)
+                            CardBoxOps.HostApplyCollect(boxCollect, msg.ConnId);
+                        break;
+                    }
+                case MsgType.BoxCollectResult:
+                    {
+                        if (Role != CoopRole.Client || !InGameLevel())
+                            break;
+                        if (msg.Message is BoxCollectResultMessage boxResult)
+                            CardBoxOps.ClientApplyResult(boxResult);
                         break;
                     }
                 case MsgType.PopState:
@@ -4651,31 +4665,6 @@ namespace CardShopCoop
                             break;
                         if (msg.Message is PopStateMessage popState)
                             _population.ClientApply(popState.Entries);
-                        break;
-                    }
-                case MsgType.BoxRequest:
-                    {
-                        if (Role != CoopRole.Host || !InGameLevel())
-                            break;
-                        if (msg.Message is BoxRequestMessage boxRequest)
-                            _boxes.HostApplyRequest(boxRequest.Entries, msg.ConnId);
-                        break;
-                    }
-                case MsgType.BoxMovePreview:
-                    {
-                        if (!InGameLevel() || !(msg.Message is BoxMovePreviewMessage boxPreview))
-                            break;
-                        if (Role == CoopRole.Host)
-                        {
-                            boxPreview.SourceId = msg.ConnId;
-                            _boxes.ApplyRemotePreview(boxPreview, msg.ConnId);
-                            if (_net != null)
-                                foreach (int cid in _net.ConnIds())
-                                    if (cid != msg.ConnId)
-                                        _net.SendTransient(cid, boxPreview);
-                        }
-                        else if (Role == CoopRole.Client)
-                            _boxes.ApplyRemotePreview(boxPreview, boxPreview.SourceId);
                         break;
                     }
                 case MsgType.Toast:
@@ -4710,24 +4699,6 @@ namespace CardShopCoop
                         bool amHost = Role == CoopRole.Host;
                         if (msg.Message is GradedDigestMessage gradedDigest)
                             CompareGradedDigests(gradedDigest, amHost ? msg.ConnId : 1, amHost);
-                        break;
-                    }
-                case MsgType.BoxRemoved:
-                    {
-                        if (Role != CoopRole.Host || !InGameLevel())
-                            break;
-                        if (msg.Message is BoxRemovedMessage boxRemoved)
-                        {
-                            int id = boxRemoved.Index;
-                            // HostApplyRemoval refuses the removal unless this type matches the
-                            // tracked box's own item type, so the id has to be in local terms. An
-                            // unmappable one lands on None, fails that guard, and the box is left
-                            // standing - the safe direction for a destructive op.
-                            int type = (int)boxRemoved.ItemType;
-                            string who = PeerNames.TryGetValue(msg.ConnId, out var n) ? n : "player";
-                            CoopPlugin.Log.LogInfo($"{who} trashed box id {id} ({(EItemType)type})");
-                            _boxes.HostApplyRemoval(id, type, msg.ConnId);
-                        }
                         break;
                     }
                 case MsgType.LicenseUnlock:
@@ -4968,44 +4939,12 @@ namespace CardShopCoop
                             _tournament.ClientApplyState(tournamentState);
                         break;
                     }
-                case MsgType.CardBoxOp:
+                case MsgType.FurnitureBoxOp:
                     {
                         if (Role != CoopRole.Host || !InGameLevel())
                             break;
-                        if (msg.Message is CardBoxOpMessage cardBoxOp)
-                            _cardBoxes.HostApplyOp(cardBoxOp, msg.ConnId);
-                        break;
-                    }
-                case MsgType.CardBoxState:
-                    {
-                        if (Role != CoopRole.Client || !InGameLevel())
-                            break;
-                        if (msg.Message is CardBoxStateMessage cardBoxState)
-                            _cardBoxes.ClientApplyState(cardBoxState);
-                        break;
-                    }
-                case MsgType.CardBoxCollectResult:
-                    {
-                        if (Role != CoopRole.Client || !InGameLevel())
-                            break;
-                        if (msg.Message is CardBoxCollectResultMessage cardBoxCollect)
-                            _cardBoxes.ClientApplyCollectRejected(cardBoxCollect);
-                        break;
-                    }
-                case MsgType.FurnBoxOp:
-                    {
-                        if (Role != CoopRole.Host || !InGameLevel())
-                            break;
-                        if (msg.Message is FurnBoxOpMessage furnBoxOp)
-                            _furnBoxes.HostApplyOp(furnBoxOp, msg.ConnId);
-                        break;
-                    }
-                case MsgType.FurnBoxState:
-                    {
-                        if (Role != CoopRole.Client || !InGameLevel())
-                            break;
-                        if (msg.Message is FurnBoxStateMessage furnBoxState)
-                            _furnBoxes.ClientApplyState(furnBoxState);
+                        if (msg.Message is FurnitureBoxOpMessage furnOp)
+                            FurnitureBoxOps.HostApplyOp(furnOp, msg.ConnId);
                         break;
                     }
                 case MsgType.EnumSync:
@@ -5511,7 +5450,7 @@ namespace CardShopCoop
         {
             _diagRecvStates++;
             _avatars.UpdateState(avatarId, state.Position, state.Yaw, state.Speed,
-                state.Hold, state.HoldTypes, state.HoldCards);
+                state.Hold, state.CameraPosition, state.CameraRotation, state.HoldTypes, state.HoldCards);
             string peerName = null;
             if (!PeerNames.TryGetValue(avatarId, out peerName) && avatarId >= 1000)
                 _rosterNames.TryGetValue(avatarId - 1000, out peerName);
@@ -5537,6 +5476,11 @@ namespace CardShopCoop
                 if (Role == CoopRole.Host)
                     StatusLine = "Hosting - " + who + " is in your shop!";
             }
+        }
+
+        public bool TryGetAvatarCamera(int avatarId, out Vector3 position, out Quaternion rotation)
+        {
+            return _avatars.TryGetPlacementCamera(avatarId, out position, out rotation);
         }
 
         private void ApplyPurchaseRequest(int connectionId, PurchaseRequestMessage request)
