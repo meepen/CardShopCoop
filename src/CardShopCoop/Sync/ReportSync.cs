@@ -1,3 +1,6 @@
+using CardShopCoop.Util;
+using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -32,7 +35,7 @@ namespace CardShopCoop.Sync
         /// mistake a sync write for local play.</summary>
         public static bool ApplyingRemote;
 
-        public Action<Action<BinaryWriter>> BroadcastState; // set by CoopCore: host -> clients
+        public Action<INetMessage> BroadcastState; // set by CoopCore: host -> clients
 
         private const float Interval = 2f;
         private const float HealEvery = 15f;
@@ -60,17 +63,17 @@ namespace CardShopCoop.Sync
 
         // client UI state we must read before opening a fullscreen lock
         private static readonly System.Reflection.FieldInfo FiIsLerping =
-            AccessTools.Field(typeof(EndOfDayReportScreen), "m_IsLerpingNumber");
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_IsLerpingNumber");
         // ...and the screen's own input latch, which we have to hand back the way OpenScreen
         // expects it (see CloseClientReport)
         private static readonly System.Reflection.FieldInfo FiHoldingMouseDown =
-            AccessTools.Field(typeof(EndOfDayReportScreen), "m_IsHoldingMouseDown");
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_IsHoldingMouseDown");
         private static readonly System.Reflection.FieldInfo FiMouseDownTime =
-            AccessTools.Field(typeof(EndOfDayReportScreen), "m_MouseDownTime");
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_MouseDownTime");
         private static readonly System.Reflection.FieldInfo FiPhoneMode =
-            AccessTools.Field(typeof(InteractionPlayerController), "m_IsPhoneScreenMode");
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsPhoneScreenMode");
         private static readonly System.Reflection.FieldInfo FiCashMode =
-            AccessTools.Field(typeof(InteractionPlayerController), "m_IsCashCounterMode");
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsCashCounterMode");
 
         private float _timer;
         private int _lastHash;
@@ -131,6 +134,11 @@ namespace CardShopCoop.Sync
             // host-event-fee coroutine on a joiner.
             Try(h, typeof(EndOfDayReportScreen), "OnPressGoNextDay",
                 prefix: new HarmonyMethod(typeof(ReportSync), nameof(NextDayBlockPrefix)));
+
+            // A forced client close can interrupt EndDayReportTextUI.UpdateLerp before it
+            // reaches its normal sound cleanup. Always clear the looping recap sound on close.
+            Try(h, typeof(EndOfDayReportScreen), "CloseScreen",
+                postfix: new HarmonyMethod(typeof(ReportSync), nameof(ClientReportClosedPostfix)));
         }
 
         private static void Try(Harmony h, Type type, string method,
@@ -138,7 +146,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"Patch target missing: {type.Name}.{method}");
@@ -154,11 +162,13 @@ namespace CardShopCoop.Sync
 
         public static void ReportOpenedPostfix()
         {
-            if (CoopCore.Role != CoopRole.Host) return;
+            if (CoopCore.Role != CoopRole.Host)
+                return;
             try
             {
                 // OpenScreen doubles as a toggle: only a real open broadcasts
-                if (!EndOfDayReportScreen.IsActive()) return;
+                if (!EndOfDayReportScreen.IsActive())
+                    return;
             }
             catch { return; }
             s_openSnapshot = CPlayerData.m_GameReportDataCollect; // value copy
@@ -180,10 +190,16 @@ namespace CardShopCoop.Sync
 
         public static bool NextButtonPrefix(EndOfDayReportScreen __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             bool lerping = false;
-            try { lerping = FiIsLerping != null && (bool)FiIsLerping.GetValue(__instance); } catch { }
-            if (lerping) return true; // vanilla behavior: fast-forward the count-up
+            try
+            {
+                lerping = FiIsLerping != null && (bool)FiIsLerping.GetValue(__instance);
+            }
+            catch { }
+            if (lerping)
+                return true; // vanilla behavior: fast-forward the count-up
             // Vanilla's other branch runs OnPressGoNextDay() whenever GetHasDayEnded() is
             // true - and on a joiner it usually IS. The DayTime mirror clears
             // m_HasDayEnded on the host's 2s beat, but LightManager.Update re-latches it
@@ -199,7 +215,8 @@ namespace CardShopCoop.Sync
 
         public static bool NextDayBlockPrefix()
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             // This is the big visible "next day" button, and it used to be a silent
             // no-op on a joiner: the ONLY way out of the recap was the click-anywhere
             // raw-input reroute above, so a son who politely aimed at the button sat
@@ -217,7 +234,8 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame || BroadcastState == null) return;
+            if (!inGame || BroadcastState == null)
+                return;
 
             // the open-moment ships immediately (not on the 2s grid): the snapshot was
             // taken at OpenScreen time, so even a host racing to "next day" can't feed
@@ -228,7 +246,7 @@ namespace CardShopCoop.Sync
                 var snap = s_openSnapshot;
                 try
                 {
-                    BroadcastState(bw => WriteState(bw, snap, openScreen: true));
+                    BroadcastState(BuildState(snap, openScreen: true));
                     _heal = 0f;
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync open: " + e.Message); }
@@ -236,7 +254,8 @@ namespace CardShopCoop.Sync
             }
 
             _timer += dt;
-            if (_timer < Interval) return;
+            if (_timer < Interval)
+                return;
             _timer -= Interval;
             try
             {
@@ -247,11 +266,12 @@ namespace CardShopCoop.Sync
                 }
                 int hash = HashState();
                 _heal += Interval;
-                if (hash == _lastHash && _heal < HealEvery) return;
+                if (hash == _lastHash && _heal < HealEvery)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
                 var live = CPlayerData.m_GameReportDataCollect;
-                BroadcastState(bw => WriteState(bw, live, openScreen: false));
+                BroadcastState(BuildState(live, openScreen: false));
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync host: " + e.Message); }
         }
@@ -287,128 +307,142 @@ namespace CardShopCoop.Sync
             return h;
         }
 
-        private static void WriteState(BinaryWriter bw, GameReportDataCollect r, bool openScreen)
+        private static ReportStateMessage BuildState(GameReportDataCollect r, bool openScreen)
         {
-            bw.Write((byte)(openScreen ? 1 : 0));
-            bw.Write(r.customerVisited);
-            bw.Write(r.checkoutCount);
-            bw.Write(r.customerDisatisfied);
-            bw.Write(r.customerBoughtItem);
-            bw.Write(r.customerBoughtCard);
-            bw.Write(r.customerPlayed);
-            bw.Write(r.storeExpGained);
-            bw.Write(r.storeLevelGained);
-            bw.Write(r.itemAmountSold);
-            bw.Write(r.cardAmountSold);
-            bw.Write(r.totalPlayTableTime);
-            bw.Write(r.totalItemEarning);
-            bw.Write(r.totalCardEarning);
-            bw.Write(r.totalPlayTableEarning);
-            bw.Write(r.supplyCost);
-            bw.Write(r.upgradeCost);
-            bw.Write(r.employeeCost);
-            bw.Write(r.rentCost);
-            bw.Write(r.billCost);
-            bw.Write(r.cardPackOpened);
-            bw.Write(r.smellyCustomerCleaned);
-            bw.Write(r.manualCheckoutCount);
-            bw.Write(r.gemMintCardObtained);
+            var msg = new ReportStateMessage
+            {
+                OpenScreen = openScreen,
+                CustomerVisited = r.customerVisited,
+                CheckoutCount = r.checkoutCount,
+                CustomerDisatisfied = r.customerDisatisfied,
+                CustomerBoughtItem = r.customerBoughtItem,
+                CustomerBoughtCard = r.customerBoughtCard,
+                CustomerPlayed = r.customerPlayed,
+                StoreExpGained = r.storeExpGained,
+                StoreLevelGained = r.storeLevelGained,
+                ItemAmountSold = r.itemAmountSold,
+                CardAmountSold = r.cardAmountSold,
+                TotalPlayTableTime = r.totalPlayTableTime,
+                TotalItemEarning = r.totalItemEarning,
+                TotalCardEarning = r.totalCardEarning,
+                TotalPlayTableEarning = r.totalPlayTableEarning,
+                SupplyCost = r.supplyCost,
+                UpgradeCost = r.upgradeCost,
+                EmployeeCost = r.employeeCost,
+                RentCost = r.rentCost,
+                BillCost = r.billCost,
+                CardPackOpened = r.cardPackOpened,
+                SmellyCustomerCleaned = r.smellyCustomerCleaned,
+                ManualCheckoutCount = r.manualCheckoutCount,
+                GemMintCardObtained = r.gemMintCardObtained,
+            };
 
             // reviews: lifetime count doubles as a sequence number, so the client can
             // append exactly the ones it hasn't seen (list itself is capped at 50)
             var reviews = CPlayerData.m_CustomerReviewDataList;
-            bw.Write(CPlayerData.m_CustomerReviewCount);
-            bw.Write(CPlayerData.m_CustomerReviewScoreAverage);
+            msg.ReviewCount = CPlayerData.m_CustomerReviewCount;
+            msg.ReviewScoreAverage = CPlayerData.m_CustomerReviewScoreAverage;
             int n = Mathf.Min(reviews != null ? reviews.Count : 0, ReviewTail);
-            bw.Write((byte)n);
             for (int i = 0; i < n; i++)
             {
                 var rv = reviews[reviews.Count - n + i]; // oldest-first tail
-                bw.Write((int)rv.customerReviewType);
-                bw.Write((byte)Mathf.Clamp(rv.starLevel, 0, 255));
-                bw.Write((byte)Mathf.Clamp(rv.textSOGoodBadLevel, 0, 255));
-                bw.Write(rv.textSOIndex);
-                bw.Write(rv.day);
-                bw.Write((byte)Mathf.Clamp(rv.hour, 0, 255));
-                bw.Write((byte)Mathf.Clamp(rv.minute, 0, 255));
-                Net.Msg.WriteItemType(bw, rv.itemType); // modded ids travel as HOST ids
-                bw.Write(rv.customerName ?? "");
+                msg.Reviews.Add(new ReportReviewEntry
+                {
+                    CustomerReviewType = (int)rv.customerReviewType,
+                    StarLevel = (byte)Mathf.Clamp(rv.starLevel, 0, 255),
+                    TextSOGoodBadLevel = (byte)Mathf.Clamp(rv.textSOGoodBadLevel, 0, 255),
+                    TextSOIndex = rv.textSOIndex,
+                    Day = rv.day,
+                    Hour = (byte)Mathf.Clamp(rv.hour, 0, 255),
+                    Minute = (byte)Mathf.Clamp(rv.minute, 0, 255),
+                    ItemType = rv.itemType, // modded ids travel as HOST ids (translated by the DTO)
+                    CustomerName = rv.customerName ?? "",
+                });
             }
+            return msg;
         }
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(ReportStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(br); }
+            try
+            {
+                ClientApplyInner(message);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(ReportStateMessage message)
         {
-            bool openScreen = br.ReadByte() != 0;
+            bool openScreen = message.OpenScreen;
 
             var r = default(GameReportDataCollect);
-            r.customerVisited = br.ReadInt32();
-            r.checkoutCount = br.ReadInt32();
-            r.customerDisatisfied = br.ReadInt32();
-            r.customerBoughtItem = br.ReadInt32();
-            r.customerBoughtCard = br.ReadInt32();
-            r.customerPlayed = br.ReadInt32();
-            r.storeExpGained = br.ReadInt32();
-            r.storeLevelGained = br.ReadInt32();
-            r.itemAmountSold = br.ReadInt32();
-            r.cardAmountSold = br.ReadInt32();
-            r.totalPlayTableTime = br.ReadSingle();
-            r.totalItemEarning = br.ReadSingle();
-            r.totalCardEarning = br.ReadSingle();
-            r.totalPlayTableEarning = br.ReadSingle();
-            r.supplyCost = br.ReadSingle();
-            r.upgradeCost = br.ReadSingle();
-            r.employeeCost = br.ReadSingle();
-            r.rentCost = br.ReadSingle();
-            r.billCost = br.ReadSingle();
-            r.cardPackOpened = br.ReadInt32();
-            r.smellyCustomerCleaned = br.ReadInt32();
-            r.manualCheckoutCount = br.ReadInt32();
-            r.gemMintCardObtained = br.ReadInt32();
+            r.customerVisited = message.CustomerVisited;
+            r.checkoutCount = message.CheckoutCount;
+            r.customerDisatisfied = message.CustomerDisatisfied;
+            r.customerBoughtItem = message.CustomerBoughtItem;
+            r.customerBoughtCard = message.CustomerBoughtCard;
+            r.customerPlayed = message.CustomerPlayed;
+            r.storeExpGained = message.StoreExpGained;
+            r.storeLevelGained = message.StoreLevelGained;
+            r.itemAmountSold = message.ItemAmountSold;
+            r.cardAmountSold = message.CardAmountSold;
+            r.totalPlayTableTime = message.TotalPlayTableTime;
+            r.totalItemEarning = message.TotalItemEarning;
+            r.totalCardEarning = message.TotalCardEarning;
+            r.totalPlayTableEarning = message.TotalPlayTableEarning;
+            r.supplyCost = message.SupplyCost;
+            r.upgradeCost = message.UpgradeCost;
+            r.employeeCost = message.EmployeeCost;
+            r.rentCost = message.RentCost;
+            r.billCost = message.BillCost;
+            r.cardPackOpened = message.CardPackOpened;
+            r.smellyCustomerCleaned = message.SmellyCustomerCleaned;
+            r.manualCheckoutCount = message.ManualCheckoutCount;
+            r.gemMintCardObtained = message.GemMintCardObtained;
             // host truth replaces the joiner's near-zero local counters (his own pack
             // opens etc. are folded into the host numbers only where the host saw them;
             // m_GameReportDataCollectPermanent stays local so achievements keep their
             // per-player pacing)
             CPlayerData.m_GameReportDataCollect = r;
 
-            int totalCount = br.ReadInt32();
-            float average = br.ReadSingle();
-            int n = br.ReadByte();
+            int totalCount = message.ReviewCount;
+            float average = message.ReviewScoreAverage;
+            var entries = message.Reviews;
             var reviews = CPlayerData.m_CustomerReviewDataList;
-            if (_reviewSeq < 0) _reviewSeq = CPlayerData.m_CustomerReviewCount; // join baseline = the save
-            int firstSeq = totalCount - n + 1; // sequence number of tail[0]
-            for (int i = 0; i < n; i++)
+            if (_reviewSeq < 0)
+                _reviewSeq = CPlayerData.m_CustomerReviewCount; // join baseline = the save
+            int firstSeq = totalCount - entries.Count + 1; // sequence number of tail[0]
+            for (int i = 0; i < entries.Count; i++)
             {
+                var e = entries[i];
                 var rv = new CustomerReviewData();
-                rv.customerReviewType = (ECustomerReviewType)br.ReadInt32();
-                rv.starLevel = br.ReadByte();
-                rv.textSOGoodBadLevel = br.ReadByte();
-                rv.textSOIndex = br.ReadInt32();
-                rv.day = br.ReadInt32();
-                rv.hour = br.ReadByte();
-                rv.minute = br.ReadByte();
-                // host id -> ours; a review about an item from a pack only the host has
-                // reads back as EItemType.None, which the phone's review row renders as
-                // no icon - the review text itself is unaffected
-                rv.itemType = Net.Msg.ReadItemType(br);
-                rv.customerName = br.ReadString();
+                rv.customerReviewType = (ECustomerReviewType)e.CustomerReviewType;
+                rv.starLevel = e.StarLevel;
+                rv.textSOGoodBadLevel = e.TextSOGoodBadLevel;
+                rv.textSOIndex = e.TextSOIndex;
+                rv.day = e.Day;
+                rv.hour = e.Hour;
+                rv.minute = e.Minute;
+                // host id -> ours (already translated by the DTO deserialize); a review about
+                // an item from a pack only the host has reads back as EItemType.None, which
+                // the phone's review row renders as no icon - the review text itself is
+                // unaffected
+                rv.itemType = e.ItemType;
+                rv.customerName = e.CustomerName;
                 if (firstSeq + i > _reviewSeq && reviews != null)
                     reviews.Add(rv); // in place: CustomerReviewManager aliases this list
             }
-            if (totalCount > _reviewSeq) _reviewSeq = totalCount;
+            if (totalCount > _reviewSeq)
+                _reviewSeq = totalCount;
             CPlayerData.m_CustomerReviewCount = totalCount;
             CPlayerData.m_CustomerReviewScoreAverage = average;
             if (reviews != null)
-                while (reviews.Count > 50) reviews.RemoveAt(0); // vanilla cap
+                while (reviews.Count > 50)
+                    reviews.RemoveAt(0); // vanilla cap
 
             if (openScreen)
             {
@@ -423,11 +457,15 @@ namespace CardShopCoop.Sync
             {
                 // a REAL screen in the scene means the vanilla statics below resolve
                 // it too; without one they would auto-create a fake (see class fields)
-                if (_screen == null) _screen = UnityEngine.Object.FindObjectOfType<EndOfDayReportScreen>();
-                if (_screen == null) return;
-                if (EndOfDayReportScreen.IsActive()) return; // OpenScreen is a toggle: don't close it
+                if (_screen == null)
+                    _screen = UnityEngine.Object.FindObjectOfType<EndOfDayReportScreen>();
+                if (_screen == null)
+                    return;
+                if (EndOfDayReportScreen.IsActive())
+                    return; // OpenScreen is a toggle: don't close it
 
-                if (_ipc == null) _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
+                if (_ipc == null)
+                    _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
                 var pc = _ipc;
                 if (pc != null)
                 {
@@ -436,13 +474,24 @@ namespace CardShopCoop.Sync
                     // still updates) and skips the popup
                     try
                     {
-                        if (FiPhoneMode != null && (bool)FiPhoneMode.GetValue(pc)) return;
+                        if (FiPhoneMode != null && (bool)FiPhoneMode.GetValue(pc))
+                            return;
                     }
                     catch { }
-                    // vanilla ShowGoNextDayScreen exits register mode before opening
+                    // vanilla ShowGoNextDayScreen exits register mode before opening. The
+                    // bare OnExitCashCounterMode clears the IPC flag but leaves the counter's
+                    // m_IsMannedByPlayer and the co-op claim set, and on a joiner the recap
+                    // must also pull him off a register whose customer the host just resolved
+                    // - so do the FULL exit (vanilla OnPressEsc) and release the claim too.
                     try
                     {
-                        if (FiCashMode != null && (bool)FiCashMode.GetValue(pc)) pc.OnExitCashCounterMode();
+                        if (FiCashMode != null && (bool)FiCashMode.GetValue(pc))
+                            pc.OnExitCashCounterMode();
+                    }
+                    catch { }
+                    try
+                    {
+                        Sync.RegisterSync.ForceExitManned();
                     }
                     catch { }
                 }
@@ -458,6 +507,17 @@ namespace CardShopCoop.Sync
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync open screen: " + e.Message); }
         }
 
+        public static void ClientReportClosedPostfix()
+        {
+            if (CoopCore.Role != CoopRole.Client)
+                return;
+            try
+            {
+                SoundManager.SetEnableSound_CoinIncrease(false);
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("report sound cleanup: " + e.Message); }
+        }
+
         /// <summary>
         /// The joiner's only way out of the recap - and the only thing that gives him his
         /// legs back, since OpenScreen took EnterLockMoveMode. Both report buttons route
@@ -466,15 +526,27 @@ namespace CardShopCoop.Sync
         /// </summary>
         public static void CloseClientReport()
         {
-            if (CoopCore.Role != CoopRole.Client) return;
+            if (CoopCore.Role != CoopRole.Client)
+                return;
             try
             {
                 // same rule as TryOpenReportScreen: only touch the vanilla statics when a
                 // REAL screen exists in the scene, or CSingleton fabricates a fake one
                 // that shadows the real screen for the rest of the run
-                if (_screen == null) _screen = UnityEngine.Object.FindObjectOfType<EndOfDayReportScreen>();
-                if (_screen == null) return;
-                if (!EndOfDayReportScreen.IsActive()) return; // nothing open: don't file a phantom day
+                if (_screen == null)
+                    _screen = UnityEngine.Object.FindObjectOfType<EndOfDayReportScreen>();
+                if (_screen == null)
+                    return;
+                if (!EndOfDayReportScreen.IsActive())
+                    return; // nothing open: don't file a phantom day
+
+                // Closing during the number lerp skips EndDayReportTextUI's normal cleanup,
+                // which otherwise leaves the looping coin-increase source enabled forever.
+                try
+                {
+                    SoundManager.SetEnableSound_CoinIncrease(false);
+                }
+                catch { }
 
                 // Re-assert the report this screen actually displayed so a host that
                 // already moved on (and healed a reset report over us) can't make us
@@ -484,7 +556,8 @@ namespace CardShopCoop.Sync
                 // yesterday) day got filed into the joiner's phone history. Without it the
                 // live host-synced day-collect is what CloseScreen files: not the frozen
                 // open-moment snapshot, but real numbers instead of a phantom.
-                if (s_haveOpenReport) CPlayerData.m_GameReportDataCollect = s_clientOpenReport;
+                if (s_haveOpenReport)
+                    CPlayerData.m_GameReportDataCollect = s_clientOpenReport;
                 s_haveOpenReport = false;
                 // CloseScreen is the vanilla bookkeeping the phone's report history needs -
                 // past-list append, day-collect reset - plus the cursor hide and
@@ -499,8 +572,16 @@ namespace CardShopCoop.Sync
                 // OnPressGoNextButton every 0.05s with no input at all and snap the whole
                 // count-up past the son. m_MouseDownTime matters for the same reason: a
                 // leftover non-zero fires one extra press through Update's else branch.
-                try { FiHoldingMouseDown?.SetValue(_screen, false); } catch { }
-                try { FiMouseDownTime?.SetValue(_screen, 0f); } catch { }
+                try
+                {
+                    FiHoldingMouseDown?.SetValue(_screen, false);
+                }
+                catch { }
+                try
+                {
+                    FiMouseDownTime?.SetValue(_screen, 0f);
+                }
+                catch { }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync close screen: " + e.Message); }
         }

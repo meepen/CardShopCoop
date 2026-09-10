@@ -1,3 +1,4 @@
+using CardShopCoop.Util;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -66,19 +67,38 @@ namespace CardShopCoop.Net
         /// separate question, already answered by this object being non-null.)</summary>
         bool SteamAvailable();
 
+        /// <summary>Local Steam persona, or an empty string when unavailable.</summary>
+        string LocalPersonaName
+        {
+            get;
+        }
+
+        /// <summary>Local Steam identity, or zero when Steam is unavailable.</summary>
+        ulong LocalSteamId
+        {
+            get;
+        }
+
+        /// <summary>Local nickname for a Steam friend, or an empty string when the
+        /// friend is not known locally or Steam is unavailable.</summary>
+        string FriendNickname(ulong steamId);
+
         /// <summary>Build the Steam P2P transport. MUST be called BEFORE Host()/Join():
         /// the lobby callbacks inside the bridge write the lobby id (and, on the client,
         /// the host connection) into the transport this returns. Reorder these two and
         /// the callback fires against a null transport and the Steam path silently never
         /// connects - on the Steam build, where nobody is looking for it.</summary>
-        ICoopTransport CreateTransport(bool isHost, byte[] keepalive);
+        ICoopTransport CreateTransport(bool isHost, INetMessage keepalive);
 
         void Host(bool isPublic, string lobbyName, bool hasPassword);
         void Join(ulong lobbyId);
         void Leave();
         void OpenInviteDialog();
         void RefreshList();
-        bool ListRefreshing { get; }
+        bool ListRefreshing
+        {
+            get;
+        }
 
         /// <summary>Public-lobby browser rows, already converted to the Steam-free
         /// <see cref="LobbyRow"/>. The list is reused between calls (OnGUI polls it every
@@ -90,21 +110,36 @@ namespace CardShopCoop.Net
         /// second read taken while a foreach over the first is still running clears the
         /// list out from under that foreach - InvalidOperationException, from a getter
         /// that looks like a plain field).</summary>
-        List<LobbyRow> Lobbies { get; }
+        List<LobbyRow> Lobbies
+        {
+            get;
+        }
 
-        Action<string> OnError { get; set; }
+        Action<string> OnError
+        {
+            get; set;
+        }
 
         /// <summary>Host: the lobby exists and the transport is already wired to it;
         /// arg = the created lobby id. Steam-free by construction, like every other member
         /// here - the id is the raw ulong, never a CSteamID.</summary>
-        Action<ulong> OnLobbyLive { get; set; }
+        Action<ulong> OnLobbyLive
+        {
+            get; set;
+        }
 
         /// <summary>Client: we entered a lobby and the transport is already wired to its
         /// owner. The ROLE CHECK IS THE SUBSCRIBER'S JOB - see CoopCore.</summary>
-        Action OnConnectedToHost { get; set; }
+        Action OnConnectedToHost
+        {
+            get; set;
+        }
 
         /// <summary>The local player accepted somebody's invite; arg = lobby id.</summary>
-        Action<ulong> OnInviteAccepted { get; set; }
+        Action<ulong> OnInviteAccepted
+        {
+            get; set;
+        }
     }
 
     /// <summary>
@@ -122,7 +157,8 @@ namespace CardShopCoop.Net
         {
             get
             {
-                if (_state == 0) _state = Detect() ? 1 : 2;
+                if (_state == 0)
+                    _state = Detect() ? 1 : 2;
                 return _state == 1;
             }
         }
@@ -202,7 +238,10 @@ namespace CardShopCoop.Net
                     foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
                         if (string.Equals(a.GetName().Name, "Assembly-CSharp",
                                           StringComparison.OrdinalIgnoreCase))
-                        { _gameAsm = a; break; }
+                        {
+                            _gameAsm = a;
+                            break;
+                        }
                 }
                 catch { }
             }
@@ -228,7 +267,8 @@ namespace CardShopCoop.Net
         /// </summary>
         public static bool TrySampleSaveCounter(out int index, out int cycle)
         {
-            index = 0; cycle = 0;
+            index = 0;
+            cycle = 0;
             try
             {
                 if (!_counterSearched)
@@ -237,13 +277,12 @@ namespace CardShopCoop.Net
                     var t = GameAssembly()?.GetType("CPlayerData");
                     if (t != null)
                     {
-                        const BindingFlags f = BindingFlags.Static | BindingFlags.Public |
-                                               BindingFlags.NonPublic;
-                        _saveIndexField = t.GetField("m_SaveIndex", f);
-                        _saveCycleField = t.GetField("m_SaveCycle", f);
+                        _saveIndexField = ReflectionSurface.OptionalField(t, "m_SaveIndex");
+                        _saveCycleField = ReflectionSurface.OptionalField(t, "m_SaveCycle");
                     }
                 }
-                if (_saveIndexField == null || _saveCycleField == null) return false;
+                if (_saveIndexField == null || _saveCycleField == null)
+                    return false;
                 index = (int)_saveIndexField.GetValue(null);
                 cycle = (int)_saveCycleField.GetValue(null);
                 return true;
@@ -268,7 +307,8 @@ namespace CardShopCoop.Net
         {
             get
             {
-                if (_gpState == 0) _gpState = DetectGamecore() ? 1 : 2;
+                if (_gpState == 0)
+                    _gpState = DetectGamecore() ? 1 : 2;
                 return _gpState == 1;
             }
         }
@@ -276,17 +316,23 @@ namespace CardShopCoop.Net
         private static bool DetectGamecore()
         {
             var asm = GameAssembly();
-            if (asm == null) return false;
+            if (asm == null)
+                return false;
             Type[] types;
             // a partially-loadable assembly still tells us what we need: walk .Types and
             // skip the nulls rather than giving up on the whole probe
-            try { types = asm.GetTypes(); }
+            try
+            {
+                types = asm.GetTypes();
+            }
             catch (ReflectionTypeLoadException e) { types = e.Types; }
             catch { return false; }
-            if (types == null) return false;
+            if (types == null)
+                return false;
             foreach (var t in types)
             {
-                if (t == null) continue;
+                if (t == null)
+                    continue;
                 try
                 {
                     if (t.Name.IndexOf("Gamecore", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -331,8 +377,12 @@ namespace CardShopCoop.Net
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static ISteamBridge TryCreate()
         {
-            if (!PlatformProbe.SteamworksPresent) return null;
-            try { return Create(); }
+            if (!PlatformProbe.SteamworksPresent)
+                return null;
+            try
+            {
+                return Create();
+            }
             catch (Exception e)
             {
                 // Reached when the assembly probed present but the type still failed to

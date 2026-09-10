@@ -20,7 +20,9 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
   walls, loose boxes (carry them, throw them, trash them), placed furniture, licenses,
   bills, room expansions, decorations, signs, tournaments, grading, the daily market,
   and the end-of-day report are all shared.
-- **Both players can work**: the joiner serves the register (click-to-scan or hold V),
+- **Both players can work**: the joiner serves the register through the vanilla interaction
+  flow (click the counter to man it, click items/cards to scan, take payment, give change,
+  and press Space to finish),
   runs customer trade-ins/sell-ins through the game's real trade screen, restocks,
   prices, orders stock and furniture, hires staff, pays bills, and buys licenses and
   expansions — everything lands in the host's real simulation and echoes back.
@@ -48,7 +50,8 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
 ## Repo layout
 
 - `src/CardShopCoop/` — plugin source. Build: `dotnet build -c Release`
-  (auto-deploys into the game's plugins; pass `/p:SkipDeploy=true` while the game runs).
+  (deployment is opt-in; use `-p:Deploy=true` only when you want the DLL copied into the
+  game's plugins directory).
   The game install path (`GamePath`) is resolved by `Directory.Build.props`:
   point it at your install by copying `Directory.Build.user.props.example` to
   `Directory.Build.user.props` (git-ignored), or set the `CARDSHOP_GAMEPATH`

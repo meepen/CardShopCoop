@@ -1,3 +1,4 @@
+using CardShopCoop.Net;
 using System;
 using System.IO;
 using System.Reflection;
@@ -98,13 +99,17 @@ namespace CardShopCoop.Sync
             {
                 const BindingFlags F = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
                 var fld = typeof(CSaveLoad).GetField("m_SavedGame", F);
-                if (fld == null) return null;
+                if (fld == null)
+                    return null;
                 object saved = fld.GetValue(null);
 
                 if (saved == null || !MatchesSaveIndex(saved, expectedSaveIndex))
                 {
                     object live = null;
-                    try { live = fld.FieldType.GetField("instance", F)?.GetValue(null); }
+                    try
+                    {
+                        live = fld.FieldType.GetField("instance", F)?.GetValue(null);
+                    }
                     catch { }
                     if (live != null)
                     {
@@ -113,13 +118,18 @@ namespace CardShopCoop.Sync
                         saved = live;
                     }
                 }
-                if (saved == null) return null;
+                if (saved == null)
+                    return null;
                 identity = DescribeWorldObject(saved);
 
                 string json = JsonUtility.ToJson(saved);
                 // an empty/degenerate serialization means the object is not a real world -
                 // shipping "{}" to the joiner would boot it into an empty shop
-                if (string.IsNullOrEmpty(json) || json.Length < 32 || json == "{}") { identity = null; return null; }
+                if (string.IsNullOrEmpty(json) || json.Length < 32 || json == "{}")
+                {
+                    identity = null;
+                    return null;
+                }
                 return new UTF8Encoding(false).GetBytes(json); // no BOM: the game's writer emits none
             }
             catch (Exception e)
@@ -158,7 +168,8 @@ namespace CardShopCoop.Sync
         /// fields are absent.</summary>
         private static string DescribeWorldObject(object saved)
         {
-            if (saved == null) return null;
+            if (saved == null)
+                return null;
             try
             {
                 const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -189,7 +200,8 @@ namespace CardShopCoop.Sync
         /// Returns null when either key is missing or the shape is unexpected; never throws.</summary>
         private static string DescribeWorldJson(string json)
         {
-            if (string.IsNullOrEmpty(json)) return null;
+            if (string.IsNullOrEmpty(json))
+                return null;
             try
             {
                 int? day = null;
@@ -199,8 +211,10 @@ namespace CardShopCoop.Sync
                 {
                     i += dayKey.Length;
                     int j = i;
-                    while (j < json.Length && (json[j] == '-' || (json[j] >= '0' && json[j] <= '9'))) j++;
-                    if (j > i && int.TryParse(json.Substring(i, j - i), out int d)) day = d;
+                    while (j < json.Length && (json[j] == '-' || (json[j] >= '0' && json[j] <= '9')))
+                        j++;
+                    if (j > i && int.TryParse(json.Substring(i, j - i), out int d))
+                        day = d;
                 }
 
                 string who = null;
@@ -215,8 +229,10 @@ namespace CardShopCoop.Sync
                     // a quote, which JsonUtility writes escaped, and a plain IndexOf would
                     // truncate the name there.
                     int end = k;
-                    while (end < json.Length && !(json[end] == '"' && json[end - 1] != '\\')) end++;
-                    if (end < json.Length) who = json.Substring(k, end - k); // no closing quote = truncated json, take nothing
+                    while (end < json.Length && !(json[end] == '"' && json[end - 1] != '\\'))
+                        end++;
+                    if (end < json.Length)
+                        who = json.Substring(k, end - k); // no closing quote = truncated json, take nothing
                 }
 
                 return Describe(day, who);
@@ -231,10 +247,14 @@ namespace CardShopCoop.Sync
         private static string Describe(int? day, string shop)
         {
             bool hasShop = !string.IsNullOrEmpty(shop);
-            if (day == null && !hasShop) return null;
-            if (hasShop && shop.Length > 64) shop = shop.Substring(0, 64) + "...";
-            if (!hasShop) return "day " + day.Value;
-            if (day == null) return "shop \"" + shop + "\"";
+            if (day == null && !hasShop)
+                return null;
+            if (hasShop && shop.Length > 64)
+                shop = shop.Substring(0, 64) + "...";
+            if (!hasShop)
+                return "day " + day.Value;
+            if (day == null)
+                return "shop \"" + shop + "\"";
             return "day " + day.Value + ", shop \"" + shop + "\"";
         }
 
@@ -245,12 +265,14 @@ namespace CardShopCoop.Sync
         /// have on a build it cannot read.</summary>
         private static bool MatchesSaveIndex(object saved, int expectedSaveIndex)
         {
-            if (expectedSaveIndex < 0) return true;
+            if (expectedSaveIndex < 0)
+                return true;
             try
             {
                 var f = saved.GetType().GetField("m_SaveIndex",
                     BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (f == null) return true;
+                if (f == null)
+                    return true;
                 return (int)f.GetValue(saved) == expectedSaveIndex;
             }
             catch { return true; }
@@ -272,11 +294,17 @@ namespace CardShopCoop.Sync
             // snapshot and ship an OLD world to the joiner. A skip must be LOUD (the throw
             // below), never stale. Best effort only - the timestamp check further down is what
             // makes the guarantee, because this delete is allowed to fail silently.
-            try { if (File.Exists(path)) File.Delete(path); } catch { }
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch { }
             try
             {
                 string gd = Application.persistentDataPath + "/savedGames_Release" + HostSnapshotSlot + ".gd";
-                if (File.Exists(gd)) File.Delete(gd);
+                if (File.Exists(gd))
+                    File.Delete(gd);
             }
             catch { }
             int prevSlot = gm.m_CurrentSaveLoadSlotSelectedIndex;
@@ -329,7 +357,10 @@ namespace CardShopCoop.Sync
             // granularity and clock skew only; it is orders of magnitude shorter than the gap
             // between two joins, so it can never re-admit a previous session's snapshot.
             bool fresh;
-            try { fresh = File.Exists(path) && File.GetLastWriteTimeUtc(path) >= t0.AddSeconds(-1); }
+            try
+            {
+                fresh = File.Exists(path) && File.GetLastWriteTimeUtc(path) >= t0.AddSeconds(-1);
+            }
             catch { fresh = false; } // unreadable metadata is not proof of anything: treat as absent
             if (fresh)
             {
@@ -339,7 +370,10 @@ namespace CardShopCoop.Sync
                 // so a support log has exactly one greppable line for it, with the tail naming
                 // the path that produced it.
                 string id = null;
-                try { id = DescribeWorldJson(new UTF8Encoding(false).GetString(bytes)); }
+                try
+                {
+                    id = DescribeWorldJson(new UTF8Encoding(false).GetString(bytes));
+                }
                 catch { } // a log line is never worth failing a join over
                 CoopPlugin.Log.LogInfo("coop: shipping world from slot file" +
                     (id != null ? " - " + id : "") + $" ({bytes.Length / 1024} KB)");
@@ -416,6 +450,79 @@ namespace CardShopCoop.Sync
                   "no error at all. Load into your shop fully, then retry.", path);
         }
 
+        /// <summary>Apply filesystem changes away from Unity's update thread. The object
+        /// injection and scene transition are deliberately marshalled back to the main thread:
+        /// JsonUtility and CGameManager are Unity/game APIs and are not thread-safe.</summary>
+        public static void ApplyAndLoadAsync(byte[] saveBytes, Action completed, Action<Exception> failed)
+        {
+            if (saveBytes == null || saveBytes.Length == 0)
+                throw new ArgumentException("Received save payload is empty", nameof(saveBytes));
+
+            string root = Application.persistentDataPath;
+            string basePath = Path.Combine(root, "savedGames_Release" + CoopSlot);
+            string slotPath = basePath + ".json";
+            string backupPath = Path.Combine(root, "savedGames_ReleaseBackupFile" + CoopSlot + ".json");
+            new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    TryDelete(basePath + ".gd");
+                    TryDelete(slotPath);
+                    TryDelete(backupPath);
+                    if (File.Exists(basePath + ".gd") || File.Exists(slotPath) || File.Exists(backupPath))
+                        throw new IOException("A previous co-op save could not be cleared");
+                    File.WriteAllBytes(slotPath, saveBytes);
+                    CoopCore.EnqueueMainThread(() =>
+                    {
+                        try
+                        {
+                            InjectAndForceLoad(saveBytes);
+                            completed?.Invoke();
+                        }
+                        catch (Exception e)
+                        {
+                            CoopPlugin.Log.LogError("coop: received world main-thread apply failed: " + e);
+                            failed?.Invoke(e);
+                        }
+                    });
+                }
+                catch (Exception e)
+                {
+                    CoopPlugin.Log.LogError("coop: save apply worker failed: " + e);
+                    CoopCore.EnqueueMainThread(() => failed?.Invoke(e));
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "CoopSaveApply"
+            }.Start();
+        }
+
+        private static void InjectAndForceLoad(byte[] saveBytes)
+        {
+            var gm = CSingleton<CGameManager>.Instance;
+            gm.m_ForceNoCloudSaveLoad = true;
+            bool injected = false;
+            string json = new UTF8Encoding(false).GetString(saveBytes)
+                .TrimStart('\uFEFF', ' ', '\r', '\n', '\t');
+            if (json.StartsWith("{", StringComparison.Ordinal))
+            {
+                var fld = typeof(CSaveLoad).GetField("m_SavedGame",
+                    BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                if (fld != null)
+                {
+                    object world = JsonUtility.FromJson(json, fld.FieldType);
+                    if (world != null)
+                    {
+                        fld.SetValue(null, world);
+                        injected = true;
+                    }
+                }
+            }
+            CoopPlugin.Log.LogInfo($"Coop save received ({saveBytes.Length / 1024} KB){(injected ? " [in-memory]" : "")}, loading world...");
+            ForceLoadSlot(CoopSlot);
+        }
+
         /// <summary>Client: apply the received world into the co-op slot and load it.
         ///
         /// GAME PASS FALLBACK: writing savedGames_Release&lt;CoopSlot&gt;.json is not enough on the
@@ -463,8 +570,13 @@ namespace CardShopCoop.Sync
                         // FromJson(json, fld.FieldType), not FromJson<CGameData>: the save
                         // type is resolved from the running build, never named here
                         object world = JsonUtility.FromJson(json, fld.FieldType);
-                        if (world != null) { fld.SetValue(null, world); injected = true; }
-                        else CoopPlugin.Log.LogWarning("coop: FromJson returned null for the received world");
+                        if (world != null)
+                        {
+                            fld.SetValue(null, world);
+                            injected = true;
+                        }
+                        else
+                            CoopPlugin.Log.LogWarning("coop: FromJson returned null for the received world");
                     }
                 }
             }
@@ -513,7 +625,8 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                if (File.Exists(path)) File.Delete(path);
+                if (File.Exists(path))
+                    File.Delete(path);
             }
             catch (Exception e)
             {

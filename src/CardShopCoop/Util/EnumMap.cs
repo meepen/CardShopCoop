@@ -121,9 +121,12 @@ namespace CardShopCoop.Util
         {
             switch (kind)
             {
-                case EnumKind.DecoObject: return 0;  // EDecoObject.None = 0
-                case EnumKind.MonsterType: return 0; // EMonsterType.None = 0 (EarlyPlayer = -1)
-                default: return -1;                  // EItemType/EObjectType/ECardExpansionType.None = -1
+                case EnumKind.DecoObject:
+                    return 0;  // EDecoObject.None = 0
+                case EnumKind.MonsterType:
+                    return 0; // EMonsterType.None = 0 (EarlyPlayer = -1)
+                default:
+                    return -1;                  // EItemType/EObjectType/ECardExpansionType.None = -1
             }
         }
 
@@ -162,10 +165,13 @@ namespace CardShopCoop.Util
         public static bool TryFromWire(EnumKind kind, int wireId, out int localId)
         {
             localId = wireId;
-            if (!_active) return true;                       // identity: nothing to fail at
+            if (!_active)
+                return true;                       // identity: nothing to fail at
             var t = TableFor(_inTables, kind);
-            if (t == null || !t.IsModded(wireId)) return true; // vanilla / untranslated kind
-            if (t.Map.TryGetValue(wireId, out localId)) return true;
+            if (t == null || !t.IsModded(wireId))
+                return true; // vanilla / untranslated kind
+            if (t.Map.TryGetValue(wireId, out localId))
+                return true;
             localId = Sentinel(kind);
             LogMissOnce(kind, wireId, "host->local");
             return false;
@@ -183,15 +189,27 @@ namespace CardShopCoop.Util
             // Same lock LogMissOnce takes. HashSet is not thread-safe and translation runs off
             // whatever thread a message is handled on, so clearing unguarded could corrupt the
             // set (or throw) while a miss is being recorded.
-            lock (_loggedMisses) { _loggedMisses.Clear(); }
+            lock (_loggedMisses)
+            {
+                _loggedMisses.Clear();
+            }
         }
 
         /// <summary>Alias for <see cref="Clear"/> - both names get reached for.</summary>
-        public static void Reset() { Clear(); }
+        public static void Reset()
+        {
+            Clear();
+        }
 
         /// <summary>True while a translation table is live (i.e. we are a client that received
         /// the host's registry). Diagnostics only - correctness must never depend on asking.</summary>
-        public static bool Active { get { return _active; } }
+        public static bool Active
+        {
+            get
+            {
+                return _active;
+            }
+        }
 
         // ------------------------------------------------------------------ construction
 
@@ -231,13 +249,15 @@ namespace CardShopCoop.Util
                 var theirEnum = ParseEnumLines(hostEnumLines);
                 for (int k = 0; k < KindCount; k++)
                 {
-                    if (EnumTypeNames[k] == null) continue;         // MonsterType, handled below
+                    if (EnumTypeNames[k] == null)
+                        continue;         // MonsterType, handled below
                     // BOTH sides must have modded names of this kind before a table is worth
                     // building. An empty side has two causes we cannot tell apart - genuinely
                     // vanilla, or our own registry walk came up empty on a modded PC - and only
                     // the first is safe to act on. Skipping means identity, i.e. exactly what
                     // this build did before translation existed.
-                    if (ourEnum[k].Count == 0 || theirEnum[k].Count == 0) continue;
+                    if (ourEnum[k].Count == 0 || theirEnum[k].Count == 0)
+                        continue;
                     var pair = BuildPair(ourEnum[k], theirEnum[k], null, null);
                     outTables[k] = pair.Item1;
                     inTables[k] = pair.Item2;
@@ -274,7 +294,8 @@ namespace CardShopCoop.Util
                     _lastSummary = line;
                     Log(line);
                 }
-                else Log("id translation ready (unchanged, join #" + _buildCount + ")");
+                else
+                    Log("id translation ready (unchanged, join #" + _buildCount + ")");
             }
             catch (Exception e)
             {
@@ -297,7 +318,8 @@ namespace CardShopCoop.Util
             foreach (var kv in ours)
             {
                 int hostId;
-                if (!theirs.TryGetValue(kv.Key, out hostId)) continue;
+                if (!theirs.TryGetValue(kv.Key, out hostId))
+                    continue;
                 // Indexer, not Add: EPL registries can carry ALIASES (two names, one id), and a
                 // duplicate key must not throw a handshake to the floor. Last one wins, which is
                 // the same rule CoopCore's own registry parse already uses.
@@ -319,11 +341,14 @@ namespace CardShopCoop.Util
 
         private static int Translate(Table[] tables, EnumKind kind, int id, string dir)
         {
-            if (!_active) return id;                        // host, or not connected: identity
+            if (!_active)
+                return id;                        // host, or not connected: identity
             var t = TableFor(tables, kind);
-            if (t == null || !t.IsModded(id)) return id;    // vanilla id, or no table for this kind
+            if (t == null || !t.IsModded(id))
+                return id;    // vanilla id, or no table for this kind
             int mapped;
-            if (t.Map.TryGetValue(id, out mapped)) return mapped;
+            if (t.Map.TryGetValue(id, out mapped))
+                return mapped;
             LogMissOnce(kind, id, dir);
             return Sentinel(kind);
         }
@@ -331,7 +356,8 @@ namespace CardShopCoop.Util
         private static Table TableFor(Table[] tables, EnumKind kind)
         {
             var t = tables;
-            if (t == null) return null;
+            if (t == null)
+                return null;
             int i = (int)kind;
             return i >= 0 && i < t.Length ? t[i] : null;
         }
@@ -340,7 +366,10 @@ namespace CardShopCoop.Util
         {
             long key = ((long)(int)kind << 32) | (uint)id;
             bool first;
-            lock (_loggedMisses) { first = _loggedMisses.Add(key); }
+            lock (_loggedMisses)
+            {
+                first = _loggedMisses.Add(key);
+            }
             if (first)
                 Log("no local counterpart for " + kind + " id " + id + " (" + dir +
                     ") - one-sided content pack; sent as None, further ones for this id are silent");
@@ -352,21 +381,29 @@ namespace CardShopCoop.Util
         private static Dictionary<string, int>[] ParseEnumLines(List<string> lines)
         {
             var byKind = new Dictionary<string, int>[KindCount];
-            for (int i = 0; i < KindCount; i++) byKind[i] = new Dictionary<string, int>(StringComparer.Ordinal);
-            if (lines == null) return byKind;
+            for (int i = 0; i < KindCount; i++)
+                byKind[i] = new Dictionary<string, int>(StringComparer.Ordinal);
+            if (lines == null)
+                return byKind;
             foreach (var raw in lines)
             {
-                if (string.IsNullOrEmpty(raw)) continue;
+                if (string.IsNullOrEmpty(raw))
+                    continue;
                 string line = raw.Trim();
                 int colon = line.IndexOf(':');
-                if (colon <= 0) continue;
+                if (colon <= 0)
+                    continue;
                 int kind = KindOfTypeName(line.Substring(0, colon));
-                if (kind < 0) continue;                       // ERarity / ECollectionPackType: nothing crosses the wire
+                if (kind < 0)
+                    continue;                       // ERarity / ECollectionPackType: nothing crosses the wire
                 int eq = line.LastIndexOf('=');               // LAST '=': a member name may contain one
-                if (eq <= colon + 1 || eq == line.Length - 1) continue;
+                if (eq <= colon + 1 || eq == line.Length - 1)
+                    continue;
                 int id;
-                if (!int.TryParse(line.Substring(eq + 1), out id)) continue;
-                if (id < ModdedIdFloor) continue;
+                if (!int.TryParse(line.Substring(eq + 1), out id))
+                    continue;
+                if (id < ModdedIdFloor)
+                    continue;
                 byKind[kind][line.Substring(colon + 1, eq - colon - 1)] = id;
             }
             return byKind;
@@ -377,15 +414,19 @@ namespace CardShopCoop.Util
         private static Dictionary<string, int> ParseCardLines(List<string> lines)
         {
             var map = new Dictionary<string, int>(StringComparer.Ordinal);
-            if (lines == null) return map;
+            if (lines == null)
+                return map;
             foreach (var raw in lines)
             {
-                if (string.IsNullOrEmpty(raw)) continue;
+                if (string.IsNullOrEmpty(raw))
+                    continue;
                 string line = raw.Trim();
                 int eq = line.LastIndexOf('=');
-                if (eq <= 0 || eq == line.Length - 1) continue;
+                if (eq <= 0 || eq == line.Length - 1)
+                    continue;
                 int id;
-                if (!int.TryParse(line.Substring(eq + 1).Trim(), out id)) continue;
+                if (!int.TryParse(line.Substring(eq + 1).Trim(), out id))
+                    continue;
                 map[line.Substring(0, eq).Trim()] = id;
             }
             return map;
@@ -394,7 +435,8 @@ namespace CardShopCoop.Util
         private static HashSet<int> IdSet(Dictionary<string, int> nameToId)
         {
             var s = new HashSet<int>();
-            foreach (var kv in nameToId) s.Add(kv.Value);
+            foreach (var kv in nameToId)
+                s.Add(kv.Value);
             return s;
         }
 
@@ -409,18 +451,29 @@ namespace CardShopCoop.Util
         /// <summary>Our own registry reads must never throw into a session handshake.</summary>
         private static List<string> SafeLines(Func<List<string>> f)
         {
-            try { return f() ?? new List<string>(); }
+            try
+            {
+                return f() ?? new List<string>();
+            }
             catch { return new List<string>(); }
         }
 
         private static void Log(string s)
         {
-            try { CoopPlugin.Log.LogInfo("EnumMap: " + s); } catch { }
+            try
+            {
+                CoopPlugin.Log.LogInfo("EnumMap: " + s);
+            }
+            catch { }
         }
 
         private static void LogWarn(string s)
         {
-            try { CoopPlugin.Log.LogWarning("EnumMap: " + s); } catch { }
+            try
+            {
+                CoopPlugin.Log.LogWarning("EnumMap: " + s);
+            }
+            catch { }
         }
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using HarmonyLib;
 using UnityEngine;
 
@@ -65,10 +66,10 @@ namespace CardShopCoop.Sync
         public static GradingSync Instance;
 
         /// <summary>Set by CoopCore: client -> host op (MsgType.GradingOp).</summary>
-        public Action<Action<BinaryWriter>> SendOp;
+        public Action<INetMessage> SendOp;
 
         /// <summary>Set by CoopCore: host -> clients state (MsgType.GradingState).</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
 
         /// <summary>True while ClientApplyState rewrites the mirrored pending list, so
         /// no patch mistakes the authoritative copy for local player action.</summary>
@@ -82,7 +83,7 @@ namespace CardShopCoop.Sync
         // submission cap and it is NOT a wire bound: with Grading Overhaul the submit screen
         // holds up to 52 cards (GradingInterop.MaxSubmitSlots, which reads GO's own MAX_SLOTS).
         // Every count that decides how many cards actually move - the submit op, the
-        // host->guest GradingState broadcast (WriteState / ClientApplyInner) and the change
+        // host->guest GradingState broadcast (BuildState / ClientApplyInner) and the change
         // detector that gates it (ComputeHash) - reads MaxSubmitSlots. Using 8 in any of those
         // silently dropped every card past the eighth.
         private const int MaxSets = 8;
@@ -90,9 +91,9 @@ namespace CardShopCoop.Sync
         private const float DeliveryFee = 10f; // GradedCardSubmitSelectScreen.EvaluateTotalCost
 
         private static readonly FieldInfo FiShowingAlpha =
-            AccessTools.Field(typeof(GradedCardSubmitSelectScreen), "m_IsShowingCanvasGrpAlpha");
+            Util.ReflectionSurface.RequiredField(typeof(GradedCardSubmitSelectScreen), "m_IsShowingCanvasGrpAlpha");
         private static readonly FieldInfo FiHidingAlpha =
-            AccessTools.Field(typeof(GradedCardSubmitSelectScreen), "m_IsHidingCanvasGrpAlpha");
+            Util.ReflectionSurface.RequiredField(typeof(GradedCardSubmitSelectScreen), "m_IsHidingCanvasGrpAlpha");
         // The on-screen bill. Vanilla EvaluateTotalCost writes it as (10 + m_CostPerCard*n);
         // Grading Overhaul's EvaluateTotalCost prefix REPLACES that and writes the real
         // per-value fee (deliveryFee + sum(marketValue * tier.FeeMultiplier)) into this same
@@ -100,7 +101,7 @@ namespace CardShopCoop.Sync
         // _fiServiceTotalCost.SetValue at :14378). Whatever the guest SEES on the submit screen
         // lives here, so reading it forwards GO's actual number instead of the vanilla-flat guess.
         private static readonly FieldInfo FiServiceTotalCost =
-            AccessTools.Field(typeof(GradedCardSubmitSelectScreen), "m_ServiceTotalCost");
+            Util.ReflectionSurface.RequiredField(typeof(GradedCardSubmitSelectScreen), "m_ServiceTotalCost");
 
         /// <summary>Grading Overhaul's own submit validator,
         /// GradingSubmit_CompanyValidation_Patch.Prefix(GradedCardSubmitSelectScreen)
@@ -119,7 +120,7 @@ namespace CardShopCoop.Sync
                     "TCGCardShopSimulator.GradingOverhaul.GradingSubmit_CompanyValidation_Patch",
                     Util.GradingInterop.GradingAssembly);
                 return t == null ? null
-                    : AccessTools.Method(t, "Prefix", new[] { typeof(GradedCardSubmitSelectScreen) });
+                    : Util.ReflectionSurface.OptionalMethod(t, "Prefix", new[] { typeof(GradedCardSubmitSelectScreen) });
             }
             catch { return null; }
         }
@@ -149,7 +150,8 @@ namespace CardShopCoop.Sync
         /// separate rejections.</summary>
         private static bool GoVetoesSubmit(GradedCardSubmitSelectScreen screen)
         {
-            if (!Util.GradingInterop.Present) return false;
+            if (!Util.GradingInterop.Present)
+                return false;
             if (MiGoSubmitVeto == null)
             {
                 if (!_goVetoWarned)
@@ -161,7 +163,10 @@ namespace CardShopCoop.Sync
                 }
                 return false;
             }
-            try { return !(bool)MiGoSubmitVeto.Invoke(null, new object[] { screen }); }
+            try
+            {
+                return !(bool)MiGoSubmitVeto.Invoke(null, new object[] { screen });
+            }
             catch (Exception e)
             {
                 if (!_goVetoWarned)
@@ -188,13 +193,26 @@ namespace CardShopCoop.Sync
 
         private static InventoryBase Inv()
         {
-            if (_inv == null) _inv = UnityEngine.Object.FindObjectOfType<InventoryBase>();
+            if (_inv == null)
+                _inv = UnityEngine.Object.FindObjectOfType<InventoryBase>();
             return _inv;
         }
 
         public GradingSync()
         {
             Instance = this;
+        }
+
+        /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
+        public static void ClearLive()
+        {
+            Instance = null;
+            ApplyingRemote = false;
+        }
+
+        public static void ActivateLive(GradingSync instance)
+        {
+            Instance = instance;
         }
 
         public void Reset()
@@ -301,7 +319,7 @@ namespace CardShopCoop.Sync
                 var t = Util.ModParity.ResolveType(
                     "TCGCardShopSimulator.GradingOverhaul.CompanyStamp_RestockManager_OnDayStartedPatch",
                     Util.GradingInterop.GradingAssembly);
-                var m = t == null ? null : AccessTools.Method(t, "Prefix", Type.EmptyTypes);
+                var m = t == null ? null : Util.ReflectionSurface.OptionalMethod(t, "Prefix", Type.EmptyTypes);
                 if (m == null)
                 {
                     // Present separates "GO is not installed" (normal - there is nothing to block)
@@ -344,14 +362,15 @@ namespace CardShopCoop.Sync
 
         public static bool SubmitPrefix(GradedCardSubmitSelectScreen __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             try
             {
                 ClientSubmit(__instance);
             }
             catch (Exception e)
             {
-                CoopPlugin.Log.LogWarning("GradingSync submit: " + e.Message);
+                CoopPlugin.Log.LogError("coop: grading client submit failed; the screen was left open so its cards can be returned: " + e);
             }
             // never fall through to vanilla on the client: it would charge the mirrored
             // wallet (forwarded as a second contribution) AND strand the set locally.
@@ -365,17 +384,21 @@ namespace CardShopCoop.Sync
         private static void ClientSubmit(GradedCardSubmitSelectScreen screen)
         {
             // mid canvas fade: vanilla no-ops, so do we
-            if (FiShowingAlpha?.GetValue(screen) is bool s && s) return;
-            if (FiHidingAlpha?.GetValue(screen) is bool hd && hd) return;
+            if (FiShowingAlpha?.GetValue(screen) is bool s && s)
+                return;
+            if (FiHidingAlpha?.GetValue(screen) is bool hd && hd)
+                return;
 
             var set = CPlayerData.m_CurrentGradeCardSubmitSet;
-            if (set == null || set.m_CardDataList == null) return;
+            if (set == null || set.m_CardDataList == null)
+                return;
 
             var picked = new List<CardData>();
             for (int i = 0; i < set.m_CardDataList.Count; i++)
             {
                 var c = set.m_CardDataList[i];
-                if (c != null && c.monsterType != EMonsterType.None) picked.Add(c);
+                if (c != null && c.monsterType != EMonsterType.None)
+                    picked.Add(c);
             }
             if (picked.Count == 0)
             {
@@ -430,7 +453,8 @@ namespace CardShopCoop.Sync
 
             int serviceLevel = set.m_ServiceLevel;
             var inv = Inv();
-            if (inv == null) return; // no live world = nothing vanilla could price either
+            if (inv == null)
+                return; // no live world = nothing vanilla could price either
             var svc = inv.m_MonsterData_SO.GetGradeCardServiceData(serviceLevel);
             // Vanilla-flat fee: the number the ORIGINAL EvaluateTotalCost would show. This is
             // the fallback whenever Grading Overhaul isn't driving the screen.
@@ -472,7 +496,7 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogWarning("GradingSync: no host link, submission cancelled");
                 return;
             }
-            inst.SendOp(bw =>
+            var gradOp = new GradingOpMessage
             {
                 // Widened from 0..3 to 0..255: Grading Overhaul cycles up to
                 // ServiceTierControlCenter.GetTierCount(company) tiers, which can exceed 4
@@ -486,14 +510,9 @@ namespace CardShopCoop.Sync
                 // out-of-range serviceLevel to Count-1 before that index runs (decompiled-grading
                 // :13971-13993), and a high tier only ever exists in a GO session - so no stray
                 // value can reach vanilla's raw indexer.
-                bw.Write((byte)Mathf.Clamp(serviceLevel, 0, 255));
-                // cap, not MaxSlots: with Grading Overhaul this is 52. The cap check above already
-                // guarantees picked.Count <= cap <= 255, so the Min/loop bound can no longer drop a
-                // card - it only keeps the byte cast provably safe.
-                bw.Write((byte)Mathf.Min(picked.Count, cap));
-                for (int i = 0; i < picked.Count && i < cap; i++)
-                    Msg.WriteCard(bw, picked[i]);
-                bw.Write(total); // client's fee view; host recomputes authoritatively
+                ServiceLevel = (byte)Mathf.Clamp(serviceLevel, 0, 255),
+                // client's fee view; host recomputes authoritatively
+                Total = total,
                 // WHICH grading company the guest was looking at. Without this the host had no
                 // way to stamp the submission as a Grading Overhaul job at all: GO records the
                 // company in an OnPressSubmitButton POSTFIX gated on the in-progress list already
@@ -508,8 +527,14 @@ namespace CardShopCoop.Sync
                 // 255 (GradingInterop.NoCompany) when GO is absent or unreadable - the host
                 // rejects it by the same allow-list test it applies to every other value, so a
                 // GO-absent session enrolls exactly as it always did.
-                bw.Write((byte)Mathf.Clamp(Util.GradingInterop.CurrentCompanyId, 0, 255));
-            });
+                CompanyId = (byte)Mathf.Clamp(Util.GradingInterop.CurrentCompanyId, 0, 255),
+            };
+            // cap, not MaxSlots: with Grading Overhaul this is 52. The cap check above already
+            // guarantees picked.Count <= cap <= 255, so the Min/loop bound can no longer drop a
+            // card - it only keeps the byte cast provably safe.
+            for (int i = 0; i < picked.Count && i < cap; i++)
+                gradOp.Cards.Add(picked[i]);
+            inst.SendOp(gradOp);
 
             SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
 
@@ -526,11 +551,16 @@ namespace CardShopCoop.Sync
                 m_ServiceLevel = serviceLevel,
                 m_CardDataList = new List<CardData>(cap),
             };
-            for (int j = 0; j < cap; j++) fresh.m_CardDataList.Add(new CardData());
+            for (int j = 0; j < cap; j++)
+                fresh.m_CardDataList.Add(new CardData());
             CPlayerData.m_CurrentGradeCardSubmitSet = fresh;
 
             screen.CloseScreen();
-            try { screen.m_GradeCardWebsiteUIScreen?.UpdateSubmissionProgressPanelUI(); } catch { }
+            try
+            {
+                screen.m_GradeCardWebsiteUIScreen?.UpdateSubmissionProgressPanelUI();
+            }
+            catch { }
             try
             {
                 CSingleton<InteractionPlayerController>.Instance
@@ -550,7 +580,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = Util.ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"Patch target missing: {type.Name}.{method}");
@@ -568,20 +598,24 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < 1.5f) return;
+            if (_timer < 1.5f)
+                return;
             _timer -= 1.5f;
             try
             {
                 var list = CPlayerData.m_GradeCardInProgressList;
-                if (list == null) return;
+                if (list == null)
+                    return;
                 int hash = ComputeHash(list);
                 _heal += 1.5f;
-                if (hash == _lastHash && _heal < 15f) return;
+                if (hash == _lastHash && _heal < 15f)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
-                BroadcastState?.Invoke(bw => WriteState(bw, list));
+                BroadcastState?.Invoke(BuildState(list));
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync host: " + e.Message); }
         }
@@ -611,7 +645,8 @@ namespace CardShopCoop.Sync
         {
             for (int i = 0; i < cards.Count; i++)
             {
-                if (cards[i] == null) continue;
+                if (cards[i] == null)
+                    continue;
                 // Wire-derived card: AddCard would mis-index (vanilla) or throw on
                 // CardCountList[-1] (EPL) for content this PC doesn't have. Unlike the delta
                 // path there is nothing to relay here - the restore IS the host's AddCard - so
@@ -621,13 +656,108 @@ namespace CardShopCoop.Sync
                     CoopCore.WarnRefusedCard(cards[i], "grade-return");
                     continue;
                 }
-                if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
-                    Util.GradingInterop.Remember(cards[i]);
-                CPlayerData.AddCard(cards[i], 1);
+                try
+                {
+                    if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
+                        Util.GradingInterop.Remember(cards[i]);
+                    CPlayerData.AddCard(cards[i], 1);
+                }
+                catch (Exception e)
+                {
+                    // Restoration is a recovery operation, so one bad card must not prevent
+                    // the remaining cards from being returned. Include its complete wire
+                    // identity: this is the last useful trace if the host cannot represent it.
+                    CoopPlugin.Log.LogError($"coop: grading card restore failed (conn {senderConn}, card {CardIdentity(cards[i])}); card may be lost: {e}");
+                }
             }
         }
 
-        public void HostApplyOp(BinaryReader br, int senderConn)
+        private static string CardIdentity(CardData card)
+        {
+            if (card == null)
+                return "<null>";
+            return $"monster={card.monsterType}, expansion={card.expansionType}, border={card.borderType}, grade={card.cardGrade}, foil={card.isFoil}, destiny={card.isDestiny}, champion={card.isChampionCard}";
+        }
+
+        private static void CompensateSubmission(List<CardData> cards, GradeCardSubmitSet set,
+            bool coinQueued, float total, float reportSupplyCost, float permanentSupplyCost,
+            bool reportMutated, bool permanentReportMutated, int senderConn, Exception failure)
+        {
+            CoopPlugin.Log.LogError($"coop: grading submission transaction failed (conn {senderConn}, cards {cards.Count}, chargeQueued={coinQueued}, total={total:F2}); compensating: {failure}");
+
+            if (set != null && CPlayerData.m_GradeCardInProgressList != null)
+            {
+                if (CPlayerData.m_GradeCardInProgressList.Remove(set))
+                    CoopPlugin.Log.LogInfo($"GradingSync: removed half-created grading set while compensating conn {senderConn}");
+            }
+
+            if (reportMutated)
+                CPlayerData.m_GameReportDataCollect.supplyCost = reportSupplyCost;
+            if (permanentReportMutated)
+                CPlayerData.m_GameReportDataCollectPermanent.supplyCost = permanentSupplyCost;
+
+            ReturnRejectedCards(cards, senderConn);
+
+            if (coinQueued)
+            {
+                CoopPlugin.Log.LogInfo($"GradingSync: queuing compensating coin credit {total:F2} for conn {senderConn}");
+                try
+                {
+                    CEventManager.QueueEvent(new CEventPlayer_AddCoin(total));
+                }
+                catch (Exception e)
+                {
+                    CoopPlugin.Log.LogError($"coop: compensating coin credit failed (conn {senderConn}, amount {total:F2}); wallet may remain charged: {e}");
+                }
+            }
+        }
+
+        private static bool TryEnrollGoJob(GradeCardSubmitSet set, int companyId, int serviceLevel)
+        {
+            if (!Util.GradingInterop.Present || !Util.GradingInterop.CanEnroll)
+                return false;
+            if (!Util.GradingInterop.IsAllowedCompany(companyId))
+            {
+                CoopPlugin.Log.LogInfo($"GradingSync: no GO enrollment - wire company {companyId} is not a website-selectable GradingCompany");
+                return false;
+            }
+
+            try
+            {
+                bool useCheats = Util.GradingInterop.HostUseCheatsWebsite;
+                bool registered = Util.GradingInterop.RegisterJobCompany(set, companyId, useCheats);
+                int jobId = Util.GradingInterop.NextJobId();
+                int encoded = jobId > 0 ? Util.GradingInterop.EncodeServiceLevel(companyId, serviceLevel, jobId) : 0;
+                if (encoded == 0 && jobId > 0)
+                    encoded = 100000 + jobId * 10000 + companyId * 1000 + Mathf.Clamp(serviceLevel, 0, 999);
+
+                if (encoded > 0
+                    && Util.GradingInterop.TryDecodeServiceLevel(encoded, out int backCompany, out int backTier)
+                    && backCompany == companyId && backTier == serviceLevel)
+                {
+                    set.m_ServiceLevel = encoded;
+                    // A failure here can occur after GO has burned certs. Keep the set as a
+                    // degraded vanilla job, matching the old behavior, rather than charging
+                    // and then losing the submission while attempting to undo GO's store.
+                    Util.GradingInterop.PreRollJob(set, companyId, useCheats, jobId);
+                    CoopPlugin.Log.LogInfo($"GradingSync: enrolled guest submission as a Grading Overhaul job - company {Util.GradingInterop.CompanyName(companyId)}, tier {serviceLevel}, jobId {jobId} (serviceLevel {encoded})");
+                    return true;
+                }
+
+                CoopPlugin.Log.LogWarning($"GradingSync: GO service-level encode failed round-trip (company {companyId}, tier {serviceLevel}, jobId {jobId}, encoded {encoded}) - keeping the raw tier"
+                    + (registered ? "; company registry entry stands" : "; company registry entry also failed"));
+            }
+            catch (Exception e)
+            {
+                // Do not leave an encoded level behind when pre-roll or a later GO step
+                // fails; that would make the fallback look like a valid GO job at maturation.
+                set.m_ServiceLevel = serviceLevel;
+                CoopPlugin.Log.LogError($"coop: GO grading enrollment failed after the submission was accepted (company {companyId}, tier {serviceLevel}); keeping a degraded vanilla job: {e}");
+            }
+            return false;
+        }
+
+        public void HostApplyOp(GradingOpMessage message, int senderConn)
         {
             // Widened from 0..3 to 0..255 to match the sender: Grading Overhaul's extra service
             // tiers (GetTierCount(company) can exceed 4) would otherwise be truncated here and the
@@ -637,7 +767,7 @@ namespace CardShopCoop.Sync
             // tier cannot crash vanilla in a GO session. In a GO-ABSENT session no legitimate
             // guest can produce a tier > 3, and the flat-recompute path below guards its raw
             // vanilla GetGradeCardServiceData call so a spoofed high tier can't throw there either.
-            int serviceLevel = Mathf.Clamp(br.ReadByte(), 0, 255);
+            int serviceLevel = Mathf.Clamp(message.ServiceLevel, 0, 255);
 
             // Card count. VALIDATED, never clamped - this used to be Min(count, 8), which meant a
             // guest submitting more than eight had the tail of his submission silently discarded
@@ -653,34 +783,41 @@ namespace CardShopCoop.Sync
             // decoding it threw that copy away with no refund, while every other reject path here
             // hands the cards back through ReturnRejectedCards.
             //
-            // Reading first is safe: `n` is a BYTE, so the loop is bounded at 255 iterations no
-            // matter what a crafted message claims - it cannot spin the reader. A payload too
-            // short for the count it advertises makes Msg.ReadCard throw, which lands in
-            // Dispatch's existing catch, and every op gets its OWN BinaryReader over its own
-            // payload (CoopCore, MsgType.GradingOp), so a half-consumed reader leaves no shared
-            // stream misaligned.
+            // Reading first is safe: the DTO's Deserialize already decoded the whole card blob (the
+            // count is a BYTE, so the loop is bounded at 255 iterations no matter what a crafted
+            // message claims - it cannot spin the reader; a payload too short for the count it
+            // advertises makes Msg.ReadCard throw during deserialize, which lands in Dispatch's
+            // existing catch). Every op carries its own payload, so nothing shared is misaligned.
             //
             // The cap is the HOST's: 8 without Grading Overhaul (unchanged legacy behavior), GO's
             // MAX_SLOTS with it. Version + PluginHash parity means a GO guest can only join a GO
             // host, so both ends agree on the number.
             int cap = Util.GradingInterop.MaxSubmitSlots;
-            int n = br.ReadByte();
-            var cards = new List<CardData>(n);
-            for (int i = 0; i < n; i++) cards.Add(Msg.ReadCard(br));
+            var cards = message.Cards;
+            int n = cards.Count;
             if (n > cap)
             {
                 CoopPlugin.Log.LogWarning($"GradingSync: malformed grading submission from conn {senderConn} (cardCount {n} > cap {cap}) - submission refused whole; returning its {cards.Count} cards to the shared binder so they are not destroyed");
-                if (CoopCore.Role == CoopRole.Host) ReturnRejectedCards(cards, senderConn);
+                if (CoopCore.Role == CoopRole.Host)
+                    ReturnRejectedCards(cards, senderConn);
                 return;
             }
-            float clientFee = br.ReadSingle(); // GO present: the REAL bill the guest saw; GO absent: client's flat view
+            float clientFee = message.Total; // GO present: the REAL bill the guest saw; GO absent: client's flat view
             // The grading company the guest's website was showing (GradingInterop.NoCompany=255
             // when he has no Grading Overhaul). Validated below before it is allowed to stamp
             // anything; see the enrollment block after the set is enrolled.
-            int companyId = br.ReadByte();
+            int companyId = message.CompanyId;
 
-            if (CoopCore.Role != CoopRole.Host || cards.Count == 0) return;
+            if (CoopCore.Role != CoopRole.Host || cards.Count == 0)
+                return;
 
+            GradeCardSubmitSet set = null;
+            bool coinQueued = false;
+            bool reportMutated = false;
+            bool permanentReportMutated = false;
+            float reportSupplyCost = 0f;
+            float permanentSupplyCost = 0f;
+            float total = 0f;
             try
             {
                 // ---- content-parity gate (before ANY charge, enrollment or set construction) ----
@@ -708,7 +845,8 @@ namespace CardShopCoop.Sync
                 int refused = 0;
                 for (int i = 0; i < cards.Count; i++)
                 {
-                    if (CoopCore.CardSetInstalledHere(cards[i])) continue;
+                    if (CoopCore.CardSetInstalledHere(cards[i]))
+                        continue;
                     refused++;
                     CoopCore.WarnRefusedCard(cards[i], "grade-submit");
                 }
@@ -722,8 +860,8 @@ namespace CardShopCoop.Sync
                 var inv = Inv();
                 if (inv == null)
                 {
-                    // same outcome as the old fee-lookup failure, minus the fake manager
-                    CoopPlugin.Log.LogWarning("GradingSync: no InventoryBase (world loading?) - submission dropped");
+                    CoopPlugin.Log.LogWarning($"GradingSync: no InventoryBase (world loading?) - submission dropped; returning {cards.Count} cards");
+                    ReturnRejectedCards(cards, senderConn);
                     return;
                 }
                 // Decide what to actually charge the host wallet.
@@ -738,7 +876,6 @@ namespace CardShopCoop.Sync
                 //     indexer throwing on one of GO's out-of-vanilla-range tiers.
                 //   GO absent: the guest ran the vanilla-flat model, so recompute it authoritatively
                 //     (unchanged legacy behavior) and warn on any mismatch.
-                float total;
                 if (Util.GradingInterop.Present)
                 {
                     if (float.IsNaN(clientFee) || float.IsInfinity(clientFee) || clientFee < 0f)
@@ -795,12 +932,19 @@ namespace CardShopCoop.Sync
                 // carries the card data forward through grading.
 
                 // the vanilla submit body (GradedCardSubmitSelectScreen.OnPressSubmitButton)
+                // Snapshot the report values before the first mutation. If any later operation
+                // throws, restoring these fields keeps the economic/report transaction whole.
+                reportSupplyCost = CPlayerData.m_GameReportDataCollect.supplyCost;
+                permanentSupplyCost = CPlayerData.m_GameReportDataCollectPermanent.supplyCost;
                 PriceChangeManager.AddTransaction(0f - total, ETransactionType.GradingFee, serviceLevel);
                 CPlayerData.m_GameReportDataCollect.supplyCost -= total;
+                reportMutated = true;
                 CPlayerData.m_GameReportDataCollectPermanent.supplyCost -= total;
+                permanentReportMutated = true;
                 CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(total));
+                coinQueued = true;
 
-                var set = new GradeCardSubmitSet
+                set = new GradeCardSubmitSet
                 {
                     m_ServiceLevel = serviceLevel,
                     m_DayPassed = 0,
@@ -812,84 +956,10 @@ namespace CardShopCoop.Sync
                 set.m_CardDataList.AddRange(cards);
                 CPlayerData.m_GradeCardInProgressList.Add(set);
 
-                // ---- Grading Overhaul job enrollment (the field-bug fix) ----
-                // GO turns a plain submission into one of ITS jobs in an OnPressSubmitButton
-                // postfix (GradingJobSubmissionRegistryPatch, decompiled-grading
-                // Grading Overhaul.decompiled.cs :12866-12895) that is gated on
-                // m_GradeCardInProgressList.Contains(m_CurrentGradeCardSubmitSet). A set the host
-                // built from the wire is in the list but is not the host's scratch set, so that
-                // gate is never satisfied and the postfix never ran for a guest's submission:
-                // at maturation GO's TryDecode failed on the bare tier AND its registry lookup
-                // missed (the registry is reference-keyed on the LOCAL submit set), so GO handed
-                // the job back to vanilla grading - the guest paid a Grading Overhaul bill and
-                // got vanilla grades. Replay GO's chain here, in GO's order, for this set.
-                //
-                // Strictly after the slots/wallet rejection above and after the list Add: the
-                // registry, the jobId counter and the pre-roll all mutate GO's persistent state
-                // (PreRollOnSubmit burns a cert per card, :5399), so nothing may run until the
-                // submission is definitely accepted, and GO stamps a set that is already enrolled.
-                bool enrolled = false;
-                if (Util.GradingInterop.Present && Util.GradingInterop.CanEnroll)
-                {
-                    if (!Util.GradingInterop.IsAllowedCompany(companyId))
-                    {
-                        // Includes the GO-absent guest's 255 sentinel, a value outside the enum,
-                        // and Custom (=1) - a real member, but GO's internal cheat skin that the
-                        // website never offers (AllowedCompanies, :4017). The job stays vanilla
-                        // rather than being enrolled under a company no website could have picked.
-                        CoopPlugin.Log.LogInfo($"GradingSync: no GO enrollment - wire company {companyId} is not a website-selectable GradingCompany");
-                    }
-                    else
-                    {
-                        // (a) useCheats is the HOST's setting, not the submitter's - see
-                        // GradingInterop.HostUseCheatsWebsite for why (fake cards land in the
-                        // shared album, so the album's owner decides).
-                        bool useCheats = Util.GradingInterop.HostUseCheatsWebsite;
-
-                        // (b) register company + cheat flag against the set instance
-                        bool registered = Util.GradingInterop.RegisterJobCompany(set, companyId, useCheats);
-
-                        // (c) claim a job id
-                        int jobId = Util.GradingInterop.NextJobId();
-
-                        // (d) encode (company, tier, jobId) into m_ServiceLevel - this is what
-                        // GO's maturation decodes FIRST (:8007) and what makes the guest's
-                        // grading app show the right company and tier for the job.
-                        int encoded = jobId > 0 ? Util.GradingInterop.EncodeServiceLevel(companyId, serviceLevel, jobId) : 0;
-                        if (encoded == 0 && jobId > 0)
-                        {
-                            // ServiceLevelCodec is internal and its Encode could not be invoked.
-                            // Its V2 layout is a literal (decompiled :5601) - reproduce it and let
-                            // the round-trip below decide whether it is actually usable.
-                            encoded = 100000 + jobId * 10000 + companyId * 1000 + Mathf.Clamp(serviceLevel, 0, 999);
-                        }
-
-                        // MANDATORY round-trip. m_ServiceLevel is the field the whole grading UI
-                        // and the maturation path read; writing a value GO cannot decode is worse
-                        // than leaving the raw tier, because it turns a wrong-grade bug into a
-                        // wrong-everything bug. Only a verified encode is written.
-                        if (encoded > 0
-                            && Util.GradingInterop.TryDecodeServiceLevel(encoded, out int backCompany, out int backTier)
-                            && backCompany == companyId && backTier == serviceLevel)
-                        {
-                            set.m_ServiceLevel = encoded;
-
-                            // (e) pre-roll the grades and burn the certs, as GO does at :12891.
-                            Util.GradingInterop.PreRollJob(set, companyId, useCheats, jobId);
-
-                            enrolled = true;
-                            CoopPlugin.Log.LogInfo($"GradingSync: enrolled guest submission as a Grading Overhaul job - company {Util.GradingInterop.CompanyName(companyId)}, tier {serviceLevel}, jobId {jobId} (serviceLevel {encoded})");
-                        }
-                        else
-                        {
-                            // Registry alone still lets GO take the job (maturation falls back to
-                            // TryGetJobCompany at :8009), so a failed encode is a degraded result,
-                            // not a lost one - but the guest's app will show vanilla tier text.
-                            CoopPlugin.Log.LogWarning($"GradingSync: GO service-level encode failed round-trip (company {companyId}, tier {serviceLevel}, jobId {jobId}, encoded {encoded}) - keeping the raw tier"
-                                + (registered ? "; company registry entry stands" : "; company registry entry also failed"));
-                        }
-                    }
-                }
+                // Enrollment is intentionally isolated: GO can burn certificates before a
+                // reflection/codec failure. Its established fallback is a degraded vanilla
+                // job, which is safe because the core fee/list mutation is already consistent.
+                bool enrolled = TryEnrollGoJob(set, companyId, serviceLevel);
 
                 // Pad to vanilla's 8 slots ONLY when this stayed a vanilla job. GO's chain ends by
                 // trimming every empty slot off an enrolled set (TrimEmptyCards, :12936), and its
@@ -901,7 +971,7 @@ namespace CardShopCoop.Sync
                 // used to be stated as "the trimmed set still displays correctly there", which
                 // only held while a set was <= 8 cards: the broadcast truncated every set to
                 // eight, so a longer job crossed the wire mutilated no matter what shape the host
-                // built. The wire now carries GradingInterop.MaxSubmitSlots (see WriteState).
+                // built. The wire now carries GradingInterop.MaxSubmitSlots (see BuildState).
                 // Moved below the list Add (it used to sit above): enrollment has to see
                 // the set already enrolled, and nothing between the two reads the list.
                 if (!enrolled)
@@ -929,7 +999,14 @@ namespace CardShopCoop.Sync
                 }
                 catch { }
             }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync op: " + e.Message); }
+            catch (Exception e)
+            {
+                if (CoopCore.Role == CoopRole.Host)
+                    CompensateSubmission(cards, set, coinQueued, total,
+                        reportSupplyCost, permanentSupplyCost, reportMutated, permanentReportMutated, senderConn, e);
+                else
+                    CoopPlugin.Log.LogError($"coop: grading op failed outside host role (conn {senderConn}): {e}");
+            }
         }
 
         // ---------------- client ----------------
@@ -937,27 +1014,31 @@ namespace CardShopCoop.Sync
         /// <summary>Client: adopt the host's pending-submission list wholesale. The
         /// joiner never enrolls sets locally (submit is forwarded), so there is no
         /// local-edit-vs-echo race - the broadcast is simply the truth.</summary>
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(GradingStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(br); }
+            try
+            {
+                ClientApplyInner(message);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(BinaryReader br)
+        private void ClientApplyInner(GradingStateMessage message)
         {
-            int sets = Mathf.Min(br.ReadByte(), MaxSets);
+            int sets = Mathf.Min(message.Sets.Count, MaxSets);
             var list = new List<GradeCardSubmitSet>(sets);
             for (int i = 0; i < sets; i++)
             {
+                var se = message.Sets[i];
                 var set = new GradeCardSubmitSet
                 {
-                    // Int32 to match WriteState: a Grading Overhaul m_ServiceLevel is an encoded
+                    // Int32 to match BuildState: a Grading Overhaul m_ServiceLevel is an encoded
                     // (company, tier, jobId) value, not a 0..255 tier index.
-                    m_ServiceLevel = br.ReadInt32(),
-                    m_DayPassed = br.ReadByte(),
-                    m_MinutePassed = br.ReadSingle(),
+                    m_ServiceLevel = se.ServiceLevel,
+                    m_DayPassed = se.DayPassed,
+                    m_MinutePassed = se.MinutePassed,
                     m_CardDataList = new List<CardData>(MaxSlots),
                 };
                 // The vanilla status UI draws days-left as (m_ServiceDays - m_DayPassed) with
@@ -988,13 +1069,14 @@ namespace CardShopCoop.Sync
                     }
                     catch { }
                 }
-                // Read bound = MaxSubmitSlots, the same number WriteState uses. An 8 here would
+                // Read bound = MaxSubmitSlots, the same number BuildState uses. An 8 here would
                 // STOP READING mid-set on any Grading Overhaul job longer than eight cards and
-                // leave the reader parked in the middle of that set's card blob, so every set
-                // after it decoded from garbage. Both ends agree on the number: Version +
-                // PluginHash parity means a GO guest can only ever join a GO host.
-                int n = Mathf.Min(br.ReadByte(), Util.GradingInterop.MaxSubmitSlots);
-                for (int j = 0; j < n; j++) set.m_CardDataList.Add(Msg.ReadCard(br));
+                // leave decoding the rest of the set's card blob from garbage. Both ends agree on
+                // the number: Version + PluginHash parity means a GO guest can only ever join a GO
+                // host.
+                int n = Mathf.Min(se.Cards.Count, Util.GradingInterop.MaxSubmitSlots);
+                for (int j = 0; j < n; j++)
+                    set.m_CardDataList.Add(se.Cards[j]);
                 // MaxSlots (8) is right HERE and only here: it is the vanilla SHAPE.
                 // GradedCardSetCheckStatusScreen repaints exactly m_CardDataList.Count
                 // panels; short lists would leave stale cards from the previous page. A set
@@ -1019,22 +1101,25 @@ namespace CardShopCoop.Sync
 
         // ---------------- wire / hash ----------------
 
-        private static void WriteState(BinaryWriter bw, List<GradeCardSubmitSet> list)
+        private static GradingStateMessage BuildState(List<GradeCardSubmitSet> list)
         {
+            var msg = new GradingStateMessage();
             int count = Mathf.Min(list.Count, MaxSets);
-            bw.Write((byte)count);
             for (int i = 0; i < count; i++)
             {
                 var set = list[i];
-                // Int32, NOT a clamped byte. With Grading Overhaul a live m_ServiceLevel is an
-                // ENCODED (company, tier, jobId) triple starting at 100000 (ServiceLevelCodec,
-                // decompiled-grading :5601) - every one of those truncated to 255 on the way out,
-                // so the guest's grading app rendered garbage for the HOST's own jobs long before
-                // any of this touched guest submissions. A tier index needed one byte; an encoded
-                // level needs the whole int.
-                bw.Write(set != null ? set.m_ServiceLevel : 0);
-                bw.Write((byte)Mathf.Clamp(set != null ? set.m_DayPassed : 0, 0, 255));
-                bw.Write(set != null ? set.m_MinutePassed : 0f);
+                var entry = new GradingSetEntry
+                {
+                    // Int32, NOT a clamped byte. With Grading Overhaul a live m_ServiceLevel is an
+                    // ENCODED (company, tier, jobId) triple starting at 100000 (ServiceLevelCodec,
+                    // decompiled-grading :5601) - every one of those truncated to 255 on the way out,
+                    // so the guest's grading app rendered garbage for the HOST's own jobs long before
+                    // any of this touched guest submissions. A tier index needed one byte; an encoded
+                    // level needs the whole int.
+                    ServiceLevel = set != null ? set.m_ServiceLevel : 0,
+                    DayPassed = (byte)Mathf.Clamp(set != null ? set.m_DayPassed : 0, 0, 255),
+                    MinutePassed = set != null ? set.m_MinutePassed : 0f,
+                };
                 var cards = set != null ? set.m_CardDataList : null;
                 // MaxSubmitSlots, NOT MaxSlots. A Grading Overhaul set legitimately holds up to
                 // 52 cards (enrolled sets are GO-trimmed to their real length, and the guest's
@@ -1043,13 +1128,14 @@ namespace CardShopCoop.Sync
                 // 30-card job and nothing else. The count still ships as a byte, and
                 // MaxSubmitSlots is itself bounded to 255, so the cast stays provably safe.
                 int n = cards != null ? Mathf.Min(cards.Count, Util.GradingInterop.MaxSubmitSlots) : 0;
-                bw.Write((byte)n);
                 for (int j = 0; j < n; j++)
-                    Msg.WriteCard(bw, cards[j] ?? new CardData());
+                    entry.Cards.Add(cards[j] ?? new CardData());
+                msg.Sets.Add(entry);
             }
+            return msg;
         }
 
-        /// <summary>Change detector over everything WriteState sends. m_MinutePassed is
+        /// <summary>Change detector over everything BuildState sends. m_MinutePassed is
         /// folded at hour granularity (LightManager bumps it +60 per game hour anyway),
         /// so the rebroadcast cadence is one per game hour, not per frame.</summary>
         private static int ComputeHash(List<GradeCardSubmitSet> list)
@@ -1059,20 +1145,23 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < list.Count && i < MaxSets; i++)
             {
                 var set = list[i];
-                if (set == null) continue;
+                if (set == null)
+                    continue;
                 hash = hash * 31 + set.m_ServiceLevel;
                 hash = hash * 31 + set.m_DayPassed;
                 hash = hash * 31 + (int)(set.m_MinutePassed / 60f);
                 var cards = set.m_CardDataList;
-                if (cards == null) continue;
-                // Same bound as WriteState. The change detector has to cover everything the wire
+                if (cards == null)
+                    continue;
+                // Same bound as BuildState. The change detector has to cover everything the wire
                 // carries: hashing only the first eight cards of a 52-card set meant an edit past
                 // the eighth produced an IDENTICAL hash, so the rebroadcast never fired and the
                 // guest kept a stale set until the 15s heal timer happened to come round.
                 for (int j = 0; j < cards.Count && j < Util.GradingInterop.MaxSubmitSlots; j++)
                 {
                     var c = cards[j];
-                    if (c == null) continue;
+                    if (c == null)
+                        continue;
                     hash = hash * 31 + (int)c.monsterType;
                     hash = hash * 31 + (int)c.expansionType;
                     hash = hash * 31 + (int)c.borderType;
