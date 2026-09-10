@@ -492,6 +492,15 @@ namespace CardShopCoop
                 Broadcast(new BoxStateMessage { Entries = list });
             _boxes.OnClientChanges = list =>
                 Send(1, new BoxRequestMessage { Entries = list });
+            _boxes.SendPreview = message =>
+            {
+                if (_net == null)
+                    return;
+                if (Role == CoopRole.Host)
+                    _net.BroadcastTransient(message);
+                else if (Role == CoopRole.Client)
+                    _net.SendTransient(1, message);
+            };
             BoxSync.IsLocallyCarried = box =>
             {
                 if (_playerIpc == null || box == null)
@@ -4607,6 +4616,23 @@ namespace CardShopCoop
                             break;
                         if (msg.Message is BoxRequestMessage boxRequest)
                             _boxes.HostApplyRequest(boxRequest.Entries, msg.ConnId);
+                        break;
+                    }
+                case MsgType.BoxMovePreview:
+                    {
+                        if (!InGameLevel() || !(msg.Message is BoxMovePreviewMessage boxPreview))
+                            break;
+                        if (Role == CoopRole.Host)
+                        {
+                            boxPreview.SourceId = msg.ConnId;
+                            _boxes.ApplyRemotePreview(boxPreview, msg.ConnId);
+                            if (_net != null)
+                                foreach (int cid in _net.ConnIds())
+                                    if (cid != msg.ConnId)
+                                        _net.SendTransient(cid, boxPreview);
+                        }
+                        else if (Role == CoopRole.Client)
+                            _boxes.ApplyRemotePreview(boxPreview, boxPreview.SourceId);
                         break;
                     }
                 case MsgType.Toast:
