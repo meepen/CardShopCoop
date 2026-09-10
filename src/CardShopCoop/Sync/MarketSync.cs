@@ -35,13 +35,18 @@ namespace CardShopCoop.Sync
 
         public Action<INetMessage> BroadcastState; // set by CoopCore: host -> clients
 
-        private const float Interval = 2f;
-        private const float HealEvery = 20f; // ~32KB per snapshot; keep the heal slow
-
-        private float _timer;
-        private int _lastHash;
-        private float _heal;
         private int _lastAppliedGen; // client: which host roll's history append already ran
+
+        // Host: set whenever the market data is known to have changed. Every writer of the
+        // synced tables flags this (day roll, base generation, game-event price edits, load,
+        // cost updates, join) and HostTick broadcasts on the next tick. No polling, no timer:
+        // the snapshot is a Reliable message, so a send is a delivery.
+        private static bool s_dirty;
+
+        // Cached EPL modded-id list (walking the EPL item dictionary + Convert.ToInt32 per key
+        // was happening on every snapshot build). The registry is fixed for a session.
+        private static List<int> s_eplModdedCache;
+        private static float s_eplModdedCacheAt = -999f;
 
         // Host: bumped AFTER PriceChangeManager finishes a day-start roll. The raw day
         // number is not a safe stamp - HostTick could sample in the frames between the
@@ -51,16 +56,15 @@ namespace CardShopCoop.Sync
 
         public void Reset()
         {
-            _timer = -3.4f; // staggered phase vs the other snapshot engines
-            _lastHash = 0;
-            _heal = 0f;
             _lastAppliedGen = int.MinValue;
+            s_dirty = false;
+            s_eplModdedCache = null;
+            s_eplModdedCacheAt = -999f;
         }
 
         public void ForceResend()
         {
-            _lastHash = 0;
-            _heal = HealEvery; // next tick broadcasts even if the hash collides
+            s_dirty = true;
         }
 
         // ---------------- patches ----------------
@@ -75,6 +79,29 @@ namespace CardShopCoop.Sync
             Try(h, typeof(PriceChangeManager), "OnDayStarted",
                 prefix: new HarmonyMethod(typeof(MarketSync), nameof(ClientBlockPrefix)),
                 postfix: new HarmonyMethod(typeof(MarketSync), nameof(HostRolledPostfix)));
+            // Other writers of the synced market tables: a game-event price edit, the
+            // initial load, first-seen base generation, and per-purchase cost updates.
+            // Boot them all into the dirty flag so HostTick never has to poll.
+            Try(h, typeof(PriceChangeManager), "SetGameEventPrice",
+                postfix: new HarmonyMethod(typeof(MarketSync), nameof(MarkDirtyHostPostfix)));
+            Try(h, typeof(PriceChangeManager), "Init",
+                postfix: new HarmonyMethod(typeof(MarketSync), nameof(MarkDirtyHostPostfix)));
+            // RestockManager.Init is the only caller of GenerateCardMarketPrice and the one
+            // place generated item cost/market bases are first filled (a newly met item).
+            Try(h, typeof(RestockManager), "Init",
+                postfix: new HarmonyMethod(typeof(MarketSync), nameof(MarkDirtyHostPostfix)));
+            // Average item cost moves during normal gameplay (buying stock).
+            Try(h, typeof(CPlayerData), "UpdateAverageItemCost",
+                postfix: new HarmonyMethod(typeof(MarketSync), nameof(MarkDirtyHostPostfix)));
+            Try(h, typeof(CPlayerData), "SetAverageItemCost",
+                postfix: new HarmonyMethod(typeof(MarketSync), nameof(MarkDirtyHostPostfix)));
+        }
+
+        /// <summary>Host: a market table was written; flush on the next tick.</summary>
+        public static void MarkDirtyHostPostfix()
+        {
+            if (CoopCore.Role == CoopRole.Host && !ApplyingRemote)
+                s_dirty = true;
         }
 
         private static void Try(Harmony h, Type type, string method,
@@ -105,58 +132,28 @@ namespace CardShopCoop.Sync
         {
             // postfixes run even when the prefix skipped the original - host gate here
             if (CoopCore.Role == CoopRole.Host)
+            {
                 s_rollGen++;
+                s_dirty = true; // a day roll changed the market; flush promptly
+            }
         }
 
         // ---------------- host ----------------
 
-        public void HostTick(float dt, bool inGame)
+        public void HostTick(bool inGame)
         {
-            if (!inGame || BroadcastState == null)
+            if (!inGame || BroadcastState == null || !s_dirty)
                 return;
-            _timer += dt;
-            if (_timer < Interval)
-                return;
-            _timer -= Interval;
             try
             {
                 // tables exist only after CPlayerData init; an empty item list means the
-                // save hasn't landed yet
+                // save hasn't landed yet. Keep s_dirty so the flush still happens later.
                 if (CPlayerData.m_ItemPricePercentChangeList == null
                     || CPlayerData.m_ItemPricePercentChangeList.Count == 0)
                     return;
-
-                // the market changes once per host day (plus rare game-event price edits),
-                // so the hash keeps this ~32KB snapshot off the wire almost always
-                int hash = 17;
-                hash = hash * 31 + s_rollGen; // a value-neutral roll still appends history
-                hash = HashFloats(hash, CPlayerData.m_ItemPricePercentChangeList);
-                hash = HashMarket(hash, CPlayerData.m_GenCardMarketPriceList);
-                hash = HashMarket(hash, CPlayerData.m_GenCardMarketPriceListDestiny);
-                hash = HashMarket(hash, CPlayerData.m_GenCardMarketPriceListGhost);
-                hash = HashMarket(hash, CPlayerData.m_GenCardMarketPriceListGhostBlack);
-                hash = HashMarket(hash, CPlayerData.m_GenCardMarketPriceListMegabot);
-                hash = HashMarket(hash, CPlayerData.m_GenCardMarketPriceListFantasyRPG);
-                hash = HashMarket(hash, CPlayerData.m_GenCardMarketPriceListCatJob);
-                hash = HashFloats(hash, CPlayerData.m_SetGameEventPriceList);
-                hash = HashFloats(hash, CPlayerData.m_GeneratedGameEventPriceList);
-                hash = HashFloats(hash, CPlayerData.m_GameEventPricePercentChangeList);
-                // generated BASE prices: per-save tables filled the first time a machine
-                // "meets" an item. Content packs installed mid-save get bases only on the
-                // host - without this the joiner sees $0 market prices for them forever
-                hash = HashFloats(hash, CPlayerData.m_GeneratedMarketPriceList);
-                hash = HashFloats(hash, CPlayerData.m_GeneratedCostPriceList);
-                hash = HashFloats(hash, CPlayerData.m_AverageItemCostList);
-                // modded rows live in EPL's save data, not in the raw lists above -
-                // without this the hash never moves when only a modded price changes
-                hash = HashEplMarket(hash);
-
-                _heal += Interval;
-                if (hash == _lastHash && _heal < HealEvery)
-                    return;
-                _lastHash = hash;
-                _heal = 0f;
-                BroadcastState(BuildState());
+                var msg = BuildState();
+                s_dirty = false;
+                BroadcastState(msg);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("MarketSync host: " + e.Message); }
         }
@@ -549,23 +546,32 @@ namespace CardShopCoop.Sync
         /// lands in EPL's machine-local index space, above fails the receive cap.</summary>
         private static List<int> EplModdedItemTypes()
         {
+            // Cached: the EPL item registry is fixed for a session, and this walk (dictionary
+            // keys + Convert.ToInt32) was running on every market tick. Refresh slowly in case
+            // a mid-session content load adds rows.
+            float now = Time.realtimeSinceStartup;
+            if (s_eplModdedCache != null && now - s_eplModdedCacheAt < 30f)
+                return s_eplModdedCache;
             var result = new List<int>();
-            if (!EplMarketBridge())
-                return result;
-            try
+            if (EplMarketBridge())
             {
-                var assets = s_eplAssetsProp.GetValue(null);
-                var lib = assets == null ? null : s_eplItemLibProp.GetValue(assets);
-                var dict = lib == null ? null : s_eplItemDataProp.GetValue(lib) as System.Collections.IDictionary;
-                if (dict != null)
-                    foreach (object key in dict.Keys)
-                    {
-                        int v = Convert.ToInt32(key);
-                        if (v >= 200000 && v <= 500000)
-                            result.Add(v);
-                    }
+                try
+                {
+                    var assets = s_eplAssetsProp.GetValue(null);
+                    var lib = assets == null ? null : s_eplItemLibProp.GetValue(assets);
+                    var dict = lib == null ? null : s_eplItemDataProp.GetValue(lib) as System.Collections.IDictionary;
+                    if (dict != null)
+                        foreach (object key in dict.Keys)
+                        {
+                            int v = Convert.ToInt32(key);
+                            if (v >= 200000 && v <= 500000)
+                                result.Add(v);
+                        }
+                }
+                catch { }
             }
-            catch { }
+            s_eplModdedCache = result;
+            s_eplModdedCacheAt = now;
             return result;
         }
 
@@ -621,47 +627,6 @@ namespace CardShopCoop.Sync
             // the GAME's setter: no math in its body, and its woven form routes
             // >= 129 into EPL save data exactly like the reflection path
             CPlayerData.SetAverageItemCost((EItemType)itemType, v);
-        }
-
-        private static int HashEplMarket(int h)
-        {
-            var modded = EplModdedItemTypes();
-            for (int k = 0; k < modded.Count; k++)
-            {
-                object d = EplSaveData(modded[k]);
-                if (d == null)
-                    continue;
-                h = h * 31 + (int)((float)s_eplPctChange.GetValue(d, null) * 100f);
-                h = h * 31 + (int)((float)s_eplGenMarket.GetValue(d, null) * 100f);
-                h = h * 31 + (int)((float)s_eplGenCost.GetValue(d, null) * 100f);
-                h = h * 31 + (int)((float)s_eplAvgCost.GetValue(d, null) * 100f);
-            }
-            return h;
-        }
-
-        private static int HashFloats(int h, List<float> list)
-        {
-            if (list == null)
-                return h;
-            for (int i = 0; i < list.Count; i++)
-                h = h * 31 + (int)(list[i] * 100f);
-            return h;
-        }
-
-        private static int HashMarket(int h, List<MarketPrice> list)
-        {
-            if (list == null)
-                return h;
-            for (int i = 0; i < list.Count; i++)
-            {
-                var m = list[i];
-                h = h * 31 + (int)((m != null ? m.pricePercentChangeList : 0f) * 100f);
-                // bases too, now that they are on the wire: they change when the host rolls
-                // rows for newly shown monsters, and a base-only change that doesn't move the
-                // hash sits unsent until the slow heal
-                h = h * 31 + (int)((m != null ? m.generatedMarketPrice : 0f) * 100f);
-            }
-            return h;
         }
     }
 }

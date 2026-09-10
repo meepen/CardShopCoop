@@ -272,6 +272,14 @@ namespace CardShopCoop
         private Vector3 _lastPos;
         private bool _hasLastPos;
 
+        // StateSendTick change-gate: send only when the pose/camera/hold actually changed,
+        // with a keepalive so a standing-still player still refreshes.
+        private Vector3 _lastSentPos;
+        private float _lastSentCamYaw;
+        private byte _lastSentHold;
+        private bool _hasSentState;
+        private float _stateKeepalive;
+
         // host economy/progression change detection
         private double _lastCoinSent = double.MinValue;
         private long _lastProgressSent = long.MinValue;
@@ -1477,35 +1485,68 @@ namespace CardShopCoop
         private void ModulesTick()
         {
             bool inGame = InGameLevel();
+            long t;
             if (Role == CoopRole.Host)
             {
+                t = Util.PerfProbe.Start();
                 _grading.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.grading", t);
+                t = Util.PerfProbe.Start();
                 _trades.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.trades", t);
+                t = Util.PerfProbe.Start();
                 _tables.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.tables", t);
+                t = Util.PerfProbe.Start();
                 _staff.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.staff", t);
+                t = Util.PerfProbe.Start();
                 _shopState.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.shopState", t);
+                t = Util.PerfProbe.Start();
                 _settings.HostTick(_dt, inGame);
-                _market.HostTick(_dt, inGame);
-                _report.HostTick(_dt, inGame); // per-frame: its report-open flag fires outside the timer
+                Util.PerfProbe.End("mod.settings", t);
+                t = Util.PerfProbe.Start();
+                _market.HostTick(inGame);
+                Util.PerfProbe.End("mod.market", t);
+                t = Util.PerfProbe.Start();
+                _report.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.report", t);
+                t = Util.PerfProbe.Start();
                 _containers.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.containers", t);
+                t = Util.PerfProbe.Start();
                 _tournament.HostTick(_dt, inGame);
-
+                Util.PerfProbe.End("mod.tournament", t);
+                t = Util.PerfProbe.Start();
                 _register.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.register", t);
+                t = Util.PerfProbe.Start();
                 _tv.HostTick(_dt, inGame);
+                Util.PerfProbe.End("mod.tv", t);
             }
             else if (Role == CoopRole.Client)
             {
+                t = Util.PerfProbe.Start();
                 _tv.ClientTick(_dt, inGame);
-                _trades.ClientTick(_dt, inGame); // offer countdown + accept/decline keys
-                _containers.ClientTick(_dt, inGame && !ClientPreloadHold); // mirror opener presentation + retry container clicks
+                Util.PerfProbe.End("mod.tv", t);
+                t = Util.PerfProbe.Start();
+                _trades.ClientTick(_dt, inGame);
+                Util.PerfProbe.End("mod.trades", t);
+                t = Util.PerfProbe.Start();
+                _containers.ClientTick(_dt, inGame && !ClientPreloadHold);
+                Util.PerfProbe.End("mod.containers", t);
 
                 // Box trajectories are cosmetic client prediction only. Their endpoints are
                 // still host-authored; this makes throw/drop/set-down reconciliation readable
                 // instead of teleporting the remote copy.
+                t = Util.PerfProbe.Start();
                 BoxPlacement.TickRemoteMotions(_dt);
+                Util.PerfProbe.End("mod.remoteMotions", t);
                 // content mods register their products SECONDS after the scene loads
                 // (and per-save: a host mid-tutorial has none yet) - keep re-digesting
                 // as our catalog changes so the comparison never goes stale
+                t = Util.PerfProbe.Start();
                 _catalogTimer += _dt;
                 if (inGame && (_catalogTimer >= 45f || !_catalogSent))
                 {
@@ -1518,10 +1559,12 @@ namespace CardShopCoop
                         SendCatalogDigest();
                     }
                 }
+                Util.PerfProbe.End("mod.catalogDigest", t);
                 // ...and the graded-cert digest on the same gating for the same reason: the album
                 // changes constantly (every pack opened, every card graded), so a one-shot send
                 // would be stale within a minute. Built once and reused for both the hash test
                 // and the send - the union walk is the expensive half, not the write.
+                t = Util.PerfProbe.Start();
                 _gradedTimer += _dt;
                 if (inGame && (_gradedTimer >= 45f || !_gradedSent))
                 {
@@ -1548,6 +1591,7 @@ namespace CardShopCoop
                         }
                     }
                 }
+                Util.PerfProbe.End("mod.gradedDigest", t);
             }
         }
 
@@ -1673,22 +1717,43 @@ namespace CardShopCoop
         {
             float interval = 1f / Mathf.Clamp(CoopPlugin.SendRateHz.Value, 4f, 30f);
             Transform playerTf = InGameLevel() ? ResolvePlayer() : null;
-            if (_stateTimer < interval || playerTf == null)
+            if (playerTf == null)
+                return;
+            _stateKeepalive += _dt;
+            if (_stateTimer < interval)
                 return;
             Vector3 pos = playerTf.position;
+            float yaw = _playerCamTf != null ? _playerCamTf.eulerAngles.y
+                : (Camera.main != null ? Camera.main.transform.eulerAngles.y : playerTf.eulerAngles.y);
+            Transform camera = _playerCamTf != null ? _playerCamTf : Camera.main != null ? Camera.main.transform : null;
+            byte hold = ComputeHoldState();
+
+            // Change-gate: only send when pose/camera/hold actually moved, plus a slow
+            // keepalive so a standing-still player still refreshes the far side.
+            bool changed = !_hasSentState
+                || (pos - _lastSentPos).sqrMagnitude > 0.0004f   // > 2 cm
+                || Mathf.Abs(Mathf.DeltaAngle(yaw, _lastSentCamYaw)) > 1f
+                || hold != _lastSentHold;
+            if (!changed && _stateKeepalive < 5f)
+            {
+                _stateTimer = 0f; // consumed this interval
+                return;
+            }
+            _stateKeepalive = 0f;
+
             float speed = 0f;
             if (_hasLastPos)
             {
                 Vector3 delta = pos - _lastPos;
                 delta.y = 0f;
-                speed = Mathf.Clamp(delta.magnitude / _stateTimer, 0f, 6f);
+                speed = Mathf.Clamp(delta.magnitude / Mathf.Max(_stateTimer, 0.0001f), 0f, 6f);
             }
             _lastPos = pos;
             _hasLastPos = true;
-            float yaw = _playerCamTf != null ? _playerCamTf.eulerAngles.y
-                : (Camera.main != null ? Camera.main.transform.eulerAngles.y : playerTf.eulerAngles.y);
-            Transform camera = _playerCamTf != null ? _playerCamTf : Camera.main != null ? Camera.main.transform : null;
-            byte hold = ComputeHoldState();
+            _lastSentPos = pos;
+            _lastSentCamYaw = yaw;
+            _lastSentHold = hold;
+            _hasSentState = true;
             BroadcastTransient(new PlayerStateMessage
             {
                 Position = pos,

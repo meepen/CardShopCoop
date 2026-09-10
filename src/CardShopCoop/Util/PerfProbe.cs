@@ -63,5 +63,26 @@ namespace CardShopCoop.Util
         {
             _lastLog.Clear();
         }
+
+        /// <summary>Allocation-free variant for call sites that can't pass a delegate:
+        /// Start() returns a token (0 when probing is off) and End() logs the span.</summary>
+        public static long Start()
+        {
+            return Enabled ? Stopwatch.GetTimestamp() : 0L;
+        }
+
+        public static void End(string stage, long start)
+        {
+            if (start == 0L)
+                return;
+            double ms = (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
+            if (ms < ThresholdMs)
+                return;
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (_lastLog.TryGetValue(stage, out var last) && now - last < RepeatSeconds)
+                return;
+            _lastLog[stage] = now;
+            CoopPlugin.Log.LogWarning($"[perf] {stage} took {ms:F1} ms");
+        }
     }
 }

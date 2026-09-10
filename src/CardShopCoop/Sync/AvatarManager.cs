@@ -1154,7 +1154,11 @@ namespace CardShopCoop.Sync
                         av.BoxSig = "";
                     }
                     if (av.HasState)
+                    {
+                        long ts = Util.PerfProbe.Start();
                         TrySpawn(av);
+                        Util.PerfProbe.End("avatar.spawn", ts);
+                    }
                     continue;
                 }
 
