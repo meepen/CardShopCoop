@@ -11,17 +11,21 @@ jobs:
   format:
     name: C# formatting
     runs-on: windows-latest
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 9.x
+          cache: true
+          cache-dependency-path: src/CardShopCoop/packages.lock.json
 
       - name: Restore project metadata
-        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj
+        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode
 
       # Formatting does not require the proprietary game assemblies. The compile
       # job remains intentionally deferred until CI has a reference-assembly source.
