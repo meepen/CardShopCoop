@@ -94,7 +94,10 @@ namespace CardShopCoop.Sync
             _live = null;
         }
 
-        public static void ActivateLive(NpcSync instance) { _live = instance; }
+        public static void ActivateLive(NpcSync instance)
+        {
+            _live = instance;
+        }
 
         private sealed class ExistingCustomer
         {
@@ -118,7 +121,8 @@ namespace CardShopCoop.Sync
         {
             // Shutdown clears the pointer before resetting instance state. Do not resurrect it
             // while late Harmony callbacks can still arrive during teardown.
-            if (CoopCore.Role != CoopRole.None && !CoopCore.IsTearingDown) _live = this;
+            if (CoopCore.Role != CoopRole.None && !CoopCore.IsTearingDown)
+                _live = this;
             _cm = null;
             _sendTimer = 0f;
             _nameRefreshIn = 0f;
@@ -133,7 +137,8 @@ namespace CardShopCoop.Sync
             _workerGenerations.Clear();
             _workerActive.Clear();
             foreach (var mirror in _existing.Values)
-                if (mirror.Customer != null) mirror.Customer.gameObject.SetActive(false);
+                if (mirror.Customer != null)
+                    mirror.Customer.gameObject.SetActive(false);
             _existing.Clear();
             ClearPuppets();
         }
@@ -144,12 +149,16 @@ namespace CardShopCoop.Sync
         {
             _live = this;
             _sendTimer += dt;
-            if (_sendTimer < SendInterval) return null;
+            if (_sendTimer < SendInterval)
+                return null;
             _sendTimer -= SendInterval; // preserve cadence across frame boundaries
-            if (_sendTimer > SendInterval) _sendTimer = SendInterval; // clamp debt after a hitch
+            if (_sendTimer > SendInterval)
+                _sendTimer = SendInterval; // clamp debt after a hitch
 
-            if (_cm == null) _cm = Object.FindObjectOfType<CustomerManager>();
-            if (_cm == null) return null;
+            if (_cm == null)
+                _cm = Object.FindObjectOfType<CustomerManager>();
+            if (_cm == null)
+                return null;
 
             _nameRefreshIn -= SendInterval;
             if (_nameRefreshIn <= 0f)
@@ -174,21 +183,33 @@ namespace CardShopCoop.Sync
                     _customerGenerations[i] = generation + 1;
                 }
                 _customerActive[i] = active;
-                if (!active) continue;
+                if (!active)
+                    continue;
                 // m_CharacterCustom is momentarily null during pooled activation; skipping
                 // one tick is harmless (client despawn timeout is 1.5s) whereas an empty
                 // name would churn the puppet through a bogus re-dress
                 var cc = c.m_CharacterCustom;
-                if (cc == null || string.IsNullOrEmpty(cc.CharacterName)) continue;
+                if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
+                    continue;
                 var flags = CollectFlags(c.m_Anim);
                 int grabSequence = GetGrabSequence(i, c.m_CurrentState);
                 byte actionKind = c.m_CurrentState == ECustomerState.TournamentTakePrize ? (byte)2 : (byte)1;
                 // smelly is sim state, not an animator bool - without it the joiner
                 // can't see the stink cloud the host (and the cleansers) react to
-                try { if (c.IsSmelly()) flags |= NpcFlags.Smelly; } catch { }
+                try
+                {
+                    if (c.IsSmelly())
+                        flags |= NpcFlags.Smelly;
+                }
+                catch { }
                 // the red "!" trade/sell-in prompt is a plain mesh toggle, not an animator
                 // bool - mirror it so the guest can see which customer wants to be served
-                try { if (c.m_ExclaimationMesh != null && c.m_ExclaimationMesh.activeSelf) flags |= NpcFlags.Exclaim; } catch { }
+                try
+                {
+                    if (c.m_ExclaimationMesh != null && c.m_ExclaimationMesh.activeSelf)
+                        flags |= NpcFlags.Exclaim;
+                }
+                catch { }
                 WriteEntry(chunks, hostTime, KindCustomer, (ushort)i, cc.CharacterName,
                     c.transform, c.m_CurrentMoveSpeed, flags, _customerGenerations[i], grabSequence, actionKind);
             }
@@ -213,11 +234,13 @@ namespace CardShopCoop.Sync
                     }
                     _workerActive[i] = true;
                     var cc = w.m_CharacterCustom;
-                    if (cc == null || string.IsNullOrEmpty(cc.CharacterName)) continue;
+                    if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
+                        continue;
                     // worker names aren't prefixed "Female", so gender must ride a flag or
                     // female workers spawn from the male customer prefab on the guest
                     var wflags = CollectFlags(w.m_Anim);
-                    if (w.m_IsFemale) wflags |= NpcFlags.Female;
+                    if (w.m_IsFemale)
+                        wflags |= NpcFlags.Female;
                     _workerActionSequences.TryGetValue(i, out int workerAction);
                     _workerActionKinds.TryGetValue(i, out byte workerActionKind);
                     WriteEntry(chunks, hostTime, KindWorker, (ushort)i, cc.CharacterName,
@@ -239,7 +262,8 @@ namespace CardShopCoop.Sync
 
         private void FlushChunk(List<NpcStateMessage> chunks)
         {
-            if (_chunkCount == 0) return;
+            if (_chunkCount == 0)
+                return;
             chunks.Add(_currentChunk);
             _chunkCount = 0;
         }
@@ -255,12 +279,17 @@ namespace CardShopCoop.Sync
             }
             if (speedFromAnim != null)
             {
-                try { moveSpeed = speedFromAnim.GetFloat(HashMoveSpeed); } catch { }
+                try
+                {
+                    moveSpeed = speedFromAnim.GetFloat(HashMoveSpeed);
+                }
+                catch { }
             }
             int key = (kind << 16) | index;
             bool sendName = !_sentNames.TryGetValue(key, out var prev) || prev != charName
                 || !_sentIdentities.TryGetValue(key, out var prevIdentity) || prevIdentity != identity;
-            if (sendName) _sentNames[key] = charName;
+            if (sendName)
+                _sentNames[key] = charName;
             _sentIdentities[key] = identity;
 
             var p = t.position;
@@ -323,10 +352,12 @@ namespace CardShopCoop.Sync
 
         public static void RecordWorkerAction(Worker worker)
         {
-            if (_live == null || worker == null || CoopCore.Role != CoopRole.Host) return;
+            if (_live == null || worker == null || CoopCore.Role != CoopRole.Host)
+                return;
             var workers = WorkerManager.GetWorkerList();
             int index = workers != null ? workers.IndexOf(worker) : -1;
-            if (index < 0) return;
+            if (index < 0)
+                return;
             _live._workerActionSequences.TryGetValue(index, out int sequence);
             _live._workerActionSequences[index] = sequence + 1;
             _live._workerActionKinds[index] = 3; // ScanItem
@@ -334,14 +365,16 @@ namespace CardShopCoop.Sync
 
         public static Transform GetWorkerHoldAnchor(int index)
         {
-            if (_live == null) return null;
+            if (_live == null)
+                return null;
             int key = (KindWorker << 16) | index;
             return _live._puppets.TryGetValue(key, out var p) ? p.HoldBox : null;
         }
 
         public static Worker GetWorkerPuppet(int index)
         {
-            if (_live == null) return null;
+            if (_live == null)
+                return null;
             int key = (KindWorker << 16) | index;
             return _live._puppets.TryGetValue(key, out var p) && p.Go != null
                 ? p.Go.GetComponent<Worker>() : null;
@@ -351,9 +384,11 @@ namespace CardShopCoop.Sync
         /// gameplay object is intentionally never attached to the puppet.</summary>
         public static void SetWorkerBoxVisual(int index, bool visible, bool isBig, int itemType)
         {
-            if (_live == null) return;
+            if (_live == null)
+                return;
             int key = (KindWorker << 16) | index;
-            if (!_live._puppets.TryGetValue(key, out var p) || p.Go == null) return;
+            if (!_live._puppets.TryGetValue(key, out var p) || p.Go == null)
+                return;
             if (!visible)
             {
                 _live.ReleaseWorkerBoxProp(p);
@@ -369,16 +404,20 @@ namespace CardShopCoop.Sync
             {
                 var rm = Object.FindObjectOfType<RestockManager>();
                 var prefab = isBig ? rm?.m_PackageBoxPrefab : rm?.m_PackageBoxSmallPrefab;
-                if (prefab == null || p.HoldBox == null) return;
+                if (prefab == null || p.HoldBox == null)
+                    return;
                 var holder = new GameObject("CoopWorkerBoxProp_tmp");
                 holder.SetActive(false);
                 var clone = Object.Instantiate(prefab.gameObject, holder.transform);
                 foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
-                    if (mb != null) Object.DestroyImmediate(mb);
+                    if (mb != null)
+                        Object.DestroyImmediate(mb);
                 foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
-                    if (rb != null) Object.DestroyImmediate(rb);
+                    if (rb != null)
+                        Object.DestroyImmediate(rb);
                 foreach (var col in clone.GetComponentsInChildren<Collider>(true))
-                    if (col != null) Object.DestroyImmediate(col);
+                    if (col != null)
+                        Object.DestroyImmediate(col);
                 clone.transform.SetParent(p.HoldBox, false);
                 clone.transform.localPosition = Vector3.zero;
                 clone.transform.localRotation = Quaternion.identity;
@@ -397,11 +436,14 @@ namespace CardShopCoop.Sync
         /// its normal data and labels.</summary>
         public static void RefreshWorkerUi(int index, WorkerSaveData data)
         {
-            if (_live == null || data == null) return;
+            if (_live == null || data == null)
+                return;
             int key = (KindWorker << 16) | index;
-            if (!_live._puppets.TryGetValue(key, out var p) || p.Go == null) return;
+            if (!_live._puppets.TryGetValue(key, out var p) || p.Go == null)
+                return;
             var worker = p.Go.GetComponent<Worker>();
-            if (worker == null) return;
+            if (worker == null)
+                return;
             try
             {
                 worker.m_PrimaryTask = data.primaryTask;
@@ -430,14 +472,20 @@ namespace CardShopCoop.Sync
         private static NpcFlags CollectFlags(Animator anim)
         {
             var f = NpcFlags.None;
-            if (anim == null) return f;
+            if (anim == null)
+                return f;
             try
             {
-                if (anim.GetBool(HashHoldingBag)) f |= NpcFlags.HoldingBag;
-                if (anim.GetBool(HashHandingOverCash)) f |= NpcFlags.HandingOverCash;
-                if (anim.GetBool(HashIsSitting)) f |= NpcFlags.IsSitting;
-                if (anim.GetBool(HashIsPlaying)) f |= NpcFlags.IsPlaying;
-                if (anim.GetBool(HashIsHoldingBox)) f |= NpcFlags.IsHoldingBox;
+                if (anim.GetBool(HashHoldingBag))
+                    f |= NpcFlags.HoldingBag;
+                if (anim.GetBool(HashHandingOverCash))
+                    f |= NpcFlags.HandingOverCash;
+                if (anim.GetBool(HashIsSitting))
+                    f |= NpcFlags.IsSitting;
+                if (anim.GetBool(HashIsPlaying))
+                    f |= NpcFlags.IsPlaying;
+                if (anim.GetBool(HashIsHoldingBox))
+                    f |= NpcFlags.IsHoldingBox;
             }
             catch { }
             return f;
@@ -489,8 +537,13 @@ namespace CardShopCoop.Sync
 
         private void ReleaseWorkerBoxProp(Puppet p)
         {
-            if (p == null || p.BoxProp == null) return;
-            try { Object.Destroy(p.BoxProp); } catch { }
+            if (p == null || p.BoxProp == null)
+                return;
+            try
+            {
+                Object.Destroy(p.BoxProp);
+            }
+            catch { }
             p.BoxProp = null;
             p.BoxPropType = 0;
         }
@@ -517,18 +570,21 @@ namespace CardShopCoop.Sync
         public static int CountLocalActiveNpcs()
         {
             // cached across calls; Unity's overloaded == re-resolves after scene changes
-            if (s_diagCm == null) s_diagCm = Object.FindObjectOfType<CustomerManager>();
+            if (s_diagCm == null)
+                s_diagCm = Object.FindObjectOfType<CustomerManager>();
             int n = 0;
             if (s_diagCm != null)
             {
                 var list = s_diagCm.GetCustomerList();
                 for (int i = 0; i < list.Count; i++)
-                    if (list[i] != null && list[i].gameObject.activeSelf) n++;
+                    if (list[i] != null && list[i].gameObject.activeSelf)
+                        n++;
             }
             var workers = WorkerManager.GetWorkerList();
             if (workers != null)
                 for (int i = 0; i < workers.Count; i++)
-                    if (workers[i] != null && workers[i].gameObject.activeSelf) n++;
+                    if (workers[i] != null && workers[i].gameObject.activeSelf)
+                        n++;
             return n;
         }
 
@@ -537,7 +593,8 @@ namespace CardShopCoop.Sync
             foreach (var p in _puppets.Values)
             {
                 ReleaseWorkerBoxProp(p);
-                if (p.Go != null) Object.Destroy(p.Go);
+                if (p.Go != null)
+                    Object.Destroy(p.Go);
             }
             _puppets.Clear();
             SuppressedCustomer.Clear();
@@ -547,12 +604,16 @@ namespace CardShopCoop.Sync
 
         public static int GetCustomerGeneration(Customer customer)
         {
-            if (_live == null || customer == null) return 0;
-            if (_live._cm == null) _live._cm = Object.FindObjectOfType<CustomerManager>();
+            if (_live == null || customer == null)
+                return 0;
+            if (_live._cm == null)
+                _live._cm = Object.FindObjectOfType<CustomerManager>();
             var list = _live._cm != null ? _live._cm.GetCustomerList() : null;
-            if (list == null) return 0;
+            if (list == null)
+                return 0;
             int index = list.IndexOf(customer);
-            if (index < 0) return 0;
+            if (index < 0)
+                return 0;
             if (!_live._customerGenerations.TryGetValue(index, out int generation) || generation == 0)
             {
                 generation = 1;
@@ -560,7 +621,8 @@ namespace CardShopCoop.Sync
             }
             bool active = customer.m_IsActive && customer.gameObject.activeSelf;
             bool wasActive = _live._customerActive.TryGetValue(index, out var oldActive) && oldActive;
-            if (active && !wasActive) generation++;
+            if (active && !wasActive)
+                generation++;
             _live._customerGenerations[index] = generation;
             _live._customerActive[index] = active;
             return generation;
@@ -573,14 +635,18 @@ namespace CardShopCoop.Sync
         {
             index = 0;
             identity = 0;
-            if (_live == null || transform == null) return false;
-            if (_live._cm == null) _live._cm = Object.FindObjectOfType<CustomerManager>();
+            if (_live == null || transform == null)
+                return false;
+            if (_live._cm == null)
+                _live._cm = Object.FindObjectOfType<CustomerManager>();
             var list = _live._cm != null ? _live._cm.GetCustomerList() : null;
-            if (list == null) return false;
+            if (list == null)
+                return false;
             for (int i = 0; i < list.Count; i++)
             {
                 var customer = list[i];
-                if (customer == null || customer.transform != transform) continue;
+                if (customer == null || customer.transform != transform)
+                    continue;
                 index = (ushort)i;
                 identity = GetCustomerGeneration(customer);
                 return true;
@@ -593,8 +659,10 @@ namespace CardShopCoop.Sync
         /// speech is cosmetic and should not keep stale references alive.</summary>
         public void ShowSpeech(NpcSpeechMessage message, bool inGame)
         {
-            if (!inGame || message == null || string.IsNullOrEmpty(message.Text)) return;
-            if (message.Kind != KindCustomer) return;
+            if (!inGame || message == null || string.IsNullOrEmpty(message.Text))
+                return;
+            if (message.Kind != KindCustomer)
+                return;
             int key = (message.Kind << 16) | message.Index;
             Transform anchor = null;
             if (_existing.TryGetValue(message.Index, out var existing)
@@ -603,22 +671,26 @@ namespace CardShopCoop.Sync
             else if (_puppets.TryGetValue(key, out var puppet)
                 && puppet.HasIdentity && puppet.Identity == message.Identity && puppet.Go != null)
                 anchor = puppet.Go.transform;
-            if (anchor == null) return;
+            if (anchor == null)
+                return;
             var spawner = CSingleton<PricePopupSpawner>.Instance;
-            if (spawner == null) return;
+            if (spawner == null)
+                return;
             spawner.ShowTextPopup(message.Text, message.OffsetUp, anchor);
         }
 
         public static void DetachExistingCustomer(int index, Customer customer)
         {
-            if (_live == null) return;
+            if (_live == null)
+                return;
             SuppressedCustomer.Remove(index);
             int key = (KindCustomer << 16) | index;
             if (_live._puppets.TryGetValue(key, out var puppet) && puppet.Go != null && puppet.BufCount > 0)
             {
                 _live._existing.Remove(index);
                 puppet.Go.SetActive(true);
-                if (customer != null) customer.gameObject.SetActive(false);
+                if (customer != null)
+                    customer.gameObject.SetActive(false);
             }
             // If the puppet has not received a usable snapshot yet, retain the existing
             // customer mirror as the visible representation. It will continue interpolating
@@ -627,7 +699,8 @@ namespace CardShopCoop.Sync
 
         public static void AttachExistingCustomer(int index, int generation, Customer customer, bool keepPuppetVisible = false)
         {
-            if (_live == null || customer == null) return;
+            if (_live == null || customer == null)
+                return;
             if (!_live._existing.TryGetValue(index, out var existing) || existing.Generation != generation)
             {
                 existing = new ExistingCustomer
@@ -649,15 +722,18 @@ namespace CardShopCoop.Sync
             int key = (KindCustomer << 16) | index;
             if (_live._puppets.TryGetValue(key, out var puppet))
             {
-                if (puppet.Go != null) puppet.Go.SetActive(!keepPuppetVisible);
+                if (puppet.Go != null)
+                    puppet.Go.SetActive(!keepPuppetVisible);
             }
         }
 
         public static bool IsExistingCustomer(Customer customer)
         {
-            if (_live == null || customer == null) return false;
+            if (_live == null || customer == null)
+                return false;
             foreach (var mirror in _live._existing.Values)
-                if (ReferenceEquals(mirror.Customer, customer)) return true;
+                if (ReferenceEquals(mirror.Customer, customer))
+                    return true;
             return false;
         }
 
@@ -676,11 +752,13 @@ namespace CardShopCoop.Sync
                 // re-basing invalidates buffered snapshot times; drop them so the
                 // stale-packet guard cannot reject fresh snapshots against old ones
                 if (_clockInit)
-                    foreach (var pup in _puppets.Values) pup.BufCount = 0;
+                    foreach (var pup in _puppets.Values)
+                        pup.BufCount = 0;
                 _clockOffset = rawOffset;
                 _clockInit = true;
             }
-            else _clockOffset += 0.1f * (rawOffset - _clockOffset);
+            else
+                _clockOffset += 0.1f * (rawOffset - _clockOffset);
             float snapTime = hostTime + _clockOffset;
 
             for (int n = 0; n < count; n++)
@@ -697,7 +775,8 @@ namespace CardShopCoop.Sync
                 var flags = (NpcFlags)ent.Flags;
                 int actionSequence = ent.ActionSequence;
                 byte actionKind = ent.ActionKind;
-                if (!inGame) continue; // consume the payload, render nothing yet
+                if (!inGame)
+                    continue; // consume the payload, render nothing yet
 
                 int key = (kind << 16) | index;
                 if (kind == KindCustomer && _existing.TryGetValue(index, out var existingMirror)
@@ -712,9 +791,14 @@ namespace CardShopCoop.Sync
                             existing.BufHead = (existing.BufHead + 1) & 3;
                             existing.Buf[existing.BufHead] = new Snap
                             {
-                                Pos = pos, Yaw = yaw, Speed = speed, Flags = flags, Time = snapTime
+                                Pos = pos,
+                                Yaw = yaw,
+                                Speed = speed,
+                                Flags = flags,
+                                Time = snapTime
                             };
-                            if (existing.BufCount < 4) existing.BufCount++;
+                            if (existing.BufCount < 4)
+                                existing.BufCount++;
                         }
                         existing.Flags = flags;
                         if (actionSequence != existing.GrabSequence && existing.Customer != null
@@ -737,14 +821,20 @@ namespace CardShopCoop.Sync
                             {
                                 visual.BufHead = (visual.BufHead + 1) & 3;
                                 visual.Buf[visual.BufHead] = new Snap { Pos = pos, Yaw = yaw, Speed = speed, Flags = flags, Time = snapTime };
-                                if (visual.BufCount < 4) visual.BufCount++;
+                                if (visual.BufCount < 4)
+                                    visual.BufCount++;
                             }
                             if (actionSequence != visual.GrabSequence && visual.Anim != null)
                             {
-                                try { visual.Anim.SetTrigger(actionKind == 2 ? "GrabItemHigh" : "GrabItem"); } catch { }
+                                try
+                                {
+                                    visual.Anim.SetTrigger(actionKind == 2 ? "GrabItemHigh" : "GrabItem");
+                                }
+                                catch { }
                                 visual.GrabSequence = actionSequence;
                             }
-                            if (visual.Go != null) visual.Go.SetActive(true);
+                            if (visual.Go != null)
+                                visual.Go.SetActive(true);
                         }
                     }
                     continue;
@@ -755,7 +845,8 @@ namespace CardShopCoop.Sync
                 {
                     // no cached wardrobe yet: skip this tick; the periodic name refresh
                     // (or the next change) delivers it well inside the despawn timeout
-                    if (!hasName) continue;
+                    if (!hasName)
+                        continue;
                     p = new Puppet();
                     _puppets[key] = p;
                 }
@@ -763,7 +854,8 @@ namespace CardShopCoop.Sync
                 bool identityChanged = p.HasIdentity && p.Identity != identity;
                 if (identityChanged)
                 {
-                    if (p.Go != null) Object.Destroy(p.Go);
+                    if (p.Go != null)
+                        Object.Destroy(p.Go);
                     p.Go = null;
                     p.CharName = "";
                     p.BufCount = 0;
@@ -790,7 +882,8 @@ namespace CardShopCoop.Sync
                         Flags = flags,
                         Time = snapTime,
                     };
-                    if (p.BufCount < 4) p.BufCount++;
+                    if (p.BufCount < 4)
+                        p.BufCount++;
                 }
                 p.Flags = flags;
                 if (actionSequence != p.GrabSequence && p.Anim != null)
@@ -812,7 +905,8 @@ namespace CardShopCoop.Sync
 
         private static void ApplyExistingFlags(Customer customer, NpcFlags flags, float speed)
         {
-            if (customer.m_Anim == null) return;
+            if (customer.m_Anim == null)
+                return;
             customer.m_Anim.SetFloat(HashMoveSpeed, speed);
             customer.m_Anim.SetBool(HashHoldingBag, (flags & NpcFlags.HoldingBag) != 0);
             customer.m_Anim.SetBool(HashHandingOverCash, (flags & NpcFlags.HandingOverCash) != 0);
@@ -845,7 +939,8 @@ namespace CardShopCoop.Sync
             bool genderChanged = p.Go != null && p.Female != female;
             if (p.Go == null || p.Custom == null || genderChanged)
             {
-                if (p.Go != null) Object.Destroy(p.Go);
+                if (p.Go != null)
+                    Object.Destroy(p.Go);
                 p.Go = null;
                 Spawn(p, charName, pos, femaleHint, kind, index);
                 return;
@@ -871,7 +966,8 @@ namespace CardShopCoop.Sync
             // (_now - LastSeen) blow past the 6s despawn timeout and blink the WHOLE crowd
             // out on resume. Keeping _now anchored keeps both on the same timeline; the
             // clock-offset re-base on the first post-gap batch re-syncs interpolation.
-            if (!inGame || dt <= 0f) return;
+            if (!inGame || dt <= 0f)
+                return;
             _now += dt;
 
             float renderTime = _now - InterpDelay;
@@ -893,11 +989,13 @@ namespace CardShopCoop.Sync
                 // for players on rough connections (first field report)
                 if (_now - p.LastSeen > 6f)
                 {
-                    if (p.Go != null) Object.Destroy(p.Go);
+                    if (p.Go != null)
+                        Object.Destroy(p.Go);
                     (dead = dead ?? new List<int>()).Add(kv.Key);
                     continue;
                 }
-                if (p.Go == null || p.BufCount == 0) continue;
+                if (p.Go == null || p.BufCount == 0)
+                    continue;
 
                 Sample(p, renderTime, out var target, out float targetYaw);
 
@@ -913,14 +1011,20 @@ namespace CardShopCoop.Sync
                 float rendered = snap ? 0f : Mathf.Min((newPos - p.PrevRenderedPos).magnitude / dt, 10f);
                 p.PrevRenderedPos = newPos;
                 p.AnimSpeed = Mathf.Lerp(p.AnimSpeed, rendered, speedBlend);
-                if (p.AnimSpeed < 0.05f) p.AnimSpeed = 0f;
+                if (p.AnimSpeed < 0.05f)
+                    p.AnimSpeed = 0f;
 
                 if (p.Anim != null)
                 {
                     if (float.IsNaN(p.AppliedAnimSpeed)
                         || Mathf.Abs(p.AppliedAnimSpeed - p.AnimSpeed) > 0.01f)
                     {
-                        try { p.Anim.SetFloat(HashMoveSpeed, p.AnimSpeed); p.AppliedAnimSpeed = p.AnimSpeed; } catch { }
+                        try
+                        {
+                            p.Anim.SetFloat(HashMoveSpeed, p.AnimSpeed);
+                            p.AppliedAnimSpeed = p.AnimSpeed;
+                        }
+                        catch { }
                     }
                 }
                 if ((int)p.Flags != p.AppliedFlags)
@@ -943,11 +1047,14 @@ namespace CardShopCoop.Sync
                     Toggle(p.CardSingle, (p.Flags & NpcFlags.IsPlaying) != 0);
                     Toggle(p.Smelly, (p.Flags & NpcFlags.Smelly) != 0);
                     Toggle(p.Exclaim, (p.Flags & NpcFlags.Exclaim) != 0);
-                    if ((p.Flags & NpcFlags.IsHoldingBox) == 0) ReleaseWorkerBoxProp(p);
+                    if ((p.Flags & NpcFlags.IsHoldingBox) == 0)
+                        ReleaseWorkerBoxProp(p);
                     p.AppliedFlags = (int)p.Flags;
                 }
             }
-            if (dead != null) foreach (int k in dead) _puppets.Remove(k);
+            if (dead != null)
+                foreach (int k in dead)
+                    _puppets.Remove(k);
 
             List<int> existingDead = null;
             foreach (var kv in _existing)
@@ -955,11 +1062,13 @@ namespace CardShopCoop.Sync
                 var mirror = kv.Value;
                 if (_now - mirror.LastSeen > 6f)
                 {
-                    if (mirror.Customer != null) mirror.Customer.gameObject.SetActive(false);
+                    if (mirror.Customer != null)
+                        mirror.Customer.gameObject.SetActive(false);
                     (existingDead = existingDead ?? new List<int>()).Add(kv.Key);
                     continue;
                 }
-                if (mirror.Customer == null || mirror.BufCount == 0) continue;
+                if (mirror.Customer == null || mirror.BufCount == 0)
+                    continue;
                 SampleExisting(mirror, renderTime, out var target, out float targetYaw);
                 float existingPosBlend = 1f - Mathf.Exp(-18f * dt);
                 float existingYawBlend = 1f - Mathf.Exp(-14f * dt);
@@ -973,7 +1082,8 @@ namespace CardShopCoop.Sync
                 float rendered = snap ? 0f : Mathf.Min((newPos - mirror.PrevRenderedPos).magnitude / dt, 10f);
                 mirror.PrevRenderedPos = newPos;
                 mirror.AnimSpeed = Mathf.Lerp(mirror.AnimSpeed, rendered, existingSpeedBlend);
-                if (mirror.AnimSpeed < 0.05f) mirror.AnimSpeed = 0f;
+                if (mirror.AnimSpeed < 0.05f)
+                    mirror.AnimSpeed = 0f;
                 if (mirror.Customer.m_Anim != null
                     && (float.IsNaN(mirror.AppliedAnimSpeed)
                         || Mathf.Abs(mirror.AppliedAnimSpeed - mirror.AnimSpeed) > 0.01f))
@@ -989,7 +1099,8 @@ namespace CardShopCoop.Sync
                 }
             }
             if (existingDead != null)
-                foreach (int key in existingDead) _existing.Remove(key);
+                foreach (int key in existingDead)
+                    _existing.Remove(key);
         }
 
         private static void SampleExisting(ExistingCustomer mirror, float renderTime,
@@ -1084,7 +1195,8 @@ namespace CardShopCoop.Sync
 
         private static void Toggle(GameObject go, bool on)
         {
-            if (go != null && go.activeSelf != on) go.SetActive(on);
+            if (go != null && go.activeSelf != on)
+                go.SetActive(on);
         }
 
         private void Spawn(Puppet p, string charName, Vector3 pos, bool femaleHint, byte kind, ushort index)
@@ -1098,8 +1210,10 @@ namespace CardShopCoop.Sync
             bool clonedLiveWorker = false;
             if (kind == KindWorker)
             {
-                if (_wmClient == null) _wmClient = Object.FindObjectOfType<WorkerManager>();
-                if (_wmClient == null) return;
+                if (_wmClient == null)
+                    _wmClient = Object.FindObjectOfType<WorkerManager>();
+                if (_wmClient == null)
+                    return;
                 var workers = WorkerManager.GetWorkerList();
                 Worker source = workers != null && index < workers.Count ? workers[index] : null;
                 if (source != null)
@@ -1113,16 +1227,20 @@ namespace CardShopCoop.Sync
                 else
                 {
                     var prefab = female ? _wmClient.m_WorkerFemalePrefab : _wmClient.m_WorkerPrefab;
-                    if (prefab == null) return;
+                    if (prefab == null)
+                        return;
                     prefabObject = prefab.gameObject;
                 }
             }
             else
             {
-                if (_cmClient == null) _cmClient = Object.FindObjectOfType<CustomerManager>();
-                if (_cmClient == null) return;
+                if (_cmClient == null)
+                    _cmClient = Object.FindObjectOfType<CustomerManager>();
+                if (_cmClient == null)
+                    return;
                 var prefab = female ? _cmClient.m_CustomerFemalePrefab : _cmClient.m_CustomerPrefab;
-                if (prefab == null) return;
+                if (prefab == null)
+                    return;
                 prefabObject = prefab.gameObject;
             }
 
@@ -1141,9 +1259,22 @@ namespace CardShopCoop.Sync
                 // WorkerManager.ActivateWorker is deliberately not used on clients: it
                 // starts the real AI loop and changes worker counts. These are the two
                 // vanilla initialization routines OpenScreen's labels depend on.
-                try { worker.m_WorkerIndex = index; worker.InitializeCharacter(); } catch { }
-                try { MiEvaluateWorkerAttribute?.Invoke(worker, null); } catch { }
-                try { MiEvaluateSkillLevel?.Invoke(worker, null); } catch { }
+                try
+                {
+                    worker.m_WorkerIndex = index;
+                    worker.InitializeCharacter();
+                }
+                catch { }
+                try
+                {
+                    MiEvaluateWorkerAttribute?.Invoke(worker, null);
+                }
+                catch { }
+                try
+                {
+                    MiEvaluateSkillLevel?.Invoke(worker, null);
+                }
+                catch { }
             }
             p.Custom = cust != null ? cust.m_CharacterCustom
                 : worker != null ? worker.m_CharacterCustom : null;
@@ -1171,12 +1302,18 @@ namespace CardShopCoop.Sync
                 p.Exclaim = cust.m_ExclaimationMesh; // the "!" trade prompt, driven by flags below
                 try
                 {
-                    Toggle(p.Bag, false); Toggle(p.Cash, false);
-                    Toggle(p.CardFan, false); Toggle(p.CardSingle, false);
-                    if (cust.m_CleanFX != null) cust.m_CleanFX.SetActive(false);
-                    if (cust.m_ExclaimationMesh != null) cust.m_ExclaimationMesh.SetActive(false);
-                    if (cust.m_InteractCollider != null) cust.m_InteractCollider.SetActive(false);
-                    if (cust.m_SmellyFX != null) cust.m_SmellyFX.SetActive(false);
+                    Toggle(p.Bag, false);
+                    Toggle(p.Cash, false);
+                    Toggle(p.CardFan, false);
+                    Toggle(p.CardSingle, false);
+                    if (cust.m_CleanFX != null)
+                        cust.m_CleanFX.SetActive(false);
+                    if (cust.m_ExclaimationMesh != null)
+                        cust.m_ExclaimationMesh.SetActive(false);
+                    if (cust.m_InteractCollider != null)
+                        cust.m_InteractCollider.SetActive(false);
+                    if (cust.m_SmellyFX != null)
+                        cust.m_SmellyFX.SetActive(false);
                 }
                 catch { }
             }
@@ -1187,21 +1324,24 @@ namespace CardShopCoop.Sync
                 // the live Worker component; never leave its interaction marker visible.
                 p.Exclaim = worker.m_ExclaimationMesh;
                 p.HoldBox = worker.m_HoldBoxLoc;
-                if (p.Exclaim != null) p.Exclaim.SetActive(false);
+                if (p.Exclaim != null)
+                    p.Exclaim.SetActive(false);
             }
 
             // CharacterCustomization must survive the strip so wardrobe changes can
             // re-dress in place instead of Destroy+Instantiate churn
             foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
             {
-                if (mb == null) continue;
+                if (mb == null)
+                    continue;
                 string tn = mb.GetType().Name;
                 if (tn == "Worker" || tn == "Customer" || tn == "WorkerCollider"
                     || tn == "NavMeshAgent" || tn == "NavMeshObstacle" || tn == "Seeker"
                     || tn == "FunnelModifier" || tn == "InteractableObject")
                 {
                     var behaviour = mb as Behaviour;
-                    if (behaviour != null) behaviour.enabled = false;
+                    if (behaviour != null)
+                        behaviour.enabled = false;
                 }
             }
             foreach (var col in clone.GetComponentsInChildren<Collider>(true))

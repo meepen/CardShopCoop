@@ -31,7 +31,10 @@ namespace CardShopCoop.Net
         private readonly Dictionary<int, CSteamID> _peers = new Dictionary<int, CSteamID>();
         private readonly Dictionary<CSteamID, int> _ids = new Dictionary<CSteamID, int>();
         private readonly Dictionary<int, double> _lastRecv = new Dictionary<int, double>();
-        private struct Outgoing { public int ConnId; public byte[] Frame; }
+        private struct Outgoing
+        {
+            public int ConnId; public byte[] Frame;
+        }
 
         private readonly ConcurrentQueue<Outgoing> _transientOutbox = new ConcurrentQueue<Outgoing>();
         private readonly ConcurrentQueue<Outgoing> _reliableOutbox = new ConcurrentQueue<Outgoing>();
@@ -66,7 +69,8 @@ namespace CardShopCoop.Net
 
         private void OnSessionRequest(P2PSessionRequest_t req)
         {
-            if (_stopped) return;
+            if (_stopped)
+                return;
             bool allowed;
             if (_isHost)
             {
@@ -90,7 +94,8 @@ namespace CardShopCoop.Net
         {
             int n = SteamMatchmaking.GetNumLobbyMembers(LobbyId);
             for (int i = 0; i < n; i++)
-                if (SteamMatchmaking.GetLobbyMemberByIndex(LobbyId, i) == user) return true;
+                if (SteamMatchmaking.GetLobbyMemberByIndex(LobbyId, i) == user)
+                    return true;
             return false;
         }
 
@@ -167,7 +172,8 @@ namespace CardShopCoop.Net
 
         public void PumpMainThread()
         {
-            if (_stopped) return;
+            if (_stopped)
+                return;
 
             // ---- transient lane: drained fully every frame, ahead of the reliable lane,
             // so a clogged bulk transfer can never delay position updates. States replace
@@ -202,8 +208,10 @@ namespace CardShopCoop.Net
             for (int i = 0; i < _transientScratch.Count; i++)
             {
                 var t = _transientScratch[i];
-                if (t.Frame == null) continue;
-                if (!_peers.TryGetValue(t.ConnId, out var tsid)) continue; // peer gone
+                if (t.Frame == null)
+                    continue;
+                if (!_peers.TryGetValue(t.ConnId, out var tsid))
+                    continue; // peer gone
                 if (!SteamNetworking.SendP2PPacket(tsid, t.Frame, (uint)t.Frame.Length,
                         EP2PSend.k_EP2PSendUnreliableNoDelay, Channel))
                 {
@@ -223,10 +231,19 @@ namespace CardShopCoop.Net
             while (budget > 0)
             {
                 Outgoing entry;
-                if (_stalled.HasValue) { entry = _stalled.Value; _stalled = null; }
-                else if (!_reliableOutbox.TryDequeue(out entry)) break;
+                if (_stalled.HasValue)
+                {
+                    entry = _stalled.Value;
+                    _stalled = null;
+                }
+                else if (!_reliableOutbox.TryDequeue(out entry))
+                    break;
 
-                if (!_peers.TryGetValue(entry.ConnId, out var sid)) { _stallRetries = 0; continue; } // peer gone
+                if (!_peers.TryGetValue(entry.ConnId, out var sid))
+                {
+                    _stallRetries = 0;
+                    continue;
+                } // peer gone
                 if (!SteamNetworking.SendP2PPacket(sid, entry.Frame, (uint)entry.Frame.Length,
                         EP2PSend.k_EP2PSendReliable, Channel))
                 {
@@ -262,16 +279,20 @@ namespace CardShopCoop.Net
             // ---- receives ----
             while (SteamNetworking.IsP2PPacketAvailable(out uint size, Channel))
             {
-                if (size > _readBuf.Length) _readBuf = new byte[size];
+                if (size > _readBuf.Length)
+                    _readBuf = new byte[size];
                 if (!SteamNetworking.ReadP2PPacket(_readBuf, (uint)_readBuf.Length, out uint msgSize, out CSteamID remote, Channel))
                     break;
-                if (msgSize < Msg.MinimumFrameSize) continue;
+                if (msgSize < Msg.MinimumFrameSize)
+                    continue;
 
                 if (!_ids.TryGetValue(remote, out int cid))
                 {
                     // packet can beat the session callback on the host side
-                    if (_isHost && LobbyId != CSteamID.Nil && IsLobbyMember(remote)) cid = AddPeer(remote);
-                    else continue;
+                    if (_isHost && LobbyId != CSteamID.Nil && IsLobbyMember(remote))
+                        cid = AddPeer(remote);
+                    else
+                        continue;
                 }
                 _lastRecv[cid] = Time.realtimeSinceStartupAsDouble;
 
@@ -299,7 +320,8 @@ namespace CardShopCoop.Net
 
         public void Kick(int connId)
         {
-            if (!_peers.TryGetValue(connId, out var sid)) return;
+            if (!_peers.TryGetValue(connId, out var sid))
+                return;
             SteamNetworking.CloseP2PSessionWithUser(sid);
             _peers.Remove(connId);
             _ids.Remove(sid);
@@ -310,7 +332,8 @@ namespace CardShopCoop.Net
 
         public void Stop()
         {
-            if (_stopped) return;
+            if (_stopped)
+                return;
             _stopped = true;
             foreach (var kv in _peers)
                 SteamNetworking.CloseP2PSessionWithUser(kv.Value);
@@ -319,14 +342,23 @@ namespace CardShopCoop.Net
             _connIdsCache = null;
             if (LobbyId != CSteamID.Nil)
             {
-                try { SteamMatchmaking.LeaveLobby(LobbyId); } catch { }
+                try
+                {
+                    SteamMatchmaking.LeaveLobby(LobbyId);
+                }
+                catch { }
                 LobbyId = CSteamID.Nil;
             }
-            _cbSessionReq?.Dispose(); _cbSessionReq = null;
-            _cbSessionFail?.Dispose(); _cbSessionFail = null;
+            _cbSessionReq?.Dispose();
+            _cbSessionReq = null;
+            _cbSessionFail?.Dispose();
+            _cbSessionFail = null;
         }
 
-        public void Dispose() { Stop(); }
+        public void Dispose()
+        {
+            Stop();
+        }
     }
 
     /// <summary>
@@ -364,7 +396,10 @@ namespace CardShopCoop.Net
         }
 
         public readonly List<LobbyRow> Lobbies = new List<LobbyRow>();
-        public bool ListRefreshing { get; private set; }
+        public bool ListRefreshing
+        {
+            get; private set;
+        }
 
         public void Init()
         {
@@ -376,7 +411,7 @@ namespace CardShopCoop.Net
                     return;
                 }
                 LobbyId = new CSteamID(e.m_ulSteamIDLobby);
-                SteamMatchmaking.SetLobbyData(LobbyId, "coopmod", "cardshopcoop");
+                SteamMatchmaking.SetLobbyData(LobbyId, "coopmod", "communitymultiplayer");
                 SteamMatchmaking.SetLobbyData(LobbyId, "coopver", CoopPlugin.Version);
                 string ownerName = CoopCore.Instance == null
                     ? CoopPlugin.PlayerName.Value
@@ -390,11 +425,16 @@ namespace CardShopCoop.Net
             {
                 ListRefreshing = false;
                 Lobbies.Clear();
-                if (ioFail) { OnError?.Invoke("Steam lobby list failed"); return; }
+                if (ioFail)
+                {
+                    OnError?.Invoke("Steam lobby list failed");
+                    return;
+                }
                 for (int i = 0; i < e.m_nLobbiesMatching; i++)
                 {
                     var id = SteamMatchmaking.GetLobbyByIndex(i);
-                    if (id == CSteamID.Nil) continue;
+                    if (id == CSteamID.Nil)
+                        continue;
                     Lobbies.Add(new LobbyRow
                     {
                         Id = id,
@@ -409,7 +449,8 @@ namespace CardShopCoop.Net
             });
             _cbEnter = Callback<LobbyEnter_t>.Create(e =>
             {
-                if (!_joining) return; // our own host-side enter
+                if (!_joining)
+                    return; // our own host-side enter
                 _joining = false;
                 LobbyId = new CSteamID(e.m_ulSteamIDLobby);
                 var owner = SteamMatchmaking.GetLobbyOwner(LobbyId);
@@ -423,7 +464,10 @@ namespace CardShopCoop.Net
 
         public bool SteamAvailable()
         {
-            try { return SteamAPI.IsSteamRunning(); }
+            try
+            {
+                return SteamAPI.IsSteamRunning();
+            }
             catch { return false; }
         }
 
@@ -439,9 +483,10 @@ namespace CardShopCoop.Net
         /// <summary>Fetch public lobbies of THIS mod (server-side filtered by our key).</summary>
         public void RefreshList()
         {
-            if (ListRefreshing) return;
+            if (ListRefreshing)
+                return;
             ListRefreshing = true;
-            SteamMatchmaking.AddRequestLobbyListStringFilter("coopmod", "cardshopcoop", ELobbyComparison.k_ELobbyComparisonEqual);
+            SteamMatchmaking.AddRequestLobbyListStringFilter("coopmod", "communitymultiplayer", ELobbyComparison.k_ELobbyComparisonEqual);
             SteamMatchmaking.AddRequestLobbyListResultCountFilter(100);
             SteamMatchmaking.AddRequestLobbyListDistanceFilter(ELobbyDistanceFilter.k_ELobbyDistanceFilterWorldwide);
             var call = SteamMatchmaking.RequestLobbyList();
@@ -464,7 +509,11 @@ namespace CardShopCoop.Net
         {
             if (LobbyId != CSteamID.Nil)
             {
-                try { SteamMatchmaking.LeaveLobby(LobbyId); } catch { }
+                try
+                {
+                    SteamMatchmaking.LeaveLobby(LobbyId);
+                }
+                catch { }
                 LobbyId = CSteamID.Nil;
             }
             _joining = false;
@@ -572,10 +621,22 @@ namespace CardShopCoop.Net
             }
         }
 
-        public Action<string> OnError { get; set; }
-        public Action<ulong> OnLobbyLive { get; set; }
-        public Action OnConnectedToHost { get; set; }
-        public Action<ulong> OnInviteAccepted { get; set; }
+        public Action<string> OnError
+        {
+            get; set;
+        }
+        public Action<ulong> OnLobbyLive
+        {
+            get; set;
+        }
+        public Action OnConnectedToHost
+        {
+            get; set;
+        }
+        public Action<ulong> OnInviteAccepted
+        {
+            get; set;
+        }
 
         public void Init()
         {
@@ -586,7 +647,8 @@ namespace CardShopCoop.Net
                 // Host side. The transport is always created BEFORE Host() is called
                 // (see CreateTransport's contract), so _tx is non-null here in every
                 // real flow; the guard is only for a Leave() racing the callback.
-                if (_tx != null) _tx.LobbyId = id;
+                if (_tx != null)
+                    _tx.LobbyId = id;
                 // .m_SteamID, not the struct: the boundary is what keeps CoopCore's handler
                 // free of Steamworks metadata (see ISteamBridge).
                 OnLobbyLive?.Invoke(id.m_SteamID);
@@ -597,7 +659,8 @@ namespace CardShopCoop.Net
                 // lives on CoopCore's OnConnectedToHost handler - the bridge has no idea
                 // what a CoopRole is. SteamLobby._joining already filters the host's own
                 // lobby-enter, so this only fires on a real join.
-                if (_tx == null) return;
+                if (_tx == null)
+                    return;
                 _tx.LobbyId = _lobby.LobbyId;
                 _tx.ConnectToHost(owner);
                 OnConnectedToHost?.Invoke();
@@ -606,13 +669,19 @@ namespace CardShopCoop.Net
             _lobby.OnListUpdated = () => { };
         }
 
-        public bool SteamAvailable() { return _lobby.SteamAvailable(); }
+        public bool SteamAvailable()
+        {
+            return _lobby.SteamAvailable();
+        }
 
         public string LocalPersonaName
         {
             get
             {
-                try { return SteamAvailable() ? (SteamFriends.GetPersonaName() ?? "") : ""; }
+                try
+                {
+                    return SteamAvailable() ? (SteamFriends.GetPersonaName() ?? "") : "";
+                }
                 catch { return ""; }
             }
         }
@@ -623,7 +692,8 @@ namespace CardShopCoop.Net
             {
                 try
                 {
-                    if (!SteamAvailable()) return 0;
+                    if (!SteamAvailable())
+                        return 0;
                     return SteamUser.GetSteamID().m_SteamID;
                 }
                 catch { return 0; }
@@ -632,12 +702,15 @@ namespace CardShopCoop.Net
 
         public string FriendNickname(ulong steamId)
         {
-            if (steamId == 0) return "";
+            if (steamId == 0)
+                return "";
             try
             {
-                if (!SteamAvailable()) return "";
+                if (!SteamAvailable())
+                    return "";
                 var friend = new CSteamID(steamId);
-                if (!SteamFriends.HasFriend(friend, EFriendFlags.k_EFriendFlagImmediate)) return "";
+                if (!SteamFriends.HasFriend(friend, EFriendFlags.k_EFriendFlagImmediate))
+                    return "";
                 return SteamFriends.GetFriendPersonaName(friend) ?? "";
             }
             catch { return ""; }
@@ -654,7 +727,10 @@ namespace CardShopCoop.Net
             _lobby.Host(isPublic, lobbyName, hasPassword);
         }
 
-        public void Join(ulong lobbyId) { _lobby.Join(new CSteamID(lobbyId)); }
+        public void Join(ulong lobbyId)
+        {
+            _lobby.Join(new CSteamID(lobbyId));
+        }
 
         public void Leave()
         {
@@ -664,9 +740,21 @@ namespace CardShopCoop.Net
             _tx = null;
         }
 
-        public void OpenInviteDialog() { _lobby.OpenInviteDialog(); }
-        public void RefreshList() { _lobby.RefreshList(); }
-        public bool ListRefreshing { get { return _lobby.ListRefreshing; } }
+        public void OpenInviteDialog()
+        {
+            _lobby.OpenInviteDialog();
+        }
+        public void RefreshList()
+        {
+            _lobby.RefreshList();
+        }
+        public bool ListRefreshing
+        {
+            get
+            {
+                return _lobby.ListRefreshing;
+            }
+        }
 
         public List<LobbyRow> Lobbies
         {

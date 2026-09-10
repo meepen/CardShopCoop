@@ -91,6 +91,8 @@ namespace CardShopCoop.Net
         PlayerModelState = 83,   // host -> clients: authoritative appearance roster
         PurchaseResult = 84,     // host -> requesting client: purchase outcome
         PlayerIntent = 85,       // client -> host: single-shot interaction intent
+        EconDelta = 86,          // host -> clients: replay a vanilla money/XP HUD delta
+        MovePreview = 87,        // peers: transient furniture placement preview
     }
 
     /// <summary>One received message, already reassembled and decoded from the wire.
@@ -112,7 +114,23 @@ namespace CardShopCoop.Net
         public const int TypeSize = 1;
         public const int MinimumFrameSize = FrameHeaderSize + TypeSize;
         public const int MaxFrameSize = 64 * 1024 * 1024;
-         public const int WireVersion = 8;
+        // Patch releases must not change the wire revision. A new message or a
+        // substantial change behind an existing message requires a minor bump.
+        // 1.2.3 therefore becomes 102 (major * 100 + minor).
+        public static readonly int WireVersion = DeriveWireVersion(CoopPlugin.Version);
+
+        private static int DeriveWireVersion(string version)
+        {
+            if (!Version.TryParse(version, out Version parsed)
+                || parsed.Major < 0 || parsed.Minor < 0
+                || parsed.Major > 999 || parsed.Minor > 999)
+            {
+                throw new InvalidOperationException(
+                    CoopPlugin.Name + " version must have major and minor components from 0 to 999: " + version);
+            }
+
+            return parsed.Major * 100 + parsed.Minor;
+        }
 
         /// <summary>
         /// Decodes one complete wire frame. This is the only protocol-framing entry
@@ -125,11 +143,14 @@ namespace CardShopCoop.Net
         {
             message = default(InMsg);
             if (frame == null || offset < 0 || count < MinimumFrameSize
-                || offset > frame.Length - count) return false;
+                || offset > frame.Length - count)
+                return false;
 
             int declared = BitConverter.ToInt32(frame, offset);
-            if (declared < TypeSize || declared > maxFrame) return false;
-            if (declared + FrameHeaderSize != count) return false;
+            if (declared < TypeSize || declared > maxFrame)
+                return false;
+            if (declared + FrameHeaderSize != count)
+                return false;
 
             int payloadLength = declared - TypeSize;
             var payload = new byte[payloadLength];
@@ -162,7 +183,8 @@ namespace CardShopCoop.Net
         /// assembly lives here.</summary>
         public static byte[] ReadFrame(Stream stream, int maxFrame)
         {
-            if (stream == null) throw new ArgumentNullException("stream");
+            if (stream == null)
+                throw new ArgumentNullException("stream");
             var header = new byte[FrameHeaderSize];
             ReadExact(stream, header, 0, header.Length);
             int declared = BitConverter.ToInt32(header, 0);
@@ -181,7 +203,8 @@ namespace CardShopCoop.Net
             while (read < count)
             {
                 int n = stream.Read(buffer, offset + read, count - read);
-                if (n <= 0) throw new IOException("Connection closed");
+                if (n <= 0)
+                    throw new IOException("Connection closed");
                 read += n;
             }
         }
@@ -191,9 +214,11 @@ namespace CardShopCoop.Net
         public static bool TryGetType(byte[] frame, out MsgType type)
         {
             type = default(MsgType);
-            if (frame == null || frame.Length < MinimumFrameSize) return false;
+            if (frame == null || frame.Length < MinimumFrameSize)
+                return false;
             int declared = BitConverter.ToInt32(frame, 0);
-            if (declared < TypeSize || declared + FrameHeaderSize != frame.Length) return false;
+            if (declared < TypeSize || declared + FrameHeaderSize != frame.Length)
+                return false;
             type = (MsgType)frame[FrameHeaderSize];
             return true;
         }

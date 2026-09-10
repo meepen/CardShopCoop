@@ -36,21 +36,25 @@ namespace CardShopCoop.Sync
 
         public static bool TryGet(InteractableObject obj, out ushort id)
         {
-            if (obj != null && ByObject.TryGetValue(obj, out id) && id != Invalid) return true;
+            if (obj != null && ByObject.TryGetValue(obj, out id) && id != Invalid)
+                return true;
             id = Invalid;
             return false;
         }
 
         public static ushort AssignHost(InteractableObject obj)
         {
-            if (obj == null) return Invalid;
-            if (TryGet(obj, out ushort existing)) return existing;
+            if (obj == null)
+                return Invalid;
+            if (TryGet(obj, out ushort existing))
+                return existing;
 
             ushort id;
             do
             {
                 id = _next++;
-                if (_next == Invalid) _next = 1;
+                if (_next == Invalid)
+                    _next = 1;
             }
             while (id == Invalid || ById.ContainsKey(id));
 
@@ -60,7 +64,8 @@ namespace CardShopCoop.Sync
 
         public static void Bind(InteractableObject obj, ushort id)
         {
-            if (obj == null || id == Invalid) return;
+            if (obj == null || id == Invalid)
+                return;
 
             if (ByObject.TryGetValue(obj, out ushort old) && old != id)
                 ById.Remove(old);
@@ -73,7 +78,8 @@ namespace CardShopCoop.Sync
 
         public static void Forget(InteractableObject obj)
         {
-            if (obj == null) return;
+            if (obj == null)
+                return;
             if (ByObject.TryGetValue(obj, out ushort id))
             {
                 ByObject.Remove(obj);
@@ -87,8 +93,10 @@ namespace CardShopCoop.Sync
         {
             key = 0;
             ushort id;
-            if (CoopCore.Role == CoopRole.Host) id = AssignHost(obj);
-            else if (!TryGet(obj, out id)) return false;
+            if (CoopCore.Role == CoopRole.Host)
+                id = AssignHost(obj);
+            else if (!TryGet(obj, out id))
+                return false;
             key = (kind << 24) | (id << 8) | (compartment & 0xFF);
             return true;
         }
@@ -97,8 +105,10 @@ namespace CardShopCoop.Sync
         {
             key = 0;
             ushort id;
-            if (CoopCore.Role == CoopRole.Host) id = AssignHost(obj);
-            else if (!TryGet(obj, out id)) return false;
+            if (CoopCore.Role == CoopRole.Host)
+                id = AssignHost(obj);
+            else if (!TryGet(obj, out id))
+                return false;
             key = (kind << 24) | id;
             return true;
         }
@@ -107,9 +117,11 @@ namespace CardShopCoop.Sync
             out InteractableObject result)
         {
             result = null;
-            if (sm == null || id == Invalid) return false;
+            if (sm == null || id == Invalid)
+                return false;
             var list = PopulationSync.GetList(sm, kind);
-            if (list == null) return false;
+            if (list == null)
+                return false;
             for (int i = 0; i < list.Count; i++)
             {
                 var obj = list[i] as InteractableObject;

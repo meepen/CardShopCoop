@@ -1,0 +1,29 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: C# formatting
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.x
+
+      - name: Restore project metadata
+        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj
+
+      # Formatting does not require the proprietary game assemblies. The compile
+      # job remains intentionally deferred until CI has a reference-assembly source.
+      - name: Verify formatting
+        run: dotnet format src/CardShopCoop/CardShopCoop.csproj whitespace --verify-no-changes --no-restore

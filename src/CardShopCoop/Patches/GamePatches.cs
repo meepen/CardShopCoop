@@ -23,6 +23,44 @@ namespace CardShopCoop.Patches
         // spawn is a mirror operation, never a new purchase.
         public static bool ApplyingMirrorPurchase;
 
+        private sealed class PendingDeco
+        {
+            public InteractableObject Object;
+            public EDecoObject Type;
+            public bool Committed;
+        }
+        private static readonly List<PendingDeco> PendingDecos = new List<PendingDeco>();
+        private static readonly MethodInfo MiPlacedMoved = AccessTools.Method(typeof(InteractableObject), "OnPlacedMovedObject");
+
+        private static void FinishDecoPlacement(InteractableObject obj)
+        {
+            MiPlacedMoved?.Invoke(obj, null);
+        }
+
+        public static bool IsPendingDeco(InteractableObject obj)
+        {
+            for (int i = PendingDecos.Count - 1; i >= 0; i--)
+            {
+                if (PendingDecos[i].Object == null)
+                {
+                    PendingDecos.RemoveAt(i);
+                    continue;
+                }
+                if (ReferenceEquals(PendingDecos[i].Object, obj))
+                    return true;
+            }
+            return false;
+        }
+
+        public static void AdoptPendingDeco(InteractableObject obj)
+        {
+            for (int i = PendingDecos.Count - 1; i >= 0; i--)
+                if (PendingDecos[i].Object == null)
+                    PendingDecos.RemoveAt(i);
+                else if (ReferenceEquals(PendingDecos[i].Object, obj) && PendingDecos[i].Committed)
+                    PendingDecos.RemoveAt(i);
+        }
+
         private static readonly FieldInfo FiRestockCart = AccessTools.Field(typeof(RestockItemScreen), "m_CartItemList");
         private static readonly FieldInfo FiScannerIndexes = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockIndexList");
         private static readonly FieldInfo FiScannerCounts = AccessTools.Field(typeof(ScannerRestockScreen), "m_RestockBoxCountList");
@@ -69,6 +107,16 @@ namespace CardShopCoop.Patches
             Try(h, typeof(CEventManager), "QueueEvent",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(DayEndBlockPrefix)));
 
+            // Relay the exact deltas that the host's GameUIScreen accepted. Clients suppress
+            // their local economy events, so they replay these values into the vanilla HUD
+            // queues when the host broadcasts them.
+            Try(h, typeof(GameUIScreen), "CPlayer_OnAddCoin",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(EconAddCoinPostfix)));
+            Try(h, typeof(GameUIScreen), "CPlayer_OnReduceCoin",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(EconReduceCoinPostfix)));
+            Try(h, typeof(GameUIScreen), "CPlayer_OnAddShopExp",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(EconAddShopExpPostfix)));
+
             // ...and the joiner must never OPEN the day-end recap himself. The mirrored
             // clock is allowed to latch m_HasDayEnded just like the host, but a
             // guest who presses Enter before the host does runs the whole vanilla
@@ -91,6 +139,8 @@ namespace CardShopCoop.Patches
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(LightStateChangedPostfix)));
             Try(h, typeof(LightManager), "UpdateLightTimeData",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(LightStateChangedPostfix)));
+            Try(h, typeof(LightManager), "Update",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ClientLightClockPrefix)));
 
             // Shared card collection: every add/remove on either side mirrors to the other,
             // so the joiner's pack pulls land in the real binder (and vice versa).
@@ -171,7 +221,11 @@ namespace CardShopCoop.Patches
             // DIFFERENT host deco sharing the same index. Block before the decrement; the toast
             // explains. Host placement is untouched (Role check).
             Try(h, typeof(PlaceDecoUIScreen), "StartPlaceDecoItem",
-                prefix: new HarmonyMethod(typeof(GamePatches), nameof(PlaceDecoBlockPrefix)));
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(PlaceDecoPrefix)));
+            Try(h, typeof(InteractableObject), "PlaceMovedObject",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(DecoPlacedPostfix)));
+            Try(h, typeof(InteractableObject), "BoxUpObject",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(DecoBoxUpPrefix)));
 
             // Handheld deodorant spray: the guest's hold-spray loop only ever hits the
             // LOCAL customer list - inert puppets on a client - so a guest could never
@@ -190,6 +244,21 @@ namespace CardShopCoop.Patches
             // (field report: PlayTable). Skip the teardown when there's nothing to tear down.
             Try(h, typeof(ShelfManager), "DisableMoveObjectPreviewMode",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(DisablePreviewGuardPrefix)));
+
+            // Furniture placement is authoritative only after it settles, but the visual
+            // placement ghost is safe to stream independently because receivers render a
+            // detached cosmetic mesh rather than moving their real mirrored object.
+            Try(h, typeof(InteractableObject), "StartMoveObject",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(MovePreviewStartPostfix)));
+            // These overrides call base.StartMoveObject, so patching them too would emit a
+            // duplicate Stop/Start sequence for one drag. Packaging boxes are different: their
+            // override owns the complete move setup and never calls the base implementation.
+            Try(h, typeof(InteractablePackagingBox), "StartMoveObject",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(MovePreviewStartPostfix)));
+            Try(h, typeof(ShelfManager), "SetMoveObjectPreviewModelValidState",
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(MovePreviewValidPostfix)));
+            Try(h, typeof(ShelfManager), "DisableMoveObjectPreviewMode",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(MovePreviewStopPrefix)));
 
             // A trashed box must die on the host too, or the next broadcast resurrects
             // it at its old spot on the ground.
@@ -217,6 +286,14 @@ namespace CardShopCoop.Patches
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
             Try(h, typeof(InteractablePackagingBox_Item), "DropBox",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+            // While held, the game's visible box root follows the hand but its
+            // Rigidbody can remain at the old spawn pose. Align the shared base
+            // implementation before ThrowBox/DropBox enables physics; otherwise
+            // the first coop snapshot can legitimately report (0,0,0).
+            Try(h, typeof(InteractablePackagingBox), "ThrowBox",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(AlignBoxBodyPrefix)));
+            Try(h, typeof(InteractablePackagingBox), "DropBox",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(AlignBoxBodyPrefix)));
             Try(h, typeof(InteractablePackagingBox_Item), "FillBoxWithItem",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
             Try(h, typeof(InteractablePackagingBox_Item), "DispenseItem",
@@ -292,7 +369,10 @@ namespace CardShopCoop.Patches
 
         private static void TryModule(string name, Action<Harmony> apply, Harmony h)
         {
-            try { apply(h); }
+            try
+            {
+                apply(h);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning($"Module patches failed ({name}): {e.Message}"); }
         }
 
@@ -301,14 +381,16 @@ namespace CardShopCoop.Patches
         /// method from reading the input axis at all.</summary>
         public static bool CameraInputPrefix(ref float __result)
         {
-            if (!CoopCore.WindowBlocksInput) return true;
+            if (!CoopCore.WindowBlocksInput)
+                return true;
             __result = 0f;
             return false;
         }
 
         public static void ReduceCardIndexPostfix(int index, ECardExpansionType expansionType, bool isDestiny, int reduceAmount)
         {
-            if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None) return;
+            if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None)
+                return;
             try
             {
                 var card = CPlayerData.GetCardData(index, expansionType, isDestiny);
@@ -338,14 +420,22 @@ namespace CardShopCoop.Patches
         /// population broadcast.</summary>
         public static void InteractableObjectDestroyedPostfix(InteractableObject __instance)
         {
-            if (CoopCore.Role != CoopRole.Host) return;
-            if (CoopCore.ClientReloading || __instance == null) return;
+            if (CoopCore.Role != CoopRole.Host)
+                return;
+            if (CoopCore.ClientReloading || __instance == null)
+                return;
             // a placed object carries a real (or deco) object type; cards/boxes don't.
-            if (__instance is InteractablePackagingBox) return;
-            if (__instance is InteractableCard3d) return;
+            if (__instance is InteractablePackagingBox)
+                return;
+            if (__instance is InteractableCard3d)
+                return;
             if (__instance.m_ObjectType == EObjectType.None
-                && __instance.m_DecoObjectType == EDecoObject.None) return;
-            try { CoopCore.Instance?.NotifyHostStructureChanged(); }
+                && __instance.m_DecoObjectType == EDecoObject.None)
+                return;
+            try
+            {
+                CoopCore.Instance?.NotifyHostStructureChanged();
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("OnDestroyed structure change: " + e.Message); }
         }
 
@@ -355,12 +445,23 @@ namespace CardShopCoop.Patches
                 CoopCore.RequestImmediateObjectSync();
         }
 
+        public static void AlignBoxBodyPrefix(InteractablePackagingBox __instance)
+        {
+            if (CoopCore.Role == CoopRole.None || __instance == null)
+                return;
+            BoxSync.AlignHeldBody(__instance);
+        }
+
         public static bool ApplyingRemoteLicense;
 
         public static void LicenseUnlockPostfix(int index)
         {
-            if (ApplyingRemoteLicense || CoopCore.Role == CoopRole.None) return;
-            try { CoopCore.Instance?.ForwardLicense(index); }
+            if (ApplyingRemoteLicense || CoopCore.Role == CoopRole.None)
+                return;
+            try
+            {
+                CoopCore.Instance?.ForwardLicense(index);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("LicenseUnlockPostfix forward failed: " + e.Message); }
         }
 
@@ -376,7 +477,8 @@ namespace CardShopCoop.Patches
 
         public static bool RestockCheckoutPrefix(RestockItemScreen __instance, float totalCost)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             _pendingRestockScreen = __instance;
             _pendingScannerScreen = null;
             var cart = FiRestockCart?.GetValue(__instance) as Dictionary<int, int>;
@@ -385,7 +487,8 @@ namespace CardShopCoop.Patches
                 foreach (var p in cart)
                 {
                     var rd = InventoryBase.GetRestockData(p.Key);
-                    if (rd != null) lines.Add(new PurchaseLine { ItemType = (int)rd.itemType, IsBig = rd.isBigBox, Name = rd.name ?? "", Count = p.Value });
+                    if (rd != null)
+                        lines.Add(new PurchaseLine { ItemType = (int)rd.itemType, IsBig = rd.isBigBox, Name = rd.name ?? "", Count = p.Value });
                 }
             CoopCore.Instance?.RequestPurchase(0, lines);
             return false;
@@ -393,7 +496,8 @@ namespace CardShopCoop.Patches
 
         public static bool ScannerCheckoutPrefix(ScannerRestockScreen __instance, float totalCost)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             _pendingScannerScreen = __instance;
             _pendingRestockScreen = null;
             var indexes = FiScannerIndexes?.GetValue(__instance) as List<int>;
@@ -403,7 +507,8 @@ namespace CardShopCoop.Patches
                 for (int i = 0; i < indexes.Count && i < counts.Count; i++)
                 {
                     var rd = InventoryBase.GetRestockData(indexes[i]);
-                    if (rd != null) lines.Add(new PurchaseLine { ItemType = (int)rd.itemType, IsBig = rd.isBigBox, Name = rd.name ?? "", Count = counts[i] });
+                    if (rd != null)
+                        lines.Add(new PurchaseLine { ItemType = (int)rd.itemType, IsBig = rd.isBigBox, Name = rd.name ?? "", Count = counts[i] });
                 }
             CoopCore.Instance?.RequestPurchase(0, lines);
             return false;
@@ -415,7 +520,8 @@ namespace CardShopCoop.Patches
         /// preventing another client's purchase from affecting this UI.</summary>
         public static void ClientPurchaseAccepted(byte kind)
         {
-            if (CoopCore.Role != CoopRole.Client || kind != 0) return;
+            if (CoopCore.Role != CoopRole.Client || kind != 0)
+                return;
             var restock = _pendingRestockScreen;
             if (restock != null)
             {
@@ -433,8 +539,10 @@ namespace CardShopCoop.Patches
             {
                 var indexes = FiScannerIndexes?.GetValue(scanner) as List<int>;
                 var counts = FiScannerCounts?.GetValue(scanner) as List<int>;
-                if (indexes != null) indexes.Clear();
-                if (counts != null) counts.Clear();
+                if (indexes != null)
+                    indexes.Clear();
+                if (counts != null)
+                    counts.Clear();
                 FiScannerPage?.SetValue(scanner, 0);
                 MiScannerPage?.Invoke(scanner, new object[] { 0 });
                 MiScannerTotals?.Invoke(scanner, null);
@@ -445,7 +553,8 @@ namespace CardShopCoop.Patches
 
         public static bool FurnitureCheckoutPrefix(int index, float totalCost)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             var fp = InventoryBase.GetFurniturePurchaseData(index);
             if (fp != null)
             {
@@ -457,7 +566,8 @@ namespace CardShopCoop.Patches
 
         public static bool LicenseCheckoutPrefix(RestockItemPanelUI __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             // m_Index is private in the game assembly; retrieve it without changing the UI.
             var fi = AccessTools.Field(typeof(RestockItemPanelUI), "m_Index");
             int index = fi != null ? (int)fi.GetValue(__instance) : -1;
@@ -475,8 +585,13 @@ namespace CardShopCoop.Patches
             // client only: hold the OOB timer under its 5s trigger so the teleport sweep
             // (RestockManager.Update, guarded by `if (!(m_OutofBoundCheckTimer > 5f)) return`)
             // never runs; the host owns box placement and re-broadcasts it every 1.5s.
-            if (CoopCore.Role != CoopRole.Client) return;
-            try { FiOobTimer?.SetValue(__instance, 0f); } catch { }
+            if (CoopCore.Role != CoopRole.Client)
+                return;
+            try
+            {
+                FiOobTimer?.SetValue(__instance, 0f);
+            }
+            catch { }
         }
 
         private static bool s_warnedNoCardBases;
@@ -503,26 +618,41 @@ namespace CardShopCoop.Patches
         /// "the host's bases arrived" and block the other five.</summary>
         public static bool GenerateCardMarketPriceBlockPrefix(ECardExpansionType expansionType)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             bool landed;
             switch (expansionType)
             {
-                case ECardExpansionType.Tetramon: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceList); break;
-                case ECardExpansionType.Destiny: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListDestiny); break;
+                case ECardExpansionType.Tetramon:
+                    landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceList);
+                    break;
+                case ECardExpansionType.Destiny:
+                    landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListDestiny);
+                    break;
                 // one Ghost call fills BOTH halves - it doubles its range and splits them with
                 // isDestiny (RestockManager.cs:214-226 -> CPlayerData.cs:1167-1175) - and the
                 // load gate restores the pair together, so either one filled means both landed
-                case ECardExpansionType.Ghost: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListGhost)
-                                                     || AnyCardBase(CPlayerData.m_GenCardMarketPriceListGhostBlack); break;
-                case ECardExpansionType.Megabot: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListMegabot); break;
-                case ECardExpansionType.FantasyRPG: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListFantasyRPG); break;
-                case ECardExpansionType.CatJob: landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListCatJob); break;
+                case ECardExpansionType.Ghost:
+                    landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListGhost)
+                                                     || AnyCardBase(CPlayerData.m_GenCardMarketPriceListGhostBlack);
+                    break;
+                case ECardExpansionType.Megabot:
+                    landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListMegabot);
+                    break;
+                case ECardExpansionType.FantasyRPG:
+                    landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListFantasyRPG);
+                    break;
+                case ECardExpansionType.CatJob:
+                    landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListCatJob);
+                    break;
                 // An expansion we can't name has no table among MarketSync's seven either, so a
                 // local roll into it could never be corrected by the host's snapshot. Keep
                 // blocking: visible $0.00 beats prices that silently disagree with the host.
-                default: return false;
+                default:
+                    return false;
             }
-            if (landed) return false;
+            if (landed)
+                return false;
             if (!s_warnedNoCardBases)
             {
                 s_warnedNoCardBases = true;
@@ -537,9 +667,11 @@ namespace CardShopCoop.Patches
         /// (CPlayerData.cs:563-565 seeds the lists with blank MarketPrice objects).</summary>
         private static bool AnyCardBase(System.Collections.Generic.List<MarketPrice> list)
         {
-            if (list == null) return false;
+            if (list == null)
+                return false;
             for (int i = 0; i < list.Count; i++)
-                if (list[i] != null && list[i].generatedMarketPrice != 0f) return true;
+                if (list[i] != null && list[i].generatedMarketPrice != 0f)
+                    return true;
             return false;
         }
 
@@ -556,15 +688,33 @@ namespace CardShopCoop.Patches
                 var sm = CSingleton<ShelfManager>.Instance;
                 // no live preview model = no interactive move in progress = nothing to
                 // clean up; skipping avoids the NRE and lets the spawn finish
-                if (sm == null || sm.m_MoveObjectPreviewModel == null) return false;
+                if (sm == null || sm.m_MoveObjectPreviewModel == null)
+                    return false;
             }
             catch { return false; }
             return true; // real interactive move: run the vanilla teardown
         }
 
+        public static void MovePreviewStartPostfix(InteractableObject __instance)
+        {
+            if (__instance != null)
+                CoopCore.Instance?.BeginMovePreview(__instance);
+        }
+
+        public static void MovePreviewValidPostfix(bool isValid)
+        {
+            CoopCore.Instance?.UpdateMovePreviewValidity(isValid);
+        }
+
+        public static void MovePreviewStopPrefix()
+        {
+            CoopCore.Instance?.EndMovePreview();
+        }
+
         public static bool RenamerBlockPrefix()
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             if (CoopCore.Instance != null)
             {
                 CoopCore.Instance.RegisterLine = "the host names the shop";
@@ -584,7 +734,8 @@ namespace CardShopCoop.Patches
         /// block+toast idiom as RenamerBlockPrefix.</summary>
         public static bool SellFurnitureBlockPrefix()
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             if (CoopCore.Instance != null)
             {
                 CoopCore.Instance.RegisterLine = "selling furniture is host-only for now - ask the host";
@@ -600,14 +751,73 @@ namespace CardShopCoop.Patches
         /// whose settled move-request can teleport a DIFFERENT host deco at the same index.
         /// Returning false BEFORE the inventory decrement keeps the guest's deco intact. Host is
         /// unaffected (Role check). Same block+toast idiom as RenamerBlockPrefix.</summary>
-        public static bool PlaceDecoBlockPrefix()
+        public static bool PlaceDecoPrefix(EDecoObject itemType)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
-            if (CoopCore.Instance != null)
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
+            int pending = 0;
+            for (int i = 0; i < PendingDecos.Count; i++)
+                if (PendingDecos[i].Type == itemType)
+                    pending++;
+            if (CPlayerData.GetDecoItemInventoryCount(itemType) <= pending)
             {
-                CoopCore.Instance.RegisterLine = "deco placement is host-only for now";
-                CoopCore.Instance.RegisterLineTimer = 3f;
+                SoundManager.GenericCancel();
+                NotEnoughResourceTextPopup.ShowText(ENotEnoughResourceText.NoDecoInventory);
+                return false;
             }
+            CSingleton<InteractionPlayerController>.Instance.CloseDecoInventoryScreen();
+            ShelfManager.SpawnDecoObjectOnHand(itemType);
+            var list = CSingleton<ShelfManager>.Instance.m_DecoObjectList;
+            if (list != null)
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    var obj = list[i];
+                    if (obj != null && obj.m_DecoObjectType == itemType && obj.GetIsMovingObject() && !IsPendingDeco(obj))
+                    {
+                        PendingDecos.Add(new PendingDeco { Object = obj, Type = itemType });
+                        break;
+                    }
+                }
+            return false;
+        }
+
+        public static void DecoPlacedPostfix(InteractableObject __instance)
+        {
+            if (CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
+            for (int i = 0; i < PendingDecos.Count; i++)
+            {
+                var p = PendingDecos[i];
+                if (!ReferenceEquals(p.Object, __instance) || p.Committed || __instance.GetIsMovingObject())
+                    continue;
+                p.Committed = true;
+                CoopCore.Instance?.SendDecorationPlacement(p.Type, __instance.transform.position, __instance.transform.rotation);
+                return;
+            }
+        }
+
+        public static bool DecoBoxUpPrefix(InteractableObject __instance, bool holdBox)
+        {
+            if (CoopCore.Role != CoopRole.Client || __instance == null || __instance.m_DecoObjectType == EDecoObject.None)
+                return true;
+            for (int i = 0; i < PendingDecos.Count; i++)
+            {
+                var p = PendingDecos[i];
+                if (!ReferenceEquals(p.Object, __instance))
+                    continue;
+                if (p.Committed && PlacedObjectIdentity.TryMakeObjectKey(5, __instance, out int key))
+                    CoopCore.Instance?.SendDecorationRemoval(key);
+                PendingDecos.RemoveAt(i);
+                FinishDecoPlacement(__instance);
+                __instance.gameObject.SetActive(false);
+                __instance.OnDestroyed();
+                return false;
+            }
+            if (PlacedObjectIdentity.TryMakeObjectKey(5, __instance, out int objectKey))
+                CoopCore.Instance?.SendDecorationRemoval(objectKey);
+            FinishDecoPlacement(__instance);
+            __instance.gameObject.SetActive(false);
+            __instance.OnDestroyed();
             return false;
         }
 
@@ -632,10 +842,12 @@ namespace CardShopCoop.Patches
         /// the hit. The cleaned state echoes back through the NpcSync smelly mirror.</summary>
         public static bool DeodorantSprayPrefix(UnityEngine.Vector3 sprayPos, float range, int potency)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             try
             {
-                if (_sprayIpc == null) _sprayIpc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
+                if (_sprayIpc == null)
+                    _sprayIpc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
                 var ipc = _sprayIpc;
                 bool handheld = ipc != null
                     && FiHoldSprayItem?.GetValue(ipc) != null
@@ -654,7 +866,8 @@ namespace CardShopCoop.Patches
 
         public static void SetCardPricePostfix(CardData cardData, float priceSet)
         {
-            if (ApplyingRemotePrice || CoopCore.Role == CoopRole.None) return;
+            if (ApplyingRemotePrice || CoopCore.Role == CoopRole.None)
+                return;
             try
             {
                 // Same encoded-grade swap AddCardPostfix does, and for the same reason - but
@@ -671,10 +884,14 @@ namespace CardShopCoop.Patches
                 {
                     int saved = cardData.cardGrade;
                     cardData.cardGrade = enc;
-                    try { CoopCore.Instance?.ForwardCardPrice(cardData, priceSet); }
+                    try
+                    {
+                        CoopCore.Instance?.ForwardCardPrice(cardData, priceSet);
+                    }
                     finally { cardData.cardGrade = saved; } // never leave the game's object mutated
                 }
-                else CoopCore.Instance?.ForwardCardPrice(cardData, priceSet);
+                else
+                    CoopCore.Instance?.ForwardCardPrice(cardData, priceSet);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("SetCardPricePostfix forward failed: " + e.Message); }
         }
@@ -690,7 +907,8 @@ namespace CardShopCoop.Patches
         // "freezes on the first card". Never let a forward failure escape into the caller.
         public static void AddCardPostfix(CardData cardData, int addAmount)
         {
-            if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None) return;
+            if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None)
+                return;
             try
             {
                 // Forward the ENCODED grade for a graded card. Some display/album paths
@@ -703,18 +921,26 @@ namespace CardShopCoop.Patches
                 {
                     int saved = cardData.cardGrade;
                     cardData.cardGrade = enc;
-                    try { CoopCore.Instance?.ForwardCardDelta(cardData, addAmount, isAdd: true); }
+                    try
+                    {
+                        CoopCore.Instance?.ForwardCardDelta(cardData, addAmount, isAdd: true);
+                    }
                     finally { cardData.cardGrade = saved; } // never leave the game's object mutated
                 }
-                else CoopCore.Instance?.ForwardCardDelta(cardData, addAmount, isAdd: true);
+                else
+                    CoopCore.Instance?.ForwardCardDelta(cardData, addAmount, isAdd: true);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("AddCardPostfix forward failed: " + e.Message); }
         }
 
         public static void ReduceCardPostfix(CardData cardData, int reduceAmount)
         {
-            if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None) return;
-            try { CoopCore.Instance?.ForwardCardDelta(cardData, reduceAmount, isAdd: false); }
+            if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None)
+                return;
+            try
+            {
+                CoopCore.Instance?.ForwardCardDelta(cardData, reduceAmount, isAdd: false);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReduceCardPostfix forward failed: " + e.Message); }
         }
 
@@ -725,8 +951,10 @@ namespace CardShopCoop.Patches
         /// turned fake" report. Runs inside the game's RemoveGradedCard; must never throw.</summary>
         public static void RemoveGradedCardPostfix(CardData cardData)
         {
-            if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None) return;
-            if (cardData == null || cardData.cardGrade <= 0) return;
+            if (ApplyingRemoteCards || CoopCore.Role == CoopRole.None)
+                return;
+            if (cardData == null || cardData.cardGrade <= 0)
+                return;
             try
             {
                 // The SAME encoded-grade swap AddCardPostfix does, for the same reason and with
@@ -741,10 +969,14 @@ namespace CardShopCoop.Patches
                 {
                     int saved = cardData.cardGrade;
                     cardData.cardGrade = enc;
-                    try { CoopCore.Instance?.ForwardGradedRemoval(cardData); }
+                    try
+                    {
+                        CoopCore.Instance?.ForwardGradedRemoval(cardData);
+                    }
                     finally { cardData.cardGrade = saved; } // never leave the game's object mutated
                 }
-                else CoopCore.Instance?.ForwardGradedRemoval(cardData);
+                else
+                    CoopCore.Instance?.ForwardGradedRemoval(cardData);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("RemoveGradedCardPostfix forward failed: " + e.Message); }
         }
@@ -773,7 +1005,8 @@ namespace CardShopCoop.Patches
         /// player's shop + the network tick. The menu still shows; only the freeze is undone.</summary>
         public static void PauseNoFreezePostfix()
         {
-            if (CoopCore.Role != CoopRole.None) UnityEngine.Time.timeScale = 1f;
+            if (CoopCore.Role != CoopRole.None)
+                UnityEngine.Time.timeScale = 1f;
         }
 
         public static bool SaveGuardPrefix()
@@ -792,6 +1025,24 @@ namespace CardShopCoop.Patches
         public static bool ClientBlockPrefix()
         {
             return CoopCore.Role != CoopRole.Client;
+        }
+
+        public static void EconAddCoinPostfix(CEventPlayer_AddCoin evt)
+        {
+            if (CoopCore.Role == CoopRole.Host && evt != null)
+                CoopCore.Instance?.BroadcastEconDelta(1, evt.m_CoinValue);
+        }
+
+        public static void EconReduceCoinPostfix(CEventPlayer_ReduceCoin evt)
+        {
+            if (CoopCore.Role == CoopRole.Host && evt != null)
+                CoopCore.Instance?.BroadcastEconDelta(2, 0f - evt.m_CoinValue);
+        }
+
+        public static void EconAddShopExpPostfix(CEventPlayer_AddShopExp evt)
+        {
+            if (CoopCore.Role == CoopRole.Host && evt != null)
+                CoopCore.Instance?.BroadcastEconDelta(3, evt.m_ExpValue);
         }
 
         public static bool CustomerActivatePrefix()
@@ -813,7 +1064,8 @@ namespace CardShopCoop.Patches
             float offsetUp, Transform followTransform)
         {
             if (CoopCore.Role != CoopRole.Host || __instance == null
-                || string.IsNullOrEmpty(text) || followTransform == null) return;
+                || string.IsNullOrEmpty(text) || followTransform == null)
+                return;
             bool shown = false;
             var popups = __instance.m_PricePopupList;
             if (popups != null)
@@ -828,7 +1080,8 @@ namespace CardShopCoop.Patches
                         break;
                     }
                 }
-            if (!shown) return;
+            if (!shown)
+                return;
             if (Sync.NpcSync.TryGetCustomerSpeechSource(followTransform,
                 out ushort index, out int identity))
                 CoopCore.Instance?.ForwardNpcSpeech(index, identity, text, offsetUp);
@@ -849,8 +1102,10 @@ namespace CardShopCoop.Patches
 
         public static bool ClientLightTogglePrefix()
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
-            if (!ShopStateSync.ApplyingRemote) ShopStateSync.RequestLightToggle();
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
+            if (!ShopStateSync.ApplyingRemote)
+                ShopStateSync.RequestLightToggle();
             return false;
         }
 
@@ -874,19 +1129,30 @@ namespace CardShopCoop.Patches
             CoopCore.Instance?.ObserveHostLightState(__instance);
         }
 
+        public static void ClientLightClockPrefix(LightManager __instance)
+        {
+            CoopCore.Instance?.EnforceClientClock(__instance);
+        }
+
         /// <summary>Set by CoopCore right before it mirrors a host day-change, so exactly
         /// one OnDayStarted gets through to refresh the HUD/day label on the client.</summary>
         public static bool AllowNextDayStarted;
 
         public static bool DayEndBlockPrefix(CEvent evt)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
 
             // The client's clock follows the host; its own day must never end.
-            if (evt is CEventPlayer_OnDayEnded) return false;
+            if (evt is CEventPlayer_OnDayEnded)
+                return false;
             if (evt is CEventPlayer_OnDayStarted)
             {
-                if (AllowNextDayStarted) { AllowNextDayStarted = false; return true; }
+                if (AllowNextDayStarted)
+                {
+                    AllowNextDayStarted = false;
+                    return true;
+                }
                 return false;
             }
 
@@ -896,25 +1162,29 @@ namespace CardShopCoop.Patches
             // pass through, so there is no feedback loop.
             if (evt is CEventPlayer_AddCoin addCoin)
             {
-                if (RegisterSync.SuppressClientRegisterEvents) return false;
+                if (RegisterSync.SuppressClientRegisterEvents)
+                    return false;
                 CoopCore.Instance?.ForwardContribution(1, (float)addCoin.m_CoinValue);
                 return false;
             }
             if (evt is CEventPlayer_ReduceCoin reduceCoin)
             {
-                if (RegisterSync.SuppressClientRegisterEvents) return false;
+                if (RegisterSync.SuppressClientRegisterEvents)
+                    return false;
                 CoopCore.Instance?.ForwardContribution(2, (float)reduceCoin.m_CoinValue);
                 return false;
             }
             if (evt is CEventPlayer_AddShopExp addExp)
             {
-                if (RegisterSync.SuppressClientRegisterEvents) return false;
+                if (RegisterSync.SuppressClientRegisterEvents)
+                    return false;
                 CoopCore.Instance?.ForwardContribution(3, addExp.m_ExpValue);
                 return false;
             }
             if (evt is CEventPlayer_AddFame addFame)
             {
-                if (RegisterSync.SuppressClientRegisterEvents) return false;
+                if (RegisterSync.SuppressClientRegisterEvents)
+                    return false;
                 CoopCore.Instance?.ForwardContribution(4, addFame.m_FameValue);
                 return false;
             }

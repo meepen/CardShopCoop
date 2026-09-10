@@ -80,7 +80,8 @@ namespace CardShopCoop.Sync
         private static int TypeIdOf(Component obj, int kind)
         {
             var io = obj as InteractableObject;
-            if (io == null) return NoType;
+            if (io == null)
+                return NoType;
             return (kind == 5) ? (int)io.m_DecoObjectType : (int)io.m_ObjectType;
         }
 
@@ -97,15 +98,18 @@ namespace CardShopCoop.Sync
 
         private ShelfManager Sm()
         {
-            if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
         public void Tick(float dt, bool active)
         {
-            if (!active) return;
+            if (!active)
+                return;
             _timer += dt;
-            if (_timer < 1.0f) return;
+            if (_timer < 1.0f)
+                return;
             _timer -= 1.0f;
             bool immediate = _forceImmediate;
             _forceImmediate = false;
@@ -121,7 +125,8 @@ namespace CardShopCoop.Sync
             try
             {
                 var sm = Sm();
-                if (sm == null) return;
+                if (sm == null)
+                    return;
                 for (int kind = 0; kind < PopulationSync.KindCount; kind++)
                     Walk(PopulationSync.GetList(sm, kind), kind, ref changes, immediate, heal);
             }
@@ -137,11 +142,15 @@ namespace CardShopCoop.Sync
         private void Walk(System.Collections.IList list, int kind, ref List<Entry> changes,
             bool immediate = false, bool heal = false)
         {
-            if (list == null) return;
+            if (list == null)
+                return;
             for (int i = 0; i < list.Count; i++)
             {
                 var obj = list[i] as Component;
-                if (obj == null || !obj.gameObject.activeInHierarchy) continue; // boxed/carried
+                if (obj == null || !obj.gameObject.activeInHierarchy)
+                    continue; // boxed/carried
+                if (kind == 5 && CardShopCoop.Patches.GamePatches.IsPendingDeco(obj as InteractableObject))
+                    continue;
                 if (!PlacedObjectIdentity.TryMakeObjectKey(kind, obj as InteractableObject, out int key))
                     continue;
                 // Never author a move for an object the game is actively moving (a drag in
@@ -181,10 +190,12 @@ namespace CardShopCoop.Sync
                 // two-sample gate for ordinary recovery polling.
                 if (forceHeal || immediate || (_candidate.TryGetValue(key, out var cand) && cand.Same(p, r)))
                 {
-                    if (changes == null) changes = new List<Entry>();
+                    if (changes == null)
+                        changes = new List<Entry>();
                     // Do not advance the sent baseline until this entry is actually
                     // queued; otherwise the 65th move in a batch is lost forever.
-                    if (changes.Count >= 64) continue;
+                    if (changes.Count >= 64)
+                        continue;
                     _sent[key] = new Pose { P = p, R = r, Valid = true };
                     _candidate.Remove(key);
                     changes.Add(new Entry { Key = key, Type = TypeIdOf(obj, kind), Pos = p, Rot = r });
@@ -210,7 +221,8 @@ namespace CardShopCoop.Sync
         {
             var sm = Sm();
             var accepted = new List<Entry>();
-            if (sm == null) return accepted;
+            if (sm == null)
+                return accepted;
             foreach (var e in entries)
             {
                 try
@@ -219,9 +231,11 @@ namespace CardShopCoop.Sync
                     // at all, so it can never be compared against a live object (see Entry.
                     // Unresolved). We do not have the object the host moved, so there is nothing
                     // here to move - drop the entry before Resolve can hand us a stand-in.
-                    if (e.Unresolved) continue;
+                    if (e.Unresolved)
+                        continue;
                     var comp = Resolve(sm, e.Key);
-                    if (comp == null) continue;
+                    if (comp == null)
+                        continue;
                     // IDENTITY GUARD: the (kind,index) may resolve to a DIFFERENT object than
                     // the sender meant (a stale index from a fresh/lagging peer, or a
                     // population that shifted under us before repair catches up). Applying it
@@ -253,7 +267,14 @@ namespace CardShopCoop.Sync
                     var oldPos = t.position;
                     t.SetPositionAndRotation(e.Pos, e.Rot);
                     SyncTagGroup(t);
-                    if (io is InteractableAutoPackOpener) { try { _miOpenerSetUI?.Invoke(io, null); } catch { } }
+                    if (io is InteractableAutoPackOpener)
+                    {
+                        try
+                        {
+                            _miOpenerSetUI?.Invoke(io, null);
+                        }
+                        catch { }
+                    }
                     _sent[e.Key] = new Pose { P = e.Pos, R = e.Rot, Valid = true };
                     _candidate.Remove(e.Key);
                     accepted.Add(e);
@@ -290,7 +311,8 @@ namespace CardShopCoop.Sync
         public static void SyncTagGroup(Transform objTransform)
         {
             var comp = objTransform.GetComponent<InteractableObject>();
-            if (comp == null) return;
+            if (comp == null)
+                return;
             var type = comp.GetType();
             if (!_tagGrpFields.TryGetValue(type, out var fi))
             {
@@ -307,7 +329,8 @@ namespace CardShopCoop.Sync
         {
             int kind = key >> 24;
             ushort id = PlacedObjectIdentity.ObjectIdFromObjectKey(key);
-            if (PopulationSync.GetList(sm, kind) == null) return null;
+            if (PopulationSync.GetList(sm, kind) == null)
+                return null;
             return PlacedObjectIdentity.TryResolve(sm, kind, id, out var obj) ? obj : null;
         }
 

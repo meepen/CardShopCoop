@@ -58,6 +58,12 @@ namespace CardShopCoop.Sync
             public bool Carried;  // in someone's hands: position is transient
             // 0=free, 1=host/local player, 2=remote client, 3=worker.
             public byte OwnerKind;
+            public bool InFlight;
+            public bool Moving;
+            public Vector3 Velocity;
+            public Vector3 AngularVelocity;
+            public bool Owned;
+            public int OwnerId;
         }
 
         // Keep the count wide enough that a busy shop cannot silently lose the tail of
@@ -120,7 +126,8 @@ namespace CardShopCoop.Sync
                 {
                     var box = boxes[i];
                     if (box == null || BoxedObject(box) == null
-                        || BoxedObject(box).m_ObjectType != objType) continue;
+                        || BoxedObject(box).m_ObjectType != objType)
+                        continue;
 
                     // The newly-created box is appended to the list. Reverse order avoids
                     // accidentally repairing an older same-type delivery at the same location.
@@ -131,13 +138,15 @@ namespace CardShopCoop.Sync
                         rb.rotation = rotation;
                         rb.velocity = Vector3.zero;
                         rb.angularVelocity = Vector3.zero;
-                        if (!rb.isKinematic) rb.WakeUp();
+                        if (!rb.isKinematic)
+                            rb.WakeUp();
                         // ShelfManager moves the box Transform after spawning it, but Unity
                         // can leave a dynamic Rigidbody at the construction position until a
                         // later physics step. Commit both representations before snapshots.
                         box.transform.SetPositionAndRotation(position, rotation);
                     }
-                    else box.transform.SetPositionAndRotation(position, rotation);
+                    else
+                        box.transform.SetPositionAndRotation(position, rotation);
                     return;
                 }
                 CoopPlugin.Log.LogWarning($"FurnBoxSync: could not find newly spawned {objType} delivery box to align its Rigidbody");
@@ -180,10 +189,34 @@ namespace CardShopCoop.Sync
             = new BoxIdentityMap<InteractablePackagingBox_Shelf>();
         private readonly BoxIdentityMap<InteractablePackagingBox_Shelf> _clientIdentity
             = new BoxIdentityMap<InteractablePackagingBox_Shelf>();
-        private Dictionary<InteractablePackagingBox_Shelf, ushort> _hostIds { get { return _hostIdentity.IdOf; } }
-        private Dictionary<ushort, InteractablePackagingBox_Shelf> _hostById { get { return _hostIdentity.ById; } }
-        private Dictionary<ushort, InteractablePackagingBox_Shelf> _clientById { get { return _clientIdentity.ById; } }
-        private Dictionary<InteractablePackagingBox_Shelf, ushort> _clientIdOf { get { return _clientIdentity.IdOf; } }
+        private Dictionary<InteractablePackagingBox_Shelf, ushort> _hostIds
+        {
+            get
+            {
+                return _hostIdentity.IdOf;
+            }
+        }
+        private Dictionary<ushort, InteractablePackagingBox_Shelf> _hostById
+        {
+            get
+            {
+                return _hostIdentity.ById;
+            }
+        }
+        private Dictionary<ushort, InteractablePackagingBox_Shelf> _clientById
+        {
+            get
+            {
+                return _clientIdentity.ById;
+            }
+        }
+        private Dictionary<InteractablePackagingBox_Shelf, ushort> _clientIdOf
+        {
+            get
+            {
+                return _clientIdentity.IdOf;
+            }
+        }
         private readonly Dictionary<InteractableObject, double> _recentlyUnpacked
             = new Dictionary<InteractableObject, double>();                               // client: I placed it; the echo must not re-box it
         private double _suppressBoxUp;     // client: kind indices shifted (local sell); no NEW box-ups until the echo re-aligns
@@ -215,7 +248,10 @@ namespace CardShopCoop.Sync
             ApplyingRemote = false;
         }
 
-        public static void ActivateLive(FurnBoxSync instance) { Instance = instance; }
+        public static void ActivateLive(FurnBoxSync instance)
+        {
+            Instance = instance;
+        }
 
         public void Reset()
         {
@@ -253,11 +289,13 @@ namespace CardShopCoop.Sync
         /// connection); a surviving guest still carrying re-asserts on its next report.</summary>
         public void HostReleaseRemoteCarried()
         {
-            if (_remoteCarried.Count == 0) return;
+            if (_remoteCarried.Count == 0)
+                return;
             int released = 0;
             foreach (var box in _remoteCarried)
             {
-                if (box == null) continue;
+                if (box == null)
+                    continue;
                 ApplyToBox(box, BoxSync.PhysicsPosition(box), BoxSync.PhysicsRotation(box).eulerAngles.y, carried: false);
                 released++;
             }
@@ -271,13 +309,15 @@ namespace CardShopCoop.Sync
 
         private RestockManager Rm()
         {
-            if (_rm == null) _rm = UnityEngine.Object.FindObjectOfType<RestockManager>();
+            if (_rm == null)
+                _rm = UnityEngine.Object.FindObjectOfType<RestockManager>();
             return _rm;
         }
 
         private ShelfManager Sm()
         {
-            if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
@@ -323,14 +363,18 @@ namespace CardShopCoop.Sync
 
         public static bool PlacePrefix(InteractableObject __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
-            if (__instance == null || !__instance.GetIsBoxedUp()) return true; // ordinary move, not an unpack
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
+            if (__instance == null || !__instance.GetIsBoxedUp())
+                return true; // ordinary move, not an unpack
             try
             {
                 // vanilla no-ops on an invalid spot; match it exactly
-                if (FiMovingValid != null && !(bool)FiMovingValid.GetValue(__instance)) return true;
+                if (FiMovingValid != null && !(bool)FiMovingValid.GetValue(__instance))
+                    return true;
                 var box = __instance.GetPackagingBoxShelf();
-                if (box == null) return true;
+                if (box == null)
+                    return true;
                 Instance?.ClientPlace(__instance, box);
                 return false; // forwarded + replayed locally under ApplyingRemote
             }
@@ -344,7 +388,8 @@ namespace CardShopCoop.Sync
         public static bool DestroyedPrefix(InteractablePackagingBox_Shelf __instance)
         {
             // world-(re)load cleanup destroys are not player actions
-            if (!ApplyingRemote && !CoopCore.ClientReloading) Instance?.OnLocalDestroyed(__instance);
+            if (!ApplyingRemote && !CoopCore.ClientReloading)
+                Instance?.OnLocalDestroyed(__instance);
             return true;
         }
 
@@ -371,7 +416,8 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame || Rm() == null) return;
+            if (!inGame || Rm() == null)
+                return;
             _carryPollTimer += dt;
             // carry transitions broadcast IMMEDIATELY - a box that still looks
             // on-the-floor invites another player to grab it too
@@ -380,7 +426,8 @@ namespace CardShopCoop.Sync
             if (pollCarry)
             {
                 _carryPollTimer -= CarryPollInterval;
-                if (_carryPollTimer > CarryPollInterval) _carryPollTimer = CarryPollInterval;
+                if (_carryPollTimer > CarryPollInterval)
+                    _carryPollTimer = CarryPollInterval;
             }
             try
             {
@@ -390,10 +437,12 @@ namespace CardShopCoop.Sync
                     for (int i = 0; i < scan.Count; i++)
                     {
                         var box = scan[i];
-                        if (box == null) continue;
+                        if (box == null)
+                            continue;
                         if (IsLocallyCarried(box))
                         {
-                            if (_hostCarriedLastTick.Add(box)) force = true;
+                            if (_hostCarriedLastTick.Add(box))
+                                force = true;
                         }
                         else if (_hostCarriedLastTick.Remove(box))
                         {
@@ -405,9 +454,24 @@ namespace CardShopCoop.Sync
             }
             catch { }
             _timer += dt;
-            if (!force && _timer < Period) return;
-            if (_timer >= Period) _timer -= Period;
-            if (force) _lastHostHash = 0; // transitions bypass the unchanged-gate
+            bool transient = false;
+            var cadenceBoxes = LiveBoxes();
+            for (int i = 0; i < cadenceBoxes.Count; i++)
+            {
+                var b = cadenceBoxes[i];
+                if (b != null && (b.GetIsMovingObject() || (b.m_Rigidbody != null && !b.m_Rigidbody.IsSleeping())))
+                {
+                    transient = true;
+                    break;
+                }
+            }
+            float cadence = transient ? 0.05f : Period;
+            if (!force && _timer < cadence)
+                return;
+            if (_timer >= cadence)
+                _timer -= cadence;
+            if (force)
+                _lastHostHash = 0; // transitions bypass the unchanged-gate
             try
             {
                 var boxes = LiveBoxes();
@@ -415,10 +479,13 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < boxes.Count && list.Count < MaxBoxes; i++)
                 {
                     var box = boxes[i];
-                    if (box == null) continue;
+                    if (box == null)
+                        continue;
                     var obj = BoxedObject(box);
-                    if (obj == null) continue; // mid-unpack this frame; next tick has truth
-                    if (!TryFindObjKey(obj, out byte kind, out int objIdx)) continue;
+                    if (obj == null)
+                        continue; // mid-unpack this frame; next tick has truth
+                    if (!TryFindObjKey(obj, out byte kind, out int objIdx))
+                        continue;
                     var boxPos = BoxSync.PhysicsPosition(box);
                     if (!IsSanePose(boxPos))
                     {
@@ -436,6 +503,12 @@ namespace CardShopCoop.Sync
                         Yaw = BoxSync.PhysicsRotation(box).eulerAngles.y,
                         Carried = IsLocallyCarried(box) || _remoteCarried.Contains(box),
                         OwnerKind = IsLocallyCarried(box) ? (byte)1 : (_remoteCarried.Contains(box) ? (byte)2 : (byte)0),
+                        InFlight = !IsLocallyCarried(box) && !box.GetIsMovingObject() && box.m_Rigidbody != null && !box.m_Rigidbody.IsSleeping(),
+                        Moving = box.GetIsMovingObject(),
+                        Velocity = box.m_Rigidbody != null ? box.m_Rigidbody.velocity : Vector3.zero,
+                        AngularVelocity = box.m_Rigidbody != null ? box.m_Rigidbody.angularVelocity : Vector3.zero,
+                        Owned = IsLocallyCarried(box) || box.GetIsMovingObject(),
+                        OwnerId = 0,
                     });
                 }
                 // skip identical snapshots (deliveries sit still until collected); a
@@ -448,16 +521,19 @@ namespace CardShopCoop.Sync
                     hash = hash * 31 + (e.Kind << 16 | (e.ObjIndex & 0xFFFF));
                     hash = hash * 31 + (e.Carried ? 1 : 0);
                     hash = hash * 31 + e.OwnerKind;
+                    hash = hash * 31 + (e.InFlight ? 1 : 0) + (e.Moving ? 2 : 0);
                     hash = hash * 31 + (int)(e.Pos.x * 8f);
                     hash = hash * 31 + (int)(e.Pos.z * 8f);
                 }
                 _hostHeal += Period;
-                if (hash == _lastHostHash && _hostHeal < 10f) return;
+                if (hash == _lastHostHash && _hostHeal < 10f)
+                    return;
                 _lastHostHash = hash;
                 _hostHeal = 0f;
                 var snap = list;
                 var entries = new List<FurnBoxEntry>(snap.Count);
-                for (int i = 0; i < snap.Count; i++) entries.Add(ToWire(snap[i]));
+                for (int i = 0; i < snap.Count; i++)
+                    entries.Add(ToWire(snap[i]));
                 BroadcastState?.Invoke(new FurnBoxStateMessage { Entries = entries });
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync host: " + e.Message); }
@@ -466,13 +542,20 @@ namespace CardShopCoop.Sync
         /// <summary>Host: dispatch a client op (report / place / removed).</summary>
         public void HostApplyOp(FurnBoxOpMessage message, int connId)
         {
-            if (CoopCore.Role != CoopRole.Host) return;
+            if (CoopCore.Role != CoopRole.Host)
+                return;
             byte kind = message.Op;
             switch (kind)
             {
-                case OpReport: HostApplyReport(message); break;
-                case OpPlace: HostApplyPlace(message); break;
-                case OpRemoved: HostApplyRemoved(message, connId); break;
+                case OpReport:
+                    HostApplyReport(message);
+                    break;
+                case OpPlace:
+                    HostApplyPlace(message);
+                    break;
+                case OpRemoved:
+                    HostApplyRemoved(message, connId);
+                    break;
                 default:
                     CoopPlugin.Log.LogWarning($"FurnBoxSync: unknown op {kind}");
                     break;
@@ -494,21 +577,32 @@ namespace CardShopCoop.Sync
                 bool carried = entry.Carried;
                 var pos = entry.Position;
                 float yaw = entry.Yaw;
-                if (!_hostById.TryGetValue(id, out var box) || box == null) continue;
+                if (!_hostById.TryGetValue(id, out var box) || box == null)
+                    continue;
                 if (!IsSanePose(pos))
                 {
                     CoopPlugin.Log.LogWarning($"FurnBoxSync host: rejected invalid client pose for box {id}: {pos}");
                     continue;
                 }
                 // the stable id is authoritative; type remains a corruption guard
-                if (!BoxedTypeMatches(box, wireType, nameHash)) continue;
-                if (IsLocallyCarried(box)) continue; // never stomp a box in the host's hands
+                if (!BoxedTypeMatches(box, wireType, nameHash))
+                    continue;
+                if (IsLocallyCarried(box))
+                    continue; // never stomp a box in the host's hands
                 // just set down: a report the client built while we still carried it is
                 // stale by definition - the race that teleported boxes mid-restock
-                if (_hostRecentlyReleased.TryGetValue(box, out double rel) && now - rel < 6.0) continue;
-                if (carried) _remoteCarried.Add(box);
-                else _remoteCarried.Remove(box);
-                ApplyToBox(box, pos, yaw, carried);
+                if (_hostRecentlyReleased.TryGetValue(box, out double rel) && now - rel < 6.0)
+                    continue;
+                if (carried)
+                    _remoteCarried.Add(box);
+                else
+                    _remoteCarried.Remove(box);
+                if (entry.InFlight || entry.Moving)
+                {
+                    ApplyTransientToBox(box, new Entry { Pos = pos, Yaw = yaw, InFlight = entry.InFlight, Moving = entry.Moving, Velocity = entry.Velocity, AngularVelocity = entry.AngularVelocity });
+                }
+                else
+                    ApplyToBox(box, pos, yaw, carried);
             }
             SweepOld(_hostRecentlyReleased, now);
             // fan the change out to everyone NOW - with 3+ players the other
@@ -533,15 +627,18 @@ namespace CardShopCoop.Sync
             float yaw = message.Yaw;
 
             _hostById.TryGetValue(id, out var box);
-            if (box != null && !BoxedTypeMatches(box, wireType, nameHash)) box = null;
+            if (box != null && !BoxedTypeMatches(box, wireType, nameHash))
+                box = null;
             if (box == null)
             {
                 CoopPlugin.Log.LogWarning("FurnBoxSync: place for unknown/mismatched box - ignored");
                 return; // the joiner's guard expires and the echo re-boxes his copy; he retries
             }
-            if (IsLocallyCarried(box)) return; // host is holding it: his hands win
+            if (IsLocallyCarried(box))
+                return; // host is holding it: his hands win
             var obj = BoxedObject(box);
-            if (obj == null) return;
+            if (obj == null)
+                return;
 
             ApplyingRemote = true;
             try
@@ -564,14 +661,20 @@ namespace CardShopCoop.Sync
             // shared budget with item/card boxes: a reloading client's world-teardown
             // echoes ALL THREE box lists as removals in one burst - and each furn-box
             // removal would take its boxed FURNITURE with it
-            if (BoxSync.RemovalFlooded(connId, "furniture-box")) return;
+            if (BoxSync.RemovalFlooded(connId, "furniture-box"))
+                return;
             _hostById.TryGetValue(id, out var box);
-            if (box != null && !BoxedTypeMatches(box, wireType, nameHash)) box = null;
-            if (box == null || IsLocallyCarried(box)) return;
+            if (box != null && !BoxedTypeMatches(box, wireType, nameHash))
+                box = null;
+            if (box == null || IsLocallyCarried(box))
+                return;
             // sell/trash: OnDestroyed with m_BoxedObject still set kills the furniture
             // too, exactly what the joiner's vanilla flow did on his side
             ApplyingRemote = true;
-            try { box.OnDestroyed(); }
+            try
+            {
+                box.OnDestroyed();
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync removal: " + e.Message); }
             finally { ApplyingRemote = false; }
             ForgetBox(box);
@@ -591,8 +694,10 @@ namespace CardShopCoop.Sync
             InteractablePackagingBox_Shelf found = null;
             for (int i = 0; i < boxes.Count; i++)
             {
-                if (boxes[i] == null || !BoxedTypeMatches(boxes[i], wireType, nameHash)) continue;
-                if (found != null) return null; // ambiguous - drop, the echo re-aligns
+                if (boxes[i] == null || !BoxedTypeMatches(boxes[i], wireType, nameHash))
+                    continue;
+                if (found != null)
+                    return null; // ambiguous - drop, the echo re-aligns
                 found = boxes[i];
             }
             return found;
@@ -626,16 +731,21 @@ namespace CardShopCoop.Sync
         {
             var entries = message.Entries;
             var hostList = new List<Entry>(entries.Count);
-            for (int i = 0; i < entries.Count; i++) hostList.Add(ToEntry(entries[i]));
+            for (int i = 0; i < entries.Count; i++)
+                hostList.Add(ToEntry(entries[i]));
             ApplyingRemote = true;
-            try { ClientApplyInner(hostList); }
+            try
+            {
+                ClientApplyInner(hostList);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
         private void ClientApplyInner(List<Entry> hostList)
         {
-            if (Rm() == null || Sm() == null) return;
+            if (Rm() == null || Sm() == null)
+                return;
             double now = Time.realtimeSinceStartupAsDouble;
 
             // resolve every entry to its local object first; a failed resolve means
@@ -650,7 +760,8 @@ namespace CardShopCoop.Sync
                 // Every furniture object, including generic kind 15 objects, is
                 // mirrored by PopulationSync. Never fabricate a second object+box
                 // while waiting for that roster to arrive.
-                if (obj == null) allResolved = false;
+                if (obj == null)
+                    allResolved = false;
             }
 
             // vanished entries: replay what the host did. Last seen CARRIED means a
@@ -666,12 +777,18 @@ namespace CardShopCoop.Sync
                 for (int i = live.Count - 1; i >= 0; i--)
                 {
                     var box = live[i];
-                    if (box == null) continue;
+                    if (box == null)
+                        continue;
                     var boxed = BoxedObject(box);
                     bool wanted = false;
                     for (int j = 0; j < wantedObjs.Count; j++)
-                        if (ReferenceEquals(wantedObjs[j], boxed) && boxed != null) { wanted = true; break; }
-                    if (wanted) continue;
+                        if (ReferenceEquals(wantedObjs[j], boxed) && boxed != null)
+                        {
+                            wanted = true;
+                            break;
+                        }
+                    if (wanted)
+                        continue;
                     bool lastCarried = _lastApplied.TryGetValue(box, out var lastE) && lastE.Carried;
                     try
                     {
@@ -679,7 +796,11 @@ namespace CardShopCoop.Sync
                         {
                             // if a player is holding this box, release hold-box mode first or
                             // OnDestroyed strands them in the soft-lock (no-op if not held)
-                            try { CoopCore.ForceExitHoldBox(box); } catch { }
+                            try
+                            {
+                                CoopCore.ForceExitHoldBox(box);
+                            }
+                            catch { }
                             box.OnDestroyed(); // boxed object (if any) dies too - the sell
                         }
                         else
@@ -721,9 +842,12 @@ namespace CardShopCoop.Sync
                     // not boxed here yet - unless this is MY unpack the host hasn't
                     // confirmed, my mid-unpack move, or the shifted-index window after
                     // a local sell (same-type neighbor must not get boxed by mistake)
-                    if (obj.GetIsMovingObject()) continue;
-                    if (_recentlyUnpacked.TryGetValue(obj, out double up) && now - up < 6.0) continue;
-                    if (now - _suppressBoxUp < 6.0) continue;
+                    if (obj.GetIsMovingObject())
+                        continue;
+                    if (_recentlyUnpacked.TryGetValue(obj, out double up) && now - up < 6.0)
+                        continue;
+                    if (now - _suppressBoxUp < 6.0)
+                        continue;
                     try
                     {
                         obj.BoxUpObject(holdBox: false); // vanilla recipe; registers the box itself
@@ -734,28 +858,49 @@ namespace CardShopCoop.Sync
                         CoopPlugin.Log.LogWarning("FurnBoxSync boxup: " + e.Message);
                         continue;
                     }
-                    if (box == null) continue; // e.g. play table vetoed the box-up; retry next tick
+                    if (box == null)
+                        continue; // e.g. play table vetoed the box-up; retry next tick
                 }
                 _clientById[want.Id] = box;
                 _clientIdOf[box] = want.Id;
                 // a box in MY hands is mine until I put it down; a box in the HOST's
                 // hands has a transient position we don't copy
-                if (IsLocallyCarried(box)) { _lastApplied[box] = want; continue; }
+                if (IsLocallyCarried(box) || box.GetIsMovingObject())
+                {
+                    _lastApplied[box] = want;
+                    continue;
+                }
+                // Preserve the thrower's local flight against a stale carried
+                // snapshot arriving before the host processes the release.
+                if (box.m_Rigidbody != null && !box.m_Rigidbody.IsSleeping())
+                {
+                    ShowBox(box);
+                    _lastApplied[box] = want;
+                    continue;
+                }
                 // a stale "carried" echo about a box I JUST released must not hide it
                 if (want.Carried && _recentlyReleased.TryGetValue(box, out double t) && now - t < 6.0)
-                { _lastApplied[box] = want; continue; }
+                {
+                    _lastApplied[box] = want;
+                    continue;
+                }
                 // my own recent moves win over stale echoes; my report reaches the
                 // host and the next echo agrees. VISIBILITY is exempt: someone else's
                 // pickup/set-down must show here immediately, or their set-down box
                 // stays invisible to me for the whole window
                 if (_locallyTouched.TryGetValue(box, out double touched) && now - touched < 6.0)
                 {
-                    if (!want.Carried && !box.gameObject.activeSelf) ShowBox(box);
-                    else if (want.Carried && box.gameObject.activeSelf) HideBox(box);
+                    if (!want.Carried && !box.gameObject.activeSelf)
+                        ShowBox(box);
+                    else if (want.Carried && box.gameObject.activeSelf)
+                        HideBox(box);
                     _lastApplied[box] = want;
                     continue;
                 }
-                ApplyToBox(box, want.Pos, want.Yaw, want.Carried);
+                if (want.InFlight || want.Moving)
+                    ApplyTransientToBox(box, want);
+                else
+                    ApplyToBox(box, want.Pos, want.Yaw, want.Carried);
                 _lastApplied[box] = want;
             }
             SweepOld(_recentlyUnpacked, now);
@@ -766,7 +911,8 @@ namespace CardShopCoop.Sync
         /// object; unpack and sell travel as their own ops).</summary>
         public void ClientTick(float dt, bool inGame)
         {
-            if (!inGame || Rm() == null || _lastApplied.Count == 0) return;
+            if (!inGame || Rm() == null || _lastApplied.Count == 0)
+                return;
             // carry transitions are detected EVERY FRAME and reported immediately -
             // the periodic diff alone left pickups/set-downs invisible for seconds,
             // long enough for someone else to try grabbing the same box
@@ -776,7 +922,8 @@ namespace CardShopCoop.Sync
             if (pollCarry)
             {
                 _carryPollTimer -= CarryPollInterval;
-                if (_carryPollTimer > CarryPollInterval) _carryPollTimer = CarryPollInterval;
+                if (_carryPollTimer > CarryPollInterval)
+                    _carryPollTimer = CarryPollInterval;
             }
             try
             {
@@ -786,11 +933,13 @@ namespace CardShopCoop.Sync
                     for (int i = 0; i < scan.Count; i++)
                     {
                         var box = scan[i];
-                        if (box == null) continue;
+                        if (box == null)
+                            continue;
                         if (IsLocallyCarried(box))
                         {
                             BoxSync.CancelRemoteMotion(box);
-                            if (_carriedLastTick.Add(box)) force = true; // pickup transition
+                            if (_carriedLastTick.Add(box))
+                                force = true; // pickup transition
                         }
                         else if (_carriedLastTick.Remove(box))
                         {
@@ -802,8 +951,10 @@ namespace CardShopCoop.Sync
             }
             catch { }
             _timer += dt;
-            if (!force && _timer < Period) return;
-            if (_timer >= Period) _timer -= Period;
+            if (!force && _timer < Period)
+                return;
+            if (_timer >= Period)
+                _timer -= Period;
             try
             {
                 var boxes = LiveBoxes();
@@ -811,15 +962,19 @@ namespace CardShopCoop.Sync
                 double nowT = Time.realtimeSinceStartupAsDouble;
                 _reportIds.Clear();
                 _reportEntries.Clear();
-                if (_reportIds.Capacity < boxes.Count) _reportIds.Capacity = boxes.Count;
-                if (_reportEntries.Capacity < boxes.Count) _reportEntries.Capacity = boxes.Count;
+                if (_reportIds.Capacity < boxes.Count)
+                    _reportIds.Capacity = boxes.Count;
+                if (_reportEntries.Capacity < boxes.Count)
+                    _reportEntries.Capacity = boxes.Count;
                 var idxList = _reportIds;
                 var entryList = _reportEntries;
                 for (int i = 0; i < boxes.Count && entryList.Count < MaxBoxes; i++)
                 {
                     var box = boxes[i];
-                    if (box == null || !_lastApplied.TryGetValue(box, out var last)) continue;
-                    if (BoxSync.IsRemoteMotion(box)) continue; // don't echo interpolation as a guest move
+                    if (box == null || !_lastApplied.TryGetValue(box, out var last))
+                        continue;
+                    if (BoxSync.IsRemoteMotion(box))
+                        continue; // don't echo interpolation as a guest move
                     Entry rep = last;
                     if (IsLocallyCarried(box))
                     {
@@ -840,6 +995,10 @@ namespace CardShopCoop.Sync
                         rep.Carried = false;
                         rep.Pos = BoxSync.PhysicsPosition(box);
                         rep.Yaw = BoxSync.PhysicsRotation(box).eulerAngles.y;
+                        rep.InFlight = box.m_Rigidbody != null && !box.m_Rigidbody.IsSleeping();
+                        rep.Moving = box.GetIsMovingObject();
+                        rep.Velocity = box.m_Rigidbody != null ? box.m_Rigidbody.velocity : Vector3.zero;
+                        rep.AngularVelocity = box.m_Rigidbody != null ? box.m_Rigidbody.angularVelocity : Vector3.zero;
                         if ((rep.Pos - last.Pos).sqrMagnitude > 0.01f
                             || Mathf.Abs(Mathf.DeltaAngle(rep.Yaw, last.Yaw)) > 3f
                             || rep.Carried != last.Carried)
@@ -848,7 +1007,8 @@ namespace CardShopCoop.Sync
                             _locallyTouched[box] = nowT;
                         }
                     }
-                    if (!_clientIdOf.TryGetValue(box, out var reportId)) continue;
+                    if (!_clientIdOf.TryGetValue(box, out var reportId))
+                        continue;
                     idxList.Add(reportId);
                     entryList.Add(rep);
                 }
@@ -866,6 +1026,12 @@ namespace CardShopCoop.Sync
                             Carried = e.Carried,
                             Position = e.Pos,
                             Yaw = e.Yaw,
+                            InFlight = e.InFlight,
+                            Moving = e.Moving,
+                            Velocity = e.Velocity,
+                            AngularVelocity = e.AngularVelocity,
+                            Owned = e.Owned,
+                            OwnerId = e.OwnerId,
                         });
                     }
                     SendOp(new FurnBoxOpMessage { Op = OpReport, Report = report });
@@ -883,7 +1049,8 @@ namespace CardShopCoop.Sync
             bool hasId = _clientIdOf.TryGetValue(box, out ushort boxId);
             if (SendOp == null)
                 CoopPlugin.Log.LogWarning("FurnBoxSync: no host link, placing locally only");
-            else if (!hasId) return;
+            else if (!hasId)
+                return;
 
             // Replay vanilla first. For vertical furniture this is important: the game
             // determines the locked-room wall and snap index in OnPlacedMovedObject from
@@ -895,20 +1062,25 @@ namespace CardShopCoop.Sync
             _recentlyUnpacked[obj] = Time.realtimeSinceStartupAsDouble;
             _lastApplied.Remove(box);
             _clientIdOf.Remove(box);
-            if (hasId) _clientById.Remove(boxId);
+            if (hasId)
+                _clientById.Remove(boxId);
             _carriedLastTick.Remove(box);
             _recentlyReleased.Remove(box);
             _locallyTouched.Remove(box);
 
             ApplyingRemote = true;
-            try { obj.PlaceMovedObject(); }
+            try
+            {
+                obj.PlaceMovedObject();
+            }
             finally { ApplyingRemote = false; }
 
             if (SendOp != null)
             {
                 var pos = obj.transform.position;
                 var rotation = obj.transform.rotation;
-                if (!isVertical) pos.y = 0f; // retain vanilla floor semantics explicitly
+                if (!isVertical)
+                    pos.y = 0f; // retain vanilla floor semantics explicitly
                 SendOp(new FurnBoxOpMessage
                 {
                     Op = OpPlace,
@@ -930,15 +1102,18 @@ namespace CardShopCoop.Sync
         /// tells the host so the real box (and its furniture) dies too.</summary>
         private void OnLocalDestroyed(InteractablePackagingBox_Shelf box)
         {
-            if (!InGameLevel()) return;
+            if (!InGameLevel())
+                return;
             if (CoopCore.Role == CoopRole.Host)
             {
                 ForgetBox(box);
                 return;
             }
-            if (CoopCore.Role != CoopRole.Client) return;
+            if (CoopCore.Role != CoopRole.Client)
+                return;
             var obj = BoxedObject(box);
-            if (!_clientIdOf.TryGetValue(box, out ushort boxId)) return;
+            if (!_clientIdOf.TryGetValue(box, out ushort boxId))
+                return;
             _lastApplied.TryGetValue(box, out var last);
             _lastApplied.Remove(box);
             _clientIdOf.Remove(box);
@@ -948,7 +1123,8 @@ namespace CardShopCoop.Sync
             _locallyTouched.Remove(box);
             // an unpack destroys the box AFTER EmptyBoxShelf (m_BoxedObject null) and
             // is forwarded by the place op instead - only a real sell/trash goes here
-            if (obj == null) return;
+            if (obj == null)
+                return;
             // the furniture dies with the box: its kind list shifts, so a stale echo
             // could resolve onto the same-type NEIGHBOR - no new box-ups for a while
             _suppressBoxUp = Time.realtimeSinceStartupAsDouble;
@@ -1008,18 +1184,50 @@ namespace CardShopCoop.Sync
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnBoxSync apply: " + e.Message); }
         }
 
+        private static void ApplyTransientToBox(InteractablePackagingBox_Shelf box, Entry want)
+        {
+            if (box == null)
+                return;
+            if (!box.gameObject.activeSelf)
+                box.gameObject.SetActive(true);
+            if (want.Moving)
+            {
+                box.SetPhysicsEnabled(false);
+                BoxSync.ApplyPhysicsPose(box, want.Pos, want.Yaw);
+                return;
+            }
+            box.SetPhysicsEnabled(true);
+            BoxSync.ApplyPhysicsPose(box, want.Pos, want.Yaw);
+            if (box.m_Rigidbody != null)
+            {
+                box.m_Rigidbody.velocity = want.Velocity;
+                box.m_Rigidbody.angularVelocity = want.AngularVelocity;
+                box.m_Rigidbody.WakeUp();
+            }
+        }
+
         private static void HideBox(InteractablePackagingBox_Shelf box)
         {
-            if (!box.gameObject.activeSelf) return;
-            try { box.m_ItemCompartment.SetPriceTagVisibility(false); } catch { }
+            if (!box.gameObject.activeSelf)
+                return;
+            try
+            {
+                box.m_ItemCompartment.SetPriceTagVisibility(false);
+            }
+            catch { }
             box.gameObject.SetActive(false);
         }
 
         private static void ShowBox(InteractablePackagingBox_Shelf box)
         {
-            if (box.gameObject.activeSelf) return;
+            if (box.gameObject.activeSelf)
+                return;
             box.gameObject.SetActive(true);
-            try { box.m_ItemCompartment.SetPriceTagVisibility(true); } catch { }
+            try
+            {
+                box.m_ItemCompartment.SetPriceTagVisibility(true);
+            }
+            catch { }
         }
 
         /// <summary>Run the vanilla placement on a still-boxed object without a player
@@ -1057,15 +1265,20 @@ namespace CardShopCoop.Sync
 
         private static InteractableObject BoxedObject(InteractablePackagingBox_Shelf box)
         {
-            try { return FiBoxedObject?.GetValue(box) as InteractableObject; }
+            try
+            {
+                return FiBoxedObject?.GetValue(box) as InteractableObject;
+            }
             catch { return null; }
         }
 
         private static bool BoxedTypeMatches(InteractablePackagingBox_Shelf box, int wireType, int nameHash)
         {
             var obj = BoxedObject(box);
-            if (obj == null) return false;
-            if ((int)obj.m_ObjectType == wireType) return true;
+            if (obj == null)
+                return false;
+            if ((int)obj.m_ObjectType == wireType)
+                return true;
             return Fnv(obj.m_ObjectType.ToString()) == nameHash; // modded int drift
         }
 
@@ -1078,16 +1291,20 @@ namespace CardShopCoop.Sync
             kind = Unresolved;
             idx = -1;
             var sm = Sm();
-            if (sm == null) return false;
+            if (sm == null)
+                return false;
             if (_kindCache.TryGetValue(obj, out byte cached))
             {
                 var list = KindList(sm, cached);
                 int i = list?.IndexOf(obj) ?? -1;
                 if (i >= 0)
                 {
-                    if (CoopCore.Role == CoopRole.Host) idx = PlacedObjectIdentity.AssignHost(obj);
-                    else if (!PlacedObjectIdentity.TryGet(obj, out ushort knownId)) return false;
-                    else idx = knownId;
+                    if (CoopCore.Role == CoopRole.Host)
+                        idx = PlacedObjectIdentity.AssignHost(obj);
+                    else if (!PlacedObjectIdentity.TryGet(obj, out ushort knownId))
+                        return false;
+                    else
+                        idx = knownId;
                     kind = cached;
                     return true;
                 }
@@ -1097,10 +1314,14 @@ namespace CardShopCoop.Sync
             {
                 var list = KindList(sm, k);
                 int i = list?.IndexOf(obj) ?? -1;
-                if (i < 0) continue;
-                if (CoopCore.Role == CoopRole.Host) idx = PlacedObjectIdentity.AssignHost(obj);
-                else if (!PlacedObjectIdentity.TryGet(obj, out ushort knownId)) continue;
-                else idx = knownId;
+                if (i < 0)
+                    continue;
+                if (CoopCore.Role == CoopRole.Host)
+                    idx = PlacedObjectIdentity.AssignHost(obj);
+                else if (!PlacedObjectIdentity.TryGet(obj, out ushort knownId))
+                    continue;
+                else
+                    idx = knownId;
                 _kindCache[obj] = k;
                 kind = k;
                 return true;
@@ -1110,23 +1331,30 @@ namespace CardShopCoop.Sync
 
         private InteractableObject ResolveEntryObject(Entry e)
         {
-            if (e.Kind == Unresolved) return null;
+            if (e.Kind == Unresolved)
+                return null;
             var sm = Sm();
-            if (sm == null) return null;
+            if (sm == null)
+                return null;
             var list = KindList(sm, e.Kind);
-            if (list == null || e.ObjIndex <= 0 || e.ObjIndex > ushort.MaxValue) return null;
-            if (!PlacedObjectIdentity.TryResolve(sm, e.Kind, (ushort)e.ObjIndex, out var obj)) return null;
+            if (list == null || e.ObjIndex <= 0 || e.ObjIndex > ushort.MaxValue)
+                return null;
+            if (!PlacedObjectIdentity.TryResolve(sm, e.Kind, (ushort)e.ObjIndex, out var obj))
+                return null;
             // type gate: the roster may be mid-repair; boxing the wrong object is the
             // one mistake this module must never make
             int localType = ResolveObjType(e.WireType, e.NameHash);
-            if ((int)obj.m_ObjectType != localType) return null;
+            if ((int)obj.m_ObjectType != localType)
+                return null;
             return obj;
         }
 
         private static IList KindList(ShelfManager sm, byte kind)
         {
-            if (kind < GenericKind) return PopulationSync.GetList(sm, kind);
-            if (kind == GenericKind) return FiGenericList?.GetValue(sm) as IList;
+            if (kind < GenericKind)
+                return PopulationSync.GetList(sm, kind);
+            if (kind == GenericKind)
+                return FiGenericList?.GetValue(sm) as IList;
             return null;
         }
 
@@ -1135,7 +1363,8 @@ namespace CardShopCoop.Sync
         /// otherwise the enum NAME finds it (license-sync philosophy).</summary>
         private int ResolveObjType(int wireType, int nameHash)
         {
-            if (Fnv(((EObjectType)wireType).ToString()) == nameHash) return wireType;
+            if (Fnv(((EObjectType)wireType).ToString()) == nameHash)
+                return wireType;
             if (_nameToType == null)
             {
                 _nameToType = new Dictionary<int, int>();
@@ -1151,18 +1380,26 @@ namespace CardShopCoop.Sync
             unchecked
             {
                 uint h = 2166136261;
-                for (int i = 0; i < s.Length; i++) { h ^= s[i]; h *= 16777619; }
+                for (int i = 0; i < s.Length; i++)
+                {
+                    h ^= s[i];
+                    h *= 16777619;
+                }
                 return (int)h;
             }
         }
 
         private static void SweepOld<TKey>(Dictionary<TKey, double> dict, double now)
         {
-            if (dict.Count == 0) return;
+            if (dict.Count == 0)
+                return;
             List<TKey> dead = null;
             foreach (var kv in dict)
-                if (now - kv.Value > 12.0) (dead ?? (dead = new List<TKey>())).Add(kv.Key);
-            if (dead != null) foreach (var k in dead) dict.Remove(k);
+                if (now - kv.Value > 12.0)
+                    (dead ?? (dead = new List<TKey>())).Add(kv.Key);
+            if (dead != null)
+                foreach (var k in dead)
+                    dict.Remove(k);
         }
 
         // ---------------- wire ----------------
@@ -1180,6 +1417,12 @@ namespace CardShopCoop.Sync
                 Yaw = e.Yaw,
                 Carried = e.Carried,
                 OwnerKind = e.OwnerKind,
+                InFlight = e.InFlight,
+                Moving = e.Moving,
+                Velocity = e.Velocity,
+                AngularVelocity = e.AngularVelocity,
+                Owned = e.Owned,
+                OwnerId = e.OwnerId,
             };
         }
 
@@ -1196,6 +1439,12 @@ namespace CardShopCoop.Sync
                 Yaw = e.Yaw,
                 Carried = e.Carried,
                 OwnerKind = e.OwnerKind,
+                InFlight = e.InFlight,
+                Moving = e.Moving,
+                Velocity = e.Velocity,
+                AngularVelocity = e.AngularVelocity,
+                Owned = e.Owned,
+                OwnerId = e.OwnerId,
             };
         }
 

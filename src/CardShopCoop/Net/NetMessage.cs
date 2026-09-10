@@ -8,14 +8,18 @@ namespace CardShopCoop.Net
     /// centralized in <see cref="WireCodec"/>; message DTOs contain data only.</summary>
     public interface INetMessage
     {
-        MsgType Type { get; }
+        MsgType Type
+        {
+            get;
+        }
     }
 
     public static class NetMessageCodec
     {
         public static byte[] Encode(INetMessage message)
         {
-            if (message == null) throw new ArgumentNullException("message");
+            if (message == null)
+                throw new ArgumentNullException("message");
             var payload = WireCodec.Serialize(message);
             var frame = new byte[Msg.FrameHeaderSize + Msg.TypeSize + payload.Length];
             Buffer.BlockCopy(BitConverter.GetBytes(payload.Length + Msg.TypeSize), 0, frame, 0, Msg.FrameHeaderSize);
@@ -32,13 +36,15 @@ namespace CardShopCoop.Net
     {
         public static byte[] Serialize(INetMessage message)
         {
-            if (message == null) throw new ArgumentNullException("message");
+            if (message == null)
+                throw new ArgumentNullException("message");
             return SerializeObject(message, message.GetType());
         }
 
         public static byte[] SerializeObject(object value)
         {
-            if (value == null) throw new ArgumentNullException("value");
+            if (value == null)
+                throw new ArgumentNullException("value");
             return SerializeObject(value, value.GetType());
         }
 
@@ -49,8 +55,10 @@ namespace CardShopCoop.Net
 
         public static INetMessage Deserialize(Type type, byte[] payload)
         {
-            if (type == null) throw new ArgumentNullException("type");
-            if (payload == null) throw new ArgumentNullException("payload");
+            if (type == null)
+                throw new ArgumentNullException("type");
+            if (payload == null)
+                throw new ArgumentNullException("payload");
             return (INetMessage)JsonConvert.DeserializeObject(Encoding.UTF8.GetString(payload), type, WireSettings.Settings);
         }
     }

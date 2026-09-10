@@ -28,7 +28,13 @@ namespace CardShopCoop.Net.Messages
         public string UnityVersion;
         public ulong SteamId;
 
-        public MsgType Type { get { return MsgType.Hello; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.Hello;
+            }
+        }
 
 
     }
@@ -48,7 +54,13 @@ namespace CardShopCoop.Net.Messages
         public byte[] HostCardsBlob = new byte[0];
         public ulong SteamId;
 
-        public MsgType Type { get { return MsgType.Welcome; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.Welcome;
+            }
+        }
 
 
     }
@@ -64,7 +76,13 @@ namespace CardShopCoop.Net.Messages
         public int Offset;
         public byte[] Data = new byte[0];
 
-        public MsgType Type { get { return MsgType.SaveChunk; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.SaveChunk;
+            }
+        }
 
 
     }
@@ -75,7 +93,13 @@ namespace CardShopCoop.Net.Messages
     {
         public int TotalLength;
 
-        public MsgType Type { get { return MsgType.SaveDone; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.SaveDone;
+            }
+        }
 
 
     }
@@ -87,7 +111,13 @@ namespace CardShopCoop.Net.Messages
         public int Offset;
         public byte[] Data = new byte[0];
 
-        public MsgType Type { get { return MsgType.BundleChunk; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.BundleChunk;
+            }
+        }
 
 
     }
@@ -98,7 +128,13 @@ namespace CardShopCoop.Net.Messages
     {
         public int TotalLength;
 
-        public MsgType Type { get { return MsgType.BundleDone; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.BundleDone;
+            }
+        }
 
 
     }
@@ -112,7 +148,13 @@ namespace CardShopCoop.Net.Messages
     {
         public byte[] Data = new byte[0];
 
-        public MsgType Type { get { return MsgType.EnumSync; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.EnumSync;
+            }
+        }
 
 
     }
@@ -126,7 +168,13 @@ namespace CardShopCoop.Net.Messages
     {
         public List<CatalogDigestEntry> Entries = new List<CatalogDigestEntry>();
 
-        public MsgType Type { get { return MsgType.CatalogDigest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CatalogDigest;
+            }
+        }
 
 
     }
@@ -147,7 +195,13 @@ namespace CardShopCoop.Net.Messages
     {
         public List<GradedDigestEntry> Entries = new List<GradedDigestEntry>();
 
-        public MsgType Type { get { return MsgType.GradedDigest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.GradedDigest;
+            }
+        }
 
 
     }

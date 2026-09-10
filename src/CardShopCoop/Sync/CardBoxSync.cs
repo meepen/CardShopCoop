@@ -47,6 +47,12 @@ namespace CardShopCoop.Sync
             public bool Carried;         // in someone's hands: position is transient
             public Vector3 Pos;
             public float Yaw;
+            public bool InFlight;
+            public bool Moving;
+            public Vector3 Velocity;
+            public Vector3 AngularVelocity;
+            public bool Owned;
+            public int OwnerId;
         }
 
         // Use a widened snapshot count so a large backlog cannot make the client
@@ -147,17 +153,23 @@ namespace CardShopCoop.Sync
         /// carry on its next ~0.5s report.</summary>
         public void HostReleaseRemoteCarried()
         {
-            if (_remoteCarried.Count == 0) return;
+            if (_remoteCarried.Count == 0)
+                return;
             // NEVER touch LiveBoxes() (a fabricating CSingleton accessor) when no real
             // RestockManager exists - a disconnect drained while the host is mid world-
             // load would otherwise mint the fake-manager landmine. Rm() resolves via
             // FindObjectOfType, which returns null without fabricating.
-            if (Rm() == null) { _remoteCarried.Clear(); return; }
+            if (Rm() == null)
+            {
+                _remoteCarried.Clear();
+                return;
+            }
             var boxes = LiveBoxes();
             int released = 0;
             foreach (int i in _remoteCarried)
             {
-                if (i < 0 || i >= boxes.Count || boxes[i] == null) continue;
+                if (i < 0 || i >= boxes.Count || boxes[i] == null)
+                    continue;
                 var box = boxes[i];
                 ApplyToBox(box, new Entry
                 {
@@ -178,13 +190,15 @@ namespace CardShopCoop.Sync
 
         private RestockManager Rm()
         {
-            if (_rm == null) _rm = UnityEngine.Object.FindObjectOfType<RestockManager>();
+            if (_rm == null)
+                _rm = UnityEngine.Object.FindObjectOfType<RestockManager>();
             return _rm;
         }
 
         private InteractionPlayerController Ipc()
         {
-            if (_ipc == null) _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
+            if (_ipc == null)
+                _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
             return _ipc;
         }
 
@@ -217,8 +231,12 @@ namespace CardShopCoop.Sync
 
         public static bool OpenBoxPrefix(InteractablePackagingBox_Card __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
-            try { Instance?.ClientCollect(__instance); }
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
+            try
+            {
+                Instance?.ClientCollect(__instance);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync collect: " + e.Message); }
             return false; // never vanilla on the client (see class comment)
         }
@@ -226,7 +244,8 @@ namespace CardShopCoop.Sync
         public static bool DestroyedPrefix(InteractablePackagingBox_Card __instance)
         {
             // world-(re)load cleanup destroys are not player actions
-            if (!ApplyingRemote && !CoopCore.ClientReloading) Instance?.OnLocalDestroyed(__instance);
+            if (!ApplyingRemote && !CoopCore.ClientReloading)
+                Instance?.OnLocalDestroyed(__instance);
             return true;
         }
 
@@ -253,10 +272,21 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame || Rm() == null) return;
+            if (!inGame || Rm() == null)
+                return;
             _timer += dt;
-            if (_timer < 1.5f) return;
-            _timer -= 1.5f;
+            bool transient = false;
+            var cadenceBoxes = LiveBoxes();
+            for (int i = 0; i < cadenceBoxes.Count; i++)
+                if (cadenceBoxes[i] != null && (cadenceBoxes[i].GetIsMovingObject() || (cadenceBoxes[i].m_Rigidbody != null && !cadenceBoxes[i].m_Rigidbody.IsSleeping())))
+                {
+                    transient = true;
+                    break;
+                }
+            float cadence = transient ? 0.05f : 1.5f;
+            if (_timer < cadence)
+                return;
+            _timer -= cadence;
             try
             {
                 var boxes = LiveBoxes();
@@ -264,37 +294,44 @@ namespace CardShopCoop.Sync
                 bool sawError = false;
                 for (int i = 0; i < boxes.Count && list.Count < MaxBoxes; i++)
                 {
-                    if (boxes[i] == null) continue;
+                    if (boxes[i] == null)
+                        continue;
                     try
                     {
                         var e = Snapshot(boxes[i]);
                         e.Id = HostId(boxes[i]);
-                        if (_remoteCarried.Contains(i)) e.Carried = true; // a client holds it
+                        if (_remoteCarried.Contains(i))
+                            e.Carried = true; // a client holds it
                         list.Add(e);
                     }
                     catch (Exception e)
                     {
                         sawError = true;
-                        if (_snapshotErrors.Add(i)) CoopPlugin.Log.LogWarning($"CardBoxSync snapshot box {i}: {e.Message}");
+                        if (_snapshotErrors.Add(i))
+                            CoopPlugin.Log.LogWarning($"CardBoxSync snapshot box {i}: {e.Message}");
                     }
                 }
-                if (sawError) return; // do not broadcast an incomplete authoritative list
+                if (sawError)
+                    return; // do not broadcast an incomplete authoritative list
                 int hash = 17;
                 for (int i = 0; i < list.Count; i++)
                 {
                     var e = list[i];
                     hash = hash * 31 + HashCards(e.Cards);
                     hash = hash * 31 + (e.Carried ? 1 : 0);
+                    hash = hash * 31 + (e.InFlight ? 1 : 0) + (e.Moving ? 2 : 0);
                     hash = hash * 31 + (int)(e.Pos.x * 8f);
                     hash = hash * 31 + (int)(e.Pos.z * 8f);
                 }
                 _hostHeal += 1.5f;
-                if (hash == _lastHostHash && _hostHeal < 10f) return;
+                if (hash == _lastHostHash && _hostHeal < 10f)
+                    return;
                 _lastHostHash = hash;
                 _hostHeal = 0f;
                 var snap = list;
                 var entries = new List<CardBoxEntry>(snap.Count);
-                for (int i = 0; i < snap.Count; i++) entries.Add(ToWire(snap[i]));
+                for (int i = 0; i < snap.Count; i++)
+                    entries.Add(ToWire(snap[i]));
                 BroadcastState?.Invoke(new CardBoxStateMessage { Entries = entries });
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync host: " + e.Message); }
@@ -303,13 +340,20 @@ namespace CardShopCoop.Sync
         /// <summary>Host: dispatch a client op (report / collect / removed).</summary>
         public void HostApplyOp(CardBoxOpMessage message, int connId)
         {
-            if (CoopCore.Role != CoopRole.Host) return;
+            if (CoopCore.Role != CoopRole.Host)
+                return;
             byte kind = message.Op;
             switch (kind)
             {
-                case OpReport: HostApplyReport(message); break;
-                case OpCollect: HostApplyCollect(message, connId); break;
-                case OpRemoved: HostApplyRemoved(message, connId); break;
+                case OpReport:
+                    HostApplyReport(message);
+                    break;
+                case OpCollect:
+                    HostApplyCollect(message, connId);
+                    break;
+                case OpRemoved:
+                    HostApplyRemoved(message, connId);
+                    break;
                 default:
                     CoopPlugin.Log.LogWarning($"CardBoxSync: unknown op {kind}");
                     break;
@@ -328,14 +372,19 @@ namespace CardShopCoop.Sync
                 bool carried = entry.Carried;
                 var pos = entry.Position;
                 float yaw = entry.Yaw;
-                if (i >= boxes.Count || boxes[i] == null) continue;
+                if (i >= boxes.Count || boxes[i] == null)
+                    continue;
                 var box = boxes[i];
                 // identity must match: indices may have shifted between snapshot and report
-                if (SafeCards(box).Count != cardCount) continue;
-                if (IsLocallyCarried(box)) continue; // never stomp a box in the host's hands
-                if (carried) _remoteCarried.Add(i);
-                else _remoteCarried.Remove(i);
-                ApplyToBox(box, new Entry { Cards = null, Carried = carried, Pos = pos, Yaw = yaw });
+                if (SafeCards(box).Count != cardCount)
+                    continue;
+                if (IsLocallyCarried(box))
+                    continue; // never stomp a box in the host's hands
+                if (carried)
+                    _remoteCarried.Add(i);
+                else
+                    _remoteCarried.Remove(i);
+                ApplyToBox(box, new Entry { Cards = null, Carried = carried, Pos = pos, Yaw = yaw, InFlight = entry.InFlight, Moving = entry.Moving, Velocity = entry.Velocity, AngularVelocity = entry.AngularVelocity });
             }
         }
 
@@ -360,7 +409,8 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < live.Count; i++)
                 {
                     var candidate = live[i];
-                    if (candidate == null) continue;
+                    if (candidate == null)
+                        continue;
                     var candidateCards = SafeCards(candidate);
                     identities.Add(HostId(candidate) + "@" + i + ":" + candidateCards.Count + "/" + HashCards(candidateCards));
                 }
@@ -371,14 +421,16 @@ namespace CardShopCoop.Sync
                 ForceResend();
                 return; // explicit rejection lets the client restore its mirror immediately
             }
-            if (IsLocallyCarried(box)) return; // host is holding it: let him open it himself
+            if (IsLocallyCarried(box))
+                return; // host is holding it: let him open it himself
 
             try
             {
                 var cards = SafeCards(box);
                 for (int i = 0; i < cards.Count; i++)
                 {
-                    if (cards[i] == null) continue;
+                    if (cards[i] == null)
+                        continue;
                     // Wire-derived card: AddCard would mis-index (vanilla) or throw on
                     // CardCountList[-1] (EPL) for content this PC doesn't have. The box is
                     // destroyed below either way, so a skipped card is genuinely gone on this
@@ -404,7 +456,10 @@ namespace CardShopCoop.Sync
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync collect apply: " + e.Message); }
 
             ApplyingRemote = true;
-            try { box.OnDestroyed(); } // destroys its card3ds + RemoveCardPackageBox
+            try
+            {
+                box.OnDestroyed();
+            } // destroys its card3ds + RemoveCardPackageBox
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync collect despawn: " + e.Message); }
             finally { ApplyingRemote = false; }
             _remoteCarried.Clear(); // indices shifted; holds re-assert within a tick
@@ -443,11 +498,16 @@ namespace CardShopCoop.Sync
             int cardsHash = message.CardsHash;
             // shared budget with item/furn boxes: a reloading client's world-teardown
             // echoes ALL THREE box lists as removals in one burst
-            if (BoxSync.RemovalFlooded(connId, "card-box")) return;
+            if (BoxSync.RemovalFlooded(connId, "card-box"))
+                return;
             var box = FindBoxById(boxId);
-            if (box == null || IsLocallyCarried(box)) return;
+            if (box == null || IsLocallyCarried(box))
+                return;
             ApplyingRemote = true;
-            try { box.OnDestroyed(); }
+            try
+            {
+                box.OnDestroyed();
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync removal: " + e.Message); }
             finally { ApplyingRemote = false; }
             _remoteCarried.Clear();
@@ -467,7 +527,8 @@ namespace CardShopCoop.Sync
             }
             for (int i = 0; i < boxes.Count; i++)
             {
-                if (boxes[i] == null) continue;
+                if (boxes[i] == null)
+                    continue;
                 var cards = SafeCards(boxes[i]);
                 if (cards.Count == cardCount && HashCards(cards) == cardsHash)
                     return boxes[i];
@@ -477,22 +538,27 @@ namespace CardShopCoop.Sync
 
         private InteractablePackagingBox_Card FindBoxById(int id)
         {
-            if (id <= 0) return null;
+            if (id <= 0)
+                return null;
             var boxes = LiveBoxes();
             for (int i = 0; i < boxes.Count; i++)
             {
                 var box = boxes[i];
-                if (box != null && HostId(box) == id) return box;
+                if (box != null && HostId(box) == id)
+                    return box;
             }
             return null;
         }
 
         private int HostId(InteractablePackagingBox_Card box)
         {
-            if (box == null) return 0;
-            if (_hostIds.TryGetValue(box, out int id)) return id;
+            if (box == null)
+                return 0;
+            if (_hostIds.TryGetValue(box, out int id))
+                return id;
             id = _nextHostId++;
-            if (id <= 0) id = _nextHostId++;
+            if (id <= 0)
+                id = _nextHostId++;
             _hostIds[box] = id;
             return id;
         }
@@ -507,16 +573,21 @@ namespace CardShopCoop.Sync
         {
             var entries = message.Entries;
             var hostList = new List<Entry>(entries.Count);
-            for (int i = 0; i < entries.Count; i++) hostList.Add(ToEntry(entries[i]));
+            for (int i = 0; i < entries.Count; i++)
+                hostList.Add(ToEntry(entries[i]));
             ApplyingRemote = true;
-            try { ClientApplyInner(hostList); }
+            try
+            {
+                ClientApplyInner(hostList);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 
         private void ClientApplyInner(List<Entry> hostList)
         {
-            if (Rm() == null) return;
+            if (Rm() == null)
+                return;
             var boxes = LiveBoxes();
             double now = Time.realtimeSinceStartupAsDouble;
 
@@ -537,8 +608,11 @@ namespace CardShopCoop.Sync
             {
                 List<int> dead = null;
                 foreach (var kv in _recentlyCollected)
-                    if (now - kv.Value > 12.0) (dead ?? (dead = new List<int>())).Add(kv.Key);
-                if (dead != null) foreach (int k in dead) _recentlyCollected.Remove(k);
+                    if (now - kv.Value > 12.0)
+                        (dead ?? (dead = new List<int>())).Add(kv.Key);
+                if (dead != null)
+                    foreach (int k in dead)
+                        _recentlyCollected.Remove(k);
             }
 
             // A snapshot at the wire ceiling may be truncated; its absent tail is
@@ -548,7 +622,12 @@ namespace CardShopCoop.Sync
             {
                 for (int i = boxes.Count - 1; i >= hostList.Count; i--)
                 {
-                    try { if (boxes[i] != null) boxes[i].OnDestroyed(); } catch { }
+                    try
+                    {
+                        if (boxes[i] != null)
+                            boxes[i].OnDestroyed();
+                    }
+                    catch { }
                 }
             }
             // grow / fix / update
@@ -558,7 +637,11 @@ namespace CardShopCoop.Sync
                 InteractablePackagingBox_Card box = i < boxes.Count ? boxes[i] : null;
                 if (box != null && !SameCards(SafeCards(box), want.Cards))
                 {
-                    try { box.OnDestroyed(); } catch { }
+                    try
+                    {
+                        box.OnDestroyed();
+                    }
+                    catch { }
                     box = null;
                     boxes = LiveBoxes(); // list mutated
                 }
@@ -580,7 +663,15 @@ namespace CardShopCoop.Sync
                 }
                 // a box in MY hands is mine until I put it down; a box in the HOST's
                 // hands has a transient position we don't copy
-                if (IsLocallyCarried(box)) continue;
+                if (IsLocallyCarried(box) || box.GetIsMovingObject())
+                    continue;
+                // A thrower may receive the final carried snapshot before the
+                // host receives the release report. Preserve the local flight.
+                if (!BoxSync.PhysicsSettled(box))
+                {
+                    SetBoxVisible(box, true);
+                    continue;
+                }
                 // a stale "carried" echo about a box I JUST released must not hide it
                 if (want.Carried && _recentlyReleased.TryGetValue(i, out double t) && now - t < 6.0)
                     continue;
@@ -600,9 +691,11 @@ namespace CardShopCoop.Sync
         /// applied locally) and report them to the host.</summary>
         public void ClientTick(float dt, bool inGame)
         {
-            if (!inGame || Rm() == null || _lastApplied.Count == 0) return;
+            if (!inGame || Rm() == null || _lastApplied.Count == 0)
+                return;
             _timer += dt;
-            if (_timer < 1.5f) return;
+            if (_timer < 1.5f)
+                return;
             _timer -= 1.5f;
             try
             {
@@ -622,7 +715,8 @@ namespace CardShopCoop.Sync
                             BoxSync.CancelRemoteMotion(boxes[i]);
                             var held = _lastApplied[i];
                             held.Carried = true;
-                            if (_carriedLastTick.Add(i)) changed = true; // pickup transition
+                            if (_carriedLastTick.Add(i))
+                                changed = true; // pickup transition
                             list.Add(held);
                             continue;
                         }
@@ -661,6 +755,12 @@ namespace CardShopCoop.Sync
                             Carried = e.Carried,
                             Position = e.Pos,
                             Yaw = e.Yaw,
+                            InFlight = e.InFlight,
+                            Moving = e.Moving,
+                            Velocity = e.Velocity,
+                            AngularVelocity = e.AngularVelocity,
+                            Owned = e.Owned,
+                            OwnerId = e.OwnerId,
                         });
                     }
                     SendOp(new CardBoxOpMessage { Op = OpReport, Report = report });
@@ -676,7 +776,8 @@ namespace CardShopCoop.Sync
         private void ClientCollect(InteractablePackagingBox_Card box)
         {
             int idx = LiveBoxes().IndexOf(box);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             var cards = SafeCards(box);
 
             if (SendOp == null)
@@ -697,21 +798,37 @@ namespace CardShopCoop.Sync
             _recentlyCollected[hash] = Time.realtimeSinceStartupAsDouble;
 
             // local index bookkeeping shifts once the mirror despawns
-            if (idx < _lastApplied.Count) _lastApplied.RemoveAt(idx);
+            if (idx < _lastApplied.Count)
+                _lastApplied.RemoveAt(idx);
             _carriedLastTick.Clear();   // index-keyed trackers all shifted;
             _locallyTouched.Clear();    // they re-establish within a tick
             _recentlyReleased.Clear();
 
             // the reveal moment, minus the hold-card handout (see class comment)
-            try { Ipc()?.OnExitHoldBoxMode(); } catch { }
-            try { box.m_BoxAnim.Play("Open"); } catch { }
-            try { SoundManager.PlayAudio("SFX_BoxOpen", 0.5f); } catch { }
+            try
+            {
+                Ipc()?.OnExitHoldBoxMode();
+            }
+            catch { }
+            try
+            {
+                box.m_BoxAnim.Play("Open");
+            }
+            catch { }
+            try
+            {
+                SoundManager.PlayAudio("SFX_BoxOpen", 0.5f);
+            }
+            catch { }
             if (CoopCore.Instance != null)
             {
                 CoopCore.Instance.RegisterLine = "graded cards collected - check the binder";
                 CoopCore.Instance.RegisterLineTimer = 4f;
             }
-            try { box.StartCoroutine(CollectDespawn(box)); }
+            try
+            {
+                box.StartCoroutine(CollectDespawn(box));
+            }
             catch { DespawnNow(box); }
         }
 
@@ -723,7 +840,8 @@ namespace CardShopCoop.Sync
 
         private static void DespawnNow(InteractablePackagingBox_Card box)
         {
-            if (box == null) return;
+            if (box == null)
+                return;
             ApplyingRemote = true;
             try
             {
@@ -739,20 +857,24 @@ namespace CardShopCoop.Sync
         /// tells the host so the real box dies too and no echo resurrects it.</summary>
         private void OnLocalDestroyed(InteractablePackagingBox_Card box)
         {
-            if (!InGameLevel()) return;
+            if (!InGameLevel())
+                return;
             if (CoopCore.Role == CoopRole.Host)
             {
                 _remoteCarried.Clear(); // indices shifted; holds re-assert within a tick
                 return;
             }
-            if (CoopCore.Role != CoopRole.Client) return;
+            if (CoopCore.Role != CoopRole.Client)
+                return;
             int idx = LiveBoxes().IndexOf(box);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             var cards = SafeCards(box);
             int hash = HashCards(cards);
             int count = cards.Count;
             int boxId = idx < _lastApplied.Count ? _lastApplied[idx].Id : 0;
-            if (idx < _lastApplied.Count) _lastApplied.RemoveAt(idx);
+            if (idx < _lastApplied.Count)
+                _lastApplied.RemoveAt(idx);
             _carriedLastTick.Clear();
             _locallyTouched.Clear();
             _recentlyReleased.Clear();
@@ -775,14 +897,23 @@ namespace CardShopCoop.Sync
                 Id = 0,
                 Cards = SafeCards(box),
                 Carried = IsLocallyCarried(box),
-                        Pos = BoxSync.PhysicsPosition(box),
-                        Yaw = BoxSync.PhysicsRotation(box).eulerAngles.y,
+                InFlight = !IsLocallyCarried(box) && !box.GetIsMovingObject() && box.m_Rigidbody != null && !box.m_Rigidbody.IsSleeping(),
+                Moving = box.GetIsMovingObject(),
+                Velocity = box.m_Rigidbody != null ? box.m_Rigidbody.velocity : Vector3.zero,
+                AngularVelocity = box.m_Rigidbody != null ? box.m_Rigidbody.angularVelocity : Vector3.zero,
+                Owned = IsLocallyCarried(box) || box.GetIsMovingObject(),
+                OwnerId = 0,
+                Pos = BoxSync.PhysicsPosition(box),
+                Yaw = BoxSync.PhysicsRotation(box).eulerAngles.y,
             };
         }
 
         private static List<CardData> SafeCards(InteractablePackagingBox_Card box)
         {
-            try { return box.GetCardDataList() ?? EmptyCards; }
+            try
+            {
+                return box.GetCardDataList() ?? EmptyCards;
+            }
             catch { return EmptyCards; }
         }
 
@@ -794,6 +925,26 @@ namespace CardShopCoop.Sync
         {
             try
             {
+                if (want.InFlight || want.Moving)
+                {
+                    SetBoxVisible(box, true);
+                    if (want.Moving)
+                        box.SetPhysicsEnabled(false);
+                    else
+                    {
+                        box.SetPhysicsEnabled(true);
+                        BoxSync.ApplyPhysicsPose(box, want.Pos, want.Yaw);
+                        if (box.m_Rigidbody != null)
+                        {
+                            box.m_Rigidbody.velocity = want.Velocity;
+                            box.m_Rigidbody.angularVelocity = want.AngularVelocity;
+                            box.m_Rigidbody.WakeUp();
+                        }
+                    }
+                    if (want.Moving)
+                        BoxSync.ApplyPhysicsPose(box, want.Pos, want.Yaw);
+                    return;
+                }
                 // someone (remote) is carrying it: their avatar shows the box in hand,
                 // so the world copy disappears until it's set down - including the
                 // Card3dUIGroup followers, which don't live under the box transform
@@ -820,7 +971,8 @@ namespace CardShopCoop.Sync
 
         private static void SetBoxVisible(InteractablePackagingBox_Card box, bool visible)
         {
-            if (box.gameObject.activeSelf == visible) return;
+            if (box.gameObject.activeSelf == visible)
+                return;
             box.gameObject.SetActive(visible);
             try
             {
@@ -854,6 +1006,12 @@ namespace CardShopCoop.Sync
                 Id = e.Id,
                 Cards = e.Cards,
                 Carried = e.Carried,
+                InFlight = e.InFlight,
+                Moving = e.Moving,
+                Velocity = e.Velocity,
+                AngularVelocity = e.AngularVelocity,
+                Owned = e.Owned,
+                OwnerId = e.OwnerId,
                 Pos = e.Position,
                 Yaw = e.Yaw,
             };
@@ -868,6 +1026,12 @@ namespace CardShopCoop.Sync
                 Position = e.Pos,
                 Yaw = e.Yaw,
                 Carried = e.Carried,
+                InFlight = e.InFlight,
+                Moving = e.Moving,
+                Velocity = e.Velocity,
+                AngularVelocity = e.AngularVelocity,
+                Owned = e.Owned,
+                OwnerId = e.OwnerId,
             };
         }
 
@@ -879,12 +1043,14 @@ namespace CardShopCoop.Sync
         private static int HashCards(List<CardData> cards)
         {
             int h = 17;
-            if (cards == null) return h;
+            if (cards == null)
+                return h;
             h = h * 31 + cards.Count;
             for (int i = 0; i < cards.Count && i < MaxCards; i++)
             {
                 var c = cards[i];
-                if (c == null) continue;
+                if (c == null)
+                    continue;
                 h = h * 31 + (int)c.monsterType;
                 h = h * 31 + (int)c.expansionType;
                 h = h * 31 + (int)c.borderType;
@@ -899,7 +1065,8 @@ namespace CardShopCoop.Sync
         /// the certificate-bearing encoded value remains in its registry.</summary>
         private static int CanonicalGrade(CardData card)
         {
-            if (card == null) return 0;
+            if (card == null)
+                return 0;
             return Util.GradingInterop.Present
                 ? Util.GradingInterop.Encoded(card)
                 : card.cardGrade;
@@ -909,7 +1076,8 @@ namespace CardShopCoop.Sync
         {
             int ca = a != null ? a.Count : 0;
             int cb = b != null ? b.Count : 0;
-            if (ca != cb) return false;
+            if (ca != cb)
+                return false;
             return HashCards(a) == HashCards(b);
         }
     }

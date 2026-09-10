@@ -106,13 +106,17 @@ namespace CardShopCoop.Sync
 
         public void SetName(int connId, string name)
         {
-            if (string.IsNullOrEmpty(name)) return;
+            if (string.IsNullOrEmpty(name))
+                return;
             if (_avatars.TryGetValue(connId, out var av))
             {
-                if (av.Name == name) return;
+                if (av.Name == name)
+                    return;
                 av.Name = name;
-                if (av.NameTag != null) av.NameTag.text = name;
-                if (av.Go != null) av.Go.name = "CoopAvatar_" + name;
+                if (av.NameTag != null)
+                    av.NameTag.text = name;
+                if (av.Go != null)
+                    av.Go.name = "CoopAvatar_" + name;
             }
             else
             {
@@ -150,7 +154,8 @@ namespace CardShopCoop.Sync
         {
             var result = new PlayerModelEntry { Female = false, ModelIndex = 0, CustomizationJson = null };
             var custom = FindCustomization(root);
-            if (custom == null) return result;
+            if (custom == null)
+                return result;
             string name = custom.CharacterName ?? "";
             result.Female = name.StartsWith("Female", System.StringComparison.OrdinalIgnoreCase);
             int parsed;
@@ -183,7 +188,8 @@ namespace CardShopCoop.Sync
 
         public void ApplyLocalModel(CC.CharacterCustomization custom, PlayerModelEntry model)
         {
-            if (custom == null || model == null) return;
+            if (custom == null || model == null)
+                return;
             try
             {
                 custom.CharacterName = (model.Female ? "Female" : "Male") + Mathf.Max(0, model.ModelIndex);
@@ -210,7 +216,10 @@ namespace CardShopCoop.Sync
                 // abort the world snapshot. Initialize has already selected the safe default.
                 model.CustomizationJson = null;
                 CoopPlugin.Log.LogWarning("Local character model was reset after invalid appearance data: " + e.Message);
-                try { custom.Initialize(); }
+                try
+                {
+                    custom.Initialize();
+                }
                 catch (System.Exception resetError)
                 {
                     CoopPlugin.Log.LogWarning("Default character model could not be initialized: " + resetError.Message);
@@ -220,10 +229,14 @@ namespace CardShopCoop.Sync
 
         private static void NormalizeCharacterData(CC.CharacterCustomization custom, CC.CC_CharacterData data)
         {
-            if (data.Blendshapes == null) data.Blendshapes = new List<CC.CC_Property>();
-            if (data.TextureProperties == null) data.TextureProperties = new List<CC.CC_Property>();
-            if (data.FloatProperties == null) data.FloatProperties = new List<CC.CC_Property>();
-            if (data.ColorProperties == null) data.ColorProperties = new List<CC.CC_Property>();
+            if (data.Blendshapes == null)
+                data.Blendshapes = new List<CC.CC_Property>();
+            if (data.TextureProperties == null)
+                data.TextureProperties = new List<CC.CC_Property>();
+            if (data.FloatProperties == null)
+                data.FloatProperties = new List<CC.CC_Property>();
+            if (data.ColorProperties == null)
+                data.ColorProperties = new List<CC.CC_Property>();
 
             int hairSlots = custom.HairTables != null ? custom.HairTables.Count : 0;
             int apparelSlots = custom.ApparelTables != null ? custom.ApparelTables.Count : 0;
@@ -236,16 +249,20 @@ namespace CardShopCoop.Sync
         private static void NormalizeList<T>(List<T> source, int count, T fill, System.Action<List<T>> assign)
         {
             var list = source ?? new List<T>();
-            if (list.Count > count) list.RemoveRange(count, list.Count - count);
-            while (list.Count < count) list.Add(fill);
+            if (list.Count > count)
+                list.RemoveRange(count, list.Count - count);
+            while (list.Count < count)
+                list.Add(fill);
             assign(list);
         }
 
         private static void NormalizeList<T>(List<T> source, int count, System.Func<T> fill, System.Action<List<T>> assign)
         {
             var list = source ?? new List<T>();
-            if (list.Count > count) list.RemoveRange(count, list.Count - count);
-            while (list.Count < count) list.Add(fill());
+            if (list.Count > count)
+                list.RemoveRange(count, list.Count - count);
+            while (list.Count < count)
+                list.Add(fill());
             assign(list);
         }
 
@@ -259,7 +276,8 @@ namespace CardShopCoop.Sync
                 if (data.ColorProperties != null)
                     data.ColorProperties.RemoveAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal));
                 custom.ApplyCharacterVars(data);
-                if (data.ColorProperties != null) data.ColorProperties.AddRange(savedApparelTints);
+                if (data.ColorProperties != null)
+                    data.ColorProperties.AddRange(savedApparelTints);
                 ApplyStoredApparelTints(custom, savedApparelTints);
                 return true;
             }
@@ -271,7 +289,10 @@ namespace CardShopCoop.Sync
                     data.ColorProperties.AddRange(savedApparelTints);
                 }
                 CoopPlugin.Log.LogWarning("Character appearance reset during " + context + ": " + e.Message);
-                try { custom.Initialize(); }
+                try
+                {
+                    custom.Initialize();
+                }
                 catch (System.Exception resetError)
                 {
                     CoopPlugin.Log.LogWarning("Character appearance default reset failed: " + resetError.Message);
@@ -282,16 +303,20 @@ namespace CardShopCoop.Sync
 
         private static void ApplyStoredApparelTints(CC.CharacterCustomization custom, List<CC.CC_Property> tints)
         {
-            if (custom == null || tints == null) return;
+            if (custom == null || tints == null)
+                return;
             foreach (var tint in tints)
             {
-                if (tint == null || !int.TryParse(tint.propertyName.Substring(ApparelTintPrefix.Length), out int slot)) continue;
+                if (tint == null || !int.TryParse(tint.propertyName.Substring(ApparelTintPrefix.Length), out int slot))
+                    continue;
                 Color color;
-                if (!ColorUtility.TryParseHtmlString("#" + tint.stringValue, out color)) continue;
+                if (!ColorUtility.TryParseHtmlString("#" + tint.stringValue, out color))
+                    continue;
                 var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
                     BindingFlags.Instance | BindingFlags.NonPublic);
                 var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
-                if (objects == null || slot < 0 || slot >= objects.Count || objects[slot] == null) continue;
+                if (objects == null || slot < 0 || slot >= objects.Count || objects[slot] == null)
+                    continue;
                 foreach (var renderer in objects[slot].GetComponentsInChildren<Renderer>(true))
                     foreach (var material in renderer.materials)
                     {
@@ -305,7 +330,8 @@ namespace CardShopCoop.Sync
 
         private static void ClearEmptyWardrobeSlots(CC.CharacterCustomization custom, CC.CC_CharacterData data)
         {
-            if (custom == null || data == null) return;
+            if (custom == null || data == null)
+                return;
             for (int slot = 0; slot < custom.HairTables.Count; slot++)
                 if (slot >= data.HairNames.Count || string.IsNullOrEmpty(data.HairNames[slot]))
                     ClearHairOverlay(custom, slot);
@@ -316,14 +342,16 @@ namespace CardShopCoop.Sync
 
         private static void ClearAllApparel(CC.CharacterCustomization custom)
         {
-            if (custom == null || custom.ApparelTables == null) return;
+            if (custom == null || custom.ApparelTables == null)
+                return;
             for (int slot = 0; slot < custom.ApparelTables.Count; slot++)
                 ClearApparelOverlay(custom, slot);
         }
 
         private static void ClearHairOverlay(CC.CharacterCustomization custom, int slot)
         {
-            if (custom == null || slot < 0 || slot >= custom.HairTables.Count) return;
+            if (custom == null || slot < 0 || slot >= custom.HairTables.Count)
+                return;
             var field = typeof(CC.CharacterCustomization).GetField("HairObjects",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
@@ -338,7 +366,8 @@ namespace CardShopCoop.Sync
 
         private static void ClearApparelOverlay(CC.CharacterCustomization custom, int slot)
         {
-            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count) return;
+            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count)
+                return;
             var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
@@ -361,7 +390,8 @@ namespace CardShopCoop.Sync
             if (custom == null || custom.ApparelTables == null || slot < 0 || slot >= custom.ApparelTables.Count)
                 return;
             var table = custom.ApparelTables[slot];
-            if (table == null || string.IsNullOrEmpty(table.MaskProperty)) return;
+            if (table == null || string.IsNullOrEmpty(table.MaskProperty))
+                return;
 
             // Apparel applies its mask to the base body material. Removing only the
             // apparel mesh leaves the old mask behind, which makes the nude body render
@@ -392,13 +422,18 @@ namespace CardShopCoop.Sync
 
         public CC.CharacterCustomization GetEditorCustomization(bool female)
         {
-            if (_editorCustomization != null && _editorFemale == female) return _editorCustomization;
-            if (_editorHolder != null) Object.DestroyImmediate(_editorHolder);
+            if (_editorCustomization != null && _editorFemale == female)
+                return _editorCustomization;
+            if (_editorHolder != null)
+                Object.DestroyImmediate(_editorHolder);
             _editorCustomization = null;
-            if (_customers == null) _customers = Object.FindObjectOfType<CustomerManager>();
-            if (_customers == null) return null;
+            if (_customers == null)
+                _customers = Object.FindObjectOfType<CustomerManager>();
+            if (_customers == null)
+                return null;
             var prefab = female ? _customers.m_CustomerFemalePrefab : _customers.m_CustomerPrefab;
-            if (prefab == null) return null;
+            if (prefab == null)
+                return null;
             _editorHolder = new GameObject("CoopCharacterEditorTemplate");
             _editorHolder.SetActive(false);
             var clone = Object.Instantiate(prefab.gameObject, _editorHolder.transform);
@@ -424,14 +459,16 @@ namespace CardShopCoop.Sync
         public bool SetLocalBlendshape(Transform root, string propertyName, float value)
         {
             var custom = FindCustomization(root);
-            if (custom == null || string.IsNullOrEmpty(propertyName)) return false;
+            if (custom == null || string.IsNullOrEmpty(propertyName))
+                return false;
             custom.setBlendshapeByName(propertyName, Mathf.Clamp01(value));
             return true;
         }
 
         public bool SetBlendshape(CC.CharacterCustomization custom, string propertyName, float value)
         {
-            if (custom == null || string.IsNullOrEmpty(propertyName)) return false;
+            if (custom == null || string.IsNullOrEmpty(propertyName))
+                return false;
             custom.setBlendshapeByName(propertyName, Mathf.Clamp01(value));
             return true;
         }
@@ -439,7 +476,8 @@ namespace CardShopCoop.Sync
         public bool SetHairColor(CC.CharacterCustomization custom, int slot, Color color)
         {
             if (custom == null || slot < 0 || custom.HairTables == null || slot >= custom.HairTables.Count
-                || custom.StoredCharacterData == null) return false;
+                || custom.StoredCharacterData == null)
+                return false;
             custom.setHairColor(new CC.CC_Property { propertyName = "_Hair_Color" }, color, slot, save: true);
             return true;
         }
@@ -457,11 +495,13 @@ namespace CardShopCoop.Sync
         public bool SetApparelTint(CC.CharacterCustomization custom, int slot, Color color)
         {
             if (custom == null || custom.StoredCharacterData == null || slot < 0
-                || custom.ApparelTables == null || slot >= custom.ApparelTables.Count) return false;
+                || custom.ApparelTables == null || slot >= custom.ApparelTables.Count)
+                return false;
             var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
-            if (objects == null || slot >= objects.Count || objects[slot] == null) return false;
+            if (objects == null || slot >= objects.Count || objects[slot] == null)
+                return false;
             foreach (var renderer in objects[slot].GetComponentsInChildren<Renderer>(true))
                 foreach (var material in renderer.materials)
                 {
@@ -473,17 +513,21 @@ namespace CardShopCoop.Sync
             string propertyName = ApparelTintPrefix + slot;
             string value = ColorUtility.ToHtmlStringRGBA(color);
             var properties = custom.StoredCharacterData.ColorProperties;
-            if (properties == null) custom.StoredCharacterData.ColorProperties = properties = new List<CC.CC_Property>();
+            if (properties == null)
+                custom.StoredCharacterData.ColorProperties = properties = new List<CC.CC_Property>();
             var saved = properties.Find(p => p != null && p.propertyName == propertyName);
-            if (saved == null) properties.Add(new CC.CC_Property { propertyName = propertyName, stringValue = value });
-            else saved.stringValue = value;
+            if (saved == null)
+                properties.Add(new CC.CC_Property { propertyName = propertyName, stringValue = value });
+            else
+                saved.stringValue = value;
             return true;
         }
 
         public bool ClearLocalHair(Transform root, int slot)
         {
             var custom = FindCustomization(root);
-            if (custom == null || slot < 0 || slot >= custom.HairTables.Count) return false;
+            if (custom == null || slot < 0 || slot >= custom.HairTables.Count)
+                return false;
             var field = typeof(CC.CharacterCustomization).GetField("HairObjects",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
@@ -499,7 +543,8 @@ namespace CardShopCoop.Sync
 
         public bool ClearHair(CC.CharacterCustomization custom, int slot)
         {
-            if (custom == null || slot < 0 || slot >= custom.HairTables.Count) return false;
+            if (custom == null || slot < 0 || slot >= custom.HairTables.Count)
+                return false;
             var field = typeof(CC.CharacterCustomization).GetField("HairObjects",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
@@ -516,7 +561,8 @@ namespace CardShopCoop.Sync
         public bool ClearLocalApparel(Transform root, int slot)
         {
             var custom = FindCustomization(root);
-            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count) return false;
+            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count)
+                return false;
             var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
@@ -533,7 +579,8 @@ namespace CardShopCoop.Sync
 
         public bool ClearApparel(CC.CharacterCustomization custom, int slot)
         {
-            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count) return false;
+            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count)
+                return false;
             var field = typeof(CC.CharacterCustomization).GetField("ApparelObjects",
                 BindingFlags.Instance | BindingFlags.NonPublic);
             var objects = field != null ? field.GetValue(custom) as List<GameObject> : null;
@@ -550,20 +597,28 @@ namespace CardShopCoop.Sync
 
         private static CC.CharacterCustomization FindCustomization(Transform root)
         {
-            if (root == null) return null;
+            if (root == null)
+                return null;
             var found = root.GetComponentInChildren<CC.CharacterCustomization>(true);
-            if (found != null) return found;
+            if (found != null)
+                return found;
             found = root.GetComponentInParent<CC.CharacterCustomization>();
-            if (found != null) return found;
+            if (found != null)
+                return found;
             // Some game builds keep the visual body beside, rather than below, the CMF
             // walker. Resolve the nearest customization once the selector is opened.
             var all = Object.FindObjectsOfType<CC.CharacterCustomization>(true);
             float best = 9f;
             for (int i = 0; i < all.Length; i++)
             {
-                if (all[i] == null) continue;
+                if (all[i] == null)
+                    continue;
                 float distance = (all[i].transform.position - root.position).sqrMagnitude;
-                if (distance < best) { best = distance; found = all[i]; }
+                if (distance < best)
+                {
+                    best = distance;
+                    found = all[i];
+                }
             }
             return found;
         }
@@ -584,7 +639,8 @@ namespace CardShopCoop.Sync
                 v.y = 0f;
                 av.Velocity = Vector3.ClampMagnitude(v, 6f);
             }
-            else av.Velocity = Vector3.zero;
+            else
+                av.Velocity = Vector3.zero;
             av.LastStateTime = now;
             av.TargetPos = pos;
             av.TargetYaw = yaw;
@@ -617,7 +673,8 @@ namespace CardShopCoop.Sync
 
             av.SnapHead = (av.SnapHead + 1) % SnapBufferSize;
             av.Snaps[av.SnapHead] = new Snapshot { Pos = pos, Yaw = yaw, RecvTime = now };
-            if (av.SnapCount < SnapBufferSize) av.SnapCount++;
+            if (av.SnapCount < SnapBufferSize)
+                av.SnapCount++;
 
             // Hold signatures are built here, at packet rate (<=15 Hz): strings are fine at
             // this cadence, and Tick then only compares cached strings so rendering never
@@ -637,7 +694,8 @@ namespace CardShopCoop.Sync
                       .Append('/').Append(c.isFoil ? 1 : 0).Append(';');
                 av.PendingCardSig = sb.ToString();
             }
-            else av.PendingCardSig = "";
+            else
+                av.PendingCardSig = "";
             av.PendingItemSig = holdState == 2 && av.HoldTypes.Count > 0
                 ? string.Join(",", av.HoldTypes) : "";
 
@@ -680,7 +738,8 @@ namespace CardShopCoop.Sync
                 DestroyBody(av);
             }
             _avatars.Clear();
-            if (_editorHolder != null) Object.Destroy(_editorHolder);
+            if (_editorHolder != null)
+                Object.Destroy(_editorHolder);
             _editorHolder = null;
             _editorCustomization = null;
             DestroyPreview();
@@ -701,10 +760,12 @@ namespace CardShopCoop.Sync
                 SpawnPreview(model);
                 _previewSignature = signature;
             }
-            if (_previewBody == null) return;
+            if (_previewBody == null)
+                return;
             Vector3 forward = camera.forward;
             forward.y = 0f;
-            if (forward.sqrMagnitude < 0.001f) forward = player.forward;
+            if (forward.sqrMagnitude < 0.001f)
+                forward = player.forward;
             forward.Normalize();
             Vector3 position = player.position + forward * 1.6f;
             position.y = player.position.y;
@@ -717,7 +778,8 @@ namespace CardShopCoop.Sync
 
         public void DestroyPreview()
         {
-            if (_previewBody != null) Object.Destroy(_previewBody);
+            if (_previewBody != null)
+                Object.Destroy(_previewBody);
             _previewBody = null;
             _previewCustomization = null;
             _previewSignature = null;
@@ -725,10 +787,13 @@ namespace CardShopCoop.Sync
 
         private void SpawnPreview(PlayerModelEntry model)
         {
-            if (_customers == null) _customers = Object.FindObjectOfType<CustomerManager>();
-            if (_customers == null) return;
+            if (_customers == null)
+                _customers = Object.FindObjectOfType<CustomerManager>();
+            if (_customers == null)
+                return;
             var prefab = model.Female ? _customers.m_CustomerFemalePrefab : _customers.m_CustomerPrefab;
-            if (prefab == null) return;
+            if (prefab == null)
+                return;
             var holder = new GameObject("CoopCharacterPreviewHolder_tmp");
             holder.SetActive(false);
             var clone = Object.Instantiate(prefab.gameObject, holder.transform);
@@ -737,6 +802,7 @@ namespace CardShopCoop.Sync
             Object.Destroy(holder);
 
             var customer = clone.GetComponent<Customer>();
+            HideCustomerProps(customer, "character preview");
             _previewCustomization = customer != null ? customer.m_CharacterCustom
                 : clone.GetComponentInChildren<CC.CharacterCustomization>(true);
             if (_previewCustomization != null)
@@ -760,14 +826,18 @@ namespace CardShopCoop.Sync
 
             foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
             {
-                if (mb == null) continue;
+                if (mb == null)
+                    continue;
                 string name = mb.GetType().Name;
                 if (name == "CopyPose" || name == "BlendshapeManager" || name == "ScaleCharacter"
-                    || name == "CharacterCustomization" || name == "TransformBone" || name == "MipBiasAdjust") continue;
+                    || name == "CharacterCustomization" || name == "TransformBone" || name == "MipBiasAdjust")
+                    continue;
                 Object.DestroyImmediate(mb);
             }
-            foreach (var col in clone.GetComponentsInChildren<Collider>(true)) Object.DestroyImmediate(col);
-            foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true)) Object.DestroyImmediate(rb);
+            foreach (var col in clone.GetComponentsInChildren<Collider>(true))
+                Object.DestroyImmediate(col);
+            foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
+                Object.DestroyImmediate(rb);
             clone.name = "CoopCharacterPreview";
             _previewBody = clone;
         }
@@ -776,8 +846,13 @@ namespace CardShopCoop.Sync
         /// TrySpawn must be destroyed explicitly or it leaks past Destroy(Go).</summary>
         private static void DestroyBody(RemoteAvatar av)
         {
-            if (av.HoldPropMat != null) { Object.Destroy(av.HoldPropMat); av.HoldPropMat = null; }
-            if (av.Go != null) Object.Destroy(av.Go);
+            if (av.HoldPropMat != null)
+            {
+                Object.Destroy(av.HoldPropMat);
+                av.HoldPropMat = null;
+            }
+            if (av.Go != null)
+                Object.Destroy(av.Go);
         }
 
         /// <summary>Releases ONLY the loose-item pile. The items signature changes every time
@@ -788,7 +863,11 @@ namespace CardShopCoop.Sync
             foreach (var item in av.HeldItems)
                 if (item != null)
                 {
-                    try { ItemSpawnManager.DisableItem(item); } catch { }
+                    try
+                    {
+                        ItemSpawnManager.DisableItem(item);
+                    }
+                    catch { }
                 }
             av.HeldItems.Clear();
             av.HeldSig = "";
@@ -800,21 +879,66 @@ namespace CardShopCoop.Sync
             ReleaseCards(av);
             if (av.PackProp != null)
             {
-                try { ItemSpawnManager.DisableItem(av.PackProp); } catch { }
+                try
+                {
+                    ItemSpawnManager.DisableItem(av.PackProp);
+                }
+                catch { }
                 av.PackProp = null;
             }
-            if (av.BinderProp != null) { Object.Destroy(av.BinderProp); av.BinderProp = null; }
+            if (av.BinderProp != null)
+            {
+                Object.Destroy(av.BinderProp);
+                av.BinderProp = null;
+            }
             ReleaseBoxProp(av);
+        }
+
+        private static void HideCustomerProps(Customer customer, string context)
+        {
+            if (customer == null)
+                return;
+            try
+            {
+                if (customer.m_ShoppingBagTransform != null)
+                    customer.m_ShoppingBagTransform.gameObject.SetActive(false);
+                if (customer.m_CustomerCash != null)
+                    customer.m_CustomerCash.gameObject.SetActive(false);
+                if (customer.m_GameCardFanOut != null)
+                    customer.m_GameCardFanOut.SetActive(false);
+                if (customer.m_GameCardSingle != null)
+                    customer.m_GameCardSingle.SetActive(false);
+                if (customer.m_CleanFX != null)
+                    customer.m_CleanFX.SetActive(false);
+                if (customer.m_ExclaimationMesh != null)
+                    customer.m_ExclaimationMesh.SetActive(false);
+                if (customer.m_InteractCollider != null)
+                    customer.m_InteractCollider.SetActive(false);
+                if (customer.m_SmellyFX != null)
+                    customer.m_SmellyFX.SetActive(false);
+            }
+            catch (System.Exception e)
+            {
+                CoopPlugin.Log.LogWarning("Customer prop hiding partial (" + context + "): " + e.Message);
+            }
         }
 
         private static void ReleaseBoxProp(RemoteAvatar av)
         {
             if (av.BoxProdItem != null)
             {
-                try { ItemSpawnManager.DisableItem(av.BoxProdItem); } catch { }
+                try
+                {
+                    ItemSpawnManager.DisableItem(av.BoxProdItem);
+                }
+                catch { }
                 av.BoxProdItem = null;
             }
-            if (av.BoxProp != null) { Object.Destroy(av.BoxProp); av.BoxProp = null; }
+            if (av.BoxProp != null)
+            {
+                Object.Destroy(av.BoxProp);
+                av.BoxProp = null;
+            }
             av.BoxSig = "";
         }
 
@@ -824,15 +948,18 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                if (_restock == null) _restock = Object.FindObjectOfType<RestockManager>();
+                if (_restock == null)
+                    _restock = Object.FindObjectOfType<RestockManager>();
                 var rm = _restock;
                 var prefab = isBig ? rm?.m_PackageBoxPrefab : rm?.m_PackageBoxSmallPrefab;
-                if (prefab == null) return;
+                if (prefab == null)
+                    return;
                 var holder = new GameObject("CoopBoxHolder_tmp");
                 holder.SetActive(false);
                 var clone = Object.Instantiate(prefab.gameObject, holder.transform);
                 foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
-                    if (mb != null) Object.DestroyImmediate(mb);
+                    if (mb != null)
+                        Object.DestroyImmediate(mb);
                 foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
                     Object.DestroyImmediate(rb);
                 foreach (var col in clone.GetComponentsInChildren<Collider>(true))
@@ -841,7 +968,11 @@ namespace CardShopCoop.Sync
                 // against the model's rendered bounds - the prefab's pivot is offset from
                 // its visible box, which is how a "waist-height" offset drew at the knees
                 Transform anchor = null;
-                try { anchor = av.Anim != null ? av.Anim.GetBoneTransform(HumanBodyBones.Chest) : null; } catch { }
+                try
+                {
+                    anchor = av.Anim != null ? av.Anim.GetBoneTransform(HumanBodyBones.Chest) : null;
+                }
+                catch { }
                 var body = av.Go.transform;
                 clone.transform.SetParent(anchor != null ? anchor : body, worldPositionStays: false);
                 clone.transform.rotation = body.rotation;
@@ -856,7 +987,8 @@ namespace CardShopCoop.Sync
                 if (rends.Length > 0)
                 {
                     var b = rends[0].bounds;
-                    for (int i = 1; i < rends.Length; i++) b.Encapsulate(rends[i].bounds);
+                    for (int i = 1; i < rends.Length; i++)
+                        b.Encapsulate(rends[i].bounds);
                     clone.transform.position += armsCenter - b.center;
                 }
                 else
@@ -876,8 +1008,10 @@ namespace CardShopCoop.Sync
                         item.transform.position = armsCenter + body.up * (isBig ? 0.30f : 0.22f);
                         item.transform.rotation = body.rotation;
                         item.gameObject.SetActive(true);
-                        if (item.m_Rigidbody != null) item.m_Rigidbody.isKinematic = true;
-                        if (item.m_Collider != null) item.m_Collider.enabled = false;
+                        if (item.m_Rigidbody != null)
+                            item.m_Rigidbody.isKinematic = true;
+                        if (item.m_Collider != null)
+                            item.m_Collider.enabled = false;
                         av.BoxProdItem = item;
                     }
                 }
@@ -893,7 +1027,11 @@ namespace CardShopCoop.Sync
             foreach (var c in av.HeldCards3d)
                 if (c != null)
                 {
-                    try { c.OnDestroyed(); } catch { } // game's own card despawn path
+                    try
+                    {
+                        c.OnDestroyed();
+                    }
+                    catch { } // game's own card despawn path
                 }
             av.HeldCards3d.Clear();
             av.CardSig = "";
@@ -903,9 +1041,15 @@ namespace CardShopCoop.Sync
         /// briefly and play the grab motion.</summary>
         public void ShowPackOpen(int connId, int packIndex)
         {
-            if (!_avatars.TryGetValue(connId, out var av) || av.Go == null) return;
+            if (!_avatars.TryGetValue(connId, out var av) || av.Go == null)
+                return;
             av.PackTimer = 4f;
-            try { if (av.Anim != null) av.Anim.SetTrigger("GrabItem"); } catch { }
+            try
+            {
+                if (av.Anim != null)
+                    av.Anim.SetTrigger("GrabItem");
+            }
+            catch { }
             // packIndex is ALREADY A LOCAL EItemType: both callers (CoopCore's Activity and
             // RelayTag handlers) read it with Msg.ReadItemType, which is the one translation
             // boundary for it. Do NOT translate again here. A pack from a set only the
@@ -924,8 +1068,10 @@ namespace CardShopCoop.Sync
                         item.transform.localPosition = new Vector3(0f, 1.15f, 0.4f);
                         item.transform.localRotation = Quaternion.Euler(35f, 0f, 0f);
                         item.gameObject.SetActive(true);
-                        if (item.m_Rigidbody != null) item.m_Rigidbody.isKinematic = true;
-                        if (item.m_Collider != null) item.m_Collider.enabled = false;
+                        if (item.m_Rigidbody != null)
+                            item.m_Rigidbody.isKinematic = true;
+                        if (item.m_Collider != null)
+                            item.m_Collider.enabled = false;
                         av.PackProp = item;
                     }
                     else
@@ -940,10 +1086,12 @@ namespace CardShopCoop.Sync
         /// <summary>Called every frame from CoopCore while linked.</summary>
         public void Tick(float dt)
         {
-            if (!CoopPlugin.AvatarsEnabled.Value) return;
+            if (!CoopPlugin.AvatarsEnabled.Value)
+                return;
             bool inGame = CSingleton<CGameManager>.Instance != null
                           && CSingleton<CGameManager>.Instance.m_IsGameLevel;
-            if (!inGame) return;
+            if (!inGame)
+                return;
 
             // billboard against the camera the player actually SEES THROUGH - the game
             // runs several cameras, and Camera.main can be one of the others, which
@@ -972,7 +1120,8 @@ namespace CardShopCoop.Sync
                         av.CardSig = "";
                         av.BoxSig = "";
                     }
-                    if (av.HasState) TrySpawn(av);
+                    if (av.HasState)
+                        TrySpawn(av);
                     continue;
                 }
 
@@ -984,7 +1133,11 @@ namespace CardShopCoop.Sync
                 float renderYaw;
                 if (av.SnapCount > 0)
                     SampleSnapshots(av, Time.time - InterpDelay, dt, out renderPos, out renderYaw);
-                else { renderPos = av.TargetPos; renderYaw = av.TargetYaw; }
+                else
+                {
+                    renderPos = av.TargetPos;
+                    renderYaw = av.TargetYaw;
+                }
                 bool snap = (t.position - renderPos).sqrMagnitude > 25f; // 5m = teleport, don't glide
                 float blend = 1f - Mathf.Exp(-14f * dt); // frame-rate independent residual smoothing
                 t.position = snap ? renderPos : Vector3.Lerp(t.position, renderPos, blend);
@@ -1067,14 +1220,19 @@ namespace CardShopCoop.Sync
                     av.PackTimer -= dt;
                     if (av.PackTimer <= 0f)
                     {
-                        try { ItemSpawnManager.DisableItem(av.PackProp); } catch { }
+                        try
+                        {
+                            ItemSpawnManager.DisableItem(av.PackProp);
+                        }
+                        catch { }
                         av.PackProp = null;
                     }
                 }
 
                 // reading the collection binder
                 bool wantBinder = av.HoldState == 4;
-                if (wantBinder && av.BinderProp == null) TrySpawnBinder(av);
+                if (wantBinder && av.BinderProp == null)
+                    TrySpawnBinder(av);
                 if (av.BinderProp != null && av.BinderProp.activeSelf != wantBinder)
                     av.BinderProp.SetActive(wantBinder);
 
@@ -1093,9 +1251,11 @@ namespace CardShopCoop.Sync
                                 // a BLANK `new ItemMeshData()`, which is non-null, so an item from
                                 // a content pack this PC does not have would build a real pooled
                                 // prop with no mesh instead of being skipped.
-                                if (av.HoldTypes[i] == (int)EItemType.None) continue;
+                                if (av.HoldTypes[i] == (int)EItemType.None)
+                                    continue;
                                 var meshData = InventoryBase.GetItemMeshData((EItemType)av.HoldTypes[i]);
-                                if (meshData == null) continue;
+                                if (meshData == null)
+                                    continue;
                                 var item = ItemSpawnManager.GetItem(av.Go.transform);
                                 item.SetMesh(meshData.mesh, meshData.material, (EItemType)av.HoldTypes[i],
                                     meshData.meshSecondary, meshData.materialSecondary, meshData.materialList);
@@ -1104,8 +1264,10 @@ namespace CardShopCoop.Sync
                                 item.transform.localPosition = new Vector3(0f, 1.04f + 0.018f * i, 0.36f + 0.055f * i);
                                 item.transform.localRotation = Quaternion.Euler(14f, 0f, 0f);
                                 item.gameObject.SetActive(true);
-                                if (item.m_Rigidbody != null) item.m_Rigidbody.isKinematic = true;
-                                if (item.m_Collider != null) item.m_Collider.enabled = false;
+                                if (item.m_Rigidbody != null)
+                                    item.m_Rigidbody.isKinematic = true;
+                                if (item.m_Collider != null)
+                                    item.m_Collider.enabled = false;
                                 av.HeldItems.Add(item);
                             }
                             catch { }
@@ -1126,7 +1288,8 @@ namespace CardShopCoop.Sync
                 if (av.EmoteTimer > 0f)
                 {
                     av.EmoteTimer -= dt;
-                    if (av.EmoteTimer <= 0f && av.EmoteTag != null) av.EmoteTag.text = "";
+                    if (av.EmoteTimer <= 0f && av.EmoteTag != null)
+                        av.EmoteTag.text = "";
                 }
             }
         }
@@ -1168,13 +1331,16 @@ namespace CardShopCoop.Sync
 
         private void TrySpawn(RemoteAvatar av)
         {
-            if (_customers == null) _customers = Object.FindObjectOfType<CustomerManager>();
+            if (_customers == null)
+                _customers = Object.FindObjectOfType<CustomerManager>();
             var cm = _customers;
-            if (cm == null) return;
+            if (cm == null)
+                return;
 
             // Stable gender pick per player name, so each remote player keeps a consistent look.
             int nameHash = 17;
-            foreach (char c in av.Name) nameHash = nameHash * 31 + c;
+            foreach (char c in av.Name)
+                nameHash = nameHash * 31 + c;
             bool female = (nameHash & 1) == 1;
             var prefab = female ? cm.m_CustomerFemalePrefab : cm.m_CustomerPrefab;
             if (av.HasModel)
@@ -1182,8 +1348,10 @@ namespace CardShopCoop.Sync
                 female = av.Female;
                 prefab = female ? cm.m_CustomerFemalePrefab : cm.m_CustomerPrefab;
             }
-            if (prefab == null) prefab = cm.m_CustomerPrefab != null ? cm.m_CustomerPrefab : cm.m_CustomerFemalePrefab;
-            if (prefab == null) return;
+            if (prefab == null)
+                prefab = cm.m_CustomerPrefab != null ? cm.m_CustomerPrefab : cm.m_CustomerFemalePrefab;
+            if (prefab == null)
+                return;
 
             // Instantiate under an inactive holder (defers Awake), position it, then
             // activate and IMMEDIATELY dress + strip within this same call - no game
@@ -1219,7 +1387,8 @@ namespace CardShopCoop.Sync
                         else
                             ClearAllApparel(cust.m_CharacterCustom);
                     }
-                    else cust.RandomizeCharacterMesh(); // game's own wardrobe pipeline
+                    else
+                        cust.RandomizeCharacterMesh(); // game's own wardrobe pipeline
                 }
             }
             catch (System.Exception e)
@@ -1227,32 +1396,15 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogWarning("Avatar dressing failed (spawning undressed): " + e.Message);
             }
 
-            // Hide the hand/FX props that ActivateCustomer normally hides - without this
-            // the clone spawns clutching the prefab's shopping bag, cash and card fans.
-            if (cust != null)
-            {
-                try
-                {
-                    if (cust.m_ShoppingBagTransform != null) cust.m_ShoppingBagTransform.gameObject.SetActive(false);
-                    if (cust.m_CustomerCash != null) cust.m_CustomerCash.gameObject.SetActive(false);
-                    if (cust.m_GameCardFanOut != null) cust.m_GameCardFanOut.SetActive(false);
-                    if (cust.m_GameCardSingle != null) cust.m_GameCardSingle.SetActive(false);
-                    if (cust.m_CleanFX != null) cust.m_CleanFX.SetActive(false);
-                    if (cust.m_ExclaimationMesh != null) cust.m_ExclaimationMesh.SetActive(false);
-                    if (cust.m_InteractCollider != null) cust.m_InteractCollider.SetActive(false);
-                    if (cust.m_SmellyFX != null) cust.m_SmellyFX.SetActive(false);
-                }
-                catch (System.Exception e)
-                {
-                    CoopPlugin.Log.LogWarning("Avatar prop hiding partial: " + e.Message);
-                }
-            }
+            // Customer prefabs include held-item and FX props; avatars are visual-only.
+            HideCustomerProps(cust, "remote avatar");
 
             // Strip game logic but KEEP the cosmetic rig helpers (CC namespace): CopyPose
             // drives hair/apparel bones every LateUpdate - destroying it is why hair froze.
             foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
             {
-                if (mb == null) continue;
+                if (mb == null)
+                    continue;
                 string tn = mb.GetType().Name;
                 if (tn == "CopyPose" || tn == "BlendshapeManager" || tn == "ScaleCharacter"
                     || tn == "TransformBone" || tn == "MipBiasAdjust")
@@ -1261,7 +1413,8 @@ namespace CardShopCoop.Sync
             }
             foreach (var comp in clone.GetComponentsInChildren<Component>(true))
             {
-                if (comp == null) continue;
+                if (comp == null)
+                    continue;
                 string n = comp.GetType().Name;
                 if (n == "NavMeshAgent" || n == "NavMeshObstacle" || n == "Seeker" || n == "FunnelModifier")
                     Object.DestroyImmediate(comp);
@@ -1282,14 +1435,17 @@ namespace CardShopCoop.Sync
             {
                 foreach (var p in av.Anim.parameters)
                 {
-                    if (p.name == "MoveSpeed") av.HasMoveSpeed = true;
-                    if (p.name == "IsHoldingBox") av.HasHoldingBox = true;
+                    if (p.name == "MoveSpeed")
+                        av.HasMoveSpeed = true;
+                    if (p.name == "IsHoldingBox")
+                        av.HasHoldingBox = true;
                 }
                 if (!_loggedAnimParams)
                 {
                     _loggedAnimParams = true;
                     var sb = new StringBuilder("Avatar animator params: ");
-                    foreach (var p in av.Anim.parameters) sb.Append(p.name).Append(' ');
+                    foreach (var p in av.Anim.parameters)
+                        sb.Append(p.name).Append(' ');
                     CoopPlugin.Log.LogInfo(sb.ToString());
                 }
             }
@@ -1324,7 +1480,8 @@ namespace CardShopCoop.Sync
                 return 1f;
             foreach (var property in custom.StoredCharacterData.FloatProperties)
             {
-                if (property == null || property.propertyName != "Height") continue;
+                if (property == null || property.propertyName != "Height")
+                    continue;
                 return Mathf.Clamp(property.floatValue, 0.5f, 1.5f);
             }
             return 1f;
@@ -1335,12 +1492,14 @@ namespace CardShopCoop.Sync
             try
             {
                 var src = Object.FindObjectOfType<CollectionBinderFlipAnimCtrl>();
-                if (src == null) return;
+                if (src == null)
+                    return;
                 var holder = new GameObject("CoopBinderHolder_tmp");
                 holder.SetActive(false);
                 var clone = Object.Instantiate(src.gameObject, holder.transform);
                 foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
-                    if (mb != null) Object.DestroyImmediate(mb);
+                    if (mb != null)
+                        Object.DestroyImmediate(mb);
                 foreach (var col in clone.GetComponentsInChildren<Collider>(true))
                     Object.DestroyImmediate(col);
                 clone.transform.SetParent(av.Go.transform, worldPositionStays: false);
@@ -1387,11 +1546,14 @@ namespace CardShopCoop.Sync
                 {
                     // borrow the font any of the game's own TMP labels use
                     var any = UnityEngine.Object.FindObjectOfType<TMPro.TMP_Text>(true);
-                    if (any != null) _tagFont = any.font;
+                    if (any != null)
+                        _tagFont = any.font;
                 }
             }
-            if (_tagFont != null) tmp.font = _tagFont;
+            if (_tagFont != null)
+                tmp.font = _tagFont;
             return tmp;
         }
     }
+
 }

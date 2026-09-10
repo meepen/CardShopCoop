@@ -27,7 +27,10 @@ namespace CardShopCoop.Sync
             public int Count;
         }
 
-        private struct CompState { public int Type; public int Count; }
+        private struct CompState
+        {
+            public int Type; public int Count;
+        }
 
         private readonly Dictionary<int, CompState> _last = new Dictionary<int, CompState>();
         /// <summary>Client role only: when this machine last reported a change of its own for
@@ -48,7 +51,10 @@ namespace CardShopCoop.Sync
         /// tearing that compartment down and rebuilding it forever. Remembering the request
         /// that clamped, plus what it clamped TO, lets ApplyRemote skip the identical rebuild
         /// while still reacting the moment either the request or the compartment changes.</summary>
-        private struct ClampState { public int Type; public int Requested; public int Actual; }
+        private struct ClampState
+        {
+            public int Type; public int Requested; public int Actual;
+        }
         private readonly Dictionary<int, ClampState> _clamped = new Dictionary<int, ClampState>();
         /// <summary>Keys we've already named in the log: a clamp is silent by construction (the
         /// type IS resolvable), so say it once per compartment or a mismatched-pack shop is
@@ -76,7 +82,8 @@ namespace CardShopCoop.Sync
 
         private ShelfManager ResolveShelfManager()
         {
-            if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
@@ -107,9 +114,11 @@ namespace CardShopCoop.Sync
 
         public void Tick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < _scanInterval) return;
+            if (_timer < _scanInterval)
+                return;
             _timer -= _scanInterval; // keep the phase; reset-to-zero drifts back into alignment
 
             List<Entry> changes = null;
@@ -117,18 +126,24 @@ namespace CardShopCoop.Sync
             try
             {
                 var sm = ResolveShelfManager();
-                if (sm == null) return;
+                if (sm == null)
+                    return;
 
                 for (int i = 0; i < sm.m_ShelfList.Count; i++)
                 {
                     var shelf = sm.m_ShelfList[i];
-                    if (shelf == null) continue;
+                    if (shelf == null)
+                        continue;
                     try
                     {
                         var comps = shelf.GetItemCompartmentList();
                         for (int j = 0; j < comps.Count; j++)
                         {
-                            try { if (TryKey(0, shelf, j, out int key)) Visit(key, comps[j], ref changes); }
+                            try
+                            {
+                                if (TryKey(0, shelf, j, out int key))
+                                    Visit(key, comps[j], ref changes);
+                            }
                             catch (Exception e) { sawError = true; LogSnapshotError("shelf " + i + " compartment " + j, e); }
                         }
                     }
@@ -146,13 +161,18 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < sm.m_CardItemCombiShelfList.Count; i++)
                 {
                     var combi = sm.m_CardItemCombiShelfList[i];
-                    if (combi == null) continue;
+                    if (combi == null)
+                        continue;
                     try
                     {
                         var comps = combi.GetItemCompartmentList();
                         for (int j = 0; j < comps.Count; j++)
                         {
-                            try { if (TryKey(3, combi, j, out int key)) Visit(key, comps[j], ref changes); }
+                            try
+                            {
+                                if (TryKey(3, combi, j, out int key))
+                                    Visit(key, comps[j], ref changes);
+                            }
                             catch (Exception e) { sawError = true; LogSnapshotError("combi shelf " + i + " compartment " + j, e); }
                         }
                     }
@@ -161,13 +181,18 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < sm.m_TournamentPrizeShelfList.Count; i++)
                 {
                     var prize = sm.m_TournamentPrizeShelfList[i];
-                    if (prize == null) continue;
+                    if (prize == null)
+                        continue;
                     try
                     {
                         var comps = prize.GetItemCompartmentList();
                         for (int j = 0; j < comps.Count; j++)
                         {
-                            try { if (TryKey(14, prize, j, out int key)) Visit(key, comps[j], ref changes); }
+                            try
+                            {
+                                if (TryKey(14, prize, j, out int key))
+                                    Visit(key, comps[j], ref changes);
+                            }
                             catch (Exception e) { sawError = true; LogSnapshotError("prize shelf " + i + " compartment " + j, e); }
                         }
                     }
@@ -198,12 +223,14 @@ namespace CardShopCoop.Sync
 
         private void Visit(int key, ShelfCompartment comp, ref List<Entry> changes)
         {
-            if (comp == null) return;
+            if (comp == null)
+                return;
             int type = (int)comp.GetItemType();
             int count = comp.GetItemCount();
             if (_last.TryGetValue(key, out var st))
             {
-                if (st.Type == type && st.Count == count) return; // unchanged since last snapshot
+                if (st.Type == type && st.Count == count)
+                    return; // unchanged since last snapshot
             }
             else if (CoopCore.Role == CoopRole.Client)
             {
@@ -220,13 +247,16 @@ namespace CardShopCoop.Sync
                 _last[key] = new CompState { Type = type, Count = count };
                 return;
             }
-            if (changes == null) changes = new List<Entry>();
-            if (changes.Count >= 512) return; // leave un-recorded; picked up next tick
+            if (changes == null)
+                changes = new List<Entry>();
+            if (changes.Count >= 512)
+                return; // leave un-recorded; picked up next tick
             _last[key] = new CompState { Type = type, Count = count };
             // a guest's change is only a REQUEST: it has to round-trip to the host before it
             // comes back as truth. Stamp it so an in-flight host echo (or the 12s full-state
             // heal, built before our request landed) can't roll the placement back under us.
-            if (CoopCore.Role == CoopRole.Client) _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
+            if (CoopCore.Role == CoopRole.Client)
+                _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
             changes.Add(new Entry { Key = key, Type = type, Count = count });
         }
 
@@ -234,7 +264,8 @@ namespace CardShopCoop.Sync
         public void ApplyRemote(List<Entry> entries)
         {
             var sm = ResolveShelfManager();
-            if (sm == null) return;
+            if (sm == null)
+                return;
             foreach (var e in entries)
             {
                 ShelfCompartment comp = null;
@@ -246,7 +277,8 @@ namespace CardShopCoop.Sync
                         && Time.realtimeSinceStartupAsDouble - t < 6.0)
                         continue;
                     comp = Resolve(sm, e.Key);
-                    if (comp == null) continue;
+                    if (comp == null)
+                        continue;
                     // PARTIAL-CLAMP SUPPRESSION: this exact request already ran and came up
                     // short, and the compartment still holds exactly what that rebuild left -
                     // so running it again can only produce the same result. Skipping saves the
@@ -280,7 +312,8 @@ namespace CardShopCoop.Sync
                 {
                     CoopPlugin.Log.LogWarning($"WorldSync apply {e.Key:X}: {ex.Message}");
                 }
-                if (comp == null) continue; // guarded/unresolved: leave our baseline alone
+                if (comp == null)
+                    continue; // guarded/unresolved: leave our baseline alone
                 try
                 {
                     // Baseline is ALWAYS what the compartment ACTUALLY holds now - never what
@@ -303,7 +336,8 @@ namespace CardShopCoop.Sync
                         if (_clampWarned.Add(e.Key))
                             CoopPlugin.Log.LogWarning($"WorldSync: compartment {e.Key:X} only holds {actualCount} of the {e.Count} item(s) the host has there (type {e.Type}) - your copy of that content pack gives the shelf fewer slots; it will stay short instead of rebuilding every heal");
                     }
-                    else _clamped.Remove(e.Key);
+                    else
+                        _clamped.Remove(e.Key);
                 }
                 catch (Exception ex)
                 {
@@ -324,8 +358,10 @@ namespace CardShopCoop.Sync
         {
             // EItemType.None is the empty compartment - always applicable, and its ItemData is
             // a blank placeholder whose dimensions are legitimately zero.
-            if (type == (int)EItemType.None) return true;
-            if (_resolvable.TryGetValue(type, out bool known)) return known;
+            if (type == (int)EItemType.None)
+                return true;
+            if (_resolvable.TryGetValue(type, out bool known))
+                return known;
 
             bool ok = false;
             try
@@ -352,9 +388,11 @@ namespace CardShopCoop.Sync
             int kind = key >> 24;
             ushort objectId = PlacedObjectIdentity.ObjectIdFromCompartmentKey(key);
             int compIdx = key & 0xFF;
-            if (!PlacedObjectIdentity.TryResolve(sm, kind, objectId, out var obj)) return null;
+            if (!PlacedObjectIdentity.TryResolve(sm, kind, objectId, out var obj))
+                return null;
             List<ShelfCompartment> comps = null;
-            if (kind == 0) comps = (obj as Shelf)?.GetItemCompartmentList();
+            if (kind == 0)
+                comps = (obj as Shelf)?.GetItemCompartmentList();
             else if (kind == 3 || kind == 14)
                 comps = (obj as CardItemCombiShelf)?.GetItemCompartmentList();
             return comps != null && compIdx < comps.Count ? comps[compIdx] : null;
@@ -382,7 +420,8 @@ namespace CardShopCoop.Sync
             // mirror must express. Treating every count==0 as "already the same" was why a
             // coop player's right-click remove-label desynced: the far side was told
             // (None,0) and kept its label forever (and the player's own copy toggled).
-            if (cur == count && curType == type) return;
+            if (cur == count && curType == type)
+                return;
 
             // same product, fewer items (a customer bought some): remove exactly the
             // difference - the full teardown/respawn for a 1-item sale was constant
@@ -392,11 +431,13 @@ namespace CardShopCoop.Sync
                 for (int k = cur - count; k > 0; k--)
                 {
                     var item = comp.GetLastItem();
-                    if (item == null) break;
+                    if (item == null)
+                        break;
                     comp.RemoveItem(item);
                     ItemSpawnManager.DisableItem(item);
                 }
-                if (comp.GetItemCount() == count) return;
+                if (comp.GetItemCount() == count)
+                    return;
                 // count disagrees (corrupted m_ItemAmount): fall through and self-heal
             }
 
@@ -424,7 +465,8 @@ namespace CardShopCoop.Sync
             {
                 foreach (var item in new List<Item>(stored))
                 {
-                    if (item == null) continue;
+                    if (item == null)
+                        continue;
                     comp.RemoveItem(item);
                     ItemSpawnManager.DisableItem(item);
                 }
@@ -435,7 +477,8 @@ namespace CardShopCoop.Sync
                 for (int guard = 0; guard < 4096; guard++)
                 {
                     var item = comp.GetLastItem();
-                    if (item == null) break;
+                    if (item == null)
+                        break;
                     comp.RemoveItem(item);
                     ItemSpawnManager.DisableItem(item);
                 }
@@ -500,11 +543,13 @@ namespace CardShopCoop.Sync
         private static void CollectComps(List<Entry> into, List<ShelfCompartment> comps, int kind,
             InteractableObject shelf)
         {
-            if (comps == null) return;
+            if (comps == null)
+                return;
             for (int j = 0; j < comps.Count; j++)
             {
                 var comp = comps[j];
-                if (comp == null) continue;
+                if (comp == null)
+                    continue;
                 if (TryKey(kind, shelf, j, out int key))
                     into.Add(new Entry
                     {

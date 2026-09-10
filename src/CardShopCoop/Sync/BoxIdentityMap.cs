@@ -18,19 +18,34 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<ushort, T> _byId = new Dictionary<ushort, T>();
         private ushort _nextId = 1;
 
-        public Dictionary<T, ushort> IdOf { get { return _idOf; } }
-        public Dictionary<ushort, T> ById { get { return _byId; } }
+        public Dictionary<T, ushort> IdOf
+        {
+            get
+            {
+                return _idOf;
+            }
+        }
+        public Dictionary<ushort, T> ById
+        {
+            get
+            {
+                return _byId;
+            }
+        }
 
         public ushort GetOrAssign(T value)
         {
-            if (value == null) return 0;
-            if (_idOf.TryGetValue(value, out var existing)) return existing;
+            if (value == null)
+                return 0;
+            if (_idOf.TryGetValue(value, out var existing))
+                return existing;
 
             ushort id;
             do
             {
                 id = _nextId++;
-                if (_nextId == 0) _nextId = 1;
+                if (_nextId == 0)
+                    _nextId = 1;
             }
             while (id == 0 || _byId.ContainsKey(id));
 
@@ -56,16 +71,19 @@ namespace CardShopCoop.Sync
 
         public void Remove(T value)
         {
-            if (value == null || !_idOf.TryGetValue(value, out var id)) return;
+            if (value == null || !_idOf.TryGetValue(value, out var id))
+                return;
             _idOf.Remove(value);
             _byId.Remove(id);
         }
 
         public void Remove(ushort id)
         {
-            if (!_byId.TryGetValue(id, out var value)) return;
+            if (!_byId.TryGetValue(id, out var value))
+                return;
             _byId.Remove(id);
-            if (value != null) _idOf.Remove(value);
+            if (value != null)
+                _idOf.Remove(value);
         }
 
         public void Clear()

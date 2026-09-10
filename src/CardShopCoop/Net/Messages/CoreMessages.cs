@@ -8,7 +8,13 @@ namespace CardShopCoop.Net.Messages
     public sealed class RosterMessage : INetMessage
     {
         public readonly System.Collections.Generic.List<RosterEntry> Entries = new System.Collections.Generic.List<RosterEntry>();
-        public MsgType Type { get { return MsgType.Roster; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.Roster;
+            }
+        }
     }
 
     public sealed class RosterEntry
@@ -23,14 +29,26 @@ namespace CardShopCoop.Net.Messages
     {
         public double Coin;
         public float CoinFloat;
-        public MsgType Type { get { return MsgType.CoinSet; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CoinSet;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.ProgressSet, Policy = MessagePolicy.ClientOnly)]
     public sealed class ProgressSetMessage : INetMessage
     {
         public int Experience, Level, Fame;
-        public MsgType Type { get { return MsgType.ProgressSet; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ProgressSet;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.DayTime, Policy = MessagePolicy.ClientOnly)]
@@ -39,38 +57,83 @@ namespace CardShopCoop.Net.Messages
         public int Day, Hour, Minute;
         public float MinuteFloat;
         public bool ShopOnceOpen;
-        public MsgType Type { get { return MsgType.DayTime; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.DayTime;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.ShopName, Policy = MessagePolicy.ClientOnly)]
     public sealed class ShopNameMessage : INetMessage
     {
         public string Name;
-        public MsgType Type { get { return MsgType.ShopName; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ShopName;
+            }
+        }
     }
 
     public abstract class EmptyMessage : INetMessage
     {
-        public abstract MsgType Type { get; }
+        public abstract MsgType Type
+        {
+            get;
+        }
     }
 
     [NetworkMessage(MsgType.Ping)]
-    public sealed class PingMessage : EmptyMessage { public override MsgType Type { get { return MsgType.Ping; } } }
+    public sealed class PingMessage : EmptyMessage
+    {
+        public override MsgType Type
+        {
+            get
+            {
+                return MsgType.Ping;
+            }
+        }
+    }
     [NetworkMessage(MsgType.Pong)]
-    public sealed class PongMessage : EmptyMessage { public override MsgType Type { get { return MsgType.Pong; } } }
+    public sealed class PongMessage : EmptyMessage
+    {
+        public override MsgType Type
+        {
+            get
+            {
+                return MsgType.Pong;
+            }
+        }
+    }
 
     [NetworkMessage(MsgType.Bye)]
     public sealed class ByeMessage : INetMessage
     {
         public string Reason;
-        public MsgType Type { get { return MsgType.Bye; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.Bye;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.Emote)]
     public sealed class EmoteMessage : INetMessage
     {
         public byte Emote;
-        public MsgType Type { get { return MsgType.Emote; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.Emote;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.Activity)]
@@ -78,7 +141,13 @@ namespace CardShopCoop.Net.Messages
     {
         public byte Activity;
         public EItemType Pack;
-        public MsgType Type { get { return MsgType.Activity; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.Activity;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.RelayTag)]
@@ -87,7 +156,13 @@ namespace CardShopCoop.Net.Messages
         public byte SenderId;
         public byte Kind;
         public EItemType Extra;
-        public MsgType Type { get { return MsgType.RelayTag; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.RelayTag;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.PlayerState, Delivery = Delivery.Transient)]
@@ -99,7 +174,13 @@ namespace CardShopCoop.Net.Messages
         public byte Hold;
         public System.Collections.Generic.List<int> HoldTypes;
         public System.Collections.Generic.List<CardData> HoldCards;
-        public MsgType Type { get { return MsgType.PlayerState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.PlayerState;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.RelayState, Delivery = Delivery.Transient)]
@@ -107,7 +188,13 @@ namespace CardShopCoop.Net.Messages
     {
         public byte SenderId;
         public PlayerStateMessage State = new PlayerStateMessage();
-        public MsgType Type { get { return MsgType.RelayState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.RelayState;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.PlayerModelRequest, Policy = MessagePolicy.HostOnly)]
@@ -118,7 +205,13 @@ namespace CardShopCoop.Net.Messages
         // Json for CC_CharacterData. Kept as a string so absent/newer wardrobe fields
         // remain forward-compatible with older game builds.
         public string CustomizationJson;
-        public MsgType Type { get { return MsgType.PlayerModelRequest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.PlayerModelRequest;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.PlayerModelState, Policy = MessagePolicy.ClientOnly)]
@@ -126,7 +219,13 @@ namespace CardShopCoop.Net.Messages
     {
         public readonly System.Collections.Generic.List<PlayerModelEntry> Entries =
             new System.Collections.Generic.List<PlayerModelEntry>();
-        public MsgType Type { get { return MsgType.PlayerModelState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.PlayerModelState;
+            }
+        }
     }
 
     public sealed class PlayerModelEntry

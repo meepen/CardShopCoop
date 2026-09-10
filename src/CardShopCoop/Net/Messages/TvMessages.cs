@@ -21,7 +21,13 @@ namespace CardShopCoop.Net.Messages
         public bool Resume;
         public int Generation;
 
-        public MsgType Type { get { return MsgType.TvState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.TvState;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.TvOp, Policy = MessagePolicy.HostOnlyInGame)]
@@ -32,6 +38,12 @@ namespace CardShopCoop.Net.Messages
         public string Title;
         public double Value;
 
-        public MsgType Type { get { return MsgType.TvOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.TvOp;
+            }
+        }
     }
 }

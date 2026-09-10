@@ -15,11 +15,13 @@ namespace CardShopCoop.Util
         public static bool TryLoad(out PlayerModelEntry model)
         {
             model = null;
-            if (!File.Exists(FilePath)) return false;
+            if (!File.Exists(FilePath))
+                return false;
             try
             {
                 model = JsonConvert.DeserializeObject<PlayerModelEntry>(File.ReadAllText(FilePath));
-                if (model == null || model.ModelIndex < 0) throw new InvalidDataException("missing or invalid model fields");
+                if (model == null || model.ModelIndex < 0)
+                    throw new InvalidDataException("missing or invalid model fields");
                 return true;
             }
             catch (Exception e)
@@ -32,19 +34,27 @@ namespace CardShopCoop.Util
 
         public static void Save(PlayerModelEntry model)
         {
-            if (model == null) return;
+            if (model == null)
+                return;
             string temp = FilePath + ".tmp";
             try
             {
                 Directory.CreateDirectory(Paths.ConfigPath);
                 File.WriteAllText(temp, JsonConvert.SerializeObject(model, Formatting.Indented));
-                if (File.Exists(FilePath)) File.Replace(temp, FilePath, null);
-                else File.Move(temp, FilePath);
+                if (File.Exists(FilePath))
+                    File.Replace(temp, FilePath, null);
+                else
+                    File.Move(temp, FilePath);
             }
             catch (Exception e)
             {
                 CoopPlugin.Log.LogWarning("local player model could not be saved: " + e.Message);
-                try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+                try
+                {
+                    if (File.Exists(temp))
+                        File.Delete(temp);
+                }
+                catch { }
             }
         }
     }

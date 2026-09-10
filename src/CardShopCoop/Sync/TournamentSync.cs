@@ -52,7 +52,8 @@ namespace CardShopCoop.Sync
 
         private static CustomerManager Cm()
         {
-            if (_cm == null) _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
+            if (_cm == null)
+                _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
             return _cm;
         }
 
@@ -90,7 +91,8 @@ namespace CardShopCoop.Sync
 
         public static bool ScheduleBlockPrefix()
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             if (CoopCore.Instance != null)
             {
                 CoopCore.Instance.RegisterLine = "the host schedules tournaments";
@@ -122,17 +124,21 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < 1.5f) return;
+            if (_timer < 1.5f)
+                return;
             _timer -= 1.5f;
             try
             {
                 var td = CPlayerData.m_TournamentData;
-                if (td == null) return;
+                if (td == null)
+                    return;
                 int hash = ComputeHash(td);
                 _heal += 1.5f;
-                if (hash == _lastHash && _heal < 15f) return;
+                if (hash == _lastHash && _heal < 15f)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
                 BroadcastState?.Invoke(BuildState(td));
@@ -148,7 +154,10 @@ namespace CardShopCoop.Sync
         public void ClientApplyState(TournamentStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(message); }
+            try
+            {
+                ClientApplyInner(message);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TournamentSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
@@ -156,7 +165,10 @@ namespace CardShopCoop.Sync
         private void ClientApplyInner(TournamentStateMessage message)
         {
             var td = CPlayerData.m_TournamentData;
-            if (td == null) { CPlayerData.m_TournamentData = td = new TournamentData(); }
+            if (td == null)
+            {
+                CPlayerData.m_TournamentData = td = new TournamentData();
+            }
 
             byte flags = message.Flags;
             td.m_IsHostingTournament = (flags & 1) != 0;
@@ -174,21 +186,24 @@ namespace CardShopCoop.Sync
 
             // prize catalog: mutate the vanilla 4-slot list in place so screens that
             // index m_PrizeDataList[i] never see it shorter than they expect
-            if (td.m_PrizeDataList == null) td.m_PrizeDataList = new List<TournamentPrizeDataList>();
+            if (td.m_PrizeDataList == null)
+                td.m_PrizeDataList = new List<TournamentPrizeDataList>();
             int lists = message.PrizeSlots.Count;
             while (td.m_PrizeDataList.Count < lists)
                 td.m_PrizeDataList.Add(new TournamentPrizeDataList { m_PrizeDataList = new List<TournamentPrizeData>() });
             for (int i = 0; i < lists; i++)
             {
                 var slot = td.m_PrizeDataList[i];
-                if (slot.m_PrizeDataList == null) slot.m_PrizeDataList = new List<TournamentPrizeData>();
+                if (slot.m_PrizeDataList == null)
+                    slot.m_PrizeDataList = new List<TournamentPrizeData>();
                 slot.m_PrizeDataList.Clear();
                 var dtoSlot = message.PrizeSlots[i];
                 for (int j = 0; j < dtoSlot.Prizes.Count; j++)
                 {
                     var pe = dtoSlot.Prizes[j];
                     var p = new TournamentPrizeData();
-                    if (pe.HasCard) p.m_CardData = pe.Card;
+                    if (pe.HasCard)
+                        p.m_CardData = pe.Card;
                     // host id -> ours (already translated by the DTO deserialize); a prize
                     // from a pack only the host has becomes EItemType.None and the prize slot
                     // just shows nothing, which is what an unresolvable prize did before
@@ -233,7 +248,8 @@ namespace CardShopCoop.Sync
                 hash = hash * 31 + e.OMW;
                 hash = hash * 31 + e.OOMW;
             }
-            if (hash == _lastHash) return;
+            if (hash == _lastHash)
+                return;
             _lastHash = hash;
 
             RefreshBoards(td, digest, wasDay != td.m_IsTournamentDay || wasOver != td.m_IsTournamentDayOver);
@@ -245,7 +261,8 @@ namespace CardShopCoop.Sync
         private void RefreshBoards(TournamentData td, List<PairingEntry> digest, bool visibilityChanged)
         {
             var cm = Cm();
-            if (cm == null || cm.m_TournamentPairingScreen == null) return;
+            if (cm == null || cm.m_TournamentPairingScreen == null)
+                return;
             var screen = cm.m_TournamentPairingScreen;
             bool showBoard = td.m_IsTournamentDay || td.m_IsTournamentDayOver;
 
@@ -257,9 +274,11 @@ namespace CardShopCoop.Sync
                     var shelves = ShelfManager.GetTournamentPrizeShelfList();
                     for (int i = 0; i < shelves.Count; i++)
                     {
-                        if (shelves[i] == null || FiScreenMesh == null) continue;
+                        if (shelves[i] == null || FiScreenMesh == null)
+                            continue;
                         var mesh = FiScreenMesh.GetValue(shelves[i]) as GameObject;
-                        if (mesh != null) mesh.SetActive(showBoard);
+                        if (mesh != null)
+                            mesh.SetActive(showBoard);
                     }
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("TournamentSync board vis: " + e.Message); }
@@ -279,7 +298,8 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < digest.Count; i++)
             {
                 var e = digest[i];
-                if (e.SortedIndex / 2 >= panels) continue;
+                if (e.SortedIndex / 2 >= panels)
+                    continue;
                 screen.OnCustomerRegisterStart(e.SortedIndex, e.ModelIndex, e.IsFemale);
                 var ctd = new CustomerTournamentData
                 {
@@ -401,11 +421,13 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < lists.Count; i++)
                 {
                     var inner = lists[i] != null ? lists[i].m_PrizeDataList : null;
-                    if (inner == null) continue;
+                    if (inner == null)
+                        continue;
                     for (int j = 0; j < inner.Count; j++)
                     {
                         var p = inner[j];
-                        if (p == null) continue;
+                        if (p == null)
+                            continue;
                         hash = hash * 31 + (int)p.m_ItemType;
                         hash = hash * 31 + p.m_Count;
                         if (p.m_CardData != null)
@@ -428,7 +450,8 @@ namespace CardShopCoop.Sync
                     for (int i = 0; i < sorted.Count; i++)
                     {
                         var ctd = sorted[i] != null ? sorted[i].GetCustomerTournamentData() : null;
-                        if (ctd == null) continue;
+                        if (ctd == null)
+                            continue;
                         hash = hash * 31 + ctd.m_TournamentCustomerSortedIndex;
                         hash = hash * 31 + (sorted[i] != null ? sorted[i].GetCustomerModelIndex() : 0);
                         hash = hash * 31 + (((sorted[i] != null && sorted[i].m_IsFemale) ? 1 : 0)

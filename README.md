@@ -1,85 +1,113 @@
-# CardShopCoop
+# Community Multiplayer Mod
 
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20shop-2ec484)](https://discord.gg/eNswvvTYbQ)
+Run the card shop together.
 
-**True co-op multiplayer for TCG Card Shop Simulator.** Run the shop together — shared
-money, XP, collection, and customers — over Steam (invites or a public lobby browser)
-or LAN. Built mod-first: it syncs by game IDs and plays nice with the PTCGO / Enhanced
-Prefab Loader content-mod stack, including automatic card-database alignment between
-players.
+Community Multiplayer Mod turns **TCG Card Shop Simulator** into a shared co-op shop:
+one shop, one wallet, one collection, and one living simulation. Both players can stock
+shelves, serve the register, haggle with trade-in customers, open packs, order furniture,
+and watch the same customers move through the same aisles.
 
-BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
+The goal is a full vanilla-feeling co-op experience. The host runs the real game simulation
+and the other player joins that shop as a seamless working partner, using the game's normal
+interactions wherever possible instead of separate or simplified multiplayer systems.
 
 ## Features
 
-- **Steam lobbies**: friends-list invites, or a browsable/searchable public lobby list
-  with optional passwords. LAN/TCP fallback (port 27886). 2 players primary; extra
-  joiners supported via host relay.
-- **One shop, one truth** (host-authoritative): money, XP, level, fame, the card
-  collection (including graded cards), item and card prices, shelf stock, card display
-  walls, loose boxes (carry them, throw them, trash them), placed furniture, licenses,
-  bills, room expansions, decorations, signs, tournaments, grading, the daily market,
-  and the end-of-day report are all shared.
-- **Both players can work**: the joiner serves the register (click-to-scan or hold V),
-  runs customer trade-ins/sell-ins through the game's real trade screen, restocks,
-  prices, orders stock and furniture, hires staff, pays bills, and buys licenses and
-  expansions — everything lands in the host's real simulation and echoes back.
-- **Live world**: customers and workers mirrored as motion-smoothed puppets
-  (snapshot-interpolated, not jittery extrapolation), full day/night cycle and lighting
-  sync, avatars with real carried items (boxes with product, card fans, binders).
-- **Mod-stack aware**: plugin-set and card-ID-registry parity checks at join with
-  readable rejections, automatic `enum_values.json` sync (backup + install + "restart
-  and rejoin"), product-catalog diffing with plain-language warnings, refunds when an
-  ordered product doesn't exist on the host.
-- **Optional RTCGO Custom TV sync**: shared YouTube/Twitch stream selection, pause/power,
-  playlist controls, and best-effort playback position. Mute and volume remain local to
-  each player; both PCs need the TV pack and working stream tools, and stream playback is
-  intentionally best-effort.
-- **Joiners risk nothing**: the joiner receives the host's save at join, plays in a
-  dedicated scratch slot, and never writes their own saves.
+- **Steam, LAN, and direct-IP multiplayer** — invite friends through Steam, host a
+  searchable public lobby with an optional password, or connect over LAN/direct IP. Invite
+  codes and automatic UPnP port forwarding make direct connections easier.
+- **One shared shop** — money, XP, level, fame, the card collection (including graded
+  cards), item and card prices, shelf stock, card display walls, delivery boxes, furniture,
+  licenses, bills, room expansions, decorations, shop signs, tournaments, grading, the
+  daily market, and the end-of-day report are shared.
+- **Both players can work** — serve the register by clicking items or holding V, run real
+  trade-in and sell-in screens with haggling, restock shelves, set prices, order stock and
+  furniture, hire staff, pay bills, buy licenses, and purchase expansions.
+- **A live shared world** — customers, workers, avatars, carried boxes, card fans, binders,
+  the day/night cycle, and lighting are mirrored with smooth interpolated motion instead of
+  teleporting or jittering.
+- **Content-mod friendly** — built for the PTCGO / Enhanced Prefab Loader ecosystem. Join
+  checks compare plugin sets and custom-card registries, explain mismatches clearly, back up
+  and sync the card database when needed, warn about different product catalogs, and refund
+  orders for products the host cannot provide.
+- **Optional Custom TV synchronization** — with the RTCGO Custom TV pack installed on both
+  PCs, stream selection, power, pause, playlists, and best-effort playback position can be
+  shared. Volume and mute remain local.
+- **Safe joining** — the joining player receives the host's current shop in a dedicated
+  scratch slot. Their own solo saves are never overwritten or saved over while visiting.
 
-## Install
+## Compatibility
+
+- Tested only on the newest game version at the time of writing: **TCG Card Shop Simulator
+  0.70.3**.
+- Requires **BepInEx 5.4.23 x64** installed in the game folder on both PCs.
+- Both players must use the same Community Multiplayer Mod version.
+- Both players should use the same BepInEx plugins and content packs. The join screen
+  reports missing, extra, and mismatched plugins; content-pack differences are reported
+  separately.
+- Steam and Xbox Game Pass builds are supported through the connection methods available
+  to each build. The game version must match between players. Cross-build joining is an
+  advanced, potentially unsafe option and should only be used for supervised testing.
+- Designed and tested primarily for two players. Additional joiners can be relayed by the
+  host but are less heavily tested.
+
+## Mod compatibility
+
+- **Grading Overhaul** — [Nexus Mods page](https://www.nexusmods.com/tcgcardshopsimulator/mods/612).
+  Optional integration for graded cards, grading companies, grades, certificate numbers,
+  graded-card prices, and submissions from either player. Both players should use the same
+  Grading Overhaul version.
+- **RTCGO Custom TV** — [Nexus Mods page](https://www.nexusmods.com/tcgcardshopsimulator/mods/895).
+  Optional integration that shares stream selection, power, pause, playlists, and best-effort
+  playback position when the TV pack and working stream tools are installed on both PCs.
+  Volume and mute remain local to each player.
+
+## Installation
 
 1. Install [BepInEx 5](https://github.com/BepInEx/BepInEx) (5.4.23 x64) into the game
-   folder — most modded installs already have it.
-2. Drop `CardShopCoop.dll` into `BepInEx/plugins/` on **both** PCs.
-3. Both players must run the **same CardShopCoop version** and the **same mod set**
-   (including content data packs) — the join handshake tells you exactly what differs
-   if not.
-4. In game, press **F2** for the co-op window. Host: load your save, click Host.
-   Friend: Join via Steam invite, the lobby browser, or LAN IP.
+   folder on both PCs.
+2. Download the release and place `CardShopCoop.dll` in `BepInEx/plugins/` on both PCs.
+3. Start the game and press **F2** to open the multiplayer window.
 
-## Repo layout
+## Quick start
 
-- `src/CardShopCoop/` — plugin source. Build: `dotnet build -c Release`
-  (auto-deploys into the game's plugins; pass `/p:SkipDeploy=true` while the game runs).
-  The game install path (`GamePath`) is resolved by `Directory.Build.props`:
-  point it at your install by copying `Directory.Build.user.props.example` to
-  `Directory.Build.user.props` (git-ignored), or set the `CARDSHOP_GAMEPATH`
-  environment variable. `dotnet build -p:GamePath=...` overrides either for a
-  one-off/CI build. Don't edit the csproj.
-- `tools/Decomp/` — regenerates the decompiled game-assembly reference locally
-  (ILSpy; the output is not part of this repo).
-- Ready-to-install builds: see [Releases](https://github.com/DeliriumPulse/CardShopCoop/releases)
-  or the Nexus page.
+**Host:** Load your save normally, press F2, choose Steam, LAN, or direct IP, then click
+**Host**. Steam hosting can be friends-only or public with an optional password.
 
-## Architecture notes
+**Friend:** Press F2 and join through a Steam invite, the public lobby browser, an invite
+code, or the host's LAN/direct-IP address. The shop normally downloads in about 30–60
+seconds, then you appear in the host's store.
 
-- **Host-authoritative everywhere**: the host runs the only real simulation; the client
-  suppresses its own customers/workers/day-end via Harmony and mirrors state. Client
-  actions forward as ops the host executes through vanilla code paths, then authoritative
-  state echoes back (hash-gated snapshot-diff engines with staggered timers).
-- **Two network lanes**: reliable ordered frames for state, unreliable no-delay for
-  15 Hz positions and 8 Hz NPC batches (chunked under Steam's 1200-byte datagram limit).
-  Remote motion renders ~150 ms behind on a snapshot ring buffer.
-- **Identity over indexes**: anything that crosses the wire is keyed by item identity
-  (type + size + name), never by list position — content mods can order their
-  registries differently per machine.
-- Game gotchas that cost us dearly (see `Patches/GamePatches.cs` and git history):
-  dead statics (`CGameManager.Player`), auto-creating `CSingleton<T>.Instance`,
-  `SpawnItem` being a save-loader not an adder, price tags living in separate canvas
-  groups, and raw-`itemType`-indexed tables ~200k entries long under content mods.
+If the custom-card database differs, the mod backs up the local copy, syncs the host's
+copy, and asks you to restart and join again. This is expected and normally requires one
+restart.
 
-## License
+## Good to know
 
-MIT — see [LICENSE](LICENSE).
+- The host's save is the shared world. The joining player is a guest and their own saves
+  are never written while visiting.
+- Staff hiring is supported for both players; advanced staff management such as firing,
+  tasks, and bonuses remains host-only where the base game provides no guest interaction
+  path.
+- Steam achievements continue to progress per player.
+- The joining player cannot sit down for the play-table minigame; table layouts are still
+  mirrored visually.
+- If newly installed content-pack items show a price of $0, the host may need to use the
+  PTCGO Economics price-reset hotkey. Corrected prices then sync normally.
+
+## Troubleshooting
+
+- **"Your mod set differs"** — compare the `BepInEx/plugins` folders and make sure both
+  players use the same plugin versions.
+- **"Your custom-card database differed"** — restart the game completely and join again so
+  the synchronized database is loaded.
+- **"Product catalogs differ"** — compare content DATA packs, including the small `.json`
+  files beside larger bundle files. These are not always visible to the plugin-set check.
+- For other issues, collect the detailed log from both PCs:
+  `BepInEx/CardShopCoop_<number>.log`.
+
+## Source and license
+
+Source code: [github.com/meepen/CardShopCoop](https://github.com/meepen/CardShopCoop)
+
+Licensed under the [MIT License](https://github.com/meepen/CardShopCoop/blob/main/LICENSE).

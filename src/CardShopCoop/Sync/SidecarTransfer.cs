@@ -26,7 +26,8 @@ namespace CardShopCoop.Sync
 
             string[] parts = rel.Split(new[] { '/', '\\' }, StringSplitOptions.None);
             foreach (string part in parts)
-                if (part == "..") return false;
+                if (part == "..")
+                    return false;
 
             string normalizedRoot = Path.GetFullPath(root);
             if (!normalizedRoot.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
@@ -56,7 +57,11 @@ namespace CardShopCoop.Sync
                     CoopPlugin.Log.LogError("coop: sidecar apply worker failed: " + e);
                     CoopCore.EnqueueMainThread(() => failed(e));
                 }
-            }) { IsBackground = true, Name = "CoopSidecarApply" }.Start();
+            })
+            {
+                IsBackground = true,
+                Name = "CoopSidecarApply"
+            }.Start();
         }
 
         public static byte[] BuildBundle(int hostSlot)
@@ -66,7 +71,8 @@ namespace CardShopCoop.Sync
             var slotRx = new Regex($@"(_|Release){hostSlot}(_|\.|$)");
             foreach (string dir in Directory.GetDirectories(root))
             {
-                if (Path.GetFileName(dir) == "Screenshots" || Path.GetFileName(dir) == "Unity") continue;
+                if (Path.GetFileName(dir) == "Screenshots" || Path.GetFileName(dir) == "Unity")
+                    continue;
                 foreach (string f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
                 {
                     string name = Path.GetFileName(f);
@@ -95,13 +101,15 @@ namespace CardShopCoop.Sync
 
         public static void ApplyBundle(byte[] bundle, int hostSlot, int clientSlot)
         {
-            if (bundle == null || bundle.Length < 4) return;
+            if (bundle == null || bundle.Length < 4)
+                return;
             ApplyBundle(bundle, hostSlot, clientSlot, Application.persistentDataPath);
         }
 
         private static void ApplyBundle(byte[] bundle, int hostSlot, int clientSlot, string root)
         {
-            if (bundle == null || bundle.Length < 4) return;
+            if (bundle == null || bundle.Length < 4)
+                return;
             var renameRx = new Regex($@"(?<=_|Release){hostSlot}(?=_|\.|$)");
             int applied = 0, skipped = 0;
 
@@ -167,8 +175,11 @@ namespace CardShopCoop.Sync
 
         private static bool BytesEqual(byte[] a, byte[] b)
         {
-            if (a.Length != b.Length) return false;
-            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            if (a.Length != b.Length)
+                return false;
+            for (int i = 0; i < a.Length; i++)
+                if (a[i] != b[i])
+                    return false;
             return true;
         }
 
@@ -178,12 +189,15 @@ namespace CardShopCoop.Sync
             try
             {
                 File.WriteAllBytes(temp, data);
-                if (File.Exists(path)) File.Replace(temp, path, null);
-                else File.Move(temp, path);
+                if (File.Exists(path))
+                    File.Replace(temp, path, null);
+                else
+                    File.Move(temp, path);
             }
             finally
             {
-                if (File.Exists(temp)) File.Delete(temp);
+                if (File.Exists(temp))
+                    File.Delete(temp);
             }
         }
     }

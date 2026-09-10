@@ -15,18 +15,24 @@ namespace CardShopCoop.Net
             foreach (var type in LoadableTypes(typeof(MessageRegistry).Assembly))
             {
                 var attribute = (NetworkMessageAttribute)Attribute.GetCustomAttribute(type, typeof(NetworkMessageAttribute));
-                if (attribute == null || !typeof(INetMessage).IsAssignableFrom(type)) continue;
+                if (attribute == null || !typeof(INetMessage).IsAssignableFrom(type))
+                    continue;
                 Types[attribute.Type] = type;
             }
         }
 
         private static IEnumerable<Type> LoadableTypes(Assembly assembly)
         {
-            try { return assembly.GetTypes(); }
+            try
+            {
+                return assembly.GetTypes();
+            }
             catch (ReflectionTypeLoadException e)
             {
                 var result = new List<Type>();
-                foreach (var type in e.Types) if (type != null) result.Add(type);
+                foreach (var type in e.Types)
+                    if (type != null)
+                        result.Add(type);
                 return result;
             }
         }

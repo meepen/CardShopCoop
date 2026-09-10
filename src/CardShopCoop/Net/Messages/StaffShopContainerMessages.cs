@@ -37,7 +37,13 @@ namespace CardShopCoop.Net.Messages
         public float CardPriceMult;
         public List<bool> PackTypes;
 
-        public MsgType Type { get { return MsgType.StaffOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.StaffOp;
+            }
+        }
 
 
     }
@@ -48,7 +54,13 @@ namespace CardShopCoop.Net.Messages
     {
         public List<StaffEntry> Entries = new List<StaffEntry>();
 
-        public MsgType Type { get { return MsgType.StaffState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.StaffState;
+            }
+        }
 
 
 
@@ -95,7 +107,13 @@ namespace CardShopCoop.Net.Messages
         public bool Granted;
         public bool Occupied;
 
-        public MsgType Type { get { return MsgType.StaffInteract; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.StaffInteract;
+            }
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -109,7 +127,13 @@ namespace CardShopCoop.Net.Messages
         public byte Op;
         public byte Arg;
 
-        public MsgType Type { get { return MsgType.ShopOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ShopOp;
+            }
+        }
     }
 
     // ShopState (host -> client): bills + room unlocks + sign states + tutorial snapshot.
@@ -127,7 +151,13 @@ namespace CardShopCoop.Net.Messages
         public int TutorialIndex;
         public List<ShopTutorialEntry> Tutorials = new List<ShopTutorialEntry>();
 
-        public MsgType Type { get { return MsgType.ShopState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ShopState;
+            }
+        }
 
 
     }
@@ -158,6 +188,10 @@ namespace CardShopCoop.Net.Messages
         private const byte OpGameEventFee = 4;
         private const byte OpCashier = 5;
         private const byte OpTableNumber = 6;
+        private const byte OpBuyItemDeco = 7;
+        private const byte OpPlaceItemDeco = 8;
+        private const byte OpRemoveItemDeco = 9;
+        private const byte OpCancelItemDeco = 10;
 
         public byte Op;
         public byte Category;    // OpBuyDeco: 0 wall / 1 floor / 2 ceiling
@@ -169,8 +203,18 @@ namespace CardShopCoop.Net.Messages
         public byte CashierFlags; // OpCashier
         public byte TableIndex;   // OpTableNumber
         public int TableNumber;   // OpTableNumber
+        public EDecoObject DecoType;
+        public int ObjectKey;
+        public Vector3 Position;
+        public Quaternion Rotation = Quaternion.identity;
 
-        public MsgType Type { get { return MsgType.SettingsOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.SettingsOp;
+            }
+        }
 
 
     }
@@ -192,8 +236,15 @@ namespace CardShopCoop.Net.Messages
         public List<float> GameEventPrices = new List<float>();
         public List<byte> CashierFlags = new List<byte>();
         public List<byte> TableNumbers = new List<byte>();
+        public List<DecoStockEntry> DecoStock = new List<DecoStockEntry>();
 
-        public MsgType Type { get { return MsgType.SettingsState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.SettingsState;
+            }
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -229,7 +280,13 @@ namespace CardShopCoop.Net.Messages
         public float Fill;           // OpCleanserRefill
         public int ClaimToken;       // OpPackCollect
 
-        public MsgType Type { get { return MsgType.ContainerOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ContainerOp;
+            }
+        }
 
 
     }
@@ -240,7 +297,13 @@ namespace CardShopCoop.Net.Messages
     {
         public List<ContainerRecord> Records = new List<ContainerRecord>();
 
-        public MsgType Type { get { return MsgType.ContainerState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ContainerState;
+            }
+        }
     }
 
     public struct ContainerRecord
@@ -269,7 +332,13 @@ namespace CardShopCoop.Net.Messages
         public ushort BoxId;
         public int Remaining;
 
-        public MsgType Type { get { return MsgType.ContainerBoxTake; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ContainerBoxTake;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.ContainerPackClaim, Policy = MessagePolicy.ClientOnlyInGame)]
@@ -280,7 +349,19 @@ namespace CardShopCoop.Net.Messages
         public int ClaimToken;
         public List<CompactCardDataAmount> Cards = new List<CompactCardDataAmount>();
 
-        public MsgType Type { get { return MsgType.ContainerPackClaim; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ContainerPackClaim;
+            }
+        }
+    }
+
+    public sealed class DecoStockEntry
+    {
+        public int DecoType;
+        public int Count;
     }
 
     // ----------------------------------------------------------------------
@@ -311,7 +392,13 @@ namespace CardShopCoop.Net.Messages
         public bool IsWarehouseWall;
         public int VerticalSnapWallIndex = -1;
 
-        public MsgType Type { get { return MsgType.FurnBoxOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.FurnBoxOp;
+            }
+        }
 
 
     }
@@ -324,6 +411,12 @@ namespace CardShopCoop.Net.Messages
         public bool Carried;
         public Vector3 Position;
         public float Yaw;
+        public bool InFlight;
+        public bool Moving;
+        public Vector3 Velocity;
+        public Vector3 AngularVelocity;
+        public bool Owned;
+        public int OwnerId;
     }
 
     // FurnBoxState (host -> client): full furniture delivery box population.
@@ -332,7 +425,13 @@ namespace CardShopCoop.Net.Messages
     {
         public List<FurnBoxEntry> Entries = new List<FurnBoxEntry>();
 
-        public MsgType Type { get { return MsgType.FurnBoxState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.FurnBoxState;
+            }
+        }
 
 
     }
@@ -348,6 +447,12 @@ namespace CardShopCoop.Net.Messages
         public float Yaw;
         public bool Carried;
         public byte OwnerKind;
+        public bool InFlight;
+        public bool Moving;
+        public Vector3 Velocity;
+        public Vector3 AngularVelocity;
+        public bool Owned;
+        public int OwnerId;
     }
 
     // ----------------------------------------------------------------------
@@ -368,7 +473,13 @@ namespace CardShopCoop.Net.Messages
         public byte CardCount;   // OpCollect / OpRemoved
         public int CardsHash;    // OpCollect / OpRemoved
 
-        public MsgType Type { get { return MsgType.CardBoxOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CardBoxOp;
+            }
+        }
 
 
     }
@@ -379,6 +490,12 @@ namespace CardShopCoop.Net.Messages
         public bool Carried;
         public Vector3 Position;
         public float Yaw;
+        public bool InFlight;
+        public bool Moving;
+        public Vector3 Velocity;
+        public Vector3 AngularVelocity;
+        public bool Owned;
+        public int OwnerId;
     }
 
     // CardBoxState (host -> client): graded-returns box population.
@@ -387,7 +504,13 @@ namespace CardShopCoop.Net.Messages
     {
         public List<CardBoxEntry> Entries = new List<CardBoxEntry>();
 
-        public MsgType Type { get { return MsgType.CardBoxState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CardBoxState;
+            }
+        }
 
 
 
@@ -402,6 +525,12 @@ namespace CardShopCoop.Net.Messages
         public Vector3 Position;
         public float Yaw;
         public bool Carried;
+        public bool InFlight;
+        public bool Moving;
+        public Vector3 Velocity;
+        public Vector3 AngularVelocity;
+        public bool Owned;
+        public int OwnerId;
     }
 
     // CardBoxCollectResult (host -> client): graded-box collect accepted/rejected.
@@ -412,7 +541,13 @@ namespace CardShopCoop.Net.Messages
         public byte CardCount;
         public int CardsHash;
 
-        public MsgType Type { get { return MsgType.CardBoxCollectResult; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CardBoxCollectResult;
+            }
+        }
     }
 
     // ----------------------------------------------------------------------

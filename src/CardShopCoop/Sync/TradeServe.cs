@@ -102,9 +102,15 @@ namespace CardShopCoop.Sync
             _live = null;
         }
 
-        public static void ActivateLive(TradeServe instance) { _live = instance; }
+        public static void ActivateLive(TradeServe instance)
+        {
+            _live = instance;
+        }
 
-        public TradeServe() { _live = this; }
+        public TradeServe()
+        {
+            _live = this;
+        }
 
         // ---- reflection: Customer privates (verified against decompiled/Customer.cs)
         private static readonly FieldInfo FiTradeData = ReflectionSurface.RequiredField(typeof(Customer), "m_CustomerTradeData");
@@ -277,7 +283,8 @@ namespace CardShopCoop.Sync
                         double now = Time.realtimeSinceStartupAsDouble;
                         foreach (var kv in t._guestClaims)
                         {
-                            if (now - kv.Value >= 5.0) continue; // stale claim
+                            if (now - kv.Value >= 5.0)
+                                continue; // stale claim
                             var counter = sm != null && kv.Key >= 0 && kv.Key < sm.m_CashierCounterList.Count
                                 ? sm.m_CashierCounterList[kv.Key] : null;
                             if (counter != null && ReferenceEquals(FiTradeCounter?.GetValue(__instance), counter))
@@ -295,7 +302,8 @@ namespace CardShopCoop.Sync
                 }
                 return true;
             }
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             var client = _live;
             return client != null && client.IsCarrier(__instance) && !client._hostBusy;
         }
@@ -303,16 +311,19 @@ namespace CardShopCoop.Sync
         private bool IsCarrier(Customer customer)
         {
             foreach (var carrier in _carriers.Values)
-                if (ReferenceEquals(carrier, customer)) return true;
+                if (ReferenceEquals(carrier, customer))
+                    return true;
             return false;
         }
 
         public static void ClientTradeEnterPostfix(Customer __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || _live == null || _live._hostBusy || !(_live.IsCarrier(__instance))) return;
+            if (CoopCore.Role != CoopRole.Client || _live == null || _live._hostBusy || !(_live.IsCarrier(__instance)))
+                return;
             foreach (var kv in _live._carriers)
             {
-                if (!ReferenceEquals(kv.Value, __instance)) continue;
+                if (!ReferenceEquals(kv.Value, __instance))
+                    continue;
                 _live._pendingCounter = kv.Key;
                 _live._claimTimer = 999f;
                 _live.SendOp?.Invoke(new TradeOpMessage { Op = OpScreen, CounterIdx = (byte)kv.Key, Price = 0f });
@@ -325,9 +336,11 @@ namespace CardShopCoop.Sync
         /// it would move the mirrored wallet/binder locally.</summary>
         public static bool ClientAcceptPrefix(CustomerTradeCardScreen __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             var t = _live;
-            if (t == null) return false;
+            if (t == null)
+                return false;
             int idx = t._pendingCounter;
             // THE haggle "$0" bug: the game only writes m_PriceSet on the input field's
             // onEndEdit (CustomerTradeCardScreen.OnInputTextUpdated). Typing alone runs
@@ -351,7 +364,8 @@ namespace CardShopCoop.Sync
             float price = FiScrPriceSet?.GetValue(__instance) is float p ? p : 0f;
             // a zero/garbage field means "at the asking price" (-1 tells the host so);
             // a genuine $0 bid is never what an accept press means
-            if (price <= 0f) price = -1f;
+            if (price <= 0f)
+                price = -1f;
             CoopPlugin.Log.LogInfo($"TradeServe client: accept pressed on native screen (counter {idx}, price {price:F2})");
             // S1: the screen can be ORPHANED - visually open while _pendingCounter == -1
             // (the "offer vanished" close raced the CloseScreen chain and left the screen
@@ -367,11 +381,15 @@ namespace CardShopCoop.Sync
                 // the new offer at an amount the guest never saw for it (the host pins
                 // m_PriceSet to whatever we send). -1 = "accept at the asking price", so
                 // the rebound accept can only ever pay the rebound offer's own ask.
-                if (idx >= 0) price = -1f;
+                if (idx >= 0)
+                    price = -1f;
             }
             if (idx >= 0)
                 t.SendOpFor(OpAccept, idx, price, "answering the customer...");
-            try { __instance.CloseScreen(); }
+            try
+            {
+                __instance.CloseScreen();
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe client: screen close: " + e.Message); }
             return false;
         }
@@ -380,7 +398,8 @@ namespace CardShopCoop.Sync
         /// the vanilla body run (it only plays a sound and closes the screen).</summary>
         public static bool ClientDeclinePrefix()
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             var t = _live;
             if (t != null)
             {
@@ -389,7 +408,8 @@ namespace CardShopCoop.Sync
                 // guest is standing at rather than being silently dropped. Vanilla still
                 // runs (return true) so the screen plays its sound and closes normally.
                 int idx = t._pendingCounter;
-                if (idx < 0) idx = t.RebindOrphanedScreen("decline");
+                if (idx < 0)
+                    idx = t.RebindOrphanedScreen("decline");
                 if (idx >= 0)
                 {
                     CoopPlugin.Log.LogInfo($"TradeServe client: decline pressed on native screen (counter {idx})");
@@ -412,7 +432,8 @@ namespace CardShopCoop.Sync
         /// deactivated, so DetermineShopAction/StartCoroutine would throw on it.</summary>
         public static bool ClientStopInteractPrefix(Customer __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             // S3: the puppet-data clears used to run OUTSIDE the try below, so a throw in
             // the UI-restore block could skip the "_pendingCounter = -1" at the tail and
             // leave a half-closed screen wedged. Move them inside a single guarded block
@@ -430,7 +451,8 @@ namespace CardShopCoop.Sync
                 {
                     int counter = _live._pendingCounter;
                     _live._pendingCounter = -1;
-                    if (counter >= 0) _live.ReleaseCarrier(counter);
+                    if (counter >= 0)
+                        _live.ReleaseCarrier(counter);
                 }
             }
             return false;
@@ -448,7 +470,8 @@ namespace CardShopCoop.Sync
             {
                 ipc.ExitWorkerInteractMode();
                 ipc.StopAimLookAt();
-                if (ipc.m_WalkerCtrl != null) ipc.m_WalkerCtrl.SetStopMovement(isStop: false);
+                if (ipc.m_WalkerCtrl != null)
+                    ipc.m_WalkerCtrl.SetStopMovement(isStop: false);
                 ipc.ExitUIMode();
             }
             GameUIScreen.ResetToolTipVisibility();
@@ -479,25 +502,29 @@ namespace CardShopCoop.Sync
 
         private ShelfManager Sm()
         {
-            if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
         private CustomerManager Cm()
         {
-            if (_cm == null) _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
+            if (_cm == null)
+                _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
             return _cm;
         }
 
         private InteractionPlayerController Ipc()
         {
-            if (_ipc == null) _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
+            if (_ipc == null)
+                _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
             return _ipc;
         }
 
         private static string CardName(CardData c)
         {
-            if (c == null) return "a card";
+            if (c == null)
+                return "a card";
             string name = null;
             try
             {
@@ -511,7 +538,8 @@ namespace CardShopCoop.Sync
                 if ((int)c.expansionType < (int)ECardExpansionType.MAX)
                 {
                     var md = InventoryBase.GetMonsterData(c.monsterType);
-                    if (md != null) name = md.GetName();
+                    if (md != null)
+                        name = md.GetName();
                 }
             }
             catch { }
@@ -523,7 +551,8 @@ namespace CardShopCoop.Sync
                 name = (int)c.expansionType < (int)ECardExpansionType.MAX
                     ? c.monsterType.ToString()
                     : c.expansionType + "#" + (int)c.monsterType;
-            if (c.isFoil) name += " (foil)";
+            if (c.isFoil)
+                name += " (foil)";
             // S5: with Grading Overhaul installed, cardGrade is an ENCODED int (e.g.
             // 370009134) packing company+grade+cert - printing it raw showed the guest a
             // ten-digit "grade". Decode to the real 1-10 for display. Actual() is identity
@@ -532,20 +561,25 @@ namespace CardShopCoop.Sync
             if (c.cardGrade > 0)
             {
                 int g = Util.GradingInterop.Present ? Util.GradingInterop.Actual(c.cardGrade) : c.cardGrade;
-                if (g > 0) name += $" [grade {g}]";
+                if (g > 0)
+                    name += $" [grade {g}]";
             }
             return name;
         }
 
         private static string Price(float p)
         {
-            try { return GameInstance.GetPriceString(p); }
+            try
+            {
+                return GameInstance.GetPriceString(p);
+            }
             catch { return "$" + p.ToString("F2"); }
         }
 
         private static int CardHash(CardData c)
         {
-            if (c == null) return 0;
+            if (c == null)
+                return 0;
             int hash = 17;
             hash = hash * 31 + (int)c.monsterType;
             hash = hash * 31 + (int)c.expansionType;
@@ -559,28 +593,35 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < Cadence) return;
+            if (_timer < Cadence)
+                return;
             _timer -= Cadence;
             try
             {
                 var cm = Cm();
                 var sm = Sm();
-                if (cm == null || sm == null) return;
+                if (cm == null || sm == null)
+                    return;
 
                 _hostBuf.Clear();
                 var customers = cm.GetCustomerList();
                 for (int i = 0; i < customers.Count && _hostBuf.Count < MaxOffers; i++)
                 {
                     var cust = customers[i];
-                    if (cust == null || !cust.m_IsActive) continue;
-                    if (cust.m_CurrentState != ECustomerState.WaitingToTradeCard) continue;
+                    if (cust == null || !cust.m_IsActive)
+                        continue;
+                    if (cust.m_CurrentState != ECustomerState.WaitingToTradeCard)
+                        continue;
 
                     var counter = FiTradeCounter?.GetValue(cust) as InteractableCashierCounter;
-                    if (counter == null) continue;
+                    if (counter == null)
+                        continue;
                     int idx = sm.m_CashierCounterList.IndexOf(counter);
-                    if (idx < 0 || idx > 250) continue;
+                    if (idx < 0 || idx > 250)
+                        continue;
 
                     // S4: pause THIS customer's patience while a guest holds the trade screen
                     // for it. Vanilla only stops m_Timer from advancing when the HOST-local
@@ -598,7 +639,8 @@ namespace CardShopCoop.Sync
                         FiCustTimer?.SetValue(cust, 0f);
 
                     var data = FiTradeData?.GetValue(cust) as CustomerTradeData;
-                    if (data == null) data = PreRoll(cm, cust);
+                    if (data == null)
+                        data = PreRoll(cm, cust);
 
                     float waited = FiCustTimer?.GetValue(cust) is float t ? t : 0f;
                     // "known" also demands the cards the wire format will write exist
@@ -653,7 +695,8 @@ namespace CardShopCoop.Sync
 
                 _heal += Cadence;
                 bool changed = hash != _lastHash;
-                if (!changed && _heal < HealInterval) return;
+                if (!changed && _heal < HealInterval)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
                 if (changed) // real change (offers moved or a result landed) - keep the pipeline loud
@@ -681,15 +724,24 @@ namespace CardShopCoop.Sync
         /// object across customers, so anything we keep past this frame must be a copy.</summary>
         private static CardData CopyCard(CardData src)
         {
-            if (src == null) return null;
+            if (src == null)
+                return null;
             var c = new CardData();
-            try { c.CopyData(src); }
+            try
+            {
+                c.CopyData(src);
+            }
             catch
             {
-                c.expansionType = src.expansionType; c.monsterType = src.monsterType;
-                c.borderType = src.borderType; c.isFoil = src.isFoil; c.isDestiny = src.isDestiny;
-                c.isChampionCard = src.isChampionCard; c.isNew = src.isNew;
-                c.cardGrade = src.cardGrade; c.gradedCardIndex = src.gradedCardIndex;
+                c.expansionType = src.expansionType;
+                c.monsterType = src.monsterType;
+                c.borderType = src.borderType;
+                c.isFoil = src.isFoil;
+                c.isDestiny = src.isDestiny;
+                c.isChampionCard = src.isChampionCard;
+                c.isNew = src.isNew;
+                c.cardGrade = src.cardGrade;
+                c.gradedCardIndex = src.gradedCardIndex;
             }
             return c;
         }
@@ -698,14 +750,17 @@ namespace CardShopCoop.Sync
         {
             // without the storage field every roll would be lost and re-rolled (and
             // re-broadcast) each tick - better to leave the offer host-served
-            if (FiTradeData == null) return null;
+            if (FiTradeData == null)
+                return null;
             var screen = cm.m_CustomerTradeCardScreen;
             // never stomp a live trade the host is running in the real UI
-            if (screen == null || cm.m_IsPlayerTrading || screen.IsScreenOpened()) return null;
+            if (screen == null || cm.m_IsPlayerTrading || screen.IsScreenOpened())
+                return null;
             int id = cust.GetInstanceID();
             // transient backoff, NOT a permanent blacklist: one flaky roll used to mark the
             // offer host-only for the customer's whole life (guest could never answer it)
-            if (_preRollFailUntil.TryGetValue(id, out var until) && Time.time < until) return null;
+            if (_preRollFailUntil.TryGetValue(id, out var until) && Time.time < until)
+                return null;
             try
             {
                 screen.SetCustomer(cust, null); // sets m_IsPlayerTrading = true itself
@@ -745,7 +800,11 @@ namespace CardShopCoop.Sync
             }
             finally
             {
-                try { cm.m_IsPlayerTrading = false; } catch { }
+                try
+                {
+                    cm.m_IsPlayerTrading = false;
+                }
+                catch { }
             }
         }
 
@@ -815,7 +874,10 @@ namespace CardShopCoop.Sync
                 return;
             }
             CoopPlugin.Log.LogInfo($"TradeServe host: received {(op == OpAccept ? "accept" : op == OpDecline ? "decline" : "op " + op)} @ counter {idx}, price {price:F2}");
-            try { HostApplyOpInner(op, idx, price); }
+            try
+            {
+                HostApplyOpInner(op, idx, price);
+            }
             catch (Exception e)
             {
                 CoopPlugin.Log.LogWarning("TradeServe op: " + e);
@@ -866,10 +928,12 @@ namespace CardShopCoop.Sync
                 Result("trade declined - the customer moves on");
                 return;
             }
-            if (op != OpAccept) return;
+            if (op != OpAccept)
+                return;
 
             var data = FiTradeData?.GetValue(cust) as CustomerTradeData;
-            if (data == null) data = PreRoll(cm, cust);
+            if (data == null)
+                data = PreRoll(cm, cust);
             if (data == null || data.m_CardData_L == null)
             {
                 Result("couldn't read the offer - the host must serve this one");
@@ -942,7 +1006,11 @@ namespace CardShopCoop.Sync
             }
             finally
             {
-                try { cm.m_IsPlayerTrading = false; } catch { }
+                try
+                {
+                    cm.m_IsPlayerTrading = false;
+                }
+                catch { }
             }
 
             if (accepted)
@@ -988,14 +1056,23 @@ namespace CardShopCoop.Sync
             FiPausing?.SetValue(cust, false);
             try
             {
-                if (cust.m_ExclaimationMesh != null) cust.m_ExclaimationMesh.SetActive(false);
-                if (cust.m_InteractCollider != null) cust.m_InteractCollider.SetActive(false);
+                if (cust.m_ExclaimationMesh != null)
+                    cust.m_ExclaimationMesh.SetActive(false);
+                if (cust.m_InteractCollider != null)
+                    cust.m_InteractCollider.SetActive(false);
             }
             catch { }
             FiHasTraded?.SetValue(cust, true);
-            try { counter?.CustomerFinishTradingCard(); } catch { }
+            try
+            {
+                counter?.CustomerFinishTradingCard();
+            }
+            catch { }
             FiTradeCounter?.SetValue(cust, null);
-            try { MiDetermine?.Invoke(cust, null); }
+            try
+            {
+                MiDetermine?.Invoke(cust, null);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe finish: " + e.Message); }
         }
 
@@ -1030,13 +1107,17 @@ namespace CardShopCoop.Sync
                     Remaining = e.Remaining,
                 };
                 _offers[o.CounterIdx] = o;
-                if (o.Known) PrepareCarrier(o);
-                else ReleaseCarrier(o.CounterIdx);
+                if (o.Known)
+                    PrepareCarrier(o);
+                else
+                    ReleaseCarrier(o.CounterIdx);
             }
             var staleCarriers = new List<int>();
             foreach (var kv in _carriers)
-                if (!_offers.ContainsKey(kv.Key)) staleCarriers.Add(kv.Key);
-            for (int i = 0; i < staleCarriers.Count; i++) ReleaseCarrier(staleCarriers[i]);
+                if (!_offers.ContainsKey(kv.Key))
+                    staleCarriers.Add(kv.Key);
+            for (int i = 0; i < staleCarriers.Count; i++)
+                ReleaseCarrier(staleCarriers[i]);
             _staleTimer = 0f;
             if (count != _lastOfferCount) // change-only, so the 6s heal doesn't spam
             {
@@ -1058,9 +1139,11 @@ namespace CardShopCoop.Sync
         private void PrepareCarrier(Offer offer)
         {
             var cm = Cm();
-            if (cm == null) return;
+            if (cm == null)
+                return;
             var list = cm.GetCustomerList();
-            if (offer.CustomerIndex >= list.Count || list[offer.CustomerIndex] == null) return;
+            if (offer.CustomerIndex >= list.Count || list[offer.CustomerIndex] == null)
+                return;
             var carrier = list[offer.CustomerIndex];
             if (_carriers.TryGetValue(offer.CounterIdx, out var old) && !ReferenceEquals(old, carrier))
                 ReleaseCarrier(offer.CounterIdx);
@@ -1069,12 +1152,16 @@ namespace CardShopCoop.Sync
             _carrierGeneration[offer.CounterIdx] = offer.CustomerGeneration;
             bool carrierVisualsCaptured = _carrierRenderers.ContainsKey(offer.CounterIdx);
             RegisterSync.AllowClientCustomerLifecycle = true;
-            try { carrier.ActivateCustomer(false, false); }
+            try
+            {
+                carrier.ActivateCustomer(false, false);
+            }
             finally { RegisterSync.AllowClientCustomerLifecycle = false; }
             var sm = Sm();
             var counter = sm != null && offer.CounterIdx < sm.m_CashierCounterList.Count
                 ? sm.m_CashierCounterList[offer.CounterIdx] : null;
-            if (counter == null) return;
+            if (counter == null)
+                return;
             FiTradeCounter?.SetValue(carrier, counter);
             FiTradeData?.SetValue(carrier, new CustomerTradeData
             {
@@ -1090,8 +1177,10 @@ namespace CardShopCoop.Sync
             carrier.transform.position = offer.Position;
             carrier.transform.rotation = Quaternion.Euler(0f, offer.Yaw, 0f);
             carrier.gameObject.SetActive(true);
-            if (carrier.m_ExclaimationMesh != null) carrier.m_ExclaimationMesh.SetActive(true);
-            if (carrier.m_InteractCollider != null) carrier.m_InteractCollider.SetActive(true);
+            if (carrier.m_ExclaimationMesh != null)
+                carrier.m_ExclaimationMesh.SetActive(true);
+            if (carrier.m_InteractCollider != null)
+                carrier.m_InteractCollider.SetActive(true);
             if (!carrierVisualsCaptured)
             {
                 var renderers = carrier.GetComponentsInChildren<Renderer>(true);
@@ -1099,7 +1188,8 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < renderers.Length; i++)
                 {
                     states[i] = renderers[i] != null && renderers[i].enabled;
-                    if (renderers[i] != null) renderers[i].enabled = false;
+                    if (renderers[i] != null)
+                        renderers[i].enabled = false;
                 }
                 _carrierRenderers[offer.CounterIdx] = renderers;
                 _carrierRendererStates[offer.CounterIdx] = states;
@@ -1107,7 +1197,8 @@ namespace CardShopCoop.Sync
             else if (_carrierRenderers.TryGetValue(offer.CounterIdx, out var existingRenderers))
             {
                 for (int i = 0; i < existingRenderers.Length; i++)
-                    if (existingRenderers[i] != null) existingRenderers[i].enabled = false;
+                    if (existingRenderers[i] != null)
+                        existingRenderers[i].enabled = false;
             }
             NpcSync.SuppressedCustomer.Add(offer.CustomerIndex);
             NpcSync.AttachExistingCustomer(offer.CustomerIndex, offer.CustomerGeneration, carrier, keepPuppetVisible: true);
@@ -1115,12 +1206,14 @@ namespace CardShopCoop.Sync
 
         private void ReleaseCarrier(int counterIdx)
         {
-            if (!_carriers.TryGetValue(counterIdx, out var carrier)) return;
+            if (!_carriers.TryGetValue(counterIdx, out var carrier))
+                return;
             if (_carrierRenderers.TryGetValue(counterIdx, out var renderers)
                 && _carrierRendererStates.TryGetValue(counterIdx, out var states))
             {
                 for (int i = 0; i < renderers.Length && i < states.Length; i++)
-                    if (renderers[i] != null) renderers[i].enabled = states[i];
+                    if (renderers[i] != null)
+                        renderers[i].enabled = states[i];
             }
             if (_carrierSource.TryGetValue(counterIdx, out var source))
                 NpcSync.DetachExistingCustomer(source, carrier);
@@ -1134,7 +1227,8 @@ namespace CardShopCoop.Sync
         private void TeardownCarriers()
         {
             var keys = new List<int>(_carriers.Keys);
-            for (int i = 0; i < keys.Count; i++) ReleaseCarrier(keys[i]);
+            for (int i = 0; i < keys.Count; i++)
+                ReleaseCarrier(keys[i]);
             _carriers.Clear();
             _carrierSource.Clear();
             _carrierGeneration.Clear();
@@ -1155,9 +1249,11 @@ namespace CardShopCoop.Sync
         /// decline keys never fired: the manager is never within 3.5m of a counter.</summary>
         private Transform PlayerBody()
         {
-            if (_playerTf != null) return _playerTf;
+            if (_playerTf != null)
+                return _playerTf;
             var ipc = Ipc();
-            if (ipc == null) return null;
+            if (ipc == null)
+                return null;
             _playerTf = ipc.m_WalkerCtrl != null ? ipc.m_WalkerCtrl.transform : ipc.transform;
             return _playerTf;
         }
@@ -1214,7 +1310,8 @@ namespace CardShopCoop.Sync
         /// short throttle, 3.5m reach from the WALKER body).</summary>
         public void ClientTick(float dt, bool inGame)
         {
-            if (_opThrottle > 0f) _opThrottle -= dt;
+            if (_opThrottle > 0f)
+                _opThrottle -= dt;
 
             if (_offers.Count > 0)
             {
@@ -1227,17 +1324,21 @@ namespace CardShopCoop.Sync
                 {
                     // count down locally; an expired offer means the customer walked off
                     _keyBuf.Clear();
-                    foreach (var kv in _offers) _keyBuf.Add(kv.Key);
+                    foreach (var kv in _offers)
+                        _keyBuf.Add(kv.Key);
                     for (int i = 0; i < _keyBuf.Count; i++)
                     {
                         // the counter whose native screen the guest currently holds must NOT
                         // be locally timed out mid-interaction - defer to the host, which
                         // drops the offer from its broadcast when the customer truly leaves
-                        if (_keyBuf[i] == _pendingCounter) continue;
+                        if (_keyBuf[i] == _pendingCounter)
+                            continue;
                         var o = _offers[_keyBuf[i]];
                         o.Remaining -= dt;
-                        if (o.Remaining <= 0f) _offers.Remove(_keyBuf[i]);
-                        else _offers[_keyBuf[i]] = o;
+                        if (o.Remaining <= 0f)
+                            _offers.Remove(_keyBuf[i]);
+                        else
+                            _offers[_keyBuf[i]] = o;
                     }
                 }
             }
@@ -1267,7 +1368,11 @@ namespace CardShopCoop.Sync
                 else if (!_offers.ContainsKey(_pendingCounter))
                 {
                     CoopPlugin.Log.LogInfo("TradeServe client: offer vanished while the screen was open - closing it");
-                    try { screen.CloseScreen(); } catch { }
+                    try
+                    {
+                        screen.CloseScreen();
+                    }
+                    catch { }
                     // S2: CloseScreen -> OnCloseScreen -> m_CurrentCustomer.OnPressStopInteract
                     // runs BEFORE base.OnCloseScreen (which is what actually hides the screen -
                     // UIScreenBase.OnCloseScreen sets m_IsScreenOpen=false + m_ScreenGroup
@@ -1284,7 +1389,8 @@ namespace CardShopCoop.Sync
                         {
                             FiScrIsOpen?.SetValue(screen, false);
                             var group = FiScrGroup?.GetValue(screen) as GameObject;
-                            if (group != null) group.SetActive(false);
+                            if (group != null)
+                                group.SetActive(false);
                             RestorePlayerFromUiMode();
                         }
                         catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe client: hard teardown: " + e.Message); }

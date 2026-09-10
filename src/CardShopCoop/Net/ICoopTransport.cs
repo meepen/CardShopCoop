@@ -10,9 +10,18 @@ namespace CardShopCoop.Net
     /// </summary>
     public interface ICoopTransport : IDisposable
     {
-        ConcurrentQueue<InMsg> Incoming { get; }
-        ConcurrentQueue<int> Disconnects { get; }
-        ConcurrentQueue<int> Connects { get; }
+        ConcurrentQueue<InMsg> Incoming
+        {
+            get;
+        }
+        ConcurrentQueue<int> Disconnects
+        {
+            get;
+        }
+        ConcurrentQueue<int> Connects
+        {
+            get;
+        }
 
         void Send(int connId, INetMessage message);
         void Broadcast(INetMessage message);
@@ -21,7 +30,10 @@ namespace CardShopCoop.Net
         /// unreliably and never delays behind bulk transfers. TCP treats it as Send.</summary>
         void SendTransient(int connId, INetMessage message);
         void BroadcastTransient(INetMessage message);
-        int ConnectionCount { get; }
+        int ConnectionCount
+        {
+            get;
+        }
         double SecondsSinceLastRecv(int connId);
         List<int> ConnIds();
         void Kick(int connId);
@@ -33,6 +45,9 @@ namespace CardShopCoop.Net
 
         /// <summary>Peer-silence tolerance. Steam needs a longer window because its
         /// keepalives also run on the (freezable) main thread.</summary>
-        double TimeoutSeconds { get; }
+        double TimeoutSeconds
+        {
+            get;
+        }
     }
 }

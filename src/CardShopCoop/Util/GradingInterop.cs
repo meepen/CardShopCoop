@@ -159,7 +159,8 @@ namespace CardShopCoop.Util
             try
             {
                 var arr = FiAllowed?.GetValue(null) as Array;
-                if (arr == null) return "<unreadable>";
+                if (arr == null)
+                    return "<unreadable>";
                 var parts = new string[arr.Length];
                 for (int i = 0; i < arr.Length; i++)
                 {
@@ -180,7 +181,8 @@ namespace CardShopCoop.Util
         {
             get
             {
-                if (PiCurrentCompany == null) return NoCompany;
+                if (PiCurrentCompany == null)
+                    return NoCompany;
                 try
                 {
                     object v = PiCurrentCompany.GetValue(null, null);
@@ -197,10 +199,12 @@ namespace CardShopCoop.Util
         /// enrol a job under it.</summary>
         public static bool IsAllowedCompany(int id)
         {
-            if (TCompany == null || !TCompany.IsEnum) return false;
+            if (TCompany == null || !TCompany.IsEnum)
+                return false;
             try
             {
-                if (!Enum.IsDefined(TCompany, Enum.ToObject(TCompany, id))) return false;
+                if (!Enum.IsDefined(TCompany, Enum.ToObject(TCompany, id)))
+                    return false;
                 var arr = FiAllowed?.GetValue(null) as Array;
                 if (arr == null)
                 {
@@ -212,7 +216,8 @@ namespace CardShopCoop.Util
                     return n != null && n != "Custom";
                 }
                 for (int i = 0; i < arr.Length; i++)
-                    if (Convert.ToInt32(arr.GetValue(i)) == id) return true;
+                    if (Convert.ToInt32(arr.GetValue(i)) == id)
+                        return true;
                 return false;
             }
             catch { return false; }
@@ -221,8 +226,12 @@ namespace CardShopCoop.Util
         /// <summary>Display name of a company ordinal, for the enrollment log line.</summary>
         public static string CompanyName(int id)
         {
-            if (TCompany == null || !TCompany.IsEnum) return id.ToString();
-            try { return Enum.GetName(TCompany, Enum.ToObject(TCompany, id)) ?? id.ToString(); }
+            if (TCompany == null || !TCompany.IsEnum)
+                return id.ToString();
+            try
+            {
+                return Enum.GetName(TCompany, Enum.ToObject(TCompany, id)) ?? id.ToString();
+            }
             catch { return id.ToString(); }
         }
 
@@ -267,7 +276,8 @@ namespace CardShopCoop.Util
         /// :10209). embeddedCompany is passed as the same company, exactly as GO does at :12886.</summary>
         public static bool RegisterJobCompany(GradeCardSubmitSet set, int companyId, bool useCheats)
         {
-            if (set == null || MiOnJobSubmitted == null) return false;
+            if (set == null || MiOnJobSubmitted == null)
+                return false;
             try
             {
                 object company = Enum.ToObject(TCompany, companyId);
@@ -281,8 +291,12 @@ namespace CardShopCoop.Util
         /// treats jobId &lt;= 0 as "no pre-roll" at maturation (:8022), so 0 is a safe sentinel.</summary>
         public static int NextJobId()
         {
-            if (MiNextJobId == null) return 0;
-            try { return Convert.ToInt32(MiNextJobId.Invoke(null, null)); }
+            if (MiNextJobId == null)
+                return 0;
+            try
+            {
+                return Convert.ToInt32(MiNextJobId.Invoke(null, null));
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.NextJobId: " + e.Message); return 0; }
         }
 
@@ -291,8 +305,12 @@ namespace CardShopCoop.Util
         /// to the literal layout. NEVER trust the result without <see cref="TryDecodeServiceLevel"/>.</summary>
         public static int EncodeServiceLevel(int companyId, int tier, int jobId)
         {
-            if (MiEncode == null) return 0;
-            try { return Convert.ToInt32(MiEncode.Invoke(null, new object[] { Enum.ToObject(TCompany, companyId), tier, jobId })); }
+            if (MiEncode == null)
+                return 0;
+            try
+            {
+                return Convert.ToInt32(MiEncode.Invoke(null, new object[] { Enum.ToObject(TCompany, companyId), tier, jobId }));
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.EncodeServiceLevel: " + e.Message); return 0; }
         }
 
@@ -303,12 +321,14 @@ namespace CardShopCoop.Util
         {
             companyId = -1;
             tier = raw;
-            if (MiTryDecode == null) return false;
+            if (MiTryDecode == null)
+                return false;
             try
             {
                 var args = new object[] { raw, Enum.ToObject(TCompany, 0), 0 };
                 bool ok = (bool)MiTryDecode.Invoke(null, args);
-                if (!ok) return false;
+                if (!ok)
+                    return false;
                 companyId = Convert.ToInt32(args[1]);
                 tier = Convert.ToInt32(args[2]);
                 return true;
@@ -320,7 +340,8 @@ namespace CardShopCoop.Util
         /// grade and burns its cert NOW, so maturation just applies the stored result.</summary>
         public static bool PreRollJob(GradeCardSubmitSet set, int companyId, bool useCheats, int jobId)
         {
-            if (set == null || MiPreRoll == null) return false;
+            if (set == null || MiPreRoll == null)
+                return false;
             try
             {
                 MiPreRoll.Invoke(null, new object[] { set, Enum.ToObject(TCompany, companyId), useCheats, jobId });
@@ -372,8 +393,10 @@ namespace CardShopCoop.Util
         {
             get
             {
-                if (!Present) return VanillaSubmitSlots;
-                if (_maxSubmitSlots > 0) return _maxSubmitSlots;
+                if (!Present)
+                    return VanillaSubmitSlots;
+                if (_maxSubmitSlots > 0)
+                    return _maxSubmitSlots;
                 int v = GoSubmitSlotsFallback;
                 string how = "GO 3.4.2 decompile literal (MAX_SLOTS unreadable)";
                 try
@@ -384,8 +407,13 @@ namespace CardShopCoop.Util
                         int raw = Convert.ToInt32(fi.GetRawConstantValue());
                         // Never below vanilla (a smaller cap would start dropping cards the
                         // vanilla screen can hold) and never past the byte the wire carries.
-                        if (raw >= VanillaSubmitSlots && raw <= 255) { v = raw; how = "GradingSlotExpansionPatches.MAX_SLOTS"; }
-                        else CoopPlugin.Log.LogWarning($"GradingInterop: GO MAX_SLOTS = {raw} is out of the usable 8..255 range - using {v}");
+                        if (raw >= VanillaSubmitSlots && raw <= 255)
+                        {
+                            v = raw;
+                            how = "GradingSlotExpansionPatches.MAX_SLOTS";
+                        }
+                        else
+                            CoopPlugin.Log.LogWarning($"GradingInterop: GO MAX_SLOTS = {raw} is out of the usable 8..255 range - using {v}");
                     }
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.MaxSubmitSlots: " + e.Message); }
@@ -401,10 +429,15 @@ namespace CardShopCoop.Util
         /// or when GO is absent. Call on delta/price RECEIVE only, never in a per-frame loop.</summary>
         public static void Remember(CardData card)
         {
-            if (card == null || card.cardGrade <= 10 || MiRemember == null) return;
+            if (card == null || card.cardGrade <= 10 || MiRemember == null)
+                return;
             // REFUSE rather than paper over: see CertFreeForCard.
-            if (!CertFreeForCard(card)) return;
-            try { MiRemember.Invoke(null, new object[] { card, card.cardGrade }); }
+            if (!CertFreeForCard(card))
+                return;
+            try
+            {
+                MiRemember.Invoke(null, new object[] { card, card.cardGrade });
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingInterop.Remember: " + e.Message); }
         }
 
@@ -412,17 +445,26 @@ namespace CardShopCoop.Util
         /// card's own cardGrade). Used on SEND so a display's transient 1-10 isn't forwarded.</summary>
         public static int Encoded(CardData card)
         {
-            if (card == null) return 0;
-            if (MiGetEncoded == null) return card.cardGrade;
-            try { return (int)MiGetEncoded.Invoke(null, new object[] { card }); }
+            if (card == null)
+                return 0;
+            if (MiGetEncoded == null)
+                return card.cardGrade;
+            try
+            {
+                return (int)MiGetEncoded.Invoke(null, new object[] { card });
+            }
             catch { return card.cardGrade; }
         }
 
         /// <summary>Decode an encoded grade to its real 1-10 value (identity for a bare 1-10).</summary>
         public static int Actual(int encoded)
         {
-            if (encoded <= 10 || MiActual == null) return encoded;
-            try { return (int)MiActual.Invoke(null, new object[] { encoded }); }
+            if (encoded <= 10 || MiActual == null)
+                return encoded;
+            try
+            {
+                return (int)MiActual.Invoke(null, new object[] { encoded });
+            }
             catch { return encoded; }
         }
 
@@ -497,17 +539,22 @@ namespace CardShopCoop.Util
 
         private static bool CertFreeForCard(CardData card)
         {
-            if (MiHasBinding == null || MiIsBoundTo == null) return true;
+            if (MiHasBinding == null || MiIsBoundTo == null)
+                return true;
             // A FAKE-flagged encoding is never burned or bound by GO itself
             // (RememberForExternalMod :5919 skips both), so there is nothing here to protect.
-            if (CheatFlagged(card.cardGrade)) return true;
+            if (CheatFlagged(card.cardGrade))
+                return true;
             int companyId, cert;
-            if (!DecodeCert(card.cardGrade, out companyId, out cert)) return true;
+            if (!DecodeCert(card.cardGrade, out companyId, out cert))
+                return true;
             try
             {
                 object company = Enum.ToObject(TCompany, companyId);
-                if (!(bool)MiHasBinding.Invoke(null, new object[] { company, cert })) return true;
-                if ((bool)MiIsBoundTo.Invoke(null, new object[] { company, cert, card })) return true;
+                if (!(bool)MiHasBinding.Invoke(null, new object[] { company, cert }))
+                    return true;
+                if ((bool)MiIsBoundTo.Invoke(null, new object[] { company, cert, card }))
+                    return true;
             }
             catch { return true; }
 
@@ -544,7 +591,8 @@ namespace CardShopCoop.Util
         /// from a card path with no session at all.</summary>
         private static string CardIdent(CardData card)
         {
-            if (card == null) return "(null card)";
+            if (card == null)
+                return "(null card)";
             try
             {
                 return card.monsterType + "/" + card.expansionType
@@ -562,7 +610,8 @@ namespace CardShopCoop.Util
         {
             companyId = -1;
             cert = 0;
-            if (encoded <= 10 || MiDecodeFull == null) return false;
+            if (encoded <= 10 || MiDecodeFull == null)
+                return false;
             try
             {
                 var args = new object[] { encoded, Enum.ToObject(TCompany, 0), 0, 0 };
@@ -580,7 +629,8 @@ namespace CardShopCoop.Util
         public static long CertKey(int encoded)
         {
             int company, cert;
-            if (!DecodeCert(encoded, out company, out cert)) return 0L;
+            if (!DecodeCert(encoded, out company, out cert))
+                return 0L;
             return ((long)company << 32) | (uint)cert;
         }
 
@@ -589,8 +639,12 @@ namespace CardShopCoop.Util
         /// on the other is the duplicate-cert sweep having fired, not a missing card.</summary>
         public static bool CheatFlagged(int encoded)
         {
-            if (MiIsCheat == null) return false;
-            try { return (bool)MiIsCheat.Invoke(null, new object[] { encoded }); }
+            if (MiIsCheat == null)
+                return false;
+            try
+            {
+                return (bool)MiIsCheat.Invoke(null, new object[] { encoded });
+            }
             catch { return false; }
         }
 
@@ -752,7 +806,8 @@ namespace CardShopCoop.Util
         public static List<GradedEntry> BuildGradedCertInventory()
         {
             var sm0 = Shelves();
-            if (sm0 == null || !sm0.m_FinishLoadingObjectData) return null;
+            if (sm0 == null || !sm0.m_FinishLoadingObjectData)
+                return null;
 
             var list = new List<GradedEntry>();
             var seen = new HashSet<string>();
@@ -776,7 +831,8 @@ namespace CardShopCoop.Util
                 var sm = Shelves();
                 var shelves = sm == null ? null : sm.m_CardShelfList;
                 if (shelves != null)
-                    for (int i = 0; i < shelves.Count; i++) AddShelfCards(list, seen, shelves[i]);
+                    for (int i = 0; i < shelves.Count; i++)
+                        AddShelfCards(list, seen, shelves[i]);
             });
 
             Step("card/item combi shelves", () =>
@@ -784,7 +840,8 @@ namespace CardShopCoop.Util
                 var sm = Shelves();
                 var combi = sm == null ? null : sm.m_CardItemCombiShelfList;
                 if (combi != null)
-                    for (int i = 0; i < combi.Count; i++) AddShelfCards(list, seen, combi[i]);
+                    for (int i = 0; i < combi.Count; i++)
+                        AddShelfCards(list, seen, combi[i]);
             });
 
             Step("card packaging boxes", () =>
@@ -793,7 +850,8 @@ namespace CardShopCoop.Util
                 var boxes = rm == null ? null : rm.m_CardPackagingBoxList;
                 if (boxes != null)
                     for (int i = 0; i < boxes.Count; i++)
-                        if (boxes[i] != null) AddAll(list, seen, boxes[i].GetCardDataList());
+                        if (boxes[i] != null)
+                            AddAll(list, seen, boxes[i].GetCardDataList());
             });
 
             Step("card storage shelves", () =>
@@ -860,7 +918,8 @@ namespace CardShopCoop.Util
             Step("the grading submit screen's scratch set", () =>
             {
                 var set = CPlayerData.m_CurrentGradeCardSubmitSet;
-                if (set != null) AddAll(list, seen, set.m_CardDataList);
+                if (set != null)
+                    AddAll(list, seen, set.m_CardDataList);
             });
 
             return list;
@@ -873,7 +932,10 @@ namespace CardShopCoop.Util
         /// is warned about by name rather than swallowed.</summary>
         private static void Step(string what, Action body)
         {
-            try { body(); }
+            try
+            {
+                body();
+            }
             catch (Exception e)
             {
                 CoopPlugin.Log.LogWarning("GradingInterop: could not read "
@@ -893,7 +955,8 @@ namespace CardShopCoop.Util
         private static ShelfManager _shelfMgr;
         private static ShelfManager Shelves()
         {
-            if (_shelfMgr == null) _shelfMgr = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_shelfMgr == null)
+                _shelfMgr = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _shelfMgr;
         }
 
@@ -903,7 +966,8 @@ namespace CardShopCoop.Util
         private static RestockManager _restockMgr;
         private static RestockManager Restock()
         {
-            if (_restockMgr == null) _restockMgr = UnityEngine.Object.FindObjectOfType<RestockManager>();
+            if (_restockMgr == null)
+                _restockMgr = UnityEngine.Object.FindObjectOfType<RestockManager>();
             return _restockMgr;
         }
 
@@ -914,23 +978,29 @@ namespace CardShopCoop.Util
         /// m_StoredCardList would count state no module mirrors - the banned direction.</summary>
         private static void AddShelfCards(List<GradedEntry> list, HashSet<string> seen, CardShelf shelf)
         {
-            if (shelf == null) return;
+            if (shelf == null)
+                return;
             var comps = shelf.GetCardCompartmentList();
-            if (comps == null) return;
+            if (comps == null)
+                return;
             for (int i = 0; i < comps.Count; i++)
             {
                 var comp = comps[i];
-                if (comp == null || comp.m_StoredCardList == null || comp.m_StoredCardList.Count == 0) continue;
+                if (comp == null || comp.m_StoredCardList == null || comp.m_StoredCardList.Count == 0)
+                    continue;
                 var card3d = comp.m_StoredCardList[0];
-                if (card3d == null || card3d.m_Card3dUI == null || card3d.m_Card3dUI.m_CardUI == null) continue;
+                if (card3d == null || card3d.m_Card3dUI == null || card3d.m_Card3dUI.m_CardUI == null)
+                    continue;
                 Add(list, seen, card3d.m_Card3dUI.m_CardUI.GetCardData());
             }
         }
 
         private static void AddAll(List<GradedEntry> list, HashSet<string> seen, List<CardData> cards)
         {
-            if (cards == null) return;
-            for (int i = 0; i < cards.Count; i++) Add(list, seen, cards[i]);
+            if (cards == null)
+                return;
+            for (int i = 0; i < cards.Count; i++)
+                Add(list, seen, cards[i]);
         }
 
         /// <summary>Compact (save-shaped) rows, where the encoded grade rides in <c>amount</c>.
@@ -963,19 +1033,25 @@ namespace CardShopCoop.Util
         private static void AddAllCompact(List<GradedEntry> list, HashSet<string> seen,
             List<CompactCardDataAmount> rows)
         {
-            if (rows == null) return;
+            if (rows == null)
+                return;
             for (int i = 0; i < rows.Count; i++)
             {
                 var row = rows[i];
-                if (row == null || row.amount <= 10) continue;
-                try { Add(list, seen, CPlayerData.GetGradedCardData(row)); }
+                if (row == null || row.amount <= 10)
+                    continue;
+                try
+                {
+                    Add(list, seen, CPlayerData.GetGradedCardData(row));
+                }
                 catch { }
             }
         }
 
         private static void Add(List<GradedEntry> list, HashSet<string> seen, CardData c)
         {
-            if (c == null || c.cardGrade <= 10) return;
+            if (c == null || c.cardGrade <= 10)
+                return;
             // A BLANKED SUBMIT SLOT IS NOT A CARD. GradedCardSubmitSelectScreen.OnCloseScreen
             // hands every staged card back and then sets monsterType = EMonsterType.None on the
             // slot it abandoned (decompiled/GradedCardSubmitSelectScreen.cs:92) - it does NOT
@@ -985,7 +1061,8 @@ namespace CardShopCoop.Util
             // with the genuine card that still holds that cert, and the check reported a CERT
             // COLLISION - the one category that means "Grading Overhaul is about to call both
             // copies FAKE" - for a slot that no longer holds anything.
-            if (c.monsterType == EMonsterType.None) return;
+            if (c.monsterType == EMonsterType.None)
+                return;
 
             var e = new GradedEntry
             {
@@ -999,7 +1076,8 @@ namespace CardShopCoop.Util
             // Deduped because this is an EXISTENCE set, not a count. The duplicate rows GO's
             // anti-cheat sweep leaves behind would otherwise inflate one side's total and make a
             // pure set difference read as a count difference.
-            if (seen.Add(e.Key)) list.Add(e);
+            if (seen.Add(e.Key))
+                list.Add(e);
         }
     }
 }

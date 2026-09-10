@@ -150,7 +150,8 @@ namespace CardShopCoop.Sync
         /// separate rejections.</summary>
         private static bool GoVetoesSubmit(GradedCardSubmitSelectScreen screen)
         {
-            if (!Util.GradingInterop.Present) return false;
+            if (!Util.GradingInterop.Present)
+                return false;
             if (MiGoSubmitVeto == null)
             {
                 if (!_goVetoWarned)
@@ -162,7 +163,10 @@ namespace CardShopCoop.Sync
                 }
                 return false;
             }
-            try { return !(bool)MiGoSubmitVeto.Invoke(null, new object[] { screen }); }
+            try
+            {
+                return !(bool)MiGoSubmitVeto.Invoke(null, new object[] { screen });
+            }
             catch (Exception e)
             {
                 if (!_goVetoWarned)
@@ -189,7 +193,8 @@ namespace CardShopCoop.Sync
 
         private static InventoryBase Inv()
         {
-            if (_inv == null) _inv = UnityEngine.Object.FindObjectOfType<InventoryBase>();
+            if (_inv == null)
+                _inv = UnityEngine.Object.FindObjectOfType<InventoryBase>();
             return _inv;
         }
 
@@ -205,7 +210,10 @@ namespace CardShopCoop.Sync
             ApplyingRemote = false;
         }
 
-        public static void ActivateLive(GradingSync instance) { Instance = instance; }
+        public static void ActivateLive(GradingSync instance)
+        {
+            Instance = instance;
+        }
 
         public void Reset()
         {
@@ -354,7 +362,8 @@ namespace CardShopCoop.Sync
 
         public static bool SubmitPrefix(GradedCardSubmitSelectScreen __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             try
             {
                 ClientSubmit(__instance);
@@ -375,17 +384,21 @@ namespace CardShopCoop.Sync
         private static void ClientSubmit(GradedCardSubmitSelectScreen screen)
         {
             // mid canvas fade: vanilla no-ops, so do we
-            if (FiShowingAlpha?.GetValue(screen) is bool s && s) return;
-            if (FiHidingAlpha?.GetValue(screen) is bool hd && hd) return;
+            if (FiShowingAlpha?.GetValue(screen) is bool s && s)
+                return;
+            if (FiHidingAlpha?.GetValue(screen) is bool hd && hd)
+                return;
 
             var set = CPlayerData.m_CurrentGradeCardSubmitSet;
-            if (set == null || set.m_CardDataList == null) return;
+            if (set == null || set.m_CardDataList == null)
+                return;
 
             var picked = new List<CardData>();
             for (int i = 0; i < set.m_CardDataList.Count; i++)
             {
                 var c = set.m_CardDataList[i];
-                if (c != null && c.monsterType != EMonsterType.None) picked.Add(c);
+                if (c != null && c.monsterType != EMonsterType.None)
+                    picked.Add(c);
             }
             if (picked.Count == 0)
             {
@@ -440,7 +453,8 @@ namespace CardShopCoop.Sync
 
             int serviceLevel = set.m_ServiceLevel;
             var inv = Inv();
-            if (inv == null) return; // no live world = nothing vanilla could price either
+            if (inv == null)
+                return; // no live world = nothing vanilla could price either
             var svc = inv.m_MonsterData_SO.GetGradeCardServiceData(serviceLevel);
             // Vanilla-flat fee: the number the ORIGINAL EvaluateTotalCost would show. This is
             // the fallback whenever Grading Overhaul isn't driving the screen.
@@ -537,11 +551,16 @@ namespace CardShopCoop.Sync
                 m_ServiceLevel = serviceLevel,
                 m_CardDataList = new List<CardData>(cap),
             };
-            for (int j = 0; j < cap; j++) fresh.m_CardDataList.Add(new CardData());
+            for (int j = 0; j < cap; j++)
+                fresh.m_CardDataList.Add(new CardData());
             CPlayerData.m_CurrentGradeCardSubmitSet = fresh;
 
             screen.CloseScreen();
-            try { screen.m_GradeCardWebsiteUIScreen?.UpdateSubmissionProgressPanelUI(); } catch { }
+            try
+            {
+                screen.m_GradeCardWebsiteUIScreen?.UpdateSubmissionProgressPanelUI();
+            }
+            catch { }
             try
             {
                 CSingleton<InteractionPlayerController>.Instance
@@ -579,17 +598,21 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < 1.5f) return;
+            if (_timer < 1.5f)
+                return;
             _timer -= 1.5f;
             try
             {
                 var list = CPlayerData.m_GradeCardInProgressList;
-                if (list == null) return;
+                if (list == null)
+                    return;
                 int hash = ComputeHash(list);
                 _heal += 1.5f;
-                if (hash == _lastHash && _heal < 15f) return;
+                if (hash == _lastHash && _heal < 15f)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
                 BroadcastState?.Invoke(BuildState(list));
@@ -622,7 +645,8 @@ namespace CardShopCoop.Sync
         {
             for (int i = 0; i < cards.Count; i++)
             {
-                if (cards[i] == null) continue;
+                if (cards[i] == null)
+                    continue;
                 // Wire-derived card: AddCard would mis-index (vanilla) or throw on
                 // CardCountList[-1] (EPL) for content this PC doesn't have. Unlike the delta
                 // path there is nothing to relay here - the restore IS the host's AddCard - so
@@ -650,7 +674,8 @@ namespace CardShopCoop.Sync
 
         private static string CardIdentity(CardData card)
         {
-            if (card == null) return "<null>";
+            if (card == null)
+                return "<null>";
             return $"monster={card.monsterType}, expansion={card.expansionType}, border={card.borderType}, grade={card.cardGrade}, foil={card.isFoil}, destiny={card.isDestiny}, champion={card.isChampionCard}";
         }
 
@@ -773,7 +798,8 @@ namespace CardShopCoop.Sync
             if (n > cap)
             {
                 CoopPlugin.Log.LogWarning($"GradingSync: malformed grading submission from conn {senderConn} (cardCount {n} > cap {cap}) - submission refused whole; returning its {cards.Count} cards to the shared binder so they are not destroyed");
-                if (CoopCore.Role == CoopRole.Host) ReturnRejectedCards(cards, senderConn);
+                if (CoopCore.Role == CoopRole.Host)
+                    ReturnRejectedCards(cards, senderConn);
                 return;
             }
             float clientFee = message.Total; // GO present: the REAL bill the guest saw; GO absent: client's flat view
@@ -782,7 +808,8 @@ namespace CardShopCoop.Sync
             // anything; see the enrollment block after the set is enrolled.
             int companyId = message.CompanyId;
 
-            if (CoopCore.Role != CoopRole.Host || cards.Count == 0) return;
+            if (CoopCore.Role != CoopRole.Host || cards.Count == 0)
+                return;
 
             GradeCardSubmitSet set = null;
             bool coinQueued = false;
@@ -818,7 +845,8 @@ namespace CardShopCoop.Sync
                 int refused = 0;
                 for (int i = 0; i < cards.Count; i++)
                 {
-                    if (CoopCore.CardSetInstalledHere(cards[i])) continue;
+                    if (CoopCore.CardSetInstalledHere(cards[i]))
+                        continue;
                     refused++;
                     CoopCore.WarnRefusedCard(cards[i], "grade-submit");
                 }
@@ -989,7 +1017,10 @@ namespace CardShopCoop.Sync
         public void ClientApplyState(GradingStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(message); }
+            try
+            {
+                ClientApplyInner(message);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
@@ -1044,7 +1075,8 @@ namespace CardShopCoop.Sync
                 // the number: Version + PluginHash parity means a GO guest can only ever join a GO
                 // host.
                 int n = Mathf.Min(se.Cards.Count, Util.GradingInterop.MaxSubmitSlots);
-                for (int j = 0; j < n; j++) set.m_CardDataList.Add(se.Cards[j]);
+                for (int j = 0; j < n; j++)
+                    set.m_CardDataList.Add(se.Cards[j]);
                 // MaxSlots (8) is right HERE and only here: it is the vanilla SHAPE.
                 // GradedCardSetCheckStatusScreen repaints exactly m_CardDataList.Count
                 // panels; short lists would leave stale cards from the previous page. A set
@@ -1113,12 +1145,14 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < list.Count && i < MaxSets; i++)
             {
                 var set = list[i];
-                if (set == null) continue;
+                if (set == null)
+                    continue;
                 hash = hash * 31 + set.m_ServiceLevel;
                 hash = hash * 31 + set.m_DayPassed;
                 hash = hash * 31 + (int)(set.m_MinutePassed / 60f);
                 var cards = set.m_CardDataList;
-                if (cards == null) continue;
+                if (cards == null)
+                    continue;
                 // Same bound as BuildState. The change detector has to cover everything the wire
                 // carries: hashing only the first eight cards of a 52-card set meant an edit past
                 // the eighth produced an IDENTICAL hash, so the rebroadcast never fired and the
@@ -1126,7 +1160,8 @@ namespace CardShopCoop.Sync
                 for (int j = 0; j < cards.Count && j < Util.GradingInterop.MaxSubmitSlots; j++)
                 {
                     var c = cards[j];
-                    if (c == null) continue;
+                    if (c == null)
+                        continue;
                     hash = hash * 31 + (int)c.monsterType;
                     hash = hash * 31 + (int)c.expansionType;
                     hash = hash * 31 + (int)c.borderType;

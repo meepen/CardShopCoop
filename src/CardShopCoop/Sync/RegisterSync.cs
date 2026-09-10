@@ -77,7 +77,10 @@ namespace CardShopCoop.Sync
         public static bool SuppressClientRegisterEvents;
         public static bool ApplyingAuthoritativePayment;
 
-        public RegisterSync() { _live = this; }
+        public RegisterSync()
+        {
+            _live = this;
+        }
 
         /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
         public static void ClearLive()
@@ -88,12 +91,16 @@ namespace CardShopCoop.Sync
             ApplyingAuthoritativePayment = false;
         }
 
-        public static void ActivateLive(RegisterSync instance) { _live = instance; }
+        public static void ActivateLive(RegisterSync instance)
+        {
+            _live = instance;
+        }
 
         private ShelfManager _sm;
         private ShelfManager Sm()
         {
-            if (_sm == null) _sm = Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
@@ -153,17 +160,21 @@ namespace CardShopCoop.Sync
         {
             var drop = new List<int>();
             foreach (var kv in _guestManned)
-                if (kv.Value == connId) drop.Add(kv.Key);
-            foreach (int idx in drop) _guestManned.Remove(idx);
+                if (kv.Value == connId)
+                    drop.Add(kv.Key);
+            foreach (int idx in drop)
+                _guestManned.Remove(idx);
         }
 
         /// <summary>Host: is this counter claimed by a guest? (worker + host-serve gate)</summary>
         public static bool IsGuestManned(InteractableCashierCounter counter)
         {
             var t = _live;
-            if (t == null || counter == null) return false;
+            if (t == null || counter == null)
+                return false;
             var sm = t.Sm();
-            if (sm == null) return false;
+            if (sm == null)
+                return false;
             int idx = sm.m_CashierCounterList.IndexOf(counter);
             return idx >= 0 && t._guestManned.ContainsKey(idx);
         }
@@ -178,13 +189,17 @@ namespace CardShopCoop.Sync
         public static void ForceExitManned()
         {
             var t = _live;
-            if (t == null) return;
-            if (CoopCore.Role != CoopRole.Client || t._localManned < 0) return;
+            if (t == null)
+                return;
+            if (CoopCore.Role != CoopRole.Client || t._localManned < 0)
+                return;
             int idx = t._localManned;
             var sm = t.Sm();
-            if (sm == null || idx >= sm.m_CashierCounterList.Count) return;
+            if (sm == null || idx >= sm.m_CashierCounterList.Count)
+                return;
             var counter = sm.m_CashierCounterList[idx];
-            if (counter == null) return;
+            if (counter == null)
+                return;
             try
             {
                 // ManningExitPostfix (postfix on OnPressEsc) releases _localManned and
@@ -199,9 +214,11 @@ namespace CardShopCoop.Sync
         public static bool IsCarrier(Customer c)
         {
             var t = _live;
-            if (t == null || c == null) return false;
+            if (t == null || c == null)
+                return false;
             foreach (var kv in t._carrier)
-                if (ReferenceEquals(kv.Value, c)) return true;
+                if (ReferenceEquals(kv.Value, c))
+                    return true;
             return false;
         }
 
@@ -259,18 +276,24 @@ namespace CardShopCoop.Sync
         public static bool ManningBlockPrefix(InteractableCashierCounter __instance)
         {
             var t = _live;
-            if (t == null || __instance == null) return true;
+            if (t == null || __instance == null)
+                return true;
             if (CoopCore.Role == CoopRole.Host)
                 return !IsGuestManned(__instance);
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
 
             var sm = t.Sm();
-            if (sm == null) return true;
+            if (sm == null)
+                return true;
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
-            if (idx < 0) return true;
+            if (idx < 0)
+                return true;
             byte who = t._mannedBy.TryGetValue(idx, out byte w) ? w : (byte)0;
-            if (who == 1) return false;                       // the host player mans it
-            if (who == 2 && t._localManned != idx) return false; // another guest mans it
+            if (who == 1)
+                return false;                       // the host player mans it
+            if (who == 2 && t._localManned != idx)
+                return false; // another guest mans it
             return true;
         }
 
@@ -280,12 +303,16 @@ namespace CardShopCoop.Sync
         public static void ManningEnterPostfix(InteractableCashierCounter __instance)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return;
-            if (!__instance.IsMannedByPlayer()) return; // the block prefix stopped the vanilla entry
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
+            if (!__instance.IsMannedByPlayer())
+                return; // the block prefix stopped the vanilla entry
             var sm = t.Sm();
-            if (sm == null) return;
+            if (sm == null)
+                return;
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             t._localManned = idx;
             t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpEnter });
             CoopPlugin.Log.LogDebug($"RegisterSync client: manned counter {idx}");
@@ -295,11 +322,14 @@ namespace CardShopCoop.Sync
         public static void ManningExitPostfix(InteractableCashierCounter __instance)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
             var sm = t.Sm();
-            if (sm == null) return;
+            if (sm == null)
+                return;
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             t._localManned = -1;
             t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpExit });
             CoopPlugin.Log.LogDebug($"RegisterSync client: left counter {idx}");
@@ -308,7 +338,8 @@ namespace CardShopCoop.Sync
         /// <summary>Host: a worker must never serve a guest-claimed station.</summary>
         public static bool WorkerGatePrefix(InteractableCashierCounter __instance)
         {
-            if (CoopCore.Role != CoopRole.Host) return true;
+            if (CoopCore.Role != CoopRole.Host)
+                return true;
             return !IsGuestManned(__instance);
         }
 
@@ -317,14 +348,18 @@ namespace CardShopCoop.Sync
         public static bool FinishPrefix(InteractableCashierCounter __instance)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return true;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+                return true;
             var sm = t.Sm();
-            if (sm == null) return true;
+            if (sm == null)
+                return true;
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
-            if (idx < 0 || !t._carrier.ContainsKey(idx)) return true;
+            if (idx < 0 || !t._carrier.ContainsKey(idx))
+                return true;
 
             bool isCard = FiIsUsingCard?.GetValue(__instance) is bool c && c;
-            if (!(FiChangeReady?.GetValue(__instance) is bool ready) || !ready) return true;
+            if (!(FiChangeReady?.GetValue(__instance) is bool ready) || !ready)
+                return true;
             double total = FiTotalScanned?.GetValue(__instance) is double d ? d : 0.0;
             CoopPlugin.Log.LogDebug($"RegisterSync client: finish counter {idx} card={isCard}");
             t.SendOp?.Invoke(new RegisterOpMessage
@@ -344,7 +379,8 @@ namespace CardShopCoop.Sync
 
         public static bool EvaluateFinishPrefix(Customer __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || __instance == null) return true;
+            if (CoopCore.Role != CoopRole.Client || __instance == null)
+                return true;
             var t = _live;
             return t == null || !t._carrier.ContainsValue(__instance);
         }
@@ -355,12 +391,16 @@ namespace CardShopCoop.Sync
         public static void EvaluateCreditCardPrefix(InteractableCashierCounter __instance, ref double value)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
             var sm = t.Sm();
-            if (sm == null) return;
+            if (sm == null)
+                return;
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
-            if (idx < 0 || !t._carrier.ContainsKey(idx)) return;
-            if (!t._authoritativeTotal.TryGetValue(idx, out double total)) return;
+            if (idx < 0 || !t._carrier.ContainsKey(idx))
+                return;
+            if (!t._authoritativeTotal.TryGetValue(idx, out double total))
+                return;
 
             // Preserve the amount entered by the player; only replace the expected
             // checkout total used by vanilla's validation.
@@ -370,14 +410,19 @@ namespace CardShopCoop.Sync
         /// <summary>Client: the counter just entered TakingCash - forward the payment roll the game made.</summary>
         public static void StateChangePostfix(InteractableCashierCounter __instance, ECashierCounterState state)
         {
-            if (ApplyingAuthoritativePayment) return;
+            if (ApplyingAuthoritativePayment)
+                return;
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return;
-            if (state != ECashierCounterState.TakingCash) return;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
+            if (state != ECashierCounterState.TakingCash)
+                return;
             var sm = t.Sm();
-            if (sm == null) return;
+            if (sm == null)
+                return;
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
-            if (idx < 0 || !t._carrier.ContainsKey(idx)) return;
+            if (idx < 0 || !t._carrier.ContainsKey(idx))
+                return;
 
             bool isCard = FiIsUsingCard?.GetValue(__instance) is bool c && c;
             double paid = FiPaidAmount?.GetValue(__instance) is double p ? p : 0.0;
@@ -395,9 +440,12 @@ namespace CardShopCoop.Sync
         public static void ScanItemPostfix(InteractableScanItem __instance)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null || __instance.m_Item == null) return;
-            if (!t._itemBag.TryGetValue(__instance.m_Item, out int k)) return;
-            if (!t._itemCounter.TryGetValue(__instance.m_Item, out int idx)) return;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null || __instance.m_Item == null)
+                return;
+            if (!t._itemBag.TryGetValue(__instance.m_Item, out int k))
+                return;
+            if (!t._itemCounter.TryGetValue(__instance.m_Item, out int idx))
+                return;
             t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpScanItem, BagIndex = (byte)k });
             CoopPlugin.Log.LogDebug($"RegisterSync client: scan item {k} @ {idx}");
         }
@@ -406,9 +454,12 @@ namespace CardShopCoop.Sync
         public static void ScanCardPostfix(InteractableCard3d __instance)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return;
-            if (!t._cardBag.TryGetValue(__instance, out int k)) return;
-            if (!t._cardCounter.TryGetValue(__instance, out int idx)) return;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
+            if (!t._cardBag.TryGetValue(__instance, out int k))
+                return;
+            if (!t._cardCounter.TryGetValue(__instance, out int idx))
+                return;
             t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpScanCard, BagIndex = (byte)k });
             CoopPlugin.Log.LogDebug($"RegisterSync client: scan card {k} @ {idx}");
         }
@@ -417,14 +468,18 @@ namespace CardShopCoop.Sync
         public static void TakePaymentPostfix(InteractableCustomerCash __instance)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null) return;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
             var cust = FiCashCustomer?.GetValue(__instance) as Customer;
-            if (cust == null || !t._carrier.ContainsValue(cust)) return;
+            if (cust == null || !t._carrier.ContainsValue(cust))
+                return;
             var counter = FiQueueCounter?.GetValue(cust) as InteractableCashierCounter;
             var sm = t.Sm();
-            if (counter == null || sm == null) return;
+            if (counter == null || sm == null)
+                return;
             int idx = sm.m_CashierCounterList.IndexOf(counter);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             bool isCard = __instance.m_IsCard;
             t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpTookPayment, IsCard = isCard });
             CoopPlugin.Log.LogDebug($"RegisterSync client: took payment @ {idx} card={isCard}");
@@ -436,11 +491,14 @@ namespace CardShopCoop.Sync
         private static void EmitChange(InteractableCounterMoneyChange __instance, bool takingBack)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null || __instance.m_CashierCounter == null) return;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null || __instance.m_CashierCounter == null)
+                return;
             var sm = t.Sm();
-            if (sm == null) return;
+            if (sm == null)
+                return;
             int idx = sm.m_CashierCounterList.IndexOf(__instance.m_CashierCounter);
-            if (idx < 0 || !t._carrier.ContainsKey(idx)) return;
+            if (idx < 0 || !t._carrier.ContainsKey(idx))
+                return;
             double value = __instance.m_ValueDouble;
             t.SendOp?.Invoke(new RegisterOpMessage
             {
@@ -455,26 +513,31 @@ namespace CardShopCoop.Sync
         // ---------------- host tick ----------------
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _stateTimer += dt;
             _cartPollTimer += dt;
             var sm = Sm();
-            if (sm == null || sm.m_CashierCounterList == null) return;
+            if (sm == null || sm.m_CashierCounterList == null)
+                return;
 
             bool cartChanged = false;
             if (_cartPollTimer >= CartPollInterval)
             {
                 _cartPollTimer -= CartPollInterval;
-                if (_cartPollTimer > CartPollInterval) _cartPollTimer = CartPollInterval;
+                if (_cartPollTimer > CartPollInterval)
+                    _cartPollTimer = CartPollInterval;
                 for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
                 {
                     var counter = sm.m_CashierCounterList[i];
-                    if (counter == null) continue;
+                    if (counter == null)
+                        continue;
                     int custId = counter.m_CurrentCustomer != null && counter.m_CurrentCustomer.m_IsActive
                         ? counter.m_CurrentCustomer.GetInstanceID() : 0;
                     int signature = CartSignature(counter, counter.m_CurrentCustomer, custId);
                     if (_cartCustomer.TryGetValue(i, out int prev) && prev == custId
-                        && _cartSignature.TryGetValue(i, out var oldSignature) && oldSignature == signature) continue;
+                        && _cartSignature.TryGetValue(i, out var oldSignature) && oldSignature == signature)
+                        continue;
                     _cartCustomer[i] = custId;
                     _cartSignature[i] = signature;
                     cartChanged = true;
@@ -483,14 +546,16 @@ namespace CardShopCoop.Sync
             if (cartChanged)
             {
                 var cartMsg = WriteCarts();
-                if (cartMsg != null) BroadcastCart?.Invoke(cartMsg);
+                if (cartMsg != null)
+                    BroadcastCart?.Invoke(cartMsg);
             }
 
             if (_stateTimer >= 0.5f)
             {
                 _stateTimer -= 0.5f;
                 var stateMsg = WriteStates();
-                if (stateMsg != null) BroadcastState?.Invoke(stateMsg);
+                if (stateMsg != null)
+                    BroadcastState?.Invoke(stateMsg);
             }
         }
 
@@ -501,7 +566,8 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
             {
                 var counter = sm.m_CashierCounterList[i];
-                if (counter == null) continue;
+                if (counter == null)
+                    continue;
                 var cust = counter.m_CurrentCustomer;
                 bool active = cust != null && cust.m_IsActive;
 
@@ -510,21 +576,25 @@ namespace CardShopCoop.Sync
                     Index = (byte)i,
                     CustomerId = active ? cust.GetInstanceID() : 0, // opaque change token (0 = customer left)
                 };
-                if (!active) { message.Entries.Add(entry); continue; }
+                if (!active)
+                {
+                    message.Entries.Add(entry);
+                    continue;
+                }
                 entry.CustomerIndex = (ushort)CustomerListIndex(cust); // for the client's carrier pick + NpcSync suppression
                 entry.CustomerGeneration = NpcSync.GetCustomerGeneration(cust);
                 entry.CharacterName = cust.m_CharacterCustom != null ? cust.m_CharacterCustom.CharacterName : "";
                 entry.State = (byte)counter.m_CashierCounterState;
-                    entry.IsCard = FiIsUsingCard?.GetValue(counter) is bool card && card;
-                    entry.PaidAmount = FiPaidAmount?.GetValue(counter) is double paid ? paid : 0.0;
-                    entry.TotalScanned = FiTotalScanned?.GetValue(counter) is double total ? total : 0.0;
-                    entry.CustomerTotalScanned = FiCustTotal?.GetValue(cust) is float customerTotal
-                        ? customerTotal : (float)entry.TotalScanned;
+                entry.IsCard = FiIsUsingCard?.GetValue(counter) is bool card && card;
+                entry.PaidAmount = FiPaidAmount?.GetValue(counter) is double paid ? paid : 0.0;
+                entry.TotalScanned = FiTotalScanned?.GetValue(counter) is double total ? total : 0.0;
+                entry.CustomerTotalScanned = FiCustTotal?.GetValue(cust) is float customerTotal
+                    ? customerTotal : (float)entry.TotalScanned;
                 var items = cust.GetItemInBagList();
                 for (int k = 0; k < items.Count; k++)
                 {
                     entry.ItemTypes.Add(items[k].GetItemType());
-                        entry.ItemPrices.Add(EffectiveItemPrice(items[k]));
+                    entry.ItemPrices.Add(EffectiveItemPrice(items[k]));
                 }
                 for (int k = 0; k < items.Count; k++)
                     entry.ItemScanned.Add(items[k].m_InteractableScanItem != null && !items[k].m_InteractableScanItem.IsNotScanned());
@@ -544,23 +614,27 @@ namespace CardShopCoop.Sync
         private static int CustomerListIndex(Customer cust)
         {
             var cm = Object.FindObjectOfType<CustomerManager>();
-            if (cm == null) return 0;
+            if (cm == null)
+                return 0;
             var list = cm.GetCustomerList();
             for (int i = 0; i < list.Count; i++)
-                if (ReferenceEquals(list[i], cust)) return i;
+                if (ReferenceEquals(list[i], cust))
+                    return i;
             return 0;
         }
 
         private static float EffectiveItemPrice(Item item)
         {
-            if (item == null) return 0f;
+            if (item == null)
+                return 0f;
             float price = item.GetCurrentPrice();
             return price > 0f ? price : CPlayerData.GetItemMarketPrice(item.GetItemType());
         }
 
         private static float EffectiveCardPrice(InteractableCard3d card)
         {
-            if (card == null || card.m_Card3dUI == null || card.m_Card3dUI.m_CardUI == null) return 0f;
+            if (card == null || card.m_Card3dUI == null || card.m_Card3dUI.m_CardUI == null)
+                return 0f;
             float price = card.GetCurrentPrice();
             return price > 0f ? price : CPlayerData.GetCardMarketPrice(card.m_Card3dUI.m_CardUI.GetCardData());
         }
@@ -575,8 +649,9 @@ namespace CardShopCoop.Sync
                 h = h * 31 + ((FiIsUsingCard?.GetValue(counter) is bool card && card) ? 1 : 0);
                 h = h * 31 + (FiPaidAmount?.GetValue(counter)?.GetHashCode() ?? 0);
                 h = h * 31 + (FiTotalScanned?.GetValue(counter)?.GetHashCode() ?? 0);
-                if (cust == null) return h;
-            var items = cust.GetItemInBagList();
+                if (cust == null)
+                    return h;
+                var items = cust.GetItemInBagList();
                 h = h * 31 + items.Count;
                 for (int i = 0; i < items.Count; i++)
                 {
@@ -585,7 +660,7 @@ namespace CardShopCoop.Sync
                     h = h * 31 + (items[i] != null && items[i].m_InteractableScanItem != null
                         && !items[i].m_InteractableScanItem.IsNotScanned() ? 1 : 0);
                 }
-            var cards = cust.GetCardInBagList();
+                var cards = cust.GetCardInBagList();
                 h = h * 31 + cards.Count;
                 for (int i = 0; i < cards.Count; i++)
                 {
@@ -616,7 +691,8 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
             {
                 var counter = sm.m_CashierCounterList[i];
-                if (counter == null) continue;
+                if (counter == null)
+                    continue;
                 byte manned = counter.IsMannedByPlayer() ? (byte)1 : (_guestManned.ContainsKey(i) ? (byte)2 : (byte)0);
                 message.Entries.Add(new RegisterStateEntry { Index = (byte)i, Manned = manned });
             }
@@ -629,19 +705,28 @@ namespace CardShopCoop.Sync
             int idx = message.Index;
             byte op = message.Op;
             var sm = Sm();
-            if (sm == null || idx >= sm.m_CashierCounterList.Count) return;
+            if (sm == null || idx >= sm.m_CashierCounterList.Count)
+                return;
             var counter = sm.m_CashierCounterList[idx];
-            if (counter == null) return;
+            if (counter == null)
+                return;
 
             if (op == OpEnter)
             {
-                if (counter.IsMannedByPlayer()) return;                       // host player already there
-                if (_guestManned.TryGetValue(idx, out int owner) && owner != connId) return; // another guest owns it
+                if (counter.IsMannedByPlayer())
+                    return;                       // host player already there
+                if (_guestManned.TryGetValue(idx, out int owner) && owner != connId)
+                    return; // another guest owns it
                 _guestManned[idx] = connId;
-                try { counter.StopCurrentWorker(); } catch { }
+                try
+                {
+                    counter.StopCurrentWorker();
+                }
+                catch { }
                 _cartSignature.Remove(idx);
                 var cartMsg = WriteCarts();
-                if (cartMsg != null) BroadcastCart?.Invoke(cartMsg);
+                if (cartMsg != null)
+                    BroadcastCart?.Invoke(cartMsg);
                 CoopPlugin.Log.LogDebug($"RegisterSync host: guest {connId} manned counter {idx}");
                 return;
             }
@@ -653,73 +738,82 @@ namespace CardShopCoop.Sync
                 return;
             }
             // serving actions are only accepted from the owner
-            if (!_guestManned.TryGetValue(idx, out int who) || who != connId) return;
+            if (!_guestManned.TryGetValue(idx, out int who) || who != connId)
+                return;
             var cust = counter.m_CurrentCustomer;
-            if (cust == null || !cust.m_IsActive) return;
+            if (cust == null || !cust.m_IsActive)
+                return;
 
             switch (op)
             {
                 case OpScanItem:
-                {
-                    int k = message.BagIndex;
-                    var items = cust.GetItemInBagList();
-                    if (k < 0 || k >= items.Count) return;
-                    var item = items[k];
-                    if (item == null || item.m_InteractableScanItem == null || !item.m_InteractableScanItem.IsNotScanned()) return;
-                    item.m_InteractableScanItem.OnMouseButtonUp();
-                    break;
-                }
+                    {
+                        int k = message.BagIndex;
+                        var items = cust.GetItemInBagList();
+                        if (k < 0 || k >= items.Count)
+                            return;
+                        var item = items[k];
+                        if (item == null || item.m_InteractableScanItem == null || !item.m_InteractableScanItem.IsNotScanned())
+                            return;
+                        item.m_InteractableScanItem.OnMouseButtonUp();
+                        break;
+                    }
                 case OpScanCard:
-                {
-                    int k = message.BagIndex;
-                    var cards = cust.GetCardInBagList();
-                    if (k < 0 || k >= cards.Count) return;
-                    var card = cards[k];
-                    if (card == null || !card.IsNotScanned()) return;
-                    card.OnMouseButtonUp();
-                    break;
-                }
+                    {
+                        int k = message.BagIndex;
+                        var cards = cust.GetCardInBagList();
+                        if (k < 0 || k >= cards.Count)
+                            return;
+                        var card = cards[k];
+                        if (card == null || !card.IsNotScanned())
+                            return;
+                        card.OnMouseButtonUp();
+                        break;
+                    }
                 case OpTakingPayment:
-                {
-                    // The final host-side scan already ran Customer.EvaluateFinishScanItem,
-                    // which selected payment, presented the real cash/card, and entered the
-                    // vanilla TakingCash state. This notification is only a client-side
-                    // convergence marker; never replace the customer flow with a manual state
-                    // write here. (message.IsCard / message.PaidAmount are carried but the
-                    // host's flow is authoritative.)
-                    break;
-                }
+                    {
+                        // The final host-side scan already ran Customer.EvaluateFinishScanItem,
+                        // which selected payment, presented the real cash/card, and entered the
+                        // vanilla TakingCash state. This notification is only a client-side
+                        // convergence marker; never replace the customer flow with a manual state
+                        // write here. (message.IsCard / message.PaidAmount are carried but the
+                        // host's flow is authoritative.)
+                        break;
+                    }
                 case OpTookPayment:
-                {
-                    // host's customer/payment object is authoritative (message.IsCard carried but unused)
-                    cust.m_CustomerCash.OnMouseButtonUp();
-                    break;
-                }
+                    {
+                        // host's customer/payment object is authoritative (message.IsCard carried but unused)
+                        cust.m_CustomerCash.OnMouseButtonUp();
+                        break;
+                    }
                 case OpGiveChange:
-                {
-                    int buttonIndex = message.ChangeIndex;
-                    double value = message.ChangeValue;
-                    bool takingBack = message.TakingBack;
-                    var money = counter.m_InteractableCounterMoneyChangeList;
-                    if (buttonIndex < 0 || buttonIndex >= money.Count) return;
-                    var button = money[buttonIndex];
-                    if (takingBack) button.OnRightMouseButtonUp();
-                    else button.OnMouseButtonUp();
-                    break;
-                }
+                    {
+                        int buttonIndex = message.ChangeIndex;
+                        double value = message.ChangeValue;
+                        bool takingBack = message.TakingBack;
+                        var money = counter.m_InteractableCounterMoneyChangeList;
+                        if (buttonIndex < 0 || buttonIndex >= money.Count)
+                            return;
+                        var button = money[buttonIndex];
+                        if (takingBack)
+                            button.OnRightMouseButtonUp();
+                        else
+                            button.OnMouseButtonUp();
+                        break;
+                    }
                 case OpFinishCash:
-                {
-                    counter.OnPressSpaceBar();
-                    CoopPlugin.Log.LogDebug($"RegisterSync host: completed a cash sale at counter {idx}");
-                    break;
-                }
+                    {
+                        counter.OnPressSpaceBar();
+                        CoopPlugin.Log.LogDebug($"RegisterSync host: completed a cash sale at counter {idx}");
+                        break;
+                    }
                 case OpFinishCard:
-                {
-                    double total = FiTotalScanned?.GetValue(counter) is double hostTotal ? hostTotal : 0.0;
-                    counter.EvaluateCreditCard(total);
-                    CoopPlugin.Log.LogDebug($"RegisterSync host: completed a card sale at counter {idx}");
-                    break;
-                }
+                    {
+                        double total = FiTotalScanned?.GetValue(counter) is double hostTotal ? hostTotal : 0.0;
+                        counter.EvaluateCreditCard(total);
+                        CoopPlugin.Log.LogDebug($"RegisterSync host: completed a card sale at counter {idx}");
+                        break;
+                    }
             }
         }
 
@@ -786,9 +880,11 @@ namespace CardShopCoop.Sync
         private void ApplyCart(Cart c, int cid)
         {
             var sm = Sm();
-            if (sm == null || c.Index >= sm.m_CashierCounterList.Count) return;
+            if (sm == null || c.Index >= sm.m_CashierCounterList.Count)
+                return;
             var counter = sm.m_CashierCounterList[c.Index];
-            if (counter == null) return;
+            if (counter == null)
+                return;
             // only re-build when this counter's customer actually changed; an unrelated
             // counter's cart broadcast must never reset a sale in progress elsewhere
             if (_cartGen.TryGetValue(c.Index, out int prev) && prev == cid)
@@ -823,23 +919,43 @@ namespace CardShopCoop.Sync
             _cartScanSignature[c.Index] = c.ScanSignature;
 
             var carrier = GetCarrier(c.Index, c.CustomerIndex);
-            if (carrier == null) return;
+            if (carrier == null)
+                return;
             AllowClientCustomerLifecycle = true;
-            try { carrier.ActivateCustomer(canSpawnSmelly: false, randomizeCharacterMesh: false); }
+            try
+            {
+                carrier.ActivateCustomer(canSpawnSmelly: false, randomizeCharacterMesh: false);
+            }
             finally { AllowClientCustomerLifecycle = false; }
             if (carrier.m_CharacterCustom != null && !string.IsNullOrEmpty(c.CharacterName))
             {
                 carrier.m_CharacterCustom.CharacterName = c.CharacterName;
                 carrier.m_CharacterCustom.Initialize();
             }
-            try { FiQueueCounter?.SetValue(carrier, counter); } catch { }
+            try
+            {
+                FiQueueCounter?.SetValue(carrier, counter);
+            }
+            catch { }
 
             // fresh customer: reset the scan/bookkeeping state the carrier carries across pool reuse.
             // ActivateCustomer is blocked on the client, so the cash was never Init()'d to the
             // carrier - wire it now or the presented payment would click into a null customer.
-            try { FiScannedCount?.SetValue(carrier, 0); } catch { }
-            try { FiCustTotal?.SetValue(carrier, 0.0); } catch { }
-            try { carrier.m_CustomerCash.Init(carrier); } catch { }
+            try
+            {
+                FiScannedCount?.SetValue(carrier, 0);
+            }
+            catch { }
+            try
+            {
+                FiCustTotal?.SetValue(carrier, 0.0);
+            }
+            catch { }
+            try
+            {
+                carrier.m_CustomerCash.Init(carrier);
+            }
+            catch { }
 
             // The served customer is LIVE at the register: activate the carrier so its real
             // interactable cash (a child, in its hands) is the presented, clickable payment, and
@@ -917,42 +1033,53 @@ namespace CardShopCoop.Sync
 
         private bool CartContentsMatch(Cart c)
         {
-            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return false;
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null)
+                return false;
             var items = customer.GetItemInBagList();
-            if (items.Count != c.ItemTypes.Count) return false;
+            if (items.Count != c.ItemTypes.Count)
+                return false;
             for (int i = 0; i < items.Count; i++)
-                if (items[i] == null || items[i].GetItemType() != c.ItemTypes[i]) return false;
+                if (items[i] == null || items[i].GetItemType() != c.ItemTypes[i])
+                    return false;
             var cards = customer.GetCardInBagList();
-            if (cards.Count != c.Cards.Count) return false;
+            if (cards.Count != c.Cards.Count)
+                return false;
             for (int i = 0; i < cards.Count; i++)
                 if (cards[i] == null || cards[i].m_Card3dUI == null || cards[i].m_Card3dUI.m_CardUI == null
-                    || !cards[i].m_Card3dUI.m_CardUI.GetCardData().IsSameCardDataType(c.Cards[i])) return false;
+                    || !cards[i].m_Card3dUI.m_CardUI.GetCardData().IsSameCardDataType(c.Cards[i]))
+                    return false;
             return true;
         }
 
         private void ApplyCartPrices(Cart c)
         {
-            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return;
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null)
+                return;
             var items = customer.GetItemInBagList();
             for (int i = 0; i < items.Count && i < c.ItemPrices.Count; i++)
-                if (items[i] != null) items[i].SetCurrentPrice(c.ItemPrices[i]);
+                if (items[i] != null)
+                    items[i].SetCurrentPrice(c.ItemPrices[i]);
             var cards = customer.GetCardInBagList();
             for (int i = 0; i < cards.Count && i < c.CardPrices.Count; i++)
-                if (cards[i] != null) cards[i].SetCurrentPrice(c.CardPrices[i]);
+                if (cards[i] != null)
+                    cards[i].SetCurrentPrice(c.CardPrices[i]);
         }
 
         private static int LocalScanCount(InteractableCashierCounter counter)
         {
             var screen = FiCashScreen?.GetValue(counter) as UI_CashCounterScreen;
-            if (screen == null) return 0;
+            if (screen == null)
+                return 0;
             int count = 0;
-            foreach (var pair in screen.GetItemScannedListDict()) count += pair.Value;
+            foreach (var pair in screen.GetItemScannedListDict())
+                count += pair.Value;
             return count;
         }
 
         private void ApplyScannedItems(Cart c)
         {
-            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return;
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null)
+                return;
             var items = customer.GetItemInBagList();
             for (int i = 0; i < c.ItemScanned.Count && i < items.Count; i++)
                 if (c.ItemScanned[i] && items[i] != null && items[i].m_InteractableScanItem != null
@@ -966,11 +1093,14 @@ namespace CardShopCoop.Sync
 
         private void ApplyAuthoritativeTotal(Cart c)
         {
-            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return;
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null)
+                return;
             var sm = Sm();
-            if (sm == null || c.Index >= sm.m_CashierCounterList.Count) return;
+            if (sm == null || c.Index >= sm.m_CashierCounterList.Count)
+                return;
             var counter = sm.m_CashierCounterList[c.Index];
-            if (counter == null) return;
+            if (counter == null)
+                return;
             _authoritativeTotal[c.Index] = c.TotalScanned;
             FiTotalScanned?.SetValue(counter, c.TotalScanned);
             FiCustTotal?.SetValue(customer, c.CustomerTotalScanned);
@@ -998,13 +1128,17 @@ namespace CardShopCoop.Sync
 
         private void ApplyAuthoritativePhase(Cart c)
         {
-            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return;
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null)
+                return;
             var sm = Sm();
-            if (sm == null || c.Index >= sm.m_CashierCounterList.Count) return;
+            if (sm == null || c.Index >= sm.m_CashierCounterList.Count)
+                return;
             var counter = sm.m_CashierCounterList[c.Index];
-            if (counter == null) return;
+            if (counter == null)
+                return;
             var state = (ECashierCounterState)c.State;
-            if (state != ECashierCounterState.ScanningItem) return;
+            if (state != ECashierCounterState.ScanningItem)
+                return;
             if ((int)counter.m_CashierCounterState > (int)ECashierCounterState.ScanningItem)
                 return;
             FiIsUsingCard?.SetValue(counter, false);
@@ -1013,15 +1147,18 @@ namespace CardShopCoop.Sync
             FiCurrentMoneyChange?.SetValue(counter, 0.0);
             FiTooMuchChange?.SetValue(counter, false);
             customer.m_CustomerCash.gameObject.SetActive(false);
-            if (customer.m_Anim != null) customer.m_Anim.SetBool("HandingOverCash", false);
+            if (customer.m_Anim != null)
+                customer.m_Anim.SetBool("HandingOverCash", false);
             counter.UpdateCashierCounterState(state);
         }
 
         private void ApplyAuthoritativePayment(Cart c)
         {
-            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null) return;
+            if (!_carrier.TryGetValue(c.Index, out var customer) || customer == null)
+                return;
             var sm = Sm();
-            if (sm == null || c.Index >= sm.m_CashierCounterList.Count) return;
+            if (sm == null || c.Index >= sm.m_CashierCounterList.Count)
+                return;
             var counter = sm.m_CashierCounterList[c.Index];
             ApplyingAuthoritativePayment = true;
             try
@@ -1048,9 +1185,11 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                if (type == EItemType.None) return null;
+                if (type == EItemType.None)
+                    return null;
                 var meshData = InventoryBase.GetItemMeshData(type);
-                if (meshData == null) return null;
+                if (meshData == null)
+                    return null;
                 var item = ItemSpawnManager.GetItem(ctf);
                 item.SetMesh(meshData.mesh, meshData.material, type,
                     meshData.meshSecondary, meshData.materialSecondary, meshData.materialList);
@@ -1070,7 +1209,8 @@ namespace CardShopCoop.Sync
                 // the item on the counter it must be a real physics object. Keeping this
                 // kinematic made the client presentation differ from the host and prevented
                 // the item from settling/interacting naturally.
-                if (item.m_Rigidbody != null) item.m_Rigidbody.isKinematic = false;
+                if (item.m_Rigidbody != null)
+                    item.m_Rigidbody.isKinematic = false;
                 item.m_InteractableScanItem.enabled = true;
                 item.m_InteractableScanItem.RegisterScanItem(carrier, counter.m_ScannedItemLerpPos);
                 carrier.m_ItemInBagList.Add(item);
@@ -1088,10 +1228,12 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                if (cardData == null || cardData.monsterType == EMonsterType.None) return null;
+                if (cardData == null || cardData.monsterType == EMonsterType.None)
+                    return null;
                 var cardUI = CSingleton<Card3dUISpawner>.Instance.GetCardUI();
                 var card = ShelfManager.SpawnInteractableObject(EObjectType.Card3d).GetComponent<InteractableCard3d>();
-                if (card == null) return null;
+                if (card == null)
+                    return null;
                 cardUI.m_CardUI.SetCardUI(cardData);
                 card.SetCardUIFollow(cardUI);
                 card.SetEnableCollision(false);
@@ -1108,7 +1250,8 @@ namespace CardShopCoop.Sync
                 card.m_Card3dUI.gameObject.SetActive(true);
                 card.gameObject.SetActive(true);
                 card.m_Collider.enabled = true;
-                if (card.m_Rigidbody != null) card.m_Rigidbody.isKinematic = false;
+                if (card.m_Rigidbody != null)
+                    card.m_Rigidbody.isKinematic = false;
                 card.RegisterScanCard(carrier, counter.m_ScannedItemLerpPos);
                 carrier.m_CardInBagList.Add(card);
                 return card;
@@ -1122,7 +1265,8 @@ namespace CardShopCoop.Sync
 
         private Customer GetCarrier(int idx, ushort customerIndex)
         {
-            if (_carrier.TryGetValue(idx, out var c) && c != null) return c;
+            if (_carrier.TryGetValue(idx, out var c) && c != null)
+                return c;
             Customer carrier = null;
             var cm = Object.FindObjectOfType<CustomerManager>();
             if (cm != null)
@@ -1132,7 +1276,11 @@ namespace CardShopCoop.Sync
                     carrier = list[customerIndex];
                 if (carrier == null)
                     for (int i = 0; i < list.Count; i++)
-                        if (list[i] != null && !_carrier.ContainsValue(list[i])) { carrier = list[i]; break; }
+                        if (list[i] != null && !_carrier.ContainsValue(list[i]))
+                        {
+                            carrier = list[i];
+                            break;
+                        }
             }
             _carrier[idx] = carrier;
             return carrier;
@@ -1147,8 +1295,10 @@ namespace CardShopCoop.Sync
             {
                 byte idx = entries[i].Index;
                 byte manned = entries[i].Manned;
-                if (manned != 0) _mannedBy[idx] = manned;
-                else _mannedBy.Remove(idx);
+                if (manned != 0)
+                    _mannedBy[idx] = manned;
+                else
+                    _mannedBy.Remove(idx);
             }
         }
 
@@ -1156,12 +1306,26 @@ namespace CardShopCoop.Sync
         private void ClientSettle(int idx)
         {
             var sm = Sm();
-            if (sm == null || idx >= sm.m_CashierCounterList.Count) return;
+            if (sm == null || idx >= sm.m_CashierCounterList.Count)
+                return;
             var counter = sm.m_CashierCounterList[idx];
-            if (counter == null) return;
-            try { counter.UpdateCashierCounterState(ECashierCounterState.Idle); } catch { }
-            try { counter.UpdateCurrentCustomer(null); } catch { }
-            try { counter.SetPlsaticBagVisibility(false); } catch { }
+            if (counter == null)
+                return;
+            try
+            {
+                counter.UpdateCashierCounterState(ECashierCounterState.Idle);
+            }
+            catch { }
+            try
+            {
+                counter.UpdateCurrentCustomer(null);
+            }
+            catch { }
+            try
+            {
+                counter.SetPlsaticBagVisibility(false);
+            }
+            catch { }
             Teardown(idx);
         }
 
@@ -1173,19 +1337,23 @@ namespace CardShopCoop.Sync
                 if (isCard)
                 {
                     var credit = FiCreditScreen?.GetValue(counter) as UI_CreditCardScreen;
-                    if (credit != null) credit.ResetCounter();
+                    if (credit != null)
+                        credit.ResetCounter();
                 }
                 var screen = FiCashScreen?.GetValue(counter) as UI_CashCounterScreen;
-                if (screen != null) screen.ResetCounter();
+                if (screen != null)
+                    screen.ResetCounter();
             }
             catch (System.Exception e) { CoopPlugin.Log.LogWarning("RegisterSync client reset: " + e.Message); }
             try
             {
                 var mc = counter.m_InteractableCounterMoneyChangeList;
-                for (int i = 0; i < mc.Count; i++) mc[i].ResetAmountGiven();
+                for (int i = 0; i < mc.Count; i++)
+                    mc[i].ResetAmountGiven();
             }
             catch { }
-            if (isCard) counter.OnPressEsc();
+            if (isCard)
+                counter.OnPressEsc();
             ClientSettle(idx);
         }
 
@@ -1193,10 +1361,15 @@ namespace CardShopCoop.Sync
         {
             if (_carrier.TryGetValue(idx, out var carrier) && carrier != null)
             {
-                try { carrier.m_CustomerCash.gameObject.SetActive(false); } catch { }
+                try
+                {
+                    carrier.m_CustomerCash.gameObject.SetActive(false);
+                }
+                catch { }
                 if (carrier.m_ItemInBagList != null)
                     for (int i = carrier.m_ItemInBagList.Count - 1; i >= 0; i--)
-                        if (carrier.m_ItemInBagList[i] != null) carrier.m_ItemInBagList[i].gameObject.SetActive(false);
+                        if (carrier.m_ItemInBagList[i] != null)
+                            carrier.m_ItemInBagList[i].gameObject.SetActive(false);
                 carrier.m_ItemInBagList.Clear();
                 if (carrier.m_CardInBagList != null)
                     for (int i = carrier.m_CardInBagList.Count - 1; i >= 0; i--)
@@ -1213,11 +1386,23 @@ namespace CardShopCoop.Sync
                 NpcSync.DetachExistingCustomer(src, carrier);
             }
             var itemDrop = new List<Item>();
-            foreach (var kv in _itemCounter) if (kv.Value == idx) itemDrop.Add(kv.Key);
-            foreach (var it in itemDrop) { _itemBag.Remove(it); _itemCounter.Remove(it); }
+            foreach (var kv in _itemCounter)
+                if (kv.Value == idx)
+                    itemDrop.Add(kv.Key);
+            foreach (var it in itemDrop)
+            {
+                _itemBag.Remove(it);
+                _itemCounter.Remove(it);
+            }
             var cardDrop = new List<InteractableCard3d>();
-            foreach (var kv in _cardCounter) if (kv.Value == idx) cardDrop.Add(kv.Key);
-            foreach (var card in cardDrop) { _cardBag.Remove(card); _cardCounter.Remove(card); }
+            foreach (var kv in _cardCounter)
+                if (kv.Value == idx)
+                    cardDrop.Add(kv.Key);
+            foreach (var card in cardDrop)
+            {
+                _cardBag.Remove(card);
+                _cardCounter.Remove(card);
+            }
         }
 
         private void TeardownCarriers()
@@ -1232,7 +1417,8 @@ namespace CardShopCoop.Sync
                         carrier.m_CustomerCash.gameObject.SetActive(false);
                         carrier.gameObject.SetActive(false);
                         for (int i = carrier.m_ItemInBagList.Count - 1; i >= 0; i--)
-                        if (carrier.m_ItemInBagList[i] != null) carrier.m_ItemInBagList[i].gameObject.SetActive(false);
+                            if (carrier.m_ItemInBagList[i] != null)
+                                carrier.m_ItemInBagList[i].gameObject.SetActive(false);
                         carrier.m_ItemInBagList.Clear();
                         if (carrier.m_CardInBagList != null)
                             for (int i = carrier.m_CardInBagList.Count - 1; i >= 0; i--)
@@ -1258,7 +1444,8 @@ namespace CardShopCoop.Sync
             {
                 if (card != null)
                 {
-                    if (card.m_Card3dUI != null) card.m_Card3dUI.gameObject.SetActive(false);
+                    if (card.m_Card3dUI != null)
+                        card.m_Card3dUI.gameObject.SetActive(false);
                     card.gameObject.SetActive(false);
                 }
             }

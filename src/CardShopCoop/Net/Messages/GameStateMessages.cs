@@ -13,7 +13,13 @@ namespace CardShopCoop.Net.Messages
         // 0 = restock, 1 = furniture, 2 = license.
         public byte Kind;
         public List<PurchaseLine> Lines = new List<PurchaseLine>();
-        public MsgType Type { get { return MsgType.PurchaseRequest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.PurchaseRequest;
+            }
+        }
     }
 
     /// <summary>Host -> the client that requested a purchase. The result is addressed by
@@ -24,7 +30,13 @@ namespace CardShopCoop.Net.Messages
         public byte Kind;
         public bool Success;
         public string Text = "";
-        public MsgType Type { get { return MsgType.PurchaseResult; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.PurchaseResult;
+            }
+        }
     }
 
     public sealed class PurchaseLine
@@ -61,7 +73,13 @@ namespace CardShopCoop.Net.Messages
         public List<MarketSparseEntry> GeneratedCostPriceList = new List<MarketSparseEntry>();
         public List<MarketSparseEntry> AverageItemCostList = new List<MarketSparseEntry>();
 
-        public MsgType Type { get { return MsgType.MarketState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.MarketState;
+            }
+        }
     }
 
     /// <summary>One non-zero item price-percent-change row (index is an EItemType).</summary>
@@ -120,7 +138,13 @@ namespace CardShopCoop.Net.Messages
         public float ReviewScoreAverage;
         public List<ReportReviewEntry> Reviews = new List<ReportReviewEntry>();
 
-        public MsgType Type { get { return MsgType.ReportState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ReportState;
+            }
+        }
 
 
     }
@@ -158,7 +182,13 @@ namespace CardShopCoop.Net.Messages
         public List<TournamentPrizeSlot> PrizeSlots = new List<TournamentPrizeSlot>();
         public List<TournamentBracketEntry> Bracket = new List<TournamentBracketEntry>();
 
-        public MsgType Type { get { return MsgType.TournamentState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.TournamentState;
+            }
+        }
 
 
     }
@@ -199,7 +229,13 @@ namespace CardShopCoop.Net.Messages
     {
         public List<TableEntry> Tables = new List<TableEntry>();
 
-        public MsgType Type { get { return MsgType.TableState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.TableState;
+            }
+        }
 
 
     }
@@ -235,7 +271,13 @@ namespace CardShopCoop.Net.Messages
         public int IntA;
         public string Json;
 
-        public MsgType Type { get { return MsgType.PlayerIntent; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.PlayerIntent;
+            }
+        }
     }
 
     // ----------------------------------------------------------------- Grading
@@ -250,7 +292,13 @@ namespace CardShopCoop.Net.Messages
         public float Total;   // client's on-screen bill; host recomputes/validates
         public byte CompanyId; // Grading Overhaul company id (255 = no GO)
 
-        public MsgType Type { get { return MsgType.GradingOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.GradingOp;
+            }
+        }
 
 
     }
@@ -262,7 +310,13 @@ namespace CardShopCoop.Net.Messages
     {
         public List<GradingSetEntry> Sets = new List<GradingSetEntry>();
 
-        public MsgType Type { get { return MsgType.GradingState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.GradingState;
+            }
+        }
 
 
     }
@@ -288,7 +342,13 @@ namespace CardShopCoop.Net.Messages
         public byte CounterIdx;
         public float Price;
 
-        public MsgType Type { get { return MsgType.TradeOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.TradeOp;
+            }
+        }
 
 
     }
@@ -303,7 +363,13 @@ namespace CardShopCoop.Net.Messages
         public string Result = "";
         public List<TradeOfferEntry> Offers = new List<TradeOfferEntry>();
 
-        public MsgType Type { get { return MsgType.TradeState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.TradeState;
+            }
+        }
 
 
     }
@@ -341,7 +407,13 @@ namespace CardShopCoop.Net.Messages
         public int Count;
         public float LineCost;
 
-        public MsgType Type { get { return MsgType.OrderRequest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.OrderRequest;
+            }
+        }
 
 
     }
@@ -355,7 +427,13 @@ namespace CardShopCoop.Net.Messages
         public Vector3 Position;
         public Quaternion Rotation;
 
-        public MsgType Type { get { return MsgType.FurnitureOrder; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.FurnitureOrder;
+            }
+        }
 
 
     }

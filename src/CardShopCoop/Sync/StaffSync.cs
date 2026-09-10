@@ -144,7 +144,8 @@ namespace CardShopCoop.Sync
             // exists (host mid-session save load) the getter fabricates a fake empty
             // DontDestroyOnLoad manager that shadows the real one for the rest of the
             // run (see WorldSync.ResolveShelfManager)
-            if (_wm == null) _wm = UnityEngine.Object.FindObjectOfType<WorkerManager>();
+            if (_wm == null)
+                _wm = UnityEngine.Object.FindObjectOfType<WorkerManager>();
             return _wm;
         }
 
@@ -177,10 +178,12 @@ namespace CardShopCoop.Sync
         /// The vanilla UX guards are re-checked locally so the button still talks back.</summary>
         public static bool HirePrefix(HireWorkerPanelUI __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             try
             {
-                if ((bool)FiPanelIsHired.GetValue(__instance)) return false;
+                if ((bool)FiPanelIsHired.GetValue(__instance))
+                    return false;
                 int index = (int)FiPanelIndex.GetValue(__instance);
                 int levelRequired = (int)FiPanelLevelRequired.GetValue(__instance);
                 float fee = (float)FiPanelHireFee.GetValue(__instance);
@@ -220,12 +223,17 @@ namespace CardShopCoop.Sync
 
         private static Worker WorkerFrom(System.Reflection.FieldInfo field, object instance)
         {
-            try { return field?.GetValue(instance) as Worker; } catch { return null; }
+            try
+            {
+                return field?.GetValue(instance) as Worker;
+            }
+            catch { return null; }
         }
 
         private static void SendUpdate(Worker worker)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote || worker == null || Instance?.SendOp == null) return;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote || worker == null || Instance?.SendOp == null)
+                return;
             try
             {
                 var d = worker.GetWorkerSaveData();
@@ -250,53 +258,82 @@ namespace CardShopCoop.Sync
         }
 
         public static void TaskChangedPostfix(WorkerInteractUIScreen __instance)
-        { if (CoopCore.Role == CoopRole.Client) SendUpdate(WorkerFrom(FiInteractWorker, __instance)); }
+        {
+            if (CoopCore.Role == CoopRole.Client)
+                SendUpdate(WorkerFrom(FiInteractWorker, __instance));
+        }
         public static void OptionChangedPostfix(WorkerOptionUIScreen __instance)
-        { if (CoopCore.Role == CoopRole.Client) SendUpdate(WorkerFrom(FiOptionWorker, __instance)); }
+        {
+            if (CoopCore.Role == CoopRole.Client)
+                SendUpdate(WorkerFrom(FiOptionWorker, __instance));
+        }
         public static void PriceOptionPostfix(WorkerOptionSetPriceUIScreen __instance)
-        { if (CoopCore.Role == CoopRole.Client) SendUpdate(WorkerFrom(FiPriceWorker, __instance)); }
+        {
+            if (CoopCore.Role == CoopRole.Client)
+                SendUpdate(WorkerFrom(FiPriceWorker, __instance));
+        }
         public static void PackOptionPostfix(WorkerSetPackOpenerTypeOptionScreen __instance)
-        { if (CoopCore.Role == CoopRole.Client) SendUpdate(WorkerFrom(FiPackWorker, __instance)); }
+        {
+            if (CoopCore.Role == CoopRole.Client)
+                SendUpdate(WorkerFrom(FiPackWorker, __instance));
+        }
 
         public static bool BonusPrefix(WorkerInteractUIScreen __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             var worker = WorkerFrom(FiInteractWorker, __instance);
-            if (worker == null || Instance?.SendOp == null) return false;
+            if (worker == null || Instance?.SendOp == null)
+                return false;
             Instance.SendOp(new StaffOpMessage { Op = OpBonus, Index = worker.m_WorkerIndex });
             return false;
         }
 
         public static bool FirePrefix(WorkerInteractUIScreen __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             var worker = WorkerFrom(FiInteractWorker, __instance);
-            if (worker == null || Instance?.SendOp == null) return false;
+            if (worker == null || Instance?.SendOp == null)
+                return false;
             Instance.SendOp(new StaffOpMessage { Op = OpFire, Index = worker.m_WorkerIndex });
-            try { worker.OnPressStopInteract(); __instance.CloseScreen(); } catch { }
+            try
+            {
+                worker.OnPressStopInteract();
+                __instance.CloseScreen();
+            }
+            catch { }
             return false;
         }
 
         public static bool WorkerMousePressPrefix(Worker __instance)
         {
-            if (__instance == null) return false;
+            if (__instance == null)
+                return false;
             int index = __instance.m_WorkerIndex;
-            if (_allowClientWorkerOpen) return true;
+            if (_allowClientWorkerOpen)
+                return true;
             if (CoopCore.Role == CoopRole.Host)
                 return Instance != null && Instance.HostBeginInteraction(index, 0, default(Vector3));
-            if (CoopCore.Role != CoopRole.Client) return true;
-            if (ClientWorkerLease.Contains(index)) return false;
-            if (ClientWorkerBusy.TryGetValue(index, out bool busy) && busy) return false;
-            if (Instance?.SendOp == null) return false;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
+            if (ClientWorkerLease.Contains(index))
+                return false;
+            if (ClientWorkerBusy.TryGetValue(index, out bool busy) && busy)
+                return false;
+            if (Instance?.SendOp == null)
+                return false;
             Vector3 pos;
-            if (!CoopCore.TryGetLocalPlayerPosition(out pos)) return false;
+            if (!CoopCore.TryGetLocalPlayerPosition(out pos))
+                return false;
             Instance.SendOp(new StaffOpMessage { Op = OpBeginInteract, Index = index, Position = pos });
             return false;
         }
 
         public static void WorkerStopInteractPostfix(Worker __instance)
         {
-            if (__instance == null) return;
+            if (__instance == null)
+                return;
             int index = __instance.m_WorkerIndex;
             if (CoopCore.Role == CoopRole.Host)
                 Instance?.HostEndInteraction(index, 0);
@@ -320,7 +357,8 @@ namespace CardShopCoop.Sync
 
         private static void ReleaseClientWorker(int index)
         {
-            if (!ClientWorkerLease.Remove(index)) return;
+            if (!ClientWorkerLease.Remove(index))
+                return;
             Instance?.SendOp?.Invoke(new StaffOpMessage { Op = OpEndInteract, Index = index });
         }
 
@@ -330,13 +368,19 @@ namespace CardShopCoop.Sync
             bool granted = message.Granted;
             bool occupied = message.Occupied;
             ClientWorkerBusy[index] = occupied;
-            if (!occupied) ClientWorkerLease.Remove(index);
-            if (!granted) return;
+            if (!occupied)
+                ClientWorkerLease.Remove(index);
+            if (!granted)
+                return;
             ClientWorkerLease.Add(index);
             var worker = NpcSync.GetWorkerPuppet(index);
-            if (worker == null) return;
+            if (worker == null)
+                return;
             _allowClientWorkerOpen = true;
-            try { worker.OnMousePress(); }
+            try
+            {
+                worker.OnMousePress();
+            }
             finally { _allowClientWorkerOpen = false; }
         }
 
@@ -399,7 +443,8 @@ namespace CardShopCoop.Sync
 
         private void SendInteraction(int connId, int index, bool granted, bool occupied)
         {
-            if (connId <= 0) return;
+            if (connId <= 0)
+                return;
             SendToClient?.Invoke(connId, new StaffInteractMessage { Index = index, Granted = granted, Occupied = occupied });
         }
 
@@ -410,10 +455,12 @@ namespace CardShopCoop.Sync
 
         private bool HostBeginInteraction(int index, int connId, Vector3 playerPosition)
         {
-            if (!ValidWorkerIndex(index)) return false;
+            if (!ValidWorkerIndex(index))
+                return false;
             if (_workerLeaseOwner.TryGetValue(index, out int owner))
             {
-                if (owner == connId) return true;
+                if (owner == connId)
+                    return true;
                 SendInteraction(connId, index, false, true);
                 return false;
             }
@@ -424,7 +471,10 @@ namespace CardShopCoop.Sync
                 toward.y = 0f;
                 if (toward.sqrMagnitude > 0.0001f)
                 {
-                    try { FiWorkerTargetRotation?.SetValue(worker, Quaternion.LookRotation(toward, Vector3.up)); }
+                    try
+                    {
+                        FiWorkerTargetRotation?.SetValue(worker, Quaternion.LookRotation(toward, Vector3.up));
+                    }
                     catch { }
                 }
             }
@@ -437,7 +487,8 @@ namespace CardShopCoop.Sync
 
         private void HostEndInteraction(int index, int connId)
         {
-            if (!_workerLeaseOwner.TryGetValue(index, out int owner) || owner != connId) return;
+            if (!_workerLeaseOwner.TryGetValue(index, out int owner) || owner != connId)
+                return;
             var workers = WorkerManager.GetWorkerList();
             if (workers != null && index >= 0 && index < workers.Count && workers[index] != null)
                 workers[index].m_IsPausingAction = false;
@@ -449,20 +500,26 @@ namespace CardShopCoop.Sync
         {
             var release = new List<int>();
             foreach (var kv in _workerLeaseOwner)
-                if (kv.Value == connId) release.Add(kv.Key);
-            foreach (int index in release) HostEndInteraction(index, connId);
+                if (kv.Value == connId)
+                    release.Add(kv.Key);
+            foreach (int index in release)
+                HostEndInteraction(index, connId);
         }
 
         private void HostUpdate(StaffOpMessage message, int connId)
         {
             int index = message.Index;
-            if (!_workerLeaseOwner.TryGetValue(index, out int leaseOwner) || leaseOwner != connId) return;
+            if (!_workerLeaseOwner.TryGetValue(index, out int leaseOwner) || leaseOwner != connId)
+                return;
             var wm = Wm();
-            if (wm == null || index < 0 || index >= wm.m_WorkerDataList.Count) return;
+            if (wm == null || index < 0 || index >= wm.m_WorkerDataList.Count)
+                return;
             var workers = WorkerManager.GetWorkerList();
-            if (workers == null || index >= workers.Count || workers[index] == null) return;
+            if (workers == null || index >= workers.Count || workers[index] == null)
+                return;
             var w = workers[index];
-            if (!CPlayerData.GetIsWorkerHired(index)) return;
+            if (!CPlayerData.GetIsWorkerHired(index))
+                return;
             var primary = (EWorkerTask)message.PrimaryTask;
             var secondary = (EWorkerTask)message.SecondaryTask;
             var task = (EWorkerTask)message.WorkerTask;
@@ -472,28 +529,38 @@ namespace CardShopCoop.Sync
             float cardMult = Mathf.Clamp(message.CardPriceMult, 0f, 10f);
             int pn = message.PackTypes == null ? 0 : Math.Min(message.PackTypes.Count, 255);
             var packs = new bool[pn];
-            for (int i = 0; i < pn; i++) packs[i] = message.PackTypes[i];
-            if ((int)primary < 0 || ((int)primary > 6 && primary != EWorkerTask.GoBackHome)) return;
-            if ((int)secondary < 0 || ((int)secondary > 6 && secondary != EWorkerTask.GoBackHome)) return;
+            for (int i = 0; i < pn; i++)
+                packs[i] = message.PackTypes[i];
+            if ((int)primary < 0 || ((int)primary > 6 && primary != EWorkerTask.GoBackHome))
+                return;
+            if ((int)secondary < 0 || ((int)secondary > 6 && secondary != EWorkerTask.GoBackHome))
+                return;
             w.SetRestockShelfWithNoLabel(fill);
             w.UpdateSetPriceOption(round, avoid, mult);
             w.UpdateSetCardPriceOption(cardRound, cardAvoid, cardMult);
             for (int i = 0; i < packs.Length && i < w.GetCardPackItemTypeEnabledList().Count; i++)
                 w.SetCardPackItemTypeEnabled(i, packs[i]);
-            w.SetTask(primary); w.SetLastTask(task); w.SetSecondaryTask(secondary);
+            w.SetTask(primary);
+            w.SetLastTask(task);
+            w.SetSecondaryTask(secondary);
             ForceResend();
         }
 
         private void HostBonus(int index, int connId)
         {
-            var wm = Wm(); var workers = WorkerManager.GetWorkerList();
+            var wm = Wm();
+            var workers = WorkerManager.GetWorkerList();
             if (wm == null || workers == null || index < 0 || index >= workers.Count || workers[index] == null
-                || !CPlayerData.GetIsWorkerHired(index)) return;
-            if (!_workerLeaseOwner.TryGetValue(index, out int owner) || owner != connId) return;
+                || !CPlayerData.GetIsWorkerHired(index))
+                return;
+            if (!_workerLeaseOwner.TryGetValue(index, out int owner) || owner != connId)
+                return;
             var w = workers[index];
-            if (w.GetBonusBoostedCount() >= 3) return;
+            if (w.GetBonusBoostedCount() >= 3)
+                return;
             float fee = w.GetWorkerData().costPerDay;
-            if (CPlayerData.m_CoinAmountDouble < fee) return;
+            if (CPlayerData.m_CoinAmountDouble < fee)
+                return;
             PriceChangeManager.AddTransaction(-fee, ETransactionType.WorkerSalary, 0);
             CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(fee));
             CPlayerData.m_GameReportDataCollect.employeeCost -= fee;
@@ -506,8 +573,10 @@ namespace CardShopCoop.Sync
         {
             var workers = WorkerManager.GetWorkerList();
             if (workers == null || index < 0 || index >= workers.Count || workers[index] == null
-                || !CPlayerData.GetIsWorkerHired(index)) return;
-            if (!_workerLeaseOwner.TryGetValue(index, out int owner) || owner != connId) return;
+                || !CPlayerData.GetIsWorkerHired(index))
+                return;
+            if (!_workerLeaseOwner.TryGetValue(index, out int owner) || owner != connId)
+                return;
             workers[index].FireWorker();
             HostEndInteraction(index, connId);
             ForceResend();
@@ -522,18 +591,22 @@ namespace CardShopCoop.Sync
             try
             {
                 var wm = Wm();
-                if (wm == null || wm.m_WorkerDataList == null) return;
+                if (wm == null || wm.m_WorkerDataList == null)
+                    return;
                 if (index < 0 || index >= wm.m_WorkerDataList.Count || index >= CPlayerData.m_IsWorkerHired.Count)
                 {
                     CoopPlugin.Log.LogWarning("StaffSync: hire op for unknown worker " + index);
                     return;
                 }
                 // double-hire guard: duplicate ops, or both players racing the same panel
-                if (CPlayerData.GetIsWorkerHired(index)) return;
+                if (CPlayerData.GetIsWorkerHired(index))
+                    return;
                 WorkerData workerData = WorkerManager.GetWorkerData(index);
-                if (CPlayerData.m_ShopLevel + 1 < workerData.shopLevelRequired) return;
+                if (CPlayerData.m_ShopLevel + 1 < workerData.shopLevelRequired)
+                    return;
                 var gm = CSingleton<CGameManager>.Instance;
-                if (gm != null && gm.m_IsPrologue && !workerData.prologueShow) return;
+                if (gm != null && gm.m_IsPrologue && !workerData.prologueShow)
+                    return;
                 if (CPlayerData.m_CoinAmountDouble < (double)workerData.hiringCost)
                 {
                     // the client pre-checked its mirror; losing this race is rare and the
@@ -552,7 +625,8 @@ namespace CardShopCoop.Sync
                 int hiredCount = 0;
                 for (int i = 0; i < CPlayerData.m_IsWorkerHired.Count; i++)
                 {
-                    if (CPlayerData.m_IsWorkerHired[i]) hiredCount++;
+                    if (CPlayerData.m_IsWorkerHired[i])
+                        hiredCount++;
                 }
                 AchievementManager.OnStaffHired(hiredCount);
                 SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
@@ -564,24 +638,29 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < SendInterval) return;
+            if (_timer < SendInterval)
+                return;
             _timer -= SendInterval;
             try
             {
                 var wm = Wm();
-                if (wm == null || wm.m_WorkerDataList == null) return;
+                if (wm == null || wm.m_WorkerDataList == null)
+                    return;
                 Collect(wm, _buf);
                 int hash = HashEntries(_buf);
                 _heal += SendInterval;
-                if (!_force && hash == _lastHash && _heal < HealInterval) return;
+                if (!_force && hash == _lastHash && _heal < HealInterval)
+                    return;
                 _force = false;
                 _lastHash = hash;
                 _heal = 0f;
                 var list = _buf; // serialized synchronously by Msg.Build; safe to close over
                 var entries = new List<StaffEntry>(list.Count);
-                for (int i = 0; i < list.Count; i++) entries.Add(ToStaffEntry(list[i]));
+                for (int i = 0; i < list.Count; i++)
+                    entries.Add(ToStaffEntry(list[i]));
                 BroadcastState?.Invoke(new StaffStateMessage { Entries = entries });
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("StaffSync host: " + e.Message); }
@@ -606,9 +685,14 @@ namespace CardShopCoop.Sync
                 var w = workers != null && i < workers.Count ? workers[i] : null;
                 if (w != null && w.m_IsActive)
                 {
-                    try { d = w.GetWorkerSaveData(); } catch { }
+                    try
+                    {
+                        d = w.GetWorkerSaveData();
+                    }
+                    catch { }
                 }
-                if (d == null && saved != null && i < saved.Count) d = saved[i];
+                if (d == null && saved != null && i < saved.Count)
+                    d = saved[i];
                 if (d != null)
                 {
                     e.HasData = true;
@@ -640,7 +724,11 @@ namespace CardShopCoop.Sync
             {
                 var e = list[i];
                 hash = hash * 31 + (e.Hired ? 1 : 0);
-                if (!e.HasData) { hash = hash * 31; continue; }
+                if (!e.HasData)
+                {
+                    hash = hash * 31;
+                    continue;
+                }
                 hash = hash * 31 + e.PrimaryTask;
                 hash = hash * 31 + e.SecondaryTask;
                 hash = hash * 31 + e.WorkerTask;
@@ -669,7 +757,10 @@ namespace CardShopCoop.Sync
         public void ClientApplyState(StaffStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(message); }
+            try
+            {
+                ClientApplyInner(message);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("StaffSync client: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
@@ -690,12 +781,18 @@ namespace CardShopCoop.Sync
                     CPlayerData.SetIsWorkerHired(i, e.Hired);
                     rosterChanged = true;
                 }
-                if (!e.HasData || saved == null) continue;
+                if (!e.HasData || saved == null)
+                    continue;
                 // WorkerManager.m_WorkerSaveDataList aliases this list after load, so
                 // writing entries in place updates both mirrors
-                while (saved.Count <= i) saved.Add(new WorkerSaveData());
+                while (saved.Count <= i)
+                    saved.Add(new WorkerSaveData());
                 var d = saved[i];
-                if (d == null) { d = new WorkerSaveData(); saved[i] = d; }
+                if (d == null)
+                {
+                    d = new WorkerSaveData();
+                    saved[i] = d;
+                }
                 d.primaryTask = (EWorkerTask)e.PrimaryTask;
                 d.secondaryTask = (EWorkerTask)e.SecondaryTask;
                 d.workerTask = (EWorkerTask)e.WorkerTask;
@@ -710,11 +807,14 @@ namespace CardShopCoop.Sync
                 d.isAvoidSetCardPriceWhileRestock = e.AvoidSetCardPriceRestock;
                 d.setPriceMultiplier = e.PriceMult;
                 d.setCardPriceMultiplier = e.CardPriceMult;
-                if (e.PackTypes != null) d.cardPackItemTypeEnabledList = e.PackTypes;
-                if (e.ExpList != null) d.expList = e.ExpList;
+                if (e.PackTypes != null)
+                    d.cardPackItemTypeEnabledList = e.PackTypes;
+                if (e.ExpList != null)
+                    d.expList = e.ExpList;
                 NpcSync.RefreshWorkerUi(i, d);
             }
-            if (rosterChanged) RefreshHirePanels();
+            if (rosterChanged)
+                RefreshHirePanels();
         }
 
         /// <summary>The hire screen Init()s its panels on every open, but an echo that
@@ -728,15 +828,22 @@ namespace CardShopCoop.Sync
                 _hireScreen = UnityEngine.Object.FindObjectOfType<HireWorkerScreen>(true);
             }
             if (_hireScreen == null || _hireScreen.m_HireWorkerPanelUIList == null
-                || MiPanelEvaluateHired == null || FiPanelScreen == null) return;
+                || MiPanelEvaluateHired == null || FiPanelScreen == null)
+                return;
             for (int i = 0; i < _hireScreen.m_HireWorkerPanelUIList.Count; i++)
             {
                 var panel = _hireScreen.m_HireWorkerPanelUIList[i];
-                if (panel == null) continue;
+                if (panel == null)
+                    continue;
                 // a panel that was never Init'd has index 0 and no screen ref; skip it -
                 // the screen's own OnOpenScreen -> Init covers the first open
-                if (FiPanelScreen.GetValue(panel) == null) continue;
-                try { MiPanelEvaluateHired.Invoke(panel, null); } catch { }
+                if (FiPanelScreen.GetValue(panel) == null)
+                    continue;
+                try
+                {
+                    MiPanelEvaluateHired.Invoke(panel, null);
+                }
+                catch { }
             }
         }
 

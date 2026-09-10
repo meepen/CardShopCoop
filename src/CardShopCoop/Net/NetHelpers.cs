@@ -37,7 +37,7 @@ namespace CardShopCoop.Net
     /// </summary>
     public static class NetHelpers
     {
-        private const string Description = "CardShopCoop";
+        private const string Description = "Community Multiplayer Mod (CardShopCoop)";
         private const int LeaseSeconds = 86400;      // 24h; re-asked every time hosting starts
         private const int HttpTimeoutMs = 4000;
         private const int MaxHttpBytes = 512 * 1024; // a router that streams forever gets cut off
@@ -91,7 +91,8 @@ namespace CardShopCoop.Net
         /// calls INSIDE one run still only sweep once.</summary>
         public static void BeginDiscovery()
         {
-            if (_controlUrl == null) _noGateway = false;
+            if (_controlUrl == null)
+                _noGateway = false;
         }
 
         // ------------------------------------------------------------------ port mapping
@@ -115,11 +116,23 @@ namespace CardShopCoop.Net
             {
                 try
                 {
-                    if (port <= 0 || port > 65535) { reason = "the co-op port is out of range"; return false; }
-                    if (!EnsureGateway()) { reason = "no UPnP router answered"; return false; }
+                    if (port <= 0 || port > 65535)
+                    {
+                        reason = "the co-op port is out of range";
+                        return false;
+                    }
+                    if (!EnsureGateway())
+                    {
+                        reason = "no UPnP router answered";
+                        return false;
+                    }
 
                     string local = LocalIPv4ForGateway();
-                    if (local == null) { reason = "couldn't work out this PC's LAN address"; return false; }
+                    if (local == null)
+                    {
+                        reason = "couldn't work out this PC's LAN address";
+                        return false;
+                    }
 
                     // ONE ATTEMPT, LEASED, AND NO PERMANENT RETRY (1.0.38). This used to fall
                     // back to a lease of 0 when the router answered 725
@@ -176,11 +189,13 @@ namespace CardShopCoop.Net
                     return;
                 }
                 int port = _mappedPort;
-                if (port == 0) return;
+                if (port == 0)
+                    return;
                 _mappedPort = 0; // claim it first: a second caller must not repeat the SOAP call
                 try
                 {
-                    if (_controlUrl == null) return;
+                    if (_controlUrl == null)
+                        return;
                     string inner =
                         "<NewRemoteHost></NewRemoteHost>" +
                         "<NewExternalPort>" + port + "</NewExternalPort>" +
@@ -209,7 +224,8 @@ namespace CardShopCoop.Net
                 "<NewEnabled>1</NewEnabled>" +
                 "<NewPortMappingDescription>" + Description + "</NewPortMappingDescription>" +
                 "<NewLeaseDuration>" + lease + "</NewLeaseDuration>";
-            if (!Soap("AddPortMapping", inner, out string body)) return false;
+            if (!Soap("AddPortMapping", inner, out string body))
+                return false;
             // A 200 carrying a fault body is rare but real; treat it as the refusal it is.
             return body == null || body.IndexOf("errorCode", StringComparison.OrdinalIgnoreCase) < 0;
         }
@@ -224,13 +240,18 @@ namespace CardShopCoop.Net
         {
             try
             {
-                if (!EnsureGateway()) return null;
-                if (!Soap("GetExternalIPAddress", "", out string body) || body == null) return null;
+                if (!EnsureGateway())
+                    return null;
+                if (!Soap("GetExternalIPAddress", "", out string body) || body == null)
+                    return null;
                 string ip = TagValue(body, "NewExternalIPAddress");
-                if (ip == null) return null;
+                if (ip == null)
+                    return null;
                 ip = ip.Trim();
-                if (!IPAddress.TryParse(ip, out IPAddress parsed)) return null;
-                if (parsed.AddressFamily != AddressFamily.InterNetwork) return null;
+                if (!IPAddress.TryParse(ip, out IPAddress parsed))
+                    return null;
+                if (parsed.AddressFamily != AddressFamily.InterNetwork)
+                    return null;
                 CoopPlugin.Log.LogInfo("UPnP: router reports external address " + ip);
                 return ip;
             }
@@ -247,7 +268,8 @@ namespace CardShopCoop.Net
         public static string StunPublicIp()
         {
             IPEndPoint server = ResolveStun(); // once, not per attempt
-            if (server == null) return null;
+            if (server == null)
+                return null;
 
             for (int attempt = 0; attempt < 2; attempt++)
             {
@@ -258,11 +280,14 @@ namespace CardShopCoop.Net
                     // fail ParseStun, so it comes from the crypto RNG rather than from a
                     // TickCount-seeded System.Random a bystander could simply guess.
                     var txn = new byte[12];
-                    using (var rng = new RNGCryptoServiceProvider()) rng.GetBytes(txn);
+                    using (var rng = new RNGCryptoServiceProvider())
+                        rng.GetBytes(txn);
 
                     var req = new byte[20];
-                    req[0] = 0x00; req[1] = 0x01;       // Binding Request
-                    req[2] = 0x00; req[3] = 0x00;       // no attributes
+                    req[0] = 0x00;
+                    req[1] = 0x01;       // Binding Request
+                    req[2] = 0x00;
+                    req[3] = 0x00;       // no attributes
                     Buffer.BlockCopy(MagicCookie, 0, req, 4, 4);
                     Buffer.BlockCopy(txn, 0, req, 8, 12);
 
@@ -285,7 +310,11 @@ namespace CardShopCoop.Net
                 }
                 finally
                 {
-                    try { udp?.Close(); } catch { }
+                    try
+                    {
+                        udp?.Close();
+                    }
+                    catch { }
                 }
             }
             return null;
@@ -306,10 +335,18 @@ namespace CardShopCoop.Net
                     try
                     {
                         foreach (IPAddress a in Dns.GetHostAddresses(StunHost))
-                            if (a.AddressFamily == AddressFamily.InterNetwork) { found = a; break; }
+                            if (a.AddressFamily == AddressFamily.InterNetwork)
+                            {
+                                found = a;
+                                break;
+                            }
                     }
                     catch { /* no DNS, no resolver, no network: the literal below covers it */ }
-                }) { IsBackground = true, Name = "CoopStunDns" };
+                })
+                {
+                    IsBackground = true,
+                    Name = "CoopStunDns"
+                };
                 t.Start();
                 if (!t.Join(StunDnsTimeoutMs))
                     CoopPlugin.Log.LogInfo("STUN: DNS did not answer in time - using the fallback address");
@@ -320,7 +357,8 @@ namespace CardShopCoop.Net
             }
 
             IPAddress ip = found;
-            if (ip == null && !IPAddress.TryParse(StunFallbackIp, out ip)) return null;
+            if (ip == null && !IPAddress.TryParse(StunFallbackIp, out ip))
+                return null;
             return new IPEndPoint(ip, 19302);
         }
 
@@ -329,10 +367,16 @@ namespace CardShopCoop.Net
         /// how a stray or spoofed datagram gets thrown away.</summary>
         private static string ParseStun(byte[] r, byte[] txn)
         {
-            if (r == null || r.Length < 20) return null;
-            if (r[0] != 0x01 || r[1] != 0x01) return null;                 // Binding Success
-            for (int i = 0; i < 4; i++) if (r[4 + i] != MagicCookie[i]) return null;
-            for (int i = 0; i < 12; i++) if (r[8 + i] != txn[i]) return null;
+            if (r == null || r.Length < 20)
+                return null;
+            if (r[0] != 0x01 || r[1] != 0x01)
+                return null;                 // Binding Success
+            for (int i = 0; i < 4; i++)
+                if (r[4 + i] != MagicCookie[i])
+                    return null;
+            for (int i = 0; i < 12; i++)
+                if (r[8 + i] != txn[i])
+                    return null;
 
             int end = Math.Min(r.Length, 20 + ((r[2] << 8) | r[3]));
             int pos = 20;
@@ -341,13 +385,15 @@ namespace CardShopCoop.Net
                 int type = (r[pos] << 8) | r[pos + 1];
                 int len = (r[pos + 2] << 8) | r[pos + 3];
                 int val = pos + 4;
-                if (len < 0 || val + len > end) break;
+                if (len < 0 || val + len > end)
+                    break;
                 // 0x0020 is the RFC attribute; 0x8020 is the pre-RFC comprehension-optional
                 // number some servers still answer with.
                 if ((type == 0x0020 || type == 0x8020) && len >= 8 && r[val + 1] == 0x01)
                 {
                     var q = new byte[4];
-                    for (int k = 0; k < 4; k++) q[k] = (byte)(r[val + 4 + k] ^ MagicCookie[k]);
+                    for (int k = 0; k < 4; k++)
+                        q[k] = (byte)(r[val + 4 + k] ^ MagicCookie[k]);
                     return $"{q[0]}.{q[1]}.{q[2]}.{q[3]}";
                 }
                 pos = val + len;
@@ -366,16 +412,25 @@ namespace CardShopCoop.Net
         {
             try
             {
-                if (!IPAddress.TryParse((ip ?? "").Trim(), out IPAddress a)) return false;
-                if (a.AddressFamily != AddressFamily.InterNetwork) return false;
+                if (!IPAddress.TryParse((ip ?? "").Trim(), out IPAddress a))
+                    return false;
+                if (a.AddressFamily != AddressFamily.InterNetwork)
+                    return false;
                 byte[] b = a.GetAddressBytes();
-                if (b[0] == 0 || b[0] == 127) return false;                   // this-network, loopback
-                if (b[0] == 10) return false;                                  // 10/8
-                if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return false;     // 100.64/10 CGNAT
-                if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return false;      // 172.16/12
-                if (b[0] == 192 && b[1] == 168) return false;                   // 192.168/16
-                if (b[0] == 169 && b[1] == 254) return false;                   // link-local
-                if (b[0] >= 224) return false;                                  // multicast + reserved
+                if (b[0] == 0 || b[0] == 127)
+                    return false;                   // this-network, loopback
+                if (b[0] == 10)
+                    return false;                                  // 10/8
+                if (b[0] == 100 && b[1] >= 64 && b[1] <= 127)
+                    return false;     // 100.64/10 CGNAT
+                if (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
+                    return false;      // 172.16/12
+                if (b[0] == 192 && b[1] == 168)
+                    return false;                   // 192.168/16
+                if (b[0] == 169 && b[1] == 254)
+                    return false;                   // link-local
+                if (b[0] >= 224)
+                    return false;                                  // multicast + reserved
                 return true;
             }
             catch { return false; }
@@ -392,15 +447,23 @@ namespace CardShopCoop.Net
                 int bestRank = int.MaxValue;
                 foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
-                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    if (ni.OperationalStatus != OperationalStatus.Up)
+                        continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                        continue;
                     foreach (var addr in ni.GetIPProperties().UnicastAddresses)
                     {
-                        if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                        if (addr.Address.AddressFamily != AddressFamily.InterNetwork)
+                            continue;
                         string s = addr.Address.ToString();
-                        if (s.StartsWith("169.254")) continue; // link-local noise
+                        if (s.StartsWith("169.254"))
+                            continue; // link-local noise
                         int rank = s.StartsWith("192.168.") ? 0 : s.StartsWith("10.") ? 1 : s.StartsWith("172.") ? 2 : 3;
-                        if (rank < bestRank) { bestRank = rank; best = s; }
+                        if (rank < bestRank)
+                        {
+                            bestRank = rank;
+                            best = s;
+                        }
                     }
                 }
                 return best;
@@ -426,7 +489,8 @@ namespace CardShopCoop.Net
         public static string LocalIPv4ForGateway()
         {
             string url = _controlUrl;
-            if (url == null) return null;
+            if (url == null)
+                return null;
             try
             {
                 var u = new Uri(url);
@@ -448,15 +512,18 @@ namespace CardShopCoop.Net
         /// Everything downstream refuses to run without it.</summary>
         private static bool EnsureGateway()
         {
-            if (_controlUrl != null) return true;
+            if (_controlUrl != null)
+                return true;
             // One failed sweep per resolve run is enough: without this, a run where TryMapPort
             // found no gateway paid the identical 3-second SSDP wait AGAIN inside
             // UpnpExternalIp, doubling the time the host panel spends saying "resolving".
-            if (_noGateway) return false;
+            if (_noGateway)
+                return false;
             _noGateway = true; // every path below that doesn't set _controlUrl is a failure
 
             string location = SsdpDiscover();
-            if (location == null) return false;
+            if (location == null)
+                return false;
 
             // THE SECURITY GATE. Anything on the LAN can answer an M-SEARCH with any LOCATION
             // it likes, so a public (or DNS-named) LOCATION is not a gateway we failed to
@@ -470,7 +537,8 @@ namespace CardShopCoop.Net
             }
 
             string xml = HttpGet(location);
-            if (xml == null) return false;
+            if (xml == null)
+                return false;
 
             if (!FindWanService(xml, out string controlUrl, out string serviceType))
             {
@@ -548,15 +616,19 @@ namespace CardShopCoop.Net
                     {
                         // A read timeout is the normal way to wait here; anything else means
                         // the socket is unusable and looping on it would spin for 3 seconds.
-                        if (se.SocketErrorCode == SocketError.TimedOut) continue;
+                        if (se.SocketErrorCode == SocketError.TimedOut)
+                            continue;
                         CoopPlugin.Log.LogInfo("UPnP discovery socket error: " + se.SocketErrorCode);
                         break;
                     }
                     string text = Encoding.ASCII.GetString(data);
-                    if (text.IndexOf("InternetGatewayDevice", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (text.IndexOf("InternetGatewayDevice", StringComparison.OrdinalIgnoreCase) < 0)
+                        continue;
                     string loc = HeaderValue(text, "LOCATION");
-                    if (loc == null) continue;
-                    if (IsPrivateHttpUrl(loc)) return loc;
+                    if (loc == null)
+                        continue;
+                    if (IsPrivateHttpUrl(loc))
+                        return loc;
                     if (!warned)
                     {
                         warned = true; // once per sweep: a chatty rogue must not flood the log
@@ -571,7 +643,11 @@ namespace CardShopCoop.Net
             }
             finally
             {
-                try { udp?.Close(); } catch { }
+                try
+                {
+                    udp?.Close();
+                }
+                catch { }
             }
             return null;
         }
@@ -584,7 +660,8 @@ namespace CardShopCoop.Net
         {
             controlUrl = null;
             serviceType = null;
-            if (xml == null) return false;
+            if (xml == null)
+                return false;
 
             string[] wanted =
             {
@@ -605,8 +682,10 @@ namespace CardShopCoop.Net
                     // aimed at the wrong service.
                     int blockStart = LastIndexOfBefore(xml, "<service>", at);
                     int blockEnd = xml.IndexOf("</service>", at, StringComparison.OrdinalIgnoreCase);
-                    if (blockStart < 0) blockStart = at;
-                    if (blockEnd < 0) blockEnd = xml.Length;
+                    if (blockStart < 0)
+                        blockStart = at;
+                    if (blockEnd < 0)
+                        blockEnd = xml.Length;
                     string block = xml.Substring(blockStart, blockEnd - blockStart);
                     string url = TagValue(block, "controlURL");
                     if (url != null && url.Trim().Length > 0)
@@ -631,16 +710,24 @@ namespace CardShopCoop.Net
         {
             try
             {
-                if (string.IsNullOrEmpty(url)) return false;
+                if (string.IsNullOrEmpty(url))
+                    return false;
                 var u = new Uri(url);
-                if (u.Scheme != Uri.UriSchemeHttp) return false;
-                if (!IPAddress.TryParse(u.Host, out IPAddress ip)) return false;
-                if (ip.AddressFamily != AddressFamily.InterNetwork) return false;
+                if (u.Scheme != Uri.UriSchemeHttp)
+                    return false;
+                if (!IPAddress.TryParse(u.Host, out IPAddress ip))
+                    return false;
+                if (ip.AddressFamily != AddressFamily.InterNetwork)
+                    return false;
                 byte[] b = ip.GetAddressBytes();
-                if (b[0] == 10) return true;
-                if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
-                if (b[0] == 192 && b[1] == 168) return true;
-                if (b[0] == 169 && b[1] == 254) return true;
+                if (b[0] == 10)
+                    return true;
+                if (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
+                    return true;
+                if (b[0] == 192 && b[1] == 168)
+                    return true;
+                if (b[0] == 169 && b[1] == 254)
+                    return true;
                 return false;
             }
             catch { return false; }
@@ -660,7 +747,8 @@ namespace CardShopCoop.Net
                 req.UserAgent = Description;
                 using (var resp = (HttpWebResponse)req.GetResponse())
                 {
-                    if (!SameTrustedTarget(resp)) return null;
+                    if (!SameTrustedTarget(resp))
+                        return null;
                     return ReadCapped(resp);
                 }
             }
@@ -678,7 +766,8 @@ namespace CardShopCoop.Net
         {
             body = null;
             string url = _controlUrl, service = _serviceType;
-            if (url == null || service == null) return false;
+            if (url == null || service == null)
+                return false;
             try
             {
                 string envelope =
@@ -701,10 +790,12 @@ namespace CardShopCoop.Net
                 req.AllowAutoRedirect = false; // see NoRedirect
                 req.UserAgent = Description;
                 req.ContentLength = data.Length;
-                using (var s = req.GetRequestStream()) s.Write(data, 0, data.Length);
+                using (var s = req.GetRequestStream())
+                    s.Write(data, 0, data.Length);
                 using (var resp = (HttpWebResponse)req.GetResponse())
                 {
-                    if (!SameTrustedTarget(resp)) return false;
+                    if (!SameTrustedTarget(resp))
+                        return false;
                     body = ReadCapped(resp);
                     return true;
                 }
@@ -714,7 +805,9 @@ namespace CardShopCoop.Net
                 try
                 {
                     if (we.Response is HttpWebResponse hr)
-                        using (hr) if (SameTrustedTarget(hr)) body = ReadCapped(hr);
+                        using (hr)
+                            if (SameTrustedTarget(hr))
+                                body = ReadCapped(hr);
                 }
                 catch { }
                 CoopPlugin.Log.LogInfo("UPnP " + action + " refused: " + we.Message
@@ -740,8 +833,13 @@ namespace CardShopCoop.Net
         private static bool SameTrustedTarget(HttpWebResponse resp)
         {
             string uri = null;
-            try { uri = resp.ResponseUri != null ? resp.ResponseUri.ToString() : null; } catch { }
-            if (uri != null && IsPrivateHttpUrl(uri)) return true;
+            try
+            {
+                uri = resp.ResponseUri != null ? resp.ResponseUri.ToString() : null;
+            }
+            catch { }
+            if (uri != null && IsPrivateHttpUrl(uri))
+                return true;
             CoopPlugin.Log.LogWarning("UPnP: refusing a reply that came from somewhere other than the LAN address we asked - " + (uri ?? "(no URI)"));
             return false;
         }
@@ -750,7 +848,8 @@ namespace CardShopCoop.Net
         {
             using (Stream s = resp.GetResponseStream())
             {
-                if (s == null) return null;
+                if (s == null)
+                    return null;
                 var ms = new MemoryStream();
                 var buf = new byte[8192];
                 int total = 0, n;
@@ -763,7 +862,8 @@ namespace CardShopCoop.Net
                 while ((n = s.Read(buf, 0, buf.Length)) > 0)
                 {
                     total += n;
-                    if (total > MaxHttpBytes) break; // a router that never stops talking gets cut off
+                    if (total > MaxHttpBytes)
+                        break; // a router that never stops talking gets cut off
                     ms.Write(buf, 0, n);
                     if ((DateTime.UtcNow - start).TotalMilliseconds > 2 * HttpTimeoutMs)
                     {
@@ -786,7 +886,8 @@ namespace CardShopCoop.Net
             while (true)
             {
                 int i = hay.IndexOf(needle, at, StringComparison.OrdinalIgnoreCase);
-                if (i < 0 || i >= before) return found;
+                if (i < 0 || i >= before)
+                    return found;
                 found = i;
                 at = i + needle.Length;
             }
@@ -801,16 +902,20 @@ namespace CardShopCoop.Net
                 while (true)
                 {
                     at = xml.IndexOf("<", at, StringComparison.Ordinal);
-                    if (at < 0) return null;
+                    if (at < 0)
+                        return null;
                     int gt = xml.IndexOf('>', at);
-                    if (gt < 0) return null;
+                    if (gt < 0)
+                        return null;
                     string name = xml.Substring(at + 1, gt - at - 1);
                     int colon = name.IndexOf(':');
-                    if (colon >= 0) name = name.Substring(colon + 1);
+                    if (colon >= 0)
+                        name = name.Substring(colon + 1);
                     if (name.Equals(tag, StringComparison.OrdinalIgnoreCase))
                     {
                         int close = xml.IndexOf("<", gt + 1, StringComparison.Ordinal);
-                        if (close < 0) return null;
+                        if (close < 0)
+                            return null;
                         return xml.Substring(gt + 1, close - gt - 1);
                     }
                     at = gt + 1;
@@ -827,12 +932,16 @@ namespace CardShopCoop.Net
                 foreach (string line in text.Split('\n'))
                 {
                     string t = line.Trim();
-                    if (t.Length <= header.Length) continue;
-                    if (!t.StartsWith(header, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (t.Length <= header.Length)
+                        continue;
+                    if (!t.StartsWith(header, StringComparison.OrdinalIgnoreCase))
+                        continue;
                     int colon = t.IndexOf(':');
-                    if (colon < 0) continue;
+                    if (colon < 0)
+                        continue;
                     string v = t.Substring(colon + 1).Trim();
-                    if (v.Length > 0) return v;
+                    if (v.Length > 0)
+                        return v;
                 }
             }
             catch { }

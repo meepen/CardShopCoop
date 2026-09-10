@@ -23,32 +23,32 @@ namespace CardShopCoop.UI
     public static class CoopTheme
     {
         // ---- palette (warm card-shop paper + teal) --------------------------------------
-        public static readonly Color Panel        = Rgb(247, 241, 227, 0.97f); // #F7F1E3
-        public static readonly Color PanelBorder  = Rgb(185, 174, 148);        // #B9AE94
-        public static readonly Color HeaderBg     = Rgb( 46,  75,  78);        // #2E4B4E
-        public static readonly Color HeaderText   = Rgb(242, 237, 226);        // #F2EDE2
-        public static readonly Color Text         = Rgb( 51,  48,  43);        // #33302B
-        public static readonly Color TextDim      = Rgb(107, 101,  92);        // #6B655C
-        public static readonly Color SectionBg    = Rgb(255, 251, 240, 0.90f); // #FFFBF0
-        public static readonly Color SectionBorder= Rgb(221, 211, 188);        // #DDD3BC
-        public static readonly Color Primary      = Rgb( 62, 158, 140);        // #3E9E8C
-        public static readonly Color PrimaryHover = Rgb( 71, 178, 158);        // #47B29E
-        public static readonly Color PrimaryActive= Rgb( 54, 139, 123);        // #368B7B
-        public static readonly Color Secondary    = Rgb(239, 231, 212);        // #EFE7D4
-        public static readonly Color SecondaryHover= Rgb(246, 239, 222);       // #F6EFDE
-        public static readonly Color SecondaryBorder= Rgb(201, 191, 168);      // #C9BFA8
-        public static readonly Color Danger       = Rgb(201,  79,  61);        // #C94F3D
-        public static readonly Color Warn         = Rgb(201, 134,  45);        // #C9862D
-        public static readonly Color Success      = Rgb( 63, 157,  83);        // #3F9D53
-        public static readonly Color DividerCol   = Rgb(217, 207, 184);        // #D9CFB8
-        public static readonly Color FieldBg      = Rgb(255, 253, 246);        // #FFFDF6
-        public static readonly Color FieldBorder  = Rgb(201, 191, 168);        // #C9BFA8
-        public static readonly Color HudBg        = Rgb( 31,  29,  26, 0.78f);  // #1F1D1A
+        public static readonly Color Panel = Rgb(27, 29, 33, 0.98f);
+        public static readonly Color PanelBorder = Rgb(62, 67, 75);
+        public static readonly Color HeaderBg = Rgb(31, 52, 55);
+        public static readonly Color HeaderText = Rgb(232, 236, 239);
+        public static readonly Color Text = Rgb(229, 233, 236);
+        public static readonly Color TextDim = Rgb(156, 164, 171);
+        public static readonly Color SectionBg = Rgb(37, 40, 45, 0.96f);
+        public static readonly Color SectionBorder = Rgb(58, 63, 70);
+        public static readonly Color Primary = Rgb(62, 158, 140);        // #3E9E8C
+        public static readonly Color PrimaryHover = Rgb(71, 178, 158);        // #47B29E
+        public static readonly Color PrimaryActive = Rgb(54, 139, 123);        // #368B7B
+        public static readonly Color Secondary = Rgb(48, 52, 58);
+        public static readonly Color SecondaryHover = Rgb(59, 64, 71);
+        public static readonly Color SecondaryBorder = Rgb(74, 80, 88);
+        public static readonly Color Danger = Rgb(218, 91, 78);
+        public static readonly Color Warn = Rgb(226, 165, 72);
+        public static readonly Color Success = Rgb(88, 190, 109);
+        public static readonly Color DividerCol = Rgb(62, 67, 75);
+        public static readonly Color FieldBg = Rgb(46, 50, 56);
+        public static readonly Color FieldBorder = Rgb(72, 78, 86);
+        public static readonly Color HudBg = Rgb(31, 29, 26, 0.78f);  // #1F1D1A
 
         // ---- built styles (all created once in EnsureBuilt) -----------------------------
         public static GUIStyle Window, HeaderStrip, Header, HeaderVersion, SectionHeader;
         public static GUIStyle Label, LabelDim, LabelDimWrap, LabelBold, LabelWrap, LabelDanger, LabelWarn;
-        public static GUIStyle SectionBox, Toggle;
+        public static GUIStyle SectionBox, ContentPanel, Toggle, Tab, TabSelected;
         public static GUIStyle ButtonPrimary, ButtonSecondary, ButtonDanger;
         public static GUIStyle TextField;
         public static GUIStyle ChipSuccess, ChipWarn, ChipDanger, ChipInfo;
@@ -57,7 +57,8 @@ namespace CardShopCoop.UI
 
         // ---- cached textures ------------------------------------------------------------
         private static Texture2D _panelTex, _headerTex, _shadowTex, _fieldTex, _fieldFocusTex,
-            _sectionTex, _dividerTex, _rowEvenTex, _rowOddTex, _hudTex;
+            _sectionTex, _contentTex, _tabTex, _tabHoverTex, _tabSelectedTex, _dotOffTex, _dotWaitTex, _dotOkTex,
+            _dividerTex, _rowEvenTex, _rowOddTex, _hudTex;
         private static Texture2D _primaryTex, _primaryHoverTex, _primaryActiveTex;
         private static Texture2D _secondaryTex, _secondaryHoverTex, _secondaryActiveTex;
         private static Texture2D _dangerTex, _dangerHoverTex, _dangerActiveTex;
@@ -74,37 +75,45 @@ namespace CardShopCoop.UI
 
         public static void EnsureBuilt()
         {
-            if (_built) return;
+            if (_built)
+                return;
             _built = true;
 
             // ---- textures -----------------------------------------------------------
-            _panelTex   = MakeRounded(WinTex, WinTex, WinRadius, Panel, PanelBorder, 1);
-            _headerTex  = MakeRoundedTop(WinTex, WinTex, WinRadius, HeaderBg);
-            _shadowTex  = MakeShadow(40, 40, 12, 0.35f, 4f);
-            _fieldTex   = MakeRounded(CtlTex, CtlTex, CtlRadius, FieldBg, FieldBorder, 1);
+            _panelTex = MakeRounded(WinTex, WinTex, WinRadius, Panel, PanelBorder, 1);
+            _headerTex = MakeRoundedTop(WinTex, WinTex, WinRadius, HeaderBg);
+            _shadowTex = MakeShadow(40, 40, 12, 0.35f, 4f);
+            _fieldTex = MakeRounded(CtlTex, CtlTex, CtlRadius, FieldBg, FieldBorder, 1);
             _fieldFocusTex = MakeRounded(CtlTex, CtlTex, CtlRadius, FieldBg, Primary, 1);
             _sectionTex = MakeRounded(SecTex, SecTex, SecRadius, SectionBg, SectionBorder, 1);
+            _contentTex = MakeRoundedBottom(SecTex, SecTex, SecRadius, Panel, PanelBorder, 1);
+            _tabTex = MakeRoundedTop(SecTex, SecTex, SecRadius, Secondary);
+            _tabHoverTex = MakeRoundedTop(SecTex, SecTex, SecRadius, SecondaryHover);
+            _tabSelectedTex = MakeRoundedTop(SecTex, SecTex, SecRadius, Primary);
+            _dotOffTex = MakeRounded(16, 16, 8, TextDim, TextDim, 0);
+            _dotWaitTex = MakeRounded(16, 16, 8, Warn, Warn, 0);
+            _dotOkTex = MakeRounded(16, 16, 8, Success, Success, 0);
             _dividerTex = Solid(DividerCol);
             _rowEvenTex = Solid(Rgb(255, 255, 255, 0.28f));
-            _rowOddTex  = Solid(Rgb(120, 110,  90, 0.10f));
-            _hudTex     = MakeRounded(HudTexSz, HudTexSz, HudRadius, HudBg, HudBg, 0);
+            _rowOddTex = Solid(Rgb(120, 110, 90, 0.10f));
+            _hudTex = MakeRounded(HudTexSz, HudTexSz, HudRadius, HudBg, HudBg, 0);
 
-            _primaryTex        = MakeRounded(CtlTex, CtlTex, CtlRadius, Primary,       Mul(Primary, 0.85f),       1);
-            _primaryHoverTex   = MakeRounded(CtlTex, CtlTex, CtlRadius, PrimaryHover,  Mul(PrimaryHover, 0.85f),  1);
-            _primaryActiveTex  = MakeRounded(CtlTex, CtlTex, CtlRadius, PrimaryActive, Mul(PrimaryActive, 0.85f), 1);
+            _primaryTex = MakeRounded(CtlTex, CtlTex, CtlRadius, Primary, Mul(Primary, 0.85f), 1);
+            _primaryHoverTex = MakeRounded(CtlTex, CtlTex, CtlRadius, PrimaryHover, Mul(PrimaryHover, 0.85f), 1);
+            _primaryActiveTex = MakeRounded(CtlTex, CtlTex, CtlRadius, PrimaryActive, Mul(PrimaryActive, 0.85f), 1);
 
-            _secondaryTex      = MakeRounded(CtlTex, CtlTex, CtlRadius, Secondary,      SecondaryBorder, 1);
+            _secondaryTex = MakeRounded(CtlTex, CtlTex, CtlRadius, Secondary, SecondaryBorder, 1);
             _secondaryHoverTex = MakeRounded(CtlTex, CtlTex, CtlRadius, SecondaryHover, SecondaryBorder, 1);
-            _secondaryActiveTex= MakeRounded(CtlTex, CtlTex, CtlRadius, Mul(Secondary, 0.94f), SecondaryBorder, 1);
+            _secondaryActiveTex = MakeRounded(CtlTex, CtlTex, CtlRadius, Mul(Secondary, 0.94f), SecondaryBorder, 1);
 
-            _dangerTex         = MakeRounded(CtlTex, CtlTex, CtlRadius, Danger,             Mul(Danger, 0.85f), 1);
-            _dangerHoverTex    = MakeRounded(CtlTex, CtlTex, CtlRadius, Lerp(Danger, Color.white, 0.10f), Mul(Danger, 0.85f), 1);
-            _dangerActiveTex   = MakeRounded(CtlTex, CtlTex, CtlRadius, Mul(Danger, 0.88f), Mul(Danger, 0.80f), 1);
+            _dangerTex = MakeRounded(CtlTex, CtlTex, CtlRadius, Danger, Mul(Danger, 0.85f), 1);
+            _dangerHoverTex = MakeRounded(CtlTex, CtlTex, CtlRadius, Lerp(Danger, Color.white, 0.10f), Mul(Danger, 0.85f), 1);
+            _dangerActiveTex = MakeRounded(CtlTex, CtlTex, CtlRadius, Mul(Danger, 0.88f), Mul(Danger, 0.80f), 1);
 
             _chipSuccessTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(Success, 0.18f), WithA(Success, 0.55f), 1);
-            _chipWarnTex    = MakeRounded(PillTex, PillTex, PillRadius, WithA(Warn,    0.18f), WithA(Warn,    0.55f), 1);
-            _chipDangerTex  = MakeRounded(PillTex, PillTex, PillRadius, WithA(Danger,  0.18f), WithA(Danger,  0.55f), 1);
-            _chipInfoTex    = MakeRounded(PillTex, PillTex, PillRadius, WithA(HeaderBg, 0.16f), WithA(HeaderBg, 0.45f), 1);
+            _chipWarnTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(Warn, 0.18f), WithA(Warn, 0.55f), 1);
+            _chipDangerTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(Danger, 0.18f), WithA(Danger, 0.55f), 1);
+            _chipInfoTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(HeaderBg, 0.16f), WithA(HeaderBg, 0.45f), 1);
 
             // ---- styles -------------------------------------------------------------
             Window = new GUIStyle(GUI.skin.window)
@@ -152,7 +161,7 @@ namespace CardShopCoop.UI
                 fontSize = 12,
                 margin = new RectOffset(0, 0, 0, 4)
             };
-            SectionHeader.normal.textColor = HeaderBg;
+            SectionHeader.normal.textColor = PrimaryHover;
 
             Label = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 12 };
             Label.normal.textColor = Text;
@@ -187,12 +196,23 @@ namespace CardShopCoop.UI
             };
             SectionBox.normal.background = _sectionTex;
 
+            ContentPanel = new GUIStyle(GUI.skin.box)
+            {
+                border = new RectOffset(SecRadius, SecRadius, SecRadius, SecRadius),
+                padding = new RectOffset(10, 10, 10, 10),
+                margin = new RectOffset(0, 0, 0, 4)
+            };
+            ContentPanel.normal.background = _contentTex;
+
+            Tab = MakeTab(_tabTex, _tabHoverTex, TextDim);
+            TabSelected = MakeTab(_tabSelectedTex, _tabSelectedTex, Color.white);
+
             Toggle = new GUIStyle(GUI.skin.toggle) { richText = true, fontSize = 12 };
             SetTextColorAllStates(Toggle, Text);
 
-            ButtonPrimary   = MakeButton(_primaryTex,   _primaryHoverTex,   _primaryActiveTex,   Color.white);
+            ButtonPrimary = MakeButton(_primaryTex, _primaryHoverTex, _primaryActiveTex, Color.white);
             ButtonSecondary = MakeButton(_secondaryTex, _secondaryHoverTex, _secondaryActiveTex, Text);
-            ButtonDanger    = MakeButton(_dangerTex,    _dangerHoverTex,    _dangerActiveTex,    Color.white);
+            ButtonDanger = MakeButton(_dangerTex, _dangerHoverTex, _dangerActiveTex, Color.white);
 
             TextField = new GUIStyle(GUI.skin.textField)
             {
@@ -208,9 +228,9 @@ namespace CardShopCoop.UI
             SetTextColorAllStates(TextField, Text);
 
             ChipSuccess = MakeChip(_chipSuccessTex, Success);
-            ChipWarn    = MakeChip(_chipWarnTex, Mul(Warn, 0.92f));
-            ChipDanger  = MakeChip(_chipDangerTex, Danger);
-            ChipInfo    = MakeChip(_chipInfoTex, HeaderBg);
+            ChipWarn = MakeChip(_chipWarnTex, Mul(Warn, 0.92f));
+            ChipDanger = MakeChip(_chipDangerTex, Danger);
+            ChipInfo = MakeChip(_chipInfoTex, HeaderBg);
 
             HudPill = new GUIStyle
             {
@@ -235,7 +255,7 @@ namespace CardShopCoop.UI
             HudPillBig.normal.textColor = Color.white;
 
             RowEven = MakeRow(_rowEvenTex);
-            RowOdd  = MakeRow(_rowOddTex);
+            RowOdd = MakeRow(_rowOddTex);
         }
 
         // --------------------------------------------------------------------------------
@@ -247,7 +267,8 @@ namespace CardShopCoop.UI
         /// callback would be clipped to the window rect and never show the offset sliver.</summary>
         public static void DrawWindowShadow(Rect win)
         {
-            if (_shadowTex == null) return;
+            if (_shadowTex == null)
+                return;
             var r = new Rect(win.x + 3f, win.y + 4f, win.width, win.height);
             GUI.Box(r, GUIContent.none, HeaderShadow());
         }
@@ -273,10 +294,12 @@ namespace CardShopCoop.UI
             const float stripH = 30f;
             GUI.Box(new Rect(0f, 0f, r.width, stripH), GUIContent.none, HeaderStrip);
 
-            if (_titleGc == null || _titleGc.text != title) _titleGc = new GUIContent(title);
+            if (_titleGc == null || _titleGc.text != title)
+                _titleGc = new GUIContent(title);
             GUI.Label(new Rect(13f, 5f, r.width - 26f, 20f), _titleGc, Header);
 
-            if (_versionGc == null || _versionGc.text != version) _versionGc = new GUIContent(version);
+            if (_versionGc == null || _versionGc.text != version)
+                _versionGc = new GUIContent(version);
             GUI.Label(new Rect(13f, 6f, r.width - 26f, 18f), _versionGc, HeaderVersion);
         }
 
@@ -326,14 +349,55 @@ namespace CardShopCoop.UI
                 margin = new RectOffset(2, 2, 3, 3),
                 border = new RectOffset(CtlRadius, CtlRadius, CtlRadius, CtlRadius)
             };
-            s.normal.background = bg;      s.normal.textColor = textColor;
-            s.hover.background = hover;    s.hover.textColor = textColor;
-            s.active.background = active;  s.active.textColor = textColor;
-            s.focused.background = bg;     s.focused.textColor = textColor;
-            s.onNormal.background = bg;    s.onNormal.textColor = textColor;
-            s.onHover.background = hover;  s.onHover.textColor = textColor;
-            s.onActive.background = active; s.onActive.textColor = textColor;
-            s.onFocused.background = bg;   s.onFocused.textColor = textColor;
+            s.normal.background = bg;
+            s.normal.textColor = textColor;
+            s.hover.background = hover;
+            s.hover.textColor = textColor;
+            s.active.background = active;
+            s.active.textColor = textColor;
+            s.focused.background = bg;
+            s.focused.textColor = textColor;
+            s.onNormal.background = bg;
+            s.onNormal.textColor = textColor;
+            s.onHover.background = hover;
+            s.onHover.textColor = textColor;
+            s.onActive.background = active;
+            s.onActive.textColor = textColor;
+            s.onFocused.background = bg;
+            s.onFocused.textColor = textColor;
+            return s;
+        }
+
+        /// <summary>Small title-bar connection indicator: 0 offline, 1 waiting/connecting,
+        /// 2 connected/hosting.</summary>
+        public static void DrawConnectionIndicator(Rect rect, int state)
+        {
+            Texture2D texture = state >= 2 ? _dotOkTex : state == 1 ? _dotWaitTex : _dotOffTex;
+            if (texture != null)
+                GUI.DrawTexture(rect, texture, ScaleMode.StretchToFill, true);
+        }
+
+        private static GUIStyle MakeTab(Texture2D bg, Texture2D hover, Color textColor)
+        {
+            var s = new GUIStyle(GUI.skin.button)
+            {
+                richText = false,
+                fontSize = 11,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter,
+                fixedHeight = 30f,
+                padding = new RectOffset(14, 14, 4, 4),
+                margin = new RectOffset(0, 2, 2, 0),
+                border = new RectOffset(SecRadius, SecRadius, SecRadius, 0)
+            };
+            s.normal.background = bg;
+            s.normal.textColor = textColor;
+            s.hover.background = hover;
+            s.hover.textColor = textColor;
+            s.active.background = hover;
+            s.active.textColor = textColor;
+            s.focused.background = bg;
+            s.focused.textColor = textColor;
             return s;
         }
 
@@ -368,10 +432,14 @@ namespace CardShopCoop.UI
 
         private static void SetTextColorAllStates(GUIStyle s, Color c)
         {
-            s.normal.textColor = c;   s.hover.textColor = c;
-            s.active.textColor = c;   s.focused.textColor = c;
-            s.onNormal.textColor = c; s.onHover.textColor = c;
-            s.onActive.textColor = c; s.onFocused.textColor = c;
+            s.normal.textColor = c;
+            s.hover.textColor = c;
+            s.active.textColor = c;
+            s.focused.textColor = c;
+            s.onNormal.textColor = c;
+            s.onHover.textColor = c;
+            s.onActive.textColor = c;
+            s.onFocused.textColor = c;
         }
 
         // --------------------------------------------------------------------------------
@@ -391,6 +459,11 @@ namespace CardShopCoop.UI
         private static Texture2D MakeRoundedTop(int w, int h, int radius, Color fill)
         {
             return MakeCore(w, h, radius, radius, 0, 0, fill, fill, 0);
+        }
+
+        private static Texture2D MakeRoundedBottom(int w, int h, int radius, Color fill, Color border, int borderWidth)
+        {
+            return MakeCore(w, h, 0, 0, radius, radius, fill, border, borderWidth);
         }
 
         private static Texture2D MakeCore(int w, int h, float rTL, float rTR, float rBR, float rBL,
@@ -475,8 +548,10 @@ namespace CardShopCoop.UI
             float rTL, float rTR, float rBR, float rBL)
         {
             float r;
-            if (px > 0f) r = (py > 0f) ? rBR : rTR;
-            else r = (py > 0f) ? rBL : rTL;
+            if (px > 0f)
+                r = (py > 0f) ? rBR : rTR;
+            else
+                r = (py > 0f) ? rBL : rTL;
             float qx = Mathf.Abs(px) - bx + r;
             float qy = Mathf.Abs(py) - by + r;
             float ox = Mathf.Max(qx, 0f), oy = Mathf.Max(qy, 0f);

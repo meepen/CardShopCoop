@@ -104,23 +104,27 @@ namespace CardShopCoop.Sync
         public static void HostRolledPostfix()
         {
             // postfixes run even when the prefix skipped the original - host gate here
-            if (CoopCore.Role == CoopRole.Host) s_rollGen++;
+            if (CoopCore.Role == CoopRole.Host)
+                s_rollGen++;
         }
 
         // ---------------- host ----------------
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame || BroadcastState == null) return;
+            if (!inGame || BroadcastState == null)
+                return;
             _timer += dt;
-            if (_timer < Interval) return;
+            if (_timer < Interval)
+                return;
             _timer -= Interval;
             try
             {
                 // tables exist only after CPlayerData init; an empty item list means the
                 // save hasn't landed yet
                 if (CPlayerData.m_ItemPricePercentChangeList == null
-                    || CPlayerData.m_ItemPricePercentChangeList.Count == 0) return;
+                    || CPlayerData.m_ItemPricePercentChangeList.Count == 0)
+                    return;
 
                 // the market changes once per host day (plus rare game-event price edits),
                 // so the hash keeps this ~32KB snapshot off the wire almost always
@@ -148,7 +152,8 @@ namespace CardShopCoop.Sync
                 hash = HashEplMarket(hash);
 
                 _heal += Interval;
-                if (hash == _lastHash && _heal < HealEvery) return;
+                if (hash == _lastHash && _heal < HealEvery)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
                 BroadcastState(BuildState());
@@ -186,7 +191,10 @@ namespace CardShopCoop.Sync
         public void ClientApplyState(MarketStateMessage message)
         {
             ApplyingRemote = true;
-            try { ClientApplyInner(message); }
+            try
+            {
+                ClientApplyInner(message);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("MarketSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
@@ -293,16 +301,22 @@ namespace CardShopCoop.Sync
                 // value by design (see FillSparse).
                 int i = (int)entries[k].ItemType;
                 float v = entries[k].Value;
-                if (!TryResolveIndex(list, i, out bool modded)) continue;
+                if (!TryResolveIndex(list, i, out bool modded))
+                    continue;
                 if (modded)
                 {
                     // raw writes up here are shadow rows the game never reads (the
                     // woven accessors serve EPL save data instead) - the original
                     // sin behind modded items' $0 market prices on the joiner
-                    try { moddedWrite(i, v); } catch { }
+                    try
+                    {
+                        moddedWrite(i, v);
+                    }
+                    catch { }
                     continue;
                 }
-                while (list.Count <= i) list.Add(0f); // grow-on-demand (no-EPL fallback)
+                while (list.Count <= i)
+                    list.Add(0f); // grow-on-demand (no-EPL fallback)
                 list[i] = v;
             }
         }
@@ -310,7 +324,8 @@ namespace CardShopCoop.Sync
         private static void ReadPercentsInto(List<MarketPercentEntry> entries, List<float> list)
         {
             if (list != null)
-                for (int i = 0; i < list.Count; i++) list[i] = 0f; // absent = no change rolled
+                for (int i = 0; i < list.Count; i++)
+                    list[i] = 0f; // absent = no change rolled
             if (EplMarketBridge())
             {
                 // modded percents need the same absent-means-zero treatment, but they
@@ -326,7 +341,8 @@ namespace CardShopCoop.Sync
                     // rolled value alone. ToWire answers "does the host know this item" and is
                     // the identity (never None) on vanilla ids and in an untranslated session,
                     // so nothing that used to be zeroed here stops being zeroed.
-                    if (Util.EnumMap.ToWire(Util.EnumKind.ItemType, modded[k]) == (int)EItemType.None) continue;
+                    if (Util.EnumMap.ToWire(Util.EnumKind.ItemType, modded[k]) == (int)EItemType.None)
+                        continue;
                     EplSetFloat(modded[k], s_eplPctChange, 0f);
                 }
             }
@@ -338,13 +354,15 @@ namespace CardShopCoop.Sync
                 // ReadSparseFloatsInto)
                 int i = (int)entries[k].ItemType;
                 float v = entries[k].Percent / 100f;
-                if (!TryResolveIndex(list, i, out bool modded)) continue;
+                if (!TryResolveIndex(list, i, out bool modded))
+                    continue;
                 if (modded)
                 {
                     EplSetFloat(i, s_eplPctChange, v);
                     continue;
                 }
-                while (list.Count <= i) list.Add(0f); // grow-on-demand (no-EPL fallback)
+                while (list.Count <= i)
+                    list.Add(0f); // grow-on-demand (no-EPL fallback)
                 list[i] = v;
             }
         }
@@ -377,7 +395,8 @@ namespace CardShopCoop.Sync
                     list[i].pricePercentChangeList = v; // in place: consumers hold the object
                     // Rows past the host's shown-monster range are legitimately 0 over there;
                     // copying that in would blank a row vanilla had just filled locally.
-                    if (gen != 0f) list[i].generatedMarketPrice = gen;
+                    if (gen != 0f)
+                        list[i].generatedMarketPrice = gen;
                 }
             }
         }
@@ -385,7 +404,8 @@ namespace CardShopCoop.Sync
         private static void FillFloats(List<float> out_list, List<float> list)
         {
             int n = Mathf.Min(list?.Count ?? 0, ushort.MaxValue);
-            for (int i = 0; i < n; i++) out_list.Add(list[i]);
+            for (int i = 0; i < n; i++)
+                out_list.Add(list[i]);
         }
 
         private static void ReadFloatsInto(List<float> entries, List<float> list)
@@ -393,7 +413,8 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < entries.Count; i++)
             {
                 float v = entries[i];
-                if (list != null && i < list.Count) list[i] = v;
+                if (list != null && i < list.Count)
+                    list[i] = v;
             }
         }
 
@@ -484,7 +505,8 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < values.Length; i++)
             {
                 int value = Convert.ToInt32(values.GetValue(i));
-                if (value >= 0 && value < 200000 && value > max) max = value;
+                if (value >= 0 && value < 200000 && value > max)
+                    max = value;
             }
             return max + 1;
         }
@@ -499,17 +521,20 @@ namespace CardShopCoop.Sync
             }
             if (!EplMarketBridge())
             {
-                if (index >= list.Count) WarnInvalidIndex(index);
+                if (index >= list.Count)
+                    WarnInvalidIndex(index);
                 return index < list.Count;
             }
             int vanilla = VanillaItemTypeCount();
             if (index < vanilla)
             {
-                if (index >= list.Count) WarnInvalidIndex(index);
+                if (index >= list.Count)
+                    WarnInvalidIndex(index);
                 return index < list.Count;
             }
             modded = EplSaveData(index) != null;
-            if (!modded) WarnInvalidIndex(index);
+            if (!modded)
+                WarnInvalidIndex(index);
             return modded;
         }
 
@@ -527,7 +552,8 @@ namespace CardShopCoop.Sync
         private static List<int> EplModdedItemTypes()
         {
             var result = new List<int>();
-            if (!EplMarketBridge()) return result;
+            if (!EplMarketBridge())
+                return result;
             try
             {
                 var assets = s_eplAssetsProp.GetValue(null);
@@ -537,7 +563,8 @@ namespace CardShopCoop.Sync
                     foreach (object key in dict.Keys)
                     {
                         int v = Convert.ToInt32(key);
-                        if (v >= 200000 && v <= 500000) result.Add(v);
+                        if (v >= 200000 && v <= 500000)
+                            result.Add(v);
                     }
             }
             catch { }
@@ -565,7 +592,8 @@ namespace CardShopCoop.Sync
             // items the host has but we don't: no save data -> silently dropped,
             // matching ItemPriceListHandler.SetItem for an unresolvable index
             object d = EplSaveData(itemType);
-            if (d != null) field.SetValue(d, value, null);
+            if (d != null)
+                field.SetValue(d, value, null);
         }
 
         private static List<KeyValuePair<int, float>> CollectModded(List<int> modded, PropertyInfo field)
@@ -575,14 +603,21 @@ namespace CardShopCoop.Sync
                 for (int k = 0; k < modded.Count; k++)
                 {
                     float v = EplGetFloat(modded[k], field);
-                    if (v != 0f) vals.Add(new KeyValuePair<int, float>(modded[k], v));
+                    if (v != 0f)
+                        vals.Add(new KeyValuePair<int, float>(modded[k], v));
                 }
             return vals;
         }
 
         // modded-index writers for ReadSparseFloatsInto (bridge verified by the caller)
-        private static void ModdedGenMarket(int itemType, float v) { EplSetFloat(itemType, s_eplGenMarket, v); }
-        private static void ModdedGenCost(int itemType, float v) { EplSetFloat(itemType, s_eplGenCost, v); }
+        private static void ModdedGenMarket(int itemType, float v)
+        {
+            EplSetFloat(itemType, s_eplGenMarket, v);
+        }
+        private static void ModdedGenCost(int itemType, float v)
+        {
+            EplSetFloat(itemType, s_eplGenCost, v);
+        }
         private static void ModdedAvgCost(int itemType, float v)
         {
             // the GAME's setter: no math in its body, and its woven form routes
@@ -596,7 +631,8 @@ namespace CardShopCoop.Sync
             for (int k = 0; k < modded.Count; k++)
             {
                 object d = EplSaveData(modded[k]);
-                if (d == null) continue;
+                if (d == null)
+                    continue;
                 h = h * 31 + (int)((float)s_eplPctChange.GetValue(d, null) * 100f);
                 h = h * 31 + (int)((float)s_eplGenMarket.GetValue(d, null) * 100f);
                 h = h * 31 + (int)((float)s_eplGenCost.GetValue(d, null) * 100f);
@@ -607,7 +643,8 @@ namespace CardShopCoop.Sync
 
         private static int HashFloats(int h, List<float> list)
         {
-            if (list == null) return h;
+            if (list == null)
+                return h;
             for (int i = 0; i < list.Count; i++)
                 h = h * 31 + (int)(list[i] * 100f);
             return h;
@@ -615,7 +652,8 @@ namespace CardShopCoop.Sync
 
         private static int HashMarket(int h, List<MarketPrice> list)
         {
-            if (list == null) return h;
+            if (list == null)
+                return h;
             for (int i = 0; i < list.Count; i++)
             {
                 var m = list[i];

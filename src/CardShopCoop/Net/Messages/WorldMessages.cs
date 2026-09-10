@@ -11,7 +11,13 @@ namespace CardShopCoop.Net.Messages
     public sealed class ShelfDeltaMessage : INetMessage
     {
         public List<WorldSync.Entry> Entries = new List<WorldSync.Entry>();
-        public MsgType Type { get { return MsgType.ShelfDelta; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ShelfDelta;
+            }
+        }
     }
 
     // Guest restock/take request: client -> host. Same Entry shape as the delta.
@@ -19,35 +25,65 @@ namespace CardShopCoop.Net.Messages
     public sealed class ShelfRequestMessage : INetMessage
     {
         public List<WorldSync.Entry> Entries = new List<WorldSync.Entry>();
-        public MsgType Type { get { return MsgType.ShelfRequest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ShelfRequest;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.ObjMoveDelta, Policy = MessagePolicy.ClientOnly)]
     public sealed class ObjMoveDeltaMessage : INetMessage
     {
         public List<ObjMoveSync.Entry> Entries = new List<ObjMoveSync.Entry>();
-        public MsgType Type { get { return MsgType.ObjMoveDelta; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ObjMoveDelta;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.ObjMoveRequest, Policy = MessagePolicy.HostOnly)]
     public sealed class ObjMoveRequestMessage : INetMessage
     {
         public List<ObjMoveSync.Entry> Entries = new List<ObjMoveSync.Entry>();
-        public MsgType Type { get { return MsgType.ObjMoveRequest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ObjMoveRequest;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.BoxState, Policy = MessagePolicy.ClientOnly)]
     public sealed class BoxStateMessage : INetMessage
     {
         public List<BoxSync.Entry> Entries = new List<BoxSync.Entry>();
-        public MsgType Type { get { return MsgType.BoxState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.BoxState;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.BoxRequest, Policy = MessagePolicy.HostOnly)]
     public sealed class BoxRequestMessage : INetMessage
     {
         public List<BoxSync.Entry> Entries = new List<BoxSync.Entry>();
-        public MsgType Type { get { return MsgType.BoxRequest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.BoxRequest;
+            }
+        }
     }
 
     // Guest trashed a loose box: client -> host, keyed by the box's stable id + its type
@@ -58,7 +94,13 @@ namespace CardShopCoop.Net.Messages
     {
         public int Index;
         public EItemType ItemType;
-        public MsgType Type { get { return MsgType.BoxRemoved; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.BoxRemoved;
+            }
+        }
     }
 
     // Placed-object population roster, one list per kind: host -> client. Deferred entirely
@@ -67,21 +109,39 @@ namespace CardShopCoop.Net.Messages
     public sealed class PopStateMessage : INetMessage
     {
         public List<List<PopulationSync.Entry>> Entries = new List<List<PopulationSync.Entry>>();
-        public MsgType Type { get { return MsgType.PopState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.PopState;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.CardShelfDelta, Policy = MessagePolicy.ClientOnly)]
     public sealed class CardShelfDeltaMessage : INetMessage
     {
         public List<CardShelfSync.Entry> Entries = new List<CardShelfSync.Entry>();
-        public MsgType Type { get { return MsgType.CardShelfDelta; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CardShelfDelta;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.CardShelfRequest, Policy = MessagePolicy.HostOnly)]
     public sealed class CardShelfRequestMessage : INetMessage
     {
         public List<CardShelfSync.Entry> Entries = new List<CardShelfSync.Entry>();
-        public MsgType Type { get { return MsgType.CardShelfRequest; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CardShelfRequest;
+            }
+        }
     }
 
     // One card entering/leaving the shared collection. Both ways on purpose (the single
@@ -92,7 +152,13 @@ namespace CardShopCoop.Net.Messages
         public bool IsAdd;
         public int Amount;
         public CardData Card;
-        public MsgType Type { get { return MsgType.CardDelta; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CardDelta;
+            }
+        }
     }
 
     /// <summary>One payload inside a CardDeltaBatch frame.</summary>
@@ -110,14 +176,26 @@ namespace CardShopCoop.Net.Messages
     public sealed class CardDeltaBatchMessage : INetMessage
     {
         public List<CardDeltaEntry> Deltas = new List<CardDeltaEntry>();
-        public MsgType Type { get { return MsgType.CardDeltaBatch; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.CardDeltaBatch;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.Toast, Policy = MessagePolicy.ClientOnly)]
     public sealed class ToastMessage : INetMessage
     {
         public string Text;
-        public MsgType Type { get { return MsgType.Toast; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.Toast;
+            }
+        }
     }
 
     /// <summary>One (item id, price) pair in a PriceList table.</summary>
@@ -134,7 +212,13 @@ namespace CardShopCoop.Net.Messages
     public sealed class PriceListMessage : INetMessage
     {
         public List<PriceEntry> Prices = new List<PriceEntry>();
-        public MsgType Type { get { return MsgType.PriceList; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.PriceList;
+            }
+        }
     }
 
     [NetworkMessage(MsgType.LightState, Policy = MessagePolicy.ClientOnly)]
@@ -145,7 +229,13 @@ namespace CardShopCoop.Net.Messages
         // client distinguish a real rollover from a large clock delta at 21:00.
         public int Day;
         public bool HasDay;
-        public MsgType Type { get { return MsgType.LightState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.LightState;
+            }
+        }
     }
 
     /// <summary>One unlocked-license entry in a LicenseState frame.</summary>
@@ -163,6 +253,12 @@ namespace CardShopCoop.Net.Messages
     {
         public bool Scanner;
         public List<LicenseEntry> Entries = new List<LicenseEntry>();
-        public MsgType Type { get { return MsgType.LicenseState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.LicenseState;
+            }
+        }
     }
 }

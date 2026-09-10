@@ -3,8 +3,13 @@
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
     <AssemblyName>CardShopCoop</AssemblyName>
+    <AssemblyTitle>Community Multiplayer Mod</AssemblyTitle>
     <RootNamespace>CardShopCoop</RootNamespace>
-    <Version>1.0.59</Version>
+    <Company>meepen</Company>
+    <Product>Community Multiplayer Mod</Product>
+    <Description>Community Multiplayer Mod for TCG Card Shop Simulator.</Description>
+    <Authors>meepen</Authors>
+    <Version>$(CardShopCoopVersion)</Version>
     <LangVersion>9</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -84,8 +89,33 @@
     </Reference>
   </ItemGroup>
 
-  <Target Name="DeployToPlugins" AfterTargets="Build" Condition="'$(SkipDeploy)' != 'true'">
+  <ItemGroup>
+    <Compile Include="$(IntermediateOutputPath)CardShopCoopVersion.g.cs" />
+  </ItemGroup>
+
+  <Target Name="GenerateCardShopCoopVersion" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <CardShopCoopGeneratedSource>// &lt;auto-generated /&gt;&#xA;namespace CardShopCoop&#xA;{&#xA;    public partial class CoopPlugin&#xA;    {&#xA;        public const string Version = &quot;$(CardShopCoopVersion)&quot;%3B&#xA;    }&#xA;}</CardShopCoopGeneratedSource>
+    </PropertyGroup>
+    <WriteLinesToFile
+      File="$(IntermediateOutputPath)CardShopCoopVersion.g.cs"
+      Overwrite="true"
+      Lines="$(CardShopCoopGeneratedSource)" />
+  </Target>
+
+  <Target Name="DeployToPlugins" AfterTargets="Build" Condition="'$(Deploy)' == 'true'">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GamePath)\BepInEx\plugins\CardShopCoop" />
+  </Target>
+
+  <Target Name="Package" AfterTargets="Build" Condition="'$(Package)' == 'true'">
+    <PropertyGroup>
+      <PackageDirectory>$(IntermediateOutputPath)package</PackageDirectory>
+      <PackageZip>$(OutputPath)$(AssemblyName)-$(CardShopCoopVersion).zip</PackageZip>
+    </PropertyGroup>
+    <RemoveDir Directories="$(PackageDirectory)" />
+    <MakeDir Directories="$(PackageDirectory)\$(AssemblyName)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageDirectory)\$(AssemblyName)" />
+    <ZipDirectory SourceDirectory="$(PackageDirectory)" DestinationFile="$(PackageZip)" Overwrite="true" />
   </Target>
 
 </Project>

@@ -15,7 +15,13 @@ namespace CardShopCoop.Net.Messages
         public float HostTime;
         public System.Collections.Generic.List<NpcEntry> Entries = new System.Collections.Generic.List<NpcEntry>();
 
-        public MsgType Type { get { return MsgType.NpcState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.NpcState;
+            }
+        }
 
 
     }
@@ -31,7 +37,13 @@ namespace CardShopCoop.Net.Messages
         public string Text;
         public float OffsetUp;
 
-        public MsgType Type { get { return MsgType.NpcSpeech; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.NpcSpeech;
+            }
+        }
 
 
     }
@@ -63,7 +75,13 @@ namespace CardShopCoop.Net.Messages
     {
         public System.Collections.Generic.List<RegisterStateEntry> Entries = new System.Collections.Generic.List<RegisterStateEntry>();
 
-        public MsgType Type { get { return MsgType.RegisterState; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.RegisterState;
+            }
+        }
 
 
     }
@@ -92,7 +110,13 @@ namespace CardShopCoop.Net.Messages
     {
         public System.Collections.Generic.List<RegisterCartEntry> Entries = new System.Collections.Generic.List<RegisterCartEntry>();
 
-        public MsgType Type { get { return MsgType.RegisterCart; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.RegisterCart;
+            }
+        }
 
 
     }
@@ -137,7 +161,13 @@ namespace CardShopCoop.Net.Messages
         public bool TakingBack;    // OpGiveChange
         public double TotalAmount; // OpFinishCard (EvaluateCreditCard total)
 
-        public MsgType Type { get { return MsgType.RegisterOp; } }
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.RegisterOp;
+            }
+        }
 
 
     }

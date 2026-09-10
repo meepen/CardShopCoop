@@ -24,7 +24,9 @@ namespace CardShopCoop.Net
         public ConcurrentQueue<int> Disconnects { get; } = new ConcurrentQueue<int>();
         public ConcurrentQueue<int> Connects { get; } = new ConcurrentQueue<int>();
 
-        public void PumpMainThread() { } // all socket work lives on background threads
+        public void PumpMainThread()
+        {
+        } // all socket work lives on background threads
 
         public double TimeoutSeconds => 60.0;
 
@@ -62,7 +64,10 @@ namespace CardShopCoop.Net
         private readonly object _connsLock = new object();
         private int _nextConnId = 1;
 
-        public bool IsListening { get; private set; }
+        public bool IsListening
+        {
+            get; private set;
+        }
 
         private class Conn
         {
@@ -101,7 +106,10 @@ namespace CardShopCoop.Net
             while (_running)
             {
                 TcpClient tcp;
-                try { tcp = listener.AcceptTcpClient(); }
+                try
+                {
+                    tcp = listener.AcceptTcpClient();
+                }
                 catch (Exception e)
                 {
                     // Stopping the listener is the normal way out of AcceptTcpClient. A
@@ -112,7 +120,11 @@ namespace CardShopCoop.Net
                 }
                 if (!_running || !ReferenceEquals(listener, _listener))
                 {
-                    try { tcp.Close(); } catch { }
+                    try
+                    {
+                        tcp.Close();
+                    }
+                    catch { }
                     break;
                 }
                 ConfigureSocket(tcp);
@@ -121,7 +133,11 @@ namespace CardShopCoop.Net
                 {
                     if (!_running)
                     {
-                        try { tcp.Close(); } catch { }
+                        try
+                        {
+                            tcp.Close();
+                        }
+                        catch { }
                         break;
                     }
                     conn.Id = _nextConnId++;
@@ -155,7 +171,10 @@ namespace CardShopCoop.Net
             tcp.EndConnect(ar);
             ConfigureSocket(tcp);
             var conn = new Conn { Id = 1, Tcp = tcp, Stream = tcp.GetStream() };
-            lock (_connsLock) { _conns[1] = conn; }
+            lock (_connsLock)
+            {
+                _conns[1] = conn;
+            }
             conn.ReadThread = new Thread(() => ReadLoop(conn)) { IsBackground = true, Name = "CoopRead1" };
             TrackThread(conn.ReadThread);
             conn.ReadThread.Start();
@@ -187,13 +206,19 @@ namespace CardShopCoop.Net
                     // Stop() signals this separately from the writer signal so teardown
                     // does not have to wait for the two-second keepalive interval.
                     conn.KeepaliveSignal.WaitOne(2000);
-                    if (!_running || !conn.Alive) break;
+                    if (!_running || !conn.Alive)
+                        break;
                     var message = KeepaliveMessage;
-                    if (message == null) continue;
+                    if (message == null)
+                        continue;
                     conn.SendQueue.Enqueue(NetMessageCodec.Encode(message));
                     conn.SendSignal.Set();
                 }
-            }) { IsBackground = true, Name = "CoopKeepalive" + conn.Id };
+            })
+            {
+                IsBackground = true,
+                Name = "CoopKeepalive" + conn.Id
+            };
             conn.KeepaliveThread = thread;
             TrackThread(thread);
             thread.Start();
@@ -201,7 +226,8 @@ namespace CardShopCoop.Net
 
         private void TrackThread(Thread thread)
         {
-            lock (_threadsLock) _threads.Add(thread);
+            lock (_threadsLock)
+                _threads.Add(thread);
         }
 
         /// <summary>Drains the connection's send queue; the only thread that writes to
@@ -273,8 +299,13 @@ namespace CardShopCoop.Net
         private void SendFrame(int connId, byte[] frame)
         {
             Conn conn;
-            lock (_connsLock) { if (!_conns.TryGetValue(connId, out conn)) return; }
-            if (!conn.Alive) return;
+            lock (_connsLock)
+            {
+                if (!_conns.TryGetValue(connId, out conn))
+                    return;
+            }
+            if (!conn.Alive)
+                return;
             conn.SendQueue.Enqueue(frame);
             conn.SendSignal.Set();
         }
@@ -282,25 +313,42 @@ namespace CardShopCoop.Net
         private void BroadcastFrame(byte[] frame)
         {
             List<int> ids;
-            lock (_connsLock) { ids = new List<int>(_conns.Keys); }
-            foreach (int id in ids) SendFrame(id, frame);
+            lock (_connsLock)
+            {
+                ids = new List<int>(_conns.Keys);
+            }
+            foreach (int id in ids)
+                SendFrame(id, frame);
         }
 
         public int ConnectionCount
         {
-            get { lock (_connsLock) { return _conns.Count; } }
+            get
+            {
+                lock (_connsLock)
+                {
+                    return _conns.Count;
+                }
+            }
         }
 
         public double SecondsSinceLastRecv(int connId)
         {
             Conn conn;
-            lock (_connsLock) { if (!_conns.TryGetValue(connId, out conn)) return double.MaxValue; }
+            lock (_connsLock)
+            {
+                if (!_conns.TryGetValue(connId, out conn))
+                    return double.MaxValue;
+            }
             return TimeSpan.FromTicks(DateTime.UtcNow.Ticks - conn.LastRecvTicksUtc).TotalSeconds;
         }
 
         public List<int> ConnIds()
         {
-            lock (_connsLock) { return new List<int>(_conns.Keys); }
+            lock (_connsLock)
+            {
+                return new List<int>(_conns.Keys);
+            }
         }
 
         /// <summary>Forcibly drop one connection (timeout, version mismatch...).</summary>
@@ -314,15 +362,33 @@ namespace CardShopCoop.Net
             Conn conn;
             lock (_connsLock)
             {
-                if (!_conns.TryGetValue(connId, out conn)) return;
+                if (!_conns.TryGetValue(connId, out conn))
+                    return;
                 _conns.Remove(connId);
             }
-            if (!conn.Alive) return;
+            if (!conn.Alive)
+                return;
             conn.Alive = false;
-            try { conn.SendSignal.Set(); } catch { } // wake the writer so it can exit
-            try { conn.KeepaliveSignal.Set(); } catch { } // wake keepalive during teardown
-            try { conn.Stream?.Close(); } catch { }
-            try { conn.Tcp?.Close(); } catch { }
+            try
+            {
+                conn.SendSignal.Set();
+            }
+            catch { } // wake the writer so it can exit
+            try
+            {
+                conn.KeepaliveSignal.Set();
+            }
+            catch { } // wake keepalive during teardown
+            try
+            {
+                conn.Stream?.Close();
+            }
+            catch { }
+            try
+            {
+                conn.Tcp?.Close();
+            }
+            catch { }
             Disconnects.Enqueue(connId);
         }
 
@@ -330,27 +396,39 @@ namespace CardShopCoop.Net
         {
             _running = false;
             IsListening = false;
-            try { _listener?.Stop(); } catch { }
+            try
+            {
+                _listener?.Stop();
+            }
+            catch { }
             _listener = null;
             List<int> ids;
-            lock (_connsLock) { ids = new List<int>(_conns.Keys); }
-            foreach (int id in ids) DropConn(id);
+            lock (_connsLock)
+            {
+                ids = new List<int>(_conns.Keys);
+            }
+            foreach (int id in ids)
+                DropConn(id);
 
             // Stop all connections before joining: closing the stream unblocks readers,
             // and SendSignal wakes writers. Join the acceptor first because it owns the
             // connection thread creation path.
             JoinThread(_acceptThread);
             List<Thread> threads;
-            lock (_threadsLock) threads = new List<Thread>(_threads);
+            lock (_threadsLock)
+                threads = new List<Thread>(_threads);
             foreach (var thread in threads)
-                if (thread != _acceptThread) JoinThread(thread);
-            lock (_threadsLock) _threads.RemoveAll(t => !t.IsAlive);
+                if (thread != _acceptThread)
+                    JoinThread(thread);
+            lock (_threadsLock)
+                _threads.RemoveAll(t => !t.IsAlive);
             _acceptThread = null;
         }
 
         private static void JoinThread(Thread thread)
         {
-            if (thread == null || thread == Thread.CurrentThread || !thread.IsAlive) return;
+            if (thread == null || thread == Thread.CurrentThread || !thread.IsAlive)
+                return;
             try
             {
                 if (!thread.Join(1500))
@@ -362,6 +440,9 @@ namespace CardShopCoop.Net
             }
         }
 
-        public void Dispose() { Stop(); }
+        public void Dispose()
+        {
+            Stop();
+        }
     }
 }

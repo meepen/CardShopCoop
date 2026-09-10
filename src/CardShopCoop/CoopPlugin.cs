@@ -12,7 +12,10 @@ namespace CardShopCoop
     /// <summary>How loudly a graded-album divergence is announced ON SCREEN.
     /// The LOG is never gated by this - a support log has to be complete whatever the player
     /// chose, and the whole point of the setting is to quiet the screen without going blind.</summary>
-    public enum GradedAlertMode { Always, OncePerSession, Never }
+    public enum GradedAlertMode
+    {
+        Always, OncePerSession, Never
+    }
 
     [BepInPlugin(Guid, Name, Version)]
     // SOFT dependency on Grading Overhaul: it changes NOTHING when GO is absent, and when GO is
@@ -23,12 +26,10 @@ namespace CardShopCoop
     // minting certificate numbers. Guid copied from GO's own BepInPlugin (decompiled-grading
     // :16912), which is also the Harmony owner id used in the `before` array over there.
     [BepInDependency("munch.gradingoverhaul", BepInDependency.DependencyFlags.SoftDependency)]
-    public class CoopPlugin : BaseUnityPlugin
+    public partial class CoopPlugin : BaseUnityPlugin
     {
-        public const string Guid = "com.zwhit.cardshopcoop";
-        public const string Name = "CardShopCoop";
-        public const string Version = "1.0.62";
-
+        public const string Guid = "dev.meepen.tcgmultiplayer";
+        public const string Name = "Community Multiplayer Mod (CardShopCoop)";
         public static ManualLogSource Log;
 
         public static ConfigEntry<int> Port;
@@ -150,7 +151,11 @@ namespace CardShopCoop
                 // silent "co-op window won't open".
                 coreLoaded = false;
                 Log.LogError($"{Name} {Version}: CoopCore FAILED TO LOAD - co-op is disabled this session and NO game patches were installed (the game runs exactly as vanilla). {e.GetType().Name}: {e.Message}");
-                try { Destroy(go); } catch { }
+                try
+                {
+                    Destroy(go);
+                }
+                catch { }
             }
 
             if (coreLoaded)

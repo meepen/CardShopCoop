@@ -1,84 +1,107 @@
 # AGENTS.md
 
-Notes for AI agents and contributors working in this repo.
+Contributor and agent notes for Community Multiplayer Mod.
 
-## What this repo is
+## Project
 
-A BepInEx 5 / Harmony mod (`CardShopCoop`) for **TCG Card Shop Simulator**, a Unity
-2021.3 **Mono** game (not IL2CPP). The game's managed assemblies live in the install's
-`Card Shop Simulator_Data\Managed\` folder; the game logic is in `Assembly-CSharp.dll`.
+Community Multiplayer Mod is the marketed name of the `CardShopCoop` BepInEx 5 / Harmony
+plugin for **TCG Card Shop Simulator**, a Unity
+2021.3 Mono game. The mod references the game's managed assemblies at build time and
+patches game behavior at runtime. The game's logic is in `Assembly-CSharp.dll`.
 
-The mod references those game assemblies at build time and patches them at runtime via
-Harmony. To understand what the game actually does (for features or bug reports) you read
-its **decompiled source** — the game ships no source, only bytecode.
+## Versioning and wire compatibility
 
-## The decompile tool
+There is one version source: `CardShopCoopVersion` in `Directory.Build.props`. The
+plugin project uses it for assembly metadata, and the build generates the compile-time
+`CoopPlugin.Version` constant used by BepInEx and the network handshake. **Bump the
+version only in `Directory.Build.props`.**
 
-`tools/Decomp` is a thin ILSpy wrapper (`ICSharpCode.Decompiler`, `WholeProjectDecompiler`)
-that turns a managed assembly into a full C# project of `.cs` files.
+Use this versioning rule:
 
-Build it once:
+- **Patch**: changes that do not alter the wire contract, such as bug fixes, UI/text,
+  tuning, configuration, and documentation.
+- **Minor**: a new `MsgType` or substantial logic change behind an existing message,
+  including field layout, encoding, semantics, or routing changes.
+- **Major**: a breaking compatibility change that requires a deliberate major protocol
+  transition.
+
+`Msg.WireVersion` is derived from `major * 100 + minor`; patch releases leave it
+unchanged. The current plugin identity is `dev.meepen.tcgmultiplayer`, while the shipped
+DLL remains `CardShopCoop.dll`. The handshake also requires exact plugin-version equality,
+so peers normally must run the identical Community Multiplayer Mod version.
+
+The mod is tested only against the newest game version available when documented here:
+**TCG Card Shop Simulator 0.70.3**.
+
+The launcher and `CHANGELOG.md` are no longer part of the repository. Git history and
+GitHub releases are the release record.
+
+## Build and CI
+
+Build the plugin with:
+
+```powershell
+dotnet build src\CardShopCoop\CardShopCoop.csproj -c Release -p:Deploy=true
+```
+
+Deployment is opt-in: `Deploy` defaults to `false` in `Directory.Build.props`. Always use
+`-p:Deploy=true` for a local build when you want the DLL copied to the game's BepInEx
+plugins directory; omit it in CI or while the game is running. The repository has no
+solution file.
+
+Before submitting changes, check formatting from the repository root:
+
+```powershell
+dotnet restore src\CardShopCoop\CardShopCoop.csproj
+dotnet format src\CardShopCoop\CardShopCoop.csproj whitespace --verify-no-changes --no-restore
+```
+
+The command must finish with no formatting errors. If it reports formatting changes, apply
+them with the same command without `--verify-no-changes`, inspect the result, and rerun the
+verification command. CI runs this same formatting check against the root `.editorconfig`.
+Full compile CI is deferred until a permitted source for the game's reference assemblies is
+available.
+
+## Game path
+
+`Directory.Build.props` resolves `GamePath` in this order:
+
+1. `Directory.Build.user.props` (git-ignored; copy `Directory.Build.user.props.example`).
+2. The `CARDSHOP_GAMEPATH` environment variable.
+3. The committed default in `Directory.Build.props`.
+
+For a one-off build, `dotnet build -p:GamePath=...` overrides those settings. Do not
+hard-code a local game path in a project file.
+
+## Decompiled game source
+
+The game ships no source, only bytecode. Use `tools/Decomp` to generate readable C# from
+the managed assemblies; the output is git-ignored and must not be committed.
+
+Build the tool once:
 
 ```powershell
 dotnet build tools\Decomp\Decomp.csproj -c Release
 ```
 
-Run it (args: `<assembly.dll>` `<output-dir>`):
+Run it with an assembly path and output directory:
 
 ```powershell
 dotnet tools\Decomp\bin\Release\net9.0\Decomp.dll `
-  "Z:\SteamLibrary\steamapps\common\TCG Card Shop Simulator\Card Shop Simulator_Data\Managed\Assembly-CSharp.dll" `
-  "C:\Users\meep\Desktop\CardShopCoop\decompiled\Assembly-CSharp"
+  "<GamePath>\Card Shop Simulator_Data\Managed\Assembly-CSharp.dll" `
+  "<repo-root>\decompiled\Assembly-CSharp"
 ```
 
-## Game path (`GamePath`)
+Other useful assemblies include `Heathen.Core.dll`, `Heathen.Steamworks.dll`,
+`AstarPathfindingProject.dll`, and `DOTween.dll`; Unity assemblies are usually needed
+only as references.
 
-The build resolves the install path via repo-root `Directory.Build.props`, in this order
-(high to low precedence):
+When developing a feature, find the game class that owns the relevant flow and inspect
+the real decompiled method bodies, fields, events, and call order. When investigating a
+bug, verify the expected behavior in the decompiled source and confirm that the patch
+targets the exact method and overload the game calls.
 
-1. `Directory.Build.user.props` (git-ignored; copy `Directory.Build.user.props.example`)
-2. `CARDSHOP_GAMEPATH` environment variable
-3. the committed `D:\SteamLibrary\steamapps\common\TCG Card Shop Simulator` default
-
-`dotnet build -p:GamePath=...` overrides all of these for a one-off/CI build. Do **not**
-hard-code a path in the csproj. The game on this machine is at `Z:\SteamLibrary\...`.
-
-## Decompile workflow
-
-1. Locate the assemblies: `<GamePath>\Card Shop Simulator_Data\Managed\`.
-2. Decompile `Assembly-CSharp.dll` (the game logic) with the tool above.
-3. Output goes to `decompiled\` (git-ignored — regenerate locally; never commit it).
-4. Search/read the generated `.cs` files. They are plain C# with real method bodies
-   (ILSpy produces full implementations, not stubs).
-
-Useful extra assemblies to decompile when needed (same command):
-- `Heathen.Core.dll` / `Heathen.Steamworks.dll` — Steam integration
-- `AstarPathfindingProject.dll` — pathfinding
-- `DOTween.dll` — tweens
-- `Unity.TextMeshPro.dll`, `UnityEngine.UI.dll` — UI/rendering (usually only via references)
-
-## When to use the decompiled source
-
-**Developing a feature** (e.g. syncing a new game system):
-- Find the game class that owns the data/flow — `decompiled\Assembly-CSharp\*.cs`.
-- Read the method bodies to learn the exact fields, events, and call order the mod must
-  hook (e.g. `CEventManager.QueueEvent(...)` calls, `CSingleton<T>.Instance` usage, the
-  save path through `CGameData`/`CSaveLoad`).
-- The mod patches against the *public API surface* of these types; the decompiled source
-  is the ground truth for what that surface is.
-
-**Investigating a bug report**:
-- Grep the decompiled source for the class/method named in the report or stack trace.
-- Confirm expected behavior from the actual bytecode, then decide whether the bug is in
-  the game or in the mod's patch.
-- Cross-check the mod's patch against the game method it patches to find mismatch (wrong
-  signature, patched method being a different overload, the method being patched when the
-  game calls a private inline copy, etc.).
-
-## Pointers
-
-- The game's event bus is `CEventManager`; scene/save flow is `CGameManager`, `CGameData`,
-  `CSaveLoad`; gameplay managers are `ShelfManager`, `CustomerManager`, `WorkerManager`,
-  `RestockManager`, `UnlockRoomManager`.
-- Many singletons are `CSingleton<T>` and auto-create instances — check `CGameManager.cs`
-  for patterns (see `Patches\GamePatches.cs` and git history for known pitfalls).
+Useful game systems to search first include `CEventManager`, `CGameManager`, `CGameData`,
+`CSaveLoad`, `ShelfManager`, `CustomerManager`, `WorkerManager`, `RestockManager`, and
+`UnlockRoomManager`. Many managers use `CSingleton<T>` and auto-create their instances;
+check the decompiled implementation before relying on singleton state.

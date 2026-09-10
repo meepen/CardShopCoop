@@ -13,7 +13,8 @@ namespace CardShopCoop.Sync
 
         private static ShelfManager Shelf()
         {
-            if (_sm == null) _sm = Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
@@ -21,15 +22,25 @@ namespace CardShopCoop.Sync
         public static int FindNearestCounter(Vector3 playerPos, float maxDist = 3.5f, bool quiet = false)
         {
             var sm = Shelf();
-            if (sm == null) { if (!quiet) CoopPlugin.Log.LogInfo("serve: no ShelfManager"); return -1; }
+            if (sm == null)
+            {
+                if (!quiet)
+                    CoopPlugin.Log.LogInfo("serve: no ShelfManager");
+                return -1;
+            }
             int best = -1;
             float bestSq = maxDist * maxDist;
             for (int i = 0; i < sm.m_CashierCounterList.Count; i++)
             {
                 var counter = sm.m_CashierCounterList[i];
-                if (counter == null) continue;
+                if (counter == null)
+                    continue;
                 float sq = (counter.transform.position - playerPos).sqrMagnitude;
-                if (sq < bestSq) { bestSq = sq; best = i; }
+                if (sq < bestSq)
+                {
+                    bestSq = sq;
+                    best = i;
+                }
             }
             if (!quiet)
                 CoopPlugin.Log.LogInfo($"serve: {sm.m_CashierCounterList.Count} counters, nearest={best} ({Mathf.Sqrt(bestSq):F1}m)");

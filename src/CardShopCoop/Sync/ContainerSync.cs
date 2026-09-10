@@ -185,7 +185,8 @@ namespace CardShopCoop.Sync
                 h = h * 31 + (stored?.Count ?? 0);
                 if (stored != null)
                     for (int i = 0; i < stored.Count; i++)
-                        if (stored[i] != null) h = h * 31 + (int)stored[i].GetItemType();
+                        if (stored[i] != null)
+                            h = h * 31 + (int)stored[i].GetItemType();
                 h = h * 31 + (p.GetIsProcessing() ? 1 : 0);
                 // quantized so a processing machine re-broadcasts ~1 Hz, an idle one never
                 h = h * 31 + (int)((FiPoOpenTimer?.GetValue(p) as float? ?? 0f) * 2f);
@@ -205,7 +206,8 @@ namespace CardShopCoop.Sync
                 h = h * 31 + (stored?.Count ?? 0);
                 if (stored != null)
                     for (int i = 0; i < stored.Count; i++)
-                        if (stored[i] != null) h = h * 31 + (int)(stored[i].GetContentFill() * 100f);
+                        if (stored[i] != null)
+                            h = h * 31 + (int)(stored[i].GetContentFill() * 100f);
                 return h;
             };
         }
@@ -218,7 +220,10 @@ namespace CardShopCoop.Sync
             _suppressedStorageDestroy = null;
         }
 
-        public static void ActivateLive(ContainerSync instance) { Instance = instance; }
+        public static void ActivateLive(ContainerSync instance)
+        {
+            Instance = instance;
+        }
 
         public void Reset()
         {
@@ -251,16 +256,19 @@ namespace CardShopCoop.Sync
 
         private ShelfManager Sm()
         {
-            if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
         private int IndexOf(int kind, object obj)
         {
             var sm = Sm();
-            if (sm == null) return -1;
+            if (sm == null)
+                return -1;
             var list = PopulationSync.GetList(sm, kind);
-            if (list == null) return -1;
+            if (list == null)
+                return -1;
             int idx = list.IndexOf(obj);
             return idx < 250 ? idx : -1; // wire index is a byte (matches PopulationSync's cap)
         }
@@ -268,39 +276,78 @@ namespace CardShopCoop.Sync
         private T Get<T>(int kind, int idx) where T : class
         {
             var sm = Sm();
-            if (sm == null) return null;
+            if (sm == null)
+                return null;
             var list = PopulationSync.GetList(sm, kind);
-            if (list == null || idx < 0 || idx >= list.Count) return null;
+            if (list == null || idx < 0 || idx >= list.Count)
+                return null;
             return list[idx] as T;
         }
 
-        /// <summary>Retry take requests clicked while PopulationSync was rebuilding the
-        /// placed-object identity table. The vanilla method is suppressed on clients, so
-        /// dropping such a click would make the storage appear dead until a reload.</summary>
-        public void ClientTick()
+        /// <summary>Advance client-only presentation state and retry take requests clicked
+        /// while PopulationSync was rebuilding the placed-object identity table. The pack
+        /// opener's real stored-item list remains empty on clients, so its vanilla Update()
+        /// cannot drive the display clock; the mirror needs to do that explicitly between
+        /// authoritative host snapshots.</summary>
+        public void ClientTick(float dt, bool inGame)
         {
-            if (CoopCore.Role != CoopRole.Client || _waitingBoxTakeStorages.Count == 0) return;
-            var retry = new List<InteractableEmptyBoxStorage>(_waitingBoxTakeStorages);
-            for (int i = 0; i < retry.Count; i++)
+            if (CoopCore.Role != CoopRole.Client)
+                return;
+
+            if (inGame && dt > 0f)
             {
-                var storage = retry[i];
-                if (storage == null) { _waitingBoxTakeStorages.Remove(storage); continue; }
-                if (!TryQueueBoxTake(storage)) continue;
-                _waitingBoxTakeStorages.Remove(storage);
+                foreach (var pair in _packMirrors)
+                {
+                    var mirror = pair.Value;
+                    if (mirror == null || !mirror.Processing || mirror.StoredCount <= 0)
+                        continue;
+                    var opener = Get<InteractableAutoPackOpener>(KindPackOpener, pair.Key);
+                    if (opener == null)
+                        continue;
+
+                    // This is presentation-only. Never write m_PackOpenTimer or refill
+                    // m_StoredItemList here: doing so would allow the client's vanilla
+                    // Update() to roll packs independently of the host. The next host
+                    // snapshot re-anchors the mirror to the authoritative timer/count.
+                    mirror.Timer = Mathf.Min(
+                        mirror.Timer + dt,
+                        opener.m_PackOpenTime * mirror.StoredCount);
+                    UpdatePackMirrorDisplay(opener, mirror);
+                }
+            }
+
+            if (_waitingBoxTakeStorages.Count > 0)
+            {
+                var retry = new List<InteractableEmptyBoxStorage>(_waitingBoxTakeStorages);
+                for (int i = 0; i < retry.Count; i++)
+                {
+                    var storage = retry[i];
+                    if (storage == null)
+                    {
+                        _waitingBoxTakeStorages.Remove(storage);
+                        continue;
+                    }
+                    if (!TryQueueBoxTake(storage))
+                        continue;
+                    _waitingBoxTakeStorages.Remove(storage);
+                }
             }
         }
 
         private InteractableEmptyBoxStorage GetBoxStorageById(ushort id)
         {
             var sm = Sm();
-            if (sm == null || id == PlacedObjectIdentity.Invalid) return null;
+            if (sm == null || id == PlacedObjectIdentity.Invalid)
+                return null;
             var list = PopulationSync.GetList(sm, KindBoxStorage);
-            if (list == null) return null;
+            if (list == null)
+                return null;
             for (int i = 0; i < list.Count; i++)
             {
                 var storage = list[i] as InteractableEmptyBoxStorage;
                 if (storage != null && PlacedObjectIdentity.TryGet(storage, out ushort current)
-                    && current == id) return storage;
+                    && current == id)
+                    return storage;
             }
             return null;
         }
@@ -320,15 +367,19 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < TickInterval) return;
+            if (_timer < TickInterval)
+                return;
             _timer -= TickInterval;
-            if (_timer > TickInterval) _timer = TickInterval; // clamp debt after a hitch
+            if (_timer > TickInterval)
+                _timer = TickInterval; // clamp debt after a hitch
             try
             {
                 var sm = Sm();
-                if (sm == null) return;
+                if (sm == null)
+                    return;
                 bool sawError = false;
                 _heal += TickInterval;
                 if (_heal >= HealInterval)
@@ -345,7 +396,8 @@ namespace CardShopCoop.Sync
                 CollectKind(sm, KindCleanser, _hashCleanser, ref sawError);
                 if (_dirty.Count == 0)
                 {
-                    if (sawError) ForceResend();
+                    if (sawError)
+                        ForceResend();
                     return;
                 }
                 var dirty = new List<int>(_dirty); // snapshot for the closure
@@ -353,7 +405,10 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < dirty.Count; i++)
                 {
                     int key = dirty[i];
-                    try { records.Add(BuildRecord(key >> 8, key & 0xFF)); }
+                    try
+                    {
+                        records.Add(BuildRecord(key >> 8, key & 0xFF));
+                    }
                     catch (Exception e)
                     {
                         sawError = true;
@@ -374,12 +429,17 @@ namespace CardShopCoop.Sync
         private void CollectKind(ShelfManager sm, int kind, Func<object, int> hashFn, ref bool sawError)
         {
             var list = PopulationSync.GetList(sm, kind);
-            if (list == null) return;
+            if (list == null)
+                return;
             for (int i = 0; i < list.Count && i < 250; i++)
             {
-                if (list[i] == null) continue;
+                if (list[i] == null)
+                    continue;
                 int h;
-                try { h = hashFn(list[i]); }
+                try
+                {
+                    h = hashFn(list[i]);
+                }
                 catch (Exception e)
                 {
                     sawError = true;
@@ -388,7 +448,8 @@ namespace CardShopCoop.Sync
                     continue;
                 }
                 int key = (kind << 8) | i;
-                if (_lastHash.TryGetValue(key, out int prev) && prev == h) continue;
+                if (_lastHash.TryGetValue(key, out int prev) && prev == h)
+                    continue;
                 _lastHash[key] = h;
                 _dirty.Add(key);
             }
@@ -400,62 +461,64 @@ namespace CardShopCoop.Sync
             switch (kind)
             {
                 case KindCardStorage:
-                {
-                    var s = Get<InteractableCardStorageShelf>(kind, idx);
-                    rec.CanWorkerTake = s == null || s.CanWorkerTake();
-                    rec.Cards = s?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
-                    break;
-                }
+                    {
+                        var s = Get<InteractableCardStorageShelf>(kind, idx);
+                        rec.CanWorkerTake = s == null || s.CanWorkerTake();
+                        rec.Cards = s?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
+                        break;
+                    }
                 case KindDonation:
-                {
-                    var b = Get<InteractableBulkDonationBox>(kind, idx);
-                    rec.Cards = b?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
-                    break;
-                }
+                    {
+                        var b = Get<InteractableBulkDonationBox>(kind, idx);
+                        rec.Cards = b?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
+                        break;
+                    }
                 case KindPackOpener:
-                {
-                    var p = Get<InteractableAutoPackOpener>(kind, idx);
-                    var stored = p?.GetStoredItemList();
-                    int n = Mathf.Min(stored?.Count ?? 0, 250);
-                    rec.StoredTypes = new List<EItemType>(n);
-                    for (int i = 0; i < n; i++)
-                        // ONE id convention for the whole container family: WriteItemType here,
-                        // (int)ReadItemType on the far side, like every other EItemType on the
-                        // wire. An empty slot goes out as EItemType.None rather than the old
-                        // literal 0 - 0 is a REAL item type, so a null slot used to arrive
-                        // indistinguishable from that item. INERT EITHER WAY: PackMirror.StoredTypes
-                        // is written and never read by anything, so nothing observable changes;
-                        // this exists so the field cannot become a bug the day something reads it.
-                        rec.StoredTypes.Add(stored[i] != null ? stored[i].GetItemType() : EItemType.None);
-                    rec.Processing = p != null && p.GetIsProcessing();
-                    rec.Timer = p != null ? (FiPoOpenTimer?.GetValue(p) as float? ?? 0f) : 0f;
-                    rec.OpenedCount = p != null ? p.GetPackOpenedCount() : 0;
-                    rec.Cards = p?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
-                    rec.CurrentState = p != null ? p.m_CurrentState : 0;
-                    rec.CollectClaimed = _packClaimOwner.ContainsKey((kind << 8) | idx);
-                    break;
-                }
+                    {
+                        var p = Get<InteractableAutoPackOpener>(kind, idx);
+                        var stored = p?.GetStoredItemList();
+                        int n = Mathf.Min(stored?.Count ?? 0, 250);
+                        rec.StoredTypes = new List<EItemType>(n);
+                        for (int i = 0; i < n; i++)
+                            // ONE id convention for the whole container family: WriteItemType here,
+                            // (int)ReadItemType on the far side, like every other EItemType on the
+                            // wire. An empty slot goes out as EItemType.None rather than the old
+                            // literal 0 - 0 is a REAL item type, so a null slot used to arrive
+                            // indistinguishable from that item. INERT EITHER WAY: PackMirror.StoredTypes
+                            // is written and never read by anything, so nothing observable changes;
+                            // this exists so the field cannot become a bug the day something reads it.
+                            rec.StoredTypes.Add(stored[i] != null ? stored[i].GetItemType() : EItemType.None);
+                        rec.Processing = p != null && p.GetIsProcessing();
+                        rec.Timer = p != null ? (FiPoOpenTimer?.GetValue(p) as float? ?? 0f) : 0f;
+                        rec.OpenedCount = p != null ? p.GetPackOpenedCount() : 0;
+                        rec.Cards = p?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
+                        rec.CurrentState = p != null ? p.m_CurrentState : 0;
+                        rec.CollectClaimed = _packClaimOwner.ContainsKey((kind << 8) | idx);
+                        break;
+                    }
                 case KindBoxStorage:
-                {
-                    var s = Get<InteractableEmptyBoxStorage>(kind, idx);
-                    rec.StorageId = s != null ? PlacedObjectIdentity.AssignHost(s) : PlacedObjectIdentity.Invalid;
-                    rec.Count = s != null ? s.GetBoxStoredCount() : 0;
-                    break;
-                }
+                    {
+                        var s = Get<InteractableEmptyBoxStorage>(kind, idx);
+                        rec.StorageId = s != null ? PlacedObjectIdentity.AssignHost(s) : PlacedObjectIdentity.Invalid;
+                        rec.Count = s != null ? s.GetBoxStoredCount() : 0;
+                        break;
+                    }
                 case KindCleanser:
-                {
-                    var c = Get<InteractableAutoCleanser>(kind, idx);
-                    byte flags = 0;
-                    if (c != null && c.IsTurnedOn()) flags |= 1;
-                    if (c == null || c.IsNeedRefill()) flags |= 2;
-                    rec.Flags = flags;
-                    var stored = c?.GetStoredItemList();
-                    int n = Mathf.Min(stored?.Count ?? 0, 32);
-                    rec.Fills = new List<float>(n);
-                    for (int i = 0; i < n; i++)
-                        rec.Fills.Add(stored[i] != null ? stored[i].GetContentFill() : 0f);
-                    break;
-                }
+                    {
+                        var c = Get<InteractableAutoCleanser>(kind, idx);
+                        byte flags = 0;
+                        if (c != null && c.IsTurnedOn())
+                            flags |= 1;
+                        if (c == null || c.IsNeedRefill())
+                            flags |= 2;
+                        rec.Flags = flags;
+                        var stored = c?.GetStoredItemList();
+                        int n = Mathf.Min(stored?.Count ?? 0, 32);
+                        rec.Fills = new List<float>(n);
+                        for (int i = 0; i < n; i++)
+                            rec.Fills.Add(stored[i] != null ? stored[i].GetContentFill() : 0f);
+                        break;
+                    }
             }
             return rec;
         }
@@ -470,140 +533,157 @@ namespace CardShopCoop.Sync
                 switch (op)
                 {
                     case OpContentSet:
-                    {
-                        int kind = message.Kind;
-                        int idx = message.Index;
-                        bool canTake = message.CanWorkerTake;
-                        var cards = message.Cards;
-                        // never drop this even if the host has the same UI open: the
-                        // joiner's binder already paid these cards through the CardDelta
-                        // mirror, so losing the list here would lose the cards for real
-                        ApplyContent(kind, idx, cards, kind == KindCardStorage, canTake);
-                        break;
-                    }
+                        {
+                            int kind = message.Kind;
+                            int idx = message.Index;
+                            bool canTake = message.CanWorkerTake;
+                            var cards = message.Cards;
+                            // never drop this even if the host has the same UI open: the
+                            // joiner's binder already paid these cards through the CardDelta
+                            // mirror, so losing the list here would lose the cards for real
+                            ApplyContent(kind, idx, cards, kind == KindCardStorage, canTake);
+                            break;
+                        }
                     case OpWorkerTakeFlag:
-                    {
-                        int idx = message.Index;
-                        bool canTake = message.CanWorkerTake;
-                        var s = Get<InteractableCardStorageShelf>(KindCardStorage, idx);
-                        if (s == null) break;
-                        ApplyingRemote = true;
-                        try { s.SetCanWorkerTake(canTake); s.OnCardStorageShelfSettingDone(); }
-                        finally { ApplyingRemote = false; }
-                        break;
-                    }
+                        {
+                            int idx = message.Index;
+                            bool canTake = message.CanWorkerTake;
+                            var s = Get<InteractableCardStorageShelf>(KindCardStorage, idx);
+                            if (s == null)
+                                break;
+                            ApplyingRemote = true;
+                            try
+                            {
+                                s.SetCanWorkerTake(canTake);
+                                s.OnCardStorageShelfSettingDone();
+                            }
+                            finally { ApplyingRemote = false; }
+                            break;
+                        }
                     case OpPackInsert:
-                    {
-                        int idx = message.Index;
-                        var itemType = message.ItemType; // guest id -> ours; see PackOpenerAddItemPrefix
-                        var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
-                        if (p == null) break;
-                        // a pack from a content pack THIS PC does not have arrives as
-                        // EItemType.None. Note WHY this has to be an explicit value test:
-                        // GetItemMeshData(None) does not fail, it returns a BLANK but NON-NULL
-                        // ItemMeshData, so SpawnItem would happily build a meshless prop the
-                        // opener then holds forever. Skip explicitly and say so once.
-                        if (itemType == EItemType.None)
                         {
-                            CoopPlugin.Log.LogWarning(
-                                "ContainerSync pack insert: item type has no counterpart here (one-sided content pack) - skipped");
+                            int idx = message.Index;
+                            var itemType = message.ItemType; // guest id -> ours; see PackOpenerAddItemPrefix
+                            var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
+                            if (p == null)
+                                break;
+                            // a pack from a content pack THIS PC does not have arrives as
+                            // EItemType.None. Note WHY this has to be an explicit value test:
+                            // GetItemMeshData(None) does not fail, it returns a BLANK but NON-NULL
+                            // ItemMeshData, so SpawnItem would happily build a meshless prop the
+                            // opener then holds forever. Skip explicitly and say so once.
+                            if (itemType == EItemType.None)
+                            {
+                                CoopPlugin.Log.LogWarning(
+                                    "ContainerSync pack insert: item type has no counterpart here (one-sided content pack) - skipped");
+                                break;
+                            }
+                            // apply unconditionally (like a worker refill would): dropping it
+                            // would eat the pack the joiner's box already gave up
+                            var item = SpawnItem(itemType, p.m_PosInside);
+                            if (item == null)
+                                break;
+                            ApplyingRemote = true;
+                            try
+                            {
+                                p.AddItem(item, addToFront: true, isPlayer: false);
+                            }
+                            finally { ApplyingRemote = false; }
                             break;
                         }
-                        // apply unconditionally (like a worker refill would): dropping it
-                        // would eat the pack the joiner's box already gave up
-                        var item = SpawnItem(itemType, p.m_PosInside);
-                        if (item == null) break;
-                        ApplyingRemote = true;
-                        try { p.AddItem(item, addToFront: true, isPlayer: false); }
-                        finally { ApplyingRemote = false; }
-                        break;
-                    }
                     case OpPackTurnOn:
-                    {
-                        int idx = message.Index;
-                        var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
-                        // the state check pins vanilla OnMouseButtonUp to its turn-on
-                        // branch; anything else means the click raced and is stale
-                        if (p != null && !p.GetIsProcessing() && p.GetStoredItemList().Count > 0)
-                            p.OnMouseButtonUp();
-                        break;
-                    }
+                        {
+                            int idx = message.Index;
+                            var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
+                            // the state check pins vanilla OnMouseButtonUp to its turn-on
+                            // branch; anything else means the click raced and is stale
+                            if (p != null && !p.GetIsProcessing() && p.GetStoredItemList().Count > 0)
+                                p.OnMouseButtonUp();
+                            break;
+                        }
                     case OpPackClaim:
-                    {
-                        HostApplyPackClaim(message.Index, connId);
-                        break;
-                    }
+                        {
+                            HostApplyPackClaim(message.Index, connId);
+                            break;
+                        }
                     case OpPackCollect:
-                    {
-                        int idx = message.Index;
-                        var revealed = message.Cards;
-                        HostApplyPackCollect(idx, message.ClaimToken, revealed, connId);
-                        break;
-                    }
+                        {
+                            int idx = message.Index;
+                            var revealed = message.Cards;
+                            HostApplyPackCollect(idx, message.ClaimToken, revealed, connId);
+                            break;
+                        }
                     case OpBoxTake:
-                    {
-                        ushort storageId = message.StorageId;
-                        var reqPos = message.Position;
-                        CoopPlugin.Log.LogInfo($"ContainerSync: empty-box take request from client {connId}, storage id {storageId}");
-                        HostApplyBoxTake(storageId, reqPos, connId);
-                        break;
-                    }
+                        {
+                            ushort storageId = message.StorageId;
+                            var reqPos = message.Position;
+                            CoopPlugin.Log.LogInfo($"ContainerSync: empty-box take request from client {connId}, storage id {storageId}");
+                            HostApplyBoxTake(storageId, reqPos, connId);
+                            break;
+                        }
                     case OpBoxStoreAtomic:
-                    {
-                        ushort storageId = message.StorageId;
-                        ushort boxId = message.BoxId;
-                        int boxType = (int)message.ItemType;
-                        bool isBig = message.IsBig;
-                        var s = GetBoxStorageById(storageId);
-                        if (s == null) break;
-                        int max = FiEbMax?.GetValue(s) as int? ?? 200;
-                        if (s.GetBoxStoredCount() >= max)
                         {
-                            CoopPlugin.Log.LogInfo($"ContainerSync: rejected atomic empty-box store id {boxId} (storage id {storageId} full)");
+                            ushort storageId = message.StorageId;
+                            ushort boxId = message.BoxId;
+                            int boxType = (int)message.ItemType;
+                            bool isBig = message.IsBig;
+                            var s = GetBoxStorageById(storageId);
+                            if (s == null)
+                                break;
+                            int max = FiEbMax?.GetValue(s) as int? ?? 200;
+                            if (s.GetBoxStoredCount() >= max)
+                            {
+                                CoopPlugin.Log.LogInfo($"ContainerSync: rejected atomic empty-box store id {boxId} (storage id {storageId} full)");
+                                break;
+                            }
+                            if (BoxSync.Instance == null
+                                || !BoxSync.Instance.TryConsumeForEmptyBoxStorage(boxId, boxType, isBig))
+                            {
+                                CoopPlugin.Log.LogWarning(
+                                    $"ContainerSync: rejected atomic empty-box store id {boxId} (box no longer valid)");
+                                break;
+                            }
+                            FiEbCount?.SetValue(s, s.GetBoxStoredCount() + 1);
+                            MiEbEval?.Invoke(s, null);
+                            CoopPlugin.Log.LogInfo($"ContainerSync: accepted atomic empty-box store id {boxId} into storage id {storageId}");
                             break;
                         }
-                        if (BoxSync.Instance == null
-                            || !BoxSync.Instance.TryConsumeForEmptyBoxStorage(boxId, boxType, isBig))
-                        {
-                            CoopPlugin.Log.LogWarning(
-                                $"ContainerSync: rejected atomic empty-box store id {boxId} (box no longer valid)");
-                            break;
-                        }
-                        FiEbCount?.SetValue(s, s.GetBoxStoredCount() + 1);
-                        MiEbEval?.Invoke(s, null);
-                        CoopPlugin.Log.LogInfo($"ContainerSync: accepted atomic empty-box store id {boxId} into storage id {storageId}");
-                        break;
-                    }
                     case OpCleanserToggle:
-                    {
-                        int idx = message.Index;
-                        bool on = message.TurnedOn;
-                        var c = Get<InteractableAutoCleanser>(KindCleanser, idx);
-                        if (c == null) break;
-                        // direct field write instead of vanilla OnMouseButtonUp: the
-                        // vanilla path would flash tooltips/popups on the HOST's HUD
-                        // for a button the host never touched
-                        FiClTurnedOn?.SetValue(c, on);
-                        if (!on)
                         {
-                            FiClCooldown?.SetValue(c, true);
-                            FiClTimer?.SetValue(c, 0f);
+                            int idx = message.Index;
+                            bool on = message.TurnedOn;
+                            var c = Get<InteractableAutoCleanser>(KindCleanser, idx);
+                            if (c == null)
+                                break;
+                            // direct field write instead of vanilla OnMouseButtonUp: the
+                            // vanilla path would flash tooltips/popups on the HOST's HUD
+                            // for a button the host never touched
+                            FiClTurnedOn?.SetValue(c, on);
+                            if (!on)
+                            {
+                                FiClCooldown?.SetValue(c, true);
+                                FiClTimer?.SetValue(c, 0f);
+                            }
+                            break;
                         }
-                        break;
-                    }
                     case OpCleanserRefill:
-                    {
-                        int idx = message.Index;
-                        float fill = message.Fill;
-                        var c = Get<InteractableAutoCleanser>(KindCleanser, idx);
-                        if (c == null || !c.HasEnoughSlot()) break;
-                        var item = SpawnItem(EItemType.Deodorant, c.m_PosList[0], fill);
-                        if (item == null) break;
-                        ApplyingRemote = true;
-                        try { c.AddItem(item, addToFront: true); }
-                        finally { ApplyingRemote = false; }
-                        break;
-                    }
+                        {
+                            int idx = message.Index;
+                            float fill = message.Fill;
+                            var c = Get<InteractableAutoCleanser>(KindCleanser, idx);
+                            if (c == null || !c.HasEnoughSlot())
+                                break;
+                            var item = SpawnItem(EItemType.Deodorant, c.m_PosList[0], fill);
+                            if (item == null)
+                                break;
+                            ApplyingRemote = true;
+                            try
+                            {
+                                c.AddItem(item, addToFront: true);
+                            }
+                            finally { ApplyingRemote = false; }
+                            break;
+                        }
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning($"ContainerSync op {op}: {e.Message}"); }
@@ -621,12 +701,15 @@ namespace CardShopCoop.Sync
                 return;
             }
             int token = _nextPackClaimToken++;
-            if (token == 0) token = _nextPackClaimToken++;
+            if (token == 0)
+                token = _nextPackClaimToken++;
             _packClaimOwner[key] = connId;
             _packClaimToken[key] = token;
             SendToClient?.Invoke(connId, new ContainerPackClaimMessage
             {
-                Index = (byte)idx, Accepted = true, ClaimToken = token,
+                Index = (byte)idx,
+                Accepted = true,
+                ClaimToken = token,
                 Cards = new List<CompactCardDataAmount>(output),
             });
             _lastHash.Remove(key);
@@ -636,7 +719,8 @@ namespace CardShopCoop.Sync
             List<CompactCardDataAmount> revealed, int connId)
         {
             var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
-            if (p == null) return;
+            if (p == null)
+                return;
             var output = p.GetCompactCardDataAmountList();
             int key = (KindPackOpener << 8) | idx;
             if (!_packClaimOwner.TryGetValue(key, out int owner) || owner != connId
@@ -705,7 +789,11 @@ namespace CardShopCoop.Sync
             {
                 CoopPlugin.Log.LogWarning($"ContainerSync: rejected empty-box take from client {connId}, BoxSync id assignment failed (storage id {storageId})");
                 BoxSync.ApplyingRemote = true;
-                try { box.OnDestroyed(); } catch { }
+                try
+                {
+                    box.OnDestroyed();
+                }
+                catch { }
                 finally { BoxSync.ApplyingRemote = false; }
                 SendBoxTakeResult(connId, storageId, 0, s.GetBoxStoredCount());
                 return;
@@ -720,7 +808,8 @@ namespace CardShopCoop.Sync
 
         private void SendBoxTakeResult(int connId, ushort storageId, ushort boxId, int remaining)
         {
-            if (SendToClient == null) return;
+            if (SendToClient == null)
+                return;
             SendToClient(connId, new ContainerBoxTakeMessage
             {
                 StorageId = storageId,
@@ -746,82 +835,89 @@ namespace CardShopCoop.Sync
                     switch (kind)
                     {
                         case KindCardStorage:
-                        {
-                            bool canTake = rec.CanWorkerTake;
-                            var cards = rec.Cards;
-                            var s = Get<InteractableCardStorageShelf>(kind, idx);
-                            // a container the player is editing right now (or edited in
-                            // the last 6s) is his; the host hears about it via the op
-                            if (s == null || s.IsEditingBulkBox() || IsTouched(kind, idx)) break;
-                            ApplyContent(kind, idx, cards, true, canTake);
-                            break;
-                        }
+                            {
+                                bool canTake = rec.CanWorkerTake;
+                                var cards = rec.Cards;
+                                var s = Get<InteractableCardStorageShelf>(kind, idx);
+                                // a container the player is editing right now (or edited in
+                                // the last 6s) is his; the host hears about it via the op
+                                if (s == null || s.IsEditingBulkBox() || IsTouched(kind, idx))
+                                    break;
+                                ApplyContent(kind, idx, cards, true, canTake);
+                                break;
+                            }
                         case KindDonation:
-                        {
-                            var cards = rec.Cards;
-                            var b = Get<InteractableBulkDonationBox>(kind, idx);
-                            if (b == null || b.IsEditingBulkBox() || IsTouched(kind, idx)) break;
-                            ApplyContent(kind, idx, cards, false, false);
-                            break;
-                        }
+                            {
+                                var cards = rec.Cards;
+                                var b = Get<InteractableBulkDonationBox>(kind, idx);
+                                if (b == null || b.IsEditingBulkBox() || IsTouched(kind, idx))
+                                    break;
+                                ApplyContent(kind, idx, cards, false, false);
+                                break;
+                            }
                         case KindPackOpener:
-                        {
-                            int sc = rec.StoredTypes != null ? rec.StoredTypes.Count : 0;
-                            var types = new List<int>(sc);
-                            // mirror of the write above: host id -> ours. An empty slot (or a
-                            // pack from a content pack this PC lacks) lands as EItemType.None.
-                            // Nothing reads StoredTypes today, so this is inert - it is here so
-                            // the two ends can never drift into disagreeing about the convention.
-                            for (int i = 0; i < sc; i++) types.Add((int)rec.StoredTypes[i]);
-                            bool proc = rec.Processing;
-                            float timer = rec.Timer;
-                            int opened = rec.OpenedCount;
-                            var output = rec.Cards;
-                            var p = Get<InteractableAutoPackOpener>(kind, idx);
-                            if (p == null) break;
-                            if (!_packMirrors.TryGetValue(idx, out var m))
-                                _packMirrors[idx] = m = new PackMirror();
-                            m.StoredCount = sc;
-                            m.StoredTypes = types;
-                            m.Processing = proc;
-                            m.Timer = timer;
-                            m.OpenedCount = opened;
-                            m.Output = output;
-                            m.CurrentState = rec.CurrentState;
-                            m.CollectClaimed = rec.CollectClaimed;
-                            // the pack opener was the only container kind with NO touch guard:
-                            // a stale/heal "processing=true" echo arriving right after the
-                            // guest's own local collect re-pinned m_IsProcessing and blocked
-                            // any further insert ("no empty slot"). Skip a stale echo for ~6s
-                            // after a local collect/insert (the record is already consumed).
-                            if (IsTouched(kind, idx)) break;
-                            ApplyPackMirrorToMachine(p, m);
-                            break;
-                        }
+                            {
+                                int sc = rec.StoredTypes != null ? rec.StoredTypes.Count : 0;
+                                var types = new List<int>(sc);
+                                // mirror of the write above: host id -> ours. An empty slot (or a
+                                // pack from a content pack this PC lacks) lands as EItemType.None.
+                                // Nothing reads StoredTypes today, so this is inert - it is here so
+                                // the two ends can never drift into disagreeing about the convention.
+                                for (int i = 0; i < sc; i++)
+                                    types.Add((int)rec.StoredTypes[i]);
+                                bool proc = rec.Processing;
+                                float timer = rec.Timer;
+                                int opened = rec.OpenedCount;
+                                var output = rec.Cards;
+                                var p = Get<InteractableAutoPackOpener>(kind, idx);
+                                if (p == null)
+                                    break;
+                                if (!_packMirrors.TryGetValue(idx, out var m))
+                                    _packMirrors[idx] = m = new PackMirror();
+                                m.StoredCount = sc;
+                                m.StoredTypes = types;
+                                m.Processing = proc;
+                                m.Timer = timer;
+                                m.OpenedCount = opened;
+                                m.Output = output;
+                                m.CurrentState = rec.CurrentState;
+                                m.CollectClaimed = rec.CollectClaimed;
+                                // the pack opener was the only container kind with NO touch guard:
+                                // a stale/heal "processing=true" echo arriving right after the
+                                // guest's own local collect re-pinned m_IsProcessing and blocked
+                                // any further insert ("no empty slot"). Skip a stale echo for ~6s
+                                // after a local collect/insert (the record is already consumed).
+                                if (IsTouched(kind, idx))
+                                    break;
+                                ApplyPackMirrorToMachine(p, m);
+                                break;
+                            }
                         case KindBoxStorage:
-                        {
-                            ushort storageId = rec.StorageId;
-                            int count = rec.Count;
-                            var s = GetBoxStorageById(storageId);
-                            // do NOT gate on IsTouched here: on a TAKE the guest suppresses
-                            // its local count entirely (no local write to protect), so the
-                            // touch-guard only stranded the authoritative count for ~15s and
-                            // made further takes look like "can't pick up". The record is
-                            // already consumed above, so stream position is safe.
-                            if (s == null) break;
-                            FiEbCount?.SetValue(s, count);
-                            MiEbEval?.Invoke(s, null);
-                            break;
-                        }
+                            {
+                                ushort storageId = rec.StorageId;
+                                int count = rec.Count;
+                                var s = GetBoxStorageById(storageId);
+                                // do NOT gate on IsTouched here: on a TAKE the guest suppresses
+                                // its local count entirely (no local write to protect), so the
+                                // touch-guard only stranded the authoritative count for ~15s and
+                                // made further takes look like "can't pick up". The record is
+                                // already consumed above, so stream position is safe.
+                                if (s == null)
+                                    break;
+                                FiEbCount?.SetValue(s, count);
+                                MiEbEval?.Invoke(s, null);
+                                break;
+                            }
                         case KindCleanser:
-                        {
-                            byte flags = rec.Flags;
-                            var fills = rec.Fills;
-                            var c = Get<InteractableAutoCleanser>(kind, idx);
-                            if (c == null || IsTouched(kind, idx)) break;
-                            ApplyCleanserState(idx, c, (flags & 1) != 0, (flags & 2) != 0, fills);
-                            break;
-                        }
+                            {
+                                byte flags = rec.Flags;
+                                var fills = rec.Fills;
+                                var c = Get<InteractableAutoCleanser>(kind, idx);
+                                if (c == null || IsTouched(kind, idx))
+                                    break;
+                                ApplyCleanserState(idx, c, (flags & 1) != 0, (flags & 2) != 0, fills);
+                                break;
+                            }
                         default:
                             sawError = true;
                             CoopPlugin.Log.LogWarning($"ContainerSync apply unknown kind {kind} at record {r}");
@@ -835,7 +931,8 @@ namespace CardShopCoop.Sync
                     continue; // records are already materialized; later records remain safe
                 }
             }
-            if (sawError) ForceResend();
+            if (sawError)
+                ForceResend();
         }
 
         private void ApplyContent(int kind, int idx, List<CompactCardDataAmount> cards,
@@ -847,7 +944,8 @@ namespace CardShopCoop.Sync
                 if (kind == KindCardStorage)
                 {
                     var s = Get<InteractableCardStorageShelf>(kind, idx);
-                    if (s == null) return;
+                    if (s == null)
+                        return;
                     s.SetCompactCardDataAmountList(cards);
                     if (hasFlag)
                     {
@@ -858,7 +956,8 @@ namespace CardShopCoop.Sync
                 else if (kind == KindDonation)
                 {
                     var b = Get<InteractableBulkDonationBox>(kind, idx);
-                    if (b == null) return;
+                    if (b == null)
+                        return;
                     b.SetCompactCardDataAmountList(cards);
                     b.UpdateFillPercent(Mathf.Clamp01(
                         (float)b.GetTotalCardAmount() / b.GetBoxTotalCardCountMax()));
@@ -884,32 +983,45 @@ namespace CardShopCoop.Sync
                     {
                         var it = stored[i];
                         stored.RemoveAt(i);
-                        if (it != null) try { ItemSpawnManager.DisableItem(it); } catch { }
+                        if (it != null)
+                            try
+                            {
+                                ItemSpawnManager.DisableItem(it);
+                            }
+                            catch { }
                     }
                 }
                 FiPoIsProcessing?.SetValue(p, m.Processing); // drives the Collect tooltip
                 FiPoOpenedCount?.SetValue(p, m.OpenedCount);
                 p.m_CurrentState = m.CurrentState;
-                if (FiPoUI?.GetValue(p) is AutoCardOpenerUI ui)
-                {
-                    if (m.CurrentState == 1 && m.StoredCount > 0)
-                    {
-                        ui.SetUIState(1);
-                        ui.UpdateProcessingFillBar(1f - (float)m.StoredCount / p.m_MaxPackCount);
-                        ui.UpdateProcessingTimeLeftText(p.m_PackOpenTime * m.StoredCount - m.Timer);
-                    }
-                    else if (m.CurrentState == 2 || m.Processing)
-                    {
-                        ui.SetUIState(2);
-                    }
-                    else
-                    {
-                        ui.SetUIState(0);
-                        ui.UpdatePackCountText(m.StoredCount, p.m_MaxPackCount);
-                    }
-                }
+                UpdatePackMirrorDisplay(p, m);
             }
             finally { ApplyingRemote = false; }
+        }
+
+        /// <summary>Paint the opener UI from the inert client mirror. This is deliberately
+        /// separate from ApplyPackMirrorToMachine so ClientTick can animate the countdown
+        /// without touching any game simulation fields.</summary>
+        private static void UpdatePackMirrorDisplay(InteractableAutoPackOpener p, PackMirror m)
+        {
+            if (p == null || m == null || !(FiPoUI?.GetValue(p) is AutoCardOpenerUI ui))
+                return;
+            if (m.CurrentState == 1 && m.StoredCount > 0)
+            {
+                ui.SetUIState(1);
+                ui.UpdateProcessingFillBar(1f - (float)m.StoredCount / p.m_MaxPackCount);
+                ui.UpdateProcessingTimeLeftText(
+                    Mathf.Max(0f, p.m_PackOpenTime * m.StoredCount - m.Timer));
+            }
+            else if (m.CurrentState == 2 || m.Processing)
+            {
+                ui.SetUIState(2);
+            }
+            else
+            {
+                ui.SetUIState(0);
+                ui.UpdatePackCountText(m.StoredCount, p.m_MaxPackCount);
+            }
         }
 
         private void ApplyCleanserState(int idx, InteractableAutoCleanser c, bool on, bool needRefill,
@@ -934,21 +1046,31 @@ namespace CardShopCoop.Sync
                 {
                     // same element GetLastItem WOULD return once the two counts agree
                     var last = stored[stored.Count - 1];
-                    if (last == null) { stored.RemoveAt(stored.Count - 1); continue; }
+                    if (last == null)
+                    {
+                        stored.RemoveAt(stored.Count - 1);
+                        continue;
+                    }
                     c.RemoveItem(last);
-                    try { ItemSpawnManager.DisableItem(last); } catch { }
+                    try
+                    {
+                        ItemSpawnManager.DisableItem(last);
+                    }
+                    catch { }
                 }
                 guard = 12;
                 // keep HasEnoughSlot(): it is the m_PosList bound AddItem itself indexes with
                 while ((stored?.Count ?? 0) < fills.Count && guard-- > 0 && c.HasEnoughSlot())
                 {
                     var item = SpawnItem(EItemType.Deodorant, c.m_PosList[0], 1f);
-                    if (item == null) break;
+                    if (item == null)
+                        break;
                     c.AddItem(item, addToFront: true);
                 }
                 if (stored != null)
                     for (int i = 0; i < stored.Count && i < fills.Count; i++)
-                        if (stored[i] != null) stored[i].SetContentFill(fills[i]);
+                        if (stored[i] != null)
+                            stored[i].SetContentFill(fills[i]);
                 // Force the counter into agreement with what the machine physically holds.
                 // This is what makes the reconcile idempotent, and it is the only thing that
                 // repairs a guest ALREADY diverged mid-session (LoadData never re-runs, so
@@ -963,7 +1085,11 @@ namespace CardShopCoop.Sync
                 // never let a cleanser reconcile escape into the record loop's catch: that
                 // one returns and strands the rest of the batch. Re-force the counter so the
                 // next apply starts from a coherent machine even if this one bailed midway.
-                try { FiClItemAmount?.SetValue(c, c.GetStoredItemList()?.Count ?? 0); } catch { }
+                try
+                {
+                    FiClItemAmount?.SetValue(c, c.GetStoredItemList()?.Count ?? 0);
+                }
+                catch { }
                 double now = Time.realtimeSinceStartupAsDouble;
                 double last;
                 if (!_lastCleanserWarn.TryGetValue(idx, out last) || now - last > 10.0)
@@ -981,7 +1107,8 @@ namespace CardShopCoop.Sync
             List<CompactCardDataAmount> cards, bool canWorkerTake)
         {
             int idx = IndexOf(kind, container);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             Touch(kind, idx);
             SendOp?.Invoke(new ContainerOpMessage
             {
@@ -996,7 +1123,8 @@ namespace CardShopCoop.Sync
         private void ClientPackOpenerClick(InteractableAutoPackOpener p)
         {
             int idx = IndexOf(KindPackOpener, p);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             var m = GetOrCreatePackMirror(idx);
             SoundManager.PlayAudio("SFX_ButtonLightTap", 0.6f, 0.5f);
             if (m == null || !m.Processing)
@@ -1047,7 +1175,8 @@ namespace CardShopCoop.Sync
             try
             {
                 int opened = 0;
-                if (_packMirrors.TryGetValue(message.Index, out var mirror)) opened = mirror.OpenedCount;
+                if (_packMirrors.TryGetValue(message.Index, out var mirror))
+                    opened = mirror.OpenedCount;
                 CPlayerData.m_GameReportDataCollect.cardPackOpened += opened;
                 CPlayerData.m_GameReportDataCollectPermanent.cardPackOpened += opened;
                 AchievementManager.OnCardPackOpened(CPlayerData.m_GameReportDataCollectPermanent.cardPackOpened);
@@ -1105,8 +1234,13 @@ namespace CardShopCoop.Sync
             if (BoxSync.Instance != null
                 && BoxSync.Instance.TryGetClientBox(id, out var box))
             {
-                TryAutoHoldTakenBox(box, new BoxSync.Entry { Id = id, Type = (int)EItemType.None,
-                    Count = 0, IsBig = true });
+                TryAutoHoldTakenBox(box, new BoxSync.Entry
+                {
+                    Id = id,
+                    Type = (int)EItemType.None,
+                    Count = 0,
+                    IsBig = true
+                });
             }
         }
 
@@ -1115,9 +1249,11 @@ namespace CardShopCoop.Sync
         /// used, so another player's take cannot be stolen by this client.</summary>
         public void TryAutoHoldTakenBox(InteractablePackagingBox_Item box, BoxSync.Entry entry)
         {
-            if (CoopCore.Role != CoopRole.Client || box == null || !_pendingBoxTakes.Contains(entry.Id)) return;
+            if (CoopCore.Role != CoopRole.Client || box == null || !_pendingBoxTakes.Contains(entry.Id))
+                return;
             if (entry.Type != (int)EItemType.None || entry.Count != 0 || !entry.IsBig
-                || entry.Carried || entry.Stored) return;
+                || entry.Carried || entry.Stored)
+                return;
             try
             {
                 if (HoldClientBox != null && HoldClientBox(box))
@@ -1130,7 +1266,8 @@ namespace CardShopCoop.Sync
         /// The atomic storage path owns the host-side consume operation instead.</summary>
         public static bool ConsumeSuppressedStorageDestroy(InteractablePackagingBox_Item box)
         {
-            if (box == null || !ReferenceEquals(_suppressedStorageDestroy, box)) return false;
+            if (box == null || !ReferenceEquals(_suppressedStorageDestroy, box))
+                return false;
             _suppressedStorageDestroy = null;
             return true;
         }
@@ -1185,25 +1322,30 @@ namespace CardShopCoop.Sync
 
         public static void StorageContentPostfix(InteractableCardStorageShelf __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return;
             Instance?.ClientForwardContent(KindCardStorage, __instance,
                 __instance.GetCompactCardDataAmountList(), __instance.CanWorkerTake());
         }
 
         public static void DonationContentPostfix(InteractableBulkDonationBox __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return;
             Instance?.ClientForwardContent(KindDonation, __instance,
                 __instance.GetCompactCardDataAmountList(), false);
         }
 
         public static void WorkerTakePostfix(InteractableCardStorageShelf __instance, bool canWorkerTake)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return;
             var self = Instance;
-            if (self == null) return;
+            if (self == null)
+                return;
             int idx = self.IndexOf(KindCardStorage, __instance);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             self.Touch(KindCardStorage, idx);
             self.SendOp?.Invoke(new ContainerOpMessage
             {
@@ -1215,15 +1357,20 @@ namespace CardShopCoop.Sync
 
         public static bool PackOpenerClickPrefix(InteractableAutoPackOpener __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
-            try { Instance?.ClientPackOpenerClick(__instance); }
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
+            try
+            {
+                Instance?.ClientPackOpenerClick(__instance);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ContainerSync click: " + e.Message); }
             return false;
         }
 
         public static bool PackOpenerAddItemPrefix(InteractableAutoPackOpener __instance, Item item)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             // the guest's join world-load restores the host save via
             // InteractableAutoPackOpener.LoadData, which calls AddItem once per stored
             // pack (decompiled ~384). Those are NOT player inserts - forwarding each one
@@ -1233,17 +1380,26 @@ namespace CardShopCoop.Sync
             // Still retire the item (as below) so it doesn't float - the host echoes truth.
             if (CoopCore.ClientReloading)
             {
-                try { ItemSpawnManager.DisableItem(item); } catch { }
+                try
+                {
+                    ItemSpawnManager.DisableItem(item);
+                }
+                catch { }
                 return false;
             }
             var self = Instance;
-            if (self == null) return true;
+            if (self == null)
+                return true;
             int idx = self.IndexOf(KindPackOpener, __instance);
             if (idx >= 0)
             {
                 var mirror = self.GetOrCreatePackMirror(idx);
                 int itemType = 0;
-                try { itemType = (int)item.GetItemType(); } catch { }
+                try
+                {
+                    itemType = (int)item.GetItemType();
+                }
+                catch { }
                 self.SendOp?.Invoke(new ContainerOpMessage
                 {
                     Op = OpPackInsert,
@@ -1266,7 +1422,11 @@ namespace CardShopCoop.Sync
             }
             // the caller strips the item out of its (synced) box either way; retire it
             // here so it doesn't float in the world - the host's insert echoes back
-            try { ItemSpawnManager.DisableItem(item); } catch { }
+            try
+            {
+                ItemSpawnManager.DisableItem(item);
+            }
+            catch { }
             return false;
         }
 
@@ -1275,16 +1435,19 @@ namespace CardShopCoop.Sync
         /// counts as inside the machine.</summary>
         public static bool TakeItemBlockPrefix(ref Item __result)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             __result = null;
             return false;
         }
 
         public static bool TakeBoxPrefix(InteractableEmptyBoxStorage __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             var self = Instance;
-            if (self == null || self.SendOp == null) return false;
+            if (self == null || self.SendOp == null)
+                return false;
             if (!self.TryQueueBoxTake(__instance))
             {
                 self._waitingBoxTakeStorages.Add(__instance);
@@ -1300,16 +1463,20 @@ namespace CardShopCoop.Sync
         public static bool StorageMouseButtonPrefix(InteractableEmptyBoxStorage __instance)
         {
             CoopPlugin.Log.LogInfo($"ContainerSync: empty-box storage click (role={CoopCore.Role}, remote={ApplyingRemote})");
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             TakeBoxPrefix(__instance);
             return false;
         }
 
         private bool TryQueueBoxTake(InteractableEmptyBoxStorage storage)
         {
-            if (storage == null || SendOp == null) return false;
-            if (!PlacedObjectIdentity.TryGet(storage, out ushort storageId)) return false;
-            if (!_pendingBoxTakeSlots.Add(storageId)) return true;
+            if (storage == null || SendOp == null)
+                return false;
+            if (!PlacedObjectIdentity.TryGet(storage, out ushort storageId))
+                return false;
+            if (!_pendingBoxTakeSlots.Add(storageId))
+                return true;
             var loc = storage.m_EmptyBoxSpawnLoc;
             Vector3 pos = loc != null ? loc.position : storage.transform.position;
             SendOp.Invoke(new ContainerOpMessage
@@ -1334,10 +1501,13 @@ namespace CardShopCoop.Sync
                 Box = packagingBox,
             };
 
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote || packagingBox == null) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote || packagingBox == null)
+                return true;
             var self = Instance;
-            if (self == null || self.SendOp == null || BoxSync.Instance == null) return false;
-            if (!PlacedObjectIdentity.TryGet(__instance, out ushort storageId)) return false;
+            if (self == null || self.SendOp == null || BoxSync.Instance == null)
+                return false;
+            if (!PlacedObjectIdentity.TryGet(__instance, out ushort storageId))
+                return false;
 
             // Match vanilla's rejection checks before arming the destroy suppression. If the
             // local call is going to reject, it must remain an ordinary no-op and must not
@@ -1348,7 +1518,8 @@ namespace CardShopCoop.Sync
                 if (packagingBox.IsTogglingOpenClose()
                     || packagingBox.m_ItemCompartment.GetItemCount() > 0
                     || !packagingBox.m_IsBigBox
-                    || __instance.GetBoxStoredCount() >= max) return true;
+                    || __instance.GetBoxStoredCount() >= max)
+                    return true;
             }
             catch { return true; }
 
@@ -1384,7 +1555,8 @@ namespace CardShopCoop.Sync
                 return;
             }
             var self = Instance;
-            if (self == null) return;
+            if (self == null)
+                return;
             if (__state.Atomic)
             {
                 self.SendOp?.Invoke(new ContainerOpMessage
@@ -1400,11 +1572,14 @@ namespace CardShopCoop.Sync
 
         public static void CleanserTogglePostfix(InteractableAutoCleanser __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return;
             var self = Instance;
-            if (self == null) return;
+            if (self == null)
+                return;
             int idx = self.IndexOf(KindCleanser, __instance);
-            if (idx < 0) return;
+            if (idx < 0)
+                return;
             bool on = __instance.IsTurnedOn(); // vanilla already flipped it locally
             self.Touch(KindCleanser, idx);
             self.SendOp?.Invoke(new ContainerOpMessage
@@ -1417,7 +1592,8 @@ namespace CardShopCoop.Sync
 
         public static bool CleanserAddItemPrefix(InteractableAutoCleanser __instance, Item item)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote) return true;
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return true;
             // same join-LoadData dupe as PackOpenerAddItemPrefix: InteractableAutoCleanser
             // .LoadData calls AddItem once per saved spray can (decompiled ~396). Forwarding
             // each as OpCleanserRefill makes the host spawn extra deodorant cans on every
@@ -1440,14 +1616,20 @@ namespace CardShopCoop.Sync
             // stops its own Update() rolling packs the host never rolled - see class doc),
             // and its LoadData derives everything from the list with no counter hard-set, so
             // it has no equivalent bug to fix.
-            if (CoopCore.ClientReloading) return true;
+            if (CoopCore.ClientReloading)
+                return true;
             var self = Instance;
-            if (self == null) return true;
+            if (self == null)
+                return true;
             int idx = self.IndexOf(KindCleanser, __instance);
             if (idx >= 0)
             {
                 float fill = 1f;
-                try { fill = item.GetContentFill(); } catch { }
+                try
+                {
+                    fill = item.GetContentFill();
+                }
+                catch { }
                 self.Touch(KindCleanser, idx);
                 self.SendOp?.Invoke(new ContainerOpMessage
                 {
@@ -1456,7 +1638,11 @@ namespace CardShopCoop.Sync
                     Fill = fill,
                 });
             }
-            try { ItemSpawnManager.DisableItem(item); } catch { }
+            try
+            {
+                ItemSpawnManager.DisableItem(item);
+            }
+            catch { }
             return false;
         }
 
@@ -1473,7 +1659,8 @@ namespace CardShopCoop.Sync
                     meshData.meshSecondary, meshData.materialSecondary);
                 item.transform.localPosition = Vector3.zero;
                 item.transform.localRotation = Quaternion.identity;
-                if (contentFill >= 0f) item.SetContentFill(contentFill);
+                if (contentFill >= 0f)
+                    item.SetContentFill(contentFill);
                 item.gameObject.SetActive(true);
                 return item;
             }
@@ -1486,7 +1673,8 @@ namespace CardShopCoop.Sync
 
         private static int AmountFor(List<CompactCardDataAmount> list, CompactCardDataAmount id)
         {
-            if (list == null) return 0;
+            if (list == null)
+                return 0;
             for (int i = 0; i < list.Count; i++)
             {
                 var e = list[i];
@@ -1499,16 +1687,19 @@ namespace CardShopCoop.Sync
 
         private static bool SameCards(List<CompactCardDataAmount> a, List<CompactCardDataAmount> b)
         {
-            if (a == null || b == null || a.Count != b.Count) return false;
+            if (a == null || b == null || a.Count != b.Count)
+                return false;
             for (int i = 0; i < a.Count; i++)
             {
                 var e = a[i];
-                if (e == null || AmountFor(b, e) != e.amount) return false;
+                if (e == null || AmountFor(b, e) != e.amount)
+                    return false;
             }
             for (int i = 0; i < b.Count; i++)
             {
                 var e = b[i];
-                if (e == null || AmountFor(a, e) != e.amount) return false;
+                if (e == null || AmountFor(a, e) != e.amount)
+                    return false;
             }
             return true;
         }
@@ -1516,11 +1707,13 @@ namespace CardShopCoop.Sync
         private static int HashCards(List<CompactCardDataAmount> list)
         {
             int h = 17;
-            if (list == null) return h;
+            if (list == null)
+                return h;
             for (int i = 0; i < list.Count; i++)
             {
                 var e = list[i];
-                if (e == null) continue;
+                if (e == null)
+                    continue;
                 h = h * 31 + e.cardSaveIndex;
                 h = h * 31 + (int)e.expansionType;
                 h = h * 31 + (e.isDestiny ? 1 : 0);
