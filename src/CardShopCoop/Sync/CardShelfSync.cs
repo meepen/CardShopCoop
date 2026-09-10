@@ -19,7 +19,7 @@ namespace CardShopCoop.Sync
     {
         public struct Entry
         {
-            public int Key; // kind<<24 | shelfIdx<<8 | compIdx  (kind: 2 card shelf, 3 combi)
+            public int Key; // kind<<24 | stableObjectId<<8 | compIdx
             public bool Occupied;
             public CardData Card; // valid when Occupied
         }
@@ -41,21 +41,30 @@ namespace CardShopCoop.Sync
 
             public static SlotState From(CardData c)
             {
-                if (c == null) return default;
+                if (c == null)
+                    return default;
                 return new SlotState
                 {
                     Occupied = true,
-                    Monster = (int)c.monsterType, Expansion = (int)c.expansionType,
-                    Border = (int)c.borderType, Grade = c.cardGrade,
-                    GradedIdx = c.gradedCardIndex, Foil = c.isFoil,
-                    Destiny = c.isDestiny, Champion = c.isChampionCard,
+                    Monster = (int)c.monsterType,
+                    Expansion = (int)c.expansionType,
+                    Border = (int)c.borderType,
+                    Grade = c.cardGrade,
+                    GradedIdx = c.gradedCardIndex,
+                    Foil = c.isFoil,
+                    Destiny = c.isDestiny,
+                    Champion = c.isChampionCard,
                 };
             }
         }
 
         private readonly Dictionary<int, SlotState> _last = new Dictionary<int, SlotState>();
         private readonly Dictionary<int, double> _locallyChanged = new Dictionary<int, double>();
+        private readonly HashSet<string> _snapshotErrors = new HashSet<string>();
         private float _timer;
+        private const float BaseScanInterval = 0.9f;
+        private const float MaxQuietScanInterval = 3.0f;
+        private float _scanInterval = BaseScanInterval;
         private ShelfManager _sm;
 
         public Action<List<Entry>> OnLocalChanges;
@@ -70,7 +79,9 @@ namespace CardShopCoop.Sync
         {
             _last.Clear();
             _locallyChanged.Clear();
+            _snapshotErrors.Clear();
             _timer = 0.1f; // staggered phase vs the other snapshot engines
+            _scanInterval = BaseScanInterval;
             _sm = null;
         }
 
@@ -82,72 +93,103 @@ namespace CardShopCoop.Sync
             _last.Clear();
         }
 
+        public void ForceNextTick()
+        {
+            _scanInterval = BaseScanInterval;
+            _timer = _scanInterval;
+        }
+
         private ShelfManager Sm()
         {
-            if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
         public void Tick(float dt, bool active)
         {
-            if (!active) return;
+            if (!active)
+                return;
             _timer += dt;
-            if (_timer < 0.9f) return;
-            _timer -= 0.9f;
+            if (_timer < _scanInterval)
+                return;
+            _timer -= _scanInterval;
 
             List<Entry> changes = null;
+            bool sawError = false;
             try
             {
                 var sm = Sm();
-                if (sm == null) return;
-                Walk(sm.m_CardShelfList, 2, ref changes);
-                Walk(sm.m_CardItemCombiShelfList, 3, ref changes);
-                Walk(sm.m_TournamentPrizeShelfList, 14, ref changes); // prize cards on display
+                if (sm == null)
+                    return;
+                Walk(sm.m_CardShelfList, 2, ref changes, ref sawError);
+                Walk(sm.m_CardItemCombiShelfList, 3, ref changes, ref sawError);
+                Walk(sm.m_TournamentPrizeShelfList, 14, ref changes, ref sawError); // prize cards on display
             }
             catch (Exception e)
             {
-                CoopPlugin.Log.LogWarning("CardShelfSync snapshot: " + e.Message);
+                LogSnapshotError("snapshot", e);
                 return;
             }
-            if (changes != null && changes.Count > 0)
+            if (!sawError && changes != null && changes.Count > 0)
+            {
+                _scanInterval = BaseScanInterval;
                 OnLocalChanges?.Invoke(changes);
+            }
+            else if (!sawError)
+                _scanInterval = Math.Min(MaxQuietScanInterval, _scanInterval * 1.25f);
         }
 
-        private void Walk<T>(List<T> shelves, int kind, ref List<Entry> changes) where T : CardShelf
+        private void Walk<T>(List<T> shelves, int kind, ref List<Entry> changes, ref bool sawError) where T : CardShelf
         {
             for (int i = 0; i < shelves.Count; i++)
             {
                 var shelf = shelves[i];
-                if (shelf == null || !shelf.gameObject.activeInHierarchy) continue; // boxed/carried
-                var comps = shelf.GetCardCompartmentList();
+                if (shelf == null || !shelf.gameObject.activeInHierarchy)
+                    continue; // boxed/carried
+                List<InteractableCardCompartment> comps;
+                try
+                {
+                    comps = shelf.GetCardCompartmentList();
+                }
+                catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i, e); continue; }
                 for (int j = 0; j < comps.Count; j++)
                 {
-                    var comp = comps[j];
-                    if (comp == null) continue;
-                    int key = (kind << 24) | ((i & 0xFFFF) << 8) | (j & 0xFF);
-                    // unreadable (a card is there but its pooled UI is culled/detached)
-                    // is NOT empty - misreporting it as empty wipes the other side
-                    if (!TryReadSlot(comp, out CardData card)) continue;
-                    bool occupied = card != null;
-
-                    if (_last.TryGetValue(key, out var st))
+                    try
                     {
-                        if (st.Occupied == occupied && (!occupied || st.Matches(card)))
+                        var comp = comps[j];
+                        if (comp == null)
                             continue;
+                        if (!PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key))
+                            continue;
+                        if (!TryReadSlot(comp, out CardData card))
+                            continue;
+                        bool occupied = card != null;
+                        if (_last.TryGetValue(key, out var st) && st.Occupied == occupied && (!occupied || st.Matches(card)))
+                            continue;
+                        if (!_last.ContainsKey(key) && IsClientRole)
+                        {
+                            _last[key] = SlotState.From(card);
+                            continue;
+                        }
+                        if (changes == null)
+                            changes = new List<Entry>();
+                        if (changes.Count >= 128)
+                            return;
+                        _last[key] = SlotState.From(card);
+                        if (IsClientRole)
+                            _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
+                        changes.Add(new Entry { Key = key, Occupied = occupied, Card = card });
                     }
-                    else if (IsClientRole)
-                    {
-                        _last[key] = SlotState.From(card); // adopt silently, never report
-                        continue;
-                    }
-
-                    if (changes == null) changes = new List<Entry>();
-                    if (changes.Count >= 128) return; // rest next tick
-                    _last[key] = SlotState.From(card);
-                    if (IsClientRole) _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
-                    changes.Add(new Entry { Key = key, Occupied = occupied, Card = card });
+                    catch (Exception e) { sawError = true; LogSnapshotError(kind + ":" + i + ":" + j, e); }
                 }
             }
+        }
+
+        private void LogSnapshotError(string item, Exception e)
+        {
+            if (_snapshotErrors.Add(item))
+                CoopPlugin.Log.LogWarning("CardShelfSync snapshot item " + item + ": " + e.Message);
         }
 
         /// <summary>Remove a displayed card the way the vanilla purchase path does:
@@ -176,7 +218,8 @@ namespace CardShopCoop.Sync
         private static bool TryReadSlot(InteractableCardCompartment comp, out CardData card)
         {
             card = null;
-            if (comp.m_StoredCardList.Count == 0) return true; // genuinely empty
+            if (comp.m_StoredCardList.Count == 0)
+                return true; // genuinely empty
             var card3d = comp.m_StoredCardList[0];
             if (card3d == null || card3d.m_Card3dUI == null || card3d.m_Card3dUI.m_CardUI == null)
                 return false;
@@ -187,7 +230,8 @@ namespace CardShopCoop.Sync
         public void ApplyRemote(List<Entry> entries)
         {
             var sm = Sm();
-            if (sm == null) return;
+            if (sm == null)
+                return;
             foreach (var e in entries)
             {
                 try
@@ -198,7 +242,8 @@ namespace CardShopCoop.Sync
                         && Time.realtimeSinceStartupAsDouble - t < 6.0)
                         continue;
                     var comp = Resolve(sm, e.Key);
-                    if (comp == null) continue;
+                    if (comp == null)
+                        continue;
                     // a culled slot (card present, pooled UI detached) matching what we
                     // last knew is almost certainly correct - rebuilding it every heal
                     // broadcast was a mass destroy/respawn spike whenever the player
@@ -220,13 +265,13 @@ namespace CardShopCoop.Sync
         private static InteractableCardCompartment Resolve(ShelfManager sm, int key)
         {
             int kind = key >> 24;
-            int shelfIdx = (key >> 8) & 0xFFFF;
+            ushort objectId = PlacedObjectIdentity.ObjectIdFromCompartmentKey(key);
             int compIdx = key & 0xFF;
-            CardShelf shelf = null;
-            if (kind == 2 && shelfIdx < sm.m_CardShelfList.Count) shelf = sm.m_CardShelfList[shelfIdx];
-            else if (kind == 3 && shelfIdx < sm.m_CardItemCombiShelfList.Count) shelf = sm.m_CardItemCombiShelfList[shelfIdx];
-            else if (kind == 14 && shelfIdx < sm.m_TournamentPrizeShelfList.Count) shelf = sm.m_TournamentPrizeShelfList[shelfIdx];
-            if (shelf == null) return null;
+            if (!PlacedObjectIdentity.TryResolve(sm, kind, objectId, out var obj))
+                return null;
+            var shelf = obj as CardShelf;
+            if (shelf == null)
+                return null;
             var comps = shelf.GetCardCompartmentList();
             return compIdx < comps.Count ? comps[compIdx] : null;
         }
@@ -236,7 +281,8 @@ namespace CardShopCoop.Sync
             bool hasCard = comp.m_StoredCardList.Count > 0;
             if (!e.Occupied)
             {
-                if (hasCard) ClearSlot(comp);
+                if (hasCard)
+                    ClearSlot(comp);
                 return;
             }
             if (hasCard)
@@ -272,7 +318,8 @@ namespace CardShopCoop.Sync
         {
             var full = new List<Entry>();
             var sm = Sm();
-            if (sm == null) return full;
+            if (sm == null)
+                return full;
             Collect(sm.m_CardShelfList, 2, full);
             Collect(sm.m_CardItemCombiShelfList, 3, full);
             Collect(sm.m_TournamentPrizeShelfList, 14, full);
@@ -284,46 +331,25 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < shelves.Count; i++)
             {
                 var shelf = shelves[i];
-                if (shelf == null || !shelf.gameObject.activeInHierarchy) continue;
+                if (shelf == null || !shelf.gameObject.activeInHierarchy)
+                    continue;
                 var comps = shelf.GetCardCompartmentList();
                 for (int j = 0; j < comps.Count; j++)
                 {
                     var comp = comps[j];
-                    if (comp == null || !TryReadSlot(comp, out CardData card)) continue;
-                    into.Add(new Entry
-                    {
-                        Key = (kind << 24) | ((i & 0xFFFF) << 8) | (j & 0xFF),
-                        Occupied = card != null,
-                        Card = card,
-                    });
+                    if (comp == null || !TryReadSlot(comp, out CardData card))
+                        continue;
+                    if (PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key))
+                        into.Add(new Entry
+                        {
+                            Key = key,
+                            Occupied = card != null,
+                            Card = card,
+                        });
                 }
             }
         }
 
         // ---- wire format ----
-
-        public static void WriteEntries(BinaryWriter bw, List<Entry> entries)
-        {
-            bw.Write((ushort)entries.Count);
-            foreach (var e in entries)
-            {
-                bw.Write(e.Key);
-                bw.Write(e.Occupied);
-                if (e.Occupied) Msg.WriteCard(bw, e.Card);
-            }
-        }
-
-        public static List<Entry> ReadEntries(BinaryReader br)
-        {
-            int n = br.ReadUInt16();
-            var list = new List<Entry>(n);
-            for (int i = 0; i < n; i++)
-            {
-                var e = new Entry { Key = br.ReadInt32(), Occupied = br.ReadBoolean() };
-                if (e.Occupied) e.Card = Msg.ReadCard(br);
-                list.Add(e);
-            }
-            return list;
-        }
     }
 }

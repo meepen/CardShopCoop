@@ -1,8 +1,10 @@
+using CardShopCoop.Util;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using HarmonyLib;
 using UnityEngine;
 
@@ -82,16 +84,10 @@ namespace CardShopCoop.Sync
         private const float VanillaWait = 60f;   // Customer.cs WaitingToTradeCard timeout
         private const int MaxOffers = 32;
 
-        // joiner's decline key. Kept hardcoded (adding a ConfigEntry would mean
-        // editing CoopPlugin, outside this module's file); it only fires while a
-        // live offer prompt is showing within reach, so a stray overlap with a
-        // vanilla bind is harmless. Answer/accept rides the existing ServeKey (V).
-        private const KeyCode DeclineKey = KeyCode.B;
-
         /// <summary>Set by CoopCore: client -> host op (MsgType.TradeOp).</summary>
-        public Action<Action<BinaryWriter>> SendOp;
+        public Action<INetMessage> SendOp;
         /// <summary>Set by CoopCore: host -> clients state (MsgType.TradeState).</summary>
-        public Action<Action<BinaryWriter>> BroadcastState;
+        public Action<INetMessage> BroadcastState;
 
         private const byte OpAccept = 1;
         private const byte OpDecline = 2;
@@ -100,36 +96,50 @@ namespace CardShopCoop.Sync
         // harmony prefixes are static; CoopCore owns the single instance
         private static TradeServe _live;
 
-        public TradeServe() { _live = this; }
+        /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
+        public static void ClearLive()
+        {
+            _live = null;
+        }
+
+        public static void ActivateLive(TradeServe instance)
+        {
+            _live = instance;
+        }
+
+        public TradeServe()
+        {
+            _live = this;
+        }
 
         // ---- reflection: Customer privates (verified against decompiled/Customer.cs)
-        private static readonly FieldInfo FiTradeData = AccessTools.Field(typeof(Customer), "m_CustomerTradeData");
-        private static readonly FieldInfo FiTradeCounter = AccessTools.Field(typeof(Customer), "m_CurrentTradeCardCashierCounter");
-        private static readonly FieldInfo FiHasTraded = AccessTools.Field(typeof(Customer), "m_HasTradedCard");
-        private static readonly FieldInfo FiCustTimer = AccessTools.Field(typeof(Customer), "m_Timer");
-        private static readonly FieldInfo FiCustTimerMax = AccessTools.Field(typeof(Customer), "m_TimerMax");
-        private static readonly FieldInfo FiPausing = AccessTools.Field(typeof(Customer), "m_IsPausingAction");
-        private static readonly MethodInfo MiDetermine = AccessTools.Method(typeof(Customer), "DetermineShopAction");
+        private static readonly FieldInfo FiTradeData = ReflectionSurface.RequiredField(typeof(Customer), "m_CustomerTradeData");
+        private static readonly FieldInfo FiTradeCounter = ReflectionSurface.RequiredField(typeof(Customer), "m_CurrentTradeCardCashierCounter");
+        private static readonly FieldInfo FiHasTraded = ReflectionSurface.RequiredField(typeof(Customer), "m_HasTradedCard");
+        private static readonly FieldInfo FiCustTimer = ReflectionSurface.RequiredField(typeof(Customer), "m_Timer");
+        private static readonly FieldInfo FiCustTimerMax = ReflectionSurface.RequiredField(typeof(Customer), "m_TimerMax");
+        private static readonly FieldInfo FiPausing = ReflectionSurface.RequiredField(typeof(Customer), "m_IsPausingAction");
+        private static readonly MethodInfo MiDetermine = ReflectionSurface.RequiredMethod(typeof(Customer), "DetermineShopAction");
 
         // ---- reflection: CustomerTradeCardScreen privates
-        private static readonly FieldInfo FiScrTrading = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_IsTrading");
-        private static readonly FieldInfo FiScrAccepted = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_HasAccepted");
-        private static readonly FieldInfo FiScrPriceSet = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_PriceSet");
-        private static readonly FieldInfo FiScrLastPrice = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_LastPriceSet");
-        private static readonly FieldInfo FiScrAsk = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_SellCardAskPrice");
-        private static readonly FieldInfo FiScrMarket = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_SellCardMarketPrice");
-        private static readonly FieldInfo FiScrMaxDecline = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_MaxDeclineCount");
-        private static readonly FieldInfo FiScrDecline = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_DeclineCount");
-        private static readonly FieldInfo FiScrCardL = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_CardData_L");
-        private static readonly FieldInfo FiScrCardR = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_CardData_R");
+        private static readonly FieldInfo FiScrTrading = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_IsTrading");
+        private static readonly FieldInfo FiScrAccepted = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_HasAccepted");
+        private static readonly FieldInfo FiScrPriceSet = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_PriceSet");
+        private static readonly FieldInfo FiScrLastPrice = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_LastPriceSet");
+        private static readonly FieldInfo FiScrAsk = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_SellCardAskPrice");
+        private static readonly FieldInfo FiScrMarket = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_SellCardMarketPrice");
+        private static readonly FieldInfo FiScrMaxDecline = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_MaxDeclineCount");
+        private static readonly FieldInfo FiScrDecline = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_DeclineCount");
+        private static readonly FieldInfo FiScrCardL = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_CardData_L");
+        private static readonly FieldInfo FiScrCardR = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_CardData_R");
 
         // ---- reflection: UIScreenBase privates (verified against decompiled/UIScreenBase.cs)
         // used ONLY by the S2 hard-teardown path, which mirrors base.OnCloseScreen when the
         // vanilla close chain threw before it (m_IsScreenOpen protected bool ~line 15,
         // m_ScreenGroup public GameObject ~line 5). Cached on the screen's runtime type
         // (CustomerTradeCardScreen), AccessTools walks the base hierarchy to find them.
-        private static readonly FieldInfo FiScrIsOpen = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_IsScreenOpen");
-        private static readonly FieldInfo FiScrGroup = AccessTools.Field(typeof(CustomerTradeCardScreen), "m_ScreenGroup");
+        private static readonly FieldInfo FiScrIsOpen = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_IsScreenOpen");
+        private static readonly FieldInfo FiScrGroup = ReflectionSurface.RequiredField(typeof(CustomerTradeCardScreen), "m_ScreenGroup");
 
         private struct Offer
         {
@@ -139,7 +149,15 @@ namespace CardShopCoop.Sync
             public CardData CardL;   // what the customer offers
             public CardData CardR;   // what the customer wants back (Trading only)
             public float Price;      // asking price (sell-in only)
+            public float PriceSet;
+            public float LastPriceSet;
+            public int MaxDeclineCount;
+            public int DeclineCount;
             public float Remaining;  // seconds before the customer gives up
+            public ushort CustomerIndex;
+            public int CustomerGeneration;
+            public Vector3 Position;
+            public float Yaw;
         }
 
         // host
@@ -162,13 +180,17 @@ namespace CardShopCoop.Sync
 
         // client
         private readonly Dictionary<int, Offer> _offers = new Dictionary<int, Offer>();
+        private readonly Dictionary<int, Customer> _carriers = new Dictionary<int, Customer>();
+        private readonly Dictionary<int, int> _carrierSource = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> _carrierGeneration = new Dictionary<int, int>();
+        private readonly Dictionary<int, Renderer[]> _carrierRenderers = new Dictionary<int, Renderer[]>();
+        private readonly Dictionary<int, bool[]> _carrierRendererStates = new Dictionary<int, bool[]>();
         private readonly List<int> _keyBuf = new List<int>();
         private float _staleTimer;
         private float _opThrottle;
         private int _seenSeq = -1;
         private int _lastOfferCount = -1; // for change-only receive logging
         private int _pendingCounter = -1; // counter our native screen is answering
-        private bool _nativeBroken;       // native screen threw once: prompt+keys fallback
         private Transform _playerTf;      // the joiner's MOVING body (ipc.m_WalkerCtrl)
         private bool _hostBusy;           // host is mid-trade: don't open ours
         private float _claimTimer;        // renews our open-screen claim to the host
@@ -198,12 +220,12 @@ namespace CardShopCoop.Sync
             _preRollFailUntil.Clear();
             _unknownLogged.Clear();
             _offers.Clear();
+            TeardownCarriers();
             _staleTimer = 0f;
             _opThrottle = 0f;
             _seenSeq = -1;
             _lastOfferCount = -1;
             _pendingCounter = -1;
-            _nativeBroken = false;
             _playerTf = null;
             _hostBusy = false;
             _claimTimer = 0f;
@@ -226,11 +248,17 @@ namespace CardShopCoop.Sync
             // remote-controlled screen below are the joiner's UI.
             Try(h, typeof(Customer), "OnMousePress",
                 prefix: new HarmonyMethod(typeof(TradeServe), nameof(ClientTradeBlockPrefix)));
+            Try(h, typeof(Customer), "OnMousePress",
+                postfix: new HarmonyMethod(typeof(TradeServe), nameof(ClientTradeEnterPostfix)));
             // The native-screen remote controls: on the client the screen's buttons
             // forward a TradeOp to the host instead of resolving locally, then close
             // through the screen's own path. The host role passes every prefix through.
             Try(h, typeof(CustomerTradeCardScreen), "OnPressAccept",
                 prefix: new HarmonyMethod(typeof(TradeServe), nameof(ClientAcceptPrefix)));
+            Try(h, typeof(CustomerTradeCardScreen), "SetCustomer",
+                postfix: new HarmonyMethod(typeof(TradeServe), nameof(ClientSetCustomerPostfix)));
+            Try(h, typeof(CustomerTradeCardScreen), "OnCloseScreen",
+                postfix: new HarmonyMethod(typeof(TradeServe), nameof(ClientCloseScreenPostfix)));
             Try(h, typeof(CustomerTradeCardScreen), "OnPressDecline",
                 prefix: new HarmonyMethod(typeof(TradeServe), nameof(ClientDeclinePrefix)));
             Try(h, typeof(CustomerTradeCardScreen), "OnPressLetMeThink",
@@ -259,7 +287,8 @@ namespace CardShopCoop.Sync
                         double now = Time.realtimeSinceStartupAsDouble;
                         foreach (var kv in t._guestClaims)
                         {
-                            if (now - kv.Value >= 5.0) continue; // stale claim
+                            if (now - kv.Value >= 5.0)
+                                continue; // stale claim
                             var counter = sm != null && kv.Key >= 0 && kv.Key < sm.m_CashierCounterList.Count
                                 ? sm.m_CashierCounterList[kv.Key] : null;
                             if (counter != null && ReferenceEquals(FiTradeCounter?.GetValue(__instance), counter))
@@ -277,13 +306,33 @@ namespace CardShopCoop.Sync
                 }
                 return true;
             }
-            if (CoopCore.Role != CoopRole.Client) return true;
-            if (CoopCore.Instance != null)
-            {
-                CoopCore.Instance.RegisterLine = $"stand at the counter and press {CoopPlugin.ServeKey.Value} to answer the trade";
-                CoopCore.Instance.RegisterLineTimer = 3f;
-            }
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
+            var client = _live;
+            return client != null && client.IsCarrier(__instance) && !client._hostBusy;
+        }
+
+        private bool IsCarrier(Customer customer)
+        {
+            foreach (var carrier in _carriers.Values)
+                if (ReferenceEquals(carrier, customer))
+                    return true;
             return false;
+        }
+
+        public static void ClientTradeEnterPostfix(Customer __instance)
+        {
+            if (CoopCore.Role != CoopRole.Client || _live == null || _live._hostBusy || !(_live.IsCarrier(__instance)))
+                return;
+            foreach (var kv in _live._carriers)
+            {
+                if (!ReferenceEquals(kv.Value, __instance))
+                    continue;
+                _live._pendingCounter = kv.Key;
+                _live._claimTimer = 999f;
+                _live.SendOp?.Invoke(new TradeOpMessage { Op = OpScreen, CounterIdx = (byte)kv.Key, Price = 0f });
+                return;
+            }
         }
 
         /// <summary>Client: the screen's Accept button = forward the CURRENT price field
@@ -291,9 +340,11 @@ namespace CardShopCoop.Sync
         /// it would move the mirrored wallet/binder locally.</summary>
         public static bool ClientAcceptPrefix(CustomerTradeCardScreen __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             var t = _live;
-            if (t == null) return false;
+            if (t == null)
+                return false;
             int idx = t._pendingCounter;
             // THE haggle "$0" bug: the game only writes m_PriceSet on the input field's
             // onEndEdit (CustomerTradeCardScreen.OnInputTextUpdated). Typing alone runs
@@ -317,7 +368,8 @@ namespace CardShopCoop.Sync
             float price = FiScrPriceSet?.GetValue(__instance) is float p ? p : 0f;
             // a zero/garbage field means "at the asking price" (-1 tells the host so);
             // a genuine $0 bid is never what an accept press means
-            if (price <= 0f) price = -1f;
+            if (price <= 0f)
+                price = -1f;
             CoopPlugin.Log.LogInfo($"TradeServe client: accept pressed on native screen (counter {idx}, price {price:F2})");
             // S1: the screen can be ORPHANED - visually open while _pendingCounter == -1
             // (the "offer vanished" close raced the CloseScreen chain and left the screen
@@ -333,20 +385,62 @@ namespace CardShopCoop.Sync
                 // the new offer at an amount the guest never saw for it (the host pins
                 // m_PriceSet to whatever we send). -1 = "accept at the asking price", so
                 // the rebound accept can only ever pay the rebound offer's own ask.
-                if (idx >= 0) price = -1f;
+                if (idx >= 0)
+                    price = -1f;
             }
             if (idx >= 0)
                 t.SendOpFor(OpAccept, idx, price, "answering the customer...");
-            try { __instance.CloseScreen(); }
+            try
+            {
+                __instance.CloseScreen();
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe client: screen close: " + e.Message); }
             return false;
+        }
+
+        /// <summary>Client: SetCustomer(data) restores the display labels but vanilla does
+        /// not restore the editable sell-in input. Seed it from the authoritative ask so a
+        /// new customer cannot inherit the previous customer's bid.</summary>
+        public static void ClientSetCustomerPostfix(CustomerTradeCardScreen __instance,
+            Customer customer, CustomerTradeData customerTradeData)
+        {
+            if (CoopCore.Role != CoopRole.Client || __instance == null || customerTradeData == null
+                || customerTradeData.m_IsTrading || __instance.m_SetPriceInput == null)
+                return;
+            try
+            {
+                __instance.m_SetPriceInput.SetTextWithoutNotify(GameInstance.GetPriceString(
+                    customerTradeData.m_SellCardAskPrice,
+                    useDashAsZero: false, useCurrencySymbol: false));
+            }
+            catch (System.Exception e)
+            {
+                CoopPlugin.Log.LogWarning("TradeServe client: seed price field: " + e.Message);
+            }
+        }
+
+        /// <summary>Client: clear the reused sell-in input when the native screen closes so
+        /// a bid from the previous customer can never be forwarded to the next one.</summary>
+        public static void ClientCloseScreenPostfix(CustomerTradeCardScreen __instance)
+        {
+            if (CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
+            try
+            {
+                __instance.m_SetPriceInput?.SetTextWithoutNotify("");
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("TradeServe client: clear price field: " + e.Message);
+            }
         }
 
         /// <summary>Client: the screen's Decline button = forward the decline, then let
         /// the vanilla body run (it only plays a sound and closes the screen).</summary>
         public static bool ClientDeclinePrefix()
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             var t = _live;
             if (t != null)
             {
@@ -355,7 +449,8 @@ namespace CardShopCoop.Sync
                 // guest is standing at rather than being silently dropped. Vanilla still
                 // runs (return true) so the screen plays its sound and closes normally.
                 int idx = t._pendingCounter;
-                if (idx < 0) idx = t.RebindOrphanedScreen("decline");
+                if (idx < 0)
+                    idx = t.RebindOrphanedScreen("decline");
                 if (idx >= 0)
                 {
                     CoopPlugin.Log.LogInfo($"TradeServe client: decline pressed on native screen (counter {idx})");
@@ -366,14 +461,11 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Client: "Let Me Think" = close without answering; the offer stays
-        /// live on the host. Vanilla would call OnPressRefreshInteract on the puppet
-        /// (re-enabling its "!" mesh and touching player state twice) - skip it.</summary>
+        /// live on the host. Vanilla's close path restores the local UI and releases the
+        /// carrier, so allow the original method to run.</summary>
         public static bool ClientLetMeThinkPrefix(CustomerTradeCardScreen __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
-            try { __instance.CloseScreen(); }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe client: screen close: " + e.Message); }
-            return false;
+            return true;
         }
 
         /// <summary>Client: the player-restore half of Customer.OnPressStopInteract
@@ -381,7 +473,8 @@ namespace CardShopCoop.Sync
         /// deactivated, so DetermineShopAction/StartCoroutine would throw on it.</summary>
         public static bool ClientStopInteractPrefix(Customer __instance)
         {
-            if (CoopCore.Role != CoopRole.Client) return true;
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
             // S3: the puppet-data clears used to run OUTSIDE the try below, so a throw in
             // the UI-restore block could skip the "_pendingCounter = -1" at the tail and
             // leave a half-closed screen wedged. Move them inside a single guarded block
@@ -395,7 +488,13 @@ namespace CardShopCoop.Sync
             catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe client: UI restore: " + e.Message); }
             finally
             {
-                if (_live != null) _live._pendingCounter = -1;
+                if (_live != null)
+                {
+                    int counter = _live._pendingCounter;
+                    _live._pendingCounter = -1;
+                    if (counter >= 0)
+                        _live.ReleaseCarrier(counter);
+                }
             }
             return false;
         }
@@ -412,7 +511,8 @@ namespace CardShopCoop.Sync
             {
                 ipc.ExitWorkerInteractMode();
                 ipc.StopAimLookAt();
-                if (ipc.m_WalkerCtrl != null) ipc.m_WalkerCtrl.SetStopMovement(isStop: false);
+                if (ipc.m_WalkerCtrl != null)
+                    ipc.m_WalkerCtrl.SetStopMovement(isStop: false);
                 ipc.ExitUIMode();
             }
             GameUIScreen.ResetToolTipVisibility();
@@ -425,7 +525,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var original = AccessTools.Method(type, method);
+                var original = ReflectionSurface.RequiredMethod(type, method);
                 if (original == null)
                 {
                     CoopPlugin.Log.LogWarning($"Patch target missing: {type.Name}.{method}");
@@ -443,25 +543,29 @@ namespace CardShopCoop.Sync
 
         private ShelfManager Sm()
         {
-            if (_sm == null) _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            if (_sm == null)
+                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
             return _sm;
         }
 
         private CustomerManager Cm()
         {
-            if (_cm == null) _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
+            if (_cm == null)
+                _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
             return _cm;
         }
 
         private InteractionPlayerController Ipc()
         {
-            if (_ipc == null) _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
+            if (_ipc == null)
+                _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
             return _ipc;
         }
 
         private static string CardName(CardData c)
         {
-            if (c == null) return "a card";
+            if (c == null)
+                return "a card";
             string name = null;
             try
             {
@@ -475,7 +579,8 @@ namespace CardShopCoop.Sync
                 if ((int)c.expansionType < (int)ECardExpansionType.MAX)
                 {
                     var md = InventoryBase.GetMonsterData(c.monsterType);
-                    if (md != null) name = md.GetName();
+                    if (md != null)
+                        name = md.GetName();
                 }
             }
             catch { }
@@ -487,7 +592,8 @@ namespace CardShopCoop.Sync
                 name = (int)c.expansionType < (int)ECardExpansionType.MAX
                     ? c.monsterType.ToString()
                     : c.expansionType + "#" + (int)c.monsterType;
-            if (c.isFoil) name += " (foil)";
+            if (c.isFoil)
+                name += " (foil)";
             // S5: with Grading Overhaul installed, cardGrade is an ENCODED int (e.g.
             // 370009134) packing company+grade+cert - printing it raw showed the guest a
             // ten-digit "grade". Decode to the real 1-10 for display. Actual() is identity
@@ -496,20 +602,25 @@ namespace CardShopCoop.Sync
             if (c.cardGrade > 0)
             {
                 int g = Util.GradingInterop.Present ? Util.GradingInterop.Actual(c.cardGrade) : c.cardGrade;
-                if (g > 0) name += $" [grade {g}]";
+                if (g > 0)
+                    name += $" [grade {g}]";
             }
             return name;
         }
 
         private static string Price(float p)
         {
-            try { return GameInstance.GetPriceString(p); }
+            try
+            {
+                return GameInstance.GetPriceString(p);
+            }
             catch { return "$" + p.ToString("F2"); }
         }
 
         private static int CardHash(CardData c)
         {
-            if (c == null) return 0;
+            if (c == null)
+                return 0;
             int hash = 17;
             hash = hash * 31 + (int)c.monsterType;
             hash = hash * 31 + (int)c.expansionType;
@@ -523,28 +634,35 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame) return;
+            if (!inGame)
+                return;
             _timer += dt;
-            if (_timer < Cadence) return;
+            if (_timer < Cadence)
+                return;
             _timer -= Cadence;
             try
             {
                 var cm = Cm();
                 var sm = Sm();
-                if (cm == null || sm == null) return;
+                if (cm == null || sm == null)
+                    return;
 
                 _hostBuf.Clear();
                 var customers = cm.GetCustomerList();
                 for (int i = 0; i < customers.Count && _hostBuf.Count < MaxOffers; i++)
                 {
                     var cust = customers[i];
-                    if (cust == null || !cust.m_IsActive) continue;
-                    if (cust.m_CurrentState != ECustomerState.WaitingToTradeCard) continue;
+                    if (cust == null || !cust.m_IsActive)
+                        continue;
+                    if (cust.m_CurrentState != ECustomerState.WaitingToTradeCard)
+                        continue;
 
                     var counter = FiTradeCounter?.GetValue(cust) as InteractableCashierCounter;
-                    if (counter == null) continue;
+                    if (counter == null)
+                        continue;
                     int idx = sm.m_CashierCounterList.IndexOf(counter);
-                    if (idx < 0 || idx > 250) continue;
+                    if (idx < 0 || idx > 250)
+                        continue;
 
                     // S4: pause THIS customer's patience while a guest holds the trade screen
                     // for it. Vanilla only stops m_Timer from advancing when the HOST-local
@@ -562,7 +680,8 @@ namespace CardShopCoop.Sync
                         FiCustTimer?.SetValue(cust, 0f);
 
                     var data = FiTradeData?.GetValue(cust) as CustomerTradeData;
-                    if (data == null) data = PreRoll(cm, cust);
+                    if (data == null)
+                        data = PreRoll(cm, cust);
 
                     float waited = FiCustTimer?.GetValue(cust) is float t ? t : 0f;
                     // "known" also demands the cards the wire format will write exist
@@ -576,6 +695,10 @@ namespace CardShopCoop.Sync
                         CounterIdx = (byte)idx,
                         Known = known,
                         Remaining = Mathf.Clamp(VanillaWait - waited, 0f, VanillaWait),
+                        CustomerIndex = (ushort)i,
+                        CustomerGeneration = NpcSync.GetCustomerGeneration(cust),
+                        Position = cust.transform.position,
+                        Yaw = cust.transform.eulerAngles.y,
                     };
                     if (known)
                     {
@@ -583,6 +706,10 @@ namespace CardShopCoop.Sync
                         offer.CardL = data.m_CardData_L;
                         offer.CardR = data.m_CardData_R;
                         offer.Price = data.m_SellCardAskPrice;
+                        offer.PriceSet = data.m_PriceSet;
+                        offer.LastPriceSet = data.m_LastPriceSet;
+                        offer.MaxDeclineCount = data.m_MaxDeclineCount;
+                        offer.DeclineCount = data.m_DeclineCount;
                     }
                     _hostBuf.Add(offer);
                 }
@@ -599,11 +726,18 @@ namespace CardShopCoop.Sync
                     hash = hash * 31 + CardHash(o.CardL);
                     hash = hash * 31 + CardHash(o.CardR);
                     hash = hash * 31 + (int)(o.Price * 100f);
+                    hash = hash * 31 + (int)(o.PriceSet * 100f);
+                    hash = hash * 31 + (int)(o.LastPriceSet * 100f);
+                    hash = hash * 31 + o.MaxDeclineCount;
+                    hash = hash * 31 + o.DeclineCount;
+                    hash = hash * 31 + o.CustomerIndex;
+                    hash = hash * 31 + o.CustomerGeneration;
                 }
 
                 _heal += Cadence;
                 bool changed = hash != _lastHash;
-                if (!changed && _heal < HealInterval) return;
+                if (!changed && _heal < HealInterval)
+                    return;
                 _lastHash = hash;
                 _heal = 0f;
                 if (changed) // real change (offers moved or a result landed) - keep the pipeline loud
@@ -616,7 +750,7 @@ namespace CardShopCoop.Sync
                     }
                     CoopPlugin.Log.LogInfo($"TradeServe host: broadcasting {_hostBuf.Count} offer(s){summary}");
                 }
-                BroadcastState?.Invoke(WriteState);
+                BroadcastState?.Invoke(BuildState());
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe host: " + e.Message); }
         }
@@ -631,15 +765,24 @@ namespace CardShopCoop.Sync
         /// object across customers, so anything we keep past this frame must be a copy.</summary>
         private static CardData CopyCard(CardData src)
         {
-            if (src == null) return null;
+            if (src == null)
+                return null;
             var c = new CardData();
-            try { c.CopyData(src); }
+            try
+            {
+                c.CopyData(src);
+            }
             catch
             {
-                c.expansionType = src.expansionType; c.monsterType = src.monsterType;
-                c.borderType = src.borderType; c.isFoil = src.isFoil; c.isDestiny = src.isDestiny;
-                c.isChampionCard = src.isChampionCard; c.isNew = src.isNew;
-                c.cardGrade = src.cardGrade; c.gradedCardIndex = src.gradedCardIndex;
+                c.expansionType = src.expansionType;
+                c.monsterType = src.monsterType;
+                c.borderType = src.borderType;
+                c.isFoil = src.isFoil;
+                c.isDestiny = src.isDestiny;
+                c.isChampionCard = src.isChampionCard;
+                c.isNew = src.isNew;
+                c.cardGrade = src.cardGrade;
+                c.gradedCardIndex = src.gradedCardIndex;
             }
             return c;
         }
@@ -648,14 +791,17 @@ namespace CardShopCoop.Sync
         {
             // without the storage field every roll would be lost and re-rolled (and
             // re-broadcast) each tick - better to leave the offer host-served
-            if (FiTradeData == null) return null;
+            if (FiTradeData == null)
+                return null;
             var screen = cm.m_CustomerTradeCardScreen;
             // never stomp a live trade the host is running in the real UI
-            if (screen == null || cm.m_IsPlayerTrading || screen.IsScreenOpened()) return null;
+            if (screen == null || cm.m_IsPlayerTrading || screen.IsScreenOpened())
+                return null;
             int id = cust.GetInstanceID();
             // transient backoff, NOT a permanent blacklist: one flaky roll used to mark the
             // offer host-only for the customer's whole life (guest could never answer it)
-            if (_preRollFailUntil.TryGetValue(id, out var until) && Time.time < until) return null;
+            if (_preRollFailUntil.TryGetValue(id, out var until) && Time.time < until)
+                return null;
             try
             {
                 screen.SetCustomer(cust, null); // sets m_IsPlayerTrading = true itself
@@ -695,11 +841,15 @@ namespace CardShopCoop.Sync
             }
             finally
             {
-                try { cm.m_IsPlayerTrading = false; } catch { }
+                try
+                {
+                    cm.m_IsPlayerTrading = false;
+                }
+                catch { }
             }
         }
 
-        private void WriteState(BinaryWriter bw)
+        private TradeStateMessage BuildState()
         {
             // both-players-on-one-customer guard, host half: while the HOST has the
             // trade screen up (or is mid-trade), joiners must not open theirs
@@ -711,40 +861,52 @@ namespace CardShopCoop.Sync
                     || (cm.m_CustomerTradeCardScreen != null && cm.m_CustomerTradeCardScreen.IsScreenOpened()));
             }
             catch { }
-            bw.Write(hostBusy);
-            bw.Write(_resultSeq);
-            bw.Write(_result ?? "");
-            bw.Write((byte)_hostBuf.Count);
+            var msg = new TradeStateMessage
+            {
+                HostBusy = hostBusy,
+                ResultSeq = _resultSeq,
+                Result = _result ?? "",
+            };
             for (int i = 0; i < _hostBuf.Count; i++)
             {
                 var o = _hostBuf[i];
-                bw.Write(o.CounterIdx);
-                bw.Write((byte)((o.Known ? 1 : 0) | (o.Trading ? 2 : 0)));
-                if (o.Known)
+                msg.Offers.Add(new TradeOfferEntry
                 {
-                    Msg.WriteCard(bw, o.CardL);
-                    if (o.Trading) Msg.WriteCard(bw, o.CardR);
-                    else bw.Write(o.Price);
-                }
-                bw.Write(o.Remaining);
+                    CounterIdx = o.CounterIdx,
+                    Known = o.Known,
+                    Trading = o.Trading,
+                    CustomerIndex = o.CustomerIndex,
+                    CustomerGeneration = o.CustomerGeneration,
+                    Position = o.Position,
+                    Yaw = o.Yaw,
+                    PriceSet = o.PriceSet,
+                    LastPriceSet = o.LastPriceSet,
+                    MaxDeclineCount = o.MaxDeclineCount,
+                    DeclineCount = o.DeclineCount,
+                    CardL = o.Known ? o.CardL : null,
+                    CardR = (o.Known && o.Trading) ? o.CardR : null,
+                    Price = (o.Known && !o.Trading) ? o.Price : 0f,
+                    Remaining = o.Remaining,
+                });
             }
+            return msg;
         }
 
         private void Result(string text)
         {
             _result = text;
-            _resultSeq++;           // seq is hashed, so the next tick must broadcast
-            ForceResend();
+            // Trade outcomes are handled by the native trade screen.  Do not surface
+            // the old co-op status-line hints (for example, "the customer moves on").
             CoopPlugin.Log.LogInfo("TradeServe: " + text);
         }
 
         /// <summary>Host: a joiner answered a counter offer (accept carries the price
         /// the joiner's screen had set; decline/trade ops carry 0).</summary>
-        public void HostApplyOp(BinaryReader br)
+        public void HostApplyOp(TradeOpMessage message)
         {
-            byte op = br.ReadByte();
-            int idx = br.ReadByte();
-            float price = br.ReadSingle();
+            byte op = message.Op;
+            int idx = message.CounterIdx;
+            float price = message.Price;
             if (op == OpScreen)
             {
                 // joiner's screen-open claim (renewed ~2s; expiry is time-based so no
@@ -753,7 +915,10 @@ namespace CardShopCoop.Sync
                 return;
             }
             CoopPlugin.Log.LogInfo($"TradeServe host: received {(op == OpAccept ? "accept" : op == OpDecline ? "decline" : "op " + op)} @ counter {idx}, price {price:F2}");
-            try { HostApplyOpInner(op, idx, price); }
+            try
+            {
+                HostApplyOpInner(op, idx, price);
+            }
             catch (Exception e)
             {
                 CoopPlugin.Log.LogWarning("TradeServe op: " + e);
@@ -804,10 +969,12 @@ namespace CardShopCoop.Sync
                 Result("trade declined - the customer moves on");
                 return;
             }
-            if (op != OpAccept) return;
+            if (op != OpAccept)
+                return;
 
             var data = FiTradeData?.GetValue(cust) as CustomerTradeData;
-            if (data == null) data = PreRoll(cm, cust);
+            if (data == null)
+                data = PreRoll(cm, cust);
             if (data == null || data.m_CardData_L == null)
             {
                 Result("couldn't read the offer - the host must serve this one");
@@ -880,7 +1047,11 @@ namespace CardShopCoop.Sync
             }
             finally
             {
-                try { cm.m_IsPlayerTrading = false; } catch { }
+                try
+                {
+                    cm.m_IsPlayerTrading = false;
+                }
+                catch { }
             }
 
             if (accepted)
@@ -926,41 +1097,68 @@ namespace CardShopCoop.Sync
             FiPausing?.SetValue(cust, false);
             try
             {
-                if (cust.m_ExclaimationMesh != null) cust.m_ExclaimationMesh.SetActive(false);
-                if (cust.m_InteractCollider != null) cust.m_InteractCollider.SetActive(false);
+                if (cust.m_ExclaimationMesh != null)
+                    cust.m_ExclaimationMesh.SetActive(false);
+                if (cust.m_InteractCollider != null)
+                    cust.m_InteractCollider.SetActive(false);
             }
             catch { }
             FiHasTraded?.SetValue(cust, true);
-            try { counter?.CustomerFinishTradingCard(); } catch { }
+            try
+            {
+                counter?.CustomerFinishTradingCard();
+            }
+            catch { }
             FiTradeCounter?.SetValue(cust, null);
-            try { MiDetermine?.Invoke(cust, null); }
+            try
+            {
+                MiDetermine?.Invoke(cust, null);
+            }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe finish: " + e.Message); }
         }
 
         // ---------------- client ----------------
 
-        public void ClientApplyState(BinaryReader br)
+        public void ClientApplyState(TradeStateMessage message)
         {
-            _hostBusy = br.ReadBoolean();
-            byte seq = br.ReadByte();
-            string result = br.ReadString();
-            int count = br.ReadByte();
+            _hostBusy = message.HostBusy;
+            byte seq = message.ResultSeq;
+            string result = message.Result;
+            int count = message.Offers.Count;
             _offers.Clear();
             for (int i = 0; i < count; i++)
             {
-                var o = new Offer { CounterIdx = br.ReadByte() };
-                byte flags = br.ReadByte();
-                o.Known = (flags & 1) != 0;
-                o.Trading = (flags & 2) != 0;
-                if (o.Known)
+                var e = message.Offers[i];
+                var o = new Offer
                 {
-                    o.CardL = Msg.ReadCard(br);
-                    if (o.Trading) o.CardR = Msg.ReadCard(br);
-                    else o.Price = br.ReadSingle();
-                }
-                o.Remaining = br.ReadSingle();
+                    CounterIdx = e.CounterIdx,
+                    Known = e.Known,
+                    Trading = e.Trading,
+                    CustomerIndex = e.CustomerIndex,
+                    CustomerGeneration = e.CustomerGeneration,
+                    Position = e.Position,
+                    Yaw = e.Yaw,
+                    PriceSet = e.PriceSet,
+                    LastPriceSet = e.LastPriceSet,
+                    MaxDeclineCount = e.MaxDeclineCount,
+                    DeclineCount = e.DeclineCount,
+                    CardL = e.Known ? e.CardL : null,
+                    CardR = (e.Known && e.Trading) ? e.CardR : null,
+                    Price = (e.Known && !e.Trading) ? e.Price : 0f,
+                    Remaining = e.Remaining,
+                };
                 _offers[o.CounterIdx] = o;
+                if (o.Known)
+                    PrepareCarrier(o);
+                else
+                    ReleaseCarrier(o.CounterIdx);
             }
+            var staleCarriers = new List<int>();
+            foreach (var kv in _carriers)
+                if (!_offers.ContainsKey(kv.Key))
+                    staleCarriers.Add(kv.Key);
+            for (int i = 0; i < staleCarriers.Count; i++)
+                ReleaseCarrier(staleCarriers[i]);
             _staleTimer = 0f;
             if (count != _lastOfferCount) // change-only, so the 6s heal doesn't spam
             {
@@ -979,36 +1177,110 @@ namespace CardShopCoop.Sync
             }
         }
 
-        /// <summary>True while a trade/sell-in offer is live at this counter - CoopCore's
-        /// serve-key path must skip ServeRequest for it (this module answers instead).</summary>
+        private void PrepareCarrier(Offer offer)
+        {
+            var cm = Cm();
+            if (cm == null)
+                return;
+            var list = cm.GetCustomerList();
+            if (offer.CustomerIndex >= list.Count || list[offer.CustomerIndex] == null)
+                return;
+            var carrier = list[offer.CustomerIndex];
+            if (_carriers.TryGetValue(offer.CounterIdx, out var old) && !ReferenceEquals(old, carrier))
+                ReleaseCarrier(offer.CounterIdx);
+            _carriers[offer.CounterIdx] = carrier;
+            _carrierSource[offer.CounterIdx] = offer.CustomerIndex;
+            _carrierGeneration[offer.CounterIdx] = offer.CustomerGeneration;
+            bool carrierVisualsCaptured = _carrierRenderers.ContainsKey(offer.CounterIdx);
+            RegisterSync.AllowClientCustomerLifecycle = true;
+            try
+            {
+                carrier.ActivateCustomer(false, false);
+            }
+            finally { RegisterSync.AllowClientCustomerLifecycle = false; }
+            var sm = Sm();
+            var counter = sm != null && offer.CounterIdx < sm.m_CashierCounterList.Count
+                ? sm.m_CashierCounterList[offer.CounterIdx] : null;
+            if (counter == null)
+                return;
+            FiTradeCounter?.SetValue(carrier, counter);
+            FiTradeData?.SetValue(carrier, new CustomerTradeData
+            {
+                m_IsTrading = offer.Trading,
+                m_CardData_L = offer.CardL,
+                m_CardData_R = offer.CardR,
+                m_SellCardAskPrice = offer.Price,
+                m_PriceSet = offer.Trading ? 0f : offer.PriceSet,
+                m_LastPriceSet = offer.Trading ? 0f : offer.LastPriceSet,
+                m_MaxDeclineCount = offer.MaxDeclineCount,
+                m_DeclineCount = offer.DeclineCount,
+            });
+            carrier.transform.position = offer.Position;
+            carrier.transform.rotation = Quaternion.Euler(0f, offer.Yaw, 0f);
+            carrier.gameObject.SetActive(true);
+            if (carrier.m_ExclaimationMesh != null)
+                carrier.m_ExclaimationMesh.SetActive(true);
+            if (carrier.m_InteractCollider != null)
+                carrier.m_InteractCollider.SetActive(true);
+            if (!carrierVisualsCaptured)
+            {
+                var renderers = carrier.GetComponentsInChildren<Renderer>(true);
+                var states = new bool[renderers.Length];
+                for (int i = 0; i < renderers.Length; i++)
+                {
+                    states[i] = renderers[i] != null && renderers[i].enabled;
+                    if (renderers[i] != null)
+                        renderers[i].enabled = false;
+                }
+                _carrierRenderers[offer.CounterIdx] = renderers;
+                _carrierRendererStates[offer.CounterIdx] = states;
+            }
+            else if (_carrierRenderers.TryGetValue(offer.CounterIdx, out var existingRenderers))
+            {
+                for (int i = 0; i < existingRenderers.Length; i++)
+                    if (existingRenderers[i] != null)
+                        existingRenderers[i].enabled = false;
+            }
+            NpcSync.SuppressedCustomer.Add(offer.CustomerIndex);
+            NpcSync.AttachExistingCustomer(offer.CustomerIndex, offer.CustomerGeneration, carrier, keepPuppetVisible: true);
+        }
+
+        private void ReleaseCarrier(int counterIdx)
+        {
+            if (!_carriers.TryGetValue(counterIdx, out var carrier))
+                return;
+            if (_carrierRenderers.TryGetValue(counterIdx, out var renderers)
+                && _carrierRendererStates.TryGetValue(counterIdx, out var states))
+            {
+                for (int i = 0; i < renderers.Length && i < states.Length; i++)
+                    if (renderers[i] != null)
+                        renderers[i].enabled = states[i];
+            }
+            if (_carrierSource.TryGetValue(counterIdx, out var source))
+                NpcSync.DetachExistingCustomer(source, carrier);
+            _carriers.Remove(counterIdx);
+            _carrierSource.Remove(counterIdx);
+            _carrierGeneration.Remove(counterIdx);
+            _carrierRenderers.Remove(counterIdx);
+            _carrierRendererStates.Remove(counterIdx);
+        }
+
+        private void TeardownCarriers()
+        {
+            var keys = new List<int>(_carriers.Keys);
+            for (int i = 0; i < keys.Count; i++)
+                ReleaseCarrier(keys[i]);
+            _carriers.Clear();
+            _carrierSource.Clear();
+            _carrierGeneration.Clear();
+            _carrierRenderers.Clear();
+            _carrierRendererStates.Clear();
+        }
+
+        /// <summary>True while a trade/sell-in offer is live at this counter.</summary>
         public bool HasOffer(int counterIdx)
         {
             return counterIdx >= 0 && _offers.ContainsKey(counterIdx);
-        }
-
-        /// <summary>Client: true if ANY live offer is answerable (has pre-rolled card data).
-        /// Drives a walk-up hint teaching the guest to go to the counter and press the serve
-        /// key - on the guest the "!" customer is a collider-less render puppet, so clicking
-        /// it (the vanilla action) does nothing and the guest never learns the interaction.</summary>
-        public bool AnyKnownOffer()
-        {
-            foreach (var kv in _offers) if (kv.Value.Known) return true;
-            return false;
-        }
-
-        /// <summary>Client: prompt for the nearest counter's live offer, or null
-        /// (composes with RegisterMirror.PromptFor in CoopCore).</summary>
-        public string PromptFor(int nearestCounter)
-        {
-            if (nearestCounter < 0 || !_offers.TryGetValue(nearestCounter, out var o)) return null;
-            if (!o.Known)
-                return "a customer wants to trade - the host must serve them";
-            string keys = _nativeBroken
-                ? $"{CoopPlugin.ServeKey.Value} accept, {DeclineKey} decline" // prompt+key fallback
-                : $"{CoopPlugin.ServeKey.Value} answer, {DeclineKey} decline";
-            if (o.Trading)
-                return $"trade: their {CardName(o.CardL)} for your {CardName(o.CardR)} - {keys}";
-            return $"sell-in: {CardName(o.CardL)} for {Price(o.Price)} - {keys}";
         }
 
         /// <summary>Client: the joiner's MOVING body. InteractionPlayerController sits on
@@ -1018,9 +1290,11 @@ namespace CardShopCoop.Sync
         /// decline keys never fired: the manager is never within 3.5m of a counter.</summary>
         private Transform PlayerBody()
         {
-            if (_playerTf != null) return _playerTf;
+            if (_playerTf != null)
+                return _playerTf;
             var ipc = Ipc();
-            if (ipc == null) return null;
+            if (ipc == null)
+                return null;
             _playerTf = ipc.m_WalkerCtrl != null ? ipc.m_WalkerCtrl.transform : ipc.transform;
             return _playerTf;
         }
@@ -1031,7 +1305,7 @@ namespace CardShopCoop.Sync
         {
             _opThrottle = 0.5f;
             CoopPlugin.Log.LogInfo($"TradeServe client: sending {(op == OpAccept ? "accept" : "decline")} @ counter {idx}, price {price:F2}");
-            SendOp?.Invoke(bw => { bw.Write(op); bw.Write((byte)idx); bw.Write(price); });
+            SendOp?.Invoke(new TradeOpMessage { Op = op, CounterIdx = (byte)idx, Price = price });
             _offers.Remove(idx);
             if (CoopCore.Instance != null)
             {
@@ -1072,73 +1346,13 @@ namespace CardShopCoop.Sync
             return -1;
         }
 
-        /// <summary>Client: open the game's REAL CustomerTradeCardScreen filled with the
-        /// host's offer. A deactivated puppet from CustomerManager's pool carries a
-        /// CustomerTradeData built from the digest (SetCustomer with non-null data
-        /// replays it verbatim and reads nothing else from the customer); the screen
-        /// opens through the host click-flow's own calls (Customer.OnMousePress:236-250,
-        /// minus the customer look-at) so input mode/cursor behave exactly like a host
-        /// trade. Market price is recomputed locally by SetCustomer from the mirrored
-        /// market data.</summary>
-        private void OpenNativeScreen(int idx, Offer offer)
-        {
-            var cm = Cm();
-            var screen = cm != null ? cm.m_CustomerTradeCardScreen : null;
-            if (screen == null) throw new InvalidOperationException("no CustomerTradeCardScreen");
-            if (screen.IsScreenOpened()) return;
-            Customer carrier = null;
-            var list = cm.GetCustomerList();
-            for (int i = 0; i < list.Count; i++)
-                if (list[i] != null) { carrier = list[i]; break; }
-            if (carrier == null) throw new InvalidOperationException("no carrier customer in the pool");
-            var data = new CustomerTradeData
-            {
-                m_IsTrading = offer.Trading,
-                m_CardData_L = offer.CardL,
-                m_CardData_R = offer.CardR,
-                m_SellCardAskPrice = offer.Price,
-                m_SellCardMarketPrice = 0f, // SetCustomer recomputes from GetCardMarketPrice
-                // prefill the ASK: the price field only writes m_PriceSet when edited,
-                // so accepting a sell-in untouched forwarded $0.00 and the haggle RNG
-                // refused it as a lowball every time (field logs: "they refuse $0.00")
-                m_PriceSet = offer.Trading ? 0f : offer.Price,
-                m_LastPriceSet = offer.Trading ? 0f : offer.Price,
-                m_MaxDeclineCount = 0, // the haggle RNG never runs here (accept is forwarded)
-                m_DeclineCount = 0,
-            };
-            // fill BEFORE touching input state: a throw here leaves nothing to unwind
-            // (bar m_IsPlayerTrading, which the caller's catch resets)
-            screen.SetCustomer(carrier, data);
-            // Seed the EDITABLE input field with the ask. SetCustomer(data != null)
-            // fills the display texts but SKIPS the field init the vanilla (data == null)
-            // path does via OnInputTextUpdated("0") - so without this the field carries a
-            // stale amount from a prior haggle round. SetTextWithoutNotify keeps the
-            // m_PriceSet SetCustomer just wrote authoritative (no onValueChanged/onEndEdit).
-            if (!offer.Trading && screen.m_SetPriceInput != null)
-            {
-                try { screen.m_SetPriceInput.SetTextWithoutNotify(GameInstance.GetPriceString(offer.Price, useDashAsZero: false, useCurrencySymbol: false)); }
-                catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe client: seed price field: " + e.Message); }
-            }
-            var ipc = Ipc();
-            if (ipc == null) throw new InvalidOperationException("no InteractionPlayerController");
-            ipc.EnterWorkerInteractMode();
-            ipc.EnterUIMode();
-            ipc.EnterLockMoveMode();
-            GameUIScreen.HideToolTip();
-            GameUIScreen.HideEnterGoNextDayIndicatorVisible();
-            TutorialManager.SetGameUIVisible(isVisible: false);
-            screen.OpenScreen();
-            _pendingCounter = idx;
-            _claimTimer = 999f; // claim immediately on the next tick
-            CoopPlugin.Log.LogInfo($"TradeServe client: opened native trade screen for counter {idx}");
-        }
-
         /// <summary>Client per-frame: local countdown/staleness, the native screen's
         /// lifecycle, and the serve/decline keys (KeyDown, TextFieldFocused guard,
         /// short throttle, 3.5m reach from the WALKER body).</summary>
         public void ClientTick(float dt, bool inGame)
         {
-            if (_opThrottle > 0f) _opThrottle -= dt;
+            if (_opThrottle > 0f)
+                _opThrottle -= dt;
 
             if (_offers.Count > 0)
             {
@@ -1151,17 +1365,21 @@ namespace CardShopCoop.Sync
                 {
                     // count down locally; an expired offer means the customer walked off
                     _keyBuf.Clear();
-                    foreach (var kv in _offers) _keyBuf.Add(kv.Key);
+                    foreach (var kv in _offers)
+                        _keyBuf.Add(kv.Key);
                     for (int i = 0; i < _keyBuf.Count; i++)
                     {
                         // the counter whose native screen the guest currently holds must NOT
                         // be locally timed out mid-interaction - defer to the host, which
                         // drops the offer from its broadcast when the customer truly leaves
-                        if (_keyBuf[i] == _pendingCounter) continue;
+                        if (_keyBuf[i] == _pendingCounter)
+                            continue;
                         var o = _offers[_keyBuf[i]];
                         o.Remaining -= dt;
-                        if (o.Remaining <= 0f) _offers.Remove(_keyBuf[i]);
-                        else _offers[_keyBuf[i]] = o;
+                        if (o.Remaining <= 0f)
+                            _offers.Remove(_keyBuf[i]);
+                        else
+                            _offers[_keyBuf[i]] = o;
                     }
                 }
             }
@@ -1180,7 +1398,7 @@ namespace CardShopCoop.Sync
                 {
                     _claimTimer = 0f;
                     int pc = _pendingCounter;
-                    SendOp?.Invoke(bw => { bw.Write(OpScreen); bw.Write((byte)pc); bw.Write(0f); });
+                    SendOp?.Invoke(new TradeOpMessage { Op = OpScreen, CounterIdx = (byte)pc, Price = 0f });
                 }
                 var cm = Cm();
                 var screen = cm != null ? cm.m_CustomerTradeCardScreen : null;
@@ -1191,7 +1409,11 @@ namespace CardShopCoop.Sync
                 else if (!_offers.ContainsKey(_pendingCounter))
                 {
                     CoopPlugin.Log.LogInfo("TradeServe client: offer vanished while the screen was open - closing it");
-                    try { screen.CloseScreen(); } catch { }
+                    try
+                    {
+                        screen.CloseScreen();
+                    }
+                    catch { }
                     // S2: CloseScreen -> OnCloseScreen -> m_CurrentCustomer.OnPressStopInteract
                     // runs BEFORE base.OnCloseScreen (which is what actually hides the screen -
                     // UIScreenBase.OnCloseScreen sets m_IsScreenOpen=false + m_ScreenGroup
@@ -1208,7 +1430,8 @@ namespace CardShopCoop.Sync
                         {
                             FiScrIsOpen?.SetValue(screen, false);
                             var group = FiScrGroup?.GetValue(screen) as GameObject;
-                            if (group != null) group.SetActive(false);
+                            if (group != null)
+                                group.SetActive(false);
                             RestorePlayerFromUiMode();
                         }
                         catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe client: hard teardown: " + e.Message); }
@@ -1223,104 +1446,6 @@ namespace CardShopCoop.Sync
                 return;
             }
 
-            if (!inGame || _offers.Count == 0 || _opThrottle > 0f) return;
-            bool accept = Input.GetKeyDown(CoopPlugin.ServeKey.Value);
-            bool decline = Input.GetKeyDown(DeclineKey);
-            if (!accept && !decline) return;
-            // S6: TextFieldFocused only covers OUR IMGUI fields, and the screen-open
-            // early-return above only fires while WE hold the trade screen. Neither guards
-            // a NATIVE TMP input field owned by the game or another mod (e.g. someone typing
-            // in a price box with no coop screen open) - the serve/decline keys would leak
-            // in as keystrokes. Skip the keys while a field is ACTIVELY EDITED - and say so
-            // in the log: these guards used to eat presses silently (mere EventSystem
-            // SELECTION persists forever after a screen closes, which killed the serve key
-            // outright - "guest can't interact with npc" field report). Checked AFTER the
-            // keydown so the suppression only logs on a real press.
-            if (UI.CoopUI.TextFieldFocused)
-            {
-                CoopPlugin.Log.LogInfo("TradeServe client: serve/decline key ignored (co-op window text field focused)");
-                return;
-            }
-            if (CoopCore.NativeTextInputFocused())
-            {
-                CoopPlugin.Log.LogInfo("TradeServe client: serve/decline key ignored (game text field being edited)");
-                return;
-            }
-
-            var body = PlayerBody();
-            if (body == null)
-            {
-                CoopPlugin.Log.LogInfo("TradeServe client: key pressed but no player body resolved");
-                return;
-            }
-            int near = RegisterServe.FindNearestCounter(body.position, Reach, quiet: true);
-            if (near < 0 || !_offers.TryGetValue(near, out var offer))
-            {
-                // THE old silent gate that ate every keypress when the distance source
-                // was wrong - log it so a dead key is diagnosable from the console
-                CoopPlugin.Log.LogInfo($"TradeServe client: {(accept ? "serve" : "decline")} key ignored (nearest counter {near}, offers at [{string.Join(",", _offers.Keys)}])");
-                return;
-            }
-            if (!offer.Known)
-            {
-                _opThrottle = 0.5f;
-                CoopPlugin.Log.LogInfo($"TradeServe client: offer at counter {near} is host-only (pre-roll failed on the host)");
-                if (CoopCore.Instance != null)
-                {
-                    CoopCore.Instance.RegisterLine = "the host must serve this one";
-                    CoopCore.Instance.RegisterLineTimer = 3f;
-                }
-                return;
-            }
-
-            if (decline)
-            {
-                SendOpFor(OpDecline, near, 0f, "declining...");
-                return;
-            }
-
-            // both-players-on-one-customer guard, joiner half
-            if (_hostBusy)
-            {
-                _opThrottle = 0.5f;
-                if (CoopCore.Instance != null)
-                {
-                    CoopCore.Instance.RegisterLine = "the host is serving a customer right now";
-                    CoopCore.Instance.RegisterLineTimer = 3f;
-                }
-                return;
-            }
-
-            // serve key: the native screen is the UX; prompt+direct-accept is the fallback
-            if (!_nativeBroken)
-            {
-                _opThrottle = 0.3f;
-                try
-                {
-                    OpenNativeScreen(near, offer);
-                    return;
-                }
-                catch (Exception e)
-                {
-                    _nativeBroken = true;
-                    _pendingCounter = -1;
-                    try
-                    {
-                        var cm = Cm();
-                        if (cm != null) cm.m_IsPlayerTrading = false; // SetCustomer may have set it
-                    }
-                    catch { }
-                    CoopPlugin.Log.LogWarning("TradeServe client: native trade screen failed, falling back to prompt keys: " + e);
-                    if (CoopCore.Instance != null)
-                    {
-                        CoopCore.Instance.RegisterLine = $"trade screen unavailable - {CoopPlugin.ServeKey.Value} accepts at asking price, {DeclineKey} declines";
-                        CoopCore.Instance.RegisterLineTimer = 4f;
-                    }
-                    return; // the failed press is spent; the next one uses the fallback
-                }
-            }
-            // fallback accept: -1 price = "at the asking price" (guaranteed branch)
-            SendOpFor(OpAccept, near, -1f, "answering the customer...");
         }
     }
 }

@@ -1,0 +1,32 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: C# formatting
+    runs-on: ubuntu-latest
+    env:
+      NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 9.x
+          cache: true
+          cache-dependency-path: src/CardShopCoop/packages.lock.json
+
+      - name: Restore project metadata
+        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode --configfile NuGet.Config
+
+      # Formatting does not require the proprietary game assemblies.
+      - name: Verify formatting
+        run: dotnet format src/CardShopCoop/CardShopCoop.csproj whitespace --verify-no-changes --no-restore

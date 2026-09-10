@@ -15,7 +15,10 @@ namespace CardShopCoop.Util
         private static readonly object Lock = new object();
         private static int _lastFlushTick;
 
-        public static string Path { get; private set; }
+        public static string Path
+        {
+            get; private set;
+        }
 
         public static void Init(string gameRoot)
         {
@@ -38,7 +41,8 @@ namespace CardShopCoop.Util
 
         public static void Write(string line)
         {
-            if (_writer == null) return;
+            if (_writer == null)
+                return;
             lock (Lock)
             {
                 try
@@ -60,7 +64,11 @@ namespace CardShopCoop.Util
         {
             lock (Lock)
             {
-                try { _writer?.Flush(); } catch { }
+                try
+                {
+                    _writer?.Flush();
+                }
+                catch { }
             }
         }
     }

@@ -77,7 +77,8 @@ namespace CardShopCoop.Util
         /// purpose so a shared card with tweaked flavor still matches.</summary>
         public static string CardsHash()
         {
-            if (_cards != null) return _cards;
+            if (_cards != null)
+                return _cards;
             try
             {
                 var entries = CardEntries();
@@ -93,7 +94,10 @@ namespace CardShopCoop.Util
         /// hash that gated them. CoopCore calls this by name.</summary>
         public static List<string> CardsList()
         {
-            try { return CardEntries(); }
+            try
+            {
+                return CardEntries();
+            }
             catch { return new List<string>(); }
         }
 
@@ -111,12 +115,16 @@ namespace CardShopCoop.Util
                     foreach (var line in File.ReadAllLines(f))
                     {
                         int eq = line.IndexOf('=');
-                        if (eq <= 0) continue;
+                        if (eq <= 0)
+                            continue;
                         string k = line.Substring(0, eq).Trim();
-                        if (k.Equals("Monster Type", StringComparison.OrdinalIgnoreCase)) name = line.Substring(eq + 1).Trim();
-                        else if (k.Equals("Monster Type ID", StringComparison.OrdinalIgnoreCase)) id = line.Substring(eq + 1).Trim();
+                        if (k.Equals("Monster Type", StringComparison.OrdinalIgnoreCase))
+                            name = line.Substring(eq + 1).Trim();
+                        else if (k.Equals("Monster Type ID", StringComparison.OrdinalIgnoreCase))
+                            id = line.Substring(eq + 1).Trim();
                     }
-                    if (name != null && id != null) entries.Add(name + "=" + id);
+                    if (name != null && id != null)
+                        entries.Add(name + "=" + id);
                 }
             }
             entries.Sort(StringComparer.Ordinal);
@@ -126,8 +134,12 @@ namespace CardShopCoop.Util
         /// <summary>Hash of the loaded BepInEx plugin set (guid=version, sorted).</summary>
         public static string PluginHash()
         {
-            if (_plugins != null) return _plugins;
-            try { _plugins = Short(Sha1(string.Join(";", PluginEntries()))); }
+            if (_plugins != null)
+                return _plugins;
+            try
+            {
+                _plugins = Short(Sha1(string.Join(";", PluginEntries())));
+            }
             catch { _plugins = "err"; }
             return _plugins;
         }
@@ -137,7 +149,10 @@ namespace CardShopCoop.Util
         /// with PluginHash so the two never disagree. CoopCore calls this by name.</summary>
         public static List<string> PluginList()
         {
-            try { return PluginEntries(); }
+            try
+            {
+                return PluginEntries();
+            }
             catch { return new List<string>(); }
         }
 
@@ -240,17 +255,20 @@ namespace CardShopCoop.Util
         ///      backstop, and a false NEGATIVE here costs the modded machine its ID-conflict gate.</summary>
         public static bool EplLoaded()
         {
-            if (_eplLoaded) return true;
+            if (_eplLoaded)
+                return true;
             int now = Environment.TickCount;
             // unchecked int subtraction compares correctly across TickCount's ~24.9-day wrap
-            if (_eplProbed && unchecked(now - _eplProbeTick) < 5000) return false;
+            if (_eplProbed && unchecked(now - _eplProbeTick) < 5000)
+                return false;
             _eplProbed = true;
             _eplProbeTick = now;
             foreach (var typeName in EplSentinelTypeNames)
             {
                 try
                 {
-                    if (Type.GetType(typeName + ", " + EplAssemblyName, false) == null) continue;
+                    if (Type.GetType(typeName + ", " + EplAssemblyName, false) == null)
+                        continue;
                     _eplLoaded = true;
                     break;
                 }
@@ -263,7 +281,8 @@ namespace CardShopCoop.Util
                     foreach (var kv in BepInEx.Bootstrap.Chainloader.PluginInfos)
                     {
                         var meta = kv.Value != null ? kv.Value.Metadata : null;
-                        if (meta == null) continue;
+                        if (meta == null)
+                            continue;
                         if (Mentions(kv.Key, "enhancedprefabloader") || Mentions(meta.Name, "enhancedprefabloader"))
                         {
                             _eplLoaded = true;
@@ -276,7 +295,11 @@ namespace CardShopCoop.Util
             if (_eplLoaded && !_eplLoadedLogged)
             {
                 _eplLoadedLogged = true;
-                try { CoopPlugin.Log.LogInfo("EnhancedPrefabLoader detected - a custom id registry is in play"); } catch { }
+                try
+                {
+                    CoopPlugin.Log.LogInfo("EnhancedPrefabLoader detected - a custom id registry is in play");
+                }
+                catch { }
             }
             return _eplLoaded;
         }
@@ -302,10 +325,14 @@ namespace CardShopCoop.Util
             try
             {
                 Type t = Type.GetType(typeName + ", " + assemblySimpleName, false);
-                if (t != null) return t;
+                if (t != null)
+                    return t;
             }
             catch { /* a lookup must never throw into a handshake, a probe or OnGUI */ }
-            try { return HarmonyLib.AccessTools.TypeByName(typeName); }
+            try
+            {
+                return HarmonyLib.AccessTools.TypeByName(typeName);
+            }
             catch { return null; }
         }
 
@@ -350,11 +377,16 @@ namespace CardShopCoop.Util
         /// check treats "none" as "unmodded, don't gate on it".</summary>
         public static string EnumHash()
         {
-            if (_enum != null) return _enum;
+            if (_enum != null)
+                return _enum;
             try
             {
                 var lines = RuntimeEnumEntries();
-                if (lines.Count > 0) { _enum = Short(Sha1(string.Join("\n", lines))); return _enum; }
+                if (lines.Count > 0)
+                {
+                    _enum = Short(Sha1(string.Join("\n", lines)));
+                    return _enum;
+                }
                 // 1.0.36 STALE-FILE GUARD - the same one EnumLines carries, and for the same
                 // reason. Zero modded ids in memory has two very different causes and the file
                 // fallback is only correct for ONE of them. If EPL is not loaded, this is a
@@ -364,7 +396,12 @@ namespace CardShopCoop.Util
                 // announce a full modded identity and get rejected against another clean vanilla
                 // game, and printed a fictitious hash in the log beside the rejection. Say
                 // "none" instead - honest, and the Hello check reads it as "don't gate".
-                if (!EplLoaded()) { LogEnumSourceOnce(VanillaEnumNote); _enum = "none"; return _enum; }
+                if (!EplLoaded())
+                {
+                    LogEnumSourceOnce(VanillaEnumNote);
+                    _enum = "none";
+                    return _enum;
+                }
                 // EPL IS loaded but the walk saw nothing: a renamed enum type, a throwing
                 // reflection call, ids minted somewhere Enum.GetNames can't see. That is the
                 // fallback's real purpose, so keep the pre-existing file behavior here - this
@@ -375,7 +412,11 @@ namespace CardShopCoop.Util
                 // of multiple restarts, via LAN"). Byte hash remains the last resort if the
                 // format ever changes under the parser.
                 string p = EnumFilePath();
-                if (!File.Exists(p)) { _enum = "none"; return _enum; }
+                if (!File.Exists(p))
+                {
+                    _enum = "none";
+                    return _enum;
+                }
                 var fileLines = CanonicalEnumLines(File.ReadAllText(p));
                 _enum = fileLines != null && fileLines.Count > 0
                     ? Short(Sha1(string.Join("\n", fileLines)))
@@ -405,7 +446,11 @@ namespace CardShopCoop.Util
             try
             {
                 var lines = RuntimeEnumEntries();
-                if (lines.Count > 0) { LogEnumSourceOnce("runtime enums (" + lines.Count + " modded ids)"); return lines; }
+                if (lines.Count > 0)
+                {
+                    LogEnumSourceOnce("runtime enums (" + lines.Count + " modded ids)");
+                    return lines;
+                }
 
                 // 1.0.36 STALE-FILE GUARD. enum_values.json lives in LocalLow and NO uninstall
                 // clears it, so a game with EPL removed - or one that never had it - can still
@@ -414,15 +459,27 @@ namespace CardShopCoop.Util
                 // with the other vanilla player's equally stale file and hard-rejected two
                 // clean installs from playing together. A process that loads no registry has an
                 // EMPTY modded set, full stop; the bytes on disk are somebody's leftovers.
-                if (!EplLoaded()) { LogEnumSourceOnce(VanillaEnumNote); return lines; }
+                if (!EplLoaded())
+                {
+                    LogEnumSourceOnce(VanillaEnumNote);
+                    return lines;
+                }
 
                 // Past here EPL really is loaded and the walk still found nothing - the case the
                 // file fallback exists for (renamed enum type, throwing reflection call, ids
                 // minted where Enum.GetNames can't see them).
                 string p = EnumFilePath();
-                if (!File.Exists(p)) { LogEnumSourceOnce("EPL is loaded but no modded ids were found and there is no registry file"); return lines; }
+                if (!File.Exists(p))
+                {
+                    LogEnumSourceOnce("EPL is loaded but no modded ids were found and there is no registry file");
+                    return lines;
+                }
                 var fileLines = CanonicalEnumLines(File.ReadAllText(p));
-                if (fileLines == null) { LogEnumSourceOnce("registry file unparseable - ID-conflict check disabled"); return lines; }
+                if (fileLines == null)
+                {
+                    LogEnumSourceOnce("registry file unparseable - ID-conflict check disabled");
+                    return lines;
+                }
                 // The file carries the FULL id space (vanilla members included); only the
                 // modded slice can differ between two players, so filter it exactly the way
                 // RuntimeEnumEntries does. CanonicalEnumLines already sorted, and dropping
@@ -431,10 +488,13 @@ namespace CardShopCoop.Util
                 foreach (var line in fileLines)
                 {
                     int eq = line.LastIndexOf('=');
-                    if (eq <= 0 || eq == line.Length - 1) continue;
+                    if (eq <= 0 || eq == line.Length - 1)
+                        continue;
                     long id;
-                    if (!long.TryParse(line.Substring(eq + 1), out id)) continue;
-                    if (id < ModdedIdFloor) continue;
+                    if (!long.TryParse(line.Substring(eq + 1), out id))
+                        continue;
+                    if (id < ModdedIdFloor)
+                        continue;
                     modded.Add(line);
                 }
                 LogEnumSourceOnce("enum_values.json fallback (" + modded.Count + " modded ids) - the runtime walk found none");
@@ -451,9 +511,14 @@ namespace CardShopCoop.Util
         /// every Hello, and one line per join attempt would be noise.</summary>
         private static void LogEnumSourceOnce(string source)
         {
-            if (_enumSourceLogged) return;
+            if (_enumSourceLogged)
+                return;
             _enumSourceLogged = true;
-            try { CoopPlugin.Log.LogInfo("enum identity source: " + source); } catch { }
+            try
+            {
+                CoopPlugin.Log.LogInfo("enum identity source: " + source);
+            }
+            catch { }
         }
 
         /// <summary>The modded enum ids resolved from the LOADED types, sorted - the single source
@@ -469,7 +534,8 @@ namespace CardShopCoop.Util
                 try
                 {
                     var t = AccessTools.TypeByName(typeName);
-                    if (t == null || !t.IsEnum) continue;
+                    if (t == null || !t.IsEnum)
+                        continue;
                     // GetNames and GetValues are documented to run in the same (binary-value)
                     // order, so index i is one member - walking them in parallel keeps aliases
                     // (two names, one id) as the two distinct lines the registry file shows.
@@ -479,9 +545,13 @@ namespace CardShopCoop.Util
                     for (int i = 0; i < n; i++)
                     {
                         long id;
-                        try { id = Convert.ToInt64(values.GetValue(i)); }
+                        try
+                        {
+                            id = Convert.ToInt64(values.GetValue(i));
+                        }
                         catch { continue; }
-                        if (id < ModdedIdFloor) continue;
+                        if (id < ModdedIdFloor)
+                            continue;
                         lines.Add(t.Name + ":" + names[i] + "=" + id);
                     }
                 }
@@ -509,10 +579,12 @@ namespace CardShopCoop.Util
         /// Enum.GetNames already returns the sanitized member names.</summary>
         private static string SanitizeMemberName(string value)
         {
-            if (string.IsNullOrEmpty(value) || value.Trim().Length == 0) return "_Invalid";
+            if (string.IsNullOrEmpty(value) || value.Trim().Length == 0)
+                return "_Invalid";
             string s = WhitespaceRx.Replace(value, "");
             s = NonWordRx.Replace(s, "_");
-            if (s.Length > 0 && !char.IsDigit(s[0])) return s;
+            if (s.Length > 0 && !char.IsDigit(s[0]))
+                return s;
             return "_" + s;
         }
 
@@ -538,7 +610,8 @@ namespace CardShopCoop.Util
                     foreach (System.Text.RegularExpressions.Match pr in pairRx.Matches(sec.Groups[2].Value))
                         outLines.Add(section + ":" + SanitizeMemberName(pr.Groups[1].Value) + "=" + pr.Groups[2].Value);
                 }
-                if (outLines.Count == 0) return null; // nothing recognizable: let the byte hash decide
+                if (outLines.Count == 0)
+                    return null; // nothing recognizable: let the byte hash decide
                 outLines.Sort(StringComparer.Ordinal);
                 return outLines;
             }
@@ -585,7 +658,8 @@ namespace CardShopCoop.Util
                     // install's backup, and only that one. A second install in the same process
                     // sets aside the FIRST HOST's file, which is not what we are running, so
                     // restoring it would owe a restart like any other foreign registry.
-                    if (_installBackupPath == null && !RestartRequiredForJoin) _installBackupPath = bak;
+                    if (_installBackupPath == null && !RestartRequiredForJoin)
+                        _installBackupPath = bak;
                     PruneBackups(p);
                 }
                 else
@@ -651,7 +725,8 @@ namespace CardShopCoop.Util
         {
             try
             {
-                if (!EplLoaded()) return false;
+                if (!EplLoaded())
+                    return false;
                 return File.Exists(EnumMarkerPath());
             }
             catch { return false; }
@@ -683,7 +758,8 @@ namespace CardShopCoop.Util
                 {
                     var baks = Directory.GetFiles(dir, Path.GetFileName(p) + ".coopbak-*");
                     Array.Sort(baks, StringComparer.Ordinal); // timestamp suffix sorts oldest-first
-                    if (baks.Length > 0) newest = baks[baks.Length - 1];
+                    if (baks.Length > 0)
+                        newest = baks[baks.Length - 1];
                 }
                 if (newest == null)
                 {
@@ -707,14 +783,20 @@ namespace CardShopCoop.Util
                     // running game, so no restart is owed - and the message says plainly that the
                     // registry itself was left alone, with the manual path for a player whose
                     // solo saves really are broken.
-                    try { File.Delete(EnumMarkerPath()); }
+                    try
+                    {
+                        File.Delete(EnumMarkerPath());
+                    }
                     catch (Exception e) { CoopPlugin.Log.LogWarning("enum marker clear: " + e.Message); }
                     // Judge success by the END STATE, not by whether Delete threw: a missing
                     // PrefabLoader directory throws DirectoryNotFoundException even though the
                     // marker is (trivially) gone, and telling the player to go delete a file
                     // that isn't there is exactly the kind of dead-end this fix exists to remove.
                     bool cleared;
-                    try { cleared = !File.Exists(EnumMarkerPath()); }
+                    try
+                    {
+                        cleared = !File.Exists(EnumMarkerPath());
+                    }
                     catch { cleared = false; }
                     message = cleared
                         ? "no backup of your card database was found, so your card database was left exactly as it is - the 'borrowed from a host' flag has been cleared (it was blocking hosting). If your solo saves still won't load, put your own enum_values.json back by hand (see mod page)."
@@ -723,7 +805,11 @@ namespace CardShopCoop.Util
                     // UI banner this message hangs under disappears on the very next OnGUI pass -
                     // the player can end up seeing no on-screen outcome at all. The log is the
                     // one place the outcome is guaranteed to survive.
-                    try { CoopPlugin.Log.LogWarning("enum restore: " + message); } catch { }
+                    try
+                    {
+                        CoopPlugin.Log.LogWarning("enum restore: " + message);
+                    }
+                    catch { }
                     return cleared;
                 }
                 // Preserve the host's installed file first so a restore is never a one-way loss.
@@ -743,9 +829,17 @@ namespace CardShopCoop.Util
                     RestartRequiredForJoin = false;
                     RestartRequiredForSolo = false;
                     _installBackupPath = null; // that backup's bytes are on disk now, not aside
-                    try { File.Delete(EnumMarkerPath()); } catch { }
+                    try
+                    {
+                        File.Delete(EnumMarkerPath());
+                    }
+                    catch { }
                     message = "your card database was restored from the backup this session made - it is exactly what the game is already running, so NO restart is needed";
-                    try { CoopPlugin.Log.LogInfo("enum restore: " + message + " (from " + Path.GetFileName(newest) + ")"); } catch { }
+                    try
+                    {
+                        CoopPlugin.Log.LogInfo("enum restore: " + message + " (from " + Path.GetFileName(newest) + ")");
+                    }
+                    catch { }
                     return true;
                 }
                 // Any OTHER backup is a registry this process never loaded: same invariant as
@@ -753,12 +847,20 @@ namespace CardShopCoop.Util
                 // but the running process still holds the ids it booted with, so nothing about
                 // our identity moves until a restart reloads them. SOLO-save concern only.
                 RestartRequiredForSolo = true;
-                try { File.Delete(EnumMarkerPath()); } catch { }
+                try
+                {
+                    File.Delete(EnumMarkerPath());
+                }
+                catch { }
                 message = "your card database was restored from backup - RESTART the game before loading your solo saves";
                 // Same reason as the no-backup branch: the marker is gone, so the banner the UI
                 // shows this under is gone too. Name the backup we used - a player who restored
                 // the wrong one needs to know which file went back.
-                try { CoopPlugin.Log.LogInfo("enum restore: " + message + " (from " + Path.GetFileName(newest) + ")"); } catch { }
+                try
+                {
+                    CoopPlugin.Log.LogInfo("enum restore: " + message + " (from " + Path.GetFileName(newest) + ")");
+                }
+                catch { }
                 return true;
             }
             catch (Exception e)
@@ -771,8 +873,11 @@ namespace CardShopCoop.Util
 
         private static bool SameBytes(byte[] a, byte[] b)
         {
-            if (a.Length != b.Length) return false;
-            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            if (a.Length != b.Length)
+                return false;
+            for (int i = 0; i < a.Length; i++)
+                if (a[i] != b[i])
+                    return false;
             return true;
         }
 
@@ -783,12 +888,16 @@ namespace CardShopCoop.Util
                 var dir = Path.GetDirectoryName(basePath);
                 var baks = Directory.GetFiles(dir, Path.GetFileName(basePath) + ".coopbak-*");
                 Array.Sort(baks, StringComparer.Ordinal); // timestamp suffix sorts oldest-first
-                for (int i = 0; i < baks.Length - 3; i++) File.Delete(baks[i]);
+                for (int i = 0; i < baks.Length - 3; i++)
+                    File.Delete(baks[i]);
             }
             catch { }
         }
 
-        private static string Sha1(string s) { return Sha1Bytes(Encoding.UTF8.GetBytes(s)); }
+        private static string Sha1(string s)
+        {
+            return Sha1Bytes(Encoding.UTF8.GetBytes(s));
+        }
 
         private static string Sha1Bytes(byte[] data)
         {
@@ -796,6 +905,9 @@ namespace CardShopCoop.Util
                 return BitConverter.ToString(sha.ComputeHash(data)).Replace("-", "");
         }
 
-        private static string Short(string hex) { return hex.Length > 16 ? hex.Substring(0, 16) : hex; }
+        private static string Short(string hex)
+        {
+            return hex.Length > 16 ? hex.Substring(0, 16) : hex;
+        }
     }
 }
