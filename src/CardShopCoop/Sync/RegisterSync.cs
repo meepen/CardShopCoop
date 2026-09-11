@@ -33,7 +33,7 @@ namespace CardShopCoop.Sync
     ///
     /// No register hints or tooltips exist in here - the register is the exact vanilla screen.
     /// </summary>
-    public class RegisterSync : ITickableCoopModule
+    public class RegisterSync : TickableCoopModule
     {
         // ---- wire op codes ----
         public const byte OpEnter = 1;
@@ -81,20 +81,17 @@ namespace CardShopCoop.Sync
             _live = this;
         }
 
-        public string Name => "register";
+        public override string Name => "register";
 
-        public void Start()
+        public override void Start()
         {
             ActivateLive(this);
         }
 
-        public void Tick(in SyncFrame frame)
+        protected override void OnHostTick(in SyncFrame frame)
         {
-            if (CoopCore.Role == CoopRole.Host)
-                HostTick(frame.Dt, frame.InGame);
+            HostTick(frame.Dt, frame.InGame);
         }
-
-        public void ResetState() => Reset();
 
         /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
         public static void ClearLive()
@@ -142,7 +139,7 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, int> _sourceIndex = new Dictionary<int, int>();    // counter idx -> served customer list index
         private readonly Dictionary<int, double> _authoritativeTotal = new Dictionary<int, double>();
 
-        public void Reset()
+        public override void Reset()
         {
             _stateTimer = 0f;
             _cartPollTimer = 0f;
@@ -162,18 +159,18 @@ namespace CardShopCoop.Sync
             _sm = null;
         }
 
-        public void ForceResend()
+        public override void ForceResend()
         {
             _cartCustomer.Clear(); // force fresh RegisterCart digests on the next host tick
             _cartSignature.Clear();
             _cartPollTimer = CartPollInterval;
         }
 
-        public void Dispose()
+        public override void Dispose()
         {
+            base.Dispose();
             if (ReferenceEquals(_live, this))
                 ClearLive();
-            Reset();
         }
 
         /// <summary>Host: a client disconnected - release whatever it was manning.</summary>

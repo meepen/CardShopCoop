@@ -21,7 +21,7 @@ namespace CardShopCoop.Sync
     /// time-sliced (round-robin over a small budget per flush), with a fast path for the
     /// actively held/placing box so interaction stays responsive.
     /// </summary>
-    public class BoxEngine : ICoopModule
+    public class BoxEngine : CoopModule
     {
         private const int MaxBoxes = 1000;
         private const float PartialPeriod = 0.10f;  // host: how often changed boxes flush
@@ -144,17 +144,9 @@ namespace CardShopCoop.Sync
         /// push-motion so every non-driver peer smooths the box.</summary>
         public Action<BoxMotionStateMessage, int> RelayMotion;
 
-        public string Name => "boxes";
+        public override string Name => "boxes";
 
-        public void Start()
-        {
-        }
-
-        public void ResetState() => Reset();
-
-        public void ForceResend() => RequestFullSnapshot();
-
-        public void Dispose() => ResetState();
+        public override void ForceResend() => RequestFullSnapshot();
 
         public BoxEngine(IEnumerable<IBoxFamily> families)
         {
@@ -335,7 +327,7 @@ namespace CardShopCoop.Sync
             }
         }
 
-        public void Reset()
+        public override void Reset()
         {
             _hostIdentity.Clear();
             _leases.Clear();

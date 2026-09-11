@@ -32,7 +32,7 @@ namespace CardShopCoop.Sync
     /// clears the machine and banks the report counters WITHOUT re-adding the cards.
     /// No coin moves through this module, so the double-charge question never arises.
     /// </summary>
-    public class ContainerSync : ITickableCoopModule
+    public class ContainerSync : TickableCoopModule
     {
         public static ContainerSync Instance;
 
@@ -212,27 +212,17 @@ namespace CardShopCoop.Sync
             };
         }
 
-        public string Name => "containers";
+        public override string Name => "containers";
 
-        public void Start()
+        protected override void OnHostTick(in SyncFrame frame)
         {
+            HostTick(frame.Dt, frame.InGame);
         }
 
-        public void Tick(in SyncFrame frame)
+        protected override void OnClientTick(in SyncFrame frame)
         {
-            if (CoopCore.Role == CoopRole.Host)
-            {
-                HostTick(frame.Dt, frame.InGame);
-                return;
-            }
-
-            if (CoopCore.Role == CoopRole.Client)
-                ClientTick(frame.Dt, frame.InGame && !frame.PreloadHold);
+            ClientTick(frame.Dt, frame.InGame && !frame.PreloadHold);
         }
-
-        public void ResetState() => Reset();
-
-        public void Dispose() => ResetState();
 
         /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
         public static void ClearLive()
@@ -247,7 +237,7 @@ namespace CardShopCoop.Sync
             Instance = instance;
         }
 
-        public void Reset()
+        public override void Reset()
         {
             _sm = null;
             _timer = -5.3f; // staggered phase vs the other snapshot engines
@@ -268,7 +258,7 @@ namespace CardShopCoop.Sync
             _lastCleanserWarn.Clear();
         }
 
-        public void ForceResend()
+        public override void ForceResend()
         {
             // forgetting every hash makes the next HostTick rebroadcast the world -
             // the on-join snapshot for containers

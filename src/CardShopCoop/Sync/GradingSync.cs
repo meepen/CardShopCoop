@@ -60,7 +60,7 @@ namespace CardShopCoop.Sync
     ///    are genuinely unrepairable in place; the clean reset is a rejoin, which transfers the
     ///    host's grading store again.
     /// </summary>
-    public class GradingSync : ITickableCoopModule
+    public class GradingSync : TickableCoopModule
     {
         /// <summary>The live module instance, for the static Harmony patches.</summary>
         public static GradingSync Instance;
@@ -179,9 +179,7 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private float _timer;
-        private int _lastHash;
-        private float _heal;
+        private readonly SnapshotGate _gate = new SnapshotGate(1.5f, 15f, -6.8f);
         private GradeCardWebsiteUIScreen _website; // cached lookup (client UI refresh)
 
         // NEVER CSingleton<InventoryBase>.Instance: touched while no real manager
@@ -203,21 +201,9 @@ namespace CardShopCoop.Sync
             Instance = this;
         }
 
-        public string Name => "grading";
+        public override string Name => "grading";
 
-        public void Start()
-        {
-        }
-
-        public void Tick(in SyncFrame frame)
-        {
-            if (CoopCore.Role == CoopRole.Host)
-                HostTick(frame.Dt, frame.InGame);
-        }
-
-        public void ResetState() => Reset();
-
-        public void Dispose() => ResetState();
+        protected override void OnHostTick(in SyncFrame frame) => HostTick(frame.Dt, frame.InGame);
 
         /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
         public static void ClearLive()
@@ -231,19 +217,16 @@ namespace CardShopCoop.Sync
             Instance = instance;
         }
 
-        public void Reset()
+        public override void Reset()
         {
-            _timer = -6.8f; // staggered phase vs the other snapshot engines
-            _lastHash = 0;
-            _heal = 0f;
+            _gate.Reset(-6.8f);
             _website = null;
             _inv = null;
         }
 
-        public void ForceResend()
+        public override void ForceResend()
         {
-            _lastHash = 0;
-            _heal = 999f; // beats the hash gate even if the real hash is 0
+            _gate.Force();
         }
 
         // ---------------- patches ----------------
@@ -616,24 +599,18 @@ namespace CardShopCoop.Sync
         {
             if (!inGame)
                 return;
-            _timer += dt;
-            if (_timer < 1.5f)
+            if (!_gate.Due(dt))
                 return;
-            _timer -= 1.5f;
-            try
+            Guarded("host", () =>
             {
                 var list = CPlayerData.m_GradeCardInProgressList;
                 if (list == null)
                     return;
                 int hash = ComputeHash(list);
-                _heal += 1.5f;
-                if (hash == _lastHash && _heal < 15f)
+                if (!_gate.ShouldSend(hash))
                     return;
-                _lastHash = hash;
-                _heal = 0f;
                 BroadcastState?.Invoke(BuildState(list));
-            }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync host: " + e.Message); }
+            });
         }
 
         /// <summary>Host: a joiner submitted cards for grading. Replicates the body of
@@ -1035,9 +1012,8 @@ namespace CardShopCoop.Sync
             ApplyingRemote = true;
             try
             {
-                ClientApplyInner(message);
+                Guarded("apply", () => ClientApplyInner(message));
             }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("GradingSync apply: " + e.Message); }
             finally { ApplyingRemote = false; }
         }
 

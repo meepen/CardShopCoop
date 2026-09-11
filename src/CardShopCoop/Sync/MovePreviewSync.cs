@@ -11,7 +11,7 @@ namespace CardShopCoop.Sync
     /// <summary>Streams only the visual furniture move preview. The real object remains under
     /// ObjMoveSync's settled-pose authority; remote previews are detached meshes and therefore
     /// cannot participate in movement, collision, or index reconciliation.</summary>
-    public sealed class MovePreviewSync : ICoopModule
+    public sealed class MovePreviewSync : CoopModule
     {
         private const byte StartPhase = 0;
         private const byte Update = 1;
@@ -54,21 +54,13 @@ namespace CardShopCoop.Sync
             typeof(InteractablePackagingBox_Shelf), "m_BoxedObject");
         private ShelfManager _shelfManager;
 
-        public string Name => "move-preview";
+        public override string Name => "move-preview";
 
-        public void Start()
+        public override void ForceResend()
         {
         }
 
-        public void ResetState() => Reset();
-
-        public void ForceResend()
-        {
-        }
-
-        public void Dispose() => ResetState();
-
-        public void Reset()
+        public override void Reset()
         {
             _localObject = null;
             _localKey = 0;

@@ -25,7 +25,7 @@ namespace CardShopCoop.Sync
     /// are chunked below the 1200-byte Steam unreliable packet limit so a crowded shop can
     /// never silently drop the whole tick.
     /// </summary>
-    public class NpcSync : ICoopModule
+    public class NpcSync : CoopModule
     {
         private const byte KindCustomer = 0;
         private const byte KindWorker = 1;
@@ -88,27 +88,25 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, ExistingCustomer> _existing = new Dictionary<int, ExistingCustomer>();
         private static NpcSync _live;
 
-        public string Name => "npcs";
+        public override string Name => "npcs";
 
-        public void Start()
+        public override void Start()
         {
             ActivateLive(this);
         }
 
-        public void ResetState() => Reset();
-
-        public void ForceResend()
+        public override void ForceResend()
         {
             _sendTimer = SendInterval;
             _sentNames.Clear();
             _sentIdentities.Clear();
         }
 
-        public void Dispose()
+        public override void Dispose()
         {
+            base.Dispose();
             if (ReferenceEquals(_live, this))
                 ClearLive();
-            Reset();
         }
 
         /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
@@ -140,7 +138,7 @@ namespace CardShopCoop.Sync
             public bool KeepPuppetVisible;
         }
 
-        public void Reset()
+        public override void Reset()
         {
             // Shutdown clears the pointer before resetting instance state. Do not resurrect it
             // while late Harmony callbacks can still arrive during teardown.

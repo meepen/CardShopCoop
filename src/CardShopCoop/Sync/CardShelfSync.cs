@@ -15,7 +15,7 @@ namespace CardShopCoop.Sync
     /// Collection accounting is NOT touched here - the CardDelta mirror already forwards
     /// the ReduceCard/AddCard the acting player's game performs.
     /// </summary>
-    public class CardShelfSync : ICoopModule
+    public class CardShelfSync : CoopModule
     {
         public struct Entry
         {
@@ -82,19 +82,11 @@ namespace CardShopCoop.Sync
         /// protect fresh local edits from stale host echoes.</summary>
         public bool IsClientRole;
 
-        public string Name => "card-shelves";
+        public override string Name => "card-shelves";
 
-        public void Start()
-        {
-        }
+        public override void ForceResend() => ForceNextTick();
 
-        public void ResetState() => Reset();
-
-        public void ForceResend() => ForceNextTick();
-
-        public void Dispose() => ResetState();
-
-        public void Reset()
+        public override void Reset()
         {
             _last.Clear();
             _locallyChanged.Clear();
