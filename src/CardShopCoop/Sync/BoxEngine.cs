@@ -15,16 +15,16 @@ namespace CardShopCoop.Sync
     /// Free/Removed release it. The host owns Free pose/velocity and rebroadcasts it.
     ///
     /// Snapshots are partial by default: the host emits only the boxes whose state hash
-    /// changed, plus an explicit Removed for retired ids, and sends a complete snapshot
-    /// periodically (and at session start) so a client can reconcile and sweep. Both
-    /// scans are time-sliced (round-robin over a small budget per frame), with a fast
-    /// path for the actively held/placing box so interaction stays responsive.
+    /// changed, plus an explicit Removed for retired ids. A complete snapshot is sent at
+    /// session start and on explicit request (join/resync); the reliable partial stream
+    /// carries every subsequent change, so there is no periodic full scan. Both scans are
+    /// time-sliced (round-robin over a small budget per flush), with a fast path for the
+    /// actively held/placing box so interaction stays responsive.
     /// </summary>
     public class BoxEngine
     {
         private const int MaxBoxes = 1000;
         private const float PartialPeriod = 0.10f;  // host: how often changed boxes flush
-        private const float FullPeriod = 1.5f;      // host: periodic reconciling full snapshot
         private const float LeaseTimeout = 3.0f;
         private const float LeaseRenewPeriod = 1.0f;
         private const float ContentReportPeriod = 0.2f;
@@ -53,6 +53,11 @@ namespace CardShopCoop.Sync
         private readonly List<ushort> _deadHost = new List<ushort>();
         private int _hostFam;
         private int _hostIdx;
+        // Reused snapshot buffers. Broadcast serializes synchronously, so a buffer can be
+        // refilled on the next flush.
+        private readonly List<BoxWire> _hostList = new List<BoxWire>(256);
+        private readonly List<BoxWire> _heldList = new List<BoxWire>(1);
+        private bool _fullPending; // next flush is a complete snapshot (session start / join / resync)
 
         // ---- client state ----
         private readonly Dictionary<ushort, InteractablePackagingBox> _clientById
@@ -69,6 +74,7 @@ namespace CardShopCoop.Sync
             = new Dictionary<InteractablePackagingBox, float>();
         private readonly HashSet<InteractablePackagingBox> _active = new HashSet<InteractablePackagingBox>();
         private readonly List<InteractablePackagingBox> _activeScratch = new List<InteractablePackagingBox>();
+        private readonly HashSet<InteractablePackagingBox> _clientDirty = new HashSet<InteractablePackagingBox>();
         private readonly HashSet<ushort> _snapshotIds = new HashSet<ushort>();
         private readonly List<ushort> _sweep = new List<ushort>();
         // Client-side ids this machine locally retired (place/collect/sell). The host's
@@ -79,7 +85,6 @@ namespace CardShopCoop.Sync
         private int _clientIdx;
 
         private float _hostTimer;
-        private float _fullTimer;
         private float _leaseClock;
 
         /// <summary>Host: broadcast a snapshot (Full flag distinguishes complete vs partial).</summary>
@@ -246,10 +251,11 @@ namespace CardShopCoop.Sync
             _contentSentAt.Clear();
             _lastSentAt.Clear();
             _active.Clear();
+            _clientDirty.Clear();
             _clientFam = 0;
             _clientIdx = 0;
             _hostTimer = 0f;
-            _fullTimer = FullPeriod; // send a full snapshot on the first tick of a session
+            _fullPending = true; // send a full snapshot on the first tick of a session
             _leaseClock = 0f;
             BoxPlacement.Reset();
             BoxVisuals.Reset();
@@ -265,14 +271,23 @@ namespace CardShopCoop.Sync
         /// (e.g. an imminent throw that must go out as soon as its velocity is real).</summary>
         public void MarkBoxDirty(InteractablePackagingBox box)
         {
-            if (box != null && _hostIdentity.TryGetId(box, out ushort id))
-                _hostDirty.Add(id);
+            if (box == null)
+                return;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                if (_hostIdentity.TryGetId(box, out ushort id))
+                    _hostDirty.Add(id);
+            }
+            else if (CoopCore.Role == CoopRole.Client && _clientIdOf.ContainsKey(box))
+            {
+                _clientDirty.Add(box);
+            }
         }
 
-        /// <summary>Host: force the next flush to be a complete snapshot (used on join).</summary>
+        /// <summary>Host: force the next flush to be a complete snapshot (join/resync).</summary>
         public void RequestFullSnapshot()
         {
-            _fullTimer = FullPeriod;
+            _fullPending = true;
         }
 
         // ---------------- host ----------------
@@ -286,18 +301,18 @@ namespace CardShopCoop.Sync
             // not when the round-robin slice happens to reach it.
             ProcessLocalHeldHost();
             _hostTimer += dt;
-            _fullTimer += dt;
-            bool full = _fullTimer >= FullPeriod;
+            bool full = _fullPending;
             if (!full && _hostTimer < PartialPeriod)
                 return;
             _hostTimer = 0f;
             if (full)
-                _fullTimer = 0f;
+                _fullPending = false;
 
             ExpireLeases();
             PruneDeadHostBoxes();
 
-            var list = new List<BoxWire>(Mathf.Min(256, MaxBoxes));
+            var list = _hostList;
+            list.Clear();
             if (full)
             {
                 // Clearing the hashes makes every live box "changed", so the scan emits a
@@ -324,7 +339,7 @@ namespace CardShopCoop.Sync
                 SendSnapshot?.Invoke(new BoxSnapshotMessage { Boxes = list, Full = false });
         }
 
-        /// <summary>Full scan: emit every live box (used for the periodic complete snapshot).</summary>
+        /// <summary>Full scan: emit every live box (session start / explicit resync).</summary>
         private void ScanHostAll(List<BoxWire> list)
         {
             for (int f = 0; f < _families.Count; f++)
@@ -402,7 +417,8 @@ namespace CardShopCoop.Sync
             var family = Family(FamilyOf(held));
             if (family == null)
                 return;
-            var one = new List<BoxWire>(1);
+            var one = _heldList;
+            one.Clear();
             ProcessHostBox(family, held, one);
             if (one.Count > 0)
                 SendSnapshot?.Invoke(new BoxSnapshotMessage { Boxes = one, Full = false });
@@ -659,7 +675,14 @@ namespace CardShopCoop.Sync
                 if (family == null)
                     continue;
                 if (_localRemoved.Contains(w.Id))
+                {
+                    // The host's explicit Removed is its agreement that the box is gone;
+                    // drop the local-retire guard so we don't depend on a full sweep to
+                    // prune it (there is no periodic full snapshot).
+                    if (w.Possession == BoxPossession.Removed)
+                        _localRemoved.Remove(w.Id);
                     continue; // locally retired; wait for the host to agree
+                }
 
                 if (!_clientById.TryGetValue(w.Id, out var box) || box == null)
                 {
@@ -800,6 +823,23 @@ namespace CardShopCoop.Sync
                 var held = LocalHeld();
                 if (held != null && ProcessClientBox(Family(FamilyOf(held)), held))
                     _active.Add(held);
+            }
+
+            // Mutation postfixes mark open/close edges directly. Process those before
+            // the round-robin so a lid change is reported without waiting for the box's
+            // position in a large warehouse scan.
+            if (_clientDirty.Count > 0)
+            {
+                _activeScratch.Clear();
+                foreach (var b in _clientDirty)
+                    _activeScratch.Add(b);
+                _clientDirty.Clear();
+                for (int i = 0; i < _activeScratch.Count; i++)
+                {
+                    var b = _activeScratch[i];
+                    if (b != null && ProcessClientBox(Family(FamilyOf(b)), b))
+                        _active.Add(b);
+                }
             }
 
             // Fast path: boxes currently carried/placed by the local player, checked every

@@ -305,7 +305,7 @@ namespace CardShopCoop.Sync
             try
             {
                 obj.BoxUpObject(holdBox: false);
-                BoxVisuals.EnsureOpenState(obj.GetPackagingBoxShelf(), false); // fresh box-up is closed
+                BoxVisuals.ApplyOpenEvent(obj.GetPackagingBoxShelf(), false); // fresh box-up is closed
             }
             finally { ApplyingRemote = false; }
             Engine?.ForceNextTick();
@@ -358,7 +358,7 @@ namespace CardShopCoop.Sync
             try
             {
                 obj.BoxUpObject(holdBox: false);
-                BoxVisuals.EnsureOpenState(obj.GetPackagingBoxShelf(), false); // a fresh box-up is closed
+                BoxVisuals.ApplyOpenEvent(obj.GetPackagingBoxShelf(), false); // a fresh box-up is closed
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("FurnitureBoxOps boxup transition: " + e.Message); }
         }

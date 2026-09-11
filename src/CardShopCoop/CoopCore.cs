@@ -256,9 +256,8 @@ namespace CardShopCoop
         private bool _worldRequested;
 
         // host price sync
-        private float _priceTimer = -0.45f;
-        private int _lastPriceHash;
-        private float _priceHeal;
+        private bool _priceFullPending; // send the whole item-price table (join / session reset)
+        private readonly Dictionary<int, float> _pricePending = new Dictionary<int, float>(); // host: per-change partials
         private readonly List<KeyValuePair<int, float>> _priceBuf = new List<KeyValuePair<int, float>>();
         private readonly HashSet<int> _priceSeenTypes = new HashSet<int>();
 
@@ -631,7 +630,7 @@ namespace CardShopCoop
             _report.BroadcastState = Broadcast;
             _containers.SendOp = Send(1);
             _containers.BroadcastState = Broadcast;
-            _containers.RequestBoxResync = () => _boxEngine?.ForceNextTick();
+            _containers.RequestBoxResync = () => _boxEngine?.RequestFullSnapshot();
             _containers.SendToClient = Send;
             _containers.HoldClientBox = TryHoldClientBox;
             _tournament.BroadcastState = Broadcast;
@@ -1527,6 +1526,11 @@ namespace CardShopCoop
             }
             else if (Role == CoopRole.Client)
             {
+                // Apply any market snapshot that arrived while the world was loading, now
+                // that CGameData.PropagateLoadData has swapped the card tables into place.
+                _market.FlushPending(inGame);
+                _market.ClientDiag(_dt);
+
                 t = Util.PerfProbe.Start();
                 _tv.ClientTick(_dt, inGame);
                 Util.PerfProbe.End("mod.tv", t);
@@ -1651,6 +1655,7 @@ namespace CardShopCoop
             _boxEngine?.RequestFullSnapshot();
             _register.ForceResend();
             _tv.ForceResend();
+            _priceFullPending = true; // fresh joiner gets the authoritative price table
         }
 
         internal void SendTvOp(TvOpMessage message)
@@ -2969,7 +2974,8 @@ namespace CardShopCoop
             _worldRequested = false;
             _hasLastPos = false;
             _lastCoinSent = double.MinValue;
-            _lastPriceHash = 0;
+            _priceFullPending = true; // first host tick after a session reset sends the whole table
+            _pricePending.Clear();
             // card-price heal change-gate: a re-host inheriting the PREVIOUS world's hash
             // would gate away the new world's very first price sync (the guests would sit on
             // whatever they had until something moved), so it resets with the session.
@@ -3525,6 +3531,16 @@ namespace CardShopCoop
                 Send(1, new ShelfRequestMessage { Entries = changes });
         }
 
+        /// <summary>Host: one item price entry changed (player/worker/EPL, or a joiner
+        /// contribution we just applied); batch it for a partial broadcast next tick.</summary>
+        public void NoteItemPriceChanged(EItemType itemType, float price)
+        {
+            int t = (int)itemType;
+            if (t < 0 || t > 500000)
+                return;
+            _pricePending[t] = price;
+        }
+
         private void HostTick(float dt)
         {
             if (_net.ConnectionCount == 0)
@@ -3535,10 +3551,11 @@ namespace CardShopCoop
                 Guarded("npc-collect", _actNpcCollect);
             }
 
-            _priceTimer += dt;
-            if (_priceTimer >= 3f)
+            if (_priceFullPending)
             {
-                _priceTimer -= 3f;
+                _priceFullPending = false;
+                _pricePending.Clear(); // a full table supersedes any queued partials
+                long tPrice = Util.PerfProbe.Start();
                 try
                 {
                     // the table is indexed by RAW itemType and EPL registers modded items
@@ -3554,7 +3571,6 @@ namespace CardShopCoop
                     var seenTypes = _priceSeenTypes;
                     seenTypes.Clear();
                     int n = CatalogCount();
-                    int hash = 17;
                     for (int i = 0; i < n; i++)
                     {
                         var rd = CatalogAt(i);
@@ -3572,25 +3588,24 @@ namespace CardShopCoop
                         if (v == 0f)
                             continue;
                         _priceBuf.Add(new KeyValuePair<int, float>(t, v));
-                        hash = hash * 31 + t;
-                        hash = hash * 31 + v.GetHashCode();
                     }
-                    // heal beat: the hash updates BEFORE the send, so a single failed
-                    // or lost broadcast used to leave those prices stale FOREVER (tag
-                    // stuck at "-" on the joiner until the next unrelated price change).
-                    // Every other snapshot engine already has a slow heal; now this does
-                    _priceHeal += 3f;
-                    if (hash != _lastPriceHash || _priceHeal >= 30f)
-                    {
-                        _lastPriceHash = hash;
-                        _priceHeal = 0f;
-                        var priceList = new PriceListMessage();
-                        for (int i = 0; i < _priceBuf.Count; i++)
-                            priceList.Prices.Add(new PriceEntry { ItemType = _priceBuf[i].Key, Price = _priceBuf[i].Value });
-                        Broadcast(priceList);
-                    }
+                    var fullList = new PriceListMessage { Full = true };
+                    for (int i = 0; i < _priceBuf.Count; i++)
+                        fullList.Prices.Add(new PriceEntry { ItemType = _priceBuf[i].Key, Price = _priceBuf[i].Value });
+                    Broadcast(fullList);
+                    Util.PerfProbe.End("price-sync", tPrice);
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("price sync: " + e.Message); }
+            }
+            else if (_pricePending.Count > 0)
+            {
+                // Per-change partial: the SetItemPrice hook already names the exact entry that
+                // moved, so there is no catalog walk. Reliable, so a send is a delivery.
+                var partial = new PriceListMessage { Full = false };
+                foreach (var kv in _pricePending)
+                    partial.Prices.Add(new PriceEntry { ItemType = kv.Key, Price = kv.Value });
+                _pricePending.Clear();
+                Broadcast(partial);
             }
 
             _shopNameTimer += dt;
@@ -4469,36 +4484,46 @@ namespace CardShopCoop
                                 // stale-price reports were undiagnosable: applies were silent
                                 if (changed > 0)
                                     CoopPlugin.Log.LogInfo($"price apply: {changed} price(s) updated from host");
-                                // a price the host CLEARED is absent from the sparse set.
-                                // BOTH sets hold LOCAL ids now, so this stays an apples-to-apples
-                                // comparison. A host-only product can never be zeroed here: it never
-                                // resolved, so it was never added above and so cannot be in
-                                // _clientPriced either. One-sided content packs keep their prices.
-                                foreach (int i in _clientPriced)
-                                    if (!_incomingPriced.Contains(i) && i >= 0 && i <= 500000)
-                                    {
-                                        // a clear is an overwrite too: the host simply hasn't seen
-                                        // our brand-new price yet
-                                        if (HeldLocalItemPrice(i, 0f))
-                                            continue;
-                                        float cur = 0f;
-                                        try
+                                if (priceList.Full)
+                                {
+                                    // a price the host CLEARED is absent from the full sparse set.
+                                    // BOTH sets hold LOCAL ids now, so this stays an apples-to-apples
+                                    // comparison. A host-only product can never be zeroed here: it never
+                                    // resolved, so it was never added above and so cannot be in
+                                    // _clientPriced either. One-sided content packs keep their prices.
+                                    foreach (int i in _clientPriced)
+                                        if (!_incomingPriced.Contains(i) && i >= 0 && i <= 500000)
                                         {
-                                            cur = CPlayerData.GetItemPrice((EItemType)i, preventZero: false);
-                                        }
-                                        catch { }
-                                        if (cur != 0f)
-                                        {
+                                            // a clear is an overwrite too: the host simply hasn't seen
+                                            // our brand-new price yet
+                                            if (HeldLocalItemPrice(i, 0f))
+                                                continue;
+                                            float cur = 0f;
                                             try
                                             {
-                                                CPlayerData.SetItemPrice((EItemType)i, 0f);
+                                                cur = CPlayerData.GetItemPrice((EItemType)i, preventZero: false);
                                             }
                                             catch { }
+                                            if (cur != 0f)
+                                            {
+                                                try
+                                                {
+                                                    CPlayerData.SetItemPrice((EItemType)i, 0f);
+                                                }
+                                                catch { }
+                                            }
                                         }
-                                    }
-                                var tmp = _clientPriced;
-                                _clientPriced = _incomingPriced;
-                                _incomingPriced = tmp;
+                                    var tmp = _clientPriced;
+                                    _clientPriced = _incomingPriced;
+                                    _incomingPriced = tmp;
+                                }
+                                else
+                                {
+                                    // Partial: only the listed entries changed (a clear arrives as an
+                                    // explicit 0 entry). Record the ids so a later full table can
+                                    // still reconcile any the host drops.
+                                    _clientPriced.UnionWith(_incomingPriced);
+                                }
                             }
                             finally { Patches.GamePatches.ApplyingRemotePrice = false; }
                         }
@@ -4952,10 +4977,10 @@ namespace CardShopCoop
                     }
                 case MsgType.MarketState:
                     {
-                        if (Role != CoopRole.Client || !InGameLevel())
+                        if (Role != CoopRole.Client)
                             break;
                         if (msg.Message is MarketStateMessage marketState)
-                            _market.ClientApplyState(marketState);
+                            _market.ClientApplyOrBuffer(marketState, InGameLevel());
                         break;
                     }
                 case MsgType.ReportState:
@@ -5514,7 +5539,7 @@ namespace CardShopCoop
         private void ApplyPlayerState(int avatarId, PlayerStateMessage state, bool directPeer)
         {
             _diagRecvStates++;
-            _avatars.UpdateState(avatarId, state.Position, state.Yaw, state.Speed,
+            _avatars.UpdateState(avatarId, state.Position, state.Yaw,
                 state.Hold, state.CameraPosition, state.CameraRotation, state.HoldTypes, state.HoldCards);
             string peerName = null;
             if (!PeerNames.TryGetValue(avatarId, out peerName) && avatarId >= 1000)

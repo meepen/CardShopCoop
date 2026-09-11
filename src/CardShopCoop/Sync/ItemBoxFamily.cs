@@ -34,7 +34,7 @@ namespace CardShopCoop.Sync
             w.ItemType = EnumMap.ToWire(EnumKind.ItemType, (int)b.m_ItemCompartment.GetItemType());
             w.ItemCount = b.m_ItemCompartment.GetItemCount();
             w.Big = b.m_IsBigBox;
-            w.Open = b.IsBoxOpened();
+            w.Open = BoxVisuals.ReadOpen(b);
             FillStore(b, ref w);
         }
 
@@ -47,6 +47,7 @@ namespace CardShopCoop.Sync
             h = h * 31 + (int)b.m_ItemCompartment.GetItemType();
             h = h * 31 + b.m_ItemCompartment.GetItemCount();
             h = h * 31 + (b.m_IsBigBox ? 1 : 0);
+            h = h * 31 + (BoxVisuals.ReadOpen(b) ? 1 : 0);
             var w = new BoxWire();
             FillStore(b, ref w);
             h = h * 31 + w.StoreShelfId;
@@ -111,6 +112,7 @@ namespace CardShopCoop.Sync
                     BoxVisuals.SetVisible(box, false);
                     break;
                 case BoxPossession.Placing:
+                    BoxVisuals.EnsureOpenState(box, w.Open);
                     BoxVisuals.SetVisible(box, true);
                     BoxPlacement.SetPlacementIntent(box, true,
                         BoxPlacement.ResolvePlacementAvatar((byte)(w.OwnerConn == 0 ? 1 : 2), w.OwnerConn));
@@ -119,6 +121,7 @@ namespace CardShopCoop.Sync
                     if (isOwner)
                         return;
                     BoxVisuals.SetVisible(box, true);
+                    BoxVisuals.EnsureOpenState(box, w.Open);
                     BoxPlacement.ClearPlacementIntent(box);
                     if (w.IsStored)
                     {

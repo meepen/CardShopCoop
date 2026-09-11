@@ -49,7 +49,12 @@ namespace CardShopCoop.Sync
             public Vector3 PreviousCameraPosition;
             public Quaternion PreviousCameraRotation = Quaternion.identity;
             public bool HasCamera;
-            public float NetSpeed;
+            // Drive the walk cycle from the motion rendered on this machine. The wire speed
+            // is an arrival-time estimate and can remain stale while a sender is idle.
+            public float AnimSpeed;
+            public float AppliedAnimSpeed = float.NaN;
+            public Vector3 PreviousRenderedPosition;
+            public bool HasRenderedPosition;
             public byte HoldState;
             // actual EItemTypes being carried, already LOCAL ids: the translation happened
             // at the wire boundary (Msg.ReadItemType inside CoopCore.ReadHoldPayload), not
@@ -151,6 +156,9 @@ namespace CardShopCoop.Sync
                 DestroyBody(av);
                 av.Go = null;
                 av.Anim = null;
+                av.HasMoveSpeed = false;
+                av.HasHoldingBox = false;
+                av.HoldingBoxPoseSet = false;
                 av.EverPositioned = false;
             }
         }
@@ -628,7 +636,7 @@ namespace CardShopCoop.Sync
             return found;
         }
 
-        public void UpdateState(int connId, Vector3 pos, float yaw, float speed, byte holdState,
+        public void UpdateState(int connId, Vector3 pos, float yaw, byte holdState,
             Vector3 cameraPosition = default(Vector3), Quaternion cameraRotation = default(Quaternion),
             List<int> holdTypes = null, List<CardData> holdCards = null)
         {
@@ -663,7 +671,6 @@ namespace CardShopCoop.Sync
             av.CameraPosition = cameraPosition;
             av.CameraRotation = cameraRotation == default(Quaternion) ? Quaternion.identity : cameraRotation;
             av.HasCamera = cameraRotation != default(Quaternion);
-            av.NetSpeed = speed;
             av.HoldState = holdState;
             // THE HOLD PAYLOAD IS ALREADY IN LOCAL IDS: CoopCore.ReadHoldPayload built it
             // with Msg.ReadItemType, which is the one and only translation boundary for
@@ -1135,24 +1142,31 @@ namespace CardShopCoop.Sync
             {
                 if (av.Go == null)
                 {
+                    av.HasRenderedPosition = false;
+                    av.AnimSpeed = 0f;
+                    av.AppliedAnimSpeed = float.NaN;
+                    av.HasMoveSpeed = false;
+                    av.HasHoldingBox = false;
+                    av.HoldingBoxPoseSet = false;
                     if (av.HoldPropMat != null)
                     {
                         // the body died with a scene load: pooled children went down with it,
-                        // so drop the dead references, free the instanced tint material, and
-                        // blank the sigs so every prop rebuilds on the fresh body
+                        // so free the instanced tint material before rebuilding the visuals.
                         Object.Destroy(av.HoldPropMat);
                         av.HoldPropMat = null;
-                        av.HoldProp = null;
-                        av.PackProp = null;
-                        av.BinderProp = null;
-                        av.BoxProp = null;
-                        av.BoxProdItem = null;
-                        av.HeldItems.Clear();
-                        av.HeldCards3d.Clear();
-                        av.HeldSig = "";
-                        av.CardSig = "";
-                        av.BoxSig = "";
                     }
+                    // Clear these even when the material was already gone. Unity's fake-null
+                    // references can otherwise leave stale props/signatures after a reload.
+                    av.HoldProp = null;
+                    av.PackProp = null;
+                    av.BinderProp = null;
+                    av.BoxProp = null;
+                    av.BoxProdItem = null;
+                    av.HeldItems.Clear();
+                    av.HeldCards3d.Clear();
+                    av.HeldSig = "";
+                    av.CardSig = "";
+                    av.BoxSig = "";
                     if (av.HasState)
                     {
                         long ts = Util.PerfProbe.Start();
@@ -1185,13 +1199,41 @@ namespace CardShopCoop.Sync
                 {
                     if (av.HasMoveSpeed)
                     {
-                        float current = av.Anim.GetFloat(MoveSpeedHash);
-                        av.Anim.SetFloat(MoveSpeedHash,
-                            Mathf.Lerp(current, av.NetSpeed, 1f - Mathf.Exp(-8f * dt)));
+                        if (!av.HasRenderedPosition)
+                        {
+                            av.PreviousRenderedPosition = t.position;
+                            av.AnimSpeed = 0f;
+                            av.AppliedAnimSpeed = float.NaN;
+                            av.HasRenderedPosition = true;
+                        }
+                        else
+                        {
+                            Vector3 renderedDelta = t.position - av.PreviousRenderedPosition;
+                            renderedDelta.y = 0f;
+                            float renderedSpeed = snap
+                                ? 0f
+                                : Mathf.Min(renderedDelta.magnitude / Mathf.Max(dt, 0.0001f), 6f);
+                            av.PreviousRenderedPosition = t.position;
+
+                            // Decelerate faster than we accelerate: a stale walking pose is
+                            // much more noticeable than a slightly soft start.
+                            float rate = renderedSpeed < av.AnimSpeed ? 14f : 8f;
+                            av.AnimSpeed = Mathf.Lerp(av.AnimSpeed, renderedSpeed,
+                                1f - Mathf.Exp(-rate * dt));
+                            if (av.AnimSpeed < 0.05f)
+                                av.AnimSpeed = 0f;
+                        }
+
+                        if (float.IsNaN(av.AppliedAnimSpeed)
+                            || Mathf.Abs(av.AppliedAnimSpeed - av.AnimSpeed) > 0.01f)
+                        {
+                            av.Anim.SetFloat(MoveSpeedHash, av.AnimSpeed);
+                            av.AppliedAnimSpeed = av.AnimSpeed;
+                        }
                     }
                     if (av.HasHoldingBox)
                     {
-                        bool holding = av.HoldState != 0;
+                        bool holding = av.HoldState == 1;
                         if (!av.HoldingBoxPoseSet || av.HoldingBoxPose != holding)
                         {
                             av.Anim.SetBool(IsHoldingBoxHash, holding);
@@ -1466,15 +1508,20 @@ namespace CardShopCoop.Sync
             av.Go = clone;
             av.Anim = clone.GetComponentInChildren<Animator>(true);
             av.EverPositioned = true;
+            av.HasMoveSpeed = false;
+            av.HasHoldingBox = false;
+            av.HasRenderedPosition = false;
+            av.AnimSpeed = 0f;
+            av.AppliedAnimSpeed = float.NaN;
             av.HoldingBoxPoseSet = false; // fresh Animator: the pose must be pushed once
 
             if (av.Anim != null)
             {
                 foreach (var p in av.Anim.parameters)
                 {
-                    if (p.name == "MoveSpeed")
+                    if (p.name == "MoveSpeed" && p.type == AnimatorControllerParameterType.Float)
                         av.HasMoveSpeed = true;
-                    if (p.name == "IsHoldingBox")
+                    if (p.name == "IsHoldingBox" && p.type == AnimatorControllerParameterType.Bool)
                         av.HasHoldingBox = true;
                 }
                 if (!_loggedAnimParams)

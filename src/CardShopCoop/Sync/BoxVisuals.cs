@@ -26,6 +26,14 @@ namespace CardShopCoop.Sync
                 return false;
             if (box is InteractablePackagingBox_Shelf)
                 return Applied.TryGetValue(box, out var tracked) && tracked;
+            if (box is InteractablePackagingBox_Item)
+            {
+                // IsBoxOpened() deliberately reports false while the game's 0.85s
+                // open/close animation is running. The private flag is the committed
+                // state and is what must travel over the wire during that animation.
+                return BoxFields.ItemBoxOpened != null
+                    && (bool)BoxFields.ItemBoxOpened.GetValue(box);
+            }
             try
             {
                 return box.IsBoxOpened();
@@ -48,7 +56,7 @@ namespace CardShopCoop.Sync
             {
                 try
                 {
-                    if (box.IsBoxOpened() == open)
+                    if (ReadOpen(box) == open)
                         return;
                 }
                 catch { }
@@ -72,6 +80,30 @@ namespace CardShopCoop.Sync
                 }
             }
             catch { }
+            Applied[box] = open;
+        }
+
+        /// <summary>Apply an explicit box lifecycle event. Unlike snapshot reconciliation,
+        /// creation/box-up events must always write the visual state: the newly-created
+        /// object may have inherited a prefab or stale cached appearance.</summary>
+        public static void ApplyOpenEvent(InteractablePackagingBox box, bool open)
+        {
+            if (box == null)
+                return;
+            switch (box)
+            {
+                case InteractablePackagingBox_Shelf shelf:
+                    shelf.SetOpenCloseBox(open);
+                    if (shelf.m_BoxAnim != null)
+                        shelf.m_BoxAnim.Play(open ? "Open" : "Close");
+                    break;
+                case InteractablePackagingBox_Card card:
+                    card.SetOpenCloseBox(open);
+                    break;
+                case InteractablePackagingBox_Item item:
+                    item.SetOpenCloseBox(open, isPlayer: false);
+                    break;
+            }
             Applied[box] = open;
         }
 

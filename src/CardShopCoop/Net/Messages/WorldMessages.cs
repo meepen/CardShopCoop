@@ -168,6 +168,9 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.PriceList, Policy = MessagePolicy.ClientOnly)]
     public sealed class PriceListMessage : INetMessage
     {
+        // True for the join/session full table (absent entries mean "the host cleared this
+        // price"). False for per-change partials: only the listed entries change.
+        public bool Full;
         public List<PriceEntry> Prices = new List<PriceEntry>();
         public MsgType Type
         {

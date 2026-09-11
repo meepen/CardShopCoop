@@ -25,6 +25,8 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
   existing synchronization messages instead of waiting for the normal polling interval.
 - Remote players see furniture boxes disappear as soon as someone picks them up.
 - Q-mode box movement uses the holder's camera state smoothly on both sides.
+- Opening or closing an item box now updates on the other player's screen too, including
+  boxes that are already open when the other player joins.
 - Throws reproduce the game's launch impulse on the receiving side instead of dropping at the
   thrower's feet.
 - Box ownership and movement now travel as a single authoritative value instead of several

@@ -24,6 +24,8 @@ namespace CardShopCoop.Sync
             AccessTools.Field(typeof(InteractablePackagingBox), "m_Shelf_WorldUIGrp");
         public static readonly FieldInfo ItemAmountToSpawn =
             ReflectionSurface.RequiredField(typeof(InteractablePackagingBox_Item), "m_ItemAmountToSpawn");
+        public static readonly FieldInfo ItemBoxOpened =
+            ReflectionSurface.RequiredField(typeof(InteractablePackagingBox_Item), "m_IsBoxOpened");
 
         // Cashier counter world screens (re-shown after a headless place)
         public static readonly FieldInfo CounterScreen =

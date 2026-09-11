@@ -154,6 +154,13 @@ namespace CardShopCoop.Patches
             Try(h, typeof(CPlayerData), "SetCardPrice",
                 prefix: null, postfix: new HarmonyMethod(typeof(GamePatches), nameof(SetCardPricePostfix)));
 
+            // Item pricing: SetItemPrice is the shared writer for the player's price screen,
+            // worker repricing, EPL Demand, and our own apply of a joiner's contribution. The
+            // host flags a pending broadcast; a joiner's local edit already forwards through
+            // the CEventPlayer_ItemPriceChanged path below.
+            Try(h, typeof(CPlayerData), "SetItemPrice",
+                prefix: null, postfix: new HarmonyMethod(typeof(GamePatches), nameof(ItemPriceSetPostfix)));
+
             Try(h, typeof(RestockItemScreen), "EvaluateCartCheckout",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(RestockCheckoutPrefix)));
             Try(h, typeof(ScannerRestockScreen), "EvaluateCartCheckout",
@@ -283,7 +290,7 @@ namespace CardShopCoop.Patches
             Try(h, typeof(InteractablePackagingBox_Item), "RemoveItemFromShelf",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
             Try(h, typeof(InteractablePackagingBox_Item), "SetOpenCloseBox",
-                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(BoxOpenClosePostfix)));
             Try(h, typeof(ShelfCompartment), "AddBox",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
             Try(h, typeof(ShelfCompartment), "RemoveBox",
@@ -426,6 +433,14 @@ namespace CardShopCoop.Patches
         {
             if (CoopCore.Role != CoopRole.None)
                 CoopCore.RequestImmediateObjectSync();
+        }
+
+        public static void BoxOpenClosePostfix(InteractablePackagingBox_Item __instance)
+        {
+            if (CoopCore.Role == CoopRole.None || __instance == null)
+                return;
+            CoopCore.Instance?.Boxes?.MarkBoxDirty(__instance);
+            CoopCore.RequestImmediateObjectSync();
         }
 
         public static void ThrowMutationPostfix(InteractablePackagingBox __instance)
@@ -872,6 +887,16 @@ namespace CardShopCoop.Patches
                     CoopCore.Instance?.ForwardCardPrice(cardData, priceSet);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("SetCardPricePostfix forward failed: " + e.Message); }
+        }
+
+        /// <summary>Host: an item price entry changed (player, worker, EPL Demand, or a
+        /// joiner's contribution we just applied); the price sync broadcasts on the next
+        /// tick. Deliberately NOT gated on ApplyingRemotePrice - a contribution applied on
+        /// the host must still reach the other clients.</summary>
+        public static void ItemPriceSetPostfix(EItemType itemType, float price)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                CoopCore.Instance?.NoteItemPriceChanged(itemType, price);
         }
 
         /// <summary>True while we're applying a card delta that came over the network,

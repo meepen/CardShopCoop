@@ -40,7 +40,6 @@ namespace CardShopCoop.Sync
         /// <summary>Names normally go out only on change; a periodic full refresh covers
         /// late joiners and name packets lost on the unreliable channel.</summary>
         private const float NameRefreshInterval = 5f;
-        private int _chunkJsonLength;
 
         // string-keyed animator calls hash the name on every call; cache the ids once
         private static readonly int HashMoveSpeed = Animator.StringToHash("MoveSpeed");
@@ -75,6 +74,7 @@ namespace CardShopCoop.Sync
         private float _nameRefreshIn;
         private int _chunkCount;
         private NpcStateMessage _currentChunk;
+        private int _chunkJsonLength;
         private readonly Dictionary<int, string> _sentNames = new Dictionary<int, string>();
         private readonly Dictionary<int, int> _sentIdentities = new Dictionary<int, int>();
         private readonly Dictionary<int, int> _customerGenerations = new Dictionary<int, int>();
@@ -172,6 +172,7 @@ namespace CardShopCoop.Sync
             BeginChunk(hostTime);
 
             var customers = _cm.GetCustomerList();
+            long tCustomers = Util.PerfProbe.Start();
             for (int i = 0; i < customers.Count; i++)
             {
                 var c = customers[i];
@@ -213,8 +214,10 @@ namespace CardShopCoop.Sync
                 WriteEntry(chunks, hostTime, KindCustomer, (ushort)i, cc.CharacterName,
                     c.transform, c.m_CurrentMoveSpeed, flags, _customerGenerations[i], grabSequence, actionKind);
             }
+            Util.PerfProbe.End("npc-customers", tCustomers);
 
             var workers = WorkerManager.GetWorkerList();
+            long tWorkers = Util.PerfProbe.Start();
             if (workers != null)
             {
                 for (int i = 0; i < workers.Count; i++)
@@ -248,8 +251,11 @@ namespace CardShopCoop.Sync
                         actionSequence: workerAction, actionKind: workerActionKind);
                 }
             }
+            Util.PerfProbe.End("npc-workers", tWorkers);
 
+            long tFlush = Util.PerfProbe.Start();
             FlushChunk(chunks);
+            Util.PerfProbe.End("npc-flush", tFlush);
             return chunks.Count > 0 ? chunks : null;
         }
 
@@ -257,7 +263,7 @@ namespace CardShopCoop.Sync
         {
             _chunkCount = 0;
             _currentChunk = new NpcStateMessage { HostTime = hostTime };
-            _chunkJsonLength = WireCodec.Serialize(_currentChunk).Length - 2; // remove []
+            _chunkJsonLength = WireCodec.SerializeUtf8Length(_currentChunk);
         }
 
         private void FlushChunk(List<NpcStateMessage> chunks)
@@ -309,7 +315,7 @@ namespace CardShopCoop.Sync
                 ActionSequence = actionSequence,
                 ActionKind = actionKind,
             };
-            int entryLength = WireCodec.SerializeObject(entry).Length;
+            int entryLength = WireCodec.SerializeUtf8Length(entry);
             _currentChunk.Entries.Add(entry);
             _chunkCount++;
             int addedLength = entryLength + (_chunkCount > 1 ? 1 : 0);
