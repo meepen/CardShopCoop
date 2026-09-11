@@ -339,21 +339,11 @@ namespace CardShopCoop.Patches
             Try(h, typeof(PauseScreen), "OpenScreen",
                 prefix: null, postfix: new HarmonyMethod(typeof(GamePatches), nameof(PauseNoFreezePostfix)));
 
-            // Domain sync modules register their own patch sets (each guarded internally).
-            TryModule("staff", Sync.StaffSync.ApplyPatches, h);
-            TryModule("shopstate", Sync.ShopStateSync.ApplyPatches, h);
-            TryModule("settings", Sync.SettingsSync.ApplyPatches, h);
-            TryModule("market", Sync.MarketSync.ApplyPatches, h);
-            TryModule("report", Sync.ReportSync.ApplyPatches, h);
-            TryModule("containers", Sync.ContainerSync.ApplyPatches, h);
-            TryModule("tournament", Sync.TournamentSync.ApplyPatches, h);
-            TryModule("grading", Sync.GradingSync.ApplyPatches, h);
-            TryModule("trades", Sync.TradeServe.ApplyPatches, h);
-            TryModule("register", Sync.RegisterSync.ApplyPatches, h);
-            TryModule("playtables", Sync.PlayTableSync.ApplyPatches, h);
-            TryModule("cardboxes", Sync.CardBoxOps.ApplyPatches, h);
-            TryModule("furnboxes", Sync.FurnitureBoxOps.ApplyPatches, h);
-            TryModule("tv", Sync.TvSync.ApplyPatches, h);
+            // Domain sync modules register their patch sets from the single module catalog.
+            var patches = CoopCore.PatchCatalog;
+            if (patches != null)
+                for (int i = 0; i < patches.Length; i++)
+                    TryModule(patches[i].Name, patches[i].Apply, h);
         }
 
         private static void TryModule(string name, Action<Harmony> apply, Harmony h)

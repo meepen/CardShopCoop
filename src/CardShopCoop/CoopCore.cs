@@ -196,6 +196,12 @@ namespace CardShopCoop
         private readonly FurnitureBoxFamily _furnBoxFamily = new FurnitureBoxFamily();
         private BoxEngine _boxEngine;
         private readonly Sync.RegisterSync _register = new Sync.RegisterSync();
+        private Sync.CoopModuleEntry[] _moduleCatalog;
+        private ICoopModule[] _allModules;
+        internal static Sync.CoopModulePatch[] PatchCatalog
+        {
+            get; private set;
+        }
         private Sync.CoopModuleRegistry _moduleRegistry;
         private Sync.TickEntry[] _hostTickOrder;
         private Sync.TickEntry[] _clientTickOrder;
@@ -699,6 +705,22 @@ namespace CardShopCoop
             CardBoxOps.IsLocallyCarried = CardBoxFamily.IsLocallyCarried;
             CardBoxOps.SendCollect = msg => Send(1, msg);
             CardBoxOps.SendResult = (connId, msg) => Send(connId, msg);
+            _moduleCatalog = BuildModuleCatalog();
+            var modules = new List<ICoopModule>();
+            var patches = new List<Sync.CoopModulePatch>();
+            for (int i = 0; i < _moduleCatalog.Length; i++)
+            {
+                Sync.CoopModuleEntry entry = _moduleCatalog[i];
+                if ((entry.HostSlot >= 0 || entry.ClientSlot >= 0) &&
+                    !(entry.Module is ITickableCoopModule))
+                    throw new InvalidOperationException("Tick pipeline entry is not tickable: " + entry.Name);
+                if (entry.Module != null)
+                    modules.Add(entry.Module);
+                if (entry.Patches != null)
+                    patches.Add(new Sync.CoopModulePatch(entry.Name, entry.Patches));
+            }
+            _allModules = modules.ToArray();
+            PatchCatalog = patches.ToArray();
             _actModules = ModulesTick;
             SceneManager.sceneLoaded += OnSceneLoaded;
 
@@ -1044,14 +1066,7 @@ namespace CardShopCoop
             }
             else
             {
-                _world.Reset();
-                _npcs.Reset();
-                _cardShelves.Reset();
-                _objMoves.Reset();
-                _movePreview.Reset();
-                _boxEngine?.Reset();
-                _population.Reset();
-                ModulesReset();
+                ResetAllModules();
             }
             _lightManager = null;
             _clientClockFrozen = false;
@@ -1715,60 +1730,46 @@ namespace CardShopCoop
             Util.PerfProbe.End("mod.gradedDigest", t);
         }
 
-        /// <summary>Process-lifetime fallback resets for when no live registry exists (the
-        /// title-screen load/quit paths). Sessions with a registry reset through
-        /// <see cref="Sync.CoopModuleRegistry.ResetState"/> instead.</summary>
-        private void ModulesReset()
+        /// <summary>The catalog is the single source of truth for lifecycle order, registry
+        /// membership, tick pipelines, and static patch registration. This is the v1.1 reset
+        /// order (with the unified box engine replacing the old box modules). Disposal walks it
+        /// in reverse, so live hooks detach first; join-heal and live-hooks therefore remain
+        /// last. Actual population/index dependencies remain explicit in the per-role slots.</summary>
+        private Sync.CoopModuleEntry[] BuildModuleCatalog()
         {
-            _grading.Reset();
-            _trades.Reset();
-            _tables.Reset();
-            _staff.Reset();
-            _shopState.Reset();
-            _settings.Reset();
-            _market.Reset();
-            _report.Reset();
-            _containers.Reset();
-            _tournament.Reset();
-            _register.Reset();
-            _tv.Reset();
+            return new[]
+            {
+                new Sync.CoopModuleEntry(_world, "world"),
+                new Sync.CoopModuleEntry(_npcs, "npcs"),
+                new Sync.CoopModuleEntry(_cardShelves, "cardshelves"),
+                new Sync.CoopModuleEntry(_objMoves, "objmoves"),
+                new Sync.CoopModuleEntry(_movePreview, "movepreview"),
+                new Sync.CoopModuleEntry(_boxEngine, "boxes"),
+                new Sync.CoopModuleEntry(_population, "population"),
+                new Sync.CoopModuleEntry(_grading, "grading", 0, -1, Sync.GradingSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_trades, "trades", 1, 2, Sync.TradeServe.ApplyPatches),
+                new Sync.CoopModuleEntry(_tables, "tables", 2, -1, Sync.PlayTableSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_staff, "staff", 3, -1, Sync.StaffSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_shopState, "shopState", 4, -1, Sync.ShopStateSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_settings, "settings", 5, -1, Sync.SettingsSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_market, "market", 6, 0, Sync.MarketSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_report, "report", 7, -1, Sync.ReportSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_containers, "containers", 8, 3, Sync.ContainerSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_tournament, "tournament", 9, -1, Sync.TournamentSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_register, "register", 10, -1, Sync.RegisterSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_tv, "tv", 11, 1, Sync.TvSync.ApplyPatches),
+                new Sync.CoopModuleEntry(new Sync.DelegateCoopModule("join-heal", null, null,
+                    () => _priceFullPending = true), "join-heal"),
+                new Sync.CoopModuleEntry(new Sync.DelegateCoopModule("live-hooks",
+                    InstallLiveModuleHooks, null, null, ClearLiveModuleHooks), "live-hooks"),
+                new Sync.CoopModuleEntry(null, "cardboxes", patches: Sync.CardBoxOps.ApplyPatches),
+                new Sync.CoopModuleEntry(null, "furnboxes", patches: Sync.FurnitureBoxOps.ApplyPatches),
+            };
         }
 
         private Sync.CoopModuleRegistry CreateModuleRegistry()
         {
-            var modules = new List<Sync.ICoopModule>
-            {
-                // This is the v1.1 reset order (with the unified box engine replacing the old
-                // box modules). Disposal walks it in reverse, so live hooks detach first;
-                // join-heal and live-hooks therefore remain last. The registry's generic
-                // ForceResend consequently follows this restored order too (rather than the
-                // former ad-hoc resend sequence); actual population/index dependencies remain
-                // explicit in the per-role tick order below.
-                _world,
-                _npcs,
-                _cardShelves,
-                _objMoves,
-                _movePreview,
-                _boxEngine,
-                _population,
-                _grading,
-                _trades,
-                _tables,
-                _staff,
-                _shopState,
-                _settings,
-                _market,
-                _report,
-                _containers,
-                _tournament,
-                _register,
-                _tv,
-                new Sync.DelegateCoopModule("join-heal", null, null, () => _priceFullPending = true),
-                // Keep static Harmony entry points inside the same lifecycle. This module is
-                // last so reverse-order disposal detaches callbacks before any state is reset.
-                new Sync.DelegateCoopModule("live-hooks", InstallLiveModuleHooks, null, null, ClearLiveModuleHooks),
-            };
-            return new Sync.CoopModuleRegistry(modules);
+            return new Sync.CoopModuleRegistry(_allModules);
         }
 
         /// <summary>Builds the explicit per-role tick pipelines. The two roles need different
@@ -1777,28 +1778,35 @@ namespace CardShopCoop
         /// here rather than inferred from the lifecycle list.</summary>
         private void BuildTickOrders()
         {
-            _hostTickOrder = new[]
+            _hostTickOrder = BuildTickOrder(host: true);
+            _clientTickOrder = BuildTickOrder(host: false);
+        }
+
+        private Sync.TickEntry[] BuildTickOrder(bool host)
+        {
+            var ordered = new List<Sync.TickEntry>();
+            int maxSlot = -1;
+            for (int i = 0; i < _moduleCatalog.Length; i++)
             {
-                new Sync.TickEntry(_grading, "mod.grading"),
-                new Sync.TickEntry(_trades, "mod.trades"),
-                new Sync.TickEntry(_tables, "mod.tables"),
-                new Sync.TickEntry(_staff, "mod.staff"),
-                new Sync.TickEntry(_shopState, "mod.shopState"),
-                new Sync.TickEntry(_settings, "mod.settings"),
-                new Sync.TickEntry(_market, "mod.market"),
-                new Sync.TickEntry(_report, "mod.report"),
-                new Sync.TickEntry(_containers, "mod.containers"),
-                new Sync.TickEntry(_tournament, "mod.tournament"),
-                new Sync.TickEntry(_register, "mod.register"),
-                new Sync.TickEntry(_tv, "mod.tv"),
-            };
-            _clientTickOrder = new[]
-            {
-                new Sync.TickEntry(_market, "mod.market"),
-                new Sync.TickEntry(_tv, "mod.tv"),
-                new Sync.TickEntry(_trades, "mod.trades"),
-                new Sync.TickEntry(_containers, "mod.containers"),
-            };
+                int slot = host ? _moduleCatalog[i].HostSlot : _moduleCatalog[i].ClientSlot;
+                if (slot > maxSlot)
+                    maxSlot = slot;
+            }
+            for (int slot = 0; slot <= maxSlot; slot++)
+                for (int i = 0; i < _moduleCatalog.Length; i++)
+                {
+                    Sync.CoopModuleEntry entry = _moduleCatalog[i];
+                    if ((host ? entry.HostSlot : entry.ClientSlot) == slot)
+                        ordered.Add(new Sync.TickEntry((ITickableCoopModule)entry.Module,
+                            "mod." + entry.Name));
+                }
+            return ordered.ToArray();
+        }
+
+        private void ResetAllModules()
+        {
+            for (int i = 0; i < _allModules.Length; i++)
+                _allModules[i].ResetState();
         }
 
         private void ActivateLiveModuleHooks()
@@ -1921,25 +1929,8 @@ namespace CardShopCoop
 
             // Process-lifetime fallback (no live registry): mirror the registry's module set
             // so a joiner still gets a full authoritative baseline.
-            _world.ForceResend();
-            _cardShelves.ForceResend();
-            _objMoves.ForceResend();
-            _movePreview.ForceResend();
-            _population.ForceResend();
-            _grading.ForceResend();
-            _trades.ForceResend();
-            _tables.ForceResend();
-            _staff.ForceResend();
-            _shopState.ForceResend();
-            _settings.ForceResend();
-            _market.ForceResend();
-            _report.ForceResend();
-            _containers.ForceResend();
-            _tournament.ForceResend();
-            _register.ForceResend();
-            _tv.ForceResend();
-            _npcs.ForceResend();
-            _boxEngine.RequestFullSnapshot();
+            for (int i = 0; i < _allModules.Length; i++)
+                _allModules[i].ForceResend();
             _priceFullPending = true; // fresh joiner gets the authoritative price table
         }
 
@@ -3342,14 +3333,7 @@ namespace CardShopCoop
                 // No live registry (e.g. quitting from the title screen): fall back to the
                 // per-instance resets. A session that had a registry was already reset by
                 // CoopModuleRegistry.Dispose, so re-resetting here would be redundant.
-                _world.Reset();
-                _npcs.Reset();
-                _cardShelves.Reset();
-                _objMoves.Reset();
-                _movePreview.Reset();
-                _boxEngine?.Reset();
-                _population.Reset();
-                ModulesReset();
+                ResetAllModules();
             }
             _lastShopNameSent = null;
             // UNCONDITIONAL PATH: Shutdown runs from OnDestroy and OnApplicationQuit, i.e.
