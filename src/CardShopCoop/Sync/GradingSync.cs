@@ -60,7 +60,7 @@ namespace CardShopCoop.Sync
     ///    are genuinely unrepairable in place; the clean reset is a rejoin, which transfers the
     ///    host's grading store again.
     /// </summary>
-    public class GradingSync
+    public class GradingSync : ITickableCoopModule
     {
         /// <summary>The live module instance, for the static Harmony patches.</summary>
         public static GradingSync Instance;
@@ -202,6 +202,22 @@ namespace CardShopCoop.Sync
         {
             Instance = this;
         }
+
+        public string Name => "grading";
+
+        public void Start()
+        {
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.Dt, frame.InGame);
+        }
+
+        public void ResetState() => Reset();
+
+        public void Dispose() => ResetState();
 
         /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
         public static void ClearLive()

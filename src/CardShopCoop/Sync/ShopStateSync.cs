@@ -19,7 +19,7 @@ namespace CardShopCoop.Sync
     /// the host's vanilla path does the one and only charge, and the state broadcast is
     /// the echo that updates the joiner's phone/signs.
     /// </summary>
-    public class ShopStateSync
+    public class ShopStateSync : ITickableCoopModule
     {
         // ShopOp sub-ops (first byte of the payload)
         private const byte OpPayBill = 1;    // + byte: 0=all, else (byte)EBillType
@@ -85,6 +85,24 @@ namespace CardShopCoop.Sync
             _instance = this;
         }
 
+        public string Name => nameof(ShopStateSync);
+
+        public void Start()
+        {
+            _instance = this;
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.Dt, frame.InGame);
+        }
+
+        public void ResetState()
+        {
+            Reset();
+        }
+
         public void Reset()
         {
             _timer = -1.9f; // staggered phase vs the other snapshot engines
@@ -101,6 +119,14 @@ namespace CardShopCoop.Sync
         {
             _lastHash = 0;
             _heal = 15f; // next tick broadcasts even if the hash collides
+        }
+
+        public void Dispose()
+        {
+            Reset();
+            if (ReferenceEquals(_instance, this))
+                _instance = null;
+            ApplyingRemote = false;
         }
 
         // ---------------- cached lookups ----------------

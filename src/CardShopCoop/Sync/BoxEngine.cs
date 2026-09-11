@@ -21,7 +21,7 @@ namespace CardShopCoop.Sync
     /// time-sliced (round-robin over a small budget per flush), with a fast path for the
     /// actively held/placing box so interaction stays responsive.
     /// </summary>
-    public class BoxEngine
+    public class BoxEngine : ICoopModule
     {
         private const int MaxBoxes = 1000;
         private const float PartialPeriod = 0.10f;  // host: how often changed boxes flush
@@ -98,6 +98,18 @@ namespace CardShopCoop.Sync
         /// Processed every tick so a host/client pickup or drop emits on the same frame
         /// instead of waiting for the round-robin slice to reach it.</summary>
         public Func<InteractablePackagingBox> LocalHeld;
+
+        public string Name => "boxes";
+
+        public void Start()
+        {
+        }
+
+        public void ResetState() => Reset();
+
+        public void ForceResend() => RequestFullSnapshot();
+
+        public void Dispose() => ResetState();
 
         public BoxEngine(IEnumerable<IBoxFamily> families)
         {

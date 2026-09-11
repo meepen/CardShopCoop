@@ -11,9 +11,9 @@ namespace CardShopCoop.Sync
     /// <summary>Streams only the visual furniture move preview. The real object remains under
     /// ObjMoveSync's settled-pose authority; remote previews are detached meshes and therefore
     /// cannot participate in movement, collision, or index reconciliation.</summary>
-    public sealed class MovePreviewSync
+    public sealed class MovePreviewSync : ICoopModule
     {
-        private const byte Start = 0;
+        private const byte StartPhase = 0;
         private const byte Update = 1;
         private const byte Stop = 2;
         private const float SendInterval = 1f / 12f;
@@ -53,6 +53,20 @@ namespace CardShopCoop.Sync
         private static readonly FieldInfo FiBoxedObject = AccessTools.Field(
             typeof(InteractablePackagingBox_Shelf), "m_BoxedObject");
         private ShelfManager _shelfManager;
+
+        public string Name => "move-preview";
+
+        public void Start()
+        {
+        }
+
+        public void ResetState() => Reset();
+
+        public void ForceResend()
+        {
+        }
+
+        public void Dispose() => ResetState();
 
         public void Reset()
         {
@@ -125,7 +139,7 @@ namespace CardShopCoop.Sync
             _localSourceId = CoopCore.Role == CoopRole.Host ? 0 : 1;
             _localValid = ReadValid();
             _sendTimer = SendInterval;
-            SendLocal(Start, _localValid);
+            SendLocal(StartPhase, _localValid);
         }
 
         public void UpdateLocalValidity(bool valid)
@@ -158,7 +172,7 @@ namespace CardShopCoop.Sync
             }
 
             int id = keyFor(sourceId, key);
-            if (message.Phase == Start)
+            if (message.Phase == StartPhase)
                 _ghostUnavailable.Remove(id);
             if (!_remote.TryGetValue(id, out var preview))
             {

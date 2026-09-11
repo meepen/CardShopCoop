@@ -21,7 +21,7 @@ namespace CardShopCoop.Sync
     /// buttons are blocked with a "the host schedules tournaments" toast instead of
     /// being forwarded. Prize shelf CONTENTS are synced elsewhere (CardShelfSync).
     /// </summary>
-    public class TournamentSync
+    public class TournamentSync : ITickableCoopModule
     {
         /// <summary>TournamentPrizeShelf.m_ScreenMesh (the shelf's little tournament display) is
         /// absent from the Game Pass Assembly-CSharp, which made a direct field access fail to
@@ -55,6 +55,29 @@ namespace CardShopCoop.Sync
             if (_cm == null)
                 _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
             return _cm;
+        }
+
+        public string Name => "tournament";
+
+        public void Start()
+        {
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.Dt, frame.InGame);
+            // Tournament scheduling is host-only; clients receive state through
+            // ClientApplyState and therefore have no per-frame client tick.
+        }
+
+        public void ResetState() => Reset();
+
+        public void Dispose()
+        {
+            ResetState();
+            ApplyingRemote = false;
+            _cm = null;
         }
 
         public void Reset()

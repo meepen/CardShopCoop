@@ -15,7 +15,7 @@ namespace CardShopCoop.Sync
     /// (stable object id, objectType, transform) roster every 3s; clients reconcile using
     /// the game's own save-load recipe and bind the host id to the resulting object.
     /// </summary>
-    public class PopulationSync
+    public class PopulationSync : ICoopModule
     {
         // 15 is the generic interactable-object list. It must be included because
         // generic furniture is still a real placed object and is referenced by the
@@ -111,6 +111,18 @@ namespace CardShopCoop.Sync
         /// other syncs' index baselines for that kind are stale from this moment.</summary>
         public static Action<int> OnClientStructureChanged;
         private static readonly HashSet<int> s_ambiguousWarnings = new HashSet<int>();
+
+        public string Name => "population";
+
+        public void Start()
+        {
+        }
+
+        public void ResetState() => Reset();
+
+        public void ForceResend() => ForceNextTick();
+
+        public void Dispose() => ResetState();
 
         public void Reset()
         {

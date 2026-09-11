@@ -29,7 +29,7 @@ namespace CardShopCoop.Sync
     /// own SpecificSetup recipe on the client's SAME table prefab children, so
     /// nothing is spawned, pooled or registered: pure visuals on existing objects.
     /// </summary>
-    public class PlayTableSync
+    public class PlayTableSync : ITickableCoopModule
     {
         private const float Cadence = 1.5f;
         private const float HealInterval = 12f;
@@ -75,6 +75,24 @@ namespace CardShopCoop.Sync
             Active = this;
         }
 
+        public string Name => nameof(PlayTableSync);
+
+        public void Start()
+        {
+            Active = this;
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.Dt, frame.InGame);
+        }
+
+        public void ResetState()
+        {
+            Reset();
+        }
+
         public void RegisterIntents(PlayerIntentBus bus)
         {
             if (bus == null)
@@ -110,6 +128,14 @@ namespace CardShopCoop.Sync
         {
             _lastHash = 0;
             _heal = 999f; // beats the hash gate even if the real hash is 0
+        }
+
+        public void Dispose()
+        {
+            Reset();
+            if (ReferenceEquals(Active, this))
+                Active = null;
+            _intents = null;
         }
 
         private ShelfManager Sm()

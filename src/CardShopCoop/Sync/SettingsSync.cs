@@ -20,8 +20,10 @@ namespace CardShopCoop.Sync
     /// here is free scalars, so those forward as postfixes (instant local apply, the
     /// echo confirms).
     /// </summary>
-    public class SettingsSync
+    public class SettingsSync : ITickableCoopModule
     {
+        public string Name => "settings";
+
         // SettingsOp sub-ops (first byte of every op payload)
         private const byte OpBuyDeco = 1;      // client->host: byte category(0 wall/1 floor/2 ceiling), int index
         private const byte OpEquipDeco = 2;    // client->host: six ints (wall, wallB, floor, floorB, ceiling, ceilingB)
@@ -85,6 +87,19 @@ namespace CardShopCoop.Sync
             Instance = this;
         }
 
+        public void Start()
+        {
+            Instance = this;
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role != CoopRole.Host)
+                return;
+
+            HostTick(frame.Dt, frame.InGame);
+        }
+
         public void Reset()
         {
             _timer = -2.6f; // staggered phase vs the other snapshot engines
@@ -96,11 +111,20 @@ namespace CardShopCoop.Sync
             _inv = null;
         }
 
+        public void ResetState() => Reset();
+
         public void ForceResend()
         {
             _lastHash = 0;
             _heal = 15f;
             _hasHash = false;
+        }
+
+        public void Dispose()
+        {
+            Reset();
+            if (ReferenceEquals(Instance, this))
+                Instance = null;
         }
 
         // ---------------- host ----------------

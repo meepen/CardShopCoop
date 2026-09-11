@@ -27,8 +27,10 @@ namespace CardShopCoop.Sync
     /// PriceChangeManager.Init aliases its own fields to the CPlayerData lists, so a
     /// fresh list instance would silently orphan every consumer.
     /// </summary>
-    public class MarketSync
+    public class MarketSync : ITickableCoopModule
     {
+        public string Name => "market";
+
         /// <summary>True while ClientApplyState writes host data, so any future patch on
         /// these tables can tell a sync write from a local one.</summary>
         public static bool ApplyingRemote;
@@ -79,6 +81,23 @@ namespace CardShopCoop.Sync
         private static readonly Dictionary<long, PendingModCard> s_modCardPending
             = new Dictionary<long, PendingModCard>();
 
+        public void Start()
+        {
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.InGame);
+            else if (CoopCore.Role == CoopRole.Client)
+            {
+                // Flush uses InGame (the snapshot may have arrived mid-load) and diagnostics
+                // use dt, matching the original per-frame order.
+                FlushPending(frame.InGame);
+                ClientDiag(frame.Dt);
+            }
+        }
+
         public void Reset()
         {
             _lastAppliedGen = int.MinValue;
@@ -89,11 +108,19 @@ namespace CardShopCoop.Sync
             s_eplModdedCache = null;
             s_eplModdedCacheAt = -999f;
             s_modCardPending.Clear();
+            ApplyingRemote = false;
         }
+
+        public void ResetState() => Reset();
 
         public void ForceResend()
         {
             s_dirty = true;
+        }
+
+        public void Dispose()
+        {
+            Reset();
         }
 
         // ---------------- patches ----------------

@@ -75,7 +75,7 @@ namespace CardShopCoop.Sync
     /// CardDelta mirror). The client never runs any vanilla trade code: OnMousePress
     /// and the screen's mutating buttons are blocked/forwarded client-side below.
     /// </summary>
-    public class TradeServe
+    public class TradeServe : ITickableCoopModule
     {
         private const float Cadence = 0.5f;      // host scan/broadcast gate
         private const float HealInterval = 6f;   // unchanged-state re-broadcast
@@ -111,6 +111,23 @@ namespace CardShopCoop.Sync
         {
             _live = this;
         }
+
+        public string Name => "trade-serve";
+
+        public void Start()
+        {
+            ActivateLive(this);
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.Dt, frame.InGame);
+            else if (CoopCore.Role == CoopRole.Client)
+                ClientTick(frame.Dt, frame.InGame);
+        }
+
+        public void ResetState() => Reset();
 
         // ---- reflection: Customer privates (verified against decompiled/Customer.cs)
         private static readonly FieldInfo FiTradeData = ReflectionSurface.RequiredField(typeof(Customer), "m_CustomerTradeData");
@@ -236,6 +253,13 @@ namespace CardShopCoop.Sync
         {
             _lastHash = 0;
             _heal = 999f; // beats the hash gate even if the real hash is 0
+        }
+
+        public void Dispose()
+        {
+            if (ReferenceEquals(_live, this))
+                ClearLive();
+            Reset();
         }
 
         // ---------------- patches ----------------

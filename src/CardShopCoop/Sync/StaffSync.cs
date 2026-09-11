@@ -26,7 +26,7 @@ namespace CardShopCoop.Sync
     /// (on change + a slow heal), into the client's CPlayerData mirrors so the joiner's
     /// phone shows the truth and salary-derived numbers (bills) agree.
     /// </summary>
-    public class StaffSync
+    public class StaffSync : ITickableCoopModule
     {
         private const byte OpHire = 1;
         private const byte OpUpdate = 2;
@@ -94,6 +94,24 @@ namespace CardShopCoop.Sync
             Instance = this;
         }
 
+        public string Name => nameof(StaffSync);
+
+        public void Start()
+        {
+            Instance = this;
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.Dt, frame.InGame);
+        }
+
+        public void ResetState()
+        {
+            Reset();
+        }
+
         private struct Entry
         {
             public bool Hired;
@@ -136,6 +154,14 @@ namespace CardShopCoop.Sync
             _lastHash = 0;
             _heal = 0f;
             _force = true;
+        }
+
+        public void Dispose()
+        {
+            Reset();
+            if (ReferenceEquals(Instance, this))
+                Instance = null;
+            ApplyingRemote = false;
         }
 
         private WorkerManager Wm()

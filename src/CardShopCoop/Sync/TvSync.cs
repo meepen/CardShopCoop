@@ -10,7 +10,7 @@ namespace CardShopCoop.Sync
     /// <summary>Optional host-authoritative synchronization for RTCGO Custom TV streams.
     /// Local files, mute, and volume deliberately remain local; only stream playback controls
     /// and best-effort stream position cross the wire.</summary>
-    public sealed class TvSync
+    public sealed class TvSync : ITickableCoopModule
     {
         private const byte Next = 1, Previous = 2, Pause = 3, Power = 4, Shuffle = 5, Seek = 6, Open = 7, Ready = 8;
         private const float Interval = 1f;
@@ -39,6 +39,30 @@ namespace CardShopCoop.Sync
         public TvSync()
         {
             Active = this;
+        }
+
+        public string Name => "tv";
+
+        public void Start()
+        {
+            Active = this;
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.Dt, frame.InGame);
+            else if (CoopCore.Role == CoopRole.Client)
+                ClientTick(frame.Dt, frame.InGame);
+        }
+
+        public void ResetState() => Reset();
+
+        public void Dispose()
+        {
+            ResetState();
+            if (ReferenceEquals(Active, this))
+                Active = null;
         }
 
         public void Reset()

@@ -29,7 +29,7 @@ namespace CardShopCoop.Sync
     /// past-list, reset day collect) that keeps the phone's report history aligned with
     /// the host's - and is what hands the joiner his movement back.
     /// </summary>
-    public class ReportSync
+    public class ReportSync : ITickableCoopModule
     {
         /// <summary>True while ClientApplyState writes host data, so our patches never
         /// mistake a sync write for local play.</summary>
@@ -88,6 +88,35 @@ namespace CardShopCoop.Sync
         private static EndOfDayReportScreen _screen;
         private static InteractionPlayerController _ipc;
 
+        public string Name => "report";
+
+        public void Start()
+        {
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                HostTick(frame.Dt, frame.InGame);
+            // Clients are driven by ClientApplyState; they must not run the host
+            // report stream or advance any local end-of-day state.
+        }
+
+        public void ResetState() => Reset();
+
+        public void Dispose()
+        {
+            ResetState();
+            ApplyingRemote = false;
+            s_openPending = false;
+            s_openSnapshot = default(GameReportDataCollect);
+            s_reviewsDirty = false;
+            s_clientOpenReport = default(GameReportDataCollect);
+            s_haveOpenReport = false;
+            _screen = null;
+            _ipc = null;
+        }
+
         public void Reset()
         {
             _timer = -4.1f; // staggered phase vs the other snapshot engines
@@ -95,6 +124,7 @@ namespace CardShopCoop.Sync
             _heal = 0f;
             _reviewSeq = -1;
             s_openPending = false;
+            s_openSnapshot = default(GameReportDataCollect);
             s_reviewsDirty = false;
             // last session's recap must not ride along: a stale copy here would be filed
             // into the NEXT save's phone history the first time the joiner closes a report

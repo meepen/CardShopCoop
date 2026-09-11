@@ -32,7 +32,7 @@ namespace CardShopCoop.Sync
     /// clears the machine and banks the report counters WITHOUT re-adding the cards.
     /// No coin moves through this module, so the double-charge question never arises.
     /// </summary>
-    public class ContainerSync
+    public class ContainerSync : ITickableCoopModule
     {
         public static ContainerSync Instance;
 
@@ -211,6 +211,28 @@ namespace CardShopCoop.Sync
                 return h;
             };
         }
+
+        public string Name => "containers";
+
+        public void Start()
+        {
+        }
+
+        public void Tick(in SyncFrame frame)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                HostTick(frame.Dt, frame.InGame);
+                return;
+            }
+
+            if (CoopCore.Role == CoopRole.Client)
+                ClientTick(frame.Dt, frame.InGame && !frame.PreloadHold);
+        }
+
+        public void ResetState() => Reset();
+
+        public void Dispose() => ResetState();
 
         /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
         public static void ClearLive()

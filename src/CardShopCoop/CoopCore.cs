@@ -195,6 +195,9 @@ namespace CardShopCoop
         private readonly FurnitureBoxFamily _furnBoxFamily = new FurnitureBoxFamily();
         private BoxEngine _boxEngine;
         private readonly Sync.RegisterSync _register = new Sync.RegisterSync();
+        private Sync.CoopModuleRegistry _moduleRegistry;
+        private Sync.TickEntry[] _hostTickOrder;
+        private Sync.TickEntry[] _clientTickOrder;
         private string _lastShopNameSent;
         private float _shopNameTimer = -1.0f; // staggered phase (see _lightSyncTimer note)
         private float _npcSweepTimer = -1.3f;
@@ -838,16 +841,23 @@ namespace CardShopCoop
                 return;
             }
             Role = CoopRole.Client;
-            ActivateLiveModuleHooks();
-            GuestBorrowedWorld = true; // block ALL saves until we're back at the title screen
-            IsSteamSession = true;
-            _joinPassword = password ?? "";
-            LastFailedLobby = lobby;
-            // ORDER IS LOAD-BEARING: the transport must exist before Join(), because the
-            // bridge's lobby-entered callback wires the host connection into it.
-            _net = _steam.CreateTransport(false, new PingMessage());
-            StatusLine = "Joining Steam lobby...";
-            _steam.Join(lobby);
+            try
+            {
+                ActivateLiveModuleHooks();
+                GuestBorrowedWorld = true; // block ALL saves until we're back at the title screen
+                IsSteamSession = true;
+                _joinPassword = password ?? "";
+                LastFailedLobby = lobby;
+                // ORDER IS LOAD-BEARING: the transport must exist before Join(), because the
+                // bridge's lobby-entered callback wires the host connection into it.
+                _net = _steam.CreateTransport(false, new PingMessage());
+                StatusLine = "Joining Steam lobby...";
+                _steam.Join(lobby);
+            }
+            catch (Exception e)
+            {
+                AbortSessionStart("Could not join: " + e.Message);
+            }
         }
 
         /// <summary>Host through Steam: friends-only (invite) or public (lobby browser).</summary>
@@ -878,14 +888,21 @@ namespace CardShopCoop
             // a HOST must never translate: drop any table a previous session left behind
             Util.EnumMap.Clear();
             Role = CoopRole.Host;
-            ActivateLiveModuleHooks();
-            IsSteamSession = true;
-            HostPassword = password ?? "";
-            // ORDER IS LOAD-BEARING: transport first, then Host() - the bridge's
-            // lobby-created callback stamps the new lobby id onto this transport.
-            _net = _steam.CreateTransport(true, new PingMessage());
-            StatusLine = "Creating Steam lobby...";
-            _steam.Host(isPublic, lobbyName, HostPassword.Length > 0);
+            try
+            {
+                ActivateLiveModuleHooks();
+                IsSteamSession = true;
+                HostPassword = password ?? "";
+                // ORDER IS LOAD-BEARING: transport first, then Host() - the bridge's
+                // lobby-created callback stamps the new lobby id onto this transport.
+                _net = _steam.CreateTransport(true, new PingMessage());
+                StatusLine = "Creating Steam lobby...";
+                _steam.Host(isPublic, lobbyName, HostPassword.Length > 0);
+            }
+            catch (Exception e)
+            {
+                AbortSessionStart("Could not host: " + e.Message);
+            }
         }
 
         public void OpenSteamInvite()
@@ -1020,14 +1037,21 @@ namespace CardShopCoop
             }
             PlayerModelGeneration++;
             _avatars.Clear();
-            _world.Reset();
-            _npcs.Reset();
-            _cardShelves.Reset();
-            _objMoves.Reset();
-            _movePreview.Reset();
-            _boxEngine?.Reset();
-            _population.Reset();
-            ModulesReset();
+            if (_moduleRegistry != null)
+            {
+                _moduleRegistry.ResetState();
+            }
+            else
+            {
+                _world.Reset();
+                _npcs.Reset();
+                _cardShelves.Reset();
+                _objMoves.Reset();
+                _movePreview.Reset();
+                _boxEngine?.Reset();
+                _population.Reset();
+                ModulesReset();
+            }
             _lightManager = null;
             _clientClockFrozen = false;
             // Unity stops scene-owned coroutines during a load. If that interrupted the
@@ -1483,122 +1507,115 @@ namespace CardShopCoop
 
         private void ModulesTick()
         {
-            bool inGame = InGameLevel();
-            long t;
+            if (_moduleRegistry == null)
+                return;
+            var frame = new Sync.SyncFrame(_dt, InGameLevel(), ClientPreloadHold);
             if (Role == CoopRole.Host)
             {
-                t = Util.PerfProbe.Start();
-                _grading.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.grading", t);
-                t = Util.PerfProbe.Start();
-                _trades.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.trades", t);
-                t = Util.PerfProbe.Start();
-                _tables.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.tables", t);
-                t = Util.PerfProbe.Start();
-                _staff.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.staff", t);
-                t = Util.PerfProbe.Start();
-                _shopState.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.shopState", t);
-                t = Util.PerfProbe.Start();
-                _settings.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.settings", t);
-                t = Util.PerfProbe.Start();
-                _market.HostTick(inGame);
-                Util.PerfProbe.End("mod.market", t);
-                t = Util.PerfProbe.Start();
-                _report.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.report", t);
-                t = Util.PerfProbe.Start();
-                _containers.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.containers", t);
-                t = Util.PerfProbe.Start();
-                _tournament.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.tournament", t);
-                t = Util.PerfProbe.Start();
-                _register.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.register", t);
-                t = Util.PerfProbe.Start();
-                _tv.HostTick(_dt, inGame);
-                Util.PerfProbe.End("mod.tv", t);
+                for (int i = 0; i < _hostTickOrder.Length; i++)
+                    TickModule(_hostTickOrder[i], in frame);
             }
             else if (Role == CoopRole.Client)
             {
-                // Apply any market snapshot that arrived while the world was loading, now
-                // that CGameData.PropagateLoadData has swapped the card tables into place.
-                _market.FlushPending(inGame);
-                _market.ClientDiag(_dt);
-
-                t = Util.PerfProbe.Start();
-                _tv.ClientTick(_dt, inGame);
-                Util.PerfProbe.End("mod.tv", t);
-                t = Util.PerfProbe.Start();
-                _trades.ClientTick(_dt, inGame);
-                Util.PerfProbe.End("mod.trades", t);
-                t = Util.PerfProbe.Start();
-                _containers.ClientTick(_dt, inGame && !ClientPreloadHold);
-                Util.PerfProbe.End("mod.containers", t);
-
-                // Box trajectories are cosmetic client prediction only. Their endpoints are
-                // still host-authored; this makes throw/drop/set-down reconciliation readable
-                // instead of teleporting the remote copy.
-                t = Util.PerfProbe.Start();
-                BoxPlacement.TickRemoteMotions(_dt);
-                Util.PerfProbe.End("mod.remoteMotions", t);
-                // content mods register their products SECONDS after the scene loads
-                // (and per-save: a host mid-tutorial has none yet) - keep re-digesting
-                // as our catalog changes so the comparison never goes stale
-                t = Util.PerfProbe.Start();
-                _catalogTimer += _dt;
-                if (inGame && (_catalogTimer >= 45f || !_catalogSent))
-                {
-                    _catalogTimer = 0f;
-                    _catalogSent = true;
-                    int h = LocalCatalogHash();
-                    if (h != _lastCatalogSentHash)
-                    {
-                        _lastCatalogSentHash = h;
-                        SendCatalogDigest();
-                    }
-                }
-                Util.PerfProbe.End("mod.catalogDigest", t);
-                // ...and the graded-cert digest on the same gating for the same reason: the album
-                // changes constantly (every pack opened, every card graded), so a one-shot send
-                // would be stale within a minute. Built once and reused for both the hash test
-                // and the send - the union walk is the expensive half, not the write.
-                t = Util.PerfProbe.Start();
-                _gradedTimer += _dt;
-                if (inGame && (_gradedTimer >= 45f || !_gradedSent))
-                {
-                    var inv = Util.GradingInterop.BuildGradedCertInventory();
-                    // NULL IS NOT AN EMPTY ALBUM - it is "the world here is still spawning", and
-                    // sending a SHORT union is the one direction that hurts: the host would read
-                    // every graded card on our own shelves as one-sided and offer them back for
-                    // adoption. InGameLevel() cannot tell us apart from a loaded world (it stays
-                    // true through the client reload screen), so this is the gate. Do not mark
-                    // the send done; come back in a second rather than in 45.
-                    if (inv == null)
-                    {
-                        _gradedTimer = 44f;
-                    }
-                    else
-                    {
-                        _gradedTimer = 0f;
-                        _gradedSent = true;
-                        int gh = GradedHash(inv);
-                        if (gh != _lastGradedHash)
-                        {
-                            _lastGradedHash = gh;
-                            SendGradedDigest(1, inv);
-                        }
-                    }
-                }
-                Util.PerfProbe.End("mod.gradedDigest", t);
+                // ORDER IS LOAD-BEARING: the market flush applies any snapshot that arrived
+                // while the world loaded (after CGameData.PropagateLoadData swapped the card
+                // tables in), then tv/trades/containers run, and the cosmetic box trajectories
+                // plus the catalog/graded digests come last - exactly as before the migration.
+                for (int i = 0; i < _clientTickOrder.Length; i++)
+                    TickModule(_clientTickOrder[i], in frame);
+                ClientDigestTick(in frame);
             }
         }
 
+        /// <summary>Runs one pipeline entry with per-stage armor and allocation-free probing.
+        /// Unlike the old Guarded("modules", ...) wrapper, one failure degrades a single
+        /// subsystem instead of aborting the rest of the frame's pipeline.</summary>
+        private void TickModule(Sync.TickEntry entry, in Sync.SyncFrame frame)
+        {
+            long t = Util.PerfProbe.Start();
+            try
+            {
+                entry.Module.Tick(frame);
+            }
+            catch (Exception e)
+            {
+                if (_errLogCooldown <= 0f)
+                {
+                    _errLogCooldown = 5f;
+                    CoopPlugin.Log.LogError($"[{entry.Probe}] {e}");
+                }
+            }
+            Util.PerfProbe.End(entry.Probe, t);
+        }
+
+        /// <summary>Client-only per-frame work that is not owned by a module: cosmetic box
+        /// trajectories and the periodically re-digested catalog and graded-album hashes.</summary>
+        private void ClientDigestTick(in Sync.SyncFrame frame)
+        {
+            bool inGame = frame.InGame;
+            float dt = frame.Dt;
+            long t;
+
+            // Box trajectories are cosmetic client prediction only. Their endpoints are
+            // still host-authored; this makes throw/drop/set-down reconciliation readable
+            // instead of teleporting the remote copy.
+            t = Util.PerfProbe.Start();
+            BoxPlacement.TickRemoteMotions(dt);
+            Util.PerfProbe.End("mod.remoteMotions", t);
+            // content mods register their products SECONDS after the scene loads
+            // (and per-save: a host mid-tutorial has none yet) - keep re-digesting
+            // as our catalog changes so the comparison never goes stale
+            t = Util.PerfProbe.Start();
+            _catalogTimer += dt;
+            if (inGame && (_catalogTimer >= 45f || !_catalogSent))
+            {
+                _catalogTimer = 0f;
+                _catalogSent = true;
+                int h = LocalCatalogHash();
+                if (h != _lastCatalogSentHash)
+                {
+                    _lastCatalogSentHash = h;
+                    SendCatalogDigest();
+                }
+            }
+            Util.PerfProbe.End("mod.catalogDigest", t);
+            // ...and the graded-cert digest on the same gating for the same reason: the album
+            // changes constantly (every pack opened, every card graded), so a one-shot send
+            // would be stale within a minute. Built once and reused for both the hash test
+            // and the send - the union walk is the expensive half, not the write.
+            t = Util.PerfProbe.Start();
+            _gradedTimer += dt;
+            if (inGame && (_gradedTimer >= 45f || !_gradedSent))
+            {
+                var inv = Util.GradingInterop.BuildGradedCertInventory();
+                // NULL IS NOT AN EMPTY ALBUM - it is "the world here is still spawning", and
+                // sending a SHORT union is the one direction that hurts: the host would read
+                // every graded card on our own shelves as one-sided and offer them back for
+                // adoption. InGameLevel() cannot tell us apart from a loaded world (it stays
+                // true through the client reload screen), so this is the gate. Do not mark
+                // the send done; come back in a second rather than in 45.
+                if (inv == null)
+                {
+                    _gradedTimer = 44f;
+                }
+                else
+                {
+                    _gradedTimer = 0f;
+                    _gradedSent = true;
+                    int gh = GradedHash(inv);
+                    if (gh != _lastGradedHash)
+                    {
+                        _lastGradedHash = gh;
+                        SendGradedDigest(1, inv);
+                    }
+                }
+            }
+            Util.PerfProbe.End("mod.gradedDigest", t);
+        }
+
+        /// <summary>Process-lifetime fallback resets for when no live registry exists (the
+        /// title-screen load/quit paths). Sessions with a registry reset through
+        /// <see cref="Sync.CoopModuleRegistry.ResetState"/> instead.</summary>
         private void ModulesReset()
         {
             _grading.Reset();
@@ -1616,7 +1633,126 @@ namespace CardShopCoop
             _tv.Reset();
         }
 
+        private Sync.CoopModuleRegistry CreateModuleRegistry()
+        {
+            var modules = new List<Sync.ICoopModule>
+            {
+                // Lifecycle order doubles as reset order; disposal walks it in reverse. The
+                // live-hooks adapter is last so static Harmony entry points detach before any
+                // module state is cleared. Tickable modules are driven by the explicit
+                // host/client pipelines built in BuildTickOrders(); the rest are ticked by the
+                // existing _act* stages and only expose the lifecycle here.
+                _world,
+                _cardShelves,
+                _objMoves,
+                _movePreview,
+                _population,
+                _grading,
+                _trades,
+                _tables,
+                _staff,
+                _shopState,
+                _settings,
+                _market,
+                _report,
+                _containers,
+                _tournament,
+                _register,
+                _tv,
+                _npcs,
+                _boxEngine,
+                new Sync.DelegateCoopModule("join-heal", null, null, () => _priceFullPending = true),
+                // Keep static Harmony entry points inside the same lifecycle. This module is
+                // last so reverse-order disposal detaches callbacks before any state is reset.
+                new Sync.DelegateCoopModule("live-hooks", InstallLiveModuleHooks, null, null, ClearLiveModuleHooks),
+            };
+            return new Sync.CoopModuleRegistry(modules);
+        }
+
+        /// <summary>Builds the explicit per-role tick pipelines. The two roles need different
+        /// orders, and several comments in the synchronizers depend on that order (market
+        /// flush before the other client modules; the client digests last), so it is declared
+        /// here rather than inferred from the lifecycle list.</summary>
+        private void BuildTickOrders()
+        {
+            _hostTickOrder = new[]
+            {
+                new Sync.TickEntry(_grading, "mod.grading"),
+                new Sync.TickEntry(_trades, "mod.trades"),
+                new Sync.TickEntry(_tables, "mod.tables"),
+                new Sync.TickEntry(_staff, "mod.staff"),
+                new Sync.TickEntry(_shopState, "mod.shopState"),
+                new Sync.TickEntry(_settings, "mod.settings"),
+                new Sync.TickEntry(_market, "mod.market"),
+                new Sync.TickEntry(_report, "mod.report"),
+                new Sync.TickEntry(_containers, "mod.containers"),
+                new Sync.TickEntry(_tournament, "mod.tournament"),
+                new Sync.TickEntry(_register, "mod.register"),
+                new Sync.TickEntry(_tv, "mod.tv"),
+            };
+            _clientTickOrder = new[]
+            {
+                new Sync.TickEntry(_market, "mod.market"),
+                new Sync.TickEntry(_tv, "mod.tv"),
+                new Sync.TickEntry(_trades, "mod.trades"),
+                new Sync.TickEntry(_containers, "mod.containers"),
+            };
+        }
+
         private void ActivateLiveModuleHooks()
+        {
+            if (_moduleRegistry != null)
+                throw new InvalidOperationException("Cannot activate co-op module hooks twice.");
+            BuildTickOrders();
+            _moduleRegistry = CreateModuleRegistry();
+            try
+            {
+                _moduleRegistry.Start();
+            }
+            catch
+            {
+                // A module Start() fault would otherwise leave a half-started registry
+                // installed and block every retry behind the double-activation guard.
+                DeactivateLiveModuleHooks();
+                throw;
+            }
+        }
+
+        /// <summary>Tears the live registry down without touching transport or world state.
+        /// Failed-start paths use this so a retry cannot inherit installed Harmony hooks or
+        /// trip the double-activation guard.</summary>
+        private void DeactivateLiveModuleHooks()
+        {
+            if (_moduleRegistry == null)
+                return;
+            _moduleRegistry.Dispose();
+            _moduleRegistry = null;
+        }
+
+        /// <summary>Undoes the partial session setup a failed host/join start can leave
+        /// behind: stops any transport, detaches the module hooks, and returns to the idle
+        /// role so the player can retry without restarting.</summary>
+        private void AbortSessionStart(string error)
+        {
+            ErrorLine = error;
+            try
+            {
+                _net?.Stop();
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("transport stop during aborted session start: " + e.Message);
+            }
+            _net = null;
+            DeactivateLiveModuleHooks();
+            Role = CoopRole.None;
+            IsSteamSession = false;
+            GuestBorrowedWorld = false;
+            HostPassword = "";
+            _joinPassword = "";
+        }
+
+        private void InstallLiveModuleHooks()
         {
             Util.GradingInterop.Reset();
             NpcSync.ActivateLive(_npcs);
@@ -1642,6 +1778,19 @@ namespace CardShopCoop
 
         private void ModulesForceResend()
         {
+            if (_moduleRegistry != null)
+            {
+                _moduleRegistry.ForceResend();
+                return;
+            }
+
+            // Process-lifetime fallback (no live registry): mirror the registry's module set
+            // so a joiner still gets a full authoritative baseline.
+            _world.ForceResend();
+            _cardShelves.ForceResend();
+            _objMoves.ForceResend();
+            _movePreview.ForceResend();
+            _population.ForceResend();
             _grading.ForceResend();
             _trades.ForceResend();
             _tables.ForceResend();
@@ -1652,9 +1801,10 @@ namespace CardShopCoop
             _report.ForceResend();
             _containers.ForceResend();
             _tournament.ForceResend();
-            _boxEngine?.RequestFullSnapshot();
             _register.ForceResend();
             _tv.ForceResend();
+            _npcs.ForceResend();
+            _boxEngine.RequestFullSnapshot();
             _priceFullPending = true; // fresh joiner gets the authoritative price table
         }
 
@@ -2072,11 +2222,10 @@ namespace CardShopCoop
             }
             catch (Exception e)
             {
-                ErrorLine = "Could not host: " + e.Message;
-                _net?.Stop();
-                _net = null;
-                Role = CoopRole.None;
-                HostPassword = ""; // nothing is listening; don't leave a stale one behind
+                // Tear the registry down too: leaving it installed would keep the static
+                // Harmony hooks live and make the next StartHosting attempt throw the
+                // double-activation guard, permanently wedging hosting until a restart.
+                AbortSessionStart("Could not host: " + e.Message);
             }
         }
 
@@ -2295,41 +2444,48 @@ namespace CardShopCoop
 
             CoopPlugin.LastJoinIP.Value = ip;
             Role = CoopRole.Client;
-            ActivateLiveModuleHooks();
-            GuestBorrowedWorld = true; // block ALL saves until we're back at the title screen
-            // Sent in our Hello; empty for a plain "Join LAN", non-empty only when an invite
-            // code carried the host's lobby password.
-            _joinPassword = password ?? "";
-            StatusLine = "Connecting to " + ip + "...";
-            var net = new Transport { KeepaliveMessage = new PingMessage() };
-            _net = net;
-            // A code from a host on a non-default port has to win over our own config; a
-            // nonsense value falls back rather than throwing at the socket.
-            int port = (joinPort > 0 && joinPort <= 65535) ? joinPort : CoopPlugin.Port.Value;
-            new Thread(() =>
+            try
             {
-                try
+                ActivateLiveModuleHooks();
+                GuestBorrowedWorld = true; // block ALL saves until we're back at the title screen
+                // Sent in our Hello; empty for a plain "Join LAN", non-empty only when an invite
+                // code carried the host's lobby password.
+                _joinPassword = password ?? "";
+                StatusLine = "Connecting to " + ip + "...";
+                var net = new Transport { KeepaliveMessage = new PingMessage() };
+                _net = net;
+                // A code from a host on a non-default port has to win over our own config; a
+                // nonsense value falls back rather than throwing at the socket.
+                int port = (joinPort > 0 && joinPort <= 65535) ? joinPort : CoopPlugin.Port.Value;
+                new Thread(() =>
                 {
-                    net.StartClient(ip, port);
-                    QueueMainThread("connect-established", () =>
+                    try
                     {
-                        StatusLine = "Connected - requesting world...";
-                        SendHello();
-                    }, true);
-                }
-                catch (Exception e)
+                        net.StartClient(ip, port);
+                        QueueMainThread("connect-established", () =>
+                        {
+                            StatusLine = "Connected - requesting world...";
+                            SendHello();
+                        }, true);
+                    }
+                    catch (Exception e)
+                    {
+                        QueueMainThread("connect-failed", () =>
+                        {
+                            ErrorLine = "Could not connect: " + e.Message;
+                            Shutdown(null);
+                        }, false);
+                    }
+                })
                 {
-                    QueueMainThread("connect-failed", () =>
-                    {
-                        ErrorLine = "Could not connect: " + e.Message;
-                        Shutdown(null);
-                    }, false);
-                }
-            })
+                    IsBackground = true,
+                    Name = "CoopConnect"
+                }.Start();
+            }
+            catch (Exception e)
             {
-                IsBackground = true,
-                Name = "CoopConnect"
-            }.Start();
+                AbortSessionStart("Could not connect: " + e.Message);
+            }
         }
 
         public void Disconnect()
@@ -2904,7 +3060,12 @@ namespace CardShopCoop
             // Harmony callbacks can arrive while transport and world teardown are in progress.
             // Drop all static module entry points first so they cannot touch the old instance
             // state (or a newly loaded world's objects).
-            ClearLiveModuleHooks();
+            bool hadModuleRegistry = _moduleRegistry != null;
+            if (hadModuleRegistry)
+            {
+                _moduleRegistry.Dispose();
+                _moduleRegistry = null;
+            }
             if (_net != null)
             {
                 try
@@ -2985,14 +3146,20 @@ namespace CardShopCoop
             _cardPriceHealDirty = true; // preserve the first post-join price sync
             _cardPriceHealTimer = -2.1f;
             _lastProgressSent = long.MinValue;
-            _world.Reset();
-            _npcs.Reset();
-            _cardShelves.Reset();
-            _objMoves.Reset();
-            _movePreview.Reset();
-            _boxEngine?.Reset();
-            _population.Reset();
-            ModulesReset();
+            if (!hadModuleRegistry)
+            {
+                // No live registry (e.g. quitting from the title screen): fall back to the
+                // per-instance resets. A session that had a registry was already reset by
+                // CoopModuleRegistry.Dispose, so re-resetting here would be redundant.
+                _world.Reset();
+                _npcs.Reset();
+                _cardShelves.Reset();
+                _objMoves.Reset();
+                _movePreview.Reset();
+                _boxEngine?.Reset();
+                _population.Reset();
+                ModulesReset();
+            }
             _lastShopNameSent = null;
             // UNCONDITIONAL PATH: Shutdown runs from OnDestroy and OnApplicationQuit, i.e.
             // on EVERY game exit and every LAN session too. The null-conditional is what

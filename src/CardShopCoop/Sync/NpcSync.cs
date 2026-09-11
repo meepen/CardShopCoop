@@ -25,7 +25,7 @@ namespace CardShopCoop.Sync
     /// are chunked below the 1200-byte Steam unreliable packet limit so a crowded shop can
     /// never silently drop the whole tick.
     /// </summary>
-    public class NpcSync
+    public class NpcSync : ICoopModule
     {
         private const byte KindCustomer = 0;
         private const byte KindWorker = 1;
@@ -87,6 +87,29 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, bool> _workerActive = new Dictionary<int, bool>();
         private readonly Dictionary<int, ExistingCustomer> _existing = new Dictionary<int, ExistingCustomer>();
         private static NpcSync _live;
+
+        public string Name => "npcs";
+
+        public void Start()
+        {
+            ActivateLive(this);
+        }
+
+        public void ResetState() => Reset();
+
+        public void ForceResend()
+        {
+            _sendTimer = SendInterval;
+            _sentNames.Clear();
+            _sentIdentities.Clear();
+        }
+
+        public void Dispose()
+        {
+            if (ReferenceEquals(_live, this))
+                ClearLive();
+            Reset();
+        }
 
         /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
         public static void ClearLive()
