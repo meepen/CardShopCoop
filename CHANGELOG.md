@@ -6,7 +6,7 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 ---
 
 ## 1.2.0
-**Guest furniture selling and box movement now work safely and stay synchronized.**
+**Furniture movement, selling, and synchronization are safer and smoother.**
 
 - Guests can sell boxed furniture, and the host removes the same authoritative furniture for both
   players.
@@ -33,20 +33,14 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
   separate flags that could disagree. This fixes rare cases where a box could stay invisible,
   remain stuck in move mode, or appear owned by the wrong player after a throw, a drop, or a
   disconnect.
-
-Both players must update.
-
----
-
-## 1.1.1
-**Fixes framerate drops for players watching someone move furniture.**
-
 - Remote furniture previews no longer repeatedly scan the whole shop while another player is
-  carrying furniture in placement mode.
+  carrying furniture in placement mode, reducing framerate drops.
 - Preview cleanup now releases temporary materials correctly, preventing repeated move previews
   from gradually increasing memory use.
 - Newly purchased furniture now appears on clients immediately when the host places it for the
   first time, instead of appearing only after the host moves it again.
+- Delivery-box contents now stay synchronized when either player restocks from a box or moves
+  items into one.
 
 Both players must update.
 
