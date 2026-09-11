@@ -46,22 +46,36 @@ namespace CardShopCoop.Net
     {
         private sealed class Route
         {
+            public MsgType Type;
             public MessagePolicy Policy;
             public Action<MessageContext, INetMessage> Handler;
+            // Retry/heal metadata replaces the former per-MsgType switches in CoopCore.
+            // Only the types registered here are retried; a bounded failure calls
+            // Heal so the owning module re-baselines instead of replaying forever.
+            public bool Retryable;
+            public Action Heal;
         }
         private readonly Dictionary<Type, Route> _routes = new Dictionary<Type, Route>();
+        private readonly Dictionary<MsgType, Route> _byType = new Dictionary<MsgType, Route>();
 
         public MessageRouter Register<T>(Action<MessageContext, T> handler,
-            MessagePolicy policy = MessagePolicy.Any) where T : INetMessage
+            MessagePolicy policy = MessagePolicy.Any, bool retryable = false, Action heal = null) where T : INetMessage
         {
             if (handler == null)
                 throw new ArgumentNullException("handler");
             var metadata = (NetworkMessageAttribute)Attribute.GetCustomAttribute(typeof(T), typeof(NetworkMessageAttribute));
-            _routes[typeof(T)] = new Route
+            if (metadata == null)
+                throw new InvalidOperationException(typeof(T).Name + " is missing [NetworkMessage]");
+            var route = new Route
             {
-                Policy = policy == MessagePolicy.Any && metadata != null ? metadata.Policy : policy,
-                Handler = (context, message) => handler(context, (T)message)
+                Type = metadata.Type,
+                Policy = policy == MessagePolicy.Any ? metadata.Policy : policy,
+                Handler = (context, message) => handler(context, (T)message),
+                Retryable = retryable,
+                Heal = heal
             };
+            _routes[typeof(T)] = route;
+            _byType[route.Type] = route;
             return this;
         }
 
@@ -76,6 +90,19 @@ namespace CardShopCoop.Net
                 return true;
             route.Handler(context, message);
             return true;
+        }
+
+        /// <summary>True when a failed dispatch of this type should be retried.</summary>
+        public bool IsRetryable(MsgType type)
+        {
+            return _byType.TryGetValue(type, out var route) && route.Retryable;
+        }
+
+        /// <summary>Ask the owning module to re-baseline after a dropped message.</summary>
+        public void Heal(MsgType type)
+        {
+            if (_byType.TryGetValue(type, out var route))
+                route.Heal?.Invoke();
         }
 
         private static bool Allowed(MessagePolicy policy, MessageContext context)
