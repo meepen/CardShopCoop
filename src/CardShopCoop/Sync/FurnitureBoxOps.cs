@@ -225,8 +225,6 @@ namespace CardShopCoop.Sync
 
         private static void HostApplyRemoved(FurnitureBoxOpMessage msg)
         {
-            if (BoxShared.RemovalFlooded(0, "furniture-box"))
-                return;
             var engine = Engine;
             if (engine == null || !engine.TryGetHostBox(msg.Id, out var boxBase)
                 || !(boxBase is InteractablePackagingBox_Shelf box)

@@ -720,7 +720,14 @@ namespace CardShopCoop.Sync
                     DestroyClientBox(box);
                     _clientById.Remove(w.Id);
                     _clientIdOf.Remove(box);
-                    continue;
+                    if (w.Possession == BoxPossession.Removed)
+                        continue;
+                    box = family.Spawn(w);
+                    if (box == null)
+                        continue;
+                    _clientById[w.Id] = box;
+                    _clientIdOf[box] = w.Id;
+                    (spawned ?? (spawned = new List<InteractablePackagingBox>())).Add(box);
                 }
                 if (w.Possession == BoxPossession.Removed)
                 {

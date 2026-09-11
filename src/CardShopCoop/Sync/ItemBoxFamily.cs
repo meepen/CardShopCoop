@@ -103,6 +103,8 @@ namespace CardShopCoop.Sync
             var b = box as InteractablePackagingBox_Item;
             if (b == null)
                 return;
+            if (w.Possession != BoxPossession.Removed)
+                ApplyContent(b, w);
             switch (w.Possession)
             {
                 case BoxPossession.Held:
@@ -139,6 +141,59 @@ namespace CardShopCoop.Sync
                         b.m_Rigidbody.WakeUp();
                     }
                     break;
+            }
+        }
+
+        /// <summary>Apply authoritative item-box contents in place. Closed/stored boxes only
+        /// need their deferred count updated; open boxes need their pooled item instances
+        /// rebuilt so the visible contents and compartment count agree.</summary>
+        private static void ApplyContent(InteractablePackagingBox_Item box, in BoxWire w)
+        {
+            if (!EnumMap.TryFromWire(EnumKind.ItemType, w.ItemType, out int localType))
+                return;
+            var comp = box.m_ItemCompartment;
+            if (comp == null)
+                return;
+            var type = (EItemType)localType;
+            int count = Mathf.Max(0, w.ItemCount);
+            bool open = BoxVisuals.ReadOpen(box);
+            bool typeChanged = comp.GetItemType() != type;
+            bool countChanged = comp.GetItemCount() != count;
+            if (!typeChanged && !countChanged)
+                return;
+
+            try
+            {
+                if (open)
+                {
+                    // An open compartment owns actual pooled Item objects. Remove those
+                    // objects through the game's API before changing the type or respawning,
+                    // otherwise the list count and visible stack diverge.
+                    while (comp.GetItemCount() > 0)
+                    {
+                        var item = comp.TakeItemToHand();
+                        if (item == null)
+                            break;
+                        item.DisableItem();
+                    }
+                }
+                box.SetItemType(type);
+                comp.SetCompartmentItemType(type);
+                comp.CalculatePositionList();
+                if (open)
+                {
+                    comp.SpawnItem(count, spawnFromFront: false);
+                    BoxFields.ItemAmountToSpawn?.SetValue(box, count);
+                }
+                else
+                {
+                    comp.PreSpawnItemUpdate(count);
+                    BoxFields.ItemAmountToSpawn?.SetValue(box, count);
+                }
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("ItemBoxFamily content apply: " + e.Message);
             }
         }
 
