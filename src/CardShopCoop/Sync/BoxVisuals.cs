@@ -79,7 +79,12 @@ namespace CardShopCoop.Sync
                         break;
                 }
             }
-            catch (System.Exception e) { Swallow.Log(e); }
+            catch (System.Exception e)
+            {
+                Swallow.Log(e);
+                Applied.Remove(box);
+                return;
+            }
             Applied[box] = open;
         }
 

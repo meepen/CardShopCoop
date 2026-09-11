@@ -279,7 +279,10 @@ namespace CardShopCoop
         // with a keepalive so a standing-still player still refreshes.
         private Vector3 _lastSentPos;
         private float _lastSentCamYaw;
+        private Vector3 _lastSentCamPos;
+        private Quaternion _lastSentCamRot;
         private byte _lastSentHold;
+        private int _lastSentHoldSig;
         private bool _hasSentState;
         private float _stateKeepalive;
 
@@ -303,7 +306,16 @@ namespace CardShopCoop
         private long _diagSent;
         private long _diagRecvStates;
         private float _diagTimer = -7.3f;
-        private float _errLogCooldown;
+        private readonly Dictionary<string, double> _errLogNextAt = new Dictionary<string, double>();
+
+        private void LogPipelineError(string tag, Exception e)
+        {
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (_errLogNextAt.TryGetValue(tag, out double nextAt) && now < nextAt)
+                return;
+            _errLogNextAt[tag] = now + 5.0;
+            CoopPlugin.Log.LogError($"[{tag}] {e}");
+        }
 
         private void Guarded(string stage, Action action)
         {
@@ -313,11 +325,7 @@ namespace CardShopCoop
             }
             catch (Exception e)
             {
-                if (_errLogCooldown <= 0f)
-                {
-                    _errLogCooldown = 5f;
-                    CoopPlugin.Log.LogError($"[{stage}] {e}");
-                }
+                LogPipelineError(stage, e);
             }
         }
 
@@ -1575,12 +1583,10 @@ namespace CardShopCoop
             _clientWorldArrived = false;
             CoopPlugin.Log.LogInfo($"Join world load completed in {elapsed:F2}s; resuming co-op sync");
 
-            // The join-time full BoxSnapshot is emitted the instant the transport connects -
-            // during the world transfer, before this world exists - and the receive guard drops
-            // it. The box engine has no periodic full scan to self-heal, so ask the host for a
-            // fresh complete snapshot now that this guest can actually apply it.
+            // The join-time authoritative snapshots are emitted during world transfer, before
+            // this world exists, so ask the host to reconverge all state now that it can apply it.
             if (Role == CoopRole.Client && _net != null)
-                Send(1, new BoxResyncRequestMessage());
+                Send(1, new JoinResyncRequestMessage());
 
             // A shop name that arrived while loading may have been painted onto a sign
             // that the reload then rebuilt. Re-stamp it now that the real world is ready.
@@ -1645,11 +1651,7 @@ namespace CardShopCoop
             }
             catch (Exception e)
             {
-                if (_errLogCooldown <= 0f)
-                {
-                    _errLogCooldown = 5f;
-                    CoopPlugin.Log.LogError($"[{entry.Probe}] {e}");
-                }
+                LogPipelineError(entry.Probe, e);
             }
             Util.PerfProbe.End(entry.Probe, t);
         }
@@ -2015,13 +2017,19 @@ namespace CardShopCoop
                 : (Camera.main != null ? Camera.main.transform.eulerAngles.y : playerTf.eulerAngles.y);
             Transform camera = _playerCamTf != null ? _playerCamTf : Camera.main != null ? Camera.main.transform : null;
             byte hold = ComputeHoldState();
+            Vector3 cameraPos = camera != null ? camera.position : pos;
+            Quaternion cameraRot = camera != null ? camera.rotation : Quaternion.Euler(0f, yaw, 0f);
+            int holdSig = HoldPayloadSignature();
 
             // Change-gate: only send when pose/camera/hold actually moved, plus a slow
             // keepalive so a standing-still player still refreshes the far side.
             bool changed = !_hasSentState
                 || (pos - _lastSentPos).sqrMagnitude > 0.0004f   // > 2 cm
                 || Mathf.Abs(Mathf.DeltaAngle(yaw, _lastSentCamYaw)) > 1f
-                || hold != _lastSentHold;
+                || hold != _lastSentHold
+                || (cameraPos - _lastSentCamPos).sqrMagnitude > 0.0004f
+                || Quaternion.Angle(cameraRot, _lastSentCamRot) > 0.5f
+                || holdSig != _lastSentHoldSig;
             if (!changed && _stateKeepalive < 5f)
             {
                 _stateTimer = 0f; // consumed this interval
@@ -2040,14 +2048,17 @@ namespace CardShopCoop
             _hasLastPos = true;
             _lastSentPos = pos;
             _lastSentCamYaw = yaw;
+            _lastSentCamPos = cameraPos;
+            _lastSentCamRot = cameraRot;
             _lastSentHold = hold;
+            _lastSentHoldSig = holdSig;
             _hasSentState = true;
             BroadcastTransient(new PlayerStateMessage
             {
                 Position = pos,
                 Yaw = yaw,
-                CameraPosition = camera != null ? camera.position : pos,
-                CameraRotation = camera != null ? camera.rotation : Quaternion.Euler(0f, yaw, 0f),
+                CameraPosition = cameraPos,
+                CameraRotation = cameraRot,
                 Speed = speed,
                 Hold = hold,
                 HoldTypes = hold == 3 ? null : new List<int>(_holdTypesBuf),
@@ -2328,6 +2339,33 @@ namespace CardShopCoop
             }
             catch (System.Exception e) { Swallow.Log(e); }
             return 0;
+        }
+
+        private int HoldPayloadSignature()
+        {
+            unchecked
+            {
+                int hash = 17;
+                hash = hash * 31 + _holdTypesBuf.Count;
+                for (int i = 0; i < _holdTypesBuf.Count; i++)
+                    hash = hash * 31 + _holdTypesBuf[i];
+                hash = hash * 31 + _holdCardsBuf.Count;
+                for (int i = 0; i < _holdCardsBuf.Count; i++)
+                {
+                    CardData card = _holdCardsBuf[i];
+                    if (card == null)
+                    {
+                        hash = hash * 31;
+                        continue;
+                    }
+                    hash = hash * 31 + (int)card.monsterType;
+                    hash = hash * 31 + (int)card.expansionType;
+                    hash = hash * 31 + (card.isFoil ? 1 : 0);
+                    hash = hash * 31 + card.cardGrade;
+                    hash = hash * 31 + card.gradedCardIndex;
+                }
+                return hash;
+            }
         }
 
         private bool IsAlive(FieldInfo fi)
@@ -3686,8 +3724,6 @@ namespace CardShopCoop
                 return;
 
             float dt = Time.deltaTime;
-            if (_errLogCooldown > 0f)
-                _errLogCooldown -= dt;
 
             // Every stage is individually armored: one failing subsystem must degrade
             // that feature only, never kill position sync for the whole session.
@@ -5070,11 +5106,13 @@ namespace CardShopCoop
                             _boxEngine.ClientApplySnapshot(boxSnap);
                         break;
                     }
-                case MsgType.BoxResyncRequest:
+                case MsgType.JoinResyncRequest:
                     {
                         if (Role != CoopRole.Host || !InGameLevel())
                             break;
-                        _boxEngine?.RequestFullSnapshot();
+                        // The guest asks after its world exists; re-emit every authoritative
+                        // baseline, not just boxes that happen to have a periodic scan.
+                        ModulesForceResend();
                         break;
                     }
                 case MsgType.BoxCollect:

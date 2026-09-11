@@ -43,14 +43,32 @@ namespace CardShopCoop.Sync
         {
             ThrowIfDisposed();
             for (int i = 0; i < _modules.Count; i++)
-                _modules[i].ResetState();
+            {
+                try
+                {
+                    _modules[i].ResetState();
+                }
+                catch (Exception e)
+                {
+                    CoopPlugin.Log.LogError("co-op module reset failed (" + _modules[i].Name + "): " + e);
+                }
+            }
         }
 
         public void ForceResend()
         {
             ThrowIfDisposed();
             for (int i = 0; i < _modules.Count; i++)
-                _modules[i].ForceResend();
+            {
+                try
+                {
+                    _modules[i].ForceResend();
+                }
+                catch (Exception e)
+                {
+                    CoopPlugin.Log.LogError("co-op module resend failed (" + _modules[i].Name + "): " + e);
+                }
+            }
         }
 
         public void Dispose()

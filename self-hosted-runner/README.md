@@ -58,8 +58,8 @@ Update `CardShopCoopVersion` in `../Directory.Build.props`, commit it, and push 
 tag:
 
 ```bash
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 The tag must match the version exactly. GitHub Actions builds and publishes the package as a

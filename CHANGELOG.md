@@ -8,6 +8,9 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 ## 1.2.0
 **Boxes and furniture now stay in sync through pickups, throws, placement, and joining.**
 
+- Joining players now see market and price values re-sync after the world finishes loading,
+  instead of briefly seeing stale values.
+
 - Guests can sell boxed furniture, and the host removes the same authoritative furniture for both
   players.
 - Guests can box up placed furniture without creating a guest-only copy; the host owns that box

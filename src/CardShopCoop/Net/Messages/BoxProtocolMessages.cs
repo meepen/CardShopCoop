@@ -39,18 +39,17 @@ namespace CardShopCoop.Net.Messages
         }
     }
 
-    /// <summary>Client -> host: the guest finished loading the borrowed world and needs a
-    /// complete box snapshot. The join-time full snapshot is emitted the instant the transport
-    /// connects (during the world transfer), so the guest cannot apply it; the box engine has
-    /// no periodic full scan to self-heal, so the guest asks once it can actually receive it.</summary>
-    [NetworkMessage(MsgType.BoxResyncRequest, Policy = MessagePolicy.HostOnlyInGame)]
-    public sealed class BoxResyncRequestMessage : INetMessage
+    /// <summary>Client -> host: the guest finished loading the borrowed world and needs
+    /// authoritative state resent. Join-time snapshots are emitted during world transfer, before
+    /// the guest can apply them.</summary>
+    [NetworkMessage(MsgType.JoinResyncRequest, Policy = MessagePolicy.HostOnlyInGame)]
+    public sealed class JoinResyncRequestMessage : INetMessage
     {
         public MsgType Type
         {
             get
             {
-                return MsgType.BoxResyncRequest;
+                return MsgType.JoinResyncRequest;
             }
         }
     }
