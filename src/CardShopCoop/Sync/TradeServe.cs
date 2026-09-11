@@ -326,7 +326,7 @@ namespace CardShopCoop.Sync
                             }
                         }
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
                 return true;
             }
@@ -607,7 +607,7 @@ namespace CardShopCoop.Sync
                         name = md.GetName();
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             // The MODDED fallback must NOT be monsterType.ToString(): modded cards are small
             // ordinals, so 1..122 print a colliding VANILLA member name - a confidently wrong
             // card name in the trade prompt. Expansion#N is honest across the whole range.
@@ -638,7 +638,7 @@ namespace CardShopCoop.Sync
             {
                 return GameInstance.GetPriceString(p);
             }
-            catch { return "$" + p.ToString("F2"); }
+            catch (System.Exception e) { Swallow.Log(e); return "$" + p.ToString("F2"); }
         }
 
         private static int CardHash(CardData c)
@@ -869,7 +869,7 @@ namespace CardShopCoop.Sync
                 {
                     cm.m_IsPlayerTrading = false;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
         }
 
@@ -884,7 +884,7 @@ namespace CardShopCoop.Sync
                 hostBusy = cm != null && (cm.m_IsPlayerTrading
                     || (cm.m_CustomerTradeCardScreen != null && cm.m_CustomerTradeCardScreen.IsScreenOpened()));
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             var msg = new TradeStateMessage
             {
                 HostBusy = hostBusy,
@@ -1075,7 +1075,7 @@ namespace CardShopCoop.Sync
                 {
                     cm.m_IsPlayerTrading = false;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
 
             if (accepted)
@@ -1126,13 +1126,13 @@ namespace CardShopCoop.Sync
                 if (cust.m_InteractCollider != null)
                     cust.m_InteractCollider.SetActive(false);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             FiHasTraded?.SetValue(cust, true);
             try
             {
                 counter?.CustomerFinishTradingCard();
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             FiTradeCounter?.SetValue(cust, null);
             try
             {
@@ -1437,7 +1437,7 @@ namespace CardShopCoop.Sync
                     {
                         screen.CloseScreen();
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     // S2: CloseScreen -> OnCloseScreen -> m_CurrentCustomer.OnPressStopInteract
                     // runs BEFORE base.OnCloseScreen (which is what actually hides the screen -
                     // UIScreenBase.OnCloseScreen sets m_IsScreenOpen=false + m_ScreenGroup

@@ -845,7 +845,7 @@ namespace CardShopCoop.Sync
                 {
                     box.OnDestroyed();
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 finally { BoxShared.ApplyingRemote = false; }
                 SendBoxTakeResult(connId, storageId, 0, s.GetBoxStoredCount());
                 return;
@@ -1040,7 +1040,7 @@ namespace CardShopCoop.Sync
                             {
                                 ItemSpawnManager.DisableItem(it);
                             }
-                            catch { }
+                            catch (System.Exception caught) { Swallow.Log(caught); }
                     }
                 }
                 FiPoIsProcessing?.SetValue(p, m.Processing); // drives the Collect tooltip
@@ -1122,7 +1122,7 @@ namespace CardShopCoop.Sync
                     {
                         ItemSpawnManager.DisableItem(last);
                     }
-                    catch { }
+                    catch (System.Exception caught) { Swallow.Log(caught); }
                 }
                 guard = 12;
                 // keep HasEnoughSlot(): it is the m_PosList bound AddItem itself indexes with
@@ -1155,7 +1155,7 @@ namespace CardShopCoop.Sync
                 {
                     FiClItemAmount?.SetValue(c, c.GetStoredItemList()?.Count ?? 0);
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 double now = Time.realtimeSinceStartupAsDouble;
                 double last;
                 if (!_lastCleanserWarn.TryGetValue(idx, out last) || now - last > 10.0)
@@ -1450,7 +1450,7 @@ namespace CardShopCoop.Sync
                 {
                     ItemSpawnManager.DisableItem(item);
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 return false;
             }
             var self = Instance;
@@ -1465,7 +1465,7 @@ namespace CardShopCoop.Sync
                 {
                     itemType = (int)item.GetItemType();
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 self.SendOp?.Invoke(new ContainerOpMessage
                 {
                     Op = OpPackInsert,
@@ -1492,7 +1492,7 @@ namespace CardShopCoop.Sync
             {
                 ItemSpawnManager.DisableItem(item);
             }
-            catch { }
+            catch (System.Exception caught) { Swallow.Log(caught); }
             return false;
         }
 
@@ -1588,7 +1588,7 @@ namespace CardShopCoop.Sync
                     || __instance.GetBoxStoredCount() >= max)
                     return true;
             }
-            catch { return true; }
+            catch (System.Exception e) { Swallow.Log(e); return true; }
 
             if (!engine.TryGetClientId(packagingBox, out ushort boxId))
             {
@@ -1696,7 +1696,7 @@ namespace CardShopCoop.Sync
                 {
                     fill = item.GetContentFill();
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 self.Touch(KindCleanser, idx);
                 self.SendOp?.Invoke(new ContainerOpMessage
                 {
@@ -1709,7 +1709,7 @@ namespace CardShopCoop.Sync
             {
                 ItemSpawnManager.DisableItem(item);
             }
-            catch { }
+            catch (System.Exception caught) { Swallow.Log(caught); }
             return false;
         }
 

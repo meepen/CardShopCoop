@@ -35,7 +35,7 @@ namespace CardShopCoop.Sync
             {
                 return BoxFields.BoxedObject?.GetValue(box) as InteractableObject;
             }
-            catch { return null; }
+            catch (System.Exception e) { Swallow.Log(e); return null; }
         }
 
         private static ShelfManager _sm;
@@ -160,7 +160,7 @@ namespace CardShopCoop.Sync
                 if (!obj.GetIsBoxedUp())
                     obj.BoxUpObject(holdBox: false);
             }
-            catch { return null; }
+            catch (System.Exception e) { Swallow.Log(e); return null; }
             var box = obj.GetPackagingBoxShelf();
             BoxVisuals.EnsureOpenState(box, false);
             return box;
@@ -175,7 +175,7 @@ namespace CardShopCoop.Sync
             {
                 box.OnDestroyed();
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         public void ApplyState(InteractablePackagingBox box, in BoxWire w, bool isOwner)
@@ -185,9 +185,11 @@ namespace CardShopCoop.Sync
             switch (w.Possession)
             {
                 case BoxPossession.Held:
+                    BoxLifecycle.Apply(box, w.Possession);
                     SetVisible(box, false);
                     break;
                 case BoxPossession.Placing:
+                    BoxLifecycle.Apply(box, w.Possession);
                     if (w.Unpack)
                     {
                         // The owner is placing the boxed furniture object; vanilla has hidden

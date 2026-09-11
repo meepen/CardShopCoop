@@ -8,7 +8,6 @@ using System.Threading;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Messages;
 using CardShopCoop.Sync;
-using Newtonsoft.Json;
 // NO `using Steamworks;` HERE, AND NEVER AGAIN. CoopCore is an always-loaded type: a
 // single Steamworks token in one of its fields or method bodies makes the whole class
 // (and therefore the whole mod) fail to load on the Game Pass build, which ships no
@@ -161,6 +160,8 @@ namespace CardShopCoop
         private readonly Dictionary<int, PlayerModelEntry> _playerModels = new Dictionary<int, PlayerModelEntry>();
         private PlayerModelEntry _localPlayerModel;
         private bool _localPlayerModelReady;
+        private bool _localModelAuto;
+        private float _localModelAutoRetry;
         private Transform _localModelAppliedRoot;
         private bool _characterPreviewActive;
         private PlayerModelEntry _lastCommittedPlayerModel;
@@ -443,7 +444,6 @@ namespace CardShopCoop
             if (Util.PlayerModelStore.TryLoad(out var savedModel))
             {
                 _localPlayerModel = savedModel;
-                _localPlayerModelReady = true;
                 CoopPlugin.Log.LogInfo("loaded local co-op player appearance");
             }
             _messageRouter.Register<PingMessage>((context, message) =>
@@ -534,7 +534,7 @@ namespace CardShopCoop
                     }
                     return ReferenceEquals(_heldBoxA, box) || ReferenceEquals(_heldBoxB, box);
                 }
-                catch { return false; }
+                catch (System.Exception e) { Swallow.Log(e); return false; }
             };
             BoxShared.LocalBoxDestroyed = box =>
             {
@@ -544,38 +544,6 @@ namespace CardShopCoop
                     _boxEngine?.ClientNotifyLocalDestroyed(box);
                 else if (Role == CoopRole.Host)
                     _boxEngine?.HostNotifyLocalDestroyed(box);
-            };
-            PopulationSync.OnClientStructureChanged = kind =>
-            {
-                if (Role != CoopRole.Client)
-                    return;
-                // The client's placed-object roster just changed (a shelf was removed or
-                // spawned). Every index-keyed mirror's baseline is now keyed against stale
-                // indexes, so read the structure back fresh instead of diffing against
-                // garbage. Repaired objects start with loader defaults; those defaults must
-                // not be reported as guest edits through any index-based mirror.
-                _world.Reset();
-                _objMoves.Reset();
-                if (kind == 2 || kind == 3 || kind == 14)
-                    _cardShelves.InvalidateBaseline();
-                // container stations (card storage, cleansers, pack openers, box storage,
-                // donation boxes) and play tables are index-keyed too; their per-index
-                // mirrors/caches go stale the moment a machine/table of that kind shifts.
-                if (kind >= 9 && kind <= 13)
-                {
-                    _containers.Reset();
-                    _containers.ForceResend();
-                }
-                if (kind == 6)
-                {
-                    _tables.Reset();
-                    _tables.ForceResend();
-                }
-                // Population reconciliation removes/inserts list elements, so every
-                // index-keyed mirror needs an immediate authoritative snapshot rather than
-                // waiting for its normal heal interval.
-                _boxEngine?.ForceNextTick();
-                _register.ForceResend();
             };
             _actCardPriceRetry = CardPriceRetryTick;
             _actFrameCardWork = FlushFrameCardWork;
@@ -604,7 +572,14 @@ namespace CardShopCoop
                     _boxEngine.HostTick(_dt, _syncActive);
                 else if (Role == CoopRole.Client)
                     _boxEngine.ClientTick(_dt, _syncActive && !ClientPreloadHold);
+                // Push motion is symmetric on both roles: the local player's physical push is
+                // pruned then streamed (PushTick), and the smoothed followers (arc + dead-reckon
+                // pushed boxes) advance exactly once per frame here for whichever role is running
+                // (moved out of the client-only digest tick).
+                _pushProbe?.Tick(_dt);
+                _boxEngine.PushTick(_dt, _syncActive);
                 BoxPlacement.TickVanillaPlacement(_dt);
+                BoxPlacement.TickRemoteMotions(_dt);
             };
             _actNpcPuppets = () => _npcs.TickPuppets(_dt, InGameLevel());
             _actNpcSweep = NpcSweepTick;
@@ -659,7 +634,7 @@ namespace CardShopCoop
                     }
                     return ReferenceEquals(_heldBoxB, box);
                 }
-                catch { return false; }
+                catch (System.Exception e) { Swallow.Log(e); return false; }
             };
 
             _boxEngine = new BoxEngine(new IBoxFamily[]
@@ -677,7 +652,25 @@ namespace CardShopCoop
                 {
                     return FiHoldBox?.GetValue(_playerIpc) as InteractablePackagingBox;
                 }
-                catch { return null; }
+                catch (System.Exception e) { Swallow.Log(e); return null; }
+            };
+            _boxEngine.LocalPushed = () => _pushProbe != null ? _pushProbe.Pushed : null;
+            // Client -> host: one transient push-motion frame for a locally pushed box.
+            _boxEngine.SendMotion = msg =>
+            {
+                if (_net != null)
+                    _net.SendTransient(1, msg);
+            };
+            // Host -> all except the given conn id (-1 = all): relay the pushed box's motion so
+            // every non-driver peer smooths it. The transient lane is safe: a lost frame is
+            // replaced by the next one.
+            _boxEngine.RelayMotion = (msg, exclude) =>
+            {
+                if (Role != CoopRole.Host || _net == null)
+                    return;
+                foreach (int cid in _net.ConnIds())
+                    if (cid != exclude)
+                        _net.SendTransient(cid, msg);
             };
             CardBoxFamily.IsLocallyCarried = box =>
             {
@@ -693,7 +686,7 @@ namespace CardShopCoop
                     }
                     return ReferenceEquals(_heldBoxC, box) || ReferenceEquals(_heldBoxB, box);
                 }
-                catch { return false; }
+                catch (System.Exception e) { Swallow.Log(e); return false; }
             };
             CardBoxOps.IsLocallyCarried = CardBoxFamily.IsLocallyCarried;
             CardBoxOps.SendCollect = msg => Send(1, msg);
@@ -788,7 +781,7 @@ namespace CardShopCoop
             {
                 EnumLendState();
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         public string HostPassword = "";        // required from joiners when non-empty
@@ -1157,6 +1150,7 @@ namespace CardShopCoop
         public void CommitLocalCustomization()
         {
             EnsureLocalPlayerModel();
+            _localModelAuto = false;
             RecordLocalModelChange();
             var custom = GetLocalCustomization();
             _localPlayerModel = _avatars.CaptureLocalModel(custom, _localPlayerModel.Female, _localPlayerModel.ModelIndex);
@@ -1170,6 +1164,7 @@ namespace CardShopCoop
         public bool UndoPlayerModel()
         {
             EnsureLocalPlayerModel();
+            _localModelAuto = false;
             if (_playerModelUndo.Count == 0)
                 return false;
             PushHistory(_playerModelRedo, _lastCommittedPlayerModel ?? _localPlayerModel);
@@ -1187,6 +1182,7 @@ namespace CardShopCoop
         public bool RedoPlayerModel()
         {
             EnsureLocalPlayerModel();
+            _localModelAuto = false;
             if (_playerModelRedo.Count == 0)
                 return false;
             PushHistory(_playerModelUndo, _lastCommittedPlayerModel ?? _localPlayerModel);
@@ -1229,15 +1225,14 @@ namespace CardShopCoop
                 }
             if (preset == null)
                 return;
+            var entry = AvatarManager.ModelFromPreset(preset);
+            if (entry == null)
+                return;
             RecordLocalModelChange();
-            bool female = (preset.CharacterName ?? "").StartsWith("Female", StringComparison.OrdinalIgnoreCase);
-            int prefixLength = female ? 6 : 4;
-            int index = 0;
-            if (preset.CharacterName.Length > prefixLength)
-                int.TryParse(preset.CharacterName.Substring(prefixLength), out index);
-            _localPlayerModel.Female = female;
-            _localPlayerModel.ModelIndex = Mathf.Max(0, index);
-            _localPlayerModel.CustomizationJson = JsonConvert.SerializeObject(preset);
+            _localModelAuto = false;
+            _localPlayerModel.Female = entry.Female;
+            _localPlayerModel.ModelIndex = entry.ModelIndex;
+            _localPlayerModel.CustomizationJson = entry.CustomizationJson;
             _localModelAppliedRoot = null;
             GetLocalCustomization();
             _lastCommittedPlayerModel = ClonePlayerModel(_localPlayerModel);
@@ -1291,6 +1286,7 @@ namespace CardShopCoop
         public void SetLocalModelSlider(string propertyName, float value)
         {
             EnsureLocalPlayerModel();
+            _localModelAuto = false;
             RecordLocalModelChange();
             if (!_avatars.SetBlendshape(GetLocalCustomization(), propertyName, value))
                 return;
@@ -1310,7 +1306,21 @@ namespace CardShopCoop
             _localPlayerModel.Female = female;
             _localPlayerModel.ModelIndex = Mathf.Max(0, modelIndex);
             if (genderChanged)
-                _localPlayerModel.CustomizationJson = null;
+            {
+                // A new gender must never start nude: use a random clothed preset of that
+                // gender, or fall back to the initialized default preset.
+                var preset = _avatars.TryCreateRandomPresetModel(female);
+                if (preset != null)
+                {
+                    _localPlayerModel.ModelIndex = preset.ModelIndex;
+                    _localPlayerModel.CustomizationJson = preset.CustomizationJson;
+                }
+                else
+                {
+                    _localPlayerModel.CustomizationJson = null;
+                }
+            }
+            _localModelAuto = false;
             _avatars.ApplyLocalModel(GetLocalCustomization(), _localPlayerModel);
             var editor = _avatars.GetEditorCustomization(_localPlayerModel.Female);
             if (editor != null)
@@ -1321,14 +1331,68 @@ namespace CardShopCoop
             SubmitLocalPlayerModel();
         }
 
+        /// <summary>Live NSFW toggle. Disabling it re-dresses a nude local model and rebuilds
+        /// every remote avatar so the filter applies immediately.</summary>
+        public void SetNsfwAllowed(bool allowed)
+        {
+            if (CoopPlugin.AllowNsfw.Value == allowed)
+                return;
+            CoopPlugin.AllowNsfw.Value = allowed;
+            CoopPlugin.Log.LogInfo("NSFW appearances " + (allowed ? "allowed" : "blocked"));
+            EnsureLocalPlayerModel();
+            if (!allowed && _localPlayerModel != null && AvatarManager.IsNude(_localPlayerModel))
+            {
+                var preset = _avatars.TryCreateRandomPresetModel(_localPlayerModel.Female);
+                if (preset != null)
+                {
+                    RecordLocalModelChange();
+                    _localPlayerModel = preset;
+                    _localModelAuto = false;
+                    _localModelAppliedRoot = null;
+                    _lastCommittedPlayerModel = ClonePlayerModel(_localPlayerModel);
+                    QueueLocalModelSave();
+                    SubmitLocalPlayerModel();
+                }
+                else
+                {
+                    _localModelAuto = true; // retry once preset data is available
+                }
+            }
+            _avatars.RefreshRemoteAvatars();
+            PlayerModelGeneration++;
+        }
+
         private void EnsureLocalPlayerModel()
         {
             if (!_localPlayerModelReady)
             {
-                if (!Util.PlayerModelStore.TryLoad(out _localPlayerModel))
-                    _localPlayerModel = _avatars.CaptureLocalModel(_playerTf);
+                bool loaded = _localPlayerModel != null || Util.PlayerModelStore.TryLoad(out _localPlayerModel);
                 _localPlayerModelReady = true;
+                if (!loaded)
+                {
+                    // A vanilla character can exist before the co-op model store has ever
+                    // been written. Capture it before falling back to a generated preset, or
+                    // first-run co-op would silently randomize an already dressed player.
+                    _localPlayerModel = _playerTf != null
+                        ? _avatars.CaptureLocalModel(_playerTf)
+                        : null;
+                    if (_localPlayerModel != null)
+                        _localModelAuto = NeedsAutoRepair(_localPlayerModel);
+                    else
+                    {
+                        _localPlayerModel = _avatars.CreateDefaultModel();
+                        _localModelAuto = true;
+                    }
+                }
+                else
+                {
+                    _localModelAuto = NeedsAutoRepair(_localPlayerModel);
+                }
             }
+
+            if (_localModelAuto)
+                TryUpgradeAutoModel();
+
             var editor = _avatars.GetEditorCustomization(_localPlayerModel.Female);
             if (editor != null && _localModelAppliedRoot != editor.transform)
             {
@@ -1346,6 +1410,40 @@ namespace CardShopCoop
             }
             if (_lastCommittedPlayerModel == null)
                 _lastCommittedPlayerModel = ClonePlayerModel(_localPlayerModel);
+        }
+
+        /// <summary>A model needs a random clothed preset when it has no saved appearance yet,
+        /// or when it is nude while NSFW is disabled. Kept false once the player makes an
+        /// explicit wardrobe choice.</summary>
+        private static bool NeedsAutoRepair(PlayerModelEntry model)
+        {
+            if (model == null)
+                return true;
+            if (string.IsNullOrEmpty(model.CustomizationJson))
+                return true;
+            return !CoopPlugin.AllowNsfw.Value && AvatarManager.IsNude(model);
+        }
+
+        /// <summary>Assigns a random clothed preset of the model's current gender. Does
+        /// nothing until the game's preset data is available, and is retried later.</summary>
+        private void TryUpgradeAutoModel()
+        {
+            if (_localPlayerModel == null)
+            {
+                _localPlayerModel = _avatars.CreateDefaultModel();
+                return;
+            }
+            var preset = _avatars.TryCreateRandomPresetModel(_localPlayerModel.Female);
+            if (preset == null)
+                return;
+            _localPlayerModel = preset;
+            _localModelAuto = false;
+            _localModelAppliedRoot = null;
+            _lastCommittedPlayerModel = ClonePlayerModel(_localPlayerModel);
+            PlayerModelGeneration++;
+            QueueLocalModelSave();
+            SubmitLocalPlayerModel();
+            CoopPlugin.Log.LogInfo($"default appearance assigned: {(preset.Female ? "female" : "male")} model {preset.ModelIndex}");
         }
 
         private void QueueLocalModelSave()
@@ -1432,6 +1530,7 @@ namespace CardShopCoop
                 {
                     _localPlayerModel = ClonePlayerModel(entry);
                     _localPlayerModelReady = true;
+                    _localModelAuto = false;
                     continue;
                 }
                 int avatarId = entry.Id == 0 ? 1 : 1000 + entry.Id;
@@ -1476,6 +1575,13 @@ namespace CardShopCoop
             _clientWorldArrived = false;
             CoopPlugin.Log.LogInfo($"Join world load completed in {elapsed:F2}s; resuming co-op sync");
 
+            // The join-time full BoxSnapshot is emitted the instant the transport connects -
+            // during the world transfer, before this world exists - and the receive guard drops
+            // it. The box engine has no periodic full scan to self-heal, so ask the host for a
+            // fresh complete snapshot now that this guest can actually apply it.
+            if (Role == CoopRole.Client && _net != null)
+                Send(1, new BoxResyncRequestMessage());
+
             // A shop name that arrived while loading may have been painted onto a sign
             // that the reload then rebuilt. Re-stamp it now that the real world is ready.
             if (_shopSign != null && !string.IsNullOrEmpty(_lastShopNameApplied))
@@ -1484,7 +1590,7 @@ namespace CardShopCoop
                 {
                     _shopSign.text = _lastShopNameApplied;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             return true;
         }
@@ -1548,20 +1654,14 @@ namespace CardShopCoop
             Util.PerfProbe.End(entry.Probe, t);
         }
 
-        /// <summary>Client-only per-frame work that is not owned by a module: cosmetic box
-        /// trajectories and the periodically re-digested catalog and graded-album hashes.</summary>
+        /// <summary>Client-only per-frame work that is not owned by a module: the
+        /// periodically re-digested catalog and graded-album hashes.</summary>
         private void ClientDigestTick(in Sync.SyncFrame frame)
         {
             bool inGame = frame.InGame;
             float dt = frame.Dt;
             long t;
 
-            // Box trajectories are cosmetic client prediction only. Their endpoints are
-            // still host-authored; this makes throw/drop/set-down reconciliation readable
-            // instead of teleporting the remote copy.
-            t = Util.PerfProbe.Start();
-            BoxPlacement.TickRemoteMotions(dt);
-            Util.PerfProbe.End("mod.remoteMotions", t);
             // content mods register their products SECONDS after the scene loads
             // (and per-save: a host mid-tutorial has none yet) - keep re-digesting
             // as our catalog changes so the comparison never goes stale
@@ -1628,7 +1728,6 @@ namespace CardShopCoop
             _report.Reset();
             _containers.Reset();
             _tournament.Reset();
-            _boxEngine?.Reset();
             _register.Reset();
             _tv.Reset();
         }
@@ -1637,15 +1736,18 @@ namespace CardShopCoop
         {
             var modules = new List<Sync.ICoopModule>
             {
-                // Lifecycle order doubles as reset order; disposal walks it in reverse. The
-                // live-hooks adapter is last so static Harmony entry points detach before any
-                // module state is cleared. Tickable modules are driven by the explicit
-                // host/client pipelines built in BuildTickOrders(); the rest are ticked by the
-                // existing _act* stages and only expose the lifecycle here.
+                // This is the v1.1 reset order (with the unified box engine replacing the old
+                // box modules). Disposal walks it in reverse, so live hooks detach first;
+                // join-heal and live-hooks therefore remain last. The registry's generic
+                // ForceResend consequently follows this restored order too (rather than the
+                // former ad-hoc resend sequence); actual population/index dependencies remain
+                // explicit in the per-role tick order below.
                 _world,
+                _npcs,
                 _cardShelves,
                 _objMoves,
                 _movePreview,
+                _boxEngine,
                 _population,
                 _grading,
                 _trades,
@@ -1659,8 +1761,6 @@ namespace CardShopCoop
                 _tournament,
                 _register,
                 _tv,
-                _npcs,
-                _boxEngine,
                 new Sync.DelegateCoopModule("join-heal", null, null, () => _priceFullPending = true),
                 // Keep static Harmony entry points inside the same lifecycle. This module is
                 // last so reverse-order disposal detaches callbacks before any state is reset.
@@ -1754,6 +1854,38 @@ namespace CardShopCoop
 
         private void InstallLiveModuleHooks()
         {
+            PopulationSync.OnClientStructureChanged = kind =>
+            {
+                if (Role != CoopRole.Client)
+                    return;
+                // The client's placed-object roster just changed (a shelf was removed or
+                // spawned). Every index-keyed mirror's baseline is now keyed against stale
+                // indexes, so read the structure back fresh instead of diffing against
+                // garbage. Repaired objects start with loader defaults; those defaults must
+                // not be reported as guest edits through any index-based mirror.
+                _world.Reset();
+                _objMoves.Reset();
+                if (kind == 2 || kind == 3 || kind == 14)
+                    _cardShelves.InvalidateBaseline();
+                // container stations (card storage, cleansers, pack openers, box storage,
+                // donation boxes) and play tables are index-keyed too; their per-index
+                // mirrors/caches go stale the moment a machine/table of that kind shifts.
+                if (kind >= 9 && kind <= 13)
+                {
+                    _containers.Reset();
+                    _containers.ForceResend();
+                }
+                if (kind == 6)
+                {
+                    _tables.Reset();
+                    _tables.ForceResend();
+                }
+                // Population reconciliation removes/inserts list elements, so every
+                // index-keyed mirror needs an immediate authoritative snapshot rather than
+                // waiting for its normal heal interval.
+                _boxEngine?.ForceNextTick();
+                _register.ForceResend();
+            };
             Util.GradingInterop.Reset();
             NpcSync.ActivateLive(_npcs);
             TradeServe.ActivateLive(_trades);
@@ -1765,6 +1897,7 @@ namespace CardShopCoop
 
         private static void ClearLiveModuleHooks()
         {
+            PopulationSync.OnClientStructureChanged = null;
             NpcSync.ClearLive();
             TradeServe.ClearLive();
             RegisterSync.ClearLive();
@@ -1831,7 +1964,7 @@ namespace CardShopCoop
                     {
                         _shopSign = renamer.m_ShopName;
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     renamer.gameObject.SetActive(false);
                     CoopPlugin.Log.LogInfo("disabled shop-renamer trigger (host names the shop)");
                     // a ShopName may have already arrived while the renamer was still live
@@ -1842,7 +1975,7 @@ namespace CardShopCoop
                         {
                             _shopSign.text = _lastShopNameApplied;
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                     }
                 }
             }
@@ -1942,6 +2075,7 @@ namespace CardShopCoop
         private Transform _playerTf;   // the MOVING body: IPC.m_WalkerCtrl (CMF walker)
         private Transform _playerCamTf; // player camera, for look yaw
         private InteractionPlayerController _playerIpc;
+        private Sync.BoxPushProbe _pushProbe; // detects the boxes the local player is pushing
         private bool _uiModeHeldByWindow;
         private InteractionPlayerController _uiModeController;
 
@@ -1962,8 +2096,27 @@ namespace CardShopCoop
                 _playerTf = ipc.m_WalkerCtrl != null ? ipc.m_WalkerCtrl.transform : ipc.transform;
                 _playerCamTf = ipc.m_Cam != null ? ipc.m_Cam.transform : null;
                 CoopPlugin.Log.LogInfo($"Player body resolved: {_playerTf.name} at {_playerTf.position}, cam={(_playerCamTf != null ? _playerCamTf.name : "none")}");
+                AttachPushProbe();
             }
             return _playerTf;
+        }
+
+        /// <summary>
+        /// Idempotently attach and initialize <see cref="Sync.BoxPushProbe"/> on the player
+        /// walker's rigidbody, so the local player's own pushing feeds the box engine. Safe
+        /// to call whenever a player is resolved; it no-ops once the probe exists, and the
+        /// probe is surfaced to <see cref="BoxEngine"/> through the <c>LocalPushed</c>
+        /// delegate wired in the constructor (which reads this field dynamically).
+        /// </summary>
+        private void AttachPushProbe()
+        {
+            if (_pushProbe != null)
+                return;
+            if (_playerIpc == null || _playerIpc.m_PlayerRigidbody == null)
+                return;
+            _pushProbe = _playerIpc.m_PlayerRigidbody.GetComponent<Sync.BoxPushProbe>()
+                ?? _playerIpc.m_PlayerRigidbody.gameObject.AddComponent<Sync.BoxPushProbe>();
+            _pushProbe.Init(_playerIpc.m_PlayerRigidbody);
         }
 
         /// <summary>Make the co-op window modal while it is visible in a game level.
@@ -2116,7 +2269,7 @@ namespace CardShopCoop
                     }
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         private readonly List<int> _holdTypesBuf = new List<int>(6);
@@ -2173,7 +2326,7 @@ namespace CardShopCoop
                 if (FiViewAlbum?.GetValue(_playerIpc) is bool album && album)
                     return 4; // reading the collection binder
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             return 0;
         }
 
@@ -2355,7 +2508,7 @@ namespace CardShopCoop
                         {
                             lan = NetHelpers.LocalIPv4();
                         }
-                        catch { }
+                        catch (System.Exception ex) { Swallow.Log(ex); }
                     }
                 }
 
@@ -2634,7 +2787,7 @@ namespace CardShopCoop
             {
                 rd = InventoryBase.GetRestockData(restockIndex);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             if (rd == null)
                 return;
             _lastLicenseBuyTime = UnityEngine.Time.realtimeSinceStartupAsDouble;
@@ -2672,18 +2825,18 @@ namespace CardShopCoop
                 {
                     AchievementManager.OnItemLicenseUnlocked((EItemType)itemType);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 try
                 {
                     GameInstance.m_IsItemLicenseUnlocked = true;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 try
                 {
                     if ((EItemType)itemType == EItemType.BasicCardBox)
                         TutorialManager.AddTaskValue(ETutorialTaskCondition.UnlockBasicCardBox, 1f);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             finally { Patches.GamePatches.ApplyingRemoteLicense = false; }
             RefreshLicensePanels();
@@ -2714,14 +2867,14 @@ namespace CardShopCoop
                     {
                         on = CPlayerData.GetIsItemLicenseUnlocked(idx);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     if (!on)
                         continue;
                     (FiPanelLicGrp?.GetValue(p) as GameObject)?.SetActive(false);
                     (FiPanelUIGrp?.GetValue(p) as GameObject)?.SetActive(true);
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         // ---- product catalog diagnosis: content DATA packs (PTCGO expansions) are
@@ -2872,7 +3025,7 @@ namespace CardShopCoop
                     return bytes.Length + "#" + h.ToString("x16");
                 }
             }
-            catch { return "?"; }
+            catch (System.Exception e) { Swallow.Log(e); return "?"; }
         }
 
         private static long CatalogKey(int type, bool big, int nameHash)
@@ -3072,7 +3225,7 @@ namespace CardShopCoop
                 {
                     Broadcast(new ByeMessage { Reason = "session ended" });
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 _net.Stop();
                 _net = null;
             }
@@ -3318,6 +3471,15 @@ namespace CardShopCoop
             }
             else
                 _avatars.DestroyPreview();
+            if (_localModelAuto)
+            {
+                _localModelAutoRetry -= Time.deltaTime;
+                if (_localModelAutoRetry <= 0f && InGameLevel())
+                {
+                    _localModelAutoRetry = 1f;
+                    EnsureLocalPlayerModel();
+                }
+            }
             FlushLocalModelSave(Time.deltaTime);
 
             // A day transition can arrive while the guest is changing scenes or has a
@@ -3386,22 +3548,22 @@ namespace CardShopCoop
                     {
                         _boxEngine?.HostReleaseConn(left);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     try
                     {
                         _register.HostReleaseConn(left);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     try
                     {
                         _staff.HostReleaseConn(left);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     try
                     {
                         _containers.HostReleaseConn(left);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     // and DROP any product still held for the departed guest: its charge
                     // is never coming, and the fail-open pump would otherwise deliver the
                     // product chargeless 1.5s from now. Its charge verdict goes too.
@@ -3448,8 +3610,16 @@ namespace CardShopCoop
                 for (int i = _dispatchBuf.Count - 1; i >= 0; i--)
                 {
                     var t = _dispatchBuf[i].Type;
+                    // Only full-replacement state may be coalesced: PlayerState is the latest
+                    // pose, RegisterState/RegisterCart and PopState are complete rosters, so the
+                    // newest frame fully supersedes older ones. BoxSnapshot is deliberately NOT
+                    // here: a Full carries every box while a Partial carries only changes, and
+                    // the box engine has no periodic full scan. Dropping a Full strands every
+                    // unchanged box; dropping an intermediate Partial strands that box's change
+                    // (the host's hash already advanced, so it is never re-sent). Apply the whole
+                    // reliable sequence in order instead.
                     if (t != MsgType.PlayerState && t != MsgType.RegisterState
-                        && t != MsgType.RegisterCart && t != MsgType.BoxSnapshot && t != MsgType.PopState)
+                        && t != MsgType.RegisterCart && t != MsgType.PopState)
                         continue;
                     long key = ((long)t << 32) | (uint)_dispatchBuf[i].ConnId;
                     if (!_dispatchSeen.Add(key))
@@ -3589,7 +3759,7 @@ namespace CardShopCoop
                             ? $" puppets={_npcs.PuppetCount} localNpcs={local}(should be 0)"
                             : $" liveNpcs={local}";
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
                 CoopPlugin.Log.LogInfo($"diag: role={Role} conns={_net.ConnectionCount} sentStates={_diagSent} recvStates={_diagRecvStates} inGame={InGameLevel()} pos={posStr}{npcStr}");
             }
@@ -3751,7 +3921,7 @@ namespace CardShopCoop
                         {
                             v = CPlayerData.GetItemPrice(rd.itemType, preventZero: false);
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                         if (v == 0f)
                             continue;
                         _priceBuf.Add(new KeyValuePair<int, float>(t, v));
@@ -4013,7 +4183,7 @@ namespace CardShopCoop
                         {
                             on = CPlayerData.GetIsItemLicenseUnlocked(i);
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                         if (!on)
                             continue;
                         var rd = CatalogAt(i);
@@ -4067,7 +4237,7 @@ namespace CardShopCoop
                             min = (int)FiTimeMin.GetValue(_lightManager);
                     }
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 int day = CPlayerData.m_CurrentDay;
                 float minFloat = min;
                 try
@@ -4075,7 +4245,7 @@ namespace CardShopCoop
                     if (_lightManager != null && FiTimeMinFloat != null)
                         minFloat = (float)FiTimeMinFloat.GetValue(_lightManager);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 bool shopOnceOpen = CPlayerData.m_IsShopOnceOpen;
                 Broadcast(new DayTimeMessage { Day = day, Hour = hour, Minute = min, MinuteFloat = minFloat, ShopOnceOpen = shopOnceOpen });
             }
@@ -4637,7 +4807,7 @@ namespace CardShopCoop
                                     {
                                         cur = CPlayerData.GetItemPrice((EItemType)i, preventZero: false);
                                     }
-                                    catch { }
+                                    catch (System.Exception e) { Swallow.Log(e); }
                                     if (Math.Abs(cur - v) > 0.0001f)
                                     {
                                         try
@@ -4645,7 +4815,7 @@ namespace CardShopCoop
                                             CPlayerData.SetItemPrice((EItemType)i, v);
                                             changed++;
                                         }
-                                        catch { }
+                                        catch (System.Exception e) { Swallow.Log(e); }
                                     }
                                 }
                                 // stale-price reports were undiagnosable: applies were silent
@@ -4670,14 +4840,14 @@ namespace CardShopCoop
                                             {
                                                 cur = CPlayerData.GetItemPrice((EItemType)i, preventZero: false);
                                             }
-                                            catch { }
+                                            catch (System.Exception e) { Swallow.Log(e); }
                                             if (cur != 0f)
                                             {
                                                 try
                                                 {
                                                     CPlayerData.SetItemPrice((EItemType)i, 0f);
                                                 }
-                                                catch { }
+                                                catch (System.Exception e) { Swallow.Log(e); }
                                             }
                                         }
                                     var tmp = _clientPriced;
@@ -4900,6 +5070,13 @@ namespace CardShopCoop
                             _boxEngine.ClientApplySnapshot(boxSnap);
                         break;
                     }
+                case MsgType.BoxResyncRequest:
+                    {
+                        if (Role != CoopRole.Host || !InGameLevel())
+                            break;
+                        _boxEngine?.RequestFullSnapshot();
+                        break;
+                    }
                 case MsgType.BoxCollect:
                     {
                         if (Role != CoopRole.Host || !InGameLevel())
@@ -4914,6 +5091,22 @@ namespace CardShopCoop
                             break;
                         if (msg.Message is BoxCollectResultMessage boxResult)
                             CardBoxOps.ClientApplyResult(boxResult);
+                        break;
+                    }
+                case MsgType.BoxMotion:
+                    {
+                        if (Role != CoopRole.Host || !InGameLevel())
+                            break;
+                        if (msg.Message is BoxMotionMessage boxMotion)
+                            _boxEngine.HostApplyMotion(boxMotion, msg.ConnId);
+                        break;
+                    }
+                case MsgType.BoxMotionState:
+                    {
+                        if (Role != CoopRole.Client || !InGameLevel())
+                            break;
+                        if (msg.Message is BoxMotionStateMessage boxMotionState)
+                            _boxEngine.ClientApplyMotion(boxMotionState);
                         break;
                     }
                 case MsgType.PopState:
@@ -5048,7 +5241,7 @@ namespace CardShopCoop
                                             if (rl[i].itemType == EItemType.BasicCardBox)
                                                 TutorialManager.AddTaskValue(ETutorialTaskCondition.UnlockBasicCardBox, 1f);
                                         }
-                                        catch { }
+                                        catch (System.Exception e) { Swallow.Log(e); }
                                     }
                                     else if (!should && flags[i] && i != 0 && allowLock)
                                     {
@@ -5063,7 +5256,7 @@ namespace CardShopCoop
                                     {
                                         GameInstance.m_IsItemLicenseUnlocked = true;
                                     }
-                                    catch { }
+                                    catch (System.Exception e) { Swallow.Log(e); }
                                     RefreshLicensePanels();
                                 }
                             });
@@ -5673,7 +5866,7 @@ namespace CardShopCoop
                 {
                     _shopSign.text = name;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
         }
 

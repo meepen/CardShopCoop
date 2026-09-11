@@ -179,9 +179,9 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private static long ModCardKey(ECardExpansionType expansion, int index)
+        private static long ModCardKey(ECardExpansionType expansion, int index, bool isDestiny)
         {
-            return ((long)(int)expansion << 32) | (uint)index;
+            return ((long)(int)expansion << 33) | ((long)(uint)index << 1) | (isDestiny ? 1L : 0L);
         }
 
         public static void CardPercentChangedPostfix(int cardIndex, ECardExpansionType expansionType, bool isDestiny, float percentChange)
@@ -196,8 +196,8 @@ namespace CardShopCoop.Sync
             {
                 absolute = CPlayerData.GetCardPricePercentChange(cardIndex, expansionType, isDestiny);
             }
-            catch { return; }
-            long key = ModCardKey(expansionType, cardIndex);
+            catch (System.Exception e) { Swallow.Log(e); return; }
+            long key = ModCardKey(expansionType, cardIndex, isDestiny);
             s_modCardPending.TryGetValue(key, out var p);
             p.Expansion = expansionType;
             p.Index = cardIndex;
@@ -212,7 +212,7 @@ namespace CardShopCoop.Sync
         {
             if (CoopCore.Role != CoopRole.Host || IsVanillaCardExpansion(expansionType))
                 return;
-            long key = ModCardKey(expansionType, cardIndex);
+            long key = ModCardKey(expansionType, cardIndex, isDestiny);
             s_modCardPending.TryGetValue(key, out var p);
             p.Expansion = expansionType;
             p.Index = cardIndex;
@@ -347,8 +347,9 @@ namespace CardShopCoop.Sync
                     return;
                 var msg = BuildState();
                 Diag($"[market-tx] gen={s_rollGen} rows={msg.GenCardMarketPriceList.Count} mod={msg.ModdedCards.Count} wcs={WireChecksum(msg)} {RowSample()}");
-                s_dirty = false;
                 BroadcastState(msg);
+                s_modCardPending.Clear();
+                s_dirty = false;
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("MarketSync host: " + e.Message); }
         }
@@ -440,26 +441,26 @@ namespace CardShopCoop.Sync
         private void ClientApplyInner(MarketStateMessage message)
         {
             int rollGen = message.RollGen;
-            ReadPercentsInto(message.ItemPricePercentChangeList, CPlayerData.m_ItemPricePercentChangeList);
-            ReadMarketInto(message.GenCardMarketPriceList, CPlayerData.m_GenCardMarketPriceList);
-            ReadMarketInto(message.GenCardMarketPriceListDestiny, CPlayerData.m_GenCardMarketPriceListDestiny);
-            ReadMarketInto(message.GenCardMarketPriceListGhost, CPlayerData.m_GenCardMarketPriceListGhost);
-            ReadMarketInto(message.GenCardMarketPriceListGhostBlack, CPlayerData.m_GenCardMarketPriceListGhostBlack);
-            ReadMarketInto(message.GenCardMarketPriceListMegabot, CPlayerData.m_GenCardMarketPriceListMegabot);
-            ReadMarketInto(message.GenCardMarketPriceListFantasyRPG, CPlayerData.m_GenCardMarketPriceListFantasyRPG);
-            ReadMarketInto(message.GenCardMarketPriceListCatJob, CPlayerData.m_GenCardMarketPriceListCatJob);
-            ReadFloatsInto(message.SetGameEventPriceList, CPlayerData.m_SetGameEventPriceList);
-            ReadFloatsInto(message.GeneratedGameEventPriceList, CPlayerData.m_GeneratedGameEventPriceList);
-            ReadFloatsInto(message.GameEventPricePercentChangeList, CPlayerData.m_GameEventPricePercentChangeList);
-            ReadFloatsInto(message.GenGradedCardPriceMultiplierList, CPlayerData.m_GenGradedCardPriceMultiplierList);
-            ReadSparseFloatsInto(message.GeneratedMarketPriceList, CPlayerData.m_GeneratedMarketPriceList, ModdedGenMarket);
-            ReadSparseFloatsInto(message.GeneratedCostPriceList, CPlayerData.m_GeneratedCostPriceList, ModdedGenCost);
-            ReadSparseFloatsInto(message.AverageItemCostList, CPlayerData.m_AverageItemCostList, ModdedAvgCost);
+            ApplySection("item price changes", () => ReadPercentsInto(message.ItemPricePercentChangeList, CPlayerData.m_ItemPricePercentChangeList));
+            ApplySection("Tetramon market", () => ReadMarketInto(message.GenCardMarketPriceList, CPlayerData.m_GenCardMarketPriceList));
+            ApplySection("Destiny market", () => ReadMarketInto(message.GenCardMarketPriceListDestiny, CPlayerData.m_GenCardMarketPriceListDestiny));
+            ApplySection("Ghost market", () => ReadMarketInto(message.GenCardMarketPriceListGhost, CPlayerData.m_GenCardMarketPriceListGhost));
+            ApplySection("Ghost Black market", () => ReadMarketInto(message.GenCardMarketPriceListGhostBlack, CPlayerData.m_GenCardMarketPriceListGhostBlack));
+            ApplySection("Megabot market", () => ReadMarketInto(message.GenCardMarketPriceListMegabot, CPlayerData.m_GenCardMarketPriceListMegabot));
+            ApplySection("FantasyRPG market", () => ReadMarketInto(message.GenCardMarketPriceListFantasyRPG, CPlayerData.m_GenCardMarketPriceListFantasyRPG));
+            ApplySection("CatJob market", () => ReadMarketInto(message.GenCardMarketPriceListCatJob, CPlayerData.m_GenCardMarketPriceListCatJob));
+            ApplySection("set game-event prices", () => ReadFloatsInto(message.SetGameEventPriceList, CPlayerData.m_SetGameEventPriceList));
+            ApplySection("generated game-event prices", () => ReadFloatsInto(message.GeneratedGameEventPriceList, CPlayerData.m_GeneratedGameEventPriceList));
+            ApplySection("game-event price changes", () => ReadFloatsInto(message.GameEventPricePercentChangeList, CPlayerData.m_GameEventPricePercentChangeList));
+            ApplySection("graded-card multipliers", () => ReadFloatsInto(message.GenGradedCardPriceMultiplierList, CPlayerData.m_GenGradedCardPriceMultiplierList));
+            ApplySection("generated market prices", () => ReadSparseFloatsInto(message.GeneratedMarketPriceList, CPlayerData.m_GeneratedMarketPriceList, ModdedGenMarket));
+            ApplySection("generated cost prices", () => ReadSparseFloatsInto(message.GeneratedCostPriceList, CPlayerData.m_GeneratedCostPriceList, ModdedGenCost));
+            ApplySection("average item costs", () => ReadSparseFloatsInto(message.AverageItemCostList, CPlayerData.m_AverageItemCostList, ModdedAvgCost));
 
             // Modded-expansion card values: replay through the game's own writers so EPL's
             // prefix stores them locally. Must run BEFORE the history append below so the
             // modded history gains the same point the host's did.
-            ApplyModdedCards(message.ModdedCards);
+            ApplySection("modded cards", () => ApplyModdedCards(message.ModdedCards));
 
             // Replay the vanilla once-per-day history append AFTER the day's values are
             // in, so the graph gains the same last point the host's did. The first
@@ -471,15 +472,33 @@ namespace CardShopCoop.Sync
             }
             else if (rollGen != _lastAppliedGen)
             {
-                _lastAppliedGen = rollGen;
+                bool historyApplied = true;
                 try
                 {
                     CPlayerData.UpdateItemPricePercentChange();
                     CPlayerData.UpdatePastCardPricePercentChange();
                 }
-                catch (Exception e) { CoopPlugin.Log.LogWarning("MarketSync history: " + e.Message); }
+                catch (Exception e)
+                {
+                    historyApplied = false;
+                    CoopPlugin.Log.LogWarning("MarketSync history: " + e.Message);
+                }
+                if (historyApplied)
+                    _lastAppliedGen = rollGen;
             }
             Diag($"[market-rx] gen={rollGen} rows0={message.GenCardMarketPriceList.Count} mod={message.ModdedCards.Count} wcs={WireChecksumFromLists()} {RowSample()}");
+        }
+
+        private static void ApplySection(string name, Action apply)
+        {
+            try
+            {
+                apply();
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("MarketSync section '" + name + "': " + e.Message);
+            }
         }
 
         // ---------------- wire helpers ----------------
@@ -557,7 +576,7 @@ namespace CardShopCoop.Sync
                     {
                         moddedWrite(i, v);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     continue;
                 }
                 while (list.Count <= i)
@@ -650,10 +669,9 @@ namespace CardShopCoop.Sync
                     list[i] = row;
                 }
                 row.pricePercentChangeList = v; // in place: consumers hold the object
-                // Rows past the host's shown-monster range are legitimately 0 over there;
-                // copying that in would blank a row vanilla had just filled locally.
-                if (gen != 0f)
-                    row.generatedMarketPrice = gen;
+                // The snapshot is authoritative, including rows the host legitimately leaves at
+                // zero; copying the value makes a stale client row converge to the host state.
+                row.generatedMarketPrice = gen;
             }
         }
 
@@ -676,7 +694,8 @@ namespace CardShopCoop.Sync
                     HasBase = p.HasBase,
                 });
             }
-            s_modCardPending.Clear();
+            // The pending map is cleared by the host tick only AFTER a successful broadcast:
+            // BuildState must not consume it, or a failed send would lose those deltas.
         }
 
         /// <summary>Client: replay modded-card changes through the game's public writers so
@@ -719,11 +738,14 @@ namespace CardShopCoop.Sync
 
         private static void ReadFloatsInto(List<float> entries, List<float> list)
         {
+            if (entries == null || list == null)
+                return;
+            while (list.Count < entries.Count)
+                list.Add(0f);
             for (int i = 0; i < entries.Count; i++)
             {
                 float v = entries[i];
-                if (list != null && i < list.Count)
-                    list[i] = v;
+                list[i] = v;
             }
         }
 
@@ -783,7 +805,7 @@ namespace CardShopCoop.Sync
                     s_eplPctChange = save?.GetProperty("ItemPriceChangePercent", F);
                     s_eplAvgCost = save?.GetProperty("AverageItemCost", F);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 if (s_eplTryGet == null || s_eplItemDataProp == null || s_eplGenMarket == null
                     || s_eplGenCost == null || s_eplPctChange == null || s_eplAvgCost == null)
                 {
@@ -880,7 +902,7 @@ namespace CardShopCoop.Sync
                                 result.Add(v);
                         }
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             s_eplModdedCache = result;
             s_eplModdedCacheAt = now;
@@ -894,7 +916,7 @@ namespace CardShopCoop.Sync
                 var args = new object[] { (EItemType)itemType, null };
                 return (bool)s_eplTryGet.Invoke(s_eplSaveMgr, args) ? args[1] : null;
             }
-            catch { return null; }
+            catch (System.Exception e) { Swallow.Log(e); return null; }
         }
 
         private static float EplGetFloat(int itemType, PropertyInfo field)

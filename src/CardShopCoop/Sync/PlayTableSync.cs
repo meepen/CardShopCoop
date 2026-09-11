@@ -413,7 +413,7 @@ namespace CardShopCoop.Sync
                         if (sets != null && seat < sets.Count && sets[seat] != null)
                             sets[seat].gameObject.SetActive(false);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
             }
             _applied.Clear();

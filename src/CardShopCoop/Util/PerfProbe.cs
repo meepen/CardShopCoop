@@ -26,7 +26,7 @@ namespace CardShopCoop.Util
                 {
                     return CoopPlugin.PerfDebug != null && CoopPlugin.PerfDebug.Value;
                 }
-                catch { return false; }
+                catch (System.Exception e) { Swallow.Log(e); return false; }
             }
         }
 

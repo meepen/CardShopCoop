@@ -457,7 +457,7 @@ namespace CardShopCoop.Sync
                 {
                     ShopCustomizationManager.ChangeWallMaterial(wall, isShopLotB: false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             if (wallB != CPlayerData.m_EquippedWallDecoIndexB && wallB >= 0 && wallB < so.m_WallDecoDataList.Count)
             {
@@ -466,7 +466,7 @@ namespace CardShopCoop.Sync
                 {
                     ShopCustomizationManager.ChangeWallMaterial(wallB, isShopLotB: true);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             if (floor != CPlayerData.m_EquippedFloorDecoIndex && floor >= 0 && floor < so.m_FloorDecoDataList.Count)
             {
@@ -475,7 +475,7 @@ namespace CardShopCoop.Sync
                 {
                     ShopCustomizationManager.ChangeFloorMaterial(floor, isShopLotB: false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             if (floorB != CPlayerData.m_EquippedFloorDecoIndexB && floorB >= 0 && floorB < so.m_FloorDecoDataList.Count)
             {
@@ -484,7 +484,7 @@ namespace CardShopCoop.Sync
                 {
                     ShopCustomizationManager.ChangeFloorMaterial(floorB, isShopLotB: true);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             if (ceiling != CPlayerData.m_EquippedCeilingDecoIndex && ceiling >= 0 && ceiling < so.m_CeilingDecoDataList.Count)
             {
@@ -493,7 +493,7 @@ namespace CardShopCoop.Sync
                 {
                     ShopCustomizationManager.ChangeCeilingMaterial(ceiling, isShopLotB: false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             if (ceilingB != CPlayerData.m_EquippedCeilingDecoIndexB && ceilingB >= 0 && ceilingB < so.m_CeilingDecoDataList.Count)
             {
@@ -502,7 +502,7 @@ namespace CardShopCoop.Sync
                 {
                     ShopCustomizationManager.ChangeCeilingMaterial(ceilingB, isShopLotB: true);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
         }
 
@@ -717,7 +717,7 @@ namespace CardShopCoop.Sync
             {
                 cat = (int)FiBuyCategory.GetValue(__instance);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             if (cat < 0 || cat > 2)
                 return true; // item-deco pages use the other handler
             // local funds check is cosmetic (the wallet mirror is authoritative-ish);

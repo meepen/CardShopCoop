@@ -109,6 +109,7 @@ namespace CardShopCoop
                 case MsgType.BoxUpdate:
                 case MsgType.BoxCollect:
                 case MsgType.FurnitureBoxOp:
+                case MsgType.BoxResyncRequest:
                 case MsgType.ItemPriceContrib:
                 case MsgType.LicenseUnlock:
                 case MsgType.StaffOp:
@@ -150,6 +151,9 @@ namespace CardShopCoop
                 case MsgType.BoxCollect:
                 case MsgType.FurnitureBoxOp:
                     _boxEngine?.ForceNextTick();
+                    break;
+                case MsgType.BoxResyncRequest:
+                    _boxEngine?.RequestFullSnapshot();
                     break;
                 case MsgType.RegisterOp:
                     _register.ForceResend();

@@ -187,21 +187,21 @@ namespace CardShopCoop.Sync
             switch (msg.Op)
             {
                 case FurnitureBoxOpMessage.OpPlace:
-                    HostApplyPlace(msg);
+                    HostApplyPlace(msg, connId);
                     break;
                 case FurnitureBoxOpMessage.OpSell:
-                    HostApplySell(msg);
+                    HostApplySell(msg, connId);
                     break;
                 case FurnitureBoxOpMessage.OpBoxUp:
-                    HostApplyBoxUp(msg);
+                    HostApplyBoxUp(msg, connId);
                     break;
                 case FurnitureBoxOpMessage.OpRemoved:
-                    HostApplyRemoved(msg);
+                    HostApplyRemoved(msg, connId);
                     break;
             }
         }
 
-        private static void HostApplyPlace(FurnitureBoxOpMessage msg)
+        private static void HostApplyPlace(FurnitureBoxOpMessage msg, int connId)
         {
             var engine = Engine;
             if (engine == null || !engine.TryGetHostBox(msg.Id, out var boxBase)
@@ -210,6 +210,11 @@ namespace CardShopCoop.Sync
             var obj = FurnitureBoxFamily.BoxedObject(box);
             if (obj == null || IsLocallyCarried(box))
                 return;
+            if (engine.HostBoxHeldByOther(msg.Id, connId))
+            {
+                CoopPlugin.Log.LogInfo($"FurnitureBoxOps: place rejected connId={connId} id={msg.Id} (held by another connection)");
+                return;
+            }
             ApplyingRemote = true;
             try
             {
@@ -223,13 +228,19 @@ namespace CardShopCoop.Sync
             engine.ForceNextTick();
         }
 
-        private static void HostApplyRemoved(FurnitureBoxOpMessage msg)
+        private static void HostApplyRemoved(FurnitureBoxOpMessage msg, int connId)
         {
             var engine = Engine;
             if (engine == null || !engine.TryGetHostBox(msg.Id, out var boxBase)
                 || !(boxBase is InteractablePackagingBox_Shelf box)
                 || IsLocallyCarried(box))
                 return;
+            if (engine.HostBoxHeldByOther(msg.Id, connId))
+            {
+                CoopPlugin.Log.LogInfo($"FurnitureBoxOps: removal rejected connId={connId} id={msg.Id} (held by another connection)");
+                return;
+            }
+            CoopPlugin.Log.LogInfo($"FurnitureBoxOps: removal accepted connId={connId} id={msg.Id}");
             ApplyingRemote = true;
             try
             {
@@ -241,7 +252,7 @@ namespace CardShopCoop.Sync
             engine.ForceNextTick();
         }
 
-        private static void HostApplySell(FurnitureBoxOpMessage msg)
+        private static void HostApplySell(FurnitureBoxOpMessage msg, int connId)
         {
             var obj = FurnitureBoxFamily.ResolveObject(new BoxWire
             {
@@ -255,6 +266,12 @@ namespace CardShopCoop.Sync
             var box = obj.GetPackagingBoxShelf();
             if (box != null && !ReferenceEquals(FurnitureBoxFamily.BoxedObject(box), obj))
                 box = null;
+            if (box != null && Engine != null && Engine.TryGetHostId(box, out var boxId)
+                && Engine.HostBoxHeldByOther(boxId, connId))
+            {
+                CoopPlugin.Log.LogInfo($"FurnitureBoxOps: sell rejected connId={connId} id={boxId} (held by another connection)");
+                return;
+            }
             if (IsLocallyCarried(box) || (box != null && box.GetIsMovingObject()) || obj.GetIsMovingObject())
                 return;
             if (obj.m_ObjectType == EObjectType.CashCounter
@@ -265,6 +282,7 @@ namespace CardShopCoop.Sync
                 || purchase.price < 0f)
                 return;
             float salePrice = purchase.price / 2f;
+            CoopPlugin.Log.LogInfo($"FurnitureBoxOps: sell accepted connId={connId} type={obj.m_ObjectType}");
             BoxShared.DebugLog("furniture-op", $"host: accepting guest sale of {obj.m_ObjectType} for {salePrice}");
             PriceChangeManager.AddTransaction(salePrice, ETransactionType.SellFurniture, (int)obj.m_ObjectType);
             CEventManager.QueueEvent(new CEventPlayer_AddCoin(salePrice));
@@ -283,7 +301,7 @@ namespace CardShopCoop.Sync
             Engine?.ForceNextTick();
         }
 
-        private static void HostApplyBoxUp(FurnitureBoxOpMessage msg)
+        private static void HostApplyBoxUp(FurnitureBoxOpMessage msg, int connId)
         {
             var obj = FurnitureBoxFamily.ResolveObject(new BoxWire
             {
@@ -295,9 +313,17 @@ namespace CardShopCoop.Sync
             if (obj == null || obj.GetIsBoxedUp() || obj.GetIsMovingObject()
                 || !obj.m_CanBoxUpObject || !obj.m_CanPickupMoveObject)
                 return;
+            var box = obj.GetPackagingBoxShelf();
+            if (box != null && Engine != null && Engine.TryGetHostId(box, out var boxId)
+                && Engine.HostBoxHeldByOther(boxId, connId))
+            {
+                CoopPlugin.Log.LogInfo($"FurnitureBoxOps: box-up rejected connId={connId} id={boxId} (held by another connection)");
+                return;
+            }
             if (obj.m_ObjectType == EObjectType.CashCounter
                 && FurnitureBoxFamily.Sm()?.m_CashierCounterList.Count <= 1)
                 return;
+            CoopPlugin.Log.LogInfo($"FurnitureBoxOps: box-up accepted connId={connId} type={obj.m_ObjectType} index={msg.ObjIndex}");
             BoxShared.DebugLog("furniture-op", $"host: accepting guest box-up of {obj.m_ObjectType}");
             ApplyingRemote = true;
             try
@@ -326,7 +352,7 @@ namespace CardShopCoop.Sync
                     (BoxFields.CounterScreen?.GetValue(obj) as Component)?.gameObject.SetActive(true);
                     (BoxFields.CreditScreen?.GetValue(obj) as Component)?.gameObject.SetActive(true);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             ObjMoveSync.SyncTagGroup(obj.transform);
         }

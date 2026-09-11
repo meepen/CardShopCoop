@@ -124,7 +124,7 @@ namespace CardShopCoop.Net
                     {
                         tcp.Close();
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     break;
                 }
                 ConfigureSocket(tcp);
@@ -137,7 +137,7 @@ namespace CardShopCoop.Net
                         {
                             tcp.Close();
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                         break;
                     }
                     conn.Id = _nextConnId++;
@@ -376,22 +376,22 @@ namespace CardShopCoop.Net
             {
                 conn.SendSignal.Set();
             }
-            catch { } // wake the writer so it can exit
+            catch (System.Exception e) { Swallow.Log(e); } // wake the writer so it can exit
             try
             {
                 conn.KeepaliveSignal.Set();
             }
-            catch { } // wake keepalive during teardown
+            catch (System.Exception e) { Swallow.Log(e); } // wake keepalive during teardown
             try
             {
                 conn.Stream?.Close();
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
                 conn.Tcp?.Close();
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             Disconnects.Enqueue(connId);
         }
 
@@ -403,7 +403,7 @@ namespace CardShopCoop.Net
             {
                 _listener?.Stop();
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             _listener = null;
             List<int> ids;
             lock (_connsLock)

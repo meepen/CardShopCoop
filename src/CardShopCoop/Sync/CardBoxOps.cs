@@ -77,12 +77,19 @@ namespace CardShopCoop.Sync
             }
             if (IsLocallyCarried(box))
                 return; // host holds it: he opens it himself
+            if (engine.HostBoxHeldByOther(msg.Id, connId))
+            {
+                CoopPlugin.Log.LogInfo($"CardBoxOps: collect rejected connId={connId} id={msg.Id} (held by another connection)");
+                SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                return;
+            }
             var cards = SafeCards(box);
             if (HashCards(cards) != msg.CardsHash)
             {
                 SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
                 return;
             }
+            CoopPlugin.Log.LogInfo($"CardBoxOps: collect accepted connId={connId} id={msg.Id}");
             try
             {
                 for (int i = 0; i < cards.Count; i++)
@@ -129,7 +136,7 @@ namespace CardShopCoop.Sync
             {
                 return box.GetCardDataList() ?? new List<CardData>();
             }
-            catch { return new List<CardData>(); }
+            catch (System.Exception e) { Swallow.Log(e); return new List<CardData>(); }
         }
 
         private static int HashCards(List<CardData> cards)

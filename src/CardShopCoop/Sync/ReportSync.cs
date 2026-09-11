@@ -200,7 +200,7 @@ namespace CardShopCoop.Sync
                 if (!EndOfDayReportScreen.IsActive())
                     return;
             }
-            catch { return; }
+            catch (System.Exception e) { Swallow.Log(e); return; }
             s_openSnapshot = CPlayerData.m_GameReportDataCollect; // value copy
             s_openPending = true;
         }
@@ -227,7 +227,7 @@ namespace CardShopCoop.Sync
             {
                 lerping = FiIsLerping != null && (bool)FiIsLerping.GetValue(__instance);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             if (lerping)
                 return true; // vanilla behavior: fast-forward the count-up
             // Vanilla's other branch runs OnPressGoNextDay() whenever GetHasDayEnded() is
@@ -507,7 +507,7 @@ namespace CardShopCoop.Sync
                         if (FiPhoneMode != null && (bool)FiPhoneMode.GetValue(pc))
                             return;
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     // vanilla ShowGoNextDayScreen exits register mode before opening. The
                     // bare OnExitCashCounterMode clears the IPC flag but leaves the counter's
                     // m_IsMannedByPlayer and the co-op claim set, and on a joiner the recap
@@ -518,12 +518,12 @@ namespace CardShopCoop.Sync
                         if (FiCashMode != null && (bool)FiCashMode.GetValue(pc))
                             pc.OnExitCashCounterMode();
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     try
                     {
                         Sync.RegisterSync.ForceExitManned();
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
                 // SaveGameData inside OpenScreen is already no-op'd for joiners by
                 // GamePatches.SaveGuardPrefix; everything else in there is pure UI
@@ -576,7 +576,7 @@ namespace CardShopCoop.Sync
                 {
                     SoundManager.SetEnableSound_CoinIncrease(false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
 
                 // Re-assert the report this screen actually displayed so a host that
                 // already moved on (and healed a reset report over us) can't make us
@@ -606,12 +606,12 @@ namespace CardShopCoop.Sync
                 {
                     FiHoldingMouseDown?.SetValue(_screen, false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 try
                 {
                     FiMouseDownTime?.SetValue(_screen, 0f);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ReportSync close screen: " + e.Message); }
         }

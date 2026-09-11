@@ -26,7 +26,23 @@ namespace CardShopCoop.Sync
             public float Age;
             public float Duration;
             public bool Arc;
+            // dead-reckon push mode (a player is physically pushing the box): the target is the
+            // streamed pose, extrapolated along the streamed velocity between frames. The body is
+            // kinematic for the duration; it resumes physics when the stream goes stale or a
+            // reliable Free snapshot cancels the entry.
+            public bool DeadReckon;
+            public Vector3 Target;
+            public Vector3 Velocity;
+            public Vector3 AngularVelocity;
+            public float LastUpdate;
+            public float TargetYaw;
         }
+
+        // Push-smoothing tuning. DeadReckonMaxSpeed is the clamped correction speed (a generous
+        // max keeps lag to about a frame while smoothing the per-frame wire steps); PushSnapDistance
+        // is the correction size above which we hard-snap instead of dragging the box across.
+        private const float DeadReckonMaxSpeed = 12f;
+        private const float PushSnapDistance = 1.0f;
 
         private static readonly Dictionary<InteractablePackagingBox, RemoteMotion> RemoteMotions
             = new Dictionary<InteractablePackagingBox, RemoteMotion>();
@@ -205,7 +221,7 @@ namespace CardShopCoop.Sync
                 if (FiShelfWorldUI?.GetValue(box) is Transform grp && grp != null)
                     grp.gameObject.SetActive(visible);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         public static bool IsRemoteMotion(InteractablePackagingBox box)
@@ -224,7 +240,7 @@ namespace CardShopCoop.Sync
         /// host has said the box is visible/not carried.</summary>
         public static void ScheduleRemoteMotion(InteractablePackagingBox box, Vector3 position, float yaw, bool allowArc = true)
         {
-            if (CoopCore.Role != CoopRole.Client || box == null)
+            if ((CoopCore.Role != CoopRole.Client && CoopCore.Role != CoopRole.Host) || box == null)
                 return;
             var from = PhysicsPosition(box);
             var fromYaw = PhysicsRotation(box).eulerAngles.y;
@@ -249,12 +265,56 @@ namespace CardShopCoop.Sync
             };
         }
 
-        /// <summary>Advance client-only cosmetic box motion. The target remains the host's
-        /// settled pose; prediction never changes authority.</summary>
+        /// <summary>Schedule dead-reckon smoothing of a box a player is physically pushing.
+        /// The target is the streamed pose; between frames it is extrapolated along the streamed
+        /// velocity and the body glides toward it (see <see cref="TickRemoteMotions"/>). The body
+        /// is kept kinematic for the duration - the stream is the single pose writer - and it
+        /// resumes physics when the stream goes stale or a reliable Free snapshot cancels the
+        /// entry. Repeated calls slide the target forward and never restart; a correction larger
+        /// than <see cref="PushSnapDistance"/> is applied hard instead of dragging. Runs on both
+        /// roles (peers smooth a host push; the host smooths a client push).</summary>
+        public static void ScheduleRemoteMotion(InteractablePackagingBox box, Vector3 position, float yaw,
+            Vector3 velocity, Vector3 angularVelocity)
+        {
+            if ((CoopCore.Role != CoopRole.Client && CoopCore.Role != CoopRole.Host) || box == null)
+                return;
+            RemoteMotion existing;
+            if (RemoteMotions.TryGetValue(box, out existing) && existing.DeadReckon)
+            {
+                // a push stream is already driving this box: slide the target forward, never
+                // restart (restarting would snap it back to the new frame's pose)
+                existing.Target = position;
+                existing.TargetYaw = yaw;
+                existing.Velocity = velocity;
+                existing.AngularVelocity = angularVelocity;
+                existing.LastUpdate = Time.time;
+                return;
+            }
+            bool snap = Vector3.Distance(PhysicsPosition(box), position) > PushSnapDistance;
+            RemoteMotions[box] = new RemoteMotion
+            {
+                DeadReckon = true,
+                Target = position,
+                TargetYaw = yaw,
+                Velocity = velocity,
+                AngularVelocity = angularVelocity,
+                LastUpdate = Time.time,
+            };
+            BoxLifecycle.ApplyEnabled(box, false); // kinematic while the stream is fresh
+            if (snap)
+                ApplyPhysicsPose(box, position, yaw); // a large correction snaps instead of dragging
+        }
+
+        /// <summary>Advance cosmetic box motion (both roles). The arc path eases to the host's
+        /// settled pose; the dead-reckon path extrapolates a pushed box's target along its
+        /// streamed velocity and glides toward it. Prediction never changes authority: a
+        /// reliable pose still wins, and physics resumes when a stream goes stale or is
+        /// cancelled.</summary>
         public static void TickRemoteMotions(float dt)
         {
             if (RemoteMotions.Count == 0)
                 return;
+            float frame = Mathf.Max(0f, dt);
             var finished = new List<InteractablePackagingBox>();
             foreach (var pair in RemoteMotions)
             {
@@ -265,7 +325,27 @@ namespace CardShopCoop.Sync
                     finished.Add(box);
                     continue;
                 }
-                motion.Age += Mathf.Max(0f, dt);
+                if (motion.DeadReckon)
+                {
+                    // the push stream went stale (the driver settled/left): let the finished
+                    // path resume real physics from the streamed velocity
+                    if (Time.time - motion.LastUpdate > BoxEngine.MotionLeaseTimeout)
+                    {
+                        finished.Add(box);
+                        continue;
+                    }
+                    // extrapolate the pushed box's target along its streamed velocity, then
+                    // glide toward it with a clamped correction (a generous max keeps lag to
+                    // about a frame while smoothing the per-frame wire steps)
+                    motion.Target += motion.Velocity * frame;
+                    var current = PhysicsPosition(box);
+                    var next = Vector3.MoveTowards(current, motion.Target, DeadReckonMaxSpeed * frame);
+                    float curYaw = PhysicsRotation(box).eulerAngles.y;
+                    ApplyPhysicsPose(box, next,
+                        Mathf.LerpAngle(curYaw, motion.TargetYaw, Mathf.Clamp01(frame * 10f)));
+                    continue;
+                }
+                motion.Age += frame;
                 float t = Mathf.Clamp01(motion.Age / motion.Duration);
                 float eased = t * t * (3f - 2f * t);
                 Vector3 p = Vector3.Lerp(motion.From, motion.To, eased);
@@ -281,8 +361,29 @@ namespace CardShopCoop.Sync
             {
                 var box = finished[i];
                 if (box != null && RemoteMotions.TryGetValue(box, out var motion))
-                    ApplyPhysicsPose(box, motion.To, motion.ToYaw);
+                {
+                    if (motion.DeadReckon)
+                        ResumePushPhysics(box, motion.Velocity, motion.AngularVelocity);
+                    else
+                        ApplyPhysicsPose(box, motion.To, motion.ToYaw);
+                }
                 RemoteMotions.Remove(box);
+            }
+        }
+
+        /// <summary>End a box's push smoothing: re-enable its physics and hand it the streamed
+        /// velocity so it continues sliding from the smoothed pose instead of stopping dead.
+        /// Callers that cancel a dead-reckon entry without letting the tick finish it (the
+        /// lease-timeout and reliable-edge paths) MUST call this, or the box stays kinematic.</summary>
+        public static void ResumePushPhysics(InteractablePackagingBox box, Vector3 velocity, Vector3 angularVelocity)
+        {
+            BoxLifecycle.ApplyEnabled(box, true);
+            var rb = box != null ? box.m_Rigidbody : null;
+            if (rb != null)
+            {
+                rb.velocity = velocity;
+                rb.angularVelocity = angularVelocity;
+                rb.WakeUp();
             }
         }
 
@@ -297,7 +398,7 @@ namespace CardShopCoop.Sync
                 if (box != null && box.m_Rigidbody != null)
                     return box.m_Rigidbody.position;
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             return box != null ? box.transform.position : Vector3.zero;
         }
 
@@ -308,7 +409,7 @@ namespace CardShopCoop.Sync
                 if (box != null && box.m_Rigidbody != null)
                     return box.m_Rigidbody.rotation;
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             return box != null ? box.transform.rotation : Quaternion.identity;
         }
 
@@ -345,7 +446,7 @@ namespace CardShopCoop.Sync
                 return rb == null || rb.isKinematic || rb.IsSleeping()
                     || rb.velocity.sqrMagnitude < 0.04f;
             }
-            catch { return true; }
+            catch (System.Exception e) { Swallow.Log(e); return true; }
         }
 
         /// <summary>Moves the real physics body, not merely the visual root. This
@@ -383,13 +484,13 @@ namespace CardShopCoop.Sync
                 {
                     box.transform.SetPositionAndRotation(position, rotation);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             try
             {
                 ObjMoveSync.SyncTagGroup(box.transform);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         private static bool IsBaseBoxHeld(InteractablePackagingBox box)
@@ -398,7 +499,7 @@ namespace CardShopCoop.Sync
             {
                 return BoxFields.BeingHold?.GetValue(box) is bool b && b;
             }
-            catch { return false; }
+            catch (System.Exception e) { Swallow.Log(e); return false; }
         }
     }
 }

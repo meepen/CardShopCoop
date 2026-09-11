@@ -88,6 +88,9 @@ namespace CardShopCoop.Net
         BoxCollect = 91,         // client -> host: open a graded card box (host mints the cards)
         BoxCollectResult = 92,   // host -> client: collect rejected (restore the mirror)
         FurnitureBoxOp = 93,     // client -> host: place / sell / box-up a furniture object
+        BoxResyncRequest = 94,   // client -> host: guest finished loading; resend a full box snapshot
+        BoxMotion = 95,        // client -> host: transient motion of a box the local player is pushing
+        BoxMotionState = 96,   // host -> clients: relayed/authoritative motion of a pushed box
     }
 
     /// <summary>One received message, already reassembled and decoded from the wire.

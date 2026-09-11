@@ -500,7 +500,7 @@ namespace CardShopCoop.Sync
                 if (_shelfMgr != null)
                     _shelfMgr.SaveInteractableObjectData();
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         private void HostToggleSign(byte which)
@@ -596,12 +596,12 @@ namespace CardShopCoop.Sync
                 {
                     MiBillEvaluateUI?.Invoke(_billScreen, null);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 try
                 {
                     MiBillNotification?.Invoke(_billScreen, null);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
 
             // unlocks: the manager methods are pure world changes (blocker off, door
@@ -649,7 +649,7 @@ namespace CardShopCoop.Sync
                     {
                         MiOpenSignMesh?.Invoke(sign, null);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
             }
             if (CPlayerData.m_IsWarehouseDoorClosed != wantWarehouseClosed)
@@ -662,7 +662,7 @@ namespace CardShopCoop.Sync
                     {
                         MiWarehouseSignMesh?.Invoke(sign, null);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
                 else if (urm != null)
                     urm.EvaluateWarehouseRoomOpenClose(); // entry gate still must move

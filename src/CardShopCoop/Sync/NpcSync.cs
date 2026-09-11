@@ -225,7 +225,7 @@ namespace CardShopCoop.Sync
                     if (c.IsSmelly())
                         flags |= NpcFlags.Smelly;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 // the red "!" trade/sell-in prompt is a plain mesh toggle, not an animator
                 // bool - mirror it so the guest can see which customer wants to be served
                 try
@@ -233,7 +233,7 @@ namespace CardShopCoop.Sync
                     if (c.m_ExclaimationMesh != null && c.m_ExclaimationMesh.activeSelf)
                         flags |= NpcFlags.Exclaim;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 WriteEntry(chunks, hostTime, KindCustomer, (ushort)i, cc.CharacterName,
                     c.transform, c.m_CurrentMoveSpeed, flags, _customerGenerations[i], grabSequence, actionKind);
             }
@@ -312,7 +312,7 @@ namespace CardShopCoop.Sync
                 {
                     moveSpeed = speedFromAnim.GetFloat(HashMoveSpeed);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             int key = (kind << 16) | index;
             bool sendName = !_sentNames.TryGetValue(key, out var prev) || prev != charName
@@ -495,7 +495,7 @@ namespace CardShopCoop.Sync
                 }
                 MiEvaluateSkillLevel?.Invoke(worker, null);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         private static NpcFlags CollectFlags(Animator anim)
@@ -516,7 +516,7 @@ namespace CardShopCoop.Sync
                 if (anim.GetBool(HashIsHoldingBox))
                     f |= NpcFlags.IsHoldingBox;
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             return f;
         }
 
@@ -572,7 +572,7 @@ namespace CardShopCoop.Sync
             {
                 Object.Destroy(p.BoxProp);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             p.BoxProp = null;
             p.BoxPropType = 0;
         }
@@ -859,7 +859,7 @@ namespace CardShopCoop.Sync
                                 {
                                     visual.Anim.SetTrigger(actionKind == 2 ? "GrabItemHigh" : "GrabItem");
                                 }
-                                catch { }
+                                catch (System.Exception e) { Swallow.Log(e); }
                                 visual.GrabSequence = actionSequence;
                             }
                             if (visual.Go != null)
@@ -923,7 +923,7 @@ namespace CardShopCoop.Sync
                             : actionKind == 2 ? "GrabItemHigh" : "GrabItem";
                         p.Anim.SetTrigger(trigger);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     p.GrabSequence = actionSequence;
                 }
                 p.LastSeen = _now;
@@ -1053,7 +1053,7 @@ namespace CardShopCoop.Sync
                             p.Anim.SetFloat(HashMoveSpeed, p.AnimSpeed);
                             p.AppliedAnimSpeed = p.AnimSpeed;
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                     }
                 }
                 if ((int)p.Flags != p.AppliedFlags)
@@ -1068,7 +1068,7 @@ namespace CardShopCoop.Sync
                             p.Anim.SetBool(HashIsPlaying, (p.Flags & NpcFlags.IsPlaying) != 0);
                             p.Anim.SetBool(HashIsHoldingBox, (p.Flags & NpcFlags.IsHoldingBox) != 0);
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                     }
                     Toggle(p.Bag, (p.Flags & NpcFlags.HoldingBag) != 0);
                     Toggle(p.Cash, (p.Flags & NpcFlags.HandingOverCash) != 0);
@@ -1293,17 +1293,17 @@ namespace CardShopCoop.Sync
                     worker.m_WorkerIndex = index;
                     worker.InitializeCharacter();
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 try
                 {
                     MiEvaluateWorkerAttribute?.Invoke(worker, null);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 try
                 {
                     MiEvaluateSkillLevel?.Invoke(worker, null);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             p.Custom = cust != null ? cust.m_CharacterCustom
                 : worker != null ? worker.m_CharacterCustom : null;
@@ -1344,7 +1344,7 @@ namespace CardShopCoop.Sync
                     if (cust.m_SmellyFX != null)
                         cust.m_SmellyFX.SetActive(false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
 
             else if (worker != null)
@@ -1400,7 +1400,7 @@ namespace CardShopCoop.Sync
                 if (worker != null && saved != null && index < saved.Count)
                     RefreshWorkerUi(index, saved[index]);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
 
             clone.name = "CoopNpc_" + charName;
             p.Go = clone;

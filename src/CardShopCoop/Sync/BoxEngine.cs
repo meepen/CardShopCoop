@@ -31,6 +31,12 @@ namespace CardShopCoop.Sync
         private const int ClientScanBudget = 16;    // boxes checked per frame (round-robin)
         private const int HostScanBudget = 24;      // boxes checked per partial flush
 
+        // ---- push-motion thresholds (shared with BoxPushProbe / BoxPlacement) ----
+        internal const float PushHysteresis = 0.2f;      // last-contact grace before a push prunes
+        internal const float MotionLeaseTimeout = 0.25f; // a push stream this stale has stopped
+        internal const float MotionSettleSpeed = 0.05f;  // below this speed a box is at rest
+        private const float MotionEpsilon = 0.01f;       // pose delta that counts as a change
+
         private const int HostConn = 0;
         private const int NoOwner = -1;
 
@@ -39,6 +45,16 @@ namespace CardShopCoop.Sync
             public int Owner;                 // HostConn / connId / NoOwner
             public BoxPossession Possession;
             public float LastSeen;
+            // Push-motion state: while MotionDriven the pose is owned by the transient motion
+            // stream (from Driver), and the snapshot path must not also write it.
+            public bool MotionDriven;
+            public int Driver;                // connId (HostConn) of the player driving the push
+            public float LastMotion;          // _leaseClock of the last accepted motion frame
+            public float MotionBlockedUntil;  // _leaseClock until which transient frames absorb
+            public Vector3 MotionPos;
+            public float MotionYaw;
+            public Vector3 MotionVel;
+            public Vector3 MotionAngVel;
         }
 
         private readonly List<IBoxFamily> _families;
@@ -77,12 +93,33 @@ namespace CardShopCoop.Sync
         private readonly HashSet<InteractablePackagingBox> _clientDirty = new HashSet<InteractablePackagingBox>();
         private readonly HashSet<ushort> _snapshotIds = new HashSet<ushort>();
         private readonly List<ushort> _sweep = new List<ushort>();
-        // Client-side ids this machine locally retired (place/collect/sell). The host's
-        // in-flight snapshot may still list them; we skip and hold until it agrees. Cleared
-        // when a full snapshot omits the id (no time window).
-        private readonly HashSet<ushort> _localRemoved = new HashSet<ushort>();
+        // Client-local retires are guarded only briefly: the host's in-flight snapshot lag is at
+        // most a flush or two (~0.1s). Without a TTL a rejected/never-processed local retire would
+        // suppress all authoritative snapshots for that id until a full snapshot (there is no
+        // periodic full scan).
+        private readonly Dictionary<ushort, float> _localRemoved = new Dictionary<ushort, float>();
+        private readonly List<ushort> _localRemovedScratch = new List<ushort>();
+        private readonly Dictionary<ushort, float> _clientMotionBlockedUntil = new Dictionary<ushort, float>();
+        private const float LocalRemovedTtl = 5.0f;
         private int _clientFam;
         private int _clientIdx;
+
+        // ---- local push-motion state (both roles) ----
+        // The boxes the local player is driving (previous tick's driven set, used for settle
+        // detection) and the per-box send bookkeeping. Only the pushed set (a handful of boxes)
+        // is ever touched here - never O(all boxes).
+        private readonly HashSet<InteractablePackagingBox> _pushDriven
+            = new HashSet<InteractablePackagingBox>();
+        private readonly List<InteractablePackagingBox> _pushScratch
+            = new List<InteractablePackagingBox>();
+        private readonly Dictionary<InteractablePackagingBox, float> _pushSentAt
+            = new Dictionary<InteractablePackagingBox, float>();
+        private readonly Dictionary<InteractablePackagingBox, Vector3> _pushSentPos
+            = new Dictionary<InteractablePackagingBox, Vector3>();
+        private readonly Dictionary<InteractablePackagingBox, float> _pushSentYaw
+            = new Dictionary<InteractablePackagingBox, float>();
+        private static readonly IReadOnlyCollection<InteractablePackagingBox> NoPushed
+            = new InteractablePackagingBox[0];
 
         private float _hostTimer;
         private float _leaseClock;
@@ -98,6 +135,14 @@ namespace CardShopCoop.Sync
         /// Processed every tick so a host/client pickup or drop emits on the same frame
         /// instead of waiting for the round-robin slice to reach it.</summary>
         public Func<InteractablePackagingBox> LocalHeld;
+        /// <summary>Wired by CoopCore: the boxes the LOCAL player is physically pushing (the
+        /// BoxPushProbe set). Read every tick so a push starts streaming on the same frame.</summary>
+        public Func<IReadOnlyCollection<InteractablePackagingBox>> LocalPushed;
+        /// <summary>Client -> host: send one transient push-motion frame for a locally pushed box.</summary>
+        public Action<BoxMotionMessage> SendMotion;
+        /// <summary>Host -> all except the given conn id (-1 = all): relay/authoritative
+        /// push-motion so every non-driver peer smooths the box.</summary>
+        public Action<BoxMotionStateMessage, int> RelayMotion;
 
         public string Name => "boxes";
 
@@ -126,6 +171,11 @@ namespace CardShopCoop.Sync
             return _hostIdentity.GetOrAssign(box);
         }
 
+        public bool TryGetHostId(InteractablePackagingBox box, out ushort id)
+        {
+            return _hostIdentity.TryGetId(box, out id);
+        }
+
         public void ForgetHostBox(ushort id)
         {
             // Emit an explicit Removed so partial-snapshot clients retire it immediately
@@ -142,6 +192,11 @@ namespace CardShopCoop.Sync
             _leases.Remove(id);
             _hostHashes.Remove(id);
             _hostDirty.Remove(id);
+            if (box != null)
+            {
+                ClearPushEntries(box);
+                BoxPlacement.CancelRemoteMotion(box); // stop any push smoothing follower
+            }
         }
 
         /// <summary>Host: drop ids for boxes that were destroyed without a Removed edge
@@ -170,10 +225,44 @@ namespace CardShopCoop.Sync
         /// Suppress the host's in-flight snapshot for that id until it agrees.</summary>
         public void ForgetClientBox(ushort id)
         {
-            if (_clientById.TryGetValue(id, out var box))
-                _clientIdOf.Remove(box); // works for a fake-null reference too (no C# null-key)
+            _clientById.TryGetValue(id, out var box);
+            ForgetClientMirror(id, box);
+            _localRemoved[id] = Time.time + LocalRemovedTtl;
+        }
+
+        /// <summary>Drop every per-box client bookkeeping entry keyed on the object. Does not
+        /// touch _clientById (callers either reassign it or follow with ForgetClientMirror).</summary>
+        private void ClearClientBoxEntries(InteractablePackagingBox box)
+        {
+            // Reference check, not Unity's overloaded ==: a destroyed box is "fake-null" but
+            // still a valid dictionary key, and its stale entries are exactly what this drops.
+            if (box is null)
+                return;
+            _clientIdOf.Remove(box);
+            _reported.Remove(box);
+            _reportedContent.Remove(box);
+            _contentSentAt.Remove(box);
+            _lastSentAt.Remove(box);
+            _active.Remove(box);
+            ClearPushEntries(box);
+            BoxVisuals.Forget(box);
+            BoxPlacement.CancelRemoteMotion(box); // stop any push smoothing follower
+        }
+
+        /// <summary>Client: unbind a mirror id and drop all of its per-box state.</summary>
+        private void ForgetClientMirror(ushort id, InteractablePackagingBox box)
+        {
+            ClearClientBoxEntries(box);
             _clientById.Remove(id);
-            _localRemoved.Add(id);
+            _clientMotionBlockedUntil.Remove(id);
+        }
+
+        public bool HostBoxHeldByOther(ushort id, int connId)
+        {
+            if (!_leases.TryGetValue(id, out var lease))
+                return false;
+            return (lease.Possession == BoxPossession.Held || lease.Possession == BoxPossession.Placing)
+                && lease.Owner != NoOwner && lease.Owner != HostConn && lease.Owner != connId;
         }
 
         /// <summary>Client: this machine destroyed a box through local gameplay (trash,
@@ -258,6 +347,8 @@ namespace CardShopCoop.Sync
             _clientById.Clear();
             _clientIdOf.Clear();
             _localRemoved.Clear();
+            _localRemovedScratch.Clear();
+            _clientMotionBlockedUntil.Clear();
             _reported.Clear();
             _reportedContent.Clear();
             _contentSentAt.Clear();
@@ -266,6 +357,11 @@ namespace CardShopCoop.Sync
             _clientDirty.Clear();
             _clientFam = 0;
             _clientIdx = 0;
+            _pushDriven.Clear();
+            _pushScratch.Clear();
+            _pushSentAt.Clear();
+            _pushSentPos.Clear();
+            _pushSentYaw.Clear();
             _hostTimer = 0f;
             _fullPending = true; // send a full snapshot on the first tick of a session
             _leaseClock = 0f;
@@ -446,6 +542,12 @@ namespace CardShopCoop.Sync
             ushort id = _hostIdentity.GetOrAssign(box);
             if (id == 0)
                 return;
+            Lease lease = _leases.TryGetValue(id, out var l) ? l : default(Lease);
+            // A pushed box's pose is owned by the transient motion stream: skip the snapshot
+            // path (FillContent/hash/emit) so the stream is the single pose writer. This is
+            // both the authority rule and the perf fix (no per-frame FillContent while pushed).
+            if (lease.MotionDriven)
+                return;
             if (BoxPlacement.IsThrowPending(box))
             {
                 if (localPoss != BoxPossession.Free)
@@ -459,7 +561,6 @@ namespace CardShopCoop.Sync
                     BoxPlacement.ClearThrow(box);
             }
 
-            Lease lease = _leases.TryGetValue(id, out var l) ? l : default(Lease);
             bool clientOwned = lease.Owner != NoOwner && lease.Owner != HostConn;
             BoxPossession poss;
             int owner;
@@ -516,7 +617,13 @@ namespace CardShopCoop.Sync
                 h = h * 31 + Mathf.RoundToInt(w.Pos.x * 8f);
                 h = h * 31 + Mathf.RoundToInt(w.Pos.y * 8f);
                 h = h * 31 + Mathf.RoundToInt(w.Pos.z * 8f);
-                h = h * 31 + Mathf.RoundToInt(w.Velocity.sqrMagnitude * 16f);
+                h = h * 31 + Mathf.RoundToInt(w.Yaw * 8f);
+                h = h * 31 + Mathf.RoundToInt(w.Velocity.x * 16f);
+                h = h * 31 + Mathf.RoundToInt(w.Velocity.y * 16f);
+                h = h * 31 + Mathf.RoundToInt(w.Velocity.z * 16f);
+                h = h * 31 + Mathf.RoundToInt(w.AngularVelocity.x * 16f);
+                h = h * 31 + Mathf.RoundToInt(w.AngularVelocity.y * 16f);
+                h = h * 31 + Mathf.RoundToInt(w.AngularVelocity.z * 16f);
             }
             h = h * 31 + ContentHash(w);
             return h;
@@ -559,6 +666,25 @@ namespace CardShopCoop.Sync
             if (msg == null)
                 return;
             var w = msg.Box;
+            // The host is the only id authority: a client cannot legitimately reference an id the
+            // host has never assigned. Drop it (and any lingering lease) instead of seeding an
+            // unowned Free lease that ExpireLeases deliberately never expires.
+            if (!_hostIdentity.ById.TryGetValue(w.Id, out var knownBox) || knownBox == null)
+            {
+                _leases.Remove(w.Id);
+                _hostDirty.Remove(w.Id);
+                return;
+            }
+            if (w.Family != FamilyOf(knownBox))
+            {
+                BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} rejected=family-mismatch");
+                return;
+            }
+            if (!Enum.IsDefined(typeof(BoxPossession), w.Possession))
+            {
+                BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} rejected=invalid-possession");
+                return;
+            }
             var sender = PlayerRegistry.ForConnection(connId);
             Lease lease = _leases.TryGetValue(w.Id, out var l) ? l : default(Lease);
             var currentOwner = lease.Owner == NoOwner
@@ -582,25 +708,34 @@ namespace CardShopCoop.Sync
                 : next.Kind == PlayerKind.Host ? HostConn : next.Id;
             lease.Possession = w.Possession;
             lease.LastSeen = _leaseClock;
+            // A reliable possession edge supersedes any in-flight push stream: stop the
+            // kinematic follower and hold off transient frames for a beat so a late motion
+            // frame (the transient lane overtakes reliable on the LAN transport) can't
+            // re-claim the pose we just committed.
+            lease.MotionDriven = false;
+            if (w.Possession != BoxPossession.Removed)
+                lease.MotionBlockedUntil = _leaseClock + MotionLeaseTimeout;
             _leases[w.Id] = lease;
 
             // Apply the owner's state to the host's own copy so the host sees it too.
-            if (_hostIdentity.ById.TryGetValue(w.Id, out var box) && box != null)
+            if (knownBox != null)
             {
                 for (int f = 0; f < _families.Count; f++)
                     if (_families[f].Family == w.Family)
-                        _families[f].ApplyState(box, w, isOwner: false);
+                        _families[f].ApplyState(knownBox, w, isOwner: false);
+                // The reliable edge ends the push: stop the smoothing follower so physics
+                // can resume from the pose ApplyState just committed.
+                BoxPlacement.CancelRemoteMotion(knownBox);
             }
 
-            if (w.Possession == BoxPossession.Removed
-                && _hostIdentity.ById.TryGetValue(w.Id, out var dead) && dead != null)
+            if (w.Possession == BoxPossession.Removed && knownBox != null)
             {
                 // The sender retired the real object on their machine (trash/storage) - do
                 // the same here, or the next snapshot re-assigns an id and resurrects it.
                 BoxShared.ApplyingRemote = true;
                 try
                 {
-                    Family(FamilyOf(dead))?.DestroyBox(dead);
+                    Family(FamilyOf(knownBox))?.DestroyBox(knownBox);
                 }
                 finally { BoxShared.ApplyingRemote = false; }
                 ForgetHostBox(w.Id);
@@ -613,27 +748,54 @@ namespace CardShopCoop.Sync
         {
             var release = new List<ushort>();
             foreach (var kv in _leases)
-                if (kv.Value.Owner == connId)
+                // A box is released if the peer owned it OR was driving its push (a pushed
+                // Free box has Owner == NoOwner, so the Driver check is what catches it).
+                if (kv.Value.Owner == connId
+                    || (kv.Value.MotionDriven && kv.Value.Driver == connId))
                     release.Add(kv.Key);
             for (int i = 0; i < release.Count; i++)
             {
-                if (_hostIdentity.ById.TryGetValue(release[i], out var box) && box != null)
-                {
-                    var w = new BoxWire
-                    {
-                        Id = release[i],
-                        Possession = BoxPossession.Free,
-                        Pos = BoxPlacement.PhysicsPosition(box),
-                        Yaw = BoxPlacement.PhysicsRotation(box).eulerAngles.y
-                    };
-                    for (int f = 0; f < _families.Count; f++)
-                        if (_families[f].Family == FamilyOf(box))
-                            _families[f].ApplyState(box, w, isOwner: false);
-                }
                 _leases.Remove(release[i]);
-                _hostDirty.Add(release[i]);
+                RestoreHostBoxToFree(release[i]);
+                // The reliable restore is the final pose: stop any push-smoothing follower
+                // so it cannot keep writing a stale extrapolated pose over the restored one.
+                if (_hostIdentity.ById.TryGetValue(release[i], out var released))
+                    BoxPlacement.CancelRemoteMotion(released);
             }
             ForceNextTick();
+        }
+
+        /// <summary>Host: restore a box to an authoritative Free state on the host's own object.
+        /// A Held update hid this box (SetVisible(false)); when the lease ends without an explicit
+        /// Free report (disconnect or lease timeout), the host must unhide/resume it from its REAL
+        /// local content. The partial wire that callers would otherwise build has ItemType/ItemCount
+        /// at their defaults and apply them, wiping the box's contents.</summary>
+        private void RestoreHostBoxToFree(ushort id)
+        {
+            if (!_hostIdentity.ById.TryGetValue(id, out var box) || box == null)
+                return;
+            var family = Family(FamilyOf(box));
+            if (family == null)
+                return;
+            if (!family.TryReadLocal(box, out _, out var pos, out var yaw,
+                    out var vel, out var angVel, out _))
+                return;
+            var w = new BoxWire
+            {
+                Id = id,
+                Family = family.Family,
+                Possession = BoxPossession.Free,
+                Pos = pos,
+                Yaw = yaw,
+                Velocity = vel,
+                AngularVelocity = angVel,
+            };
+            family.FillContent(box, ref w);
+            // isOwner:false is required: each family's ApplyState early-returns its Free branch for
+            // the owning machine. This call IS the host applying the restored state, so it must run
+            // the same branch a receiver runs.
+            family.ApplyState(box, w, isOwner: false);
+            _hostDirty.Add(id);
         }
 
         private void ExpireLeases()
@@ -651,7 +813,31 @@ namespace CardShopCoop.Sync
                 lease.Owner = NoOwner;
                 lease.Possession = BoxPossession.Free;
                 _leases[stale[i]] = lease;
-                _hostDirty.Add(stale[i]);
+                RestoreHostBoxToFree(stale[i]);
+            }
+            // A pushed box whose motion stream went silent (the driver left, dropped the box,
+            // or the connection hiccuped) settles from the last pose the host applied, and the
+            // real physics resumes on the next flush. Crash-safe: it never depends on the
+            // driver's settle update arriving.
+            var settled = new List<ushort>();
+            foreach (var kv in _leases)
+                if (kv.Value.MotionDriven && _leaseClock - kv.Value.LastMotion > MotionLeaseTimeout)
+                    settled.Add(kv.Key);
+            for (int i = 0; i < settled.Count; i++)
+            {
+                var lease = _leases[settled[i]];
+                var settleVel = lease.MotionVel;
+                var settleAngVel = lease.MotionAngVel;
+                lease.MotionDriven = false;
+                lease.Driver = NoOwner;
+                _leases[settled[i]] = lease;
+                var box = _hostIdentity.ById.TryGetValue(settled[i], out var b) ? b : null;
+                BoxPlacement.CancelRemoteMotion(box);
+                // Cancelling the glider kills its own physics-resume path: restore the real
+                // simulation from the last streamed velocity here, or the host's copy would
+                // freeze kinematic until the next possession edge.
+                BoxPlacement.ResumePushPhysics(box, settleVel, settleAngVel);
+                _hostDirty.Add(settled[i]);
             }
         }
 
@@ -666,10 +852,33 @@ namespace CardShopCoop.Sync
 
         // ---------------- client ----------------
 
+        private bool IsLocalRemoved(ushort id)
+        {
+            if (!_localRemoved.TryGetValue(id, out var expiry))
+                return false;
+            if (Time.time < expiry)
+                return true;
+            _localRemoved.Remove(id);
+            return false;
+        }
+
+        private void PruneExpiredLocalRemoved()
+        {
+            if (_localRemoved.Count == 0)
+                return;
+            _localRemovedScratch.Clear();
+            foreach (var kv in _localRemoved)
+                if (Time.time >= kv.Value)
+                    _localRemovedScratch.Add(kv.Key);
+            for (int i = 0; i < _localRemovedScratch.Count; i++)
+                _localRemoved.Remove(_localRemovedScratch[i]);
+        }
+
         public void ClientApplySnapshot(BoxSnapshotMessage msg)
         {
             if (msg == null)
                 return;
+            PruneExpiredLocalRemoved();
             bool full = msg.Full;
             bool truncated = full && msg.Boxes.Count >= MaxBoxes;
             if (full)
@@ -677,7 +886,12 @@ namespace CardShopCoop.Sync
                 _snapshotIds.Clear();
                 for (int i = 0; i < msg.Boxes.Count; i++)
                     _snapshotIds.Add(msg.Boxes[i].Id);
-                _localRemoved.RemoveWhere(id => !_snapshotIds.Contains(id));
+                _localRemovedScratch.Clear();
+                foreach (var kv in _localRemoved)
+                    if (!_snapshotIds.Contains(kv.Key))
+                        _localRemovedScratch.Add(kv.Key);
+                for (int i = 0; i < _localRemovedScratch.Count; i++)
+                    _localRemoved.Remove(_localRemovedScratch[i]);
             }
             List<InteractablePackagingBox> spawned = null;
             for (int i = 0; i < msg.Boxes.Count; i++)
@@ -686,7 +900,7 @@ namespace CardShopCoop.Sync
                 var family = Family(w.Family);
                 if (family == null)
                     continue;
-                if (_localRemoved.Contains(w.Id))
+                if (IsLocalRemoved(w.Id))
                 {
                     // The host's explicit Removed is its agreement that the box is gone;
                     // drop the local-retire guard so we don't depend on a full sweep to
@@ -696,8 +910,16 @@ namespace CardShopCoop.Sync
                     continue; // locally retired; wait for the host to agree
                 }
 
-                if (!_clientById.TryGetValue(w.Id, out var box) || box == null)
+                bool hadEntry = _clientById.TryGetValue(w.Id, out var box);
+                if (!hadEntry || box == null)
                 {
+                    // The key existed but held a destroyed object: drop its stale per-box
+                    // entries before this id is bound to the new object.
+                    if (hadEntry)
+                    {
+                        ClearClientBoxEntries(box);
+                        _clientMotionBlockedUntil.Remove(w.Id);
+                    }
                     if (w.Possession == BoxPossession.Removed)
                         continue;
                     // The client joins by loading the host's own save, so it usually already
@@ -730,8 +952,7 @@ namespace CardShopCoop.Sync
                 if (!family.ContentMatches(box, w))
                 {
                     DestroyClientBox(box);
-                    _clientById.Remove(w.Id);
-                    _clientIdOf.Remove(box);
+                    ForgetClientMirror(w.Id, box);
                     if (w.Possession == BoxPossession.Removed)
                         continue;
                     box = family.Spawn(w);
@@ -744,15 +965,24 @@ namespace CardShopCoop.Sync
                 if (w.Possession == BoxPossession.Removed)
                 {
                     DestroyClientBox(box);
-                    _clientById.Remove(w.Id);
-                    _clientIdOf.Remove(box);
+                    ForgetClientMirror(w.Id, box);
                     continue;
                 }
                 // my own Held/Placing box is driven by my local game; never re-render it
                 bool mine = (w.Possession == BoxPossession.Held || w.Possession == BoxPossession.Placing)
                     && w.OwnerConn == CoopCore.LocalConnectionId;
                 if (!mine)
+                {
                     family.ApplyState(box, w, isOwner: false);
+                    // A reliable Free pose is the settle commit: end any in-flight push
+                    // smoothing so physics resumes from the authoritative pose, not a
+                    // stale extrapolated target.
+                    if (w.Possession == BoxPossession.Free)
+                    {
+                        _clientMotionBlockedUntil[w.Id] = Time.time + MotionLeaseTimeout;
+                        BoxPlacement.CancelRemoteMotion(box);
+                    }
+                }
             }
 
             if (spawned != null)
@@ -767,11 +997,10 @@ namespace CardShopCoop.Sync
                         _sweep.Add(kv.Key);
                 for (int i = 0; i < _sweep.Count; i++)
                 {
-                    if (_clientById.TryGetValue(_sweep[i], out var box) && box != null)
+                    _clientById.TryGetValue(_sweep[i], out var box);
+                    if (box != null)
                         DestroyClientBox(box);
-                    if (_clientById.TryGetValue(_sweep[i], out var b2) && b2 != null)
-                        _clientIdOf.Remove(b2);
-                    _clientById.Remove(_sweep[i]);
+                    ForgetClientMirror(_sweep[i], box);
                 }
             }
         }
@@ -992,6 +1221,286 @@ namespace CardShopCoop.Sync
                 box.GetInstanceID(), 0.05f);
             SendUpdate?.Invoke(new BoxUpdateMessage { Box = w });
             return isActive;
+        }
+
+        // ---------------- push motion ----------------
+        //
+        // A box the LOCAL player is physically pushing is streamed as a transient pose/velocity
+        // (BoxMotion client->host, BoxMotionState host->peers) at the network send rate, gated on
+        // change. While a box is motion-driven, exactly one writer owns its pose (the stream) and
+        // the body is kinematic; on settle the host re-emits it from its real pose and the driver
+        // sends one reliable Free (with content) so the commit and broadcast converge and physics
+        // resumes with the streamed velocity. Only the pushed set (a handful of boxes) is touched
+        // per frame - never O(all boxes), and no FillContent/ContentSignature in the per-frame path.
+
+        /// <summary>True if the local player may physically push this box: it is loose (Free,
+        /// not stored) in a family we sync, and (on a client) it has a host id. The BoxPushProbe
+        /// uses this to decide which contacts count as a push.</summary>
+        public bool CanLocallyPush(InteractablePackagingBox box)
+        {
+            if (box == null)
+                return false;
+            var family = Family(FamilyOf(box));
+            if (family == null)
+                return false;
+            if (!family.TryReadLocal(box, out var poss, out _, out _, out _, out _, out var stored))
+                return false;
+            if (poss != BoxPossession.Free || stored)
+                return false;
+            if (CoopCore.Role == CoopRole.Client && !_clientIdOf.ContainsKey(box))
+                return false;
+            return true;
+        }
+
+        /// <summary>Drive the boxes the local player is physically pushing. Runs on both roles.
+        /// Host: broadcast each pushed box's pose as an authoritative BoxMotionState and mark the
+        /// lease motion-driven. Client: send each pushed box's pose to the host as a transient
+        /// BoxMotion. A box that drops out of the pushed set settles. Reads only the pushed set.</summary>
+        public void PushTick(float dt, bool active)
+        {
+            if (!active || LocalPushed == null)
+                return;
+            var pushed = LocalPushed() ?? NoPushed;
+
+            // 1) Settle any box we were driving that is no longer being pushed.
+            if (_pushDriven.Count > 0)
+            {
+                _pushScratch.Clear();
+                foreach (var box in _pushDriven)
+                    if (!IsPushed(box, pushed))
+                        _pushScratch.Add(box);
+                for (int i = 0; i < _pushScratch.Count; i++)
+                    SettlePushed(_pushScratch[i]);
+            }
+
+            // 2) Drive the boxes currently being pushed.
+            float interval = 1f / SendRate();
+            foreach (var box in pushed)
+                DrivePushed(box, interval);
+        }
+
+        /// <summary>Reference membership test over the pushed set: O(contacts), no allocation,
+        /// no Linq (the project stays allocation-free per frame).</summary>
+        private static bool IsPushed(InteractablePackagingBox box, IReadOnlyCollection<InteractablePackagingBox> pushed)
+        {
+            foreach (var candidate in pushed)
+                if (ReferenceEquals(candidate, box))
+                    return true;
+            return false;
+        }
+
+        /// <summary>Read one pushed box's pose and stream it if it moved since the last frame we
+        /// sent and the rate window allows. No FillContent / ContentSignature here.</summary>
+        private void DrivePushed(InteractablePackagingBox box, float interval)
+        {
+            if (box == null)
+                return;
+            var family = Family(FamilyOf(box));
+            if (family == null)
+                return;
+            bool isHost = CoopCore.Role == CoopRole.Host;
+            ushort id;
+            if (isHost)
+            {
+                if (!_hostIdentity.TryGetId(box, out id))
+                    return; // no id yet; the next ProcessHostBox will assign one
+            }
+            else
+            {
+                if (!_clientIdOf.TryGetValue(box, out id))
+                    return; // the host has not given this box an id; nothing to stream
+            }
+            if (!family.TryReadLocal(box, out var poss, out var pos, out var yaw,
+                    out var vel, out var angVel, out var stored))
+                return;
+            if (poss != BoxPossession.Free || stored)
+                return; // picked up or racked mid-push; stop driving it this frame
+
+            // Change gate: only send when the pose actually moved since the last frame we SENT.
+            if (_pushSentPos.TryGetValue(box, out var lastPos)
+                && _pushSentYaw.TryGetValue(box, out var lastYaw)
+                && Vector3.SqrMagnitude(pos - lastPos) <= MotionEpsilon * MotionEpsilon
+                && Mathf.Abs(Mathf.DeltaAngle(lastYaw, yaw)) <= 1f)
+                return;
+            // Rate limit: at most SendRateHz frames per second per box.
+            if (_pushSentAt.TryGetValue(box, out var lastSent) && Time.time - lastSent < interval)
+                return;
+
+            _pushSentAt[box] = Time.time;
+            _pushSentPos[box] = pos;
+            _pushSentYaw[box] = yaw;
+            _pushDriven.Add(box);
+
+            if (isHost)
+            {
+                Lease lease = _leases.TryGetValue(id, out var l) ? l : default(Lease);
+                if (lease.Possession == BoxPossession.Held || lease.Possession == BoxPossession.Placing)
+                    return; // the authoritative lease says it is in someone's hand; the local
+                            // push of the (hidden) host mirror waits for the Free edge
+                lease.MotionDriven = true;
+                lease.Driver = HostConn;
+                lease.LastMotion = _leaseClock;
+                lease.MotionPos = pos;
+                lease.MotionYaw = yaw;
+                lease.MotionVel = vel;
+                lease.MotionAngVel = angVel;
+                _leases[id] = lease;
+                RelayMotion?.Invoke(new BoxMotionStateMessage
+                {
+                    Id = id,
+                    DriverConn = HostConn,
+                    Pos = pos,
+                    Yaw = yaw,
+                    Velocity = vel,
+                    AngularVelocity = angVel,
+                }, -1);
+            }
+            else
+            {
+                SendMotion?.Invoke(new BoxMotionMessage
+                {
+                    Id = id,
+                    Pos = pos,
+                    Yaw = yaw,
+                    Velocity = vel,
+                    AngularVelocity = angVel,
+                });
+            }
+        }
+
+        /// <summary>A pushed box dropped out of the local pushed set (the player stopped). Host:
+        /// re-emit it from its real pose. Client: send ONE reliable Free with full content so the
+        /// pose and content commit converge and physics resumes with the streamed velocity.</summary>
+        private void SettlePushed(InteractablePackagingBox box)
+        {
+            if (box == null)
+                return;
+            ClearPushEntries(box);
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                if (!_hostIdentity.TryGetId(box, out var hostId))
+                    return;
+                if (_leases.TryGetValue(hostId, out var lease) && lease.MotionDriven)
+                {
+                    lease.MotionDriven = false;
+                    lease.Driver = NoOwner;
+                    _leases[hostId] = lease;
+                    // The driver's OWN box never went kinematic (local physics stayed the
+                    // single truth while pushed), so no physics resume is needed here - and
+                    // re-enabling would be wrong if the box was picked up mid-slide (the
+                    // game's hold already switched physics off). Just re-emit the real pose.
+                    _hostDirty.Add(hostId);
+                }
+                return;
+            }
+            var family = Family(FamilyOf(box));
+            if (family == null || !_clientIdOf.TryGetValue(box, out var id))
+                return;
+            if (!family.TryReadLocal(box, out var poss, out var pos, out var yaw,
+                    out var vel, out var angVel, out var stored))
+                return;
+            if (poss != BoxPossession.Free || stored)
+                return; // the normal possession path will report the real state
+            var w = new BoxWire
+            {
+                Id = id,
+                Family = family.Family,
+                Possession = BoxPossession.Free,
+                Pos = pos,
+                Yaw = yaw,
+                Velocity = vel,
+                AngularVelocity = angVel,
+            };
+            family.FillContent(box, ref w); // the one settle commit
+            SendUpdate?.Invoke(new BoxUpdateMessage { Box = w });
+        }
+
+        /// <summary>Host: a client is pushing a box. Make the host's real box a kinematic
+        /// follower of the streamed pose (the stream is the single pose writer while fresh) and
+        /// relay the motion to the other peers. Guard clauses reject frames that would fight a
+        /// possession edge or a newer driver (first-claim wins within the motion window).</summary>
+        public void HostApplyMotion(BoxMotionMessage msg, int connId)
+        {
+            if (msg == null)
+                return;
+            if (!_hostIdentity.ById.TryGetValue(msg.Id, out var box) || box == null)
+                return; // unknown/removed box
+            Lease lease = _leases.TryGetValue(msg.Id, out var l) ? l : default(Lease);
+            if (lease.Possession == BoxPossession.Held || lease.Possession == BoxPossession.Placing)
+                return; // in someone's hand; a push can't own it
+            var family = Family(FamilyOf(box));
+            if (family != null
+                && family.TryReadLocal(box, out _, out _, out _, out _, out _, out var stored)
+                && stored)
+                return; // a racked (stored) box isn't pushed
+            if (_leaseClock < lease.MotionBlockedUntil)
+                return; // a reliable edge just landed; absorb late transient frames
+            if (lease.MotionDriven && lease.Driver != connId
+                && _leaseClock - lease.LastMotion < MotionLeaseTimeout)
+                return; // another player already drives it (first-claim wins)
+
+            lease.MotionDriven = true;
+            lease.Driver = connId;
+            lease.LastMotion = _leaseClock;
+            lease.MotionPos = msg.Pos;
+            lease.MotionYaw = msg.Yaw;
+            lease.MotionVel = msg.Velocity;
+            lease.MotionAngVel = msg.AngularVelocity;
+            _leases[msg.Id] = lease;
+
+            // Kinematic follower: the motion stream is the single pose writer while it is fresh.
+            BoxLifecycle.ApplyEnabled(box, false);
+            BoxPlacement.ScheduleRemoteMotion(box, msg.Pos, msg.Yaw, msg.Velocity, msg.AngularVelocity);
+            RelayMotion?.Invoke(new BoxMotionStateMessage
+            {
+                Id = msg.Id,
+                DriverConn = connId,
+                Pos = msg.Pos,
+                Yaw = msg.Yaw,
+                Velocity = msg.Velocity,
+                AngularVelocity = msg.AngularVelocity,
+            }, connId);
+        }
+
+        /// <summary>Client: a peer (or the host) is pushing a box. Smooth our mirror of it from the
+        /// streamed pose (dead-reckon). The driver ignores its own relay; every other peer
+        /// dead-reckons. The body is kept kinematic while the stream is fresh and resumes physics
+        /// when it goes stale or a reliable Free snapshot arrives (see BoxPlacement).</summary>
+        public void ClientApplyMotion(BoxMotionStateMessage msg)
+        {
+            if (msg == null)
+                return;
+            if (msg.DriverConn == CoopCore.LocalConnectionId)
+                return; // my own push; I'm the driver (my box is the real local one)
+            if (_clientMotionBlockedUntil.TryGetValue(msg.Id, out var blockedUntil))
+            {
+                if (Time.time < blockedUntil)
+                    return;
+                _clientMotionBlockedUntil.Remove(msg.Id);
+            }
+            if (!_clientById.TryGetValue(msg.Id, out var box) || box == null)
+                return; // no local mirror for this id
+            BoxPlacement.ScheduleRemoteMotion(box, msg.Pos, msg.Yaw, msg.Velocity, msg.AngularVelocity);
+        }
+
+        /// <summary>Drop the local push bookkeeping for one box (it is being forgotten/destroyed
+        /// or has settled).</summary>
+        private void ClearPushEntries(InteractablePackagingBox box)
+        {
+            if (box is null)
+                return;
+            _pushDriven.Remove(box);
+            _pushSentAt.Remove(box);
+            _pushSentPos.Remove(box);
+            _pushSentYaw.Remove(box);
+        }
+
+        /// <summary>The configured network send rate (Hz), clamped to a sane floor. Shared by the
+        /// player-state and box-push streams so a config change moves both.</summary>
+        private static float SendRate()
+        {
+            float hz = CoopPlugin.SendRateHz != null ? CoopPlugin.SendRateHz.Value : 15f;
+            return hz > 1f ? hz : 1f;
         }
 
         private IBoxFamily Family(BoxFamily f)

@@ -95,7 +95,7 @@ namespace CardShopCoop.Sync
                     comp.RemoveBox(box);
                 box.m_IsStored = false;
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         public void ApplyState(InteractablePackagingBox box, in BoxWire w, bool isOwner)
@@ -110,10 +110,14 @@ namespace CardShopCoop.Sync
                 case BoxPossession.Held:
                     if (isOwner)
                         return;
+                    BoxLifecycle.Apply(box, w.Possession);
                     // Hides the box, its world label, and its price tag together.
                     BoxVisuals.SetVisible(box, false);
                     break;
                 case BoxPossession.Placing:
+                    if (isOwner)
+                        return;
+                    BoxLifecycle.Apply(box, w.Possession);
                     BoxVisuals.EnsureOpenState(box, w.Open);
                     BoxVisuals.SetVisible(box, true);
                     BoxPlacement.SetPlacementIntent(box, true,
@@ -240,7 +244,7 @@ namespace CardShopCoop.Sync
                 else
                     PlacedObjectIdentity.TryGet(shelf, out w.StoreShelfId);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         /// <summary>Run the game's own store recipe (physics off, then DispenseItem) so the
@@ -318,7 +322,7 @@ namespace CardShopCoop.Sync
                     return "item type mismatch";
                 return "unknown";
             }
-            catch (Exception e) { return "probe threw: " + e.Message; }
+            catch (Exception e) { Swallow.Log(e); return "probe threw: " + e.Message; }
         }
 
         private static ShelfManager _sm;
@@ -355,7 +359,7 @@ namespace CardShopCoop.Sync
                     return ws.GetWarehouseCompartment(compIdx);
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             return null;
         }
 
@@ -374,7 +378,7 @@ namespace CardShopCoop.Sync
                 {
                     storedOrClosed = box.m_IsStored || !box.IsBoxOpened();
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 if (storedOrClosed && count > 0 && comp.GetItemPosListCount() <= 0)
                 {
                     try
@@ -382,12 +386,12 @@ namespace CardShopCoop.Sync
                         comp.SetCompartmentItemType(comp.GetItemType());
                         comp.CalculatePositionList();
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
                 comp.PreSpawnItemUpdate(count);
                 BoxFields.ItemAmountToSpawn?.SetValue(box, count);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
     }
 }

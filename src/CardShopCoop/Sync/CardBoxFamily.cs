@@ -33,7 +33,7 @@ namespace CardShopCoop.Sync
             {
                 return b.GetCardDataList();
             }
-            catch { return null; }
+            catch (System.Exception e) { Swallow.Log(e); return null; }
         }
 
         public void FillContent(InteractablePackagingBox box, ref BoxWire w)
@@ -95,7 +95,7 @@ namespace CardShopCoop.Sync
             {
                 box.OnDestroyed();
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         public void ApplyState(InteractablePackagingBox box, in BoxWire w, bool isOwner)
@@ -105,9 +105,11 @@ namespace CardShopCoop.Sync
             switch (w.Possession)
             {
                 case BoxPossession.Held:
+                    BoxLifecycle.Apply(box, w.Possession);
                     BoxVisuals.SetVisible(box, false);
                     break;
                 case BoxPossession.Placing:
+                    BoxLifecycle.Apply(box, w.Possession);
                     BoxVisuals.SetVisible(box, true);
                     BoxPlacement.SetPlacementIntent(box, true,
                         BoxPlacement.ResolvePlacementAvatar((byte)(w.OwnerConn == 0 ? 1 : 2), w.OwnerConn));

@@ -152,14 +152,7 @@ namespace CardShopCoop.Sync
             {
                 // Rebuild only on an explicit appearance change. All movement/hold state is
                 // retained in RemoteAvatar and the next Tick reconstructs its visuals.
-                ReleaseHeld(av);
-                DestroyBody(av);
-                av.Go = null;
-                av.Anim = null;
-                av.HasMoveSpeed = false;
-                av.HasHoldingBox = false;
-                av.HoldingBoxPoseSet = false;
-                av.EverPositioned = false;
+                DespawnBody(av);
             }
         }
 
@@ -212,16 +205,24 @@ namespace CardShopCoop.Sync
                     var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(model.CustomizationJson);
                     if (data != null)
                     {
-                        NormalizeCharacterData(custom, data);
-                        custom.StoredCharacterData = data;
-                        if (!TryApplyCharacterData(custom, data, "local model"))
+                        if (!CoopPlugin.AllowNsfw.Value && IsNude(data))
+                        {
+                            // Deliberately nude appearance with NSFW off: forget the payload
+                            // and keep the game's initialized (clothed) preset.
                             model.CustomizationJson = null;
+                            CoopPlugin.Log.LogInfo("blocked a nude local appearance because NSFW is disabled");
+                        }
                         else
-                            ClearEmptyWardrobeSlots(custom, data);
+                        {
+                            NormalizeCharacterData(custom, data);
+                            custom.StoredCharacterData = data;
+                            if (!TryApplyCharacterData(custom, data, "local model"))
+                                model.CustomizationJson = null;
+                            else
+                                ClearEmptyWardrobeSlots(custom, data);
+                        }
                     }
                 }
-                if (string.IsNullOrEmpty(model.CustomizationJson))
-                    ClearAllApparel(custom);
             }
             catch (System.Exception e)
             {
@@ -411,6 +412,108 @@ namespace CardShopCoop.Sync
             // as holes. A solid white texture restores the body's fully visible state.
             custom.setTextureProperty(new CC.CC_Property { propertyName = table.MaskProperty },
                 save: false, t: Texture2D.whiteTexture);
+        }
+
+        /// <summary>True when the appearance would leave the character fully nude: no
+        /// customization payload at all, or a payload whose every apparel slot is empty.
+        /// A deliberately nude character commits a payload with empty apparel names, so
+        /// null JSON must be treated as "unset" (the initialized preset still counts as nude),
+        /// which is exactly what the NSFW guard acts on.</summary>
+        public static bool IsNude(PlayerModelEntry model)
+        {
+            if (model == null)
+                return true;
+            return IsNude(model.CustomizationJson);
+        }
+
+        public static bool IsNude(string customizationJson)
+        {
+            if (string.IsNullOrEmpty(customizationJson))
+                return true;
+            CC.CC_CharacterData data;
+            try
+            {
+                data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(customizationJson);
+            }
+            catch (System.Exception e) { Swallow.Log(e); return true; }
+            return IsNude(data);
+        }
+
+        public static bool IsNude(CC.CC_CharacterData data)
+        {
+            if (data == null || data.ApparelNames == null || data.ApparelNames.Count == 0)
+                return true;
+            for (int i = 0; i < data.ApparelNames.Count; i++)
+                if (!string.IsNullOrEmpty(data.ApparelNames[i]))
+                    return false;
+            return true;
+        }
+
+        /// <summary>Builds a model entry from a wardrobe preset (a complete CC_CharacterData).
+        /// The preset's CharacterName decides gender and model index.</summary>
+        public static PlayerModelEntry ModelFromPreset(CC.CC_CharacterData preset)
+        {
+            if (preset == null)
+                return null;
+            bool female = (preset.CharacterName ?? "").StartsWith("Female", System.StringComparison.OrdinalIgnoreCase);
+            return new PlayerModelEntry
+            {
+                Female = female,
+                ModelIndex = ParsePresetIndex(preset.CharacterName, female),
+                CustomizationJson = JsonConvert.SerializeObject(preset)
+            };
+        }
+
+        private static int ParsePresetIndex(string characterName, bool female)
+        {
+            int prefixLength = female ? 6 : 4;
+            int parsed;
+            if (!string.IsNullOrEmpty(characterName) && characterName.Length > prefixLength
+                && int.TryParse(characterName.Substring(prefixLength), out parsed))
+                return Mathf.Max(0, parsed);
+            return 0;
+        }
+
+        /// <summary>Random clothed preset for the requested gender, or null while the game's
+        /// preset data is not available yet (e.g. before a world with a CustomerManager exists).
+        /// Never returns a nude entry: if the preset list is unusable it falls back to the
+        /// editor template's own initialized preset.</summary>
+        public PlayerModelEntry TryCreateRandomPresetModel(bool female)
+        {
+            var custom = GetEditorCustomization(female);
+            if (custom == null)
+                return null;
+            string prefix = female ? "Female" : "Male";
+            var presets = custom.Presets != null ? custom.Presets.Presets : null;
+            if (presets != null && presets.Count > 0)
+            {
+                var matches = new List<CC.CC_CharacterData>();
+                foreach (var preset in presets)
+                    if (preset != null && (preset.CharacterName ?? "").StartsWith(prefix, System.StringComparison.OrdinalIgnoreCase))
+                        matches.Add(preset);
+                if (matches.Count > 0)
+                    return ModelFromPreset(matches[UnityEngine.Random.Range(0, matches.Count)]);
+            }
+            return ModelFromPreset(custom.StoredCharacterData);
+        }
+
+        /// <summary>Random gender + random preset of that gender, or null while preset data
+        /// is unavailable.</summary>
+        public PlayerModelEntry TryCreateRandomModel()
+        {
+            return TryCreateRandomPresetModel(UnityEngine.Random.value < 0.5f);
+        }
+
+        /// <summary>Placeholder used before preset data exists: random gender, model 0, no
+        /// payload. Applying it leaves the game's initialized preset on the body.</summary>
+        public PlayerModelEntry CreateDefaultModel()
+        {
+            return new PlayerModelEntry
+            {
+                Female = UnityEngine.Random.value < 0.5f,
+                ModelIndex = 0,
+                CustomizationJson = null
+            };
         }
 
         public List<CC.CC_Property> GetLocalBlendshapes(Transform root)
@@ -773,10 +876,7 @@ namespace CardShopCoop.Sync
         public void Clear()
         {
             foreach (var av in _avatars.Values)
-            {
-                ReleaseHeld(av);
-                DestroyBody(av);
-            }
+                DespawnBody(av);
             _avatars.Clear();
             if (_editorHolder != null)
                 Object.Destroy(_editorHolder);
@@ -849,10 +949,12 @@ namespace CardShopCoop.Sync
             {
                 _previewCustomization.CharacterName = (model.Female ? "Female" : "Male") + Mathf.Max(0, model.ModelIndex);
                 _previewCustomization.Initialize();
+                // A null payload, a nude payload with NSFW off, or an undecodable payload
+                // all keep the game's initialized (clothed) preset instead of stripping it.
                 if (!string.IsNullOrEmpty(model.CustomizationJson))
                 {
                     var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(model.CustomizationJson);
-                    if (data != null)
+                    if (data != null && (CoopPlugin.AllowNsfw.Value || !IsNude(data)))
                     {
                         NormalizeCharacterData(_previewCustomization, data);
                         _previewCustomization.StoredCharacterData = data;
@@ -860,8 +962,6 @@ namespace CardShopCoop.Sync
                             ClearEmptyWardrobeSlots(_previewCustomization, data);
                     }
                 }
-                else
-                    ClearAllApparel(_previewCustomization);
             }
 
             foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
@@ -880,6 +980,30 @@ namespace CardShopCoop.Sync
                 Object.DestroyImmediate(rb);
             clone.name = "CoopCharacterPreview";
             _previewBody = clone;
+        }
+
+        /// <summary>Tears down the spawned body AND the animator/pose flags Tick tracks for
+        /// it, so the next Tick rebuilds the body from the retained RemoteAvatar state.</summary>
+        private void DespawnBody(RemoteAvatar av)
+        {
+            if (av == null || av.Go == null)
+                return;
+            ReleaseHeld(av);
+            DestroyBody(av);
+            av.Go = null;
+            av.Anim = null;
+            av.HasMoveSpeed = false;
+            av.HasHoldingBox = false;
+            av.HoldingBoxPoseSet = false;
+            av.EverPositioned = false;
+        }
+
+        /// <summary>Drops every remote body so the next Tick respawns it. Used when the
+        /// NSFW filter changes, so an avatar that should now be re-dressed is rebuilt.</summary>
+        public void RefreshRemoteAvatars()
+        {
+            foreach (var av in _avatars.Values)
+                DespawnBody(av);
         }
 
         /// <summary>Materials are assets, not scene objects: the instanced cube tint from
@@ -907,7 +1031,7 @@ namespace CardShopCoop.Sync
                     {
                         ItemSpawnManager.DisableItem(item);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
             av.HeldItems.Clear();
             av.HeldSig = "";
@@ -923,7 +1047,7 @@ namespace CardShopCoop.Sync
                 {
                     ItemSpawnManager.DisableItem(av.PackProp);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 av.PackProp = null;
             }
             if (av.BinderProp != null)
@@ -971,7 +1095,7 @@ namespace CardShopCoop.Sync
                 {
                     ItemSpawnManager.DisableItem(av.BoxProdItem);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 av.BoxProdItem = null;
             }
             if (av.BoxProp != null)
@@ -1012,7 +1136,7 @@ namespace CardShopCoop.Sync
                 {
                     anchor = av.Anim != null ? av.Anim.GetBoneTransform(HumanBodyBones.Chest) : null;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 var body = av.Go.transform;
                 clone.transform.SetParent(anchor != null ? anchor : body, worldPositionStays: false);
                 clone.transform.rotation = body.rotation;
@@ -1071,7 +1195,7 @@ namespace CardShopCoop.Sync
                     {
                         c.OnDestroyed();
                     }
-                    catch { } // game's own card despawn path
+                    catch (System.Exception e) { Swallow.Log(e); } // game's own card despawn path
                 }
             av.HeldCards3d.Clear();
             av.CardSig = "";
@@ -1089,7 +1213,7 @@ namespace CardShopCoop.Sync
                 if (av.Anim != null)
                     av.Anim.SetTrigger("GrabItem");
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             // packIndex is ALREADY A LOCAL EItemType: both callers (CoopCore's Activity and
             // RelayTag handlers) read it with Msg.ReadItemType, which is the one translation
             // boundary for it. Do NOT translate again here. A pack from a set only the
@@ -1119,7 +1243,7 @@ namespace CardShopCoop.Sync
                         CoopPlugin.Log.LogInfo($"pack-open visual: no mesh for pack index {packIndex}");
                     }
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
         }
 
@@ -1288,7 +1412,7 @@ namespace CardShopCoop.Sync
                                 card3d.SetEnableCollision(isEnable: false);
                                 av.HeldCards3d.Add(card3d);
                             }
-                            catch { }
+                            catch (System.Exception e) { Swallow.Log(e); }
                         }
                     }
                 }
@@ -1303,7 +1427,7 @@ namespace CardShopCoop.Sync
                         {
                             ItemSpawnManager.DisableItem(av.PackProp);
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                         av.PackProp = null;
                     }
                 }
@@ -1349,7 +1473,7 @@ namespace CardShopCoop.Sync
                                     item.m_Collider.enabled = false;
                                 av.HeldItems.Add(item);
                             }
-                            catch { }
+                            catch (System.Exception e) { Swallow.Log(e); }
                         }
                     }
                 }
@@ -1448,11 +1572,19 @@ namespace CardShopCoop.Sync
             {
                 if (cust != null)
                 {
-                    if (av.HasModel)
+                    bool hasJson = !string.IsNullOrEmpty(av.CustomizationJson);
+                    bool nsfwBlocked = hasJson && !CoopPlugin.AllowNsfw.Value && IsNude(av.CustomizationJson);
+                    if (!av.HasModel || nsfwBlocked)
+                    {
+                        // No model was sent, or the model is deliberately nude while NSFW is
+                        // off: fall back to the game's own random clothed wardrobe.
+                        cust.RandomizeCharacterMesh(); // game's own wardrobe pipeline
+                    }
+                    else
                     {
                         cust.m_CharacterCustom.CharacterName = (female ? "Female" : "Male") + av.ModelIndex;
                         cust.m_CharacterCustom.Initialize();
-                        if (!string.IsNullOrEmpty(av.CustomizationJson))
+                        if (hasJson)
                         {
                             var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(av.CustomizationJson);
                             if (data != null)
@@ -1463,11 +1595,8 @@ namespace CardShopCoop.Sync
                                     ClearEmptyWardrobeSlots(cust.m_CharacterCustom, data);
                             }
                         }
-                        else
-                            ClearAllApparel(cust.m_CharacterCustom);
+                        // A model without a payload keeps the initialized (clothed) preset.
                     }
-                    else
-                        cust.RandomizeCharacterMesh(); // game's own wardrobe pipeline
                 }
             }
             catch (System.Exception e)

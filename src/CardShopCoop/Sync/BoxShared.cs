@@ -41,7 +41,7 @@ namespace CardShopCoop.Sync
                 }
                 CoopPlugin.Log.LogInfo($"[{tag}] {message}");
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         public static void ResetDebugThrottles()

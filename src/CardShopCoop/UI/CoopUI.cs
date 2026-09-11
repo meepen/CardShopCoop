@@ -342,6 +342,13 @@ namespace CardShopCoop.UI
                     core.SetLocalPlayerModel(_characterFemale, 0);
                 }
                 GUILayout.EndHorizontal();
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("NSFW", CoopTheme.Label, GUILayout.Width(56f));
+                bool allowNsfw = GUILayout.Toggle(CoopPlugin.AllowNsfw.Value,
+                    CoopPlugin.AllowNsfw.Value ? "Nude allowed" : "Nude hidden", CoopTheme.Toggle);
+                if (allowNsfw != CoopPlugin.AllowNsfw.Value)
+                    core.SetNsfwAllowed(allowNsfw);
+                GUILayout.EndHorizontal();
                 if (_presetNames.Count > 0)
                 {
                     DrawCycleRow("Preset", _presetNames, _presetSelectionBuffer, 0,
@@ -391,8 +398,15 @@ namespace CardShopCoop.UI
 
             for (int slot = 0; slot < _characterCustomizer.ApparelTables.Count; slot++)
             {
-                var options = new List<string> { "Nude" };
-                var names = new List<string> { "" };
+                var options = new List<string>();
+                var names = new List<string>();
+                // The Nude slot is only offered while NSFW is allowed; otherwise the model
+                // is guaranteed clothed, so the empty option must not be selectable.
+                if (CoopPlugin.AllowNsfw.Value)
+                {
+                    options.Add("Nude");
+                    names.Add("");
+                }
                 var table = _characterCustomizer.ApparelTables[slot];
                 if (table != null && table.Items != null)
                     foreach (var item in table.Items)
@@ -404,7 +418,7 @@ namespace CardShopCoop.UI
                 _apparelNames.Add(names);
                 string current = slot < data.ApparelNames.Count ? data.ApparelNames[slot] : "";
                 int selected = names.IndexOf(current);
-                _apparelSelections.Add(string.IsNullOrEmpty(current) ? 0 : (selected < 1 ? 0 : selected));
+                _apparelSelections.Add(selected < 0 ? 0 : selected);
                 _apparelMaterials.Add(slot < data.ApparelMaterials.Count ? Mathf.Max(0, data.ApparelMaterials[slot]) : 0);
                 _apparelColors.Add(ReadApparelTint(data, slot));
             }
@@ -431,17 +445,23 @@ namespace CardShopCoop.UI
                     () => ApplyHair(core, slot));
             for (int slot = 0; slot < _apparelOptions.Count; slot++)
             {
+                // With NSFW off a slot with no real items offers nothing selectable.
+                if (_apparelOptions[slot].Count == 0)
+                    continue;
                 string label = _characterCustomizer.ApparelTables[slot] != null
                     && !string.IsNullOrEmpty(_characterCustomizer.ApparelTables[slot].Label)
                     ? _characterCustomizer.ApparelTables[slot].Label : "Apparel " + (slot + 1);
                 DrawCycleColorRow(label, _apparelOptions[slot], _apparelSelections, slot,
                     _apparelColors[slot], 1, slot, color => { _apparelColors[slot] = color; core.SetLocalApparelTint(slot, color); },
                     () => ApplyApparel(core, slot));
-                if (_apparelSelections[slot] > 0)
+                string selectedApparel = _apparelNames[slot][_apparelSelections[slot]];
+                if (!string.IsNullOrEmpty(selectedApparel))
                 {
                     var table = _characterCustomizer.ApparelTables[slot];
-                    int itemIndex = _apparelSelections[slot] - 1;
-                    int materialCount = table != null && itemIndex < table.Items.Count
+                    // When the Nude slot is offered it occupies index 0, so the item index
+                    // is offset by one; with NSFW off the list starts at the first real item.
+                    int itemIndex = _apparelSelections[slot] - (CoopPlugin.AllowNsfw.Value ? 1 : 0);
+                    int materialCount = table != null && itemIndex >= 0 && itemIndex < table.Items.Count
                         && table.Items[itemIndex].Materials != null ? table.Items[itemIndex].Materials.Count : 0;
                     if (materialCount > 1)
                         DrawNumberRow("Material", materialCount, _apparelMaterials, slot,
@@ -679,11 +699,11 @@ namespace CardShopCoop.UI
         {
             if (_characterCustomizer == null)
                 return;
-            if (_apparelSelections[slot] == 0)
+            string name = _apparelNames[slot][_apparelSelections[slot]];
+            if (string.IsNullOrEmpty(name))
                 core.ClearLocalApparel(slot);
             else
             {
-                string name = _apparelNames[slot][_apparelSelections[slot]];
                 int material = Mathf.Max(0, _apparelMaterials[slot]);
                 _characterCustomizer.setApparelByName(name, slot, material);
                 core.CommitLocalCustomization();
@@ -1264,7 +1284,7 @@ namespace CardShopCoop.UI
                     }
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             if (result.Count == 0)
                 result.Add("(no LAN address found)");
             return result;

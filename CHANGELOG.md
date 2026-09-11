@@ -6,41 +6,42 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 ---
 
 ## 1.2.0
-**Furniture movement, selling, and synchronization are safer and smoother.**
+**Boxes and furniture now stay in sync through pickups, throws, placement, and joining.**
 
 - Guests can sell boxed furniture, and the host removes the same authoritative furniture for both
   players.
-- Guests can box up placed furniture without creating a guest-only copy; the host now owns that
-  box lifecycle too.
-- Boxes held by one player are now hidden and protected from pickup by everyone else, preventing
-  multi-player carry desyncs.
-- Item boxes placed with Q can now be picked up normally by the other player after they are set
-  down.
-- Boxes opened for furniture placement stay hidden from other players until placement is complete.
-- Furniture placement previews show the furniture being placed instead of a stray delivery box.
+- Guests can box up placed furniture without creating a guest-only copy; the host owns that box
+  lifecycle too. Boxes opened for furniture placement stay hidden from other players until
+  placement is complete, and a thrown furniture box no longer reappears with its lid open.
+- Boxes held by one player are hidden and protected from pickup by everyone else, and box ownership
+  and movement travel as a single authoritative value instead of several separate flags that could
+  disagree. This fixes rare cases where a box could stay invisible, remain stuck in move mode,
+  appear owned by the wrong player after a throw, a drop, or a disconnect, or fail to sync at all
+  for a guest joining a shop that is already open; box updates are now always applied in order, so
+  a catch-up after a stall can't silently drop a box's last move or removal.
+- Box pickup, drop, and furniture box-up changes reach the other player immediately instead of
+  waiting for the polling interval, so remote players see furniture boxes disappear as soon as
+  someone picks them up, and throws reproduce the game's launch impulse on the receiving side
+  instead of dropping at the thrower's feet.
+- When one player pushes a box, the other player's copy now slides along in real time instead of
+  jumping ahead, and the box settles back into normal physics as soon as the push ends.
+- Item boxes placed with Q can be picked up normally by the other player after they are set down,
+  and Q-mode box movement follows the holder's camera smoothly on both sides.
+- Opening or closing an item box updates on the other player's screen too, including boxes that
+  are already open when the other player joins, and delivery-box contents stay synchronized when
+  either player restocks from a box or moves items into one.
+- Furniture placement previews show the furniture being placed instead of a stray delivery box,
+  match the game's normal placement preview (alignment, multi-part rendering, layers, and
+  transparency), and no longer rescan the whole shop or leak temporary materials on every move.
 - Invalid, stale, busy, or last-cashier-counter sale requests are rejected without creating money.
-- Remote furniture previews now match the game's normal placement preview, including alignment and
-  multi-part rendering, layers, and transparent-material rendering.
-- Box pickup, drop, and furniture box-up changes now reach the other player immediately through the
-  existing synchronization messages instead of waiting for the normal polling interval.
-- Remote players see furniture boxes disappear as soon as someone picks them up.
-- Q-mode box movement uses the holder's camera state smoothly on both sides.
-- Opening or closing an item box now updates on the other player's screen too, including
-  boxes that are already open when the other player joins.
-- Throws reproduce the game's launch impulse on the receiving side instead of dropping at the
-  thrower's feet.
-- Box ownership and movement now travel as a single authoritative value instead of several
-  separate flags that could disagree. This fixes rare cases where a box could stay invisible,
-  remain stuck in move mode, or appear owned by the wrong player after a throw, a drop, or a
-  disconnect.
-- Remote furniture previews no longer repeatedly scan the whole shop while another player is
-  carrying furniture in placement mode, reducing framerate drops.
-- Preview cleanup now releases temporary materials correctly, preventing repeated move previews
-  from gradually increasing memory use.
 - Newly purchased furniture now appears on clients immediately when the host places it for the
   first time, instead of appearing only after the host moves it again.
-- Delivery-box contents now stay synchronized when either player restocks from a box or moves
-  items into one.
+- New characters now start in a randomly chosen clothed preset instead of appearing nude, and the
+  gender is randomized too. A new "Allow NSFW" toggle in the character panel controls whether nude
+  appearances are allowed at all.
+- When the NSFW toggle is off, other players who are fully nude are shown in the game's random
+  clothed customer look, and the Nude wardrobe option is hidden so you cannot accidentally make
+  your own character nude.
 
 Both players must update.
 

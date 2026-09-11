@@ -386,7 +386,7 @@ namespace CardShopCoop.Patches
                 if (card != null)
                     CoopCore.Instance?.ForwardCardDelta(card, reduceAmount, isAdd: false);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         public static bool BoxDestroyedPrefix(InteractablePackagingBox_Item __instance)
@@ -590,7 +590,7 @@ namespace CardShopCoop.Patches
             {
                 FiOobTimer?.SetValue(__instance, 0f);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         private static bool s_warnedNoCardBases;
@@ -690,7 +690,7 @@ namespace CardShopCoop.Patches
                 if (sm == null || sm.m_MoveObjectPreviewModel == null)
                     return false;
             }
-            catch { return false; }
+            catch (System.Exception e) { Swallow.Log(e); return false; }
             return true; // real interactive move: run the vanilla teardown
         }
 

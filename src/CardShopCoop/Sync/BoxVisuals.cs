@@ -38,7 +38,7 @@ namespace CardShopCoop.Sync
             {
                 return box.IsBoxOpened();
             }
-            catch { return false; }
+            catch (System.Exception e) { Swallow.Log(e); return false; }
         }
 
         public static void EnsureOpenState(InteractablePackagingBox box, bool open)
@@ -59,7 +59,7 @@ namespace CardShopCoop.Sync
                     if (ReadOpen(box) == open)
                         return;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
 
             try
@@ -79,7 +79,7 @@ namespace CardShopCoop.Sync
                         break;
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             Applied[box] = open;
         }
 
@@ -119,12 +119,14 @@ namespace CardShopCoop.Sync
         {
             if (box == null)
                 return;
+            bool wasVisible;
             try
             {
-                if (box.gameObject.activeSelf != visible)
+                wasVisible = box.gameObject.activeSelf;
+                if (wasVisible != visible)
                     box.gameObject.SetActive(visible);
             }
-            catch { }
+            catch { wasVisible = visible; }
             BoxPlacement.SetLabelVisible(box, visible);
             try
             {
@@ -138,7 +140,21 @@ namespace CardShopCoop.Sync
                         break;
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
+            // A held box is deactivated; re-enabling a shelf box restarts its Animation from the
+            // prefab default, so a thrown/dropped box can reappear with its lid open even though
+            // nothing opened it. EnsureOpenState then skips (our tracked state already says
+            // closed), so re-assert the intended look on every hidden -> visible edge. Item and
+            // card boxes carry a real open flag, so this is a no-op correction for them.
+            if (visible && !wasVisible)
+            {
+                bool open = ReadOpen(box);
+                if (BoxShared.Debug && box is InteractablePackagingBox_Shelf dbg)
+                    BoxShared.DebugLog("open-reassert",
+                        $"box={box.name} desired={open} meshOpen={dbg.m_OpenBox?.activeSelf} meshClosed={dbg.m_ClosedBox?.activeSelf}",
+                        box.GetInstanceID(), 0.05f);
+                ApplyOpenEvent(box, open);
+            }
         }
 
         public static void Reset()

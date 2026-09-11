@@ -303,7 +303,7 @@ namespace CardShopCoop.Sync
                         {
                             _miOpenerSetUI?.Invoke(io, null);
                         }
-                        catch { }
+                        catch (System.Exception caught) { Swallow.Log(caught); }
                     }
                     _sent[e.Key] = new Pose { P = e.Pos, R = e.Rot, Valid = true };
                     _candidate.Remove(e.Key);

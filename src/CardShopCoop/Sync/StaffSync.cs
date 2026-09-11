@@ -253,7 +253,7 @@ namespace CardShopCoop.Sync
             {
                 return field?.GetValue(instance) as Worker;
             }
-            catch { return null; }
+            catch (System.Exception e) { Swallow.Log(e); return null; }
         }
 
         private static void SendUpdate(Worker worker)
@@ -328,7 +328,7 @@ namespace CardShopCoop.Sync
                 worker.OnPressStopInteract();
                 __instance.CloseScreen();
             }
-            catch { }
+            catch (System.Exception caught) { Swallow.Log(caught); }
             return false;
         }
 
@@ -501,7 +501,7 @@ namespace CardShopCoop.Sync
                     {
                         FiWorkerTargetRotation?.SetValue(worker, Quaternion.LookRotation(toward, Vector3.up));
                     }
-                    catch { }
+                    catch (System.Exception caught) { Swallow.Log(caught); }
                 }
             }
             worker.m_IsPausingAction = true;
@@ -715,7 +715,7 @@ namespace CardShopCoop.Sync
                     {
                         d = w.GetWorkerSaveData();
                     }
-                    catch { }
+                    catch (System.Exception caught) { Swallow.Log(caught); }
                 }
                 if (d == null && saved != null && i < saved.Count)
                     d = saved[i];
@@ -869,7 +869,7 @@ namespace CardShopCoop.Sync
                 {
                     MiPanelEvaluateHired.Invoke(panel, null);
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
             }
         }
 

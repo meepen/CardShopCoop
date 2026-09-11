@@ -766,7 +766,7 @@ namespace CardShopCoop.Sync
                 {
                     counter.StopCurrentWorker();
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 _cartSignature.Remove(idx);
                 var cartMsg = WriteCarts();
                 if (cartMsg != null)
@@ -981,7 +981,7 @@ namespace CardShopCoop.Sync
             {
                 FiQueueCounter?.SetValue(carrier, counter);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
 
             // fresh customer: reset the scan/bookkeeping state the carrier carries across pool reuse.
             // ActivateCustomer is blocked on the client, so the cash was never Init()'d to the
@@ -990,17 +990,17 @@ namespace CardShopCoop.Sync
             {
                 FiScannedCount?.SetValue(carrier, 0);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
                 FiCustTotal?.SetValue(carrier, 0.0);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
                 carrier.m_CustomerCash.Init(carrier);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
 
             // The served customer is LIVE at the register: activate the carrier so its real
             // interactable cash (a child, in its hands) is the presented, clickable payment, and
@@ -1018,7 +1018,7 @@ namespace CardShopCoop.Sync
                 }
                 carrier.gameObject.SetActive(true);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             NpcSync.SuppressedCustomer.Add(c.CustomerIndex);
             _sourceIndex[c.Index] = c.CustomerIndex;
             NpcSync.AttachExistingCustomer(c.CustomerIndex, c.CustomerGeneration, carrier);
@@ -1373,17 +1373,17 @@ namespace CardShopCoop.Sync
             {
                 counter.UpdateCashierCounterState(ECashierCounterState.Idle);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
                 counter.UpdateCurrentCustomer(null);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
                 counter.SetPlsaticBagVisibility(false);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             Teardown(idx);
         }
 
@@ -1395,7 +1395,7 @@ namespace CardShopCoop.Sync
                 {
                     carrier.m_CustomerCash.gameObject.SetActive(false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 if (carrier.m_ItemInBagList != null)
                     for (int i = carrier.m_ItemInBagList.Count - 1; i >= 0; i--)
                         if (carrier.m_ItemInBagList[i] != null)
@@ -1456,7 +1456,7 @@ namespace CardShopCoop.Sync
                         carrier.m_CardInBagList.Clear();
                     }
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             _carrier.Clear();
             _cartGen.Clear();
@@ -1479,7 +1479,7 @@ namespace CardShopCoop.Sync
                     card.gameObject.SetActive(false);
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
     }
 }

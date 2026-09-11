@@ -576,7 +576,7 @@ namespace CardShopCoop.Sync
                     if (box != null)
                         return box.transform.position;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             return obj != null ? obj.transform.position : Vector3.zero;
         }
