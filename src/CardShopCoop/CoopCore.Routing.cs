@@ -29,17 +29,26 @@ namespace CardShopCoop
                     return;
                 if (message is ShelfRequestMessage shelfRequest)
                 {
-                    var entries = shelfRequest.Entries;
-                    _world.ApplyRemote(entries);
+                    var applied = _world.ApplyRequest(shelfRequest.Entries, context.ConnectionId);
                     // applying updates the host's diff baseline, so its own tick
                     // never re-detects this change - with 3+ players the OTHER
-                    // clients must be told explicitly
-                    if (_net.ConnectionCount > 1)
-                        Broadcast(new ShelfDeltaMessage { Entries = entries });
+                    // clients must be told explicitly, with the HOST's merged state
+                    // (not the requester's absolute) so a concurrent take is not undone.
+                    if (_net.ConnectionCount > 1 && applied != null && applied.Count > 0)
+                        Broadcast(new ShelfDeltaMessage { Entries = applied });
                 }
                 return;
             },
                 MessagePolicy.HostOnlyInGame, true, heal: () => _cardShelves.ForceNextTick());
+            _messageRouter.Register<ShelfTransferResultMessage>((context, message) =>
+            {
+                if (Role != CoopRole.Client || !InGameLevel())
+                    return;
+                if (message is ShelfTransferResultMessage result)
+                    _world.ApplyTransferResult(result);
+                return;
+            },
+                MessagePolicy.ClientOnlyInGame, true, heal: () => { _coinHeal = 999f; _progressHeal = 999f; });
             _messageRouter.Register<PriceListMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client)
@@ -365,6 +374,15 @@ namespace CardShopCoop
                 return;
             },
                 MessagePolicy.HostOnlyInGame, true, heal: () => _boxEngine?.ForceNextTick());
+            _messageRouter.Register<BoxTransferResultMessage>((context, message) =>
+            {
+                if (Role != CoopRole.Client || !InGameLevel())
+                    return;
+                if (message is BoxTransferResultMessage result)
+                    _boxEngine.ClientApplyTransferResult(result);
+                return;
+            },
+                MessagePolicy.ClientOnlyInGame, true, heal: () => { _coinHeal = 999f; _progressHeal = 999f; });
             _messageRouter.Register<BoxSnapshotMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client || !InGameLevel())

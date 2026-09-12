@@ -34,6 +34,25 @@ namespace CardShopCoop.Net.Messages
         }
     }
 
+    /// <summary>Host -> sender: the outcome of one client shelf item delta. AcceptedDelta is how
+    /// much of the requested delta the host applied, so the requester can roll back the rest of
+    /// its hand (last to pull loses). Sent only in reply to an Entry whose TransferSeq is non-zero.</summary>
+    [NetworkMessage(MsgType.ShelfTransferResult, Policy = MessagePolicy.ClientOnlyInGame)]
+    public sealed class ShelfTransferResultMessage : INetMessage
+    {
+        public int Key;
+        public uint TransferSeq;
+        public int AcceptedDelta;
+
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ShelfTransferResult;
+            }
+        }
+    }
+
     [NetworkMessage(MsgType.ObjMoveDelta, Policy = MessagePolicy.ClientOnly)]
     public sealed class ObjMoveDeltaMessage : INetMessage
     {

@@ -23,9 +23,16 @@ namespace CardShopCoop.Sync
             return 0;
         }
 
-        public bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount)
+        public int ReadItemType(InteractablePackagingBox box)
+        {
+            return 0;
+        }
+
+        public bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount,
+            int transferType, out int acceptedDelta)
         {
             // A graded box's card list is immutable; nothing to reconcile in place.
+            acceptedDelta = 0;
             return false;
         }
 

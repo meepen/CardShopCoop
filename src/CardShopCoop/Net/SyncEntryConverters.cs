@@ -54,12 +54,30 @@ namespace CardShopCoop.Net
             w.WriteValue(Util.EnumMap.ToWire(Util.EnumKind.ItemType, e.Type));
             w.WritePropertyName("Count");
             w.WriteValue(e.Count);
+            w.WritePropertyName("BaseCount");
+            w.WriteValue(e.BaseCount);
+            w.WritePropertyName("TransferType");
+            // -1 is "no transfer": keep the sentinel out of the enum id space so it survives.
+            w.WriteValue(e.TransferType < 0 ? -1 : Util.EnumMap.ToWire(Util.EnumKind.ItemType, e.TransferType));
+            w.WritePropertyName("TransferSeq");
+            w.WriteValue(e.TransferSeq);
             w.WriteEndObject();
         }
         public override object ReadJson(JsonReader r, Type t, object old, JsonSerializer s)
         {
             var o = SyncJson.Start(r);
-            return new WorldSync.Entry { Key = SyncJson.Int(o, "Key"), Type = Util.EnumMap.FromWire(Util.EnumKind.ItemType, SyncJson.Int(o, "Type")), Count = SyncJson.Int(o, "Count") };
+            int wireTransfer = SyncJson.Int(o, "TransferType");
+            return new WorldSync.Entry
+            {
+                Key = SyncJson.Int(o, "Key"),
+                Type = Util.EnumMap.FromWire(Util.EnumKind.ItemType, SyncJson.Int(o, "Type")),
+                Count = SyncJson.Int(o, "Count"),
+                BaseCount = SyncJson.Int(o, "BaseCount"),
+                TransferType = wireTransfer < 0
+                    ? -1
+                    : Util.EnumMap.FromWire(Util.EnumKind.ItemType, wireTransfer),
+                TransferSeq = (uint)SyncJson.Int(o, "TransferSeq"),
+            };
         }
     }
 

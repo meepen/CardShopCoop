@@ -17,11 +17,42 @@ namespace CardShopCoop.Net.Messages
         /// reporter's stale absolute. Ignored on host-to-client snapshots.</summary>
         public int ContentBaseItemCount;
 
+        /// <summary>Wire id of the item type actually moved by this delta (the type removed on a
+        /// take, or added on an add). Kept separate from Box.ItemType because vanilla clears a
+        /// compartment's type to None when its last item is taken, which would otherwise lose
+        /// the transferred identity. -1 when no item moved.</summary>
+        public int ContentTransferType = -1;
+
+        /// <summary>Non-zero only for a loose-box item delta. The host echoes it in a
+        /// BoxTransferResult so the requester can reconcile exactly the transfer it sent,
+        /// independent of ordering or later snapshots.</summary>
+        public uint TransferSeq;
+
         public MsgType Type
         {
             get
             {
                 return MsgType.BoxUpdate;
+            }
+        }
+    }
+
+    /// <summary>Host -> sender: the outcome of one loose-box item delta. AcceptedDelta is how
+    /// much of the requested delta the host applied to its authoritative count, so the
+    /// requester can roll back the part that could not be transferred (last to pull loses).
+    /// Sent only in reply to a BoxUpdateMessage whose TransferSeq is non-zero.</summary>
+    [NetworkMessage(MsgType.BoxTransferResult, Policy = MessagePolicy.ClientOnlyInGame)]
+    public sealed class BoxTransferResultMessage : INetMessage
+    {
+        public uint TransferSeq;
+        public ushort BoxId;
+        public int AcceptedDelta;
+
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.BoxTransferResult;
             }
         }
     }

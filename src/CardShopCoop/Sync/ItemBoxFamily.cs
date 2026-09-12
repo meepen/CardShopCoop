@@ -24,8 +24,16 @@ namespace CardShopCoop.Sync
                 ? b.m_ItemCompartment.GetItemCount() : 0;
         }
 
-        public bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount)
+        public int ReadItemType(InteractablePackagingBox box)
         {
+            return box is InteractablePackagingBox_Item b && b.m_ItemCompartment != null
+                ? (int)b.m_ItemCompartment.GetItemType() : 0;
+        }
+
+        public bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount,
+            int transferType, out int acceptedDelta)
+        {
+            acceptedDelta = 0;
             if (!(box is InteractablePackagingBox_Item b))
                 return false;
             var comp = b.m_ItemCompartment;
@@ -34,48 +42,63 @@ namespace CardShopCoop.Sync
             if (!EnumMap.TryFromWire(EnumKind.ItemType, w.ItemType, out int localWireType))
                 return false;
             int hostCount = comp.GetItemCount();
-            int delta = w.ItemCount - baseItemCount;
             var hostType = comp.GetItemType();
-            if (delta == 0)
+            int requested = w.ItemCount - baseItemCount;
+            if (requested == 0)
             {
                 // Lid-only (or a no-op content report): apply the lid, never write the reported
                 // count. This is what stops a delayed/echoed absolute from restoring items.
                 BoxVisuals.EnsureOpenState(box, w.Open);
                 return true;
             }
-            EItemType targetType = (EItemType)localWireType;
-            if (delta < 0)
-            {
-                if (localWireType == (int)EItemType.None)
-                {
-                    // The reporter's last item was taken (the game clears the compartment to
-                    // None). Only merge that removal if it also empties the host box; otherwise
-                    // the reporter's view predates a refill and its delta would delete the newer
-                    // items. Reject and let the authoritative snapshot correct the reporter.
-                    if (hostType != EItemType.None && hostCount + delta > 0)
-                        return false;
-                    targetType = EItemType.None;
-                }
-                else
-                {
-                    // A removal cannot be merged across two different item types: the reporter's
-                    // view predates a refill. Reject and let the snapshot correct the reporter.
-                    if (hostType != EItemType.None && localWireType != (int)hostType)
-                        return false;
-                    targetType = hostType;
-                }
-            }
-            else if (hostCount > 0 && hostType != EItemType.None && hostType != targetType)
-            {
-                // Adding a different type to a non-empty box: reject and let the authoritative
-                // snapshot correct the reporter.
+
+            // The type that actually moved, so a take keeps its identity even after vanilla has
+            // cleared the compartment to None. A one-sided content pack maps the moved type to
+            // None on the wire; merging that would build phantom None items or delete the wrong
+            // type, so refuse and let the reporter keep its item.
+            if (transferType < 0
+                || !EnumMap.TryFromWire(EnumKind.ItemType, transferType, out int localMoveType)
+                || localMoveType == (int)EItemType.None)
                 return false;
+            var moveType = (EItemType)localMoveType;
+
+            var targetType = hostType;
+            if (requested < 0)
+            {
+                // Removal: merge only against the host's matching type. A different non-empty
+                // type means the reporter's view predates a refill; reject and re-assert.
+                if (hostType != EItemType.None && hostType != moveType)
+                    return false;
+                int applied = Mathf.Min(-requested, hostCount);
+                acceptedDelta = -applied;
+                // Emptying clears the type (vanilla), unless the label is locked - then the
+                // reporter kept it, so mirror the reporter's post-take type.
+                targetType = hostCount + acceptedDelta <= 0 ? (EItemType)localWireType : hostType;
             }
-            int newCount = Mathf.Max(0, hostCount + delta);
-            var apply = w;
-            apply.ItemType = EnumMap.ToWire(EnumKind.ItemType, (int)targetType);
-            apply.ItemCount = newCount;
-            ApplyContent(b, apply);
+            else
+            {
+                // Add: only into an empty or same-type compartment, bounded by capacity.
+                if (hostType != EItemType.None && hostType != moveType)
+                    return false;
+                int capacity = comp.GetMaxItemCount();
+                if (capacity <= 0)
+                    capacity = hostCount + requested; // capacity unknown/unbuilt: trust the add
+                int room = Mathf.Max(0, capacity - hostCount);
+                acceptedDelta = Mathf.Min(requested, room);
+                targetType = hostType == EItemType.None ? moveType : hostType;
+            }
+
+            if (acceptedDelta != 0)
+            {
+                var apply = w;
+                apply.ItemType = EnumMap.ToWire(EnumKind.ItemType, (int)targetType);
+                apply.ItemCount = hostCount + acceptedDelta;
+                ApplyContent(b, apply);
+                // ApplyContent clamps to the compartment's real slot count (an unbuilt pos list
+                // can hold fewer than requested), so report what actually landed; the requester
+                // rolls the remainder back instead of keeping it.
+                acceptedDelta = comp.GetItemCount() - hostCount;
+            }
             BoxVisuals.EnsureOpenState(box, w.Open);
             return true;
         }

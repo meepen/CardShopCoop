@@ -26,10 +26,17 @@ namespace CardShopCoop.Sync
             return 0;
         }
 
-        public bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount)
+        public int ReadItemType(InteractablePackagingBox box)
+        {
+            return 0;
+        }
+
+        public bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount,
+            int transferType, out int acceptedDelta)
         {
             // Furniture-box content is the boxed object's identity, owned by the box ops; the
             // owner-path ApplyState handles it, so a non-owner content report is a no-op here.
+            acceptedDelta = 0;
             return false;
         }
 

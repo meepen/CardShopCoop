@@ -27,18 +27,24 @@ namespace CardShopCoop.Sync
             get;
         }
 
-        /// <summary>Applies only the entry's CONTENT/OPEN state to an existing local box, leaving
-        /// pose, physics and possession untouched. The host uses this to honor a non-owner's
-        /// legitimate loose-box edit (opening/closing, adding or taking items) without letting
-        /// the report overwrite the authoritative pose - the stale-pose guard stays intact.
-        /// Returns true when the operation was applied (or was a valid lid-only no-content
-        /// operation), and false when it must be rejected so the host re-asserts authoritative
-        /// state. Families whose content is immutable or derived (card, furniture) return false.</summary>
-        bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount);
+        /// <summary>Applies a loose-box content delta. <paramref name="baseItemCount"/> is the
+        /// count the reporter's absolute was based on and <paramref name="transferType"/> is the
+        /// wire id of the type actually moved (or -1 when unknown). Applies only as much of the
+        /// requested delta as the host can satisfy and reports it back in
+        /// <paramref name="acceptedDelta"/> (0 when nothing could be transferred), so the
+        /// requester can roll its hand back. Returns false when the report must be rejected
+        /// outright so the host re-asserts authoritative state. Families whose content is
+        /// immutable or derived (card, furniture) return false with acceptedDelta 0.</summary>
+        bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount,
+            int transferType, out int acceptedDelta);
 
         /// <summary>Reads the raw mutable item count for delta bookkeeping; returns 0 for
         /// families without a mutable count.</summary>
         int ReadItemCount(InteractablePackagingBox box);
+
+        /// <summary>Reads the raw mutable item type (local EItemType id) for delta bookkeeping;
+        /// returns 0 for families without a mutable count.</summary>
+        int ReadItemType(InteractablePackagingBox box);
 
         IList<InteractablePackagingBox> LiveBoxes();
 

@@ -92,6 +92,8 @@ namespace CardShopCoop.Net
         BoxMotion = 95,        // client -> host: transient motion of a box the local player is pushing
         BoxMotionState = 96,   // host -> clients: relayed/authoritative motion of a pushed box
         NpcMoneyPopup = 97,   // host -> client: green money popup above a customer
+        BoxTransferResult = 98, // host -> sender: how much of a loose-box item delta was accepted
+        ShelfTransferResult = 99, // host -> sender: how much of a shelf item delta was accepted
     }
 
     /// <summary>One received message, already reassembled and decoded from the wire.
