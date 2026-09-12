@@ -33,7 +33,7 @@ internal sealed class PendingTransferLedger<TKey>
 {
     public const float ResendIntervalSeconds = 1.0f;
     public const int EscalateAttempts = 15;   // log + force resync; keep entry
-    public const int HardAttempts = 60;        // stop retransmitting; KEEP entry + obligation
+    public const int HardAttempts = 300;       // stop retransmitting; KEEP entry + obligation
     public const int MaxOutstanding = 256;
 
     public Action<PendingTransfer<TKey>> Resend;   // module re-sends the SAME seq

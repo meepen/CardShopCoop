@@ -42,7 +42,9 @@ namespace CardShopCoop.Sync
             if (item == null)
                 return false;
             var held = CoopCore.GetHeldItemList(CoopCore.PlayerIpc);
-            return held != null && held.Contains(item);
+            // Conservative: if the hand list cannot be read (scene-load window), treat a reserved
+            // item as held so its protection is not lifted.
+            return held == null || held.Contains(item);
         }
 
         public static int ReserveTake(int localType, int count)
@@ -318,13 +320,15 @@ namespace CardShopCoop.Sync
                 else if (!IsInLocalHand(item) && now - pair.Value.At > 2f)
                     drop.Add(item);
             }
-            // Collect first, mutate second: RollbackUnreservedTake removes from Recent, so doing
-            // it inside the enumeration above would throw.
+            // Collect first, mutate second: pruning must not run inside the enumeration.
             for (int i = 0; i < expired.Count; i++)
             {
-                CoopPlugin.Log.LogError(
-                    $"HandEscrow.PruneRecentTaken: unreported take expired for type {expired[i].Type}; rolling back and requesting resync");
-                RollbackUnreservedTake(expired[i].Type, 1);
+                // A note that reaches expiry was never consumed by ReserveTake, so no transfer
+                // was ever created for it (ReserveTake removes the notes it tokenizes). Destroying
+                // the hand item here could delete an item whose add+take cancelled inside one
+                // scan window, so keep the item and merely reconcile to authoritative state.
+                CoopPlugin.Log.LogWarning(
+                    $"HandEscrow.PruneRecentTaken: unreported take note expired for type {expired[i].Type}; keeping the item and requesting resync");
                 CoopCore.Instance?.World?.RequestResync?.Invoke();
             }
             for (int i = 0; i < drop.Count; i++)

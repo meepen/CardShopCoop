@@ -230,9 +230,12 @@ namespace CardShopCoop.Sync
                     if (Util.GradingInterop.Actual(cards[i].cardGrade) == 10)
                         CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained++;
                 }
+                // Record the ack before the achievement calls: they can throw (e.g. an absent
+                // achievement index) and a throw after minting would otherwise let a re-click
+                // mint the same cards a second time.
+                RememberCollect(connId, msg.Id, cardsHash);
                 AchievementManager.OnCheckGemMintCardCount(CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained);
                 AchievementManager.OnCheckCollectedGradedCardSet();
-                RememberCollect(connId, msg.Id, cardsHash);
             }
             catch (Exception e)
             {

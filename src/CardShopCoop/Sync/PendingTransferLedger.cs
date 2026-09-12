@@ -29,10 +29,10 @@ namespace CardShopCoop.Sync
     {
         public const float ResendIntervalSeconds = 1f;
         public const int EscalateAttempts = 15;
-        // Abandoning a take destroys a real hand item, so the threshold must be comfortably
-        // larger than any delay the transport can produce (LagTransport.MaxDelayMs = 60s) or a
-        // merely-delayed accepted result would be destroyed while the host already removed the
-        // container copy. ~5 minutes at 1s retries.
+        // "Stop retransmitting" threshold, not an abandon threshold: the obligation is kept and
+        // the entry resolves only on a real result or teardown. Kept comfortably above any delay
+        // the transport can produce (LagTransport.MaxDelayMs = 60s) so a merely-delayed result
+        // still resolves normally.
         public const int HardAttempts = 300;
         public const int MaxOutstanding = 256;
         private readonly Dictionary<uint, PendingTransfer<TKey>> _entries
@@ -169,35 +169,20 @@ namespace CardShopCoop.Sync
 
                 if (entry.Attempts >= HardAttempts)
                 {
+                    // Stop retransmitting but KEEP the obligation, per the frozen protocol: a
+                    // timeout must never discard a take (which could destroy a real hand item the
+                    // host already removed) or an add. Replay once so a host that holds the ack
+                    // can answer, then hold the entry for a late result; it leaves only on a real
+                    // result or session teardown.
                     if (!entry.Escalated)
                     {
                         entry.Escalated = true;
-                        if (entry.RequestedDelta < 0)
-                        {
-                            // Never leave a take pinning the hand item and freezing the container
-                            // forever. After this many retries with host-ack replay the host almost
-                            // certainly never applied it, so resolve conservatively: destroy the
-                            // phantom hand items and let authoritative truth restore the container
-                            // (the same net-zero outcome as the reserve-failure path).
-                            _entries.Remove(seq);
-                            _takeCount--;
-                            ReleaseTake(entry.Target);
-                            HandEscrow.ResolveTake(entry.EscrowToken, 0);
-                            CoopPlugin.Log.LogError(
-                                $"PendingTransferLedger: take seq={seq} unresolved after {entry.Attempts} attempts; rolled back and requesting resync");
-                            Escalate?.Invoke(entry);
-                        }
-                        else
-                        {
-                            // Adds carry no escrow and cannot be safely discarded; keep the
-                            // obligation and replay once so a host holding the ack can answer.
-                            entry.LastSentAt = now;
-                            _entries[seq] = entry;
-                            CoopPlugin.Log.LogError(
-                                $"PendingTransferLedger: add seq={seq} unresolved after {entry.Attempts} attempts; keeping obligation and replaying once");
-                            Escalate?.Invoke(entry);
-                            Resend?.Invoke(entry);
-                        }
+                        entry.LastSentAt = now;
+                        _entries[seq] = entry;
+                        CoopPlugin.Log.LogError(
+                            $"PendingTransferLedger: transfer seq={seq} unresolved after {entry.Attempts} attempts; keeping obligation and replaying once");
+                        Escalate?.Invoke(entry);
+                        Resend?.Invoke(entry);
                     }
                     continue;
                 }

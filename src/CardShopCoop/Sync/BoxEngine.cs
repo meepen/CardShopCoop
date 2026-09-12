@@ -995,13 +995,12 @@ namespace CardShopCoop.Sync
         {
             if (msg == null || msg.TransferSeq == 0)
                 return;
-            if (!_transfers.TryResolve(msg.TransferSeq, out var pending))
+            if (!_transfers.TryGet(msg.TransferSeq, out var pending))
             {
                 BoxShared.DebugLog("box-transfer",
                     $"resolve seq={msg.TransferSeq} box={msg.BoxId} no pending transfer (ignored)", msg.BoxId, 2f);
                 return;
             }
-            _pendingTransferMsgs.Remove(msg.TransferSeq);
             int rejected = pending.RequestedDelta - msg.AcceptedDelta;
             if (pending.RequestedDelta < 0)
             {
@@ -1040,6 +1039,10 @@ namespace CardShopCoop.Sync
                 }
             }
             bool suppressed = _suppressedSnapshotForBox.Remove(pending.Target);
+            // Resolve only after the rollback work succeeded, so a throw leaves the entry for the
+            // dispatch retry instead of dropping the obligation (matches WorldSync).
+            _transfers.TryResolve(msg.TransferSeq, out _);
+            _pendingTransferMsgs.Remove(msg.TransferSeq);
             if (suppressed || rejected != 0)
                 RequestBoxResync?.Invoke();
         }
