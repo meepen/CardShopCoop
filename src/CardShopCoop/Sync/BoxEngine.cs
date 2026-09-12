@@ -835,41 +835,35 @@ namespace CardShopCoop.Sync
                 ? PlayerRef.None
                 : PlayerRegistry.ForConnection(lease.LastOwner);
 
-            // A loose, unowned item box accepts content as a MERGE, never as the reporter's
-            // absolute: apply the reporter's delta (Box.ItemCount - ContentBaseItemCount) to the
-            // host's current count. This runs for BOTH paths below - a former owner releasing or
-            // editing the box (AcceptBoxUpdate passes via LastOwner) and a non-owner's raycast
-            // edit (InteractionPlayerController -> OnPressOpenBox / AddItem / TakeItemToHand) -
-            // so a delayed absolute can never overwrite newer contents. It is still gated on a
-            // genuinely loose, unstored box with no lease owner, so a hand or a stale possession
-            // claim is guarded exactly as before.
-            IBoxFamily looseFamily = null;
-            bool looseApplicable = false;
-            bool looseMerged = false;
+            // A client's possession edge never writes box content; only an explicit item delta
+            // (TransferSeq != 0) may, and it is merged against the host's current contents. This
+            // covers a loose, unowned box and the current owner editing while held/placing, so a
+            // stale mirror (a pickup after the host removed items) can never restore what was taken.
+            var itemFamily = w.Family == BoxFamily.Item && w.Possession != BoxPossession.Removed
+                ? Family(BoxFamily.Item)
+                : null;
+            bool senderMayEdit = itemFamily != null
+                && (lease.Owner == connId
+                    || (currentOwner.Kind == PlayerKind.None && CanApplyContentOnly(knownBox, currentOwner)));
+            bool itemDelta = senderMayEdit && msg.TransferSeq != 0;
+            bool contentMerged = false;
             int acceptedDelta = 0;
-            if (w.Possession == BoxPossession.Free && currentOwner.Kind == PlayerKind.None
-                && w.Family == BoxFamily.Item)
-            {
-                looseFamily = Family(BoxFamily.Item);
-                looseApplicable = looseFamily != null && CanApplyContentOnly(knownBox, currentOwner);
-                looseMerged = looseApplicable
-                    && looseFamily.ReconcileContent(knownBox, w, msg.ContentBaseItemCount,
-                        msg.ContentTransferType, out acceptedDelta);
-            }
-            // A loose item report ReconcileContent refused (e.g. a conflicting type add) must be
-            // corrected: drop the cached hash so the authoritative re-assert is sent even though
-            // the host's content did not change.
-            if (looseApplicable && !looseMerged)
+            if (itemDelta)
+                contentMerged = itemFamily.ReconcileContent(knownBox, w, msg.ContentBaseItemCount,
+                    msg.ContentTransferType, out acceptedDelta);
+            // A refused delta (e.g. a conflicting type) must be corrected: drop the cached hash so
+            // the authoritative re-assert is sent even though the host's content did not change.
+            if (itemDelta && !contentMerged)
                 _hostHashes.Remove(w.Id);
 
             if (!BoxAuthority.AcceptBoxUpdate(currentOwner, sender, w.Possession, lastOwner))
             {
-                ReplyTransfer(connId, msg, looseMerged ? acceptedDelta : 0);
-                if (looseApplicable)
+                ReplyTransfer(connId, msg, contentMerged ? acceptedDelta : 0);
+                if (itemFamily != null && senderMayEdit)
                 {
                     _hostDirty.Add(w.Id);
                     BoxShared.DebugLog("box-rx",
-                        $"id={w.Id} fam={w.Family} sender={connId} state=Free content-only applied={looseMerged} base={msg.ContentBaseItemCount} count={w.ItemCount}");
+                        $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} content-preserved applied={contentMerged} base={msg.ContentBaseItemCount} count={w.ItemCount}");
                 }
                 else
                 {
@@ -878,13 +872,13 @@ namespace CardShopCoop.Sync
                 return;
             }
 
-            if (looseApplicable)
+            if (itemFamily != null)
             {
-                // The host now holds the merged (or, when the report was refused, still its own)
-                // content. Re-assert it on the wire so ApplyState's content write below is a
+                // The host now holds the merged (or, when no delta was sent/refused, still its own)
+                // content. Re-assert it in the wire entry so ApplyState's content write below is a
                 // no-op instead of replaying the reporter's stale absolute.
                 var merged = new BoxWire();
-                looseFamily.FillContent(knownBox, ref merged);
+                itemFamily.FillContent(knownBox, ref merged);
                 w.ItemType = merged.ItemType;
                 w.ItemCount = merged.ItemCount;
             }
@@ -916,13 +910,6 @@ namespace CardShopCoop.Sync
                 for (int f = 0; f < _families.Count; f++)
                     if (_families[f].Family == w.Family)
                         _families[f].ApplyState(knownBox, w, isOwner: false);
-                if (!looseApplicable && msg.TransferSeq != 0 && w.Family == BoxFamily.Item
-                    && knownBox != null && w.Possession != BoxPossession.Removed)
-                {
-                    var itemFamily = Family(BoxFamily.Item);
-                    if (itemFamily != null)
-                        acceptedDelta = itemFamily.ReadItemCount(knownBox) - msg.ContentBaseItemCount;
-                }
                 // The reliable edge ends the push: stop the smoothing follower so physics
                 // can resume from the pose ApplyState just committed.
                 BoxPlacement.CancelRemoteMotion(knownBox);
@@ -960,7 +947,7 @@ namespace CardShopCoop.Sync
             }, connId);
         }
 
-        /// <summary>Client: the host resolved one of our loose-box transfers. Anything the host
+        /// <summary>Client: the host resolved one of our item transfers. Anything the host
         /// could not accept is rolled back out of our hand/inventory here (last to pull loses),
         /// so a box count that the host clamped cannot leave a duplicated item in our hand.</summary>
         public void ClientApplyTransferResult(BoxTransferResultMessage msg)
@@ -1581,12 +1568,15 @@ namespace CardShopCoop.Sync
             family.FillContent(box, ref w);
             int baseItemCount = _baselineItemCount.TryGetValue(box, out var bc) ? bc : w.ItemCount;
             int baseItemType = _baselineItemType.TryGetValue(box, out var bt) ? bt : (int)EItemType.None;
-            // A loose-box item delta is tracked as a transfer so the host can tell us exactly
-            // how much it accepted; the rest is rolled back out of our hand on the result.
+            // An item content delta (loose edit, or the current owner editing while
+            // held/placing) is tracked as a transfer so the host can merge exactly that much
+            // and tell us what it accepted; the rest is rolled back out of our hand. Invariant:
+            // every local content mutation must either refresh _baselineItemCount/_reportedContent
+            // or produce a transfer here, or the next possession edge would report a stale delta.
             int requestedDelta = w.ItemCount - baseItemCount;
             int transferType = -1;
             uint transferSeq = 0;
-            if (poss == BoxPossession.Free && family.Family == BoxFamily.Item && requestedDelta != 0)
+            if (poss != BoxPossession.Removed && family.Family == BoxFamily.Item && requestedDelta != 0)
             {
                 // Take: the type we had before (vanilla clears it to None when we empty the
                 // box). Add: the type we now hold.

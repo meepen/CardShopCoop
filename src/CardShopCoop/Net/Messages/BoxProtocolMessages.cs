@@ -23,9 +23,10 @@ namespace CardShopCoop.Net.Messages
         /// the transferred identity. -1 when no item moved.</summary>
         public int ContentTransferType = -1;
 
-        /// <summary>Non-zero only for a loose-box item delta. The host echoes it in a
-        /// BoxTransferResult so the requester can reconcile exactly the transfer it sent,
-        /// independent of ordering or later snapshots.</summary>
+        /// <summary>Non-zero when this report carries an item delta: a loose-box edit, or the
+        /// current owner editing while held/placing. The host echoes it in a BoxTransferResult
+        /// so the requester can reconcile exactly the transfer it sent, independent of ordering
+        /// or later snapshots.</summary>
         public uint TransferSeq;
 
         public MsgType Type

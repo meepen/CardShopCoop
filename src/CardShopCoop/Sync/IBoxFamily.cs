@@ -27,14 +27,16 @@ namespace CardShopCoop.Sync
             get;
         }
 
-        /// <summary>Applies a loose-box content delta. <paramref name="baseItemCount"/> is the
-        /// count the reporter's absolute was based on and <paramref name="transferType"/> is the
-        /// wire id of the type actually moved (or -1 when unknown). Applies only as much of the
-        /// requested delta as the host can satisfy and reports it back in
-        /// <paramref name="acceptedDelta"/> (0 when nothing could be transferred), so the
-        /// requester can roll its hand back. Returns false when the report must be rejected
-        /// outright so the host re-asserts authoritative state. Families whose content is
-        /// immutable or derived (card, furniture) return false with acceptedDelta 0.</summary>
+        /// <summary>Applies a client item content delta against the host's current contents.
+        /// <paramref name="baseItemCount"/> is the count the reporter's absolute was based on and
+        /// <paramref name="transferType"/> is the wire id of the type actually moved (or -1 when
+        /// unknown). Applies only as much of the requested delta as the host can satisfy and
+        /// reports it back in <paramref name="acceptedDelta"/> (0 when nothing could be
+        /// transferred), so the requester can roll its hand back. Returns false when the report
+        /// must be rejected outright so the host re-asserts authoritative state. Families whose
+        /// content is immutable or derived (card, furniture) return false with acceptedDelta 0.
+        /// A possession edge never calls this: only an explicit delta transfer may change
+        /// content, so a stale mirror cannot overwrite what the host already took.</summary>
         bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount,
             int transferType, out int acceptedDelta);
 
