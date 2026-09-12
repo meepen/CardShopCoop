@@ -4,9 +4,10 @@ This file is the single source of truth for the parallel build agents. Do NOT ed
 Do NOT edit files you do not own (see ownership table). Code against the frozen signatures below
 even if the implementing file is owned by another agent.
 
-Version stays **1.2.0** (unreleased). No `Directory.Build.props` bump. Wire `Msg.WireVersion`
-may change only if the message layout changes (D8 does change it) — the handshake already
-requires exact plugin-version equality, so keep `CardShopCoopVersion` at `1.2.0`.
+Version stays **1.2.0** (unreleased). No `Directory.Build.props` bump. `Msg.WireVersion` is derived
+from the version, so it also stays at 102; D8 adds a field to an existing message while 1.2.0 is
+unreleased, so peers must not be running an older 1.2.0 build. The handshake still requires exact
+plugin-version equality.
 
 Do NOT run `dotnet build` unless explicitly told; parallel agents would contend on `obj/`/`bin/`.
 The orchestrator runs the authoritative build after integration.

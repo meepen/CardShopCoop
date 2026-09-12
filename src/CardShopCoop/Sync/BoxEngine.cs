@@ -1040,7 +1040,7 @@ namespace CardShopCoop.Sync
                 }
             }
             bool suppressed = _suppressedSnapshotForBox.Remove(pending.Target);
-            if (suppressed || rejected > 0)
+            if (suppressed || rejected != 0)
                 RequestBoxResync?.Invoke();
         }
 
@@ -1293,7 +1293,8 @@ namespace CardShopCoop.Sync
                     && family.ReadItemCount(box) != pendingBaseline)
                     continue;
                 bool reservedAdd = _transfers.IsAddReserved(w.Id);
-                if (!reservedAdd && !family.ContentMatches(box, w))
+                bool reservedTake = _transfers.IsTakeReserved(w.Id);
+                if (!reservedAdd && !reservedTake && !family.ContentMatches(box, w))
                 {
                     if (!family.RecreateOnContentMismatch)
                     {
@@ -1334,8 +1335,12 @@ namespace CardShopCoop.Sync
                         && _clientGuards.TryGetValue(w.Id, out var openGuard)
                         && Time.time < openGuard.OpenUntil)
                         w.Open = BoxVisuals.ReadOpen(box); // keep the lid state we just reported
-                    if (reservedAdd)
+                    if (reservedAdd || reservedTake)
                     {
+                        // A pending local edit must not be repainted by host truth: for an add
+                        // the local count/type is the optimistic truth; for a take the local
+                        // reduced count is, and restoring the host's pre-take content while the
+                        // item is still escrowed in the hand would duplicate it.
                         int localCount = family.ReadItemCount(box);
                         int localType = EnumMap.ToWire(EnumKind.ItemType, family.ReadItemType(box));
                         if (localCount != w.ItemCount || localType != w.ItemType)
@@ -1344,7 +1349,7 @@ namespace CardShopCoop.Sync
                             w.ItemType = localType;
                             _suppressedSnapshotForBox.Add(w.Id);
                             BoxShared.DebugLog("box-transfer",
-                                $"id={w.Id} pending add protected local content count={localCount} type={localType}",
+                                $"id={w.Id} pending {(reservedTake ? "take" : "add")} protected local content count={localCount} type={localType}",
                                 w.Id, 1f);
                         }
                     }

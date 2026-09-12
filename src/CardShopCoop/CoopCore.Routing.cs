@@ -39,7 +39,7 @@ namespace CardShopCoop
                 }
                 return;
             },
-                MessagePolicy.HostOnlyInGame, true, heal: () => _cardShelves.ForceNextTick());
+                MessagePolicy.HostOnlyInGame, true, heal: () => _world.RequestResync?.Invoke());
             _messageRouter.Register<ShelfTransferResultMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client || !InGameLevel())
@@ -397,8 +397,11 @@ namespace CardShopCoop
                 if (Role != CoopRole.Host || !InGameLevel())
                     return;
                 // The guest asks after its world exists; re-emit every authoritative
-                // baseline, not just boxes that happen to have a periodic scan.
+                // baseline, not just boxes that happen to have a periodic scan. The shelf
+                // engine's ForceResend only re-arms a diff scan, so broadcast its full shelf
+                // state explicitly as well.
                 ModulesForceResend();
+                _world.RequestResync?.Invoke();
                 return;
             },
                 MessagePolicy.HostOnlyInGame, true, heal: () => { _boxEngine?.RequestFullSnapshot(); _market.ForceResend(); });

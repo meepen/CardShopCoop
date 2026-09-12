@@ -91,7 +91,12 @@ namespace CardShopCoop.Sync
             _transfers.Resend = entry =>
             {
                 if (_pendingTransferEntries.TryGetValue(entry.Seq, out var stored))
+                {
+                    // Keep the local-edit guard alive for the whole obligation, not just the
+                    // first 6s, so a stale snapshot cannot repaint the container mid-flight.
+                    _locallyChanged[entry.Target] = Time.realtimeSinceStartupAsDouble;
                     OnLocalChanges?.Invoke(new List<Entry> { stored });
+                }
             };
             _transfers.Escalate = entry =>
             {
@@ -358,7 +363,8 @@ namespace CardShopCoop.Sync
                     if (CoopCore.Role == CoopRole.Client && _locallyChanged.TryGetValue(e.Key, out double t)
                         && Time.realtimeSinceStartupAsDouble - t < 6.0)
                         continue;
-                    if (CoopCore.Role == CoopRole.Client && _transfers.IsAddReserved(e.Key))
+                    if (CoopCore.Role == CoopRole.Client
+                        && (_transfers.IsAddReserved(e.Key) || _transfers.IsTakeReserved(e.Key)))
                         continue;
                     comp = Resolve(sm, e.Key);
                     if (comp == null)
@@ -574,7 +580,12 @@ namespace CardShopCoop.Sync
             _transfers.TryResolve(msg.TransferSeq, out _);
             _pendingTransferEntries.Remove(msg.TransferSeq);
             _locallyChanged.Remove(pending.Target);
-            ForceNextTick();
+            // Only a diverging (rejected/partial) resolution needs authoritative truth; a fully
+            // accepted transfer must not trigger a full all-module resync per item.
+            if (rejected != 0)
+                RequestResync?.Invoke();
+            else
+                ForceNextTick();
         }
 
         public void HostReleaseConn(int connId) => _hostAcks.ReleaseConn(connId);

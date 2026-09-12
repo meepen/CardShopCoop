@@ -87,3 +87,21 @@ Expected: not one log line per frame; rate-limited/deduped warnings.
 ## 13. Latency transport stop (A11)
 Start a session with lag enabled, stop hosting, start again.
 Expected: no delayed frames from the previous session are replayed.
+
+## 14. Outstanding take vs authoritative snapshot (C1)
+Goal: a take in flight must not be undone by a host snapshot while its item is still escrowed.
+1. Set artificial inbound lag on the **HOST** (e.g. 20000 ms) so the guest's take request is held,
+   while the guest's own resync/escalation still reaches the host.
+2. As the guest, take an item from a loose box and/or a shelf.
+3. Wait past the escalation interval (~15 s) so the guest requests a host resync.
+Expected: the guest's mirror keeps the taken item removed and it stays protected in the hand; the
+host's pre-take snapshot does not refill the container. After the delayed result arrives, the item
+exists exactly once. Repeat the take a few times and confirm no accumulation.
+
+## 15. Accepted take with a delayed result (N2-A boundary)
+1. Set guest inbound lag to the maximum (60000 ms).
+2. Take an item; the host accepts and removes it.
+3. The result arrives at ~60 s.
+Expected: the item is not destroyed before the result; it stays exactly once. (The take-abandon
+threshold is far above the transport's maximum delay for exactly this case.)
+

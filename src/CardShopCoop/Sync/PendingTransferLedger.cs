@@ -29,11 +29,16 @@ namespace CardShopCoop.Sync
     {
         public const float ResendIntervalSeconds = 1f;
         public const int EscalateAttempts = 15;
-        public const int HardAttempts = 60;
+        // Abandoning a take destroys a real hand item, so the threshold must be comfortably
+        // larger than any delay the transport can produce (LagTransport.MaxDelayMs = 60s) or a
+        // merely-delayed accepted result would be destroyed while the host already removed the
+        // container copy. ~5 minutes at 1s retries.
+        public const int HardAttempts = 300;
         public const int MaxOutstanding = 256;
         private readonly Dictionary<uint, PendingTransfer<TKey>> _entries
             = new Dictionary<uint, PendingTransfer<TKey>>();
         private readonly HashSet<TKey> _pendingAdds = new HashSet<TKey>();
+        private readonly HashSet<TKey> _pendingTakes = new HashSet<TKey>();
         private int _takeCount;
         private uint _seq;
 
@@ -71,7 +76,10 @@ namespace CardShopCoop.Sync
             if (requestedDelta > 0)
                 _pendingAdds.Add(target);
             else if (requestedDelta < 0)
+            {
                 _takeCount++;
+                _pendingTakes.Add(target);
+            }
             _entries[seq] = new PendingTransfer<TKey>
             {
                 Seq = seq,
@@ -94,7 +102,10 @@ namespace CardShopCoop.Sync
                 return false;
             _entries.Remove(seq);
             if (entry.RequestedDelta < 0)
+            {
                 _takeCount--;
+                ReleaseTake(entry.Target);
+            }
             ReleaseAdd(entry.Target);
             return true;
         }
@@ -104,6 +115,14 @@ namespace CardShopCoop.Sync
         public bool IsAddReserved(TKey target)
         {
             return _pendingAdds.Contains(target);
+        }
+
+        /// <summary>True while a take for this target is unresolved. Authoritative content
+        /// must not repaint the container to its pre-take count while the taken item is still
+        /// escrowed in the hand, or the item exists in both places.</summary>
+        public bool IsTakeReserved(TKey target)
+        {
+            return _pendingTakes.Contains(target);
         }
 
         public bool TryGet(uint seq, out PendingTransfer<TKey> entry) => _entries.TryGetValue(seq, out entry);
@@ -124,6 +143,16 @@ namespace CardShopCoop.Sync
             _pendingAdds.Remove(target);
         }
 
+        /// <summary>Drop the take reservation for a target once no live take targets it.</summary>
+        public void ReleaseTake(TKey target)
+        {
+            foreach (var entry in _entries.Values)
+                if (EqualityComparer<TKey>.Default.Equals(entry.Target, target)
+                    && entry.RequestedDelta < 0)
+                    return;
+            _pendingTakes.Remove(target);
+        }
+
         public void Tick()
         {
             if (_entries.Count == 0)
@@ -140,17 +169,35 @@ namespace CardShopCoop.Sync
 
                 if (entry.Attempts >= HardAttempts)
                 {
-                    // Stop retransmitting but KEEP the obligation. Replay once so a host that
-                    // already holds the ack can answer it; the entry stays for a late result.
                     if (!entry.Escalated)
                     {
                         entry.Escalated = true;
-                        entry.LastSentAt = now;
-                        _entries[seq] = entry;
-                        CoopPlugin.Log.LogError(
-                            $"PendingTransferLedger: transfer seq={seq} unresolved after {entry.Attempts} attempts; keeping obligation and replaying once");
-                        Escalate?.Invoke(entry);
-                        Resend?.Invoke(entry);
+                        if (entry.RequestedDelta < 0)
+                        {
+                            // Never leave a take pinning the hand item and freezing the container
+                            // forever. After this many retries with host-ack replay the host almost
+                            // certainly never applied it, so resolve conservatively: destroy the
+                            // phantom hand items and let authoritative truth restore the container
+                            // (the same net-zero outcome as the reserve-failure path).
+                            _entries.Remove(seq);
+                            _takeCount--;
+                            ReleaseTake(entry.Target);
+                            HandEscrow.ResolveTake(entry.EscrowToken, 0);
+                            CoopPlugin.Log.LogError(
+                                $"PendingTransferLedger: take seq={seq} unresolved after {entry.Attempts} attempts; rolled back and requesting resync");
+                            Escalate?.Invoke(entry);
+                        }
+                        else
+                        {
+                            // Adds carry no escrow and cannot be safely discarded; keep the
+                            // obligation and replay once so a host holding the ack can answer.
+                            entry.LastSentAt = now;
+                            _entries[seq] = entry;
+                            CoopPlugin.Log.LogError(
+                                $"PendingTransferLedger: add seq={seq} unresolved after {entry.Attempts} attempts; keeping obligation and replaying once");
+                            Escalate?.Invoke(entry);
+                            Resend?.Invoke(entry);
+                        }
                     }
                     continue;
                 }
@@ -177,6 +224,7 @@ namespace CardShopCoop.Sync
                     HandEscrow.ExpireTake(entry.EscrowToken);
             _entries.Clear();
             _pendingAdds.Clear();
+            _pendingTakes.Clear();
             _takeCount = 0;
             // Deliberately do NOT reset _seq: the host keeps its (connId, seq) ack map across a
             // client scene reload, so reusing sequence numbers could collide with a stale ack
