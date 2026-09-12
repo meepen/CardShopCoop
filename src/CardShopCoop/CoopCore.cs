@@ -988,7 +988,7 @@ namespace CardShopCoop
             // extra is the pack's EItemType for kind 1, and the unused -1 for an emote - which is
             // below the modded floor and so passes through the helper untouched. Host-side this
             // write is the identity function either way.
-            var relay = new RelayTagMessage { SenderId = (byte)senderConn, Kind = kind, Extra = (EItemType)extra };
+            var relay = new RelayTagMessage { SenderId = senderConn, Kind = kind, Extra = (EItemType)extra };
             foreach (int cid in _net.ConnIds())
                 if (cid != senderConn)
                     _net.Send(cid, relay);
@@ -1006,7 +1006,7 @@ namespace CardShopCoop
                 if (string.IsNullOrEmpty(wireName))
                     wireName = e.Value;
                 _peerSteamIds.TryGetValue(e.Key, out var steamId);
-                roster.Entries.Add(new RosterEntry { Id = (byte)e.Key, Name = wireName, SteamId = steamId });
+                roster.Entries.Add(new RosterEntry { Id = e.Key, Name = wireName, SteamId = steamId });
             }
             Broadcast(roster);
         }
@@ -1531,7 +1531,7 @@ namespace CardShopCoop
             foreach (var pair in _playerModels)
             {
                 var model = ClonePlayerModel(pair.Value);
-                model.Id = (byte)pair.Key;
+                model.Id = pair.Key;
                 state.Entries.Add(model);
             }
             return state;
@@ -3706,8 +3706,13 @@ namespace CardShopCoop
                     }
                     else
                     {
+                        // No retries happen for a non-retryable type, so do not report it as
+                        // one: the old wording claimed "retries" for every failure.
+                        string detail = retryable
+                            ? $"dropped after {current.DispatchAttempts} retry attempt(s)"
+                            : "failed (non-retryable)";
                         CoopPlugin.Log.LogError($"Dispatch conn={current.ConnId} type={current.Type} "
-                            + "dropped after bounded retries; requesting authoritative heal");
+                            + detail + "; requesting authoritative heal");
                         _messageRouter.Heal(current.Type);
                     }
                 }
@@ -4878,7 +4883,7 @@ namespace CardShopCoop
                         SaveLength = payload.Length,
                         HostSlot = hostSlot,
                         BundleLength = bundle.Length,
-                        SelfId = (byte)connId,
+                        SelfId = connId,
                         HostEnumBlob = gzHostEnum,
                         HostCardsBlob = gzHostCards,
                     });
@@ -4982,7 +4987,7 @@ namespace CardShopCoop
             {
                 var relay = new RelayStateMessage
                 {
-                    SenderId = (byte)avatarId,
+                    SenderId = avatarId,
                     State = state
                 };
                 foreach (int cid in _net.ConnIds())
@@ -5168,31 +5173,46 @@ namespace CardShopCoop
 
         private void ApplyEconomyContribution(int connectionId, EconContributionMessage message)
         {
+            // Client-supplied deltas are accepted by design (the joiner earns/spends locally
+            // and forwards the result), but a non-finite value must never reach the shared
+            // wallet: NaN fails every comparison, so it would slip past the affordability
+            // guard below and permanently poison CPlayerData.m_CoinAmountDouble.
+            float value = message.Value;
+            if (float.IsNaN(value) || float.IsInfinity(value))
+            {
+                CoopPlugin.Log.LogWarning(
+                    $"rejected non-finite economy contribution kind={message.Kind} conn={connectionId} value={value}");
+                return;
+            }
             switch (message.Kind)
             {
                 case 1:
-                    CEventManager.QueueEvent(new CEventPlayer_AddCoin(message.Value));
+                    // An "add coin" of zero or less is not a contribution; a negative one
+                    // would be a reduce with no affordability guard, so refuse it.
+                    if (value <= 0f)
+                        break;
+                    CEventManager.QueueEvent(new CEventPlayer_AddCoin(value));
                     break;
                 case 2:
-                    if (message.Value <= 0f)
+                    if (value <= 0f)
                         break;
                     double balance = CPlayerData.m_CoinAmountDouble - _pendingReduceThisFrame;
-                    if ((double)message.Value > balance + 0.0001)
+                    if ((double)value > balance + 0.0001)
                     {
                         Send(connectionId, new ToastMessage { Text = "purchase declined - the shared wallet is short" });
                         _lastCoinSent = double.MinValue;
                     }
                     else
                     {
-                        _pendingReduceThisFrame += message.Value;
-                        CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(message.Value));
+                        _pendingReduceThisFrame += value;
+                        CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(value));
                     }
                     break;
                 case 3:
-                    CEventManager.QueueEvent(new CEventPlayer_AddShopExp((int)message.Value));
+                    CEventManager.QueueEvent(new CEventPlayer_AddShopExp((int)value));
                     break;
                 case 4:
-                    CEventManager.QueueEvent(new CEventPlayer_AddFame((int)message.Value));
+                    CEventManager.QueueEvent(new CEventPlayer_AddFame((int)value));
                     break;
             }
         }

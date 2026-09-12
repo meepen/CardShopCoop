@@ -53,12 +53,12 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 - Invalid, stale, busy, or last-cashier-counter sale requests are rejected without creating money.
 - Newly purchased furniture now appears on clients immediately when the host places it for the
   first time, instead of appearing only after the host moves it again.
-- New characters now start in a randomly chosen clothed preset instead of appearing nude, and the
-  gender is randomized too. A new "Allow NSFW" toggle in the character panel controls whether nude
-  appearances are allowed at all.
-- When the NSFW toggle is off, other players who are fully nude are shown in the game's random
-  clothed customer look, and the Nude wardrobe option is hidden so you cannot accidentally make
-  your own character nude.
+- New characters no longer appear nude, and the game's own starting outfit is kept; an unsaved or
+  nude model is repaired to a clothed preset when NSFW is off. A new "Allow NSFW" toggle in the
+  character panel controls whether nude appearances are allowed at all.
+- When the NSFW toggle is off, any bare wardrobe slot on another player is filled with that
+  slot's default item instead of their whole outfit being randomized, and the Nude wardrobe
+  option is hidden so you cannot accidentally make your own character nude.
 
 Both players must update.
 

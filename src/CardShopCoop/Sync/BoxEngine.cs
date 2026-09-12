@@ -43,6 +43,7 @@ namespace CardShopCoop.Sync
         private struct Lease
         {
             public int Owner;                 // HostConn / connId / NoOwner
+            public int LastOwner;             // last connId the host accepted as owner; survives release
             public BoxPossession Possession;
             public float LastSeen;
             // Push-motion state: while MotionDriven the pose is owned by the transient motion
@@ -709,15 +710,24 @@ namespace CardShopCoop.Sync
                 return;
             }
             var sender = PlayerRegistry.ForConnection(connId);
-            Lease lease = _leases.TryGetValue(w.Id, out var l) ? l : default(Lease);
+            // default(Lease) has LastOwner == 0 (HostConn); seed NoOwner so a brand-new lease
+            // cannot be released by a phantom conn 0.
+            Lease lease = _leases.TryGetValue(w.Id, out var l)
+                ? l
+                : new Lease { Owner = NoOwner, LastOwner = NoOwner };
             var currentOwner = lease.Owner == NoOwner
                 ? PlayerRef.None
                 : lease.Owner == HostConn
                     ? new PlayerRef { Kind = PlayerKind.Host, Id = 0 }
                     : PlayerRegistry.ForConnection(lease.Owner);
-            if (!BoxAuthority.AcceptBoxUpdate(currentOwner, sender))
+            // LastOwner is only meaningful for a remote client; host ownership (HostConn) never
+            // authorizes a client's release.
+            var lastOwner = lease.LastOwner == NoOwner || lease.LastOwner == HostConn
+                ? PlayerRef.None
+                : PlayerRegistry.ForConnection(lease.LastOwner);
+            if (!BoxAuthority.AcceptBoxUpdate(currentOwner, sender, w.Possession, lastOwner))
             {
-                BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} accepted=false owner={currentOwner}");
+                BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} accepted=false owner={currentOwner} last={lastOwner}");
                 return;
             }
 
@@ -729,6 +739,8 @@ namespace CardShopCoop.Sync
             lease.Owner = next.Kind == PlayerKind.None
                 ? NoOwner
                 : next.Kind == PlayerKind.Host ? HostConn : next.Id;
+            if (next.IsOwned)
+                lease.LastOwner = lease.Owner; // remembered across the later Free/Removed release
             lease.Possession = w.Possession;
             lease.LastSeen = _leaseClock;
             // A reliable possession edge supersedes any in-flight push stream: stop the
@@ -965,13 +977,28 @@ namespace CardShopCoop.Sync
                         BoxShared.DebugLog("box-adopt", $"id={w.Id} fam={w.Family} state={w.Possession} name={box.name} adopted=false");
                     }
                 }
-                // Local possession wins: never let a remote state touch a box the local
-                // player is currently holding/placing. A stale Free echo right after a quick
-                // re-pickup would otherwise yank the held box out of the hand.
+                // Local possession wins only while the wire still agrees we own the box: a
+                // stale Free echo right after a quick re-pickup must not yank the held box
+                // out of the hand. But if the host resolved a near-simultaneous pickup against
+                // us, the incoming state names another player as owner, and yielding is the
+                // only way back into sync - every later Held/drop we send is rejected until we
+                // do. Placing is deliberately not yielded: cancelling an in-progress local
+                // placement mid-ghost is riskier than the rare placing/pickup race, which
+                // converges when the placement completes.
                 if (w.Possession != BoxPossession.Removed
                     && family.TryReadLocal(box, out var localPoss, out _, out _, out _, out _, out _)
                     && (localPoss == BoxPossession.Held || localPoss == BoxPossession.Placing))
-                    continue;
+                {
+                    bool lostToAnotherOwner = localPoss == BoxPossession.Held
+                        && (w.Possession == BoxPossession.Held || w.Possession == BoxPossession.Placing)
+                        && w.OwnerConn != CoopCore.LocalConnectionId;
+                    if (!lostToAnotherOwner)
+                        continue;
+                    BoxShared.DebugLog("box-rx",
+                        $"id={w.Id} fam={w.Family} local-held but authoritative owner={w.OwnerConn}; releasing local hold");
+                    CoopCore.ForceExitHoldBox(box);
+                    // fall through and apply the authoritative state (hides the box)
+                }
                 if (!family.ContentMatches(box, w))
                 {
                     DestroyClientBox(box);
@@ -1211,6 +1238,17 @@ namespace CardShopCoop.Sync
                     return true; // keep on the fast path; report once the impulse integrates
                 else
                     BoxPlacement.ClearThrow(box);
+            }
+            // First sighting of a box we have never reported: seed the local baseline instead
+            // of transmitting it. A joiner mirrors the host's own save, so its initial Free
+            // pose/content is not a change - sending it would let a client that never owned
+            // the box rewrite the host's authoritative state. A genuine local edge (Held/
+            // Placing, or a content/open change after this seed) still reports normally.
+            if (poss == BoxPossession.Free && !_reported.ContainsKey(box))
+            {
+                _reported[box] = poss;
+                _reportedContent[box] = family.ContentSignature(box);
+                return false;
             }
             bool change = !_reported.TryGetValue(box, out var prev) || prev != poss;
             int sig = family.ContentSignature(box);

@@ -89,18 +89,30 @@ namespace CardShopCoop.Sync
                 SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
                 return;
             }
+            // Validate the ENTIRE payload before touching the shared collection. A null card,
+            // or one from an expansion this PC does not have installed, must never be skipped
+            // silently and then lost when the box is destroyed: reject the whole collect and
+            // leave the box intact so the cards survive.
+            for (int i = 0; i < cards.Count; i++)
+            {
+                if (cards[i] == null)
+                {
+                    CoopPlugin.Log.LogWarning($"CardBoxOps: collect rejected connId={connId} id={msg.Id} (null card at {i})");
+                    SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                    return;
+                }
+                if (!CoopCore.CardSetInstalledHere(cards[i]))
+                {
+                    CoopCore.WarnRefusedCard(cards[i], "card-box");
+                    SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                    return;
+                }
+            }
             CoopPlugin.Log.LogInfo($"CardBoxOps: collect accepted connId={connId} id={msg.Id}");
             try
             {
                 for (int i = 0; i < cards.Count; i++)
                 {
-                    if (cards[i] == null)
-                        continue;
-                    if (!CoopCore.CardSetInstalledHere(cards[i]))
-                    {
-                        CoopCore.WarnRefusedCard(cards[i], "card-box");
-                        continue;
-                    }
                     if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
                         Util.GradingInterop.Remember(cards[i]);
                     CPlayerData.AddCard(cards[i], 1);
@@ -110,7 +122,22 @@ namespace CardShopCoop.Sync
                 AchievementManager.OnCheckGemMintCardCount(CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained);
                 AchievementManager.OnCheckCollectedGradedCardSet();
             }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxOps collect apply: " + e.Message); }
+            catch (Exception e)
+            {
+                // The full payload was validated above, so this is a last-resort path: keep
+                // the box rather than destroying it with only part of its cards minted, and
+                // tell the client the collect was rejected so the mirror stays put.
+                CoopPlugin.Log.LogError($"CardBoxOps: collect apply failed connId={connId} id={msg.Id}; box retained: {e}");
+                try
+                {
+                    SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                }
+                catch (Exception sendError)
+                {
+                    CoopPlugin.Log.LogWarning("CardBoxOps collect reject send: " + sendError.Message);
+                }
+                return;
+            }
 
             ApplyingRemote = true;
             try
