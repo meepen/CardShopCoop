@@ -10,10 +10,11 @@ namespace CardShopCoop.Sync
     /// The player body is a CMF capsule with a kinematic Rigidbody, so Unity does NOT raise
     /// collision callbacks on the player side. The dynamic BOX is the side the physics engine
     /// reliably reports contacts on, so every synced box carries a <see cref="BoxContactProbe"/>
-    /// that forwards real contacts with the local player body here. A box stays pushed while
-    /// contacts keep arriving; <see cref="Tick"/> releases it once contact goes stale and it
-    /// comes to rest. Remote avatars run with physics/colliders disabled, so each machine only
-    /// ever sees its own player's pushes.
+    /// that forwards real contacts with the local player body here via
+    /// <see cref="NotifyContact"/>. A box stays pushed while contacts keep arriving;
+    /// <see cref="Tick"/> releases it once contact goes stale and it comes to rest. Remote
+    /// avatars run with physics/colliders disabled, so each machine only ever sees its own
+    /// player's pushes.
     ///
     /// The engine turns <see cref="Pushed"/> into a transient motion stream
     /// (<see cref="BoxEngine.PushTick"/>), which is what actually moves the box on the peers.
@@ -61,69 +62,24 @@ namespace CardShopCoop.Sync
                 Active = null;
         }
 
-        // Player-side callbacks are kept for setups where they do fire (e.g. a non-kinematic
-        // body or a CharacterController); the box-side path is the one that actually works here.
-        private void OnCollisionEnter(Collision c)
-        {
-            NoteContact(c, true);
-        }
-
-        private void OnCollisionStay(Collision c)
-        {
-            NoteContact(c, true);
-        }
-
-        private void OnCollisionExit(Collision c)
-        {
-            NoteContact(c, false);
-        }
-
-        private void OnControllerColliderHit(ControllerColliderHit hit)
-        {
-            if (hit != null)
-                NoteCollider(hit.collider, true);
-        }
-
-        private void NoteContact(Collision c, bool contacting)
-        {
-            if (c == null)
-                return;
-            NoteCollider(c.collider, contacting);
-        }
-
-        private void NoteCollider(Collider collider, bool contacting)
-        {
-            if (collider == null)
-                return;
-            NoteBox(collider.GetComponentInParent<InteractablePackagingBox>(), contacting);
-        }
-
         /// <summary>A box's collision receiver reports a real contact with the local player.</summary>
         internal static void NotifyContact(InteractablePackagingBox box)
         {
-            Active?.NoteBox(box, true);
+            Active?.NoteBox(box);
         }
 
-        private void NoteBox(InteractablePackagingBox box, bool contacting)
+        private void NoteBox(InteractablePackagingBox box)
         {
             if (box == null)
                 return;
-            if (contacting)
-            {
-                var engine = CoopCore.Instance?.Boxes;
-                if (engine == null || !engine.CanLocallyPush(box))
-                    return;
-                _lastContact[box] = Time.time;
-                if (!_pushed.Contains(box) && _pushed.Count >= MaxPushed)
-                    return;
-                if (_pushed.Add(box))
-                    BoxShared.DebugLog("push-add", $"name={box.name} role={CoopCore.Role} count={_pushed.Count}", box.GetInstanceID(), 0.5f);
-            }
-            else
-            {
-                _pushed.Remove(box);
-                _lastContact.Remove(box);
-            }
+            var engine = CoopCore.Instance?.Boxes;
+            if (engine == null || !engine.CanLocallyPush(box))
+                return;
+            _lastContact[box] = Time.time;
+            if (!_pushed.Contains(box) && _pushed.Count >= MaxPushed)
+                return;
+            if (_pushed.Add(box))
+                BoxShared.DebugLog("push-add", $"name={box.name} role={CoopCore.Role} count={_pushed.Count}", box.GetInstanceID(), 0.5f);
         }
 
         /// <summary>Per-frame maintenance: drop boxes that are destroyed, or that lost contact

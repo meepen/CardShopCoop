@@ -444,18 +444,19 @@ namespace CardShopCoop.Sync
             if (data == null || data.ApparelNames == null || data.ApparelNames.Count == 0)
                 return true;
             for (int i = 0; i < data.ApparelNames.Count; i++)
-            {
-                string name = data.ApparelNames[i];
-                if (string.IsNullOrEmpty(name))
-                    continue;
-                // The game stores the "nothing worn in this slot" item as the literal names
-                // "None" (and the wardrobe's Nude preset can leave "Nude"); both are nude.
-                if (name.Equals("None", System.StringComparison.OrdinalIgnoreCase)
-                    || name.Equals("Nude", System.StringComparison.OrdinalIgnoreCase))
-                    continue;
-                return false;
-            }
+                if (!IsNudeApparelName(data.ApparelNames[i]))
+                    return false;
             return true;
+        }
+
+        /// <summary>The game stores the "nothing worn in this slot" item as the literal names
+        /// "None" (and the wardrobe's Nude preset can leave "Nude"); both, and an empty name,
+        /// count as nude.</summary>
+        private static bool IsNudeApparelName(string name)
+        {
+            return string.IsNullOrEmpty(name)
+                || name.Equals("None", System.StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Nude", System.StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>NSFW is off: replace each nude apparel slot ("None"/empty/"Nude") with the
@@ -471,10 +472,7 @@ namespace CardShopCoop.Sync
                 data.ApparelNames.Add("");
             for (int slot = 0; slot < custom.ApparelTables.Count && slot < data.ApparelNames.Count; slot++)
             {
-                string name = data.ApparelNames[slot];
-                if (!string.IsNullOrEmpty(name)
-                    && !name.Equals("None", System.StringComparison.OrdinalIgnoreCase)
-                    && !name.Equals("Nude", System.StringComparison.OrdinalIgnoreCase))
+                if (!IsNudeApparelName(data.ApparelNames[slot]))
                     continue;
                 var table = custom.ApparelTables[slot];
                 if (table == null || table.Items == null || table.Items.Count == 0)
@@ -1607,21 +1605,25 @@ namespace CardShopCoop.Sync
                 if (cust != null)
                 {
                     bool hasJson = !string.IsNullOrEmpty(av.CustomizationJson);
-                    bool nsfwBlocked = hasJson && !CoopPlugin.AllowNsfw.Value && IsNude(av.CustomizationJson);
-                    string apparelDbg = "n/a";
-                    if (hasJson)
+                    if (BoxShared.Debug)
                     {
-                        try
+                        string apparelDbg = "n/a";
+                        if (hasJson)
                         {
-                            var dbg = JsonConvert.DeserializeObject<CC.CC_CharacterData>(av.CustomizationJson);
-                            apparelDbg = dbg == null || dbg.ApparelNames == null
-                                ? "null"
-                                : "[" + string.Join("|", dbg.ApparelNames) + "]";
+                            try
+                            {
+                                var dbg = JsonConvert.DeserializeObject<CC.CC_CharacterData>(av.CustomizationJson);
+                                apparelDbg = dbg == null || dbg.ApparelNames == null
+                                    ? "null"
+                                    : "[" + string.Join("|", dbg.ApparelNames) + "]";
+                            }
+                            catch (System.Exception e) { apparelDbg = "err:" + e.GetType().Name; }
                         }
-                        catch (System.Exception e) { apparelDbg = "err:" + e.GetType().Name; }
+                        BoxShared.DebugLog("avatar-censor",
+                            $"name={av.Name} hasModel={av.HasModel} hasJson={hasJson} allow={CoopPlugin.AllowNsfw.Value} "
+                            + $"nude={(hasJson ? IsNude(av.CustomizationJson).ToString() : "n/a")} apparel={apparelDbg}",
+                            av.GetHashCode(), 0.5f);
                     }
-                    CoopPlugin.Log.LogInfo($"avatar censor: name={av.Name} hasModel={av.HasModel} hasJson={hasJson} "
-                        + $"allow={CoopPlugin.AllowNsfw.Value} nude={(hasJson ? IsNude(av.CustomizationJson).ToString() : "n/a")} blocked={nsfwBlocked} apparel={apparelDbg}");
                     if (!av.HasModel)
                     {
                         // No model was sent: fall back to the game's own random clothed wardrobe.

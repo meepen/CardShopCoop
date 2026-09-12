@@ -66,7 +66,10 @@ namespace CardShopCoop
                             if (!known)
                                 continue;
                             _incomingPriced.Add(i);
-                            if (i < 0 || i > 500000)
+                            // GetItemPrice/SetItemPrice index m_SetItemPriceList[(int)itemType];
+                            // an id outside it (an unmapped/modded local id) would throw.
+                            var priceSlots = CPlayerData.m_SetItemPriceList;
+                            if (i < 0 || priceSlots == null || i >= priceSlots.Count)
                                 continue;
                             // this table was built BEFORE our own ItemPriceContrib landed:
                             // for a few seconds our fresh edit outranks it (it still counts

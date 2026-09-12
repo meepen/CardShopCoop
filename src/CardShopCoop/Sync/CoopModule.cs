@@ -88,12 +88,19 @@ namespace CardShopCoop.Sync
             }
             catch (Exception e)
             {
-                double now = Time.realtimeSinceStartupAsDouble;
-                if (NextAt.TryGetValue(tag, out double next) && now < next)
-                    return;
-                NextAt[tag] = now + CooldownSeconds;
-                CoopPlugin.Log.LogError("[" + tag + "] " + e);
+                Log(tag, e);
             }
+        }
+
+        /// <summary>The single rate-limited error logger for the module pipeline and any other
+        /// per-frame boundary: one line per tag per <see cref="CooldownSeconds"/>, full exception.</summary>
+        public static void Log(string tag, Exception e)
+        {
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (NextAt.TryGetValue(tag, out double next) && now < next)
+                return;
+            NextAt[tag] = now + CooldownSeconds;
+            CoopPlugin.Log.LogError("[" + tag + "] " + e);
         }
     }
 

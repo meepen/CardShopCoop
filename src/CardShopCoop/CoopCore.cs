@@ -312,16 +312,7 @@ namespace CardShopCoop
         private long _diagSent;
         private long _diagRecvStates;
         private float _diagTimer = -7.3f;
-        private readonly Dictionary<string, double> _errLogNextAt = new Dictionary<string, double>();
-
-        private void LogPipelineError(string tag, Exception e)
-        {
-            double now = Time.realtimeSinceStartupAsDouble;
-            if (_errLogNextAt.TryGetValue(tag, out double nextAt) && now < nextAt)
-                return;
-            _errLogNextAt[tag] = now + 5.0;
-            CoopPlugin.Log.LogError($"[{tag}] {e}");
-        }
+        // Per-tag rate-limited error logging lives in one place: Sync.ModuleGuard.
 
         private void Guarded(string stage, Action action)
         {
@@ -331,7 +322,7 @@ namespace CardShopCoop
             }
             catch (Exception e)
             {
-                LogPipelineError(stage, e);
+                Sync.ModuleGuard.Log(stage, e);
             }
         }
 
@@ -1671,7 +1662,7 @@ namespace CardShopCoop
             }
             catch (Exception e)
             {
-                LogPipelineError(entry.Probe, e);
+                Sync.ModuleGuard.Log(entry.Probe, e);
             }
             Util.PerfProbe.End(entry.Probe, t);
         }

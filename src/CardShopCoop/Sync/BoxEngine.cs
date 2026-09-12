@@ -99,14 +99,26 @@ namespace CardShopCoop.Sync
         // periodic full scan).
         private readonly Dictionary<ushort, float> _localRemoved = new Dictionary<ushort, float>();
         private readonly List<ushort> _localRemovedScratch = new List<ushort>();
-        private readonly Dictionary<ushort, float> _clientMotionBlockedUntil = new Dictionary<ushort, float>();
-        // A box this client just reported (open/close/content edge): keep our local open
-        // state over any snapshot that was already in flight before the report arrived, or
-        // a stale "closed" would revert the lid a moment after the player opened it.
-        // Must outlast the game's 0.85s open/close toggle animation (SetOpenCloseBox ignores
-        // calls while a toggle is in flight), plus the network round trip.
+        // Per-box local overrides on the client, keyed by wire id:
+        //  - MotionUntil: a reliable possession edge just landed; ignore transient push frames
+        //    until it passes, so they cannot re-claim the pose we just committed.
+        //  - OpenUntil: this client just reported an open/close edge; keep our local lid state
+        //    over a snapshot already in flight. Must outlast the game's 0.85s toggle animation
+        //    (during which SetOpenCloseBox ignores calls) plus the network round trip.
+        private sealed class ClientGuard
+        {
+            public float MotionUntil;
+            public float OpenUntil;
+        }
         private const float ClientOpenBlockPeriod = 1.5f;
-        private readonly Dictionary<ushort, float> _clientOpenBlockedUntil = new Dictionary<ushort, float>();
+        private readonly Dictionary<ushort, ClientGuard> _clientGuards = new Dictionary<ushort, ClientGuard>();
+
+        private ClientGuard Guard(ushort id)
+        {
+            if (!_clientGuards.TryGetValue(id, out var guard))
+                _clientGuards[id] = guard = new ClientGuard();
+            return guard;
+        }
         private const float LocalRemovedTtl = 5.0f;
         private int _clientFam;
         private int _clientIdx;
@@ -253,8 +265,7 @@ namespace CardShopCoop.Sync
         {
             ClearClientBoxEntries(box);
             _clientById.Remove(id);
-            _clientMotionBlockedUntil.Remove(id);
-            _clientOpenBlockedUntil.Remove(id);
+            _clientGuards.Remove(id);
         }
 
         public bool HostBoxHeldByOther(ushort id, int connId)
@@ -348,8 +359,7 @@ namespace CardShopCoop.Sync
             _clientIdOf.Clear();
             _localRemoved.Clear();
             _localRemovedScratch.Clear();
-            _clientMotionBlockedUntil.Clear();
-            _clientOpenBlockedUntil.Clear();
+            _clientGuards.Clear();
             _reported.Clear();
             _reportedContent.Clear();
             _contentSentAt.Clear();
@@ -931,7 +941,7 @@ namespace CardShopCoop.Sync
                     if (hadEntry)
                     {
                         ClearClientBoxEntries(box);
-                        _clientMotionBlockedUntil.Remove(w.Id);
+                        _clientGuards.Remove(w.Id);
                     }
                     if (w.Possession == BoxPossession.Removed)
                         continue;
@@ -987,8 +997,8 @@ namespace CardShopCoop.Sync
                 if (!mine)
                 {
                     if (w.Possession == BoxPossession.Free
-                        && _clientOpenBlockedUntil.TryGetValue(w.Id, out var openBlockedUntil)
-                        && Time.time < openBlockedUntil)
+                        && _clientGuards.TryGetValue(w.Id, out var openGuard)
+                        && Time.time < openGuard.OpenUntil)
                         w.Open = BoxVisuals.ReadOpen(box); // keep the lid state we just reported
                     family.ApplyState(box, w, isOwner: false);
                     // A reliable Free pose is the settle commit: end any in-flight push
@@ -996,7 +1006,7 @@ namespace CardShopCoop.Sync
                     // stale extrapolated target.
                     if (w.Possession == BoxPossession.Free)
                     {
-                        _clientMotionBlockedUntil[w.Id] = Time.time + MotionLeaseTimeout;
+                        Guard(w.Id).MotionUntil = Time.time + MotionLeaseTimeout;
                         BoxPlacement.CancelRemoteMotion(box);
                     }
                 }
@@ -1239,7 +1249,7 @@ namespace CardShopCoop.Sync
             BoxShared.DebugLog("box-tx", $"id={w.Id} fam={w.Family} state={poss} open={w.Open} sig={sig} name={box.name}",
                 box.GetInstanceID(), 0.05f);
             SendUpdate?.Invoke(new BoxUpdateMessage { Box = w });
-            _clientOpenBlockedUntil[w.Id] = Time.time + ClientOpenBlockPeriod;
+            Guard(w.Id).OpenUntil = Time.time + ClientOpenBlockPeriod;
             return isActive;
         }
 
@@ -1521,11 +1531,11 @@ namespace CardShopCoop.Sync
                 return;
             if (msg.DriverConn == CoopCore.LocalConnectionId)
                 return; // my own push; I'm the driver (my box is the real local one)
-            if (_clientMotionBlockedUntil.TryGetValue(msg.Id, out var blockedUntil))
+            if (_clientGuards.TryGetValue(msg.Id, out var guard))
             {
-                if (Time.time < blockedUntil)
+                if (Time.time < guard.MotionUntil)
                     return;
-                _clientMotionBlockedUntil.Remove(msg.Id);
+                guard.MotionUntil = 0f;
             }
             if (!_clientById.TryGetValue(msg.Id, out var box) || box == null)
                 return; // no local mirror for this id
