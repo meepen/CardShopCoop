@@ -47,8 +47,8 @@ namespace CardShopCoop.UI
 
         // ---- built styles (all created once in EnsureBuilt) -----------------------------
         public static GUIStyle Window, HeaderStrip, Header, HeaderVersion, SectionHeader;
-        public static GUIStyle Label, LabelDim, LabelDimWrap, LabelBold, LabelWrap, LabelDanger, LabelWarn;
-        public static GUIStyle SectionBox, ContentPanel, Toggle, Tab, TabSelected;
+        public static GUIStyle Label, LabelDim, LabelDimMiddle, LabelDimWrap, LabelBold, LabelWrap, LabelDanger, LabelWarn;
+        public static GUIStyle SectionBox, ContentPanel, ScrollView, ScrollContent, Toggle, Tab, TabSelected;
         public static GUIStyle ButtonPrimary, ButtonSecondary, ButtonDanger;
         public static GUIStyle TextField;
         public static GUIStyle ChipSuccess, ChipWarn, ChipDanger, ChipInfo;
@@ -169,6 +169,10 @@ namespace CardShopCoop.UI
             LabelDim = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 11 };
             LabelDim.normal.textColor = TextDim;
 
+            // LabelDim, but vertically centred inside a taller row (the copy rows give it the
+            // button height). Labels default to upper-left, which is what looked off.
+            LabelDimMiddle = new GUIStyle(LabelDim) { alignment = TextAnchor.MiddleLeft };
+
             LabelBold = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 12, fontStyle = FontStyle.Bold };
             LabelBold.normal.textColor = Text;
 
@@ -203,6 +207,20 @@ namespace CardShopCoop.UI
                 margin = new RectOffset(0, 0, 0, 4)
             };
             ContentPanel.normal.background = _contentTex;
+
+            // Keep the scroll group's overflow calculation equal to the actual content height.
+            // Unity's default scrollView padding and GUIStyle.none's child-margin bubbling can
+            // otherwise make a fixed-height content group appear a few pixels too tall.
+            ScrollView = new GUIStyle(GUI.skin.scrollView)
+            {
+                padding = new RectOffset(0, 0, 0, 0),
+                margin = new RectOffset(0, 0, 0, 0)
+            };
+            ScrollContent = new GUIStyle
+            {
+                padding = new RectOffset(0, 0, 0, 0),
+                margin = new RectOffset(0, 0, 0, 0)
+            };
 
             Tab = MakeTab(_tabTex, _tabHoverTex, TextDim);
             TabSelected = MakeTab(_tabSelectedTex, _tabSelectedTex, Color.white);
