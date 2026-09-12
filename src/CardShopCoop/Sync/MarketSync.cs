@@ -27,9 +27,9 @@ namespace CardShopCoop.Sync
     /// PriceChangeManager.Init aliases its own fields to the CPlayerData lists, so a
     /// fresh list instance would silently orphan every consumer.
     /// </summary>
-    public class MarketSync : ITickableCoopModule
+    public class MarketSync : TickableCoopModule
     {
-        public string Name => "market";
+        public override string Name => "market";
 
         /// <summary>True while ClientApplyState writes host data, so any future patch on
         /// these tables can tell a sync write from a local one.</summary>
@@ -81,24 +81,17 @@ namespace CardShopCoop.Sync
         private static readonly Dictionary<long, PendingModCard> s_modCardPending
             = new Dictionary<long, PendingModCard>();
 
-        public void Start()
+        protected override void OnHostTick(in SyncFrame frame) => HostTick(frame.InGame);
+
+        protected override void OnClientTick(in SyncFrame frame)
         {
+            // Flush uses InGame (the snapshot may have arrived mid-load) and diagnostics
+            // use dt, matching the original per-frame order.
+            FlushPending(frame.InGame);
+            ClientDiag(frame.Dt);
         }
 
-        public void Tick(in SyncFrame frame)
-        {
-            if (CoopCore.Role == CoopRole.Host)
-                HostTick(frame.InGame);
-            else if (CoopCore.Role == CoopRole.Client)
-            {
-                // Flush uses InGame (the snapshot may have arrived mid-load) and diagnostics
-                // use dt, matching the original per-frame order.
-                FlushPending(frame.InGame);
-                ClientDiag(frame.Dt);
-            }
-        }
-
-        public void Reset()
+        public override void Reset()
         {
             _lastAppliedGen = int.MinValue;
             if (_pendingState != null)
@@ -111,16 +104,9 @@ namespace CardShopCoop.Sync
             ApplyingRemote = false;
         }
 
-        public void ResetState() => Reset();
-
-        public void ForceResend()
+        public override void ForceResend()
         {
             s_dirty = true;
-        }
-
-        public void Dispose()
-        {
-            Reset();
         }
 
         // ---------------- patches ----------------

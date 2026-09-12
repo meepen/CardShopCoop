@@ -18,7 +18,7 @@ namespace CardShopCoop.Sync
     /// per-interaction patches). On the client, diffs against the last host-applied state
     /// are the local player's own actions and are sent to the host as requests.
     /// </summary>
-    public class WorldSync : ICoopModule
+    public class WorldSync : CoopModule
     {
         public struct Entry
         {
@@ -98,19 +98,11 @@ namespace CardShopCoop.Sync
         private List<Entry> _scanChanges;
         private bool _sawError;
 
-        public string Name => "world";
+        public override string Name => "world";
 
-        public void Start()
-        {
-        }
+        public override void ForceResend() => ForceNextTick();
 
-        public void ResetState() => Reset();
-
-        public void ForceResend() => ForceNextTick();
-
-        public void Dispose() => ResetState();
-
-        public void Reset()
+        public override void Reset()
         {
             _last.Clear();
             _locallyChanged.Clear();

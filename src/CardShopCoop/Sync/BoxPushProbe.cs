@@ -5,20 +5,28 @@ using UnityEngine;
 namespace CardShopCoop.Sync
 {
     /// <summary>
-    /// Detects the boxes the LOCAL player is physically pushing. It rides on the player's
-    /// walking body, so Unity's collision callbacks fire only while a real contact exists -
-    /// the work is O(contacts), never O(all boxes). Remote avatars run with their physics and
-    /// colliders disabled, so each machine only ever sees its own player's pushes.
+    /// The set of boxes the LOCAL player is physically pushing.
     ///
-    /// This component only answers "which loose boxes is my body touching right now". The
-    /// engine turns the resulting <see cref="Pushed"/> set into a transient motion stream
+    /// The player body is a CMF capsule with a kinematic Rigidbody, so Unity does NOT raise
+    /// collision callbacks on the player side. The dynamic BOX is the side the physics engine
+    /// reliably reports contacts on, so every synced box carries a <see cref="BoxContactProbe"/>
+    /// that forwards real contacts with the local player body here via
+    /// <see cref="NotifyContact"/>. A box stays pushed while contacts keep arriving;
+    /// <see cref="Tick"/> releases it once contact goes stale and it comes to rest. Remote
+    /// avatars run with physics/colliders disabled, so each machine only ever sees its own
+    /// player's pushes.
+    ///
+    /// The engine turns <see cref="Pushed"/> into a transient motion stream
     /// (<see cref="BoxEngine.PushTick"/>), which is what actually moves the box on the peers.
     /// </summary>
     public sealed class BoxPushProbe : MonoBehaviour
     {
         // A body can only meaningfully drive a handful of boxes at once; past the cap a new
-        // box is ignored until an existing one drops out (see NoteContact).
+        // box is ignored until an existing one drops out.
         private const int MaxPushed = 8;
+
+        /// <summary>The active probe on the local player body; box contact receivers call in.</summary>
+        internal static BoxPushProbe Active;
 
         private Rigidbody _body;
         private readonly Dictionary<InteractablePackagingBox, float> _lastContact
@@ -38,52 +46,40 @@ namespace CardShopCoop.Sync
             }
         }
 
-        /// <summary>Bind the probe to the player's walking body. The body is the collision
-        /// source: contacts with loose boxes are what this tracks.</summary>
+        /// <summary>Bind the probe to the player's walking body and make it the active target
+        /// for box-side contact reports.</summary>
         public void Init(Rigidbody body)
         {
             if (body == null)
                 throw new ArgumentNullException("body");
             _body = body;
+            Active = this;
         }
 
-        private void OnCollisionEnter(Collision c)
+        private void OnDestroy()
         {
-            NoteContact(c, true);
+            if (ReferenceEquals(Active, this))
+                Active = null;
         }
 
-        private void OnCollisionStay(Collision c)
+        /// <summary>A box's collision receiver reports a real contact with the local player.</summary>
+        internal static void NotifyContact(InteractablePackagingBox box)
         {
-            NoteContact(c, true);
+            Active?.NoteBox(box);
         }
 
-        private void OnCollisionExit(Collision c)
+        private void NoteBox(InteractablePackagingBox box)
         {
-            NoteContact(c, false);
-        }
-
-        private void NoteContact(Collision c, bool contacting)
-        {
-            if (c == null || c.collider == null)
-                return;
-            var box = c.collider.GetComponentInParent<InteractablePackagingBox>();
             if (box == null)
                 return;
-            if (contacting)
-            {
-                var engine = CoopCore.Instance?.Boxes;
-                if (engine == null || !engine.CanLocallyPush(box))
-                    return;
-                _lastContact[box] = Time.time;
-                if (!_pushed.Contains(box) && _pushed.Count >= MaxPushed)
-                    return;
-                _pushed.Add(box);
-            }
-            else
-            {
-                _pushed.Remove(box);
-                _lastContact.Remove(box);
-            }
+            var engine = CoopCore.Instance?.Boxes;
+            if (engine == null || !engine.CanLocallyPush(box))
+                return;
+            _lastContact[box] = Time.time;
+            if (!_pushed.Contains(box) && _pushed.Count >= MaxPushed)
+                return;
+            if (_pushed.Add(box))
+                BoxShared.DebugLog("push-add", $"name={box.name} role={CoopCore.Role} count={_pushed.Count}", box.GetInstanceID(), 0.5f);
         }
 
         /// <summary>Per-frame maintenance: drop boxes that are destroyed, or that lost contact
@@ -92,8 +88,6 @@ namespace CardShopCoop.Sync
         /// is released. Runs over a reused scratch list - no per-frame allocation.</summary>
         public void Tick(float dt)
         {
-            if (_pushed.Count == 0)
-                return;
             // The player's body went away (scene transition): release everything we hold.
             if (_body == null)
             {
@@ -101,6 +95,8 @@ namespace CardShopCoop.Sync
                 _lastContact.Clear();
                 return;
             }
+            if (_pushed.Count == 0)
+                return;
             float settleSq = BoxEngine.MotionSettleSpeed * BoxEngine.MotionSettleSpeed;
             _scratch.Clear();
             foreach (var box in _pushed)

@@ -75,10 +75,8 @@ namespace CardShopCoop.Sync
     /// CardDelta mirror). The client never runs any vanilla trade code: OnMousePress
     /// and the screen's mutating buttons are blocked/forwarded client-side below.
     /// </summary>
-    public class TradeServe : ITickableCoopModule
+    public class TradeServe : TickableCoopModule
     {
-        private const float Cadence = 0.5f;      // host scan/broadcast gate
-        private const float HealInterval = 6f;   // unchanged-state re-broadcast
         private const float StaleAfter = 13f;    // client: > 2x heal + margin
         private static float Reach => CoopPlugin.ServeReach.Value; // same reach as RegisterServe
         private const float VanillaWait = 60f;   // Customer.cs WaitingToTradeCard timeout
@@ -112,22 +110,10 @@ namespace CardShopCoop.Sync
             _live = this;
         }
 
-        public string Name => "trade-serve";
+        public override string Name => "trade-serve";
 
-        public void Start()
-        {
-            ActivateLive(this);
-        }
-
-        public void Tick(in SyncFrame frame)
-        {
-            if (CoopCore.Role == CoopRole.Host)
-                HostTick(frame.Dt, frame.InGame);
-            else if (CoopCore.Role == CoopRole.Client)
-                ClientTick(frame.Dt, frame.InGame);
-        }
-
-        public void ResetState() => Reset();
+        protected override void OnHostTick(in SyncFrame frame) => HostTick(frame.Dt, frame.InGame);
+        protected override void OnClientTick(in SyncFrame frame) => ClientTick(frame.Dt, frame.InGame);
 
         // ---- reflection: Customer privates (verified against decompiled/Customer.cs)
         private static readonly FieldInfo FiTradeData = ReflectionSurface.RequiredField(typeof(Customer), "m_CustomerTradeData");
@@ -178,9 +164,8 @@ namespace CardShopCoop.Sync
         }
 
         // host
-        private float _timer;
-        private int _lastHash;
-        private float _heal;
+        private readonly SnapshotGate _gate = new SnapshotGate(0.5f, 6f, -0.83f);
+        private int _lastHash; // logging only; SnapshotGate owns send gating
         private byte _resultSeq;
         private string _result = "";
         // NEVER CSingleton<>.Instance for these three: touched while no real manager
@@ -223,11 +208,10 @@ namespace CardShopCoop.Sync
         // the shop's counter count, so no sweep is needed.
         private readonly Dictionary<int, double> _guestClaims = new Dictionary<int, double>();
 
-        public void Reset()
+        public override void Reset()
         {
-            _timer = -0.83f; // staggered phase vs the other snapshot engines
+            _gate.Reset(-0.83f);
             _lastHash = 0;
-            _heal = 0f;
             _resultSeq = 0;
             _result = "";
             _sm = null;
@@ -249,17 +233,17 @@ namespace CardShopCoop.Sync
             _guestClaims.Clear();
         }
 
-        public void ForceResend()
+        public override void ForceResend()
         {
+            _gate.Force();
             _lastHash = 0;
-            _heal = 999f; // beats the hash gate even if the real hash is 0
         }
 
-        public void Dispose()
+        public override void Dispose()
         {
             if (ReferenceEquals(_live, this))
                 ClearLive();
-            Reset();
+            base.Dispose();
         }
 
         // ---------------- patches ----------------
@@ -660,11 +644,9 @@ namespace CardShopCoop.Sync
         {
             if (!inGame)
                 return;
-            _timer += dt;
-            if (_timer < Cadence)
+            if (!_gate.Due(dt))
                 return;
-            _timer -= Cadence;
-            try
+            Guarded("host", () =>
             {
                 var cm = Cm();
                 var sm = Sm();
@@ -758,12 +740,10 @@ namespace CardShopCoop.Sync
                     hash = hash * 31 + o.CustomerGeneration;
                 }
 
-                _heal += Cadence;
                 bool changed = hash != _lastHash;
-                if (!changed && _heal < HealInterval)
+                if (!_gate.ShouldSend(hash))
                     return;
                 _lastHash = hash;
-                _heal = 0f;
                 if (changed) // real change (offers moved or a result landed) - keep the pipeline loud
                 {
                     string summary = "";
@@ -775,8 +755,7 @@ namespace CardShopCoop.Sync
                     CoopPlugin.Log.LogInfo($"TradeServe host: broadcasting {_hostBuf.Count} offer(s){summary}");
                 }
                 BroadcastState?.Invoke(BuildState());
-            }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("TradeServe host: " + e.Message); }
+            });
         }
 
         /// <summary>Host: roll the customer's offer WITHOUT opening the screen, using the
@@ -939,15 +918,7 @@ namespace CardShopCoop.Sync
                 return;
             }
             CoopPlugin.Log.LogInfo($"TradeServe host: received {(op == OpAccept ? "accept" : op == OpDecline ? "decline" : "op " + op)} @ counter {idx}, price {price:F2}");
-            try
-            {
-                HostApplyOpInner(op, idx, price);
-            }
-            catch (Exception e)
-            {
-                CoopPlugin.Log.LogWarning("TradeServe op: " + e);
-                Result("trade failed - ask the host to serve them");
-            }
+            Guarded("apply", () => HostApplyOpInner(op, idx, price));
         }
 
         private void HostApplyOpInner(byte op, int idx, float price)

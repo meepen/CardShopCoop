@@ -14,7 +14,7 @@ namespace CardShopCoop.Sync
     /// boxed-up shelf being carried around doesn't stream; it pops to its new spot on the
     /// other side when placed. Children (compartments, items, price tags) ride along.
     /// </summary>
-    public class ObjMoveSync : ICoopModule
+    public class ObjMoveSync : CoopModule
     {
         public struct Entry
         {
@@ -93,19 +93,11 @@ namespace CardShopCoop.Sync
             return (kind == 5) ? (int)io.m_DecoObjectType : (int)io.m_ObjectType;
         }
 
-        public string Name => "object-moves";
+        public override string Name => "object-moves";
 
-        public void Start()
-        {
-        }
+        public override void ForceResend() => ForceNextTick();
 
-        public void ResetState() => Reset();
-
-        public void ForceResend() => ForceNextTick();
-
-        public void Dispose() => ResetState();
-
-        public void Reset()
+        public override void Reset()
         {
             _sent.Clear();
             _candidate.Clear();

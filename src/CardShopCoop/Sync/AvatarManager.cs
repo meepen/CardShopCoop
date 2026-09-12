@@ -444,9 +444,41 @@ namespace CardShopCoop.Sync
             if (data == null || data.ApparelNames == null || data.ApparelNames.Count == 0)
                 return true;
             for (int i = 0; i < data.ApparelNames.Count; i++)
-                if (!string.IsNullOrEmpty(data.ApparelNames[i]))
+                if (!IsNudeApparelName(data.ApparelNames[i]))
                     return false;
             return true;
+        }
+
+        /// <summary>The game stores the "nothing worn in this slot" item as the literal names
+        /// "None" (and the wardrobe's Nude preset can leave "Nude"); both, and an empty name,
+        /// count as nude.</summary>
+        private static bool IsNudeApparelName(string name)
+        {
+            return string.IsNullOrEmpty(name)
+                || name.Equals("None", System.StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Nude", System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>NSFW is off: replace each nude apparel slot ("None"/empty/"Nude") with the
+        /// first real item for that slot, leaving hair, body and any worn items untouched. This
+        /// is deliberately slot-level so a remote nude player still looks like themselves.</summary>
+        private static void ClotheNudeSlots(CC.CharacterCustomization custom, CC.CC_CharacterData data)
+        {
+            if (custom == null || data == null || custom.ApparelTables == null)
+                return;
+            if (data.ApparelNames == null)
+                data.ApparelNames = new System.Collections.Generic.List<string>();
+            while (data.ApparelNames.Count < custom.ApparelTables.Count)
+                data.ApparelNames.Add("");
+            for (int slot = 0; slot < custom.ApparelTables.Count && slot < data.ApparelNames.Count; slot++)
+            {
+                if (!IsNudeApparelName(data.ApparelNames[slot]))
+                    continue;
+                var table = custom.ApparelTables[slot];
+                if (table == null || table.Items == null || table.Items.Count == 0)
+                    continue;
+                data.ApparelNames[slot] = table.Items[0].Name ?? "";
+            }
         }
 
         /// <summary>Builds a model entry from a wardrobe preset (a complete CC_CharacterData).
@@ -1573,29 +1605,61 @@ namespace CardShopCoop.Sync
                 if (cust != null)
                 {
                     bool hasJson = !string.IsNullOrEmpty(av.CustomizationJson);
-                    bool nsfwBlocked = hasJson && !CoopPlugin.AllowNsfw.Value && IsNude(av.CustomizationJson);
-                    if (!av.HasModel || nsfwBlocked)
+                    if (BoxShared.Debug)
                     {
-                        // No model was sent, or the model is deliberately nude while NSFW is
-                        // off: fall back to the game's own random clothed wardrobe.
-                        cust.RandomizeCharacterMesh(); // game's own wardrobe pipeline
+                        string apparelDbg = "n/a";
+                        if (hasJson)
+                        {
+                            try
+                            {
+                                var dbg = JsonConvert.DeserializeObject<CC.CC_CharacterData>(av.CustomizationJson);
+                                apparelDbg = dbg == null || dbg.ApparelNames == null
+                                    ? "null"
+                                    : "[" + string.Join("|", dbg.ApparelNames) + "]";
+                            }
+                            catch (System.Exception e) { apparelDbg = "err:" + e.GetType().Name; }
+                        }
+                        BoxShared.DebugLog("avatar-censor",
+                            $"name={av.Name} hasModel={av.HasModel} hasJson={hasJson} allow={CoopPlugin.AllowNsfw.Value} "
+                            + $"nude={(hasJson ? IsNude(av.CustomizationJson).ToString() : "n/a")} apparel={apparelDbg}",
+                            av.GetHashCode(), 0.5f);
+                    }
+                    if (!av.HasModel)
+                    {
+                        // No model was sent: fall back to the game's own random clothed wardrobe.
+                        cust.RandomizeCharacterMesh();
                     }
                     else
                     {
                         cust.m_CharacterCustom.CharacterName = (female ? "Female" : "Male") + av.ModelIndex;
                         cust.m_CharacterCustom.Initialize();
+                        CC.CC_CharacterData data = null;
                         if (hasJson)
                         {
-                            var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(av.CustomizationJson);
-                            if (data != null)
+                            try
                             {
-                                NormalizeCharacterData(cust.m_CharacterCustom, data);
-                                cust.m_CharacterCustom.StoredCharacterData = data;
-                                if (TryApplyCharacterData(cust.m_CharacterCustom, data, "remote avatar"))
-                                    ClearEmptyWardrobeSlots(cust.m_CharacterCustom, data);
+                                data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(av.CustomizationJson);
                             }
+                            catch (System.Exception e) { Swallow.Log(e); }
                         }
-                        // A model without a payload keeps the initialized (clothed) preset.
+                        if (data == null)
+                        {
+                            // Unreadable payload: the safe fallback is a random clothed customer.
+                            cust.RandomizeCharacterMesh();
+                        }
+                        else
+                        {
+                            // NSFW off: dress only the nude slots instead of randomizing the
+                            // whole character, so the player's hair/body/other clothes survive.
+                            // Runs whenever NSFW is off, not only for a fully nude model, so a
+                            // mixed outfit (top on, bottom nude) is censored too.
+                            if (!CoopPlugin.AllowNsfw.Value)
+                                ClotheNudeSlots(cust.m_CharacterCustom, data);
+                            NormalizeCharacterData(cust.m_CharacterCustom, data);
+                            cust.m_CharacterCustom.StoredCharacterData = data;
+                            if (TryApplyCharacterData(cust.m_CharacterCustom, data, "remote avatar"))
+                                ClearEmptyWardrobeSlots(cust.m_CharacterCustom, data);
+                        }
                     }
                 }
             }
