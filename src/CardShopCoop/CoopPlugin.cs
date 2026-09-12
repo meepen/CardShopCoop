@@ -49,6 +49,8 @@ namespace CardShopCoop
         public static ConfigEntry<GradedAlertMode> GradedDriftAlert;
         public static ConfigEntry<bool> BoxSyncDebug;
         public static ConfigEntry<bool> PerfDebug;
+        public static ConfigEntry<int> ArtificialLagMs;
+        public static ConfigEntry<int> ArtificialJitterMs;
 
         private void Awake()
         {
@@ -103,6 +105,10 @@ namespace CardShopCoop
                 "Log detailed box-sync activity: each possession report a client sends, each update the host accepts or rejects, and each box the client adopts or spawns. Verbose - enable temporarily (then restart) to diagnose boxes that will not pick up, move, or hide in sync.");
             PerfDebug = Config.Bind("Diagnostics", "PerfDebug", false,
                 "Log any per-frame sync stage that takes longer than 5 ms (rate-limited to one line per stage per 2 s). Enable temporarily to find lag spikes; it does not change gameplay.");
+            ArtificialLagMs = Config.Bind("Diagnostics", "ArtificialLagMs", 0,
+                "TESTING ONLY. Adds this many milliseconds of latency to every network message you RECEIVE. Set the same value on both PCs for symmetric lag (each hop adds one delay, so a round trip is roughly twice the value). 0 disables it.");
+            ArtificialJitterMs = Config.Bind("Diagnostics", "ArtificialJitterMs", 0,
+                "TESTING ONLY. Randomly varies each received message's artificial latency by up to this many milliseconds, plus or minus, so the connection feels unstable. 0 is a steady delay. Only meaningful while ArtificialLagMs is above 0.");
 
             // PLATFORM LINE FIRST, ABOVE EVERYTHING THAT CAN FAIL. This is the line a Game
             // Pass player (or a support thread) is told to look for, and it is most useful

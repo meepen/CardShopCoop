@@ -299,41 +299,52 @@ namespace CardShopCoop.UI
             GUILayout.EndHorizontal();
         }
 
-        /// <summary>The SETTINGS tab: live logging switches and the optional performance patch.
-        /// Every control writes straight to its ConfigEntry, which persists to disk, so the
-        /// tab is a front-end for the config file rather than a second source of truth.</summary>
+        /// <summary>The SETTINGS tab: appearance, live logging switches, and the artificial
+        /// latency test sliders. Every control writes straight to its ConfigEntry, which
+        /// persists to disk, so the tab is a front-end for the config file rather than a
+        /// second source of truth.</summary>
         private void DrawSettings(CoopCore core)
         {
             GUILayout.Label("APPEARANCE", CoopTheme.SectionHeader);
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("NSFW", CoopTheme.Label, GUILayout.Width(56f));
             bool allowNsfw = GUILayout.Toggle(CoopPlugin.AllowNsfw.Value,
-                CoopPlugin.AllowNsfw.Value ? "Nude allowed" : "Nude hidden", CoopTheme.Toggle);
+                CoopPlugin.AllowNsfw.Value ? "NSFW allowed" : "NSFW hidden", CoopTheme.Toggle);
             if (allowNsfw != CoopPlugin.AllowNsfw.Value)
                 core.SetNsfwAllowed(allowNsfw);
-            GUILayout.EndHorizontal();
-            GUILayout.Label("Controls whether nude appearances are allowed at all. With it off, bare wardrobe slots on other players are clothed and the Nude option is hidden in the CHARACTER tab.", CoopTheme.LabelDim);
             GUILayout.Space(8f);
 
             GUILayout.Label("LOGGING", CoopTheme.SectionHeader);
-            DrawConfigToggle(CoopPlugin.BoxSyncDebug, "Verbose box-sync logging (BoxSyncDebug)",
-                "Logs every box possession report, host accept/reject, and client adopt/spawn. Takes effect immediately and makes a large log file - turn it off when finished.");
-            DrawConfigToggle(CoopPlugin.PerfDebug, "Per-frame stage timing (PerfDebug)",
-                "Logs any sync stage that takes longer than 5 ms (rate-limited per stage). Useful for finding lag spikes.");
+            DrawConfigToggle(CoopPlugin.BoxSyncDebug, "Verbose box-sync logging (BoxSyncDebug)");
+            DrawConfigToggle(CoopPlugin.PerfDebug, "Per-frame stage timing (PerfDebug)");
+            GUILayout.Space(8f);
+
+            GUILayout.Label("LATENCY TESTING", CoopTheme.SectionHeader);
+            DrawConfigIntSlider(CoopPlugin.ArtificialLagMs, 0, 2000, "Artificial lag");
+            DrawConfigIntSlider(CoopPlugin.ArtificialJitterMs, 0, 1000, "Jitter");
             GUILayout.Space(8f);
 
             GUILayout.Label("Settings are saved to BepInEx/config/com.zwhit.cardshopcoop.cfg.", CoopTheme.LabelDim);
         }
 
-        private static void DrawConfigToggle(ConfigEntry<bool> entry, string label, string help)
+        private static void DrawConfigToggle(ConfigEntry<bool> entry, string label)
         {
             if (entry == null)
                 return;
             bool value = GUILayout.Toggle(entry.Value, " " + label, CoopTheme.Toggle);
             if (value != entry.Value)
                 entry.Value = value; // ConfigEntry writes the file itself
-            if (!string.IsNullOrEmpty(help))
-                GUILayout.Label(help, CoopTheme.LabelDim);
+        }
+
+        private static void DrawConfigIntSlider(ConfigEntry<int> entry, int min, int max, string label)
+        {
+            if (entry == null)
+                return;
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, CoopTheme.LabelDim, GUILayout.Width(130f));
+            int value = Mathf.RoundToInt(GUILayout.HorizontalSlider(entry.Value, min, max));
+            GUILayout.Label(value + " ms", CoopTheme.LabelDim, GUILayout.Width(56f));
+            GUILayout.EndHorizontal();
+            if (value != entry.Value)
+                entry.Value = value; // ConfigEntry writes the file itself
         }
 
         private static int GetConnectionState(CoopCore core, ICoopTransport net)

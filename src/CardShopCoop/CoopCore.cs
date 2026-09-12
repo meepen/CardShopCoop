@@ -871,7 +871,7 @@ namespace CardShopCoop
                 LastFailedLobby = lobby;
                 // ORDER IS LOAD-BEARING: the transport must exist before Join(), because the
                 // bridge's lobby-entered callback wires the host connection into it.
-                _net = _steam.CreateTransport(false, new PingMessage());
+                _net = LagTransport.Wrap(_steam.CreateTransport(false, new PingMessage()));
                 StatusLine = "Joining Steam lobby...";
                 _steam.Join(lobby);
             }
@@ -916,7 +916,7 @@ namespace CardShopCoop
                 HostPassword = password ?? "";
                 // ORDER IS LOAD-BEARING: transport first, then Host() - the bridge's
                 // lobby-created callback stamps the new lobby id onto this transport.
-                _net = _steam.CreateTransport(true, new PingMessage());
+                _net = LagTransport.Wrap(_steam.CreateTransport(true, new PingMessage()));
                 StatusLine = "Creating Steam lobby...";
                 _steam.Host(isPublic, lobbyName, HostPassword.Length > 0);
             }
@@ -2532,7 +2532,7 @@ namespace CardShopCoop
             {
                 var tcp = new Transport { KeepaliveMessage = new PingMessage() };
                 tcp.StartHost(CoopPlugin.Port.Value);
-                _net = tcp;
+                _net = LagTransport.Wrap(tcp);
                 Role = CoopRole.Host;
                 ActivateLiveModuleHooks();
                 StatusLine = "Hosting - waiting for a player...";
@@ -2781,7 +2781,7 @@ namespace CardShopCoop
                 _joinPassword = password ?? "";
                 StatusLine = "Connecting to " + ip + "...";
                 var net = new Transport { KeepaliveMessage = new PingMessage() };
-                _net = net;
+                _net = LagTransport.Wrap(net);
                 // A code from a host on a non-default port has to win over our own config; a
                 // nonsense value falls back rather than throwing at the socket.
                 int port = (joinPort > 0 && joinPort <= 65535) ? joinPort : CoopPlugin.Port.Value;
