@@ -32,7 +32,7 @@ namespace CardShopCoop.Sync
     /// clears the machine and banks the report counters WITHOUT re-adding the cards.
     /// No coin moves through this module, so the double-charge question never arises.
     /// </summary>
-    public class ContainerSync
+    public class ContainerSync : TickableCoopModule
     {
         public static ContainerSync Instance;
 
@@ -70,7 +70,7 @@ namespace CardShopCoop.Sync
         /// <summary>Set by CoopCore: put a newly mirrored authoritative box into the local
         /// player's hands. Kept as a delegate so this module does not own player reflection.</summary>
         public Func<InteractablePackagingBox_Item, bool> HoldClientBox;
-        /// <summary>Set by CoopCore: ask BoxSync to broadcast the loose-box population on the
+        /// <summary>Set by CoopCore: ask the box engine to broadcast the loose-box population on the
         /// next tick, so a freshly dispensed empty box appears on the guest within one tick
         /// instead of up to ~1.5s.</summary>
         public Action RequestBoxResync;
@@ -212,6 +212,18 @@ namespace CardShopCoop.Sync
             };
         }
 
+        public override string Name => "containers";
+
+        protected override void OnHostTick(in SyncFrame frame)
+        {
+            HostTick(frame.Dt, frame.InGame);
+        }
+
+        protected override void OnClientTick(in SyncFrame frame)
+        {
+            ClientTick(frame.Dt, frame.InGame && !frame.PreloadHold);
+        }
+
         /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
         public static void ClearLive()
         {
@@ -225,7 +237,7 @@ namespace CardShopCoop.Sync
             Instance = instance;
         }
 
-        public void Reset()
+        public override void Reset()
         {
             _sm = null;
             _timer = -5.3f; // staggered phase vs the other snapshot engines
@@ -246,7 +258,7 @@ namespace CardShopCoop.Sync
             _lastCleanserWarn.Clear();
         }
 
-        public void ForceResend()
+        public override void ForceResend()
         {
             // forgetting every hash makes the next HostTick rebroadcast the world -
             // the on-join snapshot for containers
@@ -664,8 +676,9 @@ namespace CardShopCoop.Sync
                                 CoopPlugin.Log.LogInfo($"ContainerSync: rejected atomic empty-box store id {boxId} (storage id {storageId} full)");
                                 break;
                             }
-                            if (BoxSync.Instance == null
-                                || !BoxSync.Instance.TryConsumeForEmptyBoxStorage(boxId, boxType, isBig))
+                            var engine = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
+                            if (engine == null
+                                || !engine.HostConsumeForEmptyBoxStorage(boxId, boxType, isBig))
                             {
                                 CoopPlugin.Log.LogWarning(
                                     $"ContainerSync: rejected atomic empty-box store id {boxId} (box no longer valid)");
@@ -793,7 +806,7 @@ namespace CardShopCoop.Sync
                 SendBoxTakeResult(connId, storageId, 0, s != null ? s.GetBoxStoredCount() : 0);
                 return;
             }
-            // spawn the box officially (RestockManager registers it) so BoxSync mirrors
+            // spawn the box officially (RestockManager registers it) so the box engine mirrors
             // it back to the joiner at the storage's own hand-off spot; vanilla TakeBox
             // is unusable here because it force-holds the box in the HOST's hands
             var box = RestockManager.SpawnPackageBoxItem(EItemType.None, 0, isBigBox: true);
@@ -806,30 +819,31 @@ namespace CardShopCoop.Sync
             var loc = s.m_EmptyBoxSpawnLoc;
             var targetPos = loc != null ? loc.position : reqPos;
             var targetYaw = loc != null ? loc.rotation.eulerAngles.y : box.transform.eulerAngles.y;
-            // BoxSync snapshots the real Rigidbody, not only the visual Transform. Using the
+            // The box engine snapshots the real Rigidbody, not only the visual Transform. Using the
             // same physics-pose helper prevents the immediate forced snapshot from advertising
             // the random RestockManager spawn location instead of the storage hand-off point.
-            BoxSync.ApplyPhysicsPose(box, targetPos, targetYaw);
+            BoxPlacement.ApplyPhysicsPose(box, targetPos, targetYaw);
             box.ForceSetOpenCloseInstant(isOpen: true);
             box.SetOpenCloseBox(isOpen: false, isPlayer: false);
-            ushort boxId = BoxSync.Instance != null ? BoxSync.Instance.EnsureHostId(box) : (ushort)0;
+            var boxEngine = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
+            ushort boxId = boxEngine != null ? boxEngine.EnsureHostId(box) : (ushort)0;
             if (boxId == 0)
             {
-                CoopPlugin.Log.LogWarning($"ContainerSync: rejected empty-box take from client {connId}, BoxSync id assignment failed (storage id {storageId})");
-                BoxSync.ApplyingRemote = true;
+                CoopPlugin.Log.LogWarning($"ContainerSync: rejected empty-box take from client {connId}, BoxEngine id assignment failed (storage id {storageId})");
+                BoxShared.ApplyingRemote = true;
                 try
                 {
                     box.OnDestroyed();
                 }
-                catch { }
-                finally { BoxSync.ApplyingRemote = false; }
+                catch (System.Exception caught) { Swallow.Log(caught); }
+                finally { BoxShared.ApplyingRemote = false; }
                 SendBoxTakeResult(connId, storageId, 0, s.GetBoxStoredCount());
                 return;
             }
             FiEbCount?.SetValue(s, s.GetBoxStoredCount() - 1);
             MiEbEval?.Invoke(s, null);
             SendBoxTakeResult(connId, storageId, boxId, s.GetBoxStoredCount());
-            CoopPlugin.Log.LogInfo($"ContainerSync: accepted empty-box take for client {connId}, storage id {storageId}, BoxSync id {boxId}");
+            CoopPlugin.Log.LogInfo($"ContainerSync: accepted empty-box take for client {connId}, storage id {storageId}, box id {boxId}");
             // push the freshly spawned box to the guest promptly (else up to ~1.5s late)
             RequestBoxResync?.Invoke();
         }
@@ -1016,7 +1030,7 @@ namespace CardShopCoop.Sync
                             {
                                 ItemSpawnManager.DisableItem(it);
                             }
-                            catch { }
+                            catch (System.Exception caught) { Swallow.Log(caught); }
                     }
                 }
                 FiPoIsProcessing?.SetValue(p, m.Processing); // drives the Collect tooltip
@@ -1098,7 +1112,7 @@ namespace CardShopCoop.Sync
                     {
                         ItemSpawnManager.DisableItem(last);
                     }
-                    catch { }
+                    catch (System.Exception caught) { Swallow.Log(caught); }
                 }
                 guard = 12;
                 // keep HasEnoughSlot(): it is the m_PosList bound AddItem itself indexes with
@@ -1131,7 +1145,7 @@ namespace CardShopCoop.Sync
                 {
                     FiClItemAmount?.SetValue(c, c.GetStoredItemList()?.Count ?? 0);
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 double now = Time.realtimeSinceStartupAsDouble;
                 double last;
                 if (!_lastCleanserWarn.TryGetValue(idx, out last) || now - last > 10.0)
@@ -1251,7 +1265,7 @@ namespace CardShopCoop.Sync
             }
         }
 
-        /// <summary>Client: the host accepted a take and assigned the authoritative BoxSync
+        /// <summary>Client: the host accepted a take and assigned the authoritative box
         /// id. The normal BoxState follows on the same ordered lane; if it already arrived,
         /// claim the existing mirror immediately.</summary>
         public void ClientApplyTakeAccepted(ContainerBoxTakeMessage message)
@@ -1271,40 +1285,40 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogInfo($"ContainerSync: empty-box take rejected for storage id {storageId}");
                 return;
             }
-            CoopPlugin.Log.LogInfo($"ContainerSync: empty-box take accepted for storage id {storageId}, BoxSync id {id}");
+            CoopPlugin.Log.LogInfo($"ContainerSync: empty-box take accepted for storage id {storageId}, box id {id}");
             _pendingBoxTakes.Add(id);
-            if (BoxSync.Instance != null
-                && BoxSync.Instance.TryGetClientBox(id, out var box))
-            {
-                TryAutoHoldTakenBox(box, new BoxSync.Entry
-                {
-                    Id = id,
-                    Type = (int)EItemType.None,
-                    Count = 0,
-                    IsBig = true
-                });
-            }
+            var engine = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
+            if (engine != null && engine.TryGetClientBox(id, out var box))
+                TryAutoHoldTakenBox(box);
         }
 
-        /// <summary>Called by BoxSync when a host snapshot creates a local box. Only an exact
-        /// acknowledged id can trigger this path; position/type guessing is deliberately not
-        /// used, so another player's take cannot be stolen by this client.</summary>
-        public void TryAutoHoldTakenBox(InteractablePackagingBox_Item box, BoxSync.Entry entry)
+        /// <summary>Called when a host snapshot creates a local box, and when a take result
+        /// names a box that already exists. Only an exact acknowledged id can trigger this
+        /// path; position/type guessing is deliberately not used, so another player's take
+        /// cannot be stolen by this client.</summary>
+        public void TryAutoHoldTakenBox(InteractablePackagingBox box)
         {
-            if (CoopCore.Role != CoopRole.Client || box == null || !_pendingBoxTakes.Contains(entry.Id))
+            var item = box as InteractablePackagingBox_Item;
+            if (CoopCore.Role != CoopRole.Client || item == null)
                 return;
-            if (entry.Type != (int)EItemType.None || entry.Count != 0 || !entry.IsBig
-                || entry.Carried || entry.Stored)
+            var engine = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
+            if (engine == null || !engine.TryGetClientId(box, out ushort id))
+                return;
+            if (!_pendingBoxTakes.Contains(id))
                 return;
             try
             {
-                if (HoldClientBox != null && HoldClientBox(box))
-                    _pendingBoxTakes.Remove(entry.Id);
+                if ((int)item.m_ItemCompartment.GetItemType() != (int)EItemType.None
+                    || item.m_ItemCompartment.GetItemCount() != 0
+                    || !item.m_IsBigBox)
+                    return;
+                if (HoldClientBox != null && HoldClientBox(item))
+                    _pendingBoxTakes.Remove(id);
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ContainerSync take hand-off: " + e.Message); }
         }
 
-        /// <summary>Called by GamePatches before BoxSync's normal local-destroy forwarding.
+        /// <summary>Called by GamePatches before the box engine's normal local-destroy forwarding.
         /// The atomic storage path owns the host-side consume operation instead.</summary>
         public static bool ConsumeSuppressedStorageDestroy(InteractablePackagingBox_Item box)
         {
@@ -1335,7 +1349,7 @@ namespace CardShopCoop.Sync
             Try(h, typeof(InteractableAutoPackOpener), "TakeItemToHand",
                 prefix: new HarmonyMethod(typeof(ContainerSync), nameof(TakeItemBlockPrefix)));
 
-            // empty box storage: TakeBox would spawn a client-local box that BoxSync's
+            // empty box storage: TakeBox would spawn a client-local box that the engine's
             // reconciliation culls within seconds - the station 'eats' the box
             Try(h, typeof(InteractableEmptyBoxStorage), "OnMouseButtonUp",
                 prefix: new HarmonyMethod(typeof(ContainerSync), nameof(StorageMouseButtonPrefix)));
@@ -1418,7 +1432,7 @@ namespace CardShopCoop.Sync
             // pack (decompiled ~384). Those are NOT player inserts - forwarding each one
             // makes the host spawn a NEW pack it already has, duplicating every pack that
             // sat in an opener on every join/rejoin. Skip the op during the reload, same
-            // as the symmetric destroy guard (CardBoxSync/FurnBoxSync DestroyedPrefix).
+            // as the symmetric destroy guard (card/furniture DestroyedPrefix).
             // Still retire the item (as below) so it doesn't float - the host echoes truth.
             if (CoopCore.ClientReloading)
             {
@@ -1426,7 +1440,7 @@ namespace CardShopCoop.Sync
                 {
                     ItemSpawnManager.DisableItem(item);
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 return false;
             }
             var self = Instance;
@@ -1441,7 +1455,7 @@ namespace CardShopCoop.Sync
                 {
                     itemType = (int)item.GetItemType();
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 self.SendOp?.Invoke(new ContainerOpMessage
                 {
                     Op = OpPackInsert,
@@ -1468,7 +1482,7 @@ namespace CardShopCoop.Sync
             {
                 ItemSpawnManager.DisableItem(item);
             }
-            catch { }
+            catch (System.Exception caught) { Swallow.Log(caught); }
             return false;
         }
 
@@ -1546,7 +1560,8 @@ namespace CardShopCoop.Sync
             if (CoopCore.Role != CoopRole.Client || ApplyingRemote || packagingBox == null)
                 return true;
             var self = Instance;
-            if (self == null || self.SendOp == null || BoxSync.Instance == null)
+            var engine = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
+            if (self == null || self.SendOp == null || engine == null)
                 return false;
             if (!PlacedObjectIdentity.TryGet(__instance, out ushort storageId))
                 return false;
@@ -1563,11 +1578,11 @@ namespace CardShopCoop.Sync
                     || __instance.GetBoxStoredCount() >= max)
                     return true;
             }
-            catch { return true; }
+            catch (System.Exception e) { Swallow.Log(e); return true; }
 
-            if (!BoxSync.Instance.TryGetClientId(packagingBox, out ushort boxId))
+            if (!engine.TryGetClientId(packagingBox, out ushort boxId))
             {
-                CoopPlugin.Log.LogWarning($"ContainerSync: blocked empty-box store at storage id {storageId}; box has no BoxSync id");
+                CoopPlugin.Log.LogWarning($"ContainerSync: blocked empty-box store at storage id {storageId}; box has no BoxEngine id");
                 return false;
             }
             __state.StorageId = storageId;
@@ -1671,7 +1686,7 @@ namespace CardShopCoop.Sync
                 {
                     fill = item.GetContentFill();
                 }
-                catch { }
+                catch (System.Exception caught) { Swallow.Log(caught); }
                 self.Touch(KindCleanser, idx);
                 self.SendOp?.Invoke(new ContainerOpMessage
                 {
@@ -1684,7 +1699,7 @@ namespace CardShopCoop.Sync
             {
                 ItemSpawnManager.DisableItem(item);
             }
-            catch { }
+            catch (System.Exception caught) { Swallow.Log(caught); }
             return false;
         }
 

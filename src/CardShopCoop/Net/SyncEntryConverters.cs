@@ -77,6 +77,10 @@ namespace CardShopCoop.Net
             s.Serialize(w, m.Position);
             w.WritePropertyName("Yaw");
             w.WriteValue(m.Yaw);
+            w.WritePropertyName("CameraPosition");
+            s.Serialize(w, m.CameraPosition);
+            w.WritePropertyName("CameraRotation");
+            s.Serialize(w, m.CameraRotation);
             w.WritePropertyName("Speed");
             w.WriteValue(m.Speed);
             w.WritePropertyName("Hold");
@@ -94,7 +98,7 @@ namespace CardShopCoop.Net
         public override object ReadJson(JsonReader r, Type t, object old, JsonSerializer s)
         {
             var o = SyncJson.Start(r);
-            var m = new Messages.PlayerStateMessage { Position = SyncJson.Vector(o, "Position", s), Yaw = o["Yaw"] == null ? 0 : o["Yaw"].Value<float>(), Speed = o["Speed"] == null ? 0 : o["Speed"].Value<float>(), Hold = (byte)SyncJson.Int(o, "Hold") };
+            var m = new Messages.PlayerStateMessage { Position = SyncJson.Vector(o, "Position", s), Yaw = o["Yaw"] == null ? 0 : o["Yaw"].Value<float>(), CameraPosition = SyncJson.Vector(o, "CameraPosition", s), CameraRotation = SyncJson.ReadQuaternion(o, "CameraRotation", s), Speed = o["Speed"] == null ? 0 : o["Speed"].Value<float>(), Hold = (byte)SyncJson.Int(o, "Hold") };
             var a = o["HoldTypes"] as JArray;
             if (a != null)
             {
@@ -104,69 +108,6 @@ namespace CardShopCoop.Net
             }
             m.HoldCards = o["HoldCards"] == null || o["HoldCards"].Type == JTokenType.Null ? null : o["HoldCards"].ToObject<System.Collections.Generic.List<CardData>>(s);
             return m;
-        }
-    }
-
-    internal sealed class BoxEntryConverter : JsonConverter
-    {
-        public override bool CanConvert(Type t)
-        {
-            return t == typeof(BoxSync.Entry);
-        }
-        public override void WriteJson(JsonWriter w, object value, JsonSerializer s)
-        {
-            var e = (BoxSync.Entry)value;
-            w.WriteStartObject();
-            w.WritePropertyName("Id");
-            w.WriteValue(e.Id);
-            w.WritePropertyName("Type");
-            w.WriteValue(Util.EnumMap.ToWire(Util.EnumKind.ItemType, e.Type));
-            w.WritePropertyName("Count");
-            w.WriteValue(e.Count);
-            w.WritePropertyName("IsBig");
-            w.WriteValue(e.IsBig);
-            w.WritePropertyName("IsOpen");
-            w.WriteValue(e.IsOpen);
-            w.WritePropertyName("Carried");
-            w.WriteValue(e.Carried);
-            w.WritePropertyName("Settled");
-            w.WriteValue(e.Settled);
-            w.WritePropertyName("Stored");
-            w.WriteValue(e.Stored);
-            w.WritePropertyName("StoreShelfId");
-            w.WriteValue(e.StoreShelfId);
-            w.WritePropertyName("StoreShelf");
-            w.WriteValue(e.StoreShelf);
-            w.WritePropertyName("StoreComp");
-            w.WriteValue(e.StoreComp);
-            w.WritePropertyName("Pos");
-            s.Serialize(w, e.Pos);
-            w.WritePropertyName("Yaw");
-            w.WriteValue(e.Yaw);
-            w.WritePropertyName("HolderWorker");
-            w.WriteValue(e.HolderWorker);
-            w.WritePropertyName("OwnerKind");
-            w.WriteValue(e.OwnerKind);
-            w.WritePropertyName("Owned");
-            w.WriteValue(e.Owned);
-            w.WritePropertyName("OwnerId");
-            w.WriteValue(e.OwnerId);
-            w.WritePropertyName("InFlight");
-            w.WriteValue(e.InFlight);
-            w.WritePropertyName("Moving");
-            w.WriteValue(e.Moving);
-            w.WritePropertyName("Velocity");
-            s.Serialize(w, e.Velocity);
-            w.WritePropertyName("AngularVelocity");
-            s.Serialize(w, e.AngularVelocity);
-            w.WriteEndObject();
-        }
-        public override object ReadJson(JsonReader r, Type t, object old, JsonSerializer s)
-        {
-            var o = SyncJson.Start(r);
-            int local;
-            bool mapped = Util.EnumMap.TryFromWire(Util.EnumKind.ItemType, SyncJson.Int(o, "Type"), out local);
-            return new BoxSync.Entry { Id = (ushort)SyncJson.Int(o, "Id"), Type = local, Unmapped = !mapped, Count = SyncJson.Int(o, "Count"), IsBig = SyncJson.Bool(o, "IsBig"), IsOpen = SyncJson.Bool(o, "IsOpen"), Carried = SyncJson.Bool(o, "Carried"), Settled = SyncJson.Bool(o, "Settled"), Stored = SyncJson.Bool(o, "Stored"), StoreShelfId = (ushort)SyncJson.Int(o, "StoreShelfId"), StoreShelf = (byte)SyncJson.Int(o, "StoreShelf"), StoreComp = (byte)SyncJson.Int(o, "StoreComp"), Pos = SyncJson.Vector(o, "Pos", s), Yaw = o["Yaw"] == null ? 0 : o["Yaw"].Value<float>(), HolderWorker = (short)SyncJson.Int(o, "HolderWorker"), OwnerKind = (byte)SyncJson.Int(o, "OwnerKind"), Owned = SyncJson.Bool(o, "Owned"), OwnerId = SyncJson.Int(o, "OwnerId"), InFlight = SyncJson.Bool(o, "InFlight"), Moving = SyncJson.Bool(o, "Moving"), Velocity = SyncJson.Vector(o, "Velocity", s), AngularVelocity = SyncJson.Vector(o, "AngularVelocity", s) };
         }
     }
 

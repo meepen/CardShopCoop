@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using BepInEx.Configuration;
 using CardShopCoop.Net;
 // NO `using Steamworks;` HERE, AND NEVER AGAIN - see the same note in CoopCore.cs. OnGUI
 // is the worst possible place for a type-load fault (DrawNone runs every frame on the main
@@ -31,7 +32,13 @@ namespace CardShopCoop.UI
         private string _passwordSeen;
         private string _lanPwField = "";
         private bool _characterOpen = true;
-        private bool _characterTab;
+        private enum CoopTab
+        {
+            Session,
+            Character,
+            Settings,
+        }
+        private CoopTab _tab = CoopTab.Session;
         private Vector2 _characterScroll;
         private bool _characterSnapshotReady;
         private bool _characterFemale;
@@ -185,14 +192,23 @@ namespace CardShopCoop.UI
             }
 
             DrawTabs(core);
-            core.SetCharacterPreview(_characterTab && CoopCore.Role != CoopRole.None);
+            core.SetCharacterPreview(_tab == CoopTab.Character && CoopCore.Role != CoopRole.None);
             GUILayout.BeginVertical(CoopTheme.ContentPanel);
-            if (_characterTab && CoopCore.Role != CoopRole.None)
+            if (_tab == CoopTab.Character && CoopCore.Role != CoopRole.None)
             {
                 DrawCharacterSelector(core);
                 GUILayout.EndVertical();
                 string characterFocused = GUI.GetNameOfFocusedControl();
                 TextFieldFocused = characterFocused != null && characterFocused.StartsWith("coop_");
+                GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
+                return;
+            }
+            if (_tab == CoopTab.Settings)
+            {
+                DrawSettings(core);
+                GUILayout.EndVertical();
+                string settingsFocused = GUI.GetNameOfFocusedControl();
+                TextFieldFocused = settingsFocused != null && settingsFocused.StartsWith("coop_");
                 GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
                 return;
             }
@@ -266,17 +282,58 @@ namespace CardShopCoop.UI
         private void DrawTabs(CoopCore core)
         {
             GUILayout.BeginHorizontal();
-            GUI.enabled = _characterTab;
-            if (GUILayout.Button("SESSION", _characterTab ? CoopTheme.Tab : CoopTheme.TabSelected,
-                GUILayout.Width(92f)))
-                _characterTab = false;
-            GUI.enabled = CoopCore.Role != CoopRole.None && !_characterTab;
-            if (GUILayout.Button("CHARACTER", _characterTab ? CoopTheme.TabSelected : CoopTheme.Tab,
-                GUILayout.Width(108f)))
-                _characterTab = true;
+            GUI.enabled = _tab != CoopTab.Session;
+            if (GUILayout.Button("SESSION", _tab == CoopTab.Session ? CoopTheme.TabSelected : CoopTheme.Tab,
+                GUILayout.Width(88f)))
+                _tab = CoopTab.Session;
+            GUI.enabled = CoopCore.Role != CoopRole.None && _tab != CoopTab.Character;
+            if (GUILayout.Button("CHARACTER", _tab == CoopTab.Character ? CoopTheme.TabSelected : CoopTheme.Tab,
+                GUILayout.Width(104f)))
+                _tab = CoopTab.Character;
+            GUI.enabled = _tab != CoopTab.Settings;
+            if (GUILayout.Button("SETTINGS", _tab == CoopTab.Settings ? CoopTheme.TabSelected : CoopTheme.Tab,
+                GUILayout.Width(96f)))
+                _tab = CoopTab.Settings;
             GUI.enabled = true;
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
+        }
+
+        /// <summary>The SETTINGS tab: live logging switches and the optional performance patch.
+        /// Every control writes straight to its ConfigEntry, which persists to disk, so the
+        /// tab is a front-end for the config file rather than a second source of truth.</summary>
+        private void DrawSettings(CoopCore core)
+        {
+            GUILayout.Label("APPEARANCE", CoopTheme.SectionHeader);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("NSFW", CoopTheme.Label, GUILayout.Width(56f));
+            bool allowNsfw = GUILayout.Toggle(CoopPlugin.AllowNsfw.Value,
+                CoopPlugin.AllowNsfw.Value ? "Nude allowed" : "Nude hidden", CoopTheme.Toggle);
+            if (allowNsfw != CoopPlugin.AllowNsfw.Value)
+                core.SetNsfwAllowed(allowNsfw);
+            GUILayout.EndHorizontal();
+            GUILayout.Label("Controls whether nude appearances are allowed at all. With it off, bare wardrobe slots on other players are clothed and the Nude option is hidden in the CHARACTER tab.", CoopTheme.LabelDim);
+            GUILayout.Space(8f);
+
+            GUILayout.Label("LOGGING", CoopTheme.SectionHeader);
+            DrawConfigToggle(CoopPlugin.BoxSyncDebug, "Verbose box-sync logging (BoxSyncDebug)",
+                "Logs every box possession report, host accept/reject, and client adopt/spawn. Takes effect immediately and makes a large log file - turn it off when finished.");
+            DrawConfigToggle(CoopPlugin.PerfDebug, "Per-frame stage timing (PerfDebug)",
+                "Logs any sync stage that takes longer than 5 ms (rate-limited per stage). Useful for finding lag spikes.");
+            GUILayout.Space(8f);
+
+            GUILayout.Label("Settings are saved to BepInEx/config/com.zwhit.cardshopcoop.cfg.", CoopTheme.LabelDim);
+        }
+
+        private static void DrawConfigToggle(ConfigEntry<bool> entry, string label, string help)
+        {
+            if (entry == null)
+                return;
+            bool value = GUILayout.Toggle(entry.Value, " " + label, CoopTheme.Toggle);
+            if (value != entry.Value)
+                entry.Value = value; // ConfigEntry writes the file itself
+            if (!string.IsNullOrEmpty(help))
+                GUILayout.Label(help, CoopTheme.LabelDim);
         }
 
         private static int GetConnectionState(CoopCore core, ICoopTransport net)
@@ -391,8 +448,15 @@ namespace CardShopCoop.UI
 
             for (int slot = 0; slot < _characterCustomizer.ApparelTables.Count; slot++)
             {
-                var options = new List<string> { "Nude" };
-                var names = new List<string> { "" };
+                var options = new List<string>();
+                var names = new List<string>();
+                // The Nude slot is only offered while NSFW is allowed; otherwise the model
+                // is guaranteed clothed, so the empty option must not be selectable.
+                if (CoopPlugin.AllowNsfw.Value)
+                {
+                    options.Add("Nude");
+                    names.Add("");
+                }
                 var table = _characterCustomizer.ApparelTables[slot];
                 if (table != null && table.Items != null)
                     foreach (var item in table.Items)
@@ -404,7 +468,7 @@ namespace CardShopCoop.UI
                 _apparelNames.Add(names);
                 string current = slot < data.ApparelNames.Count ? data.ApparelNames[slot] : "";
                 int selected = names.IndexOf(current);
-                _apparelSelections.Add(string.IsNullOrEmpty(current) ? 0 : (selected < 1 ? 0 : selected));
+                _apparelSelections.Add(selected < 0 ? 0 : selected);
                 _apparelMaterials.Add(slot < data.ApparelMaterials.Count ? Mathf.Max(0, data.ApparelMaterials[slot]) : 0);
                 _apparelColors.Add(ReadApparelTint(data, slot));
             }
@@ -431,17 +495,23 @@ namespace CardShopCoop.UI
                     () => ApplyHair(core, slot));
             for (int slot = 0; slot < _apparelOptions.Count; slot++)
             {
+                // With NSFW off a slot with no real items offers nothing selectable.
+                if (_apparelOptions[slot].Count == 0)
+                    continue;
                 string label = _characterCustomizer.ApparelTables[slot] != null
                     && !string.IsNullOrEmpty(_characterCustomizer.ApparelTables[slot].Label)
                     ? _characterCustomizer.ApparelTables[slot].Label : "Apparel " + (slot + 1);
                 DrawCycleColorRow(label, _apparelOptions[slot], _apparelSelections, slot,
                     _apparelColors[slot], 1, slot, color => { _apparelColors[slot] = color; core.SetLocalApparelTint(slot, color); },
                     () => ApplyApparel(core, slot));
-                if (_apparelSelections[slot] > 0)
+                string selectedApparel = _apparelNames[slot][_apparelSelections[slot]];
+                if (!string.IsNullOrEmpty(selectedApparel))
                 {
                     var table = _characterCustomizer.ApparelTables[slot];
-                    int itemIndex = _apparelSelections[slot] - 1;
-                    int materialCount = table != null && itemIndex < table.Items.Count
+                    // When the Nude slot is offered it occupies index 0, so the item index
+                    // is offset by one; with NSFW off the list starts at the first real item.
+                    int itemIndex = _apparelSelections[slot] - (CoopPlugin.AllowNsfw.Value ? 1 : 0);
+                    int materialCount = table != null && itemIndex >= 0 && itemIndex < table.Items.Count
                         && table.Items[itemIndex].Materials != null ? table.Items[itemIndex].Materials.Count : 0;
                     if (materialCount > 1)
                         DrawNumberRow("Material", materialCount, _apparelMaterials, slot,
@@ -679,11 +749,11 @@ namespace CardShopCoop.UI
         {
             if (_characterCustomizer == null)
                 return;
-            if (_apparelSelections[slot] == 0)
+            string name = _apparelNames[slot][_apparelSelections[slot]];
+            if (string.IsNullOrEmpty(name))
                 core.ClearLocalApparel(slot);
             else
             {
-                string name = _apparelNames[slot][_apparelSelections[slot]];
                 int material = Mathf.Max(0, _apparelMaterials[slot]);
                 _characterCustomizer.setApparelByName(name, slot, material);
                 core.CommitLocalCustomization();
@@ -1264,7 +1334,7 @@ namespace CardShopCoop.UI
                     }
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             if (result.Count == 0)
                 result.Add("(no LAN address found)");
             return result;

@@ -113,7 +113,7 @@ namespace CardShopCoop.UI
             _chipSuccessTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(Success, 0.18f), WithA(Success, 0.55f), 1);
             _chipWarnTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(Warn, 0.18f), WithA(Warn, 0.55f), 1);
             _chipDangerTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(Danger, 0.18f), WithA(Danger, 0.55f), 1);
-            _chipInfoTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(HeaderBg, 0.16f), WithA(HeaderBg, 0.45f), 1);
+            _chipInfoTex = MakeRounded(PillTex, PillTex, PillRadius, WithA(Primary, 0.18f), WithA(Primary, 0.55f), 1);
 
             // ---- styles -------------------------------------------------------------
             Window = new GUIStyle(GUI.skin.window)
@@ -230,7 +230,9 @@ namespace CardShopCoop.UI
             ChipSuccess = MakeChip(_chipSuccessTex, Success);
             ChipWarn = MakeChip(_chipWarnTex, Mul(Warn, 0.92f));
             ChipDanger = MakeChip(_chipDangerTex, Danger);
-            ChipInfo = MakeChip(_chipInfoTex, HeaderBg);
+            // Info chips use the teal accent like the other chips use their hue; the old
+            // HeaderBg text was near-black on a near-black background and unreadable.
+            ChipInfo = MakeChip(_chipInfoTex, PrimaryHover);
 
             HudPill = new GUIStyle
             {

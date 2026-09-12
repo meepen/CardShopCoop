@@ -25,7 +25,7 @@ namespace CardShopCoop.Sync
     /// are chunked below the 1200-byte Steam unreliable packet limit so a crowded shop can
     /// never silently drop the whole tick.
     /// </summary>
-    public class NpcSync
+    public class NpcSync : CoopModule
     {
         private const byte KindCustomer = 0;
         private const byte KindWorker = 1;
@@ -40,7 +40,6 @@ namespace CardShopCoop.Sync
         /// <summary>Names normally go out only on change; a periodic full refresh covers
         /// late joiners and name packets lost on the unreliable channel.</summary>
         private const float NameRefreshInterval = 5f;
-        private int _chunkJsonLength;
 
         // string-keyed animator calls hash the name on every call; cache the ids once
         private static readonly int HashMoveSpeed = Animator.StringToHash("MoveSpeed");
@@ -53,6 +52,8 @@ namespace CardShopCoop.Sync
             HarmonyLib.AccessTools.Method(typeof(Worker), "EvaluateWorkerAttribute");
         private static readonly System.Reflection.MethodInfo MiEvaluateSkillLevel =
             HarmonyLib.AccessTools.Method(typeof(Worker), "EvaluateSkillLevel");
+        private static readonly System.Reflection.FieldInfo FiCurrentHoldItemBox =
+            HarmonyLib.AccessTools.Field(typeof(Worker), "m_CurrentHoldItemBox");
 
         [System.Flags]
         private enum NpcFlags : byte
@@ -75,6 +76,7 @@ namespace CardShopCoop.Sync
         private float _nameRefreshIn;
         private int _chunkCount;
         private NpcStateMessage _currentChunk;
+        private int _chunkJsonLength;
         private readonly Dictionary<int, string> _sentNames = new Dictionary<int, string>();
         private readonly Dictionary<int, int> _sentIdentities = new Dictionary<int, int>();
         private readonly Dictionary<int, int> _customerGenerations = new Dictionary<int, int>();
@@ -87,6 +89,27 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, bool> _workerActive = new Dictionary<int, bool>();
         private readonly Dictionary<int, ExistingCustomer> _existing = new Dictionary<int, ExistingCustomer>();
         private static NpcSync _live;
+
+        public override string Name => "npcs";
+
+        public override void Start()
+        {
+            ActivateLive(this);
+        }
+
+        public override void ForceResend()
+        {
+            _sendTimer = SendInterval;
+            _sentNames.Clear();
+            _sentIdentities.Clear();
+        }
+
+        public override void Dispose()
+        {
+            base.Dispose();
+            if (ReferenceEquals(_live, this))
+                ClearLive();
+        }
 
         /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
         public static void ClearLive()
@@ -117,7 +140,7 @@ namespace CardShopCoop.Sync
             public bool KeepPuppetVisible;
         }
 
-        public void Reset()
+        public override void Reset()
         {
             // Shutdown clears the pointer before resetting instance state. Do not resurrect it
             // while late Harmony callbacks can still arrive during teardown.
@@ -172,6 +195,7 @@ namespace CardShopCoop.Sync
             BeginChunk(hostTime);
 
             var customers = _cm.GetCustomerList();
+            long tCustomers = Util.PerfProbe.Start();
             for (int i = 0; i < customers.Count; i++)
             {
                 var c = customers[i];
@@ -201,7 +225,7 @@ namespace CardShopCoop.Sync
                     if (c.IsSmelly())
                         flags |= NpcFlags.Smelly;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 // the red "!" trade/sell-in prompt is a plain mesh toggle, not an animator
                 // bool - mirror it so the guest can see which customer wants to be served
                 try
@@ -209,12 +233,14 @@ namespace CardShopCoop.Sync
                     if (c.m_ExclaimationMesh != null && c.m_ExclaimationMesh.activeSelf)
                         flags |= NpcFlags.Exclaim;
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 WriteEntry(chunks, hostTime, KindCustomer, (ushort)i, cc.CharacterName,
                     c.transform, c.m_CurrentMoveSpeed, flags, _customerGenerations[i], grabSequence, actionKind);
             }
+            Util.PerfProbe.End("npc-customers", tCustomers);
 
             var workers = WorkerManager.GetWorkerList();
+            long tWorkers = Util.PerfProbe.Start();
             if (workers != null)
             {
                 for (int i = 0; i < workers.Count; i++)
@@ -239,17 +265,30 @@ namespace CardShopCoop.Sync
                     // worker names aren't prefixed "Female", so gender must ride a flag or
                     // female workers spawn from the male customer prefab on the guest
                     var wflags = CollectFlags(w.m_Anim);
+                    var holdBox = FiCurrentHoldItemBox.GetValue(w) as InteractablePackagingBox_Item;
+                    bool holdBig = false;
+                    int holdItemType = 0;
+                    if (holdBox != null)
+                    {
+                        wflags |= NpcFlags.IsHoldingBox;
+                        holdBig = holdBox.m_IsBigBox;
+                        holdItemType = (int)holdBox.GetItemType();
+                    }
                     if (w.m_IsFemale)
                         wflags |= NpcFlags.Female;
                     _workerActionSequences.TryGetValue(i, out int workerAction);
                     _workerActionKinds.TryGetValue(i, out byte workerActionKind);
                     WriteEntry(chunks, hostTime, KindWorker, (ushort)i, cc.CharacterName,
                         w.transform, 0f, wflags, speedFromAnim: w.m_Anim, identity: _workerGenerations[i],
-                        actionSequence: workerAction, actionKind: workerActionKind);
+                        actionSequence: workerAction, actionKind: workerActionKind,
+                        holdBig: holdBig, holdItemType: holdItemType);
                 }
             }
+            Util.PerfProbe.End("npc-workers", tWorkers);
 
+            long tFlush = Util.PerfProbe.Start();
             FlushChunk(chunks);
+            Util.PerfProbe.End("npc-flush", tFlush);
             return chunks.Count > 0 ? chunks : null;
         }
 
@@ -257,7 +296,7 @@ namespace CardShopCoop.Sync
         {
             _chunkCount = 0;
             _currentChunk = new NpcStateMessage { HostTime = hostTime };
-            _chunkJsonLength = WireCodec.Serialize(_currentChunk).Length - 2; // remove []
+            _chunkJsonLength = WireCodec.SerializeUtf8Length(_currentChunk);
         }
 
         private void FlushChunk(List<NpcStateMessage> chunks)
@@ -270,7 +309,8 @@ namespace CardShopCoop.Sync
 
         private void WriteEntry(List<NpcStateMessage> chunks, float hostTime, byte kind, ushort index,
             string charName, Transform t, float moveSpeed, NpcFlags flags,
-            int identity = 0, int actionSequence = 0, byte actionKind = 0, Animator speedFromAnim = null)
+            int identity = 0, int actionSequence = 0, byte actionKind = 0, Animator speedFromAnim = null,
+            bool holdBig = false, int holdItemType = 0)
         {
             if (_chunkCount == byte.MaxValue)
             {
@@ -283,7 +323,7 @@ namespace CardShopCoop.Sync
                 {
                     moveSpeed = speedFromAnim.GetFloat(HashMoveSpeed);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             int key = (kind << 16) | index;
             bool sendName = !_sentNames.TryGetValue(key, out var prev) || prev != charName
@@ -308,8 +348,10 @@ namespace CardShopCoop.Sync
                 Flags = (byte)flags,
                 ActionSequence = actionSequence,
                 ActionKind = actionKind,
+                HoldBig = holdBig,
+                HoldItemType = holdItemType,
             };
-            int entryLength = WireCodec.SerializeObject(entry).Length;
+            int entryLength = WireCodec.SerializeUtf8Length(entry);
             _currentChunk.Entries.Add(entry);
             _chunkCount++;
             int addedLength = entryLength + (_chunkCount > 1 ? 1 : 0);
@@ -466,7 +508,7 @@ namespace CardShopCoop.Sync
                 }
                 MiEvaluateSkillLevel?.Invoke(worker, null);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         private static NpcFlags CollectFlags(Animator anim)
@@ -487,7 +529,7 @@ namespace CardShopCoop.Sync
                 if (anim.GetBool(HashIsHoldingBox))
                     f |= NpcFlags.IsHoldingBox;
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             return f;
         }
 
@@ -533,6 +575,8 @@ namespace CardShopCoop.Sync
             public GameObject BoxProp;
             public bool BoxPropBig;
             public int BoxPropType;
+            public bool HoldBig;
+            public int HoldItemType;
         }
 
         private void ReleaseWorkerBoxProp(Puppet p)
@@ -543,7 +587,7 @@ namespace CardShopCoop.Sync
             {
                 Object.Destroy(p.BoxProp);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             p.BoxProp = null;
             p.BoxPropType = 0;
         }
@@ -628,10 +672,9 @@ namespace CardShopCoop.Sync
             return generation;
         }
 
-        /// <summary>Host-side lookup used by the speech relay. Customer transforms are
-        /// stable for the lifetime of a pooled customer, while the list index plus
-        /// generation identifies the current incarnation on clients.</summary>
-        public static bool TryGetCustomerSpeechSource(Transform transform, out ushort index, out int identity)
+        /// <summary>Maps a host customer transform to its list index plus generation
+        /// identity.</summary>
+        public static bool TryGetCustomerIdentity(Transform transform, out ushort index, out int identity)
         {
             index = 0;
             identity = 0;
@@ -654,6 +697,18 @@ namespace CardShopCoop.Sync
             return false;
         }
 
+        private Transform ResolveCustomerAnchor(ushort index, int identity)
+        {
+            int key = (KindCustomer << 16) | index;
+            if (_existing.TryGetValue(index, out var existing)
+                && existing.Generation == identity && existing.Customer != null)
+                return existing.Customer.transform;
+            if (_puppets.TryGetValue(key, out var puppet)
+                && puppet.HasIdentity && puppet.Identity == identity && puppet.Go != null)
+                return puppet.Go.transform;
+            return null;
+        }
+
         /// <summary>Client-only: show a host-selected customer speech bubble over the
         /// corresponding visible representation. Missing puppets are intentionally ignored;
         /// speech is cosmetic and should not keep stale references alive.</summary>
@@ -663,20 +718,28 @@ namespace CardShopCoop.Sync
                 return;
             if (message.Kind != KindCustomer)
                 return;
-            int key = (message.Kind << 16) | message.Index;
-            Transform anchor = null;
-            if (_existing.TryGetValue(message.Index, out var existing)
-                && existing.Generation == message.Identity && existing.Customer != null)
-                anchor = existing.Customer.transform;
-            else if (_puppets.TryGetValue(key, out var puppet)
-                && puppet.HasIdentity && puppet.Identity == message.Identity && puppet.Go != null)
-                anchor = puppet.Go.transform;
+            Transform anchor = ResolveCustomerAnchor(message.Index, message.Identity);
             if (anchor == null)
                 return;
             var spawner = CSingleton<PricePopupSpawner>.Instance;
             if (spawner == null)
                 return;
             spawner.ShowTextPopup(message.Text, message.OffsetUp, anchor);
+        }
+
+        /// <summary>Mirrors the host's green add-money popup on the matching puppet or
+        /// mirror.</summary>
+        public void ShowMoneyPopup(NpcMoneyPopupMessage message, bool inGame)
+        {
+            if (!inGame || message == null || message.Amount <= 0f)
+                return;
+            Transform anchor = ResolveCustomerAnchor(message.Index, message.Identity);
+            if (anchor == null)
+                return;
+            var spawner = CSingleton<PricePopupSpawner>.Instance;
+            if (spawner == null)
+                return;
+            spawner.ShowPricePopup(message.Amount, message.OffsetUp, anchor);
         }
 
         public static void DetachExistingCustomer(int index, Customer customer)
@@ -830,7 +893,7 @@ namespace CardShopCoop.Sync
                                 {
                                     visual.Anim.SetTrigger(actionKind == 2 ? "GrabItemHigh" : "GrabItem");
                                 }
-                                catch { }
+                                catch (System.Exception e) { Swallow.Log(e); }
                                 visual.GrabSequence = actionSequence;
                             }
                             if (visual.Go != null)
@@ -861,8 +924,14 @@ namespace CardShopCoop.Sync
                     p.BufCount = 0;
                     p.GrabSequence = actionSequence;
                 }
+                p.Kind = kind;
                 p.Identity = identity;
                 p.HasIdentity = true;
+                if (kind == KindWorker)
+                {
+                    p.HoldBig = ent.HoldBig;
+                    p.HoldItemType = ent.HoldItemType;
+                }
 
                 bool female = (flags & NpcFlags.Female) != 0;
                 if (hasName && p.CharName != charName)
@@ -894,7 +963,7 @@ namespace CardShopCoop.Sync
                             : actionKind == 2 ? "GrabItemHigh" : "GrabItem";
                         p.Anim.SetTrigger(trigger);
                     }
-                    catch { }
+                    catch (System.Exception e) { Swallow.Log(e); }
                     p.GrabSequence = actionSequence;
                 }
                 p.LastSeen = _now;
@@ -1024,7 +1093,7 @@ namespace CardShopCoop.Sync
                             p.Anim.SetFloat(HashMoveSpeed, p.AnimSpeed);
                             p.AppliedAnimSpeed = p.AnimSpeed;
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                     }
                 }
                 if ((int)p.Flags != p.AppliedFlags)
@@ -1039,7 +1108,7 @@ namespace CardShopCoop.Sync
                             p.Anim.SetBool(HashIsPlaying, (p.Flags & NpcFlags.IsPlaying) != 0);
                             p.Anim.SetBool(HashIsHoldingBox, (p.Flags & NpcFlags.IsHoldingBox) != 0);
                         }
-                        catch { }
+                        catch (System.Exception e) { Swallow.Log(e); }
                     }
                     Toggle(p.Bag, (p.Flags & NpcFlags.HoldingBag) != 0);
                     Toggle(p.Cash, (p.Flags & NpcFlags.HandingOverCash) != 0);
@@ -1047,9 +1116,14 @@ namespace CardShopCoop.Sync
                     Toggle(p.CardSingle, (p.Flags & NpcFlags.IsPlaying) != 0);
                     Toggle(p.Smelly, (p.Flags & NpcFlags.Smelly) != 0);
                     Toggle(p.Exclaim, (p.Flags & NpcFlags.Exclaim) != 0);
-                    if ((p.Flags & NpcFlags.IsHoldingBox) == 0)
-                        ReleaseWorkerBoxProp(p);
                     p.AppliedFlags = (int)p.Flags;
+                }
+                if (p.Kind == KindWorker)
+                {
+                    if ((p.Flags & NpcFlags.IsHoldingBox) != 0)
+                        SetWorkerBoxVisual((int)(kv.Key & 0xffff), true, p.HoldBig, p.HoldItemType);
+                    else
+                        ReleaseWorkerBoxProp(p);
                 }
             }
             if (dead != null)
@@ -1264,17 +1338,17 @@ namespace CardShopCoop.Sync
                     worker.m_WorkerIndex = index;
                     worker.InitializeCharacter();
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 try
                 {
                     MiEvaluateWorkerAttribute?.Invoke(worker, null);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 try
                 {
                     MiEvaluateSkillLevel?.Invoke(worker, null);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             p.Custom = cust != null ? cust.m_CharacterCustom
                 : worker != null ? worker.m_CharacterCustom : null;
@@ -1315,7 +1389,7 @@ namespace CardShopCoop.Sync
                     if (cust.m_SmellyFX != null)
                         cust.m_SmellyFX.SetActive(false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
 
             else if (worker != null)
@@ -1371,7 +1445,7 @@ namespace CardShopCoop.Sync
                 if (worker != null && saved != null && index < saved.Count)
                     RefreshWorkerUi(index, saved[index]);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
 
             clone.name = "CoopNpc_" + charName;
             p.Go = clone;

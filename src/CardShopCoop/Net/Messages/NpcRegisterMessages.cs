@@ -48,6 +48,25 @@ namespace CardShopCoop.Net.Messages
 
     }
 
+    [NetworkMessage(MsgType.NpcMoneyPopup, Policy = MessagePolicy.ClientOnly)]
+    public sealed class NpcMoneyPopupMessage : INetMessage
+    {
+        public ushort Index;
+        public int Identity;
+        public float Amount;
+        public float OffsetUp;
+
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.NpcMoneyPopup;
+            }
+        }
+
+
+    }
+
     /// <summary>One NPC snapshot within an NpcState batch. Flags is the raw wire byte
     /// (the game's NpcFlags is a private nested enum in NpcSync).</summary>
     public sealed class NpcEntry
@@ -63,6 +82,8 @@ namespace CardShopCoop.Net.Messages
         public byte Flags;
         public int ActionSequence;
         public byte ActionKind;
+        public bool HoldBig;
+        public int HoldItemType;
     }
 
     // ---- RegisterState --------------------------------------------------------

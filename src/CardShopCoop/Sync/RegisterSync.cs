@@ -33,7 +33,7 @@ namespace CardShopCoop.Sync
     ///
     /// No register hints or tooltips exist in here - the register is the exact vanilla screen.
     /// </summary>
-    public class RegisterSync
+    public class RegisterSync : TickableCoopModule
     {
         // ---- wire op codes ----
         public const byte OpEnter = 1;
@@ -79,6 +79,18 @@ namespace CardShopCoop.Sync
         public RegisterSync()
         {
             _live = this;
+        }
+
+        public override string Name => "register";
+
+        public override void Start()
+        {
+            ActivateLive(this);
+        }
+
+        protected override void OnHostTick(in SyncFrame frame)
+        {
+            HostTick(frame.Dt, frame.InGame);
         }
 
         /// <summary>Disable Harmony callbacks before a session's module state is torn down.</summary>
@@ -127,7 +139,7 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, int> _sourceIndex = new Dictionary<int, int>();    // counter idx -> served customer list index
         private readonly Dictionary<int, double> _authoritativeTotal = new Dictionary<int, double>();
 
-        public void Reset()
+        public override void Reset()
         {
             _stateTimer = 0f;
             _cartPollTimer = 0f;
@@ -147,11 +159,18 @@ namespace CardShopCoop.Sync
             _sm = null;
         }
 
-        public void ForceResend()
+        public override void ForceResend()
         {
             _cartCustomer.Clear(); // force fresh RegisterCart digests on the next host tick
             _cartSignature.Clear();
             _cartPollTimer = CartPollInterval;
+        }
+
+        public override void Dispose()
+        {
+            base.Dispose();
+            if (ReferenceEquals(_live, this))
+                ClearLive();
         }
 
         /// <summary>Host: a client disconnected - release whatever it was manning.</summary>
@@ -744,7 +763,7 @@ namespace CardShopCoop.Sync
                 {
                     counter.StopCurrentWorker();
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 _cartSignature.Remove(idx);
                 var cartMsg = WriteCarts();
                 if (cartMsg != null)
@@ -959,7 +978,7 @@ namespace CardShopCoop.Sync
             {
                 FiQueueCounter?.SetValue(carrier, counter);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
 
             // fresh customer: reset the scan/bookkeeping state the carrier carries across pool reuse.
             // ActivateCustomer is blocked on the client, so the cash was never Init()'d to the
@@ -968,17 +987,17 @@ namespace CardShopCoop.Sync
             {
                 FiScannedCount?.SetValue(carrier, 0);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
-                FiCustTotal?.SetValue(carrier, 0.0);
+                FiCustTotal?.SetValue(carrier, 0f);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
                 carrier.m_CustomerCash.Init(carrier);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
 
             // The served customer is LIVE at the register: activate the carrier so its real
             // interactable cash (a child, in its hands) is the presented, clickable payment, and
@@ -996,7 +1015,7 @@ namespace CardShopCoop.Sync
                 }
                 carrier.gameObject.SetActive(true);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             NpcSync.SuppressedCustomer.Add(c.CustomerIndex);
             _sourceIndex[c.Index] = c.CustomerIndex;
             NpcSync.AttachExistingCustomer(c.CustomerIndex, c.CustomerGeneration, carrier);
@@ -1330,7 +1349,7 @@ namespace CardShopCoop.Sync
                 else
                     _mannedBy.Remove(idx);
                 if (manned != 0 && _localManned == idx
-                    && !(manned == 2 && owner == CoopCore.LocalConnectionId))
+                    && !(manned == 2 && PlayerRegistry.IsLocalConnection(owner)))
                 {
                     CoopPlugin.Log.LogInfo($"RegisterSync client: counter {idx} claim rejected; releasing local station");
                     ForceExitManned();
@@ -1351,17 +1370,17 @@ namespace CardShopCoop.Sync
             {
                 counter.UpdateCashierCounterState(ECashierCounterState.Idle);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
                 counter.UpdateCurrentCustomer(null);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             try
             {
                 counter.SetPlsaticBagVisibility(false);
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
             Teardown(idx);
         }
 
@@ -1373,7 +1392,7 @@ namespace CardShopCoop.Sync
                 {
                     carrier.m_CustomerCash.gameObject.SetActive(false);
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
                 if (carrier.m_ItemInBagList != null)
                     for (int i = carrier.m_ItemInBagList.Count - 1; i >= 0; i--)
                         if (carrier.m_ItemInBagList[i] != null)
@@ -1434,7 +1453,7 @@ namespace CardShopCoop.Sync
                         carrier.m_CardInBagList.Clear();
                     }
                 }
-                catch { }
+                catch (System.Exception e) { Swallow.Log(e); }
             }
             _carrier.Clear();
             _cartGen.Clear();
@@ -1457,7 +1476,7 @@ namespace CardShopCoop.Sync
                     card.gameObject.SetActive(false);
                 }
             }
-            catch { }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
     }
 }
