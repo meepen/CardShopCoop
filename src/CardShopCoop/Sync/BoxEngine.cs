@@ -93,18 +93,9 @@ namespace CardShopCoop.Sync
         // A loose-box item delta this client sent that the host has not yet answered. The host
         // echoes TransferSeq in a BoxTransferResult; the difference between the requested and
         // accepted delta is what the client must roll back in its own hand (last to pull loses).
-        private struct PendingTransfer
-        {
-            public ushort BoxId;
-            public int RequestedDelta;
-            public int TransferType; // local EItemType id
-            public float SentAt;
-        }
-        private readonly Dictionary<uint, PendingTransfer> _pendingTransfers
-            = new Dictionary<uint, PendingTransfer>();
-        private readonly List<uint> _pendingPrune = new List<uint>();
-        private const float PendingTransferTtl = 15f;
-        private uint _transferSeq;
+        private readonly PendingTransferLedger<ushort> _transfers = new PendingTransferLedger<ushort>();
+        private readonly HashSet<ushort> _suppressedSnapshotForBox = new HashSet<ushort>();
+        private bool _resyncRequested;
         private readonly Dictionary<InteractablePackagingBox, float> _contentSentAt
             = new Dictionary<InteractablePackagingBox, float>();
         private readonly Dictionary<InteractablePackagingBox, float> _lastSentAt
@@ -186,6 +177,9 @@ namespace CardShopCoop.Sync
         /// <summary>Host -> all except the given conn id (-1 = all): relay/authoritative
         /// push-motion so every non-driver peer smooths the box.</summary>
         public Action<BoxMotionStateMessage, int> RelayMotion;
+        /// <summary>Client: request an authoritative snapshot after a reserved local add was
+        /// protected from a stale snapshot and its transfer has resolved.</summary>
+        public Action RequestBoxResync;
 
         public override string Name => "boxes";
 
@@ -194,6 +188,21 @@ namespace CardShopCoop.Sync
         public BoxEngine(IEnumerable<IBoxFamily> families)
         {
             _families = new List<IBoxFamily>(families);
+            _transfers.Expired = pending =>
+            {
+                // A take was already restored to the hand by HandEscrow. An unanswered add may
+                // have been accepted or rejected; either way force the host's truth so a
+                // suppressed mirror cannot keep optimistic content forever. Coalesce to one
+                // resync per tick: an unanswered add cannot conservatively refund its items
+                // (the host may already hold them), so converging to host truth is the safe
+                // outcome, but it must not be silent.
+                bool suppressed = _suppressedSnapshotForBox.Remove(pending.Target);
+                if (pending.RequestedDelta > 0)
+                    CoopPlugin.Log.LogWarning(
+                        $"BoxEngine: add transfer box={pending.Target} type={pending.TransferType} delta={pending.RequestedDelta} expired unresolved; resyncing host content");
+                if (suppressed || pending.RequestedDelta > 0)
+                    _resyncRequested = true;
+            };
         }
 
         public bool TryGetHostBox(ushort id, out InteractablePackagingBox box)
@@ -415,12 +424,13 @@ namespace CardShopCoop.Sync
             _reportedContent.Clear();
             _baselineItemCount.Clear();
             _baselineItemType.Clear();
-            _pendingTransfers.Clear();
-            _transferSeq = 0;
+            _transfers.Clear();
+            _suppressedSnapshotForBox.Clear();
             _contentSentAt.Clear();
             _lastSentAt.Clear();
             _active.Clear();
             _clientDirty.Clear();
+            _resyncRequested = false;
             _clientFam = 0;
             _clientIdx = 0;
             _pushDriven.Clear();
@@ -455,6 +465,25 @@ namespace CardShopCoop.Sync
             else if (CoopCore.Role == CoopRole.Client && _clientIdOf.ContainsKey(box))
             {
                 _clientDirty.Add(box);
+            }
+        }
+
+        /// <summary>Client: an open item box's contents live on its child ShelfCompartment, and
+        /// vanilla's take/return paths run on the compartment, not the box. Mark the owning
+        /// mirror dirty so the content delta is reported this frame (and can be escrowed)
+        /// instead of waiting for the round-robin to reach the box.</summary>
+        public void MarkClientCompartmentDirty(ShelfCompartment comp)
+        {
+            if (CoopCore.Role != CoopRole.Client || comp == null)
+                return;
+            foreach (var kv in _clientById)
+            {
+                var box = kv.Value as InteractablePackagingBox_Item;
+                if (box != null && box.m_ItemCompartment == comp)
+                {
+                    _clientDirty.Add(box);
+                    return;
+                }
             }
         }
 
@@ -827,9 +856,6 @@ namespace CardShopCoop.Sync
                     && looseFamily.ReconcileContent(knownBox, w, msg.ContentBaseItemCount,
                         msg.ContentTransferType, out acceptedDelta);
             }
-            // Tell the sender how much of its transfer landed, before either branch returns.
-            // The requester rolls back the rest of its hand (last to pull loses).
-            ReplyTransfer(connId, msg, acceptedDelta);
             // A loose item report ReconcileContent refused (e.g. a conflicting type add) must be
             // corrected: drop the cached hash so the authoritative re-assert is sent even though
             // the host's content did not change.
@@ -838,6 +864,7 @@ namespace CardShopCoop.Sync
 
             if (!BoxAuthority.AcceptBoxUpdate(currentOwner, sender, w.Possession, lastOwner))
             {
+                ReplyTransfer(connId, msg, looseMerged ? acceptedDelta : 0);
                 if (looseApplicable)
                 {
                     _hostDirty.Add(w.Id);
@@ -889,10 +916,19 @@ namespace CardShopCoop.Sync
                 for (int f = 0; f < _families.Count; f++)
                     if (_families[f].Family == w.Family)
                         _families[f].ApplyState(knownBox, w, isOwner: false);
+                if (!looseApplicable && msg.TransferSeq != 0 && w.Family == BoxFamily.Item
+                    && knownBox != null && w.Possession != BoxPossession.Removed)
+                {
+                    var itemFamily = Family(BoxFamily.Item);
+                    if (itemFamily != null)
+                        acceptedDelta = itemFamily.ReadItemCount(knownBox) - msg.ContentBaseItemCount;
+                }
                 // The reliable edge ends the push: stop the smoothing follower so physics
                 // can resume from the pose ApplyState just committed.
                 BoxPlacement.CancelRemoteMotion(knownBox);
             }
+
+            ReplyTransfer(connId, msg, acceptedDelta);
 
             if (w.Possession == BoxPossession.Removed && knownBox != null)
             {
@@ -924,20 +960,6 @@ namespace CardShopCoop.Sync
             }, connId);
         }
 
-        /// <summary>Client: drop transfer bookkeeping whose result never arrived (a peer that
-        /// dropped the update, a disconnect, or a host still loading), so it cannot grow forever.</summary>
-        private void PrunePendingTransfers()
-        {
-            if (_pendingTransfers.Count == 0)
-                return;
-            _pendingPrune.Clear();
-            foreach (var kv in _pendingTransfers)
-                if (Time.time - kv.Value.SentAt > PendingTransferTtl)
-                    _pendingPrune.Add(kv.Key);
-            for (int i = 0; i < _pendingPrune.Count; i++)
-                _pendingTransfers.Remove(_pendingPrune[i]);
-        }
-
         /// <summary>Client: the host resolved one of our loose-box transfers. Anything the host
         /// could not accept is rolled back out of our hand/inventory here (last to pull loses),
         /// so a box count that the host clamped cannot leave a duplicated item in our hand.</summary>
@@ -945,35 +967,38 @@ namespace CardShopCoop.Sync
         {
             if (msg == null || msg.TransferSeq == 0)
                 return;
-            if (!_pendingTransfers.TryGetValue(msg.TransferSeq, out var pending))
+            if (!_transfers.TryResolve(msg.TransferSeq, out var pending))
             {
                 BoxShared.DebugLog("box-transfer",
                     $"resolve seq={msg.TransferSeq} box={msg.BoxId} no pending transfer (ignored)", msg.BoxId, 2f);
                 return;
             }
-            _pendingTransfers.Remove(msg.TransferSeq);
             int rejected = pending.RequestedDelta - msg.AcceptedDelta;
-            if (rejected == 0)
-                return;
-            if (rejected < 0)
+            if (pending.RequestedDelta < 0)
             {
-                // We took items the host did not have; destroy the phantom hand items. The box
-                // itself was not changed here, so its baseline stays valid.
-                int lose = -rejected;
-                int removed = CoopCore.RollbackHeldItems(pending.TransferType, lose);
-                BoxShared.DebugLog("box-transfer",
-                    $"box={pending.BoxId} take rejected={lose} removedFromHand={removed} type={pending.TransferType}",
-                    pending.BoxId, 2f);
+                _transfers.ResolveTake(pending, msg.AcceptedDelta);
+                if (rejected < 0)
+                {
+                    // We took items the host did not have; destroy the phantom hand items. The box
+                    // itself was not changed here, so its baseline stays valid.
+                    int lose = -rejected;
+                    int removed = lose;
+                    BoxShared.DebugLog("box-transfer",
+                        $"box={pending.Target} take rejected={lose} removedFromHand={removed} type={pending.TransferType}",
+                        pending.Target, 2f);
+                }
             }
-            else
+            else if (rejected > 0)
             {
                 // We added items the host could not accept (full/different type); return them
                 // from the box compartment to our hand, then REBASE so the local scan does not
                 // report the removal as a fresh take.
-                if (_clientById.TryGetValue(pending.BoxId, out var box) && box != null)
+                if (_clientById.TryGetValue(pending.Target, out var box) && box != null)
                 {
-                    int returned = CoopCore.RollbackAddedItems(box, pending.TransferType, rejected);
                     var family = Family(FamilyOf(box));
+                    var itemBox = box as InteractablePackagingBox_Item;
+                    var comp = itemBox?.m_ItemCompartment;
+                    int returned = HandEscrow.EscrowAdded(comp, pending.TransferType, rejected);
                     if (family != null)
                     {
                         _reportedContent[box] = family.ContentSignature(box);
@@ -981,10 +1006,12 @@ namespace CardShopCoop.Sync
                         _baselineItemType[box] = family.ReadItemType(box);
                     }
                     BoxShared.DebugLog("box-transfer",
-                        $"box={pending.BoxId} add rejected={rejected} returnedToHand={returned} type={pending.TransferType}",
-                        pending.BoxId, 2f);
+                        $"box={pending.Target} add rejected={rejected} returnedToHand={returned} type={pending.TransferType}",
+                        pending.Target, 2f);
                 }
             }
+            if (_suppressedSnapshotForBox.Remove(pending.Target))
+                RequestBoxResync?.Invoke();
         }
 
         public void HostReleaseConn(int connId)
@@ -1219,7 +1246,8 @@ namespace CardShopCoop.Sync
                     && _baselineItemCount.TryGetValue(box, out var pendingBaseline)
                     && family.ReadItemCount(box) != pendingBaseline)
                     continue;
-                if (!family.ContentMatches(box, w))
+                bool reservedAdd = _transfers.IsAddReserved(w.Id);
+                if (!reservedAdd && !family.ContentMatches(box, w))
                 {
                     if (!family.RecreateOnContentMismatch)
                     {
@@ -1260,6 +1288,16 @@ namespace CardShopCoop.Sync
                         && _clientGuards.TryGetValue(w.Id, out var openGuard)
                         && Time.time < openGuard.OpenUntil)
                         w.Open = BoxVisuals.ReadOpen(box); // keep the lid state we just reported
+                    if (reservedAdd)
+                    {
+                        int localCount = family.ReadItemCount(box);
+                        if (localCount != w.ItemCount)
+                        {
+                            w.ItemCount = localCount;
+                            w.ItemType = EnumMap.ToWire(EnumKind.ItemType, family.ReadItemType(box));
+                            _suppressedSnapshotForBox.Add(w.Id);
+                        }
+                    }
                     family.ApplyState(box, w, isOwner: false);
                     // A reliable Free pose is the settle commit: end any in-flight push
                     // smoothing so physics resumes from the authoritative pose, not a
@@ -1356,6 +1394,14 @@ namespace CardShopCoop.Sync
         {
             if (!active)
                 return;
+            // Expire transfers whose result never arrived even when the player is idle, so the
+            // TTL is a real wall-clock bound and a take cannot stay escrowed indefinitely.
+            _transfers.Prune();
+            if (_resyncRequested)
+            {
+                _resyncRequested = false;
+                RequestBoxResync?.Invoke();
+            }
             BoxVisuals.TickPending();
 
             // Forced path: the box the local player just picked up is processed immediately,
@@ -1379,7 +1425,7 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < _activeScratch.Count; i++)
                 {
                     var b = _activeScratch[i];
-                    if (b != null && ProcessClientBox(Family(FamilyOf(b)), b))
+                    if (b != null && ProcessClientBox(Family(FamilyOf(b)), b, force: true))
                         _active.Add(b);
                 }
             }
@@ -1449,8 +1495,10 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Inspect one client-side box and report a change. Returns true while the
-        /// box is carried/placed (so the caller keeps it on the every-frame fast path).</summary>
-        private bool ProcessClientBox(IBoxFamily family, InteractablePackagingBox box)
+        /// box is carried/placed (so the caller keeps it on the every-frame fast path).
+        /// <paramref name="force"/> bypasses the content-report throttle for a box a mutation
+        /// postfix explicitly marked dirty (a local take must be reported - and escrowed - now).</summary>
+        private bool ProcessClientBox(IBoxFamily family, InteractablePackagingBox box, bool force = false)
         {
             if (family == null || box == null)
                 return false;
@@ -1494,8 +1542,9 @@ namespace CardShopCoop.Sync
             bool change = !_reported.TryGetValue(box, out var prev) || prev != poss;
             int sig = family.ContentSignature(box);
             bool contentChange = !_reportedContent.TryGetValue(box, out var pc) || pc != sig;
-            // Rate-limit content-only reports; a state edge is immediate.
-            if (contentChange && !change
+            // Rate-limit content-only reports; a state edge is immediate. A forced call is a
+            // mutation postfix's "report now" mark (a take must be escrowed this frame).
+            if (contentChange && !change && !force
                 && _contentSentAt.TryGetValue(box, out var lastContent)
                 && Time.time - lastContent < ContentReportPeriod)
                 contentChange = false;
@@ -1507,10 +1556,15 @@ namespace CardShopCoop.Sync
             bool isActive = poss == BoxPossession.Held || poss == BoxPossession.Placing;
             if (!change && !contentChange && !renewLease)
                 return isActive;
-            _reported[box] = poss;
-            _reportedContent[box] = sig;
             _contentSentAt[box] = Time.time;
             _lastSentAt[box] = Time.time;
+            SendClientBoxReport(family, box, poss, pos, yaw, vel, angVel, sig);
+            return isActive;
+        }
+
+        private uint SendClientBoxReport(IBoxFamily family, InteractablePackagingBox box,
+            BoxPossession poss, Vector3 pos, float yaw, Vector3 vel, Vector3 angVel, int sig)
+        {
             var w = new BoxWire
             {
                 Id = _clientIdOf[box],
@@ -1538,16 +1592,10 @@ namespace CardShopCoop.Sync
                 // box). Add: the type we now hold.
                 int localTransfer = requestedDelta < 0 ? baseItemType : family.ReadItemType(box);
                 transferType = EnumMap.ToWire(EnumKind.ItemType, localTransfer);
-                transferSeq = ++_transferSeq;
-                PrunePendingTransfers();
-                _pendingTransfers[transferSeq] = new PendingTransfer
-                {
-                    BoxId = w.Id,
-                    RequestedDelta = requestedDelta,
-                    TransferType = localTransfer,
-                    SentAt = Time.time,
-                };
+                transferSeq = _transfers.Begin(w.Id, requestedDelta, localTransfer);
             }
+            _reported[box] = poss;
+            _reportedContent[box] = sig;
             BoxShared.DebugLog("box-tx", $"id={w.Id} fam={w.Family} state={poss} open={w.Open} sig={sig} name={box.name}",
                 box.GetInstanceID(), 0.05f);
             SendUpdate?.Invoke(new BoxUpdateMessage
@@ -1560,7 +1608,7 @@ namespace CardShopCoop.Sync
             _baselineItemCount[box] = w.ItemCount;
             _baselineItemType[box] = family.ReadItemType(box);
             Guard(w.Id).OpenUntil = Time.time + ClientOpenBlockPeriod;
-            return isActive;
+            return transferSeq;
         }
 
         // ---------------- push motion ----------------
@@ -1747,32 +1795,15 @@ namespace CardShopCoop.Sync
                 return;
             }
             var family = Family(FamilyOf(box));
-            if (family == null || !_clientIdOf.TryGetValue(box, out var id))
+            if (family == null || !_clientIdOf.ContainsKey(box))
                 return;
             if (!family.TryReadLocal(box, out var poss, out var pos, out var yaw,
                     out var vel, out var angVel, out var stored))
                 return;
             if (poss != BoxPossession.Free || stored)
                 return; // the normal possession path will report the real state
-            var w = new BoxWire
-            {
-                Id = id,
-                Family = family.Family,
-                Possession = BoxPossession.Free,
-                Pos = pos,
-                Yaw = yaw,
-                Velocity = vel,
-                AngularVelocity = angVel,
-            };
-            family.FillContent(box, ref w); // the one settle commit
-            int baseItemCount = _baselineItemCount.TryGetValue(box, out var settleBase) ? settleBase : w.ItemCount;
-            SendUpdate?.Invoke(new BoxUpdateMessage { Box = w, ContentBaseItemCount = baseItemCount });
-            // Mirror the normal send site's bookkeeping: the settle reports the current content,
-            // so a pending local edit must not be re-reported or clobbered after this.
-            _reported[box] = BoxPossession.Free;
-            _reportedContent[box] = family.ContentSignature(box);
-            _baselineItemCount[box] = w.ItemCount;
-            _baselineItemType[box] = family.ReadItemType(box);
+            SendClientBoxReport(family, box, BoxPossession.Free, pos, yaw, vel, angVel,
+                family.ContentSignature(box));
         }
 
         /// <summary>Host: a client is pushing a box. Make the host's real box a kinematic

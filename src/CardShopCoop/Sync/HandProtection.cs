@@ -25,7 +25,7 @@ namespace CardShopCoop.Sync
     {
         // HasEnoughSlotToHoldCard is `count < 8`; the hand holds at most 8 (indices 0..7) and the
         // load trim keeps 8. Anything at/over that is overflow.
-        private const int HandCapacity = 8;
+        internal const int HandCapacity = 8;
 
         public static void ApplyPatches(Harmony h)
         {

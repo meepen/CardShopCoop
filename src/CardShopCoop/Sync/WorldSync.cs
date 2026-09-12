@@ -81,18 +81,7 @@ namespace CardShopCoop.Sync
         /// requester can roll the unaccepted part out of its hand.</summary>
         public Action<ShelfTransferResultMessage, int> SendResult;
 
-        private struct PendingShelfTransfer
-        {
-            public int Key;
-            public int RequestedDelta;
-            public int TransferType; // local EItemType id
-            public float SentAt;
-        }
-        private readonly Dictionary<uint, PendingShelfTransfer> _pendingTransfers
-            = new Dictionary<uint, PendingShelfTransfer>();
-        private readonly List<uint> _pendingPrune = new List<uint>();
-        private const float PendingTransferTtl = 15f;
-        private uint _transferSeq;
+        private readonly PendingTransferLedger<int> _transfers = new PendingTransferLedger<int>();
 
         private static readonly FieldInfo FiWarehouseComps =
             ReflectionSurface.RequiredField(typeof(WarehouseShelf), "m_ItemCompartmentList");
@@ -134,8 +123,7 @@ namespace CardShopCoop.Sync
             _clampWarned.Clear();
             _snapshotErrors.Clear();
             _whComps.Clear();
-            _pendingTransfers.Clear();
-            _transferSeq = 0;
+            _transfers.Clear();
             _timer = 0.35f; // staggered phase: engines must not all walk on the same frame
             _scanInterval = BaseScanInterval;
             _sm = null;
@@ -157,6 +145,10 @@ namespace CardShopCoop.Sync
         {
             if (!inGame)
                 return;
+            // Expire transfers whose result never arrived even while the scan is idle, so the
+            // TTL is a real wall-clock bound and an add cannot suppress host truth forever.
+            if (CoopCore.Role == CoopRole.Client)
+                _transfers.Prune();
             _timer += dt;
             if (!_scanning)
             {
@@ -288,15 +280,7 @@ namespace CardShopCoop.Sync
                     int localTransfer = delta < 0 ? prevType : type;
                     entry.BaseCount = prevCount;
                     entry.TransferType = localTransfer;
-                    entry.TransferSeq = ++_transferSeq;
-                    PrunePendingTransfers();
-                    _pendingTransfers[entry.TransferSeq] = new PendingShelfTransfer
-                    {
-                        Key = key,
-                        RequestedDelta = delta,
-                        TransferType = localTransfer,
-                        SentAt = Time.time,
-                    };
+                    entry.TransferSeq = _transfers.Begin(key, delta, localTransfer);
                 }
             }
             _scanChanges.Add(entry);
@@ -317,6 +301,8 @@ namespace CardShopCoop.Sync
                     // echo (or the periodic full-state heal) must not stomp it
                     if (CoopCore.Role == CoopRole.Client && _locallyChanged.TryGetValue(e.Key, out double t)
                         && Time.realtimeSinceStartupAsDouble - t < 6.0)
+                        continue;
+                    if (CoopCore.Role == CoopRole.Client && _transfers.IsAddReserved(e.Key))
                         continue;
                     comp = Resolve(sm, e.Key);
                     if (comp == null)
@@ -490,20 +476,6 @@ namespace CardShopCoop.Sync
             return actual;
         }
 
-        /// <summary>Client: drop transfer bookkeeping whose result never arrived, so it cannot
-        /// grow forever across a long session.</summary>
-        private void PrunePendingTransfers()
-        {
-            if (_pendingTransfers.Count == 0)
-                return;
-            _pendingPrune.Clear();
-            foreach (var kv in _pendingTransfers)
-                if (Time.time - kv.Value.SentAt > PendingTransferTtl)
-                    _pendingPrune.Add(kv.Key);
-            for (int i = 0; i < _pendingPrune.Count; i++)
-                _pendingTransfers.Remove(_pendingPrune[i]);
-        }
-
         /// <summary>Client: the host resolved one of our shelf transfers. Anything it could not
         /// accept is rolled back out of our hand (take) or returned from the compartment to the
         /// hand (restock), so a clamped shelf can neither duplicate nor lose items.</summary>
@@ -511,29 +483,31 @@ namespace CardShopCoop.Sync
         {
             if (msg == null || msg.TransferSeq == 0)
                 return;
-            if (!_pendingTransfers.TryGetValue(msg.TransferSeq, out var pending))
+            if (!_transfers.TryResolve(msg.TransferSeq, out var pending))
                 return;
-            _pendingTransfers.Remove(msg.TransferSeq);
             int rejected = pending.RequestedDelta - msg.AcceptedDelta;
-            if (rejected < 0)
+            if (pending.RequestedDelta < 0)
             {
-                int removed = CoopCore.RollbackHeldItems(pending.TransferType, -rejected);
+                int accepted = Mathf.Max(0, -msg.AcceptedDelta);
+                _transfers.ResolveTake(pending, msg.AcceptedDelta);
                 CoopPlugin.Log.LogInfo(
-                    $"WorldSync transfer key={pending.Key:X} take rejected={-rejected} removedFromHand={removed}");
+                    $"WorldSync transfer key={pending.Target:X} take token={pending.EscrowToken} accepted={accepted} rejected={Mathf.Max(0, -rejected)}");
             }
             else if (rejected > 0)
             {
                 var sm = ResolveShelfManager();
-                var comp = sm != null ? Resolve(sm, pending.Key) : null;
+                var comp = sm != null ? Resolve(sm, pending.Target) : null;
                 int returned = comp != null
-                    ? CoopCore.RollbackAddedItems(comp, pending.TransferType, rejected) : 0;
+                    ? HandEscrow.EscrowAdded(comp, pending.TransferType, rejected) : 0;
                 // Rebase the local baseline to what the compartment actually holds now, or the
                 // next scan would re-report the returned items as a fresh take.
                 if (comp != null)
-                    _last[pending.Key] = new CompState { Type = (int)comp.GetItemType(), Count = comp.GetItemCount() };
+                    _last[pending.Target] = new CompState { Type = (int)comp.GetItemType(), Count = comp.GetItemCount() };
                 CoopPlugin.Log.LogInfo(
-                    $"WorldSync transfer key={pending.Key:X} add rejected={rejected} returnedToHand={returned}");
+                    $"WorldSync transfer key={pending.Target:X} add rejected={rejected} escrowed={returned}");
             }
+            _locallyChanged.Remove(pending.Target);
+            ForceNextTick();
         }
 
         /// <summary>

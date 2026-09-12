@@ -304,7 +304,7 @@ namespace CardShopCoop.Patches
             // Player pickups decrement m_ItemAmount and remove from m_StoredItemList directly
             // instead of routing through RemoveItem.
             Try(h, typeof(ShelfCompartment), "TakeItemToHand",
-                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(TakeItemToHandPostfix)));
             Try(h, typeof(ShelfCompartment), "SpawnItem",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
             // Removing a shelf label (right-click on the tag, when the compartment is empty)
@@ -437,6 +437,17 @@ namespace CardShopCoop.Patches
         {
             if (CoopCore.Role != CoopRole.None)
                 CoopCore.RequestImmediateObjectSync();
+        }
+
+        /// <summary>A local item take: the content delta is on a ShelfCompartment (open box or
+        /// shelf), not the box object, so a box take is invisible to the box engine until the
+        /// round-robin reaches the box. Mark the owning box dirty so the take is reported (and
+        /// escrowed) on the next tick instead of after a player-action window.</summary>
+        public static void TakeItemToHandPostfix(ShelfCompartment __instance)
+        {
+            ObjectMutationPostfix();
+            if (__instance != null)
+                CoopCore.Instance?.Boxes?.MarkClientCompartmentDirty(__instance);
         }
 
         /// <summary>Captures whether the card compartment was empty before the click. Vanilla

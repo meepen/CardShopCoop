@@ -581,7 +581,10 @@ namespace CardShopCoop
                 if (Role == CoopRole.Host)
                     _boxEngine.HostTick(_dt, _syncActive);
                 else if (Role == CoopRole.Client)
+                {
                     _boxEngine.ClientTick(_dt, _syncActive && !ClientPreloadHold);
+                    HandEscrow.Tick();
+                }
                 // Push motion is symmetric on both roles: the local player's physical push is
                 // pruned then streamed (PushTick), and the smoothed followers (arc + dead-reckon
                 // pushed boxes) advance exactly once per frame here for whichever role is running
@@ -654,6 +657,9 @@ namespace CardShopCoop
             _boxEngine.SendSnapshot = snap => Broadcast(snap);
             _boxEngine.SendUpdate = update => Send(1, update);
             _boxEngine.SendTransferResult = (result, connId) => Send(connId, result);
+            // Client: an authoritative re-assert is the only way to converge a box whose
+            // content a pending local add had to protect from a stale snapshot.
+            _boxEngine.RequestBoxResync = () => Send(1, new JoinResyncRequestMessage());
             _boxEngine.OnClientBoxSpawned = box => _containers.TryAutoHoldTakenBox(box);
             _boxEngine.LocalHeld = () =>
             {
@@ -1906,6 +1912,7 @@ namespace CardShopCoop
 
         private static void ClearLiveModuleHooks()
         {
+            HandEscrow.Reset();
             PopulationSync.OnClientStructureChanged = null;
             NpcSync.ClearLive();
             TradeServe.ClearLive();
@@ -2296,31 +2303,80 @@ namespace CardShopCoop
         private static readonly MethodInfo MiRemoveHoldItem =
             HarmonyLib.AccessTools.Method(typeof(InteractionPlayerController), "RemoveHoldItem");
 
-        /// <summary>Client: destroy up to <paramref name="count"/> held items of the given local
-        /// EItemType and remove them from the hand. Returns how many were removed. Used to
-        /// reconcile a loose-box take the host could not accept (last to pull loses), so a
-        /// clamped box count cannot leave a duplicated item in our hand.</summary>
-        public static int RollbackHeldItems(int itemType, int count)
+        /// <summary>Controller used by the local hand primitives. Keep this accessor here so
+        /// sync policies do not need to know how the player controller is discovered.</summary>
+        internal static InteractionPlayerController PlayerIpc
         {
-            var ipc = Instance != null ? Instance._playerIpc : null;
-            if (ipc == null || count <= 0)
-                return 0;
-            if (!(FiHoldItemList?.GetValue(ipc) is List<Item> items) || items.Count == 0)
-                return 0;
-            int removed = 0;
-            for (int i = items.Count - 1; i >= 0 && removed < count; i--)
+            get
+            {
+                return Instance != null ? Instance._playerIpc : null;
+            }
+        }
+
+        private static readonly FieldInfo FiHoldCardMode =
+            HarmonyLib.AccessTools.Field(typeof(InteractionPlayerController), "m_IsHoldCardMode");
+
+        /// <summary>Whether vanilla is currently able to accept an item into the hand. Escrow
+        /// must not race modal hold states: those states can consume or reposition the item.</summary>
+        internal static bool HandAcceptsItems()
+        {
+            var ipc = PlayerIpc;
+            if (ipc == null)
+                return false;
+            if (FiIsHoldBoxMode?.GetValue(ipc) is bool boxMode && boxMode)
+                return false;
+            if (FiHoldCardMode?.GetValue(ipc) is bool cardMode && cardMode)
+                return false;
+            if (FiViewAlbum?.GetValue(ipc) is bool albumMode && albumMode)
+                return false;
+            return true;
+        }
+
+        /// <summary>Detach the last matching item without disabling it. RemoveHoldItem removes
+        /// the front type entry, so RemoveHeldItemAt first swaps both parallel lists.</summary>
+        internal static Item DetachHeldItemAt(int localType)
+        {
+            var ipc = PlayerIpc;
+            if (ipc == null || !(FiHoldItemList?.GetValue(ipc) is List<Item> items))
+                return null;
+            for (int i = items.Count - 1; i >= 0; i--)
             {
                 var item = items[i];
-                if (item == null || (int)item.GetItemType() != itemType)
-                    continue;
-                RemoveHeldItemAt(ipc, items, item);
-                item.DisableItem();
-                removed++;
+                if (item != null && (int)item.GetItemType() == localType)
+                {
+                    RemoveHeldItemAt(ipc, items, item);
+                    return item;
+                }
             }
-            if (removed < count)
-                CoopPlugin.Log.LogWarning(
-                    $"RollbackHeldItems: wanted {count} of type {itemType}, removed {removed} (item already placed/consumed?)");
-            return removed;
+            return null;
+        }
+
+        /// <summary>Attach a returned item through the game's own hand path. The explicit
+        /// activation is required because AddHoldItemToFront only updates hand bookkeeping.</summary>
+        internal static bool TryAttachHeldItem(Item item)
+        {
+            if (item == null || !HandAcceptsItems())
+                return false;
+            var ipc = PlayerIpc;
+            if (ipc == null || ipc.GetHoldItemCount() >= HandProtection.HandCapacity)
+                return false;
+            item.gameObject.SetActive(true);
+            ipc.AddHoldItemToFront(item);
+            return true;
+        }
+
+        internal static void DestroyDetachedItem(Item item)
+        {
+            if (item == null)
+                return;
+            try
+            {
+                item.DisableItem();
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogError("DestroyDetachedItem: DisableItem failed; phantom item may remain: " + e);
+            }
         }
 
         /// <summary>Remove one held item using the game's own RemoveHoldItem, so the hold state,
@@ -2364,59 +2420,6 @@ namespace CardShopCoop
                 if (types != null && idx < types.Count)
                     types.RemoveAt(idx);
             }
-        }
-
-        /// <summary>Client: return up to <paramref name="count"/> items of the given local type
-        /// from a box compartment back into the hand. Returns how many moved. Used to reconcile
-        /// an add the host could not accept (box full/type mismatch).</summary>
-        public static int RollbackAddedItems(InteractablePackagingBox box, int itemType, int count)
-        {
-            var itemBox = box as InteractablePackagingBox_Item;
-            return itemBox != null && itemBox.m_ItemCompartment != null
-                ? RollbackAddedItems(itemBox.m_ItemCompartment, itemType, count)
-                : 0;
-        }
-
-        /// <summary>Client: return up to <paramref name="count"/> items of the given local type
-        /// from a compartment back into the hand. Returns how many moved.</summary>
-        public static int RollbackAddedItems(ShelfCompartment comp, int itemType, int count)
-        {
-            var ipc = Instance != null ? Instance._playerIpc : null;
-            if (comp == null || count <= 0)
-                return 0;
-            int returned = 0;
-            for (int i = 0; i < count; i++)
-            {
-                try
-                {
-                    if ((int)comp.GetItemType() != itemType || comp.GetItemCount() <= 0)
-                        break;
-                    // Never take an item out of the compartment if the hand cannot hold it, or
-                    // the item would end up in neither place.
-                    if (ipc != null && ipc.GetHoldItemCount() >= 8)
-                    {
-                        CoopPlugin.Log.LogWarning("RollbackAddedItems: hand is full, leaving items in the compartment");
-                        break;
-                    }
-                    var item = comp.TakeItemToHand();
-                    if (item == null)
-                        break;
-                    if (ipc != null)
-                        ipc.AddHoldItemToFront(item);
-                    else
-                        item.DisableItem();
-                    returned++;
-                }
-                catch (System.Exception e)
-                {
-                    CoopPlugin.Log.LogWarning("RollbackAddedItems: " + e.Message);
-                    break;
-                }
-            }
-            if (returned < count)
-                CoopPlugin.Log.LogWarning(
-                    $"RollbackAddedItems: wanted {count} of type {itemType}, returned {returned}");
-            return returned;
         }
 
 
