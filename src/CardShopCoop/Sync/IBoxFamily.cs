@@ -27,6 +27,13 @@ namespace CardShopCoop.Sync
             get;
         }
 
+        /// <summary>Applies only the entry's CONTENT/OPEN state to an existing local box, leaving
+        /// pose, physics and possession untouched. The host uses this to honor a non-owner's
+        /// legitimate loose-box edit (opening/closing, adding or taking items) without letting
+        /// the report overwrite the authoritative pose - the stale-pose guard stays intact.
+        /// Families whose content is immutable or derived (card, furniture) do nothing.</summary>
+        void ReconcileContent(InteractablePackagingBox box, in BoxWire w);
+
         IList<InteractablePackagingBox> LiveBoxes();
 
         /// <summary>Reads the family content into the wire entry (host snapshot / client report).</summary>

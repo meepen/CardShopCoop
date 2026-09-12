@@ -18,6 +18,16 @@ namespace CardShopCoop.Sync
 
         public bool RecreateOnContentMismatch => true;
 
+        public void ReconcileContent(InteractablePackagingBox box, in BoxWire w)
+        {
+            if (!(box is InteractablePackagingBox_Item b))
+                return;
+            ApplyContent(b, w);
+            // ApplyContent reconciles type/count only; the lid is a separate visual and is the
+            // main thing a non-owner changes by opening/closing a loose box, so set it here too.
+            BoxVisuals.EnsureOpenState(box, w.Open);
+        }
+
         public IList<InteractablePackagingBox> LiveBoxes()
         {
             var src = RestockManager.GetItemPackagingBoxList();

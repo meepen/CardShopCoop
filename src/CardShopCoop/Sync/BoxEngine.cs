@@ -495,7 +495,7 @@ namespace CardShopCoop.Sync
                 if (boxes == null)
                     continue;
                 for (int i = 0; i < boxes.Count && list.Count < MaxBoxes; i++)
-                    ProcessHostBox(family, boxes[i], list);
+                    ProcessHostBox(family, boxes[i], list, fullScan: true);
             }
         }
 
@@ -510,7 +510,7 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < _deadHost.Count; i++)
             {
                 if (_hostIdentity.ById.TryGetValue(_deadHost[i], out var box) && box != null)
-                    ProcessHostBox(Family(FamilyOf(box)), box, list);
+                    ProcessHostBox(Family(FamilyOf(box)), box, list, fullScan: false);
             }
         }
 
@@ -542,7 +542,7 @@ namespace CardShopCoop.Sync
                 }
                 int take = Mathf.Min(budget, boxes.Count - _hostIdx);
                 for (int k = 0; k < take && list.Count < MaxBoxes; k++)
-                    ProcessHostBox(family, boxes[_hostIdx + k], list);
+                    ProcessHostBox(family, boxes[_hostIdx + k], list, fullScan: false);
                 _hostIdx += take;
                 budget -= take;
                 if (_hostIdx >= boxes.Count)
@@ -565,7 +565,7 @@ namespace CardShopCoop.Sync
                 return;
             var one = _heldList;
             one.Clear();
-            ProcessHostBox(family, held, one);
+            ProcessHostBox(family, held, one, fullScan: false);
             if (one.Count > 0)
                 SendSnapshot?.Invoke(new BoxSnapshotMessage { Boxes = one, Full = false });
         }
@@ -580,7 +580,8 @@ namespace CardShopCoop.Sync
             box.gameObject.AddComponent<BoxContactProbe>().Init(box);
         }
 
-        private void ProcessHostBox(IBoxFamily family, InteractablePackagingBox box, List<BoxWire> list)
+        private void ProcessHostBox(IBoxFamily family, InteractablePackagingBox box, List<BoxWire> list,
+            bool fullScan)
         {
             if (family == null || box == null)
                 return;
@@ -595,7 +596,10 @@ namespace CardShopCoop.Sync
             // A pushed box's pose is owned by the transient motion stream: skip the snapshot
             // path (FillContent/hash/emit) so the stream is the single pose writer. This is
             // both the authority rule and the perf fix (no per-frame FillContent while pushed).
-            if (lease.MotionDriven)
+            // A FULL scan is the exception: it is a membership baseline, and a receiver's full
+            // snapshot sweep deletes any tracked box missing from it, so a deferred box must
+            // still be listed (with its current state) even while the stream owns its pose.
+            if (lease.MotionDriven && !fullScan)
                 return;
             if (BoxPlacement.IsThrowPending(box))
             {
@@ -603,8 +607,13 @@ namespace CardShopCoop.Sync
                     BoxPlacement.ClearThrow(box); // picked back up before the throw was reported
                 else if (!BoxPlacement.ThrowReady(box, vel))
                 {
-                    _hostDirty.Add(id); // retry next flush, once the impulse is integrated
-                    return;
+                    if (!fullScan)
+                    {
+                        _hostDirty.Add(id); // retry next flush, once the impulse is integrated
+                        return;
+                    }
+                    // full scan: emit the current state for membership; the throw's own Free
+                    // report follows once the impulse integrates.
                 }
                 else
                     BoxPlacement.ClearThrow(box);
@@ -710,6 +719,20 @@ namespace CardShopCoop.Sync
             return h;
         }
 
+        /// <summary>True when a non-owner's Free report may be applied as content-only: the box is
+        /// loose on the host (no lease owner, and the host is not carrying or placing it). Keeps
+        /// a physical hand or a stale possession claim from being edited under the holder.</summary>
+        private bool CanApplyContentOnly(InteractablePackagingBox box, PlayerRef currentOwner)
+        {
+            if (currentOwner.Kind != PlayerKind.None)
+                return false;
+            var family = Family(FamilyOf(box));
+            if (family == null
+                || !family.TryReadLocal(box, out var hostPoss, out _, out _, out _, out _, out var hostStored))
+                return false;
+            return hostPoss == BoxPossession.Free && !hostStored;
+        }
+
         public void HostApplyUpdate(BoxUpdateMessage msg, int connId)
         {
             if (msg == null)
@@ -752,7 +775,23 @@ namespace CardShopCoop.Sync
                 : PlayerRegistry.ForConnection(lease.LastOwner);
             if (!BoxAuthority.AcceptBoxUpdate(currentOwner, sender, w.Possession, lastOwner))
             {
-                BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} accepted=false owner={currentOwner} last={lastOwner}");
+                // A non-owner may still open/close or add/take items on a LOOSE box: vanilla
+                // allows that through the raycast without pickup (InteractionPlayerController ->
+                // OnPressOpenBox / AddItem / TakeItemToHand), and those arrive as Free content
+                // reports. Honor ONLY the content/lid - never the pose and never possession - so
+                // the stale-pose guard is unchanged. Held/Placing claims and Removed still
+                // require ownership.
+                if (w.Possession == BoxPossession.Free && CanApplyContentOnly(knownBox, currentOwner))
+                {
+                    Family(w.Family)?.ReconcileContent(knownBox, w);
+                    _hostDirty.Add(w.Id);
+                    BoxShared.DebugLog("box-rx",
+                        $"id={w.Id} fam={w.Family} sender={connId} state=Free content-only accepted owner={currentOwner}");
+                }
+                else
+                {
+                    BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} accepted=false owner={currentOwner} last={lastOwner}");
+                }
                 return;
             }
 

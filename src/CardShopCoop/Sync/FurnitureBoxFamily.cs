@@ -21,6 +21,12 @@ namespace CardShopCoop.Sync
 
         public bool RecreateOnContentMismatch => true;
 
+        public void ReconcileContent(InteractablePackagingBox box, in BoxWire w)
+        {
+            // Furniture-box content is the boxed object's identity, owned by the box ops; the
+            // owner-path ApplyState handles it, so a non-owner content report is a no-op here.
+        }
+
         public IList<InteractablePackagingBox> LiveBoxes()
         {
             var src = RestockManager.GetShelfPackagingBoxList();
