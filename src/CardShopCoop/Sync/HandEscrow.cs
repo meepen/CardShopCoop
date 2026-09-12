@@ -2,43 +2,43 @@ using System.Collections.Generic;
 
 namespace CardShopCoop.Sync
 {
-    /// <summary>Client-only holding area for optimistic item mutations. Items stay as live game
-    /// objects, but inactive, until the host says whether the mutation really happened. This is
+    /// <summary>Client-only reservation area for optimistic item mutations. Reserved items stay
+    /// live in the hand until the host says whether the mutation really happened. This is
     /// deliberately token-keyed: box and world acknowledgements have independent sequences.</summary>
     internal static class HandEscrow
     {
-        private static readonly Dictionary<int, List<Item>> PendingTakes
+        private static readonly Dictionary<int, List<Item>> ReservedTakes
             = new Dictionary<int, List<Item>>();
+        private static readonly HashSet<Item> Reserved = new HashSet<Item>();
         private static readonly List<Item> ToHand = new List<Item>();
         private static int _nextToken;
         private static bool _resetting;
 
-        public static int EscrowTake(int localType, int count)
+        public static int ReserveTake(int localType, int count)
         {
+            if (CoopCore.Role != CoopRole.Client)
+                return 0;
             if (count <= 0)
                 return 0;
-            var escrowed = new List<Item>(count);
-            // Escrow regardless of a modal hand state: the items being taken were placed in
-            // m_HoldItemList by vanilla, and leaving them there is exactly what lets the player
-            // place/consume them before the host answers. (Attaching on the way back IS gated,
-            // because AddHoldItemToFront must not run inside a modal state.)
-            // DetachHeldItemAt removes the LAST matching item (the most recently taken), so
-            // repeated calls escrow exactly the objects a take just added, newest first.
-            for (int i = 0; i < count; i++)
+            var items = new List<Item>(count);
+            var held = CoopCore.GetHeldItemList(CoopCore.PlayerIpc);
+            if (held != null)
             {
-                var item = CoopCore.DetachHeldItemAt(localType);
-                if (item == null)
-                    break;
-                item.gameObject.SetActive(false);
-                escrowed.Add(item);
+                for (int i = held.Count - 1; i >= 0 && items.Count < count; i--)
+                    if (held[i] != null && !Reserved.Contains(held[i])
+                        && (int)held[i].GetItemType() == localType)
+                        items.Add(held[i]);
             }
-            if (escrowed.Count < count)
-                CoopPlugin.Log.LogWarning($"HandEscrow.EscrowTake: wanted {count} of type {localType}, escrowed {escrowed.Count}");
-            if (escrowed.Count == 0)
+            if (items.Count != count)
+            {
+                CoopPlugin.Log.LogWarning($"HandEscrow.ReserveTake: wanted {count} of type {localType}, found {items.Count}; reserved 0");
                 return 0;
+            }
 
             int token = NextToken();
-            PendingTakes.Add(token, escrowed);
+            for (int i = 0; i < items.Count; i++)
+                Reserved.Add(items[i]);
+            ReservedTakes.Add(token, items);
             return token;
         }
 
@@ -46,12 +46,12 @@ namespace CardShopCoop.Sync
         {
             if (token <= 0)
                 return; // nothing was escrowed for this transfer; there is nothing to reconcile
-            if (!PendingTakes.TryGetValue(token, out var items))
+            if (!ReservedTakes.TryGetValue(token, out var items))
             {
                 CoopPlugin.Log.LogWarning($"HandEscrow.ResolveTake: unknown token {token}");
                 return;
             }
-            PendingTakes.Remove(token);
+            ReservedTakes.Remove(token);
             if (acceptedMagnitude < 0)
             {
                 CoopPlugin.Log.LogError($"HandEscrow.ResolveTake: negative accepted count {acceptedMagnitude} for token {token}; treating as zero");
@@ -59,15 +59,24 @@ namespace CardShopCoop.Sync
             }
             if (acceptedMagnitude > items.Count)
             {
-                CoopPlugin.Log.LogWarning($"HandEscrow.ResolveTake: host accepted {acceptedMagnitude}, but token {token} contains {items.Count}; restoring all");
+                CoopPlugin.Log.LogWarning($"HandEscrow.ResolveTake: host accepted {acceptedMagnitude}, but token {token} contains {items.Count}");
                 acceptedMagnitude = items.Count;
             }
             for (int i = 0; i < items.Count; i++)
             {
                 if (i < acceptedMagnitude)
-                    QueueToHand(items[i]);
+                {
+                    Reserved.Remove(items[i]);
+                }
                 else
-                    CoopCore.DestroyDetachedItem(items[i]);
+                {
+                    Reserved.Remove(items[i]);
+                    if (CoopCore.RemoveHeldItemFromHand(items[i]))
+                        CoopCore.DestroyDetachedItem(items[i]);
+                    else
+                        CoopPlugin.Log.LogError(
+                            $"HandEscrow.ResolveTake: rejected item could not be removed from the hand for token {token}; left in hand rather than destroying a live object");
+                }
             }
         }
 
@@ -75,14 +84,31 @@ namespace CardShopCoop.Sync
         {
             if (token <= 0)
                 return; // nothing was escrowed for this transfer
-            if (!PendingTakes.TryGetValue(token, out var items))
-            {
-                CoopPlugin.Log.LogWarning($"HandEscrow.ExpireTake: unknown token {token}");
+            if (!ReservedTakes.TryGetValue(token, out var items))
                 return;
-            }
-            PendingTakes.Remove(token);
+            ReservedTakes.Remove(token);
             for (int i = 0; i < items.Count; i++)
-                QueueToHand(items[i]);
+                Reserved.Remove(items[i]);
+        }
+
+        public static bool IsReserved(Item item) => item != null && Reserved.Count != 0 && Reserved.Contains(item);
+
+        public static bool HasReservedHeld(InteractionPlayerController ipc)
+        {
+            var items = CoopCore.GetHeldItemList(ipc);
+            if (items == null)
+                return false;
+            for (int i = 0; i < items.Count; i++)
+                if (IsReserved(items[i]))
+                    return true;
+            return false;
+        }
+
+        public static bool IsFrontReserved(InteractionPlayerController ipc)
+        {
+            var items = CoopCore.GetHeldItemList(ipc);
+            return ipc != null && items != null
+                && items.Count > 0 && IsReserved(items[0]);
         }
 
         public static int EscrowAdded(ShelfCompartment comp, int localType, int count)
@@ -146,10 +172,11 @@ namespace CardShopCoop.Sync
             _resetting = true;
             try
             {
-                foreach (var pair in PendingTakes)
-                    for (int i = 0; i < pair.Value.Count; i++)
-                        QueueToHand(pair.Value[i]);
-                PendingTakes.Clear();
+                var reservedItems = new List<Item>(Reserved);
+                for (int i = 0; i < reservedItems.Count; i++)
+                    Reserved.Remove(reservedItems[i]);
+                ReservedTakes.Clear();
+                Reserved.Clear();
                 Tick();
                 int remainder = 0;
                 for (int i = 0; i < ToHand.Count; i++)
@@ -179,7 +206,7 @@ namespace CardShopCoop.Sync
         {
             if (++_nextToken <= 0)
                 _nextToken = 1;
-            while (PendingTakes.ContainsKey(_nextToken))
+            while (ReservedTakes.ContainsKey(_nextToken))
             {
                 if (++_nextToken <= 0)
                     _nextToken = 1;

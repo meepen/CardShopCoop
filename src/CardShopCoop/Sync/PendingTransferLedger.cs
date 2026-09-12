@@ -45,8 +45,10 @@ namespace CardShopCoop.Sync
             if (seq == 0)
                 seq = ++_seq; // 0 means "no transfer" on the wire
             int token = requestedDelta < 0
-                ? HandEscrow.EscrowTake(transferType, -requestedDelta)
+                ? HandEscrow.ReserveTake(transferType, -requestedDelta)
                 : 0;
+            if (requestedDelta < 0 && token == 0)
+                CoopPlugin.Log.LogWarning($"PendingTransferLedger.Begin: take of {-requestedDelta} type {transferType} could not be reserved; rejection will not be reconciliable");
             if (requestedDelta > 0)
                 _pendingAdds.Add(target);
             _entries[seq] = new PendingTransfer<TKey>

@@ -190,7 +190,7 @@ namespace CardShopCoop.Sync
             _families = new List<IBoxFamily>(families);
             _transfers.Expired = pending =>
             {
-                // A take was already restored to the hand by HandEscrow. An unanswered add may
+                // A take was unreserved and remains in the hand. An unanswered add may
                 // have been accepted or rejected; either way force the host's truth so a
                 // suppressed mirror cannot keep optimistic content forever. Coalesce to one
                 // resync per tick: an unanswered add cannot conservatively refund its items

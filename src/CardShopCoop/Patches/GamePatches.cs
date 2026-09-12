@@ -131,6 +131,24 @@ namespace CardShopCoop.Patches
             Try(h, typeof(InteractionPlayerController), "ShowGoNextDayScreen",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(GoNextDayScreenBlockPrefix)));
 
+            // Keep a taken item from being placed into a shelf, box, or machine before the host
+            // confirms the transfer.
+            Try(h, typeof(InteractionPlayerController), "EvaluatePutItemOnShelf",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ReservedPutItemPrefix)));
+            // Keep a reserved handheld item from opening a card pack before confirmation; the
+            // card-box branch clears the whole hand.
+            Try(h, typeof(InteractionPlayerController), "EvaluateOpenCardPack",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ReservedOpenCardPackPrefix)));
+            // Prevent the spray path from applying a partial action to a reserved item.
+            Try(h, typeof(InteractionPlayerController), "IsHoldingSpray",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ReservedSprayPrefix)));
+            // Keep vanilla's hand removal from consuming a reserved item.
+            Try(h, typeof(InteractionPlayerController), "RemoveHoldItem",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ReservedRemoveHoldItemPrefix)));
+            // Keep vanilla cleanup from disabling a reserved item while it awaits the host.
+            Try(h, typeof(Item), "DisableItem",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(ReservedDisableItemPrefix)));
+
             // Alternate switch implementations and mods may call LightManager directly;
             // route those client requests through the host as well.
             Try(h, typeof(LightManager), "ToggleShopLight",
@@ -1122,6 +1140,34 @@ namespace CardShopCoop.Patches
             if (Sync.NpcSync.TryGetCustomerIdentity(followTransform,
                 out ushort index, out int identity))
                 CoopCore.Instance?.ForwardNpcSpeech(index, identity, text, offsetUp);
+        }
+
+        public static bool ReservedPutItemPrefix(InteractionPlayerController __instance)
+        {
+            return !HandEscrow.IsFrontReserved(__instance);
+        }
+
+        public static bool ReservedOpenCardPackPrefix(InteractionPlayerController __instance)
+        {
+            return !HandEscrow.HasReservedHeld(__instance);
+        }
+
+        public static bool ReservedSprayPrefix(InteractionPlayerController __instance, ref bool __result)
+        {
+            if (!HandEscrow.IsFrontReserved(__instance))
+                return true;
+            __result = false;
+            return false;
+        }
+
+        public static bool ReservedRemoveHoldItemPrefix(Item currentItem)
+        {
+            return !HandEscrow.IsReserved(currentItem);
+        }
+
+        public static bool ReservedDisableItemPrefix(Item __instance)
+        {
+            return !HandEscrow.IsReserved(__instance);
         }
 
         public static void NpcMoneyPopupPostfix(PricePopupSpawner __instance, float price,

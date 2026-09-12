@@ -2313,6 +2313,11 @@ namespace CardShopCoop
             }
         }
 
+        internal static List<Item> GetHeldItemList(InteractionPlayerController ipc)
+        {
+            return ipc != null ? FiHoldItemList?.GetValue(ipc) as List<Item> : null;
+        }
+
         private static readonly FieldInfo FiHoldCardMode =
             HarmonyLib.AccessTools.Field(typeof(InteractionPlayerController), "m_IsHoldCardMode");
 
@@ -2332,23 +2337,22 @@ namespace CardShopCoop
             return true;
         }
 
-        /// <summary>Detach the last matching item without disabling it. RemoveHoldItem removes
-        /// the front type entry, so RemoveHeldItemAt first swaps both parallel lists.</summary>
-        internal static Item DetachHeldItemAt(int localType)
+        /// <summary>Remove one item from the local hand through the game's own path, keeping
+        /// the hand and its parallel type list in sync. Returns false when the item is still
+        /// present afterwards (a suppressed RemoveHoldItem prefix), so callers never destroy
+        /// an object that is still in the hand.</summary>
+        internal static bool RemoveHeldItemFromHand(Item item)
         {
             var ipc = PlayerIpc;
-            if (ipc == null || !(FiHoldItemList?.GetValue(ipc) is List<Item> items))
-                return null;
-            for (int i = items.Count - 1; i >= 0; i--)
+            if (item == null || ipc == null || !(FiHoldItemList?.GetValue(ipc) is List<Item> items))
+                return false;
+            RemoveHeldItemAt(ipc, items, item);
+            if (items.IndexOf(item) >= 0)
             {
-                var item = items[i];
-                if (item != null && (int)item.GetItemType() == localType)
-                {
-                    RemoveHeldItemAt(ipc, items, item);
-                    return item;
-                }
+                CoopPlugin.Log.LogError("RemoveHeldItemFromHand: RemoveHoldItem was suppressed or failed; item remains in hand during rollback");
+                return false;
             }
-            return null;
+            return true;
         }
 
         /// <summary>Attach a returned item through the game's own hand path. The explicit
