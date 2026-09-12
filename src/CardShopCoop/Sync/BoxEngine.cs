@@ -100,6 +100,13 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<ushort, float> _localRemoved = new Dictionary<ushort, float>();
         private readonly List<ushort> _localRemovedScratch = new List<ushort>();
         private readonly Dictionary<ushort, float> _clientMotionBlockedUntil = new Dictionary<ushort, float>();
+        // A box this client just reported (open/close/content edge): keep our local open
+        // state over any snapshot that was already in flight before the report arrived, or
+        // a stale "closed" would revert the lid a moment after the player opened it.
+        // Must outlast the game's 0.85s open/close toggle animation (SetOpenCloseBox ignores
+        // calls while a toggle is in flight), plus the network round trip.
+        private const float ClientOpenBlockPeriod = 1.5f;
+        private readonly Dictionary<ushort, float> _clientOpenBlockedUntil = new Dictionary<ushort, float>();
         private const float LocalRemovedTtl = 5.0f;
         private int _clientFam;
         private int _clientIdx;
@@ -247,6 +254,7 @@ namespace CardShopCoop.Sync
             ClearClientBoxEntries(box);
             _clientById.Remove(id);
             _clientMotionBlockedUntil.Remove(id);
+            _clientOpenBlockedUntil.Remove(id);
         }
 
         public bool HostBoxHeldByOther(ushort id, int connId)
@@ -341,6 +349,7 @@ namespace CardShopCoop.Sync
             _localRemoved.Clear();
             _localRemovedScratch.Clear();
             _clientMotionBlockedUntil.Clear();
+            _clientOpenBlockedUntil.Clear();
             _reported.Clear();
             _reportedContent.Clear();
             _contentSentAt.Clear();
@@ -396,6 +405,7 @@ namespace CardShopCoop.Sync
         {
             if (!active)
                 return;
+            BoxVisuals.TickPending();
             _leaseClock += dt;
             // Forced path: the box the host player is holding must emit on the same frame,
             // not when the round-robin slice happens to reach it.
@@ -524,10 +534,21 @@ namespace CardShopCoop.Sync
                 SendSnapshot?.Invoke(new BoxSnapshotMessage { Boxes = one, Full = false });
         }
 
+        /// <summary>Ensure a box (the dynamic body) carries a contact receiver. The player's
+        /// kinematic body does not receive collision callbacks, so the box reports real
+        /// contacts with the local player to <see cref="BoxPushProbe"/>.</summary>
+        private static void EnsureContactProbe(InteractablePackagingBox box)
+        {
+            if (box == null || box.GetComponent<BoxContactProbe>() != null)
+                return;
+            box.gameObject.AddComponent<BoxContactProbe>().Init(box);
+        }
+
         private void ProcessHostBox(IBoxFamily family, InteractablePackagingBox box, List<BoxWire> list)
         {
             if (family == null || box == null)
                 return;
+            EnsureContactProbe(box);
             if (!family.TryReadLocal(box, out var localPoss, out var pos, out var yaw,
                     out var vel, out var angVel, out var stored))
                 return;
@@ -691,7 +712,7 @@ namespace CardShopCoop.Sync
             }
 
             var next = BoxAuthority.NextBoxOwner(sender, w.Possession);
-            BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} accepted=true owner={lease.Owner}->{next}");
+            BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} open={w.Open} accepted=true owner={lease.Owner}->{next}");
             // The client does not know the host's owner id for itself; stamp the sender so
             // the families resolve the correct avatar for a remote Held/Placing box.
             w.OwnerConn = connId;
@@ -921,7 +942,7 @@ namespace CardShopCoop.Sync
                     {
                         _clientById[w.Id] = box;
                         _clientIdOf[box] = w.Id;
-                        BoxShared.DebugLog("box-adopt", $"id={w.Id} fam={w.Family} state={w.Possession} name={box.name} adopted=true");
+                        BoxShared.DebugLog("box-adopt", $"id={w.Id} fam={w.Family} state={w.Possession} open={w.Open} name={box.name} adopted=true");
                     }
                     else
                     {
@@ -965,6 +986,10 @@ namespace CardShopCoop.Sync
                     && w.OwnerConn == CoopCore.LocalConnectionId;
                 if (!mine)
                 {
+                    if (w.Possession == BoxPossession.Free
+                        && _clientOpenBlockedUntil.TryGetValue(w.Id, out var openBlockedUntil)
+                        && Time.time < openBlockedUntil)
+                        w.Open = BoxVisuals.ReadOpen(box); // keep the lid state we just reported
                     family.ApplyState(box, w, isOwner: false);
                     // A reliable Free pose is the settle commit: end any in-flight push
                     // smoothing so physics resumes from the authoritative pose, not a
@@ -1055,6 +1080,7 @@ namespace CardShopCoop.Sync
         {
             if (!active)
                 return;
+            BoxVisuals.TickPending();
 
             // Forced path: the box the local player just picked up is processed immediately,
             // not when the round-robin slice reaches it.
@@ -1152,6 +1178,7 @@ namespace CardShopCoop.Sync
         {
             if (family == null || box == null)
                 return false;
+            EnsureContactProbe(box);
             bool read = family.TryReadLocal(box, out var poss, out var pos, out var yaw,
                 out var vel, out var angVel, out var stored);
             if (!_clientIdOf.ContainsKey(box))
@@ -1209,9 +1236,10 @@ namespace CardShopCoop.Sync
                 w.AngularVelocity = angVel;
             }
             family.FillContent(box, ref w);
-            BoxShared.DebugLog("box-tx", $"id={w.Id} fam={w.Family} state={poss} sig={sig} name={box.name}",
+            BoxShared.DebugLog("box-tx", $"id={w.Id} fam={w.Family} state={poss} open={w.Open} sig={sig} name={box.name}",
                 box.GetInstanceID(), 0.05f);
             SendUpdate?.Invoke(new BoxUpdateMessage { Box = w });
+            _clientOpenBlockedUntil[w.Id] = Time.time + ClientOpenBlockPeriod;
             return isActive;
         }
 
@@ -1234,13 +1262,25 @@ namespace CardShopCoop.Sync
                 return false;
             var family = Family(FamilyOf(box));
             if (family == null)
+            {
+                BoxShared.DebugLog("push-can", $"name={box.name} reject=no-family role={CoopCore.Role}", box.GetInstanceID(), 1f);
                 return false;
+            }
             if (!family.TryReadLocal(box, out var poss, out _, out _, out _, out _, out var stored))
+            {
+                BoxShared.DebugLog("push-can", $"name={box.name} reject=tryread-false fam={family.Family}", box.GetInstanceID(), 1f);
                 return false;
+            }
             if (poss != BoxPossession.Free || stored)
+            {
+                BoxShared.DebugLog("push-can", $"name={box.name} reject=poss={poss} stored={stored} fam={family.Family}", box.GetInstanceID(), 1f);
                 return false;
+            }
             if (CoopCore.Role == CoopRole.Client && !_clientIdOf.ContainsKey(box))
+            {
+                BoxShared.DebugLog("push-can", $"name={box.name} reject=no-client-id fam={family.Family}", box.GetInstanceID(), 1f);
                 return false;
+            }
             return true;
         }
 
@@ -1349,6 +1389,7 @@ namespace CardShopCoop.Sync
             }
             else
             {
+                BoxShared.DebugLog("box-motion-tx", $"id={id} name={box.name} pos={pos}", box.GetInstanceID(), 0.5f);
                 SendMotion?.Invoke(new BoxMotionMessage
                 {
                     Id = id,
@@ -1416,20 +1457,36 @@ namespace CardShopCoop.Sync
             if (msg == null)
                 return;
             if (!_hostIdentity.ById.TryGetValue(msg.Id, out var box) || box == null)
+            {
+                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=unknown-box", msg.Id, 0.5f);
                 return; // unknown/removed box
+            }
             Lease lease = _leases.TryGetValue(msg.Id, out var l) ? l : default(Lease);
             if (lease.Possession == BoxPossession.Held || lease.Possession == BoxPossession.Placing)
+            {
+                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=poss={lease.Possession}", msg.Id, 0.5f);
                 return; // in someone's hand; a push can't own it
+            }
             var family = Family(FamilyOf(box));
             if (family != null
                 && family.TryReadLocal(box, out _, out _, out _, out _, out _, out var stored)
                 && stored)
+            {
+                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=stored", msg.Id, 0.5f);
                 return; // a racked (stored) box isn't pushed
+            }
             if (_leaseClock < lease.MotionBlockedUntil)
+            {
+                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=blocked", msg.Id, 0.5f);
                 return; // a reliable edge just landed; absorb late transient frames
+            }
             if (lease.MotionDriven && lease.Driver != connId
                 && _leaseClock - lease.LastMotion < MotionLeaseTimeout)
+            {
+                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=other-driver={lease.Driver}", msg.Id, 0.5f);
                 return; // another player already drives it (first-claim wins)
+            }
+            BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} accept pos={msg.Pos}", msg.Id, 0.5f);
 
             lease.MotionDriven = true;
             lease.Driver = connId;

@@ -19,6 +19,13 @@ namespace CardShopCoop.Sync
         // animation every snapshot while still correcting a wrong state.
         private static readonly Dictionary<InteractablePackagingBox, bool> Applied
             = new Dictionary<InteractablePackagingBox, bool>();
+        // A desired open state the game refused. SetOpenCloseBox ignores calls while its 0.85s
+        // toggle animation runs, so an apply can be silently dropped; retry it each frame until
+        // the live flag agrees, or the box stays permanently wrong on that peer.
+        private static readonly Dictionary<InteractablePackagingBox, bool> Pending
+            = new Dictionary<InteractablePackagingBox, bool>();
+        private static readonly List<KeyValuePair<InteractablePackagingBox, bool>> PendingScratch
+            = new List<KeyValuePair<InteractablePackagingBox, bool>>();
 
         public static bool ReadOpen(InteractablePackagingBox box)
         {
@@ -62,6 +69,7 @@ namespace CardShopCoop.Sync
                 catch (System.Exception e) { Swallow.Log(e); }
             }
 
+            BoxShared.DebugLog("open-set", $"box={box.name} open={open} read={ReadOpen(box)}", box.GetInstanceID(), 0.25f);
             try
             {
                 switch (box)
@@ -86,6 +94,31 @@ namespace CardShopCoop.Sync
                 return;
             }
             Applied[box] = open;
+            NotePending(box, open);
+        }
+
+        /// <summary>Retry any open/close the game refused (toggle animation in flight). Called
+        /// once per frame by the box engine on both roles.</summary>
+        public static void TickPending()
+        {
+            if (Pending.Count == 0)
+                return;
+            PendingScratch.Clear();
+            foreach (var kv in Pending)
+                PendingScratch.Add(kv);
+            Pending.Clear();
+            for (int i = 0; i < PendingScratch.Count; i++)
+                EnsureOpenState(PendingScratch[i].Key, PendingScratch[i].Value);
+        }
+
+        private static void NotePending(InteractablePackagingBox box, bool open)
+        {
+            if (box == null)
+                return;
+            if (ReadOpen(box) == open)
+                Pending.Remove(box);
+            else
+                Pending[box] = open;
         }
 
         /// <summary>Apply an explicit box lifecycle event. Unlike snapshot reconciliation,
@@ -115,7 +148,10 @@ namespace CardShopCoop.Sync
         public static void Forget(InteractablePackagingBox box)
         {
             if (box != null)
+            {
                 Applied.Remove(box);
+                Pending.Remove(box);
+            }
         }
 
         /// <summary>The single visibility writer: show/hide a box AND its world label and
@@ -146,12 +182,13 @@ namespace CardShopCoop.Sync
                 }
             }
             catch (System.Exception e) { Swallow.Log(e); }
-            // A held box is deactivated; re-enabling a shelf box restarts its Animation from the
+            // A held box is deactivated; re-enabling a SHELF box restarts its Animation from the
             // prefab default, so a thrown/dropped box can reappear with its lid open even though
-            // nothing opened it. EnsureOpenState then skips (our tracked state already says
-            // closed), so re-assert the intended look on every hidden -> visible edge. Item and
-            // card boxes carry a real open flag, so this is a no-op correction for them.
-            if (visible && !wasVisible)
+            // nothing opened it. Only shelves need this - their animation has no readable flag.
+            // Item/card boxes have a real committed flag and must NOT be re-asserted here: the
+            // incoming wire value (applied next by EnsureOpenState) would otherwise close then
+            // reopen, which reads as a flicker.
+            if (visible && !wasVisible && box is InteractablePackagingBox_Shelf)
             {
                 bool open = ReadOpen(box);
                 if (BoxShared.Debug && box is InteractablePackagingBox_Shelf dbg)
@@ -165,6 +202,7 @@ namespace CardShopCoop.Sync
         public static void Reset()
         {
             Applied.Clear();
+            Pending.Clear();
         }
     }
 }

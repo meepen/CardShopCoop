@@ -2120,10 +2120,30 @@ namespace CardShopCoop
             if (_pushProbe != null)
                 return;
             if (_playerIpc == null || _playerIpc.m_PlayerRigidbody == null)
+            {
+                CoopPlugin.Log.LogWarning("push probe NOT attached: "
+                    + (_playerIpc == null ? "no InteractionPlayerController" : "m_PlayerRigidbody is null"));
                 return;
+            }
             _pushProbe = _playerIpc.m_PlayerRigidbody.GetComponent<Sync.BoxPushProbe>()
                 ?? _playerIpc.m_PlayerRigidbody.gameObject.AddComponent<Sync.BoxPushProbe>();
             _pushProbe.Init(_playerIpc.m_PlayerRigidbody);
+            CoopPlugin.Log.LogInfo($"push probe attached to {_playerIpc.m_PlayerRigidbody.gameObject.name} (kinematic={_playerIpc.m_PlayerRigidbody.isKinematic})");
+        }
+
+        /// <summary>True if the collider belongs to the LOCAL player's body. Box-side contact
+        /// probes use this to tell a real player push from any other box collision.</summary>
+        internal static bool IsLocalPlayerCollider(Collider collider)
+        {
+            var core = Instance;
+            if (core == null || collider == null || core._playerIpc == null)
+                return false;
+            var playerCollider = core._playerIpc.m_PlayerCollider;
+            if (playerCollider == null)
+                return false;
+            return collider == playerCollider
+                || collider.transform.IsChildOf(playerCollider.transform)
+                || playerCollider.transform.IsChildOf(collider.transform);
         }
 
         /// <summary>Make the co-op window modal while it is visible in a game level.

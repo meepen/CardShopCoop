@@ -990,7 +990,7 @@ namespace CardShopCoop.Sync
             catch (System.Exception e) { Swallow.Log(e); }
             try
             {
-                FiCustTotal?.SetValue(carrier, 0.0);
+                FiCustTotal?.SetValue(carrier, 0f);
             }
             catch (System.Exception e) { Swallow.Log(e); }
             try
