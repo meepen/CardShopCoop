@@ -314,6 +314,14 @@ namespace CardShopCoop.Patches
             Try(h, typeof(InteractableCardCompartment), "DisableAllCard",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
 
+            // A display card leaves the shared collection when the player picks it up from the
+            // binder - long before it reaches a shelf - so the local card3d is the only copy until
+            // the host confirms the placement. Mark the placement so CardShelfSync never silently
+            // adopts over it and never destroys it before the host has explicitly answered.
+            Try(h, typeof(InteractableCardCompartment), "OnMouseButtonUp",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(CardPlacementPrefix)),
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(CardPlacementPostfix)));
+
             // Product licenses are shared: bought by either player, unlocked for both.
             // Identity travels as (itemType + box size), never a restock-list index -
             // modded restock lists can be ordered differently per machine.
@@ -423,6 +431,25 @@ namespace CardShopCoop.Patches
         {
             if (CoopCore.Role != CoopRole.None)
                 CoopCore.RequestImmediateObjectSync();
+        }
+
+        /// <summary>Captures whether the card compartment was empty before the click. Vanilla
+        /// refuses a placement into an occupied slot, so only a 0 -> occupied transition is a
+        /// fresh player placement.</summary>
+        public static void CardPlacementPrefix(InteractableCardCompartment __instance, out int __state)
+        {
+            __state = __instance != null ? __instance.m_StoredCardList.Count : -1;
+        }
+
+        public static void CardPlacementPostfix(InteractableCardCompartment __instance, int __state)
+        {
+            if (__state != 0 || __instance == null || __instance.m_StoredCardList.Count == 0)
+                return;
+            try
+            {
+                Sync.CardShelfSync.MarkLocalPlacement(__instance);
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning("CardPlacementPostfix: " + e.Message); }
         }
 
         public static void BoxOpenClosePostfix(InteractablePackagingBox_Item __instance)

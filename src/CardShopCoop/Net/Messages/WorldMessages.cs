@@ -79,6 +79,16 @@ namespace CardShopCoop.Net.Messages
     public sealed class CardShelfDeltaMessage : INetMessage
     {
         public List<CardShelfSync.Entry> Entries = new List<CardShelfSync.Entry>();
+
+        /// <summary>True only on the direct reply the host sends after applying a
+        /// <see cref="CardShelfRequestMessage"/>. A periodic/snapshot delta does NOT set it. The
+        /// placing client uses the distinction to tell "the host processed my request" from "this
+        /// snapshot was already in flight before the host saw it": an echo whose entry is empty
+        /// means the host could not apply the placement, so the client banks the card back into
+        /// the shared collection instead of destroying the only copy. Non-echo snapshots never
+        /// resolve a pending placement.</summary>
+        public bool Echo;
+
         public MsgType Type
         {
             get

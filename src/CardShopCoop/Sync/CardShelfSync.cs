@@ -67,6 +67,29 @@ namespace CardShopCoop.Sync
         private float _scanInterval = BaseScanInterval;
         private ShelfManager _sm;
 
+        /// <summary>A display slot THIS client placed a card into and the host has not yet
+        /// explicitly confirmed. The card left the shared collection the moment it was picked up
+        /// from the binder, so while it sits in this state the local card3d is the ONLY copy. A
+        /// snapshot-like empty entry must therefore never destroy it: the client re-sends the
+        /// placement until the host echoes an authoritative result (see the two-arg
+        /// <see cref="ApplyRemote"/>), and only an EXPLICIT empty echo banks the card back into
+        /// the collection.</summary>
+        private struct PendingPlacement
+        {
+            public CardData Card;
+            public double LastSend;
+            public int Attempts;
+        }
+
+        private readonly Dictionary<int, PendingPlacement> _pendingPlacements = new Dictionary<int, PendingPlacement>();
+        private float _pendingResendTimer;
+        private const float PendingResendInterval = 2.0f;
+        private const int PendingResendMax = 15; // ~30s, then leave the slot local (never delete)
+
+        /// <summary>Live instance, for the card-compartment placement patch. Mirrors
+        /// PlayTableSync.Active; the module registry owns Start/Dispose.</summary>
+        public static CardShelfSync Active;
+
         // Time-sliced scan state: the walk is spread over frames, budget in SHELVES.
         private readonly ListScanCursor _cursor = new ListScanCursor { Budget = 12 };
         private System.Collections.IList[] _groups;
@@ -84,12 +107,32 @@ namespace CardShopCoop.Sync
 
         public override string Name => "card-shelves";
 
+        public override void Start() => Active = this;
+
+        public override void Dispose()
+        {
+            if (ReferenceEquals(Active, this))
+                Active = null;
+            base.Dispose();
+        }
+
         public override void ForceResend() => ForceNextTick();
 
         public override void Reset()
         {
+            if (_pendingPlacements.Count > 0)
+            {
+                // A teardown/world reload can arrive before the host confirms a local placement.
+                // Banking during teardown is unsafe (the world may be replaced by the host's
+                // snapshot in the same beat), so this is deliberately left as the one remaining
+                // path where an unconfirmed placement can be lost - but it must never be silent.
+                CoopPlugin.Log.LogWarning(
+                    $"CardShelfSync: reset with {_pendingPlacements.Count} unconfirmed display placement(s) - the host never confirmed them");
+            }
             _last.Clear();
             _locallyChanged.Clear();
+            _pendingPlacements.Clear();
+            _pendingResendTimer = 0f;
             _snapshotErrors.Clear();
             _timer = 0.1f; // staggered phase vs the other snapshot engines
             _scanInterval = BaseScanInterval;
@@ -126,6 +169,7 @@ namespace CardShopCoop.Sync
             if (!active)
                 return;
             _timer += dt;
+            TickPendingResend(dt);
             if (!_scanning)
             {
                 if (_timer < _scanInterval)
@@ -195,10 +239,16 @@ namespace CardShopCoop.Sync
                     if (!TryReadSlot(comp, out CardData card))
                         continue;
                     bool occupied = card != null;
-                    if (_last.TryGetValue(key, out var st) && st.Occupied == occupied && (!occupied || st.Matches(card)))
+                    bool known = _last.TryGetValue(key, out var st);
+                    bool pending = IsClientRole && _pendingPlacements.ContainsKey(key);
+                    if (known && st.Occupied == occupied && (!occupied || st.Matches(card)))
                         continue;
-                    if (!_last.ContainsKey(key) && IsClientRole)
+                    if (!known && IsClientRole && !pending)
                     {
+                        // A joiner's first sighting of a slot it did not touch is the host's
+                        // world: adopt it silently. A slot THIS client just placed into is
+                        // NOT adopted, or the placement would never be announced and the
+                        // host's next authoritative snapshot would erase the only copy.
                         _last[key] = SlotState.From(card);
                         continue;
                     }
@@ -207,6 +257,21 @@ namespace CardShopCoop.Sync
                     if (_scanChanges.Count >= 128)
                         continue; // leave un-recorded; picked up next scan
                     _last[key] = SlotState.From(card);
+                    if (pending)
+                    {
+                        // Keep the pending record in step with what is actually on the shelf:
+                        // an occupied change refreshes the card, an empty change means the
+                        // player took it back (it is in hand now, no longer a placement).
+                        if (occupied)
+                            _pendingPlacements[key] = new PendingPlacement
+                            {
+                                Card = card,
+                                LastSend = Time.realtimeSinceStartupAsDouble,
+                                Attempts = 0,
+                            };
+                        else
+                            _pendingPlacements.Remove(key);
+                    }
                     if (IsClientRole)
                         _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
                     _scanChanges.Add(new Entry { Key = key, Occupied = occupied, Card = card });
@@ -256,7 +321,15 @@ namespace CardShopCoop.Sync
             return card != null;
         }
 
-        public void ApplyRemote(List<Entry> entries)
+        public void ApplyRemote(List<Entry> entries) => ApplyRemote(entries, false);
+
+        /// <summary>Apply host-authoritative card-display state. <paramref name="echo"/> is true
+        /// only on the host's direct reply to this client's own placement request. The distinction
+        /// is load-bearing: a snapshot (echo false) that says a pending slot is empty may have been
+        /// sent before the host ever saw our request, so it must NOT destroy the placement. Only an
+        /// echo can resolve a pending placement - occupied (host has it) or empty (host rejected
+        /// it, so we bank the card instead of losing it).</summary>
+        public void ApplyRemote(List<Entry> entries, bool echo)
         {
             var sm = Sm();
             if (sm == null)
@@ -265,6 +338,35 @@ namespace CardShopCoop.Sync
             {
                 try
                 {
+                    if (IsClientRole && _pendingPlacements.TryGetValue(e.Key, out var pending))
+                    {
+                        bool isMine = e.Occupied && PendingMatches(pending.Card, e.Card);
+                        if (isMine)
+                        {
+                            // the host holds this exact card on the slot: confirmed, whether it
+                            // arrived as the direct echo or a later authoritative snapshot
+                            _pendingPlacements.Remove(e.Key);
+                            _locallyChanged.Remove(e.Key);
+                        }
+                        else if (echo)
+                        {
+                            // the host processed the request and the slot does NOT hold our card
+                            // (it is empty, or another card replaced it). Our card left the
+                            // collection at pickup, so bank it back rather than destroying it.
+                            CoopPlugin.Log.LogWarning(
+                                $"CardShelfSync: host placement result for {CardName(pending.Card)} at {e.Key:X} was '{CardName(e.Card)}' - returning our card to the binder instead of losing it");
+                            ReturnPendingToBinder(pending.Card);
+                            _pendingPlacements.Remove(e.Key);
+                            _locallyChanged.Remove(e.Key);
+                            // fall through: apply the host's authoritative state below
+                        }
+                        else
+                        {
+                            // snapshot that may predate the host seeing our request: keep the
+                            // placement and wait for the echo rather than erase the only copy
+                            continue;
+                        }
+                    }
                     // my own fresh edit is still round-tripping to the host; a stale
                     // echo (or the periodic full resync) must not stomp it
                     if (IsClientRole && _locallyChanged.TryGetValue(e.Key, out double t)
@@ -289,6 +391,176 @@ namespace CardShopCoop.Sync
                     CoopPlugin.Log.LogWarning($"CardShelfSync apply {e.Key:X}: {ex.Message}");
                 }
             }
+        }
+
+        /// <summary>Host: the authoritative post-apply state of the given slots, sent back as the
+        /// echo. A key that does not resolve at all is reported EMPTY so the placing client can
+        /// bank the card; an unreadable (culled) slot is OMITTED so the client keeps waiting
+        /// rather than banking a card the host actually holds.</summary>
+        public List<Entry> ReadEntries(List<Entry> requested)
+        {
+            var result = new List<Entry>();
+            if (requested == null)
+                return result;
+            var sm = Sm();
+            if (sm == null)
+                return result;
+            for (int i = 0; i < requested.Count; i++)
+            {
+                var e = requested[i];
+                try
+                {
+                    var comp = Resolve(sm, e.Key);
+                    if (comp == null)
+                    {
+                        result.Add(new Entry { Key = e.Key, Occupied = false });
+                        continue;
+                    }
+                    if (!TryReadSlot(comp, out CardData card))
+                        continue; // unreadable: say nothing, keep the client pending
+                    result.Add(new Entry { Key = e.Key, Occupied = card != null, Card = card });
+                }
+                catch (Exception ex)
+                {
+                    CoopPlugin.Log.LogWarning($"CardShelfSync read {e.Key:X}: {ex.Message}");
+                }
+            }
+            return result;
+        }
+
+        private static bool PendingMatches(CardData pending, CardData remote)
+        {
+            return pending != null && remote != null && SlotState.From(pending).Matches(remote);
+        }
+
+        private static string CardName(CardData c)
+        {
+            if (c == null)
+                return "(null)";
+            return c.expansionType + "#" + (int)c.monsterType
+                + (c.cardGrade > 0 ? " grade " + c.cardGrade : "");
+        }
+
+        private static void ReturnPendingToBinder(CardData card)
+        {
+            if (card == null)
+                return;
+            try
+            {
+                // A graded card must be registered with Grading Overhaul before AddCard or its
+                // anti-cheat re-encodes the cert as fake (same rule as ApplyCardDelta).
+                if (card.cardGrade > 10 && Util.GradingInterop.Present)
+                    Util.GradingInterop.Remember(card);
+                CPlayerData.AddCard(card, 1);
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("CardShelfSync return-to-binder failed: " + e.Message);
+            }
+        }
+
+        /// <summary>Client: remember that a card was placed into a display slot by THIS player, so
+        /// the mirror never silently adopts over it and never destroys it before the host has
+        /// explicitly answered. Called from the card-compartment placement patch.</summary>
+        internal static void MarkLocalPlacement(InteractableCardCompartment comp)
+        {
+            var self = Active;
+            if (self == null || !self.IsClientRole || comp == null)
+                return;
+            try
+            {
+                var shelf = comp.GetCardShelf();
+                if (shelf == null || !self.TryKindOf(shelf, out int kind))
+                    return;
+                int compIdx = CompartmentIndex(shelf, comp);
+                if (compIdx < 0)
+                    return;
+                if (!PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, compIdx, out int key))
+                {
+                    CoopPlugin.Log.LogWarning(
+                        "CardShelfSync: a card was placed on a display this client has not bound yet - the placement will not sync");
+                    return;
+                }
+                if (!TryReadSlot(comp, out CardData card) || card == null)
+                    return;
+                self._pendingPlacements[key] = new PendingPlacement
+                {
+                    Card = card,
+                    LastSend = Time.realtimeSinceStartupAsDouble,
+                    Attempts = 0,
+                };
+                self._locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
+            }
+            catch (Exception e) { Swallow.Log(e); }
+        }
+
+        private void TickPendingResend(float dt)
+        {
+            if (!IsClientRole || _pendingPlacements.Count == 0)
+                return;
+            _pendingResendTimer += dt;
+            if (_pendingResendTimer < PendingResendInterval)
+                return;
+            _pendingResendTimer = 0f;
+            var entries = new List<Entry>();
+            var keys = new List<int>(_pendingPlacements.Keys);
+            for (int i = 0; i < keys.Count; i++)
+            {
+                int key = keys[i];
+                var p = _pendingPlacements[key];
+                if (p.Attempts >= PendingResendMax)
+                    continue; // bounded: the card stays local, never deleted
+                p.Attempts++;
+                _pendingPlacements[key] = p;
+                _locallyChanged[key] = Time.realtimeSinceStartupAsDouble;
+                entries.Add(new Entry { Key = key, Occupied = true, Card = p.Card });
+            }
+            if (entries.Count > 0)
+                OnLocalChanges?.Invoke(entries);
+        }
+
+        private bool TryKindOf(CardShelf shelf, out int kind)
+        {
+            var sm = Sm();
+            if (sm != null)
+            {
+                if (ContainsRef(sm.m_CardShelfList, shelf))
+                {
+                    kind = 2;
+                    return true;
+                }
+                if (ContainsRef(sm.m_CardItemCombiShelfList, shelf))
+                {
+                    kind = 3;
+                    return true;
+                }
+                if (ContainsRef(sm.m_TournamentPrizeShelfList, shelf))
+                {
+                    kind = 14;
+                    return true;
+                }
+            }
+            kind = 0;
+            return false;
+        }
+
+        private static bool ContainsRef<T>(List<T> list, CardShelf shelf) where T : CardShelf
+        {
+            if (list == null)
+                return false;
+            for (int i = 0; i < list.Count; i++)
+                if (ReferenceEquals(list[i], shelf))
+                    return true;
+            return false;
+        }
+
+        private static int CompartmentIndex(CardShelf shelf, InteractableCardCompartment comp)
+        {
+            var comps = shelf.GetCardCompartmentList();
+            for (int i = 0; i < comps.Count; i++)
+                if (ReferenceEquals(comps[i], comp))
+                    return i;
+            return -1;
         }
 
         private static InteractableCardCompartment Resolve(ShelfManager sm, int key)

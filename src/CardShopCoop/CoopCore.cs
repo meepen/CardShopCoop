@@ -1760,6 +1760,7 @@ namespace CardShopCoop
                     InstallLiveModuleHooks, null, null, ClearLiveModuleHooks), "live-hooks"),
                 new Sync.CoopModuleEntry(null, "cardboxes", patches: Sync.CardBoxOps.ApplyPatches),
                 new Sync.CoopModuleEntry(null, "furnboxes", patches: Sync.FurnitureBoxOps.ApplyPatches),
+                new Sync.CoopModuleEntry(null, "hand-protection", patches: Sync.HandProtection.ApplyPatches),
             };
         }
 

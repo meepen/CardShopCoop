@@ -6,8 +6,22 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 ---
 
 ## 1.2.0
-**Boxes and furniture now stay in sync through pickups, throws, placement, and joining.**
+**Boxes and furniture now stay in sync through pickups, throws, placement, and joining, and cards no longer vanish when a guest sets them out to sell or is holding them.**
 
+- **Fixed: a card a guest placed on a display could be deleted by a later sync instead of
+  returning to the binder.** A card leaves your collection the moment you pick it up, so until
+  the host confirms it is on the display, the card in your hand or on the shelf is the only copy.
+  The display sync used to trust any snapshot that said the slot was empty and would destroy that
+  copy. Placement now waits for an explicit answer from the host: if the host has the card the
+  slot is confirmed, and if the host could not accept the placement the card is returned to the
+  binder instead of disappearing.
+- **Fixed: opening a graded-card return box while already holding cards could lose cards.** The
+  game's box open adds every returned card to your hand without checking the hand limit, which
+  could overflow it or throw partway through. Any card that does not fit is now put safely into
+  the shared binder (and mirrors to the other player) rather than being dropped or left in a box
+  that then despawns.
+- **Fixed: a saved hand that already overflowed could silently lose the extra cards on load.**
+  Cards beyond the hand limit are now returned to the binder before the game trims the list.
 - Joining players now see market and price values re-sync after the world finishes loading,
   instead of briefly seeing stale values.
 

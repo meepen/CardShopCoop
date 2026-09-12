@@ -322,7 +322,7 @@ namespace CardShopCoop
                 if (Role != CoopRole.Client || !InGameLevel())
                     return;
                 if (message is CardShelfDeltaMessage cardShelfDelta)
-                    _cardShelves.ApplyRemote(cardShelfDelta.Entries);
+                    _cardShelves.ApplyRemote(cardShelfDelta.Entries, cardShelfDelta.Echo);
                 return;
             },
                 MessagePolicy.ClientOnlyInGame, false, heal: () => { _coinHeal = 999f; _progressHeal = 999f; });
@@ -334,8 +334,15 @@ namespace CardShopCoop
                 {
                     var entries = cardShelfRequest.Entries;
                     _cardShelves.ApplyRemote(entries);
-                    if (_net.ConnectionCount > 1) // see ShelfRequest note
-                        Broadcast(new CardShelfDeltaMessage { Entries = entries });
+                    // ALWAYS echo the true post-apply state back - including to the sender in a
+                    // 2-player session. The echo (MsgType.CardShelfDelta, Echo=true) is what lets
+                    // the placing client tell "host has the card" from "host could not apply it":
+                    // without it the client cannot distinguish a stale in-flight snapshot from a
+                    // rejection, and the old code chose to delete the card. Other guests get the
+                    // same state as a normal delta.
+                    var echo = _cardShelves.ReadEntries(entries);
+                    if (echo.Count > 0)
+                        Broadcast(new CardShelfDeltaMessage { Echo = true, Entries = echo });
                 }
                 return;
             },
