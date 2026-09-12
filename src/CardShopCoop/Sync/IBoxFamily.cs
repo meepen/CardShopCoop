@@ -31,8 +31,14 @@ namespace CardShopCoop.Sync
         /// pose, physics and possession untouched. The host uses this to honor a non-owner's
         /// legitimate loose-box edit (opening/closing, adding or taking items) without letting
         /// the report overwrite the authoritative pose - the stale-pose guard stays intact.
-        /// Families whose content is immutable or derived (card, furniture) do nothing.</summary>
-        void ReconcileContent(InteractablePackagingBox box, in BoxWire w);
+        /// Returns true when the operation was applied (or was a valid lid-only no-content
+        /// operation), and false when it must be rejected so the host re-asserts authoritative
+        /// state. Families whose content is immutable or derived (card, furniture) return false.</summary>
+        bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount);
+
+        /// <summary>Reads the raw mutable item count for delta bookkeeping; returns 0 for
+        /// families without a mutable count.</summary>
+        int ReadItemCount(InteractablePackagingBox box);
 
         IList<InteractablePackagingBox> LiveBoxes();
 

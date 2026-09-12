@@ -12,6 +12,11 @@ namespace CardShopCoop.Net.Messages
     {
         public BoxWire Box;
 
+        /// <summary>The item count the report's Box.ItemCount was based on, so the host can
+        /// apply the reporter's delta to its current authoritative count instead of the
+        /// reporter's stale absolute. Ignored on host-to-client snapshots.</summary>
+        public int ContentBaseItemCount;
+
         public MsgType Type
         {
             get

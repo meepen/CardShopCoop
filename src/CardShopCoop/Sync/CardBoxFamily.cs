@@ -18,9 +18,15 @@ namespace CardShopCoop.Sync
         // not a change, and recreating the mirror is what duplicated boxes.
         public bool RecreateOnContentMismatch => false;
 
-        public void ReconcileContent(InteractablePackagingBox box, in BoxWire w)
+        public int ReadItemCount(InteractablePackagingBox box)
+        {
+            return 0;
+        }
+
+        public bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount)
         {
             // A graded box's card list is immutable; nothing to reconcile in place.
+            return false;
         }
 
         public IList<InteractablePackagingBox> LiveBoxes()

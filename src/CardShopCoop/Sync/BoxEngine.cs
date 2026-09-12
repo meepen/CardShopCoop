@@ -85,6 +85,8 @@ namespace CardShopCoop.Sync
             = new Dictionary<InteractablePackagingBox, BoxPossession>();
         private readonly Dictionary<InteractablePackagingBox, int> _reportedContent
             = new Dictionary<InteractablePackagingBox, int>();
+        private readonly Dictionary<InteractablePackagingBox, int> _baselineItemCount
+            = new Dictionary<InteractablePackagingBox, int>();
         private readonly Dictionary<InteractablePackagingBox, float> _contentSentAt
             = new Dictionary<InteractablePackagingBox, float>();
         private readonly Dictionary<InteractablePackagingBox, float> _lastSentAt
@@ -275,6 +277,7 @@ namespace CardShopCoop.Sync
             _clientIdOf.Remove(box);
             _reported.Remove(box);
             _reportedContent.Remove(box);
+            _baselineItemCount.Remove(box);
             _contentSentAt.Remove(box);
             _lastSentAt.Remove(box);
             _active.Remove(box);
@@ -388,6 +391,7 @@ namespace CardShopCoop.Sync
             _clientGuards.Clear();
             _reported.Clear();
             _reportedContent.Clear();
+            _baselineItemCount.Clear();
             _contentSentAt.Clear();
             _lastSentAt.Clear();
             _active.Clear();
@@ -773,26 +777,56 @@ namespace CardShopCoop.Sync
             var lastOwner = lease.LastOwner == NoOwner || lease.LastOwner == HostConn
                 ? PlayerRef.None
                 : PlayerRegistry.ForConnection(lease.LastOwner);
+
+            // A loose, unowned item box accepts content as a MERGE, never as the reporter's
+            // absolute: apply the reporter's delta (Box.ItemCount - ContentBaseItemCount) to the
+            // host's current count. This runs for BOTH paths below - a former owner releasing or
+            // editing the box (AcceptBoxUpdate passes via LastOwner) and a non-owner's raycast
+            // edit (InteractionPlayerController -> OnPressOpenBox / AddItem / TakeItemToHand) -
+            // so a delayed absolute can never overwrite newer contents. It is still gated on a
+            // genuinely loose, unstored box with no lease owner, so a hand or a stale possession
+            // claim is guarded exactly as before.
+            IBoxFamily looseFamily = null;
+            bool looseApplicable = false;
+            bool looseMerged = false;
+            if (w.Possession == BoxPossession.Free && currentOwner.Kind == PlayerKind.None
+                && w.Family == BoxFamily.Item)
+            {
+                looseFamily = Family(BoxFamily.Item);
+                looseApplicable = looseFamily != null && CanApplyContentOnly(knownBox, currentOwner);
+                looseMerged = looseApplicable
+                    && looseFamily.ReconcileContent(knownBox, w, msg.ContentBaseItemCount);
+            }
+            // A loose item report ReconcileContent refused (e.g. a conflicting type add) must be
+            // corrected: drop the cached hash so the authoritative re-assert is sent even though
+            // the host's content did not change.
+            if (looseApplicable && !looseMerged)
+                _hostHashes.Remove(w.Id);
+
             if (!BoxAuthority.AcceptBoxUpdate(currentOwner, sender, w.Possession, lastOwner))
             {
-                // A non-owner may still open/close or add/take items on a LOOSE box: vanilla
-                // allows that through the raycast without pickup (InteractionPlayerController ->
-                // OnPressOpenBox / AddItem / TakeItemToHand), and those arrive as Free content
-                // reports. Honor ONLY the content/lid - never the pose and never possession - so
-                // the stale-pose guard is unchanged. Held/Placing claims and Removed still
-                // require ownership.
-                if (w.Possession == BoxPossession.Free && CanApplyContentOnly(knownBox, currentOwner))
+                if (looseApplicable)
                 {
-                    Family(w.Family)?.ReconcileContent(knownBox, w);
                     _hostDirty.Add(w.Id);
                     BoxShared.DebugLog("box-rx",
-                        $"id={w.Id} fam={w.Family} sender={connId} state=Free content-only accepted owner={currentOwner}");
+                        $"id={w.Id} fam={w.Family} sender={connId} state=Free content-only applied={looseMerged} base={msg.ContentBaseItemCount} count={w.ItemCount}");
                 }
                 else
                 {
                     BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} accepted=false owner={currentOwner} last={lastOwner}");
                 }
                 return;
+            }
+
+            if (looseApplicable)
+            {
+                // The host now holds the merged (or, when the report was refused, still its own)
+                // content. Re-assert it on the wire so ApplyState's content write below is a
+                // no-op instead of replaying the reporter's stale absolute.
+                var merged = new BoxWire();
+                looseFamily.FillContent(knownBox, ref merged);
+                w.ItemType = merged.ItemType;
+                w.ItemCount = merged.ItemCount;
             }
 
             var next = BoxAuthority.NextBoxOwner(sender, w.Possession);
@@ -1063,6 +1097,18 @@ namespace CardShopCoop.Sync
                     CoopCore.ForceExitHoldBox(box);
                     // fall through and apply the authoritative state (hides the box)
                 }
+                // A local take/add on this mirror that has not been reported yet must not be
+                // erased by an authoritative snapshot: the baseline still holds the last synced
+                // count, so a mismatch is an un-sent local edit. Skip this entry entirely -
+                // including the content recreate below, which would otherwise drop a just-added
+                // item type - so ClientTick reports the delta and the next snapshot applies the
+                // merged result. (A lid-only edit has no count mismatch and stays protected by
+                // the open guard in the apply branch.)
+                if (w.Possession == BoxPossession.Free
+                    && w.Family == BoxFamily.Item
+                    && _baselineItemCount.TryGetValue(box, out var pendingBaseline)
+                    && family.ReadItemCount(box) != pendingBaseline)
+                    continue;
                 if (!family.ContentMatches(box, w))
                 {
                     if (!family.RecreateOnContentMismatch)
@@ -1112,6 +1158,11 @@ namespace CardShopCoop.Sync
                     {
                         Guard(w.Id).MotionUntil = Time.time + MotionLeaseTimeout;
                         BoxPlacement.CancelRemoteMotion(box);
+                    }
+                    if (w.Possession != BoxPossession.Removed)
+                    {
+                        _reportedContent[box] = family.ContentSignature(box);
+                        _baselineItemCount[box] = family.ReadItemCount(box);
                     }
                 }
             }
@@ -1325,6 +1376,7 @@ namespace CardShopCoop.Sync
             {
                 _reported[box] = poss;
                 _reportedContent[box] = family.ContentSignature(box);
+                _baselineItemCount[box] = family.ReadItemCount(box);
                 return false;
             }
             bool change = !_reported.TryGetValue(box, out var prev) || prev != poss;
@@ -1361,9 +1413,11 @@ namespace CardShopCoop.Sync
                 w.AngularVelocity = angVel;
             }
             family.FillContent(box, ref w);
+            int baseItemCount = _baselineItemCount.TryGetValue(box, out var bc) ? bc : w.ItemCount;
             BoxShared.DebugLog("box-tx", $"id={w.Id} fam={w.Family} state={poss} open={w.Open} sig={sig} name={box.name}",
                 box.GetInstanceID(), 0.05f);
-            SendUpdate?.Invoke(new BoxUpdateMessage { Box = w });
+            SendUpdate?.Invoke(new BoxUpdateMessage { Box = w, ContentBaseItemCount = baseItemCount });
+            _baselineItemCount[box] = w.ItemCount;
             Guard(w.Id).OpenUntil = Time.time + ClientOpenBlockPeriod;
             return isActive;
         }
@@ -1570,7 +1624,13 @@ namespace CardShopCoop.Sync
                 AngularVelocity = angVel,
             };
             family.FillContent(box, ref w); // the one settle commit
-            SendUpdate?.Invoke(new BoxUpdateMessage { Box = w });
+            int baseItemCount = _baselineItemCount.TryGetValue(box, out var settleBase) ? settleBase : w.ItemCount;
+            SendUpdate?.Invoke(new BoxUpdateMessage { Box = w, ContentBaseItemCount = baseItemCount });
+            // Mirror the normal send site's bookkeeping: the settle reports the current content,
+            // so a pending local edit must not be re-reported or clobbered after this.
+            _reported[box] = BoxPossession.Free;
+            _reportedContent[box] = family.ContentSignature(box);
+            _baselineItemCount[box] = w.ItemCount;
         }
 
         /// <summary>Host: a client is pushing a box. Make the host's real box a kinematic

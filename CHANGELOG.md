@@ -47,6 +47,8 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 - Opening or closing an item box updates on the other player's screen too, including boxes that
   are already open when the other player joins, and delivery-box contents stay synchronized when
   either player restocks from a box or moves items into one.
+- Opening or taking items from a loose box no longer lets a delayed update restore items the other
+  player already took; the count stays consistent regardless of who edits first.
 - Furniture placement previews show the furniture being placed instead of a stray delivery box,
   match the game's normal placement preview (alignment, multi-part rendering, layers, and
   transparency), and no longer rescan the whole shop or leak temporary materials on every move.

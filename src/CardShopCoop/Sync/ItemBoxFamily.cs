@@ -18,14 +18,66 @@ namespace CardShopCoop.Sync
 
         public bool RecreateOnContentMismatch => true;
 
-        public void ReconcileContent(InteractablePackagingBox box, in BoxWire w)
+        public int ReadItemCount(InteractablePackagingBox box)
+        {
+            return box is InteractablePackagingBox_Item b && b.m_ItemCompartment != null
+                ? b.m_ItemCompartment.GetItemCount() : 0;
+        }
+
+        public bool ReconcileContent(InteractablePackagingBox box, in BoxWire w, int baseItemCount)
         {
             if (!(box is InteractablePackagingBox_Item b))
-                return;
-            ApplyContent(b, w);
-            // ApplyContent reconciles type/count only; the lid is a separate visual and is the
-            // main thing a non-owner changes by opening/closing a loose box, so set it here too.
+                return false;
+            var comp = b.m_ItemCompartment;
+            if (comp == null)
+                return false;
+            if (!EnumMap.TryFromWire(EnumKind.ItemType, w.ItemType, out int localWireType))
+                return false;
+            int hostCount = comp.GetItemCount();
+            int delta = w.ItemCount - baseItemCount;
+            var hostType = comp.GetItemType();
+            if (delta == 0)
+            {
+                // Lid-only (or a no-op content report): apply the lid, never write the reported
+                // count. This is what stops a delayed/echoed absolute from restoring items.
+                BoxVisuals.EnsureOpenState(box, w.Open);
+                return true;
+            }
+            EItemType targetType = (EItemType)localWireType;
+            if (delta < 0)
+            {
+                if (localWireType == (int)EItemType.None)
+                {
+                    // The reporter's last item was taken (the game clears the compartment to
+                    // None). Only merge that removal if it also empties the host box; otherwise
+                    // the reporter's view predates a refill and its delta would delete the newer
+                    // items. Reject and let the authoritative snapshot correct the reporter.
+                    if (hostType != EItemType.None && hostCount + delta > 0)
+                        return false;
+                    targetType = EItemType.None;
+                }
+                else
+                {
+                    // A removal cannot be merged across two different item types: the reporter's
+                    // view predates a refill. Reject and let the snapshot correct the reporter.
+                    if (hostType != EItemType.None && localWireType != (int)hostType)
+                        return false;
+                    targetType = hostType;
+                }
+            }
+            else if (hostCount > 0 && hostType != EItemType.None && hostType != targetType)
+            {
+                // Adding a different type to a non-empty box: reject and let the authoritative
+                // snapshot correct the reporter.
+                return false;
+            }
+            int newCount = Mathf.Max(0, hostCount + delta);
+            var apply = w;
+            apply.ItemType = EnumMap.ToWire(EnumKind.ItemType, (int)targetType);
+            apply.ItemCount = newCount;
+            ApplyContent(b, apply);
             BoxVisuals.EnsureOpenState(box, w.Open);
+            return true;
         }
 
         public IList<InteractablePackagingBox> LiveBoxes()
