@@ -135,6 +135,11 @@ namespace CardShopCoop.Net
         public void Stop()
         {
             _inner.Stop();
+            while (_incoming.TryDequeue(out _))
+            {
+            }
+            _delay.Clear();
+            _overflowWarned = false;
         }
 
         public void PumpMainThread()

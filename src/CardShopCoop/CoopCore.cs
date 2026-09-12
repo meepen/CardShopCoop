@@ -171,6 +171,7 @@ namespace CardShopCoop
         private bool _localModelSavePending;
         private float _localModelSaveTimer;
         private readonly WorldSync _world = new WorldSync();
+        internal WorldSync World => _world;
         private readonly NpcSync _npcs = new NpcSync();
         private readonly CardShelfSync _cardShelves = new CardShelfSync();
         private readonly ObjMoveSync _objMoves = new ObjMoveSync();
@@ -411,6 +412,7 @@ namespace CardShopCoop
             = new System.Collections.Generic.List<InMsg>(64);
         private readonly System.Collections.Generic.List<InMsg> _dispatchRetryNextFrame
             = new System.Collections.Generic.List<InMsg>(8);
+        private bool _dispatchBacklogWarned;
         private readonly MessageRouter _messageRouter = new MessageRouter();
         private readonly System.Collections.Generic.HashSet<long> _dispatchSeen
             = new System.Collections.Generic.HashSet<long>();
@@ -418,6 +420,7 @@ namespace CardShopCoop
         /// into _dispatchBuf (the coalescer needs the full picture), but applying an unbounded
         /// backlog in one frame is the hitch itself; the remainder keeps its order and waits.</summary>
         private const int DispatchBudget = 256;
+        private const int DispatchBacklogCap = DispatchBudget * 8;
         private const byte MaxDispatchRetries = 3;
         private const int MainThreadActionBudget = 64;
 
@@ -511,6 +514,14 @@ namespace CardShopCoop
             _ui = new UI.CoopUI();
             _world.OnLocalChanges = OnLocalWorldChanges;
             _world.SendResult = (result, connId) => Send(connId, result);
+            _world.RequestResync = () =>
+            {
+                CoopPlugin.Log.LogWarning("WorldSync requested authoritative shelf resync");
+                if (Role == CoopRole.Host)
+                    Broadcast(new ShelfDeltaMessage { Entries = _world.BuildFullState() });
+                else if (Role == CoopRole.Client)
+                    Send(1, new JoinResyncRequestMessage());
+            };
             _cardShelves.OnLocalChanges = changes =>
             {
                 if (Role == CoopRole.Host)
@@ -1878,7 +1889,7 @@ namespace CardShopCoop
                 // indexes, so read the structure back fresh instead of diffing against
                 // garbage. Repaired objects start with loader defaults; those defaults must
                 // not be reported as guest edits through any index-based mirror.
-                _world.Reset();
+                _world.InvalidateBaseline();
                 _objMoves.Reset();
                 if (kind == 2 || kind == 3 || kind == 14)
                     _cardShelves.InvalidateBaseline();
@@ -3726,6 +3737,7 @@ namespace CardShopCoop
                     _playerModels.Remove(left);
                 if (Role == CoopRole.Host)
                 {
+                    _world.HostReleaseConn(left);
                     // release anything the departed guest was CARRYING: the set-down
                     // request is never coming, and without this the boxes stay hidden /
                     // worker-locked / carried-frozen on every peer until a full shutdown
@@ -3797,7 +3809,30 @@ namespace CardShopCoop
             // order; the fresh drain appends after it. The coalescer then re-runs over the
             // combined buffer, so a stale leftover snapshot still loses to a newer one.
             while (_net != null && _net.Incoming.TryDequeue(out var msg))
+            {
+                if (_dispatchBuf.Count >= DispatchBacklogCap)
+                {
+                    int drop = FindBufferedSnapshot();
+                    if (drop >= 0)
+                        _dispatchBuf.RemoveAt(drop);
+                    else
+                    {
+                        if (!_dispatchBacklogWarned)
+                        {
+                            _dispatchBacklogWarned = true;
+                            CoopPlugin.Log.LogWarning("Dispatch backlog cap reached; dropping incoming traffic until it drains");
+                        }
+                        // A dropped BoxSnapshot is not self-healing (the host's content hash
+                        // already advanced and it is never re-sent), so ask for a fresh one.
+                        if (msg.Type == MsgType.BoxSnapshot)
+                            _boxEngine?.RequestBoxResync?.Invoke();
+                        continue;
+                    }
+                }
                 _dispatchBuf.Add(msg);
+            }
+            if (_dispatchBuf.Count < DispatchBacklogCap / 2)
+                _dispatchBacklogWarned = false;
             if (_dispatchBuf.Count > 8)
             {
                 _dispatchSeen.Clear();
@@ -4063,6 +4098,18 @@ namespace CardShopCoop
                 Broadcast(new ShelfDeltaMessage { Entries = changes });
             else if (Role == CoopRole.Client)
                 Send(1, new ShelfRequestMessage { Entries = changes });
+        }
+
+        private int FindBufferedSnapshot()
+        {
+            for (int i = 0; i < _dispatchBuf.Count; i++)
+            {
+                var type = _dispatchBuf[i].Type;
+                if (type == MsgType.PlayerState || type == MsgType.RegisterState
+                    || type == MsgType.RegisterCart || type == MsgType.PopState)
+                    return i;
+            }
+            return -1;
         }
 
         /// <summary>Host: one item price entry changed (player/worker/EPL, or a joiner

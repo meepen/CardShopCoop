@@ -80,8 +80,25 @@ namespace CardShopCoop.Sync
         /// <summary>Host: send the outcome of one client shelf transfer back to its sender so the
         /// requester can roll the unaccepted part out of its hand.</summary>
         public Action<ShelfTransferResultMessage, int> SendResult;
+        public Action RequestResync;
 
         private readonly PendingTransferLedger<int> _transfers = new PendingTransferLedger<int>();
+        private readonly Dictionary<uint, Entry> _pendingTransferEntries = new Dictionary<uint, Entry>();
+        private readonly HostTransferAcks _hostAcks = new HostTransferAcks();
+
+        public WorldSync()
+        {
+            _transfers.Resend = entry =>
+            {
+                if (_pendingTransferEntries.TryGetValue(entry.Seq, out var stored))
+                    OnLocalChanges?.Invoke(new List<Entry> { stored });
+            };
+            _transfers.Escalate = entry =>
+            {
+                CoopPlugin.Log.LogError($"WorldSync: shelf transfer seq={entry.Seq} key={entry.Target:X} escalated; requesting resync");
+                RequestResync?.Invoke();
+            };
+        }
 
         private static readonly FieldInfo FiWarehouseComps =
             ReflectionSurface.RequiredField(typeof(WarehouseShelf), "m_ItemCompartmentList");
@@ -124,7 +141,31 @@ namespace CardShopCoop.Sync
             _snapshotErrors.Clear();
             _whComps.Clear();
             _transfers.Clear();
+            _pendingTransferEntries.Clear();
+            _hostAcks.Clear();
             _timer = 0.35f; // staggered phase: engines must not all walk on the same frame
+            _scanInterval = BaseScanInterval;
+            _sm = null;
+            _scanning = false;
+            _groups = null;
+            _scanChanges = null;
+            _cursor.Reset();
+        }
+
+        /// <summary>Live structure change (a shelf/object was removed or spawned): every
+        /// index-keyed baseline is stale, so re-read it fresh. Unlike <see cref="Reset"/> this
+        /// keeps outstanding transfers and escrow intact - releasing a pending take here would
+        /// drop its obligation and allow a duplicate.</summary>
+        public void InvalidateBaseline()
+        {
+            _last.Clear();
+            _locallyChanged.Clear();
+            _resolvable.Clear();
+            _clamped.Clear();
+            _clampWarned.Clear();
+            _snapshotErrors.Clear();
+            _whComps.Clear();
+            _timer = 0.35f;
             _scanInterval = BaseScanInterval;
             _sm = null;
             _scanning = false;
@@ -148,7 +189,7 @@ namespace CardShopCoop.Sync
             // Expire transfers whose result never arrived even while the scan is idle, so the
             // TTL is a real wall-clock bound and an add cannot suppress host truth forever.
             if (CoopCore.Role == CoopRole.Client)
-                _transfers.Prune();
+                _transfers.Tick();
             _timer += dt;
             if (!_scanning)
             {
@@ -281,6 +322,21 @@ namespace CardShopCoop.Sync
                     entry.BaseCount = prevCount;
                     entry.TransferType = localTransfer;
                     entry.TransferSeq = _transfers.Begin(key, delta, localTransfer);
+                    if (entry.TransferSeq == 0 && delta < 0)
+                    {
+                        // Reserve failure is fail-closed. The local take already happened, so
+                        // destroy the just-noted hand item and let an authoritative resync
+                        // restore the container: the net change is zero instead of a
+                        // hand+container duplicate. Do NOT re-detect this take - the backing
+                        // item is gone, so a retry could only be funded by a different item.
+                        int rolledBack = HandEscrow.RollbackUnreservedTake(localTransfer, -delta);
+                        CoopPlugin.Log.LogError(
+                            $"WorldSync: refused unreserved shelf take key={key:X}; rolled back {rolledBack} and requesting resync");
+                        RequestResync?.Invoke();
+                        return;
+                    }
+                    if (entry.TransferSeq != 0)
+                        _pendingTransferEntries[entry.TransferSeq] = entry;
                 }
             }
             _scanChanges.Add(entry);
@@ -403,6 +459,12 @@ namespace CardShopCoop.Sync
 
         private Entry? ApplyTransferRequest(Entry e, int connId)
         {
+            if (_hostAcks.TryGet(connId, e.TransferSeq, out int priorAccepted))
+            {
+                CoopPlugin.Log.LogInfo($"WorldSync: replaying deduplicated transfer conn={connId} seq={e.TransferSeq}");
+                SendResult?.Invoke(new ShelfTransferResultMessage { Key = e.Key, TransferSeq = e.TransferSeq, AcceptedDelta = priorAccepted }, connId);
+                return null;
+            }
             int accepted = 0;
             Entry? actual = null;
             try
@@ -467,6 +529,7 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogWarning($"WorldSync transfer {e.Key:X}: {ex.Message}");
                 accepted = 0;
             }
+            _hostAcks.Store(connId, e.TransferSeq, accepted);
             SendResult?.Invoke(new ShelfTransferResultMessage
             {
                 Key = e.Key,
@@ -483,7 +546,7 @@ namespace CardShopCoop.Sync
         {
             if (msg == null || msg.TransferSeq == 0)
                 return;
-            if (!_transfers.TryResolve(msg.TransferSeq, out var pending))
+            if (!_transfers.TryGet(msg.TransferSeq, out var pending))
                 return;
             int rejected = pending.RequestedDelta - msg.AcceptedDelta;
             if (pending.RequestedDelta < 0)
@@ -506,9 +569,15 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogInfo(
                     $"WorldSync transfer key={pending.Target:X} add rejected={rejected} escrowed={returned}");
             }
+            // Resolve only after the rollback work succeeded, so a throw leaves the entry for
+            // the dispatch retry instead of dropping the obligation.
+            _transfers.TryResolve(msg.TransferSeq, out _);
+            _pendingTransferEntries.Remove(msg.TransferSeq);
             _locallyChanged.Remove(pending.Target);
             ForceNextTick();
         }
+
+        public void HostReleaseConn(int connId) => _hostAcks.ReleaseConn(connId);
 
         /// <summary>
         /// Can THIS machine actually build a compartment of this item type? A peer running a

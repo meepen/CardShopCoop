@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using UnityEngine;
 
 namespace CardShopCoop.Sync
 {
@@ -11,8 +12,38 @@ namespace CardShopCoop.Sync
             = new Dictionary<int, List<Item>>();
         private static readonly HashSet<Item> Reserved = new HashSet<Item>();
         private static readonly List<Item> ToHand = new List<Item>();
+        private static readonly Dictionary<Item, RecentTake> Recent = new Dictionary<Item, RecentTake>();
         private static int _nextToken;
         private static bool _resetting;
+        private static int _suppressNoteDepth;
+        private struct RecentTake
+        {
+            public int Type; public float At;
+        }
+        internal static bool IsNoteSuppressed => _suppressNoteDepth > 0;
+
+        public static void BeginSuppressNote() => _suppressNoteDepth++;
+        public static void EndSuppressNote()
+        {
+            if (_suppressNoteDepth > 0)
+                _suppressNoteDepth--;
+        }
+
+        public static void NoteTakenItem(Item item)
+        {
+            if (CoopCore.Role != CoopRole.Client || item == null || IsNoteSuppressed)
+                return;
+            Recent[item] = new RecentTake { Type = (int)item.GetItemType(), At = Time.realtimeSinceStartup };
+            Reserved.Add(item);
+        }
+
+        public static bool IsInLocalHand(Item item)
+        {
+            if (item == null)
+                return false;
+            var held = CoopCore.GetHeldItemList(CoopCore.PlayerIpc);
+            return held != null && held.Contains(item);
+        }
 
         public static int ReserveTake(int localType, int count)
         {
@@ -20,12 +51,34 @@ namespace CardShopCoop.Sync
                 return 0;
             if (count <= 0)
                 return 0;
+            PruneRecentTaken();
             var items = new List<Item>(count);
+            var noted = new List<Item>();
             var held = CoopCore.GetHeldItemList(CoopCore.PlayerIpc);
             if (held != null)
             {
+                // Pass 1: just-noted takes of the expected type.
+                for (int i = held.Count - 1; i >= 0 && items.Count < count; i--)
+                    if (held[i] != null && Recent.ContainsKey(held[i])
+                        && Recent[held[i]].Type == localType)
+                    {
+                        items.Add(held[i]);
+                        noted.Add(held[i]);
+                    }
+                // Pass 2: any other just-noted take. The report's baseline type can be stale
+                // after the container emptied to None, but the note captured the real type at
+                // the take, so a genuine player take is still reservable.
+                for (int i = held.Count - 1; i >= 0 && items.Count < count; i--)
+                    if (held[i] != null && Recent.ContainsKey(held[i])
+                        && !noted.Contains(held[i]))
+                    {
+                        items.Add(held[i]);
+                        noted.Add(held[i]);
+                    }
+                // Pass 3: ordinary unreserved hand items of the expected type.
                 for (int i = held.Count - 1; i >= 0 && items.Count < count; i--)
                     if (held[i] != null && !Reserved.Contains(held[i])
+                        && !items.Contains(held[i])
                         && (int)held[i].GetItemType() == localType)
                         items.Add(held[i]);
             }
@@ -36,10 +89,43 @@ namespace CardShopCoop.Sync
             }
 
             int token = NextToken();
+            for (int i = 0; i < noted.Count; i++)
+                Recent.Remove(noted[i]);
             for (int i = 0; i < items.Count; i++)
                 Reserved.Add(items[i]);
             ReservedTakes.Add(token, items);
             return token;
+        }
+
+        /// <summary>Fail-closed cleanup for a take whose reservation failed: remove the
+        /// just-noted item(s) from the hand so host truth restoring the container cannot leave a
+        /// duplicate. Matches the expected type first, then any noted take.</summary>
+        public static int RollbackUnreservedTake(int localType, int count)
+        {
+            if (count <= 0)
+                return 0;
+            var held = CoopCore.GetHeldItemList(CoopCore.PlayerIpc);
+            if (held == null)
+                return 0;
+            var drop = new List<Item>(count);
+            for (int i = held.Count - 1; i >= 0 && drop.Count < count; i--)
+                if (held[i] != null && Recent.ContainsKey(held[i])
+                    && Recent[held[i]].Type == localType)
+                    drop.Add(held[i]);
+            for (int i = held.Count - 1; i >= 0 && drop.Count < count; i--)
+                if (held[i] != null && Recent.ContainsKey(held[i]) && !drop.Contains(held[i]))
+                    drop.Add(held[i]);
+            for (int i = 0; i < drop.Count; i++)
+            {
+                var item = drop[i];
+                Recent.Remove(item);
+                Reserved.Remove(item);
+                if (CoopCore.RemoveHeldItemFromHand(item))
+                    CoopCore.DestroyDetachedItem(item);
+            }
+            if (drop.Count != count)
+                CoopPlugin.Log.LogWarning($"HandEscrow.RollbackUnreservedTake: rolled back {drop.Count} of {count} type {localType}");
+            return drop.Count;
         }
 
         public static void ResolveTake(int token, int acceptedMagnitude)
@@ -91,7 +177,7 @@ namespace CardShopCoop.Sync
                 Reserved.Remove(items[i]);
         }
 
-        public static bool IsReserved(Item item) => item != null && Reserved.Count != 0 && Reserved.Contains(item);
+        public static bool IsReserved(Item item) => item != null && (Reserved.Contains(item) || Recent.ContainsKey(item));
 
         public static bool HasReservedHeld(InteractionPlayerController ipc)
         {
@@ -116,29 +202,34 @@ namespace CardShopCoop.Sync
             if (comp == null || count <= 0 || (int)comp.GetItemType() != localType)
                 return 0;
             int queued = 0;
-            while (queued < count && comp.GetItemCount() > 0)
+            BeginSuppressNote();
+            try
             {
-                // A network result handler is a systemic boundary: a game-side take fault here
-                // must not abort the handler with the remaining items left in the compartment.
-                // Stop, leave the rest, and let the caller rebase its baseline to the truth.
-                Item item;
-                try
+                while (queued < count && comp.GetItemCount() > 0)
                 {
-                    item = comp.TakeItemToHand();
+                    // A network result handler is a systemic boundary: a game-side take fault here
+                    // must not abort the handler with the remaining items left in the compartment.
+                    // Stop, leave the rest, and let the caller rebase its baseline to the truth.
+                    Item item;
+                    try
+                    {
+                        item = comp.TakeItemToHand();
+                    }
+                    catch (System.Exception e)
+                    {
+                        CoopPlugin.Log.LogWarning($"HandEscrow.EscrowAdded: TakeItemToHand failed after {queued} of {count}: {e.Message}");
+                        break;
+                    }
+                    if (item == null)
+                    {
+                        CoopPlugin.Log.LogError($"HandEscrow.EscrowAdded: compartment returned null after removing item {queued + 1}");
+                        break;
+                    }
+                    QueueToHand(item);
+                    queued++;
                 }
-                catch (System.Exception e)
-                {
-                    CoopPlugin.Log.LogWarning($"HandEscrow.EscrowAdded: TakeItemToHand failed after {queued} of {count}: {e.Message}");
-                    break;
-                }
-                if (item == null)
-                {
-                    CoopPlugin.Log.LogError($"HandEscrow.EscrowAdded: compartment returned null after removing item {queued + 1}");
-                    break;
-                }
-                QueueToHand(item);
-                queued++;
             }
+            finally { EndSuppressNote(); }
             if (queued < count)
                 CoopPlugin.Log.LogWarning($"HandEscrow.EscrowAdded: wanted {count} of type {localType}, queued {queued}");
             return queued;
@@ -146,6 +237,7 @@ namespace CardShopCoop.Sync
 
         public static void Tick()
         {
+            PruneRecentTaken();
             if (ToHand.Count == 0 || !CoopCore.HandAcceptsItems())
                 return;
             while (ToHand.Count > 0 && CoopCore.HandAcceptsItems())
@@ -181,16 +273,64 @@ namespace CardShopCoop.Sync
                 int remainder = 0;
                 for (int i = 0; i < ToHand.Count; i++)
                 {
-                    CoopCore.DestroyDetachedItem(ToHand[i]);
-                    remainder++;
+                    var item = ToHand[i];
+                    var ipc = CoopCore.PlayerIpc;
+                    if (item != null && ipc != null && ipc.GetHoldItemCount() < HandProtection.HandCapacity)
+                    {
+                        item.gameObject.SetActive(true);
+                        ipc.AddHoldItemToFront(item);
+                    }
+                    else
+                    {
+                        CoopCore.DestroyDetachedItem(item);
+                        remainder++;
+                    }
                 }
                 ToHand.Clear();
+                Recent.Clear();
                 if (remainder > 0)
                     CoopPlugin.Log.LogError($"HandEscrow.Reset: destroyed {remainder} queued items that could not return to hand");
             }
             finally
             {
                 _resetting = false;
+                _suppressNoteDepth = 0; // no Begin may leak a positive depth into the next session
+            }
+        }
+
+        public static void PruneRecentTaken()
+        {
+            if (Recent.Count == 0)
+                return;
+            float now = Time.realtimeSinceStartup;
+            var drop = new List<Item>();
+            var expired = new List<RecentTake>();
+            foreach (var pair in Recent)
+            {
+                var item = pair.Key;
+                if (item == null)
+                    drop.Add(item);
+                else if (now - pair.Value.At > 10f)
+                {
+                    drop.Add(item);
+                    expired.Add(pair.Value);
+                }
+                else if (!IsInLocalHand(item) && now - pair.Value.At > 2f)
+                    drop.Add(item);
+            }
+            // Collect first, mutate second: RollbackUnreservedTake removes from Recent, so doing
+            // it inside the enumeration above would throw.
+            for (int i = 0; i < expired.Count; i++)
+            {
+                CoopPlugin.Log.LogError(
+                    $"HandEscrow.PruneRecentTaken: unreported take expired for type {expired[i].Type}; rolling back and requesting resync");
+                RollbackUnreservedTake(expired[i].Type, 1);
+                CoopCore.Instance?.World?.RequestResync?.Invoke();
+            }
+            for (int i = 0; i < drop.Count; i++)
+            {
+                Recent.Remove(drop[i]);
+                Reserved.Remove(drop[i]);
             }
         }
 

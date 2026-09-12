@@ -18,6 +18,42 @@ namespace CardShopCoop.Sync
         public static Action<int, BoxCollectResultMessage> SendResult;
         public static bool ApplyingRemote;
 
+        // A retryable collect can be re-dispatched after the cards were minted but before the
+        // reply/Destroyed completed. Remember (connId, boxId) so a retry replays the result
+        // instead of minting the same graded cards twice. Entries expire and are cleared on
+        // session teardown; the hash check refuses a replay for a recycled box id.
+        private struct CollectAck
+        {
+            public float At; public int Hash;
+        }
+        private static readonly Dictionary<long, CollectAck> _collectAcks = new Dictionary<long, CollectAck>();
+        private const float CollectAckTtl = 120f;
+
+        public static void ClearCollectAcks() => _collectAcks.Clear();
+
+        private static long CollectKey(int connId, ushort boxId) => ((long)connId << 32) | boxId;
+
+        private static bool TryReplayCollect(int connId, ushort boxId, int hash)
+        {
+            float now = Time.time;
+            if (_collectAcks.Count > 64)
+            {
+                var stale = new List<long>();
+                foreach (var kv in _collectAcks)
+                    if (now - kv.Value.At > CollectAckTtl)
+                        stale.Add(kv.Key);
+                for (int i = 0; i < stale.Count; i++)
+                    _collectAcks.Remove(stale[i]);
+            }
+            return _collectAcks.TryGetValue(CollectKey(connId, boxId), out var ack)
+                && now - ack.At < CollectAckTtl && ack.Hash == hash;
+        }
+
+        private static void RememberCollect(int connId, ushort boxId, int hash)
+        {
+            _collectAcks[CollectKey(connId, boxId)] = new CollectAck { At = Time.time, Hash = hash };
+        }
+
         public static void ApplyPatches(Harmony h)
         {
             Try(h, typeof(InteractablePackagingBox_Card), "OnPressOpenBox",
@@ -80,31 +116,74 @@ namespace CardShopCoop.Sync
         {
             if (CoopCore.Role != CoopRole.Host || msg == null)
                 return;
+            if (TryReplayCollect(connId, msg.Id, msg.CardsHash))
+            {
+                // Already minted on an earlier attempt; a dispatch retry must not mint again.
+                SendResult?.Invoke(connId, new BoxCollectResultMessage
+                {
+                    Id = msg.Id,
+                    Accepted = true,
+                    Reason = (byte)BoxCollectStatus.Accepted,
+                });
+                return;
+            }
             var engine = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
             if (engine == null || !engine.TryGetHostBox(msg.Id, out var baseBox)
                 || !(baseBox is InteractablePackagingBox_Card box))
             {
-                SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
-                return;
-            }
-            if (IsLocallyCarried(box))
-                return; // host holds it: he opens it himself
-            if (engine.HostBoxHeldByOther(msg.Id, connId))
-            {
-                CoopPlugin.Log.LogInfo($"CardBoxOps: collect rejected connId={connId} id={msg.Id} (held by another connection)");
-                SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                SendResult?.Invoke(connId, new BoxCollectResultMessage
+                {
+                    Id = msg.Id,
+                    Accepted = false,
+                    Reason = (byte)BoxCollectStatus.UnknownBox,
+                });
                 return;
             }
             var cards = SafeCards(box);
-            if (HashCards(cards) != msg.CardsHash)
+            byte cardCount = (byte)Mathf.Min(cards.Count, 255);
+            int cardsHash = HashCards(cards);
+            if (IsLocallyCarried(box))
+            {
+                // host holds it: he opens it himself
+                SendResult?.Invoke(connId, new BoxCollectResultMessage
+                {
+                    Id = msg.Id,
+                    Accepted = false,
+                    CardCount = cardCount,
+                    CardsHash = cardsHash,
+                    Reason = (byte)BoxCollectStatus.HostCarried,
+                });
+                return;
+            }
+            if (engine.HostBoxHeldByOther(msg.Id, connId))
+            {
+                CoopPlugin.Log.LogInfo($"CardBoxOps: collect rejected connId={connId} id={msg.Id} (held by another connection)");
+                SendResult?.Invoke(connId, new BoxCollectResultMessage
+                {
+                    Id = msg.Id,
+                    Accepted = false,
+                    CardCount = cardCount,
+                    CardsHash = cardsHash,
+                    Reason = (byte)BoxCollectStatus.HeldByOther,
+                });
+                return;
+            }
+            if (cardsHash != msg.CardsHash)
             {
                 // Diagnose the drift: counts matching but hashes differing means the two saves
                 // bind the same graded box to different cards.
                 CoopPlugin.Log.LogWarning(
                     $"CardBoxOps: collect hash mismatch id={msg.Id} connId={connId} "
-                    + $"hostCount={cards.Count} hostHash={HashCards(cards)} "
+                    + $"hostCount={cards.Count} hostHash={cardsHash} "
                     + $"clientCount={msg.CardCount} clientHash={msg.CardsHash}");
-                SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                SendResult?.Invoke(connId, new BoxCollectResultMessage
+                {
+                    Id = msg.Id,
+                    Accepted = false,
+                    CardCount = cardCount,
+                    CardsHash = cardsHash,
+                    Reason = (byte)BoxCollectStatus.HashMismatch,
+                });
                 return;
             }
             // Validate the ENTIRE payload before touching the shared collection. A null card,
@@ -116,13 +195,27 @@ namespace CardShopCoop.Sync
                 if (cards[i] == null)
                 {
                     CoopPlugin.Log.LogWarning($"CardBoxOps: collect rejected connId={connId} id={msg.Id} (null card at {i})");
-                    SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                    SendResult?.Invoke(connId, new BoxCollectResultMessage
+                    {
+                        Id = msg.Id,
+                        Accepted = false,
+                        CardCount = cardCount,
+                        CardsHash = cardsHash,
+                        Reason = (byte)BoxCollectStatus.NullCard,
+                    });
                     return;
                 }
                 if (!CoopCore.CardSetInstalledHere(cards[i]))
                 {
                     CoopCore.WarnRefusedCard(cards[i], "card-box");
-                    SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                    SendResult?.Invoke(connId, new BoxCollectResultMessage
+                    {
+                        Id = msg.Id,
+                        Accepted = false,
+                        CardCount = cardCount,
+                        CardsHash = cardsHash,
+                        Reason = (byte)BoxCollectStatus.MissingContent,
+                    });
                     return;
                 }
             }
@@ -139,6 +232,7 @@ namespace CardShopCoop.Sync
                 }
                 AchievementManager.OnCheckGemMintCardCount(CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained);
                 AchievementManager.OnCheckCollectedGradedCardSet();
+                RememberCollect(connId, msg.Id, cardsHash);
             }
             catch (Exception e)
             {
@@ -148,7 +242,14 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogError($"CardBoxOps: collect apply failed connId={connId} id={msg.Id}; box retained: {e}");
                 try
                 {
-                    SendResult?.Invoke(connId, new BoxCollectResultMessage { Id = msg.Id });
+                    SendResult?.Invoke(connId, new BoxCollectResultMessage
+                    {
+                        Id = msg.Id,
+                        Accepted = false,
+                        CardCount = cardCount,
+                        CardsHash = cardsHash,
+                        Reason = (byte)BoxCollectStatus.ApplyFailed,
+                    });
                 }
                 catch (Exception sendError)
                 {
@@ -164,6 +265,14 @@ namespace CardShopCoop.Sync
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("CardBoxOps collect despawn: " + e.Message); }
             finally { ApplyingRemote = false; }
+            SendResult?.Invoke(connId, new BoxCollectResultMessage
+            {
+                Id = msg.Id,
+                Accepted = true,
+                CardCount = cardCount,
+                CardsHash = cardsHash,
+                Reason = (byte)BoxCollectStatus.Accepted,
+            });
             engine.ForceNextTick();
         }
 
@@ -177,7 +286,31 @@ namespace CardShopCoop.Sync
             var core = CoopCore.Instance;
             if (core != null)
             {
-                core.RegisterLine = "couldn't open that graded box - its cards differ between the two saves (graded certs have drifted)";
+                switch ((BoxCollectStatus)msg.Reason)
+                {
+                    case BoxCollectStatus.HashMismatch:
+                        core.RegisterLine = "couldn't open that graded box - its cards differ between the two saves (graded certs have drifted)";
+                        break;
+                    case BoxCollectStatus.MissingContent:
+                        core.RegisterLine = "couldn't open that graded box - the host is missing its content pack";
+                        break;
+                    case BoxCollectStatus.HeldByOther:
+                    case BoxCollectStatus.HostCarried:
+                        core.RegisterLine = "couldn't open that graded box - the host is handling it right now";
+                        break;
+                    case BoxCollectStatus.ApplyFailed:
+                        core.RegisterLine = "couldn't open that graded box on the host - please try again";
+                        break;
+                    case BoxCollectStatus.UnknownBox:
+                        core.RegisterLine = "couldn't open that graded box - it is stale on the host";
+                        break;
+                    case BoxCollectStatus.NullCard:
+                        core.RegisterLine = "couldn't open that graded box - it contains an invalid card";
+                        break;
+                    default:
+                        core.RegisterLine = "couldn't open that graded box - the host rejected it";
+                        break;
+                }
                 core.RegisterLineTimer = 8f;
             }
         }

@@ -8,39 +8,55 @@ namespace CardShopCoop.Sync
     /// TKey is the target identity (a box id or a shelf-compartment key).</summary>
     internal struct PendingTransfer<TKey>
     {
+        public uint Seq;
         public TKey Target;
         public int RequestedDelta;
         public int TransferType; // local EItemType id
         public int EscrowToken;  // > 0 for a take, 0 for an add
-        public float SentAt;
+        public float FirstSentAt;
+        public float LastSentAt;
+        public int Attempts;
+        public bool Escalated;
     }
 
     /// <summary>
     /// Shared ledger for client-originated item transfers. Owns wire-sequence allocation,
-    /// the 15s TTL prune, the take escrow token, and the pending-add reservation set, so a
-    /// box and a shelf cannot drift apart in how they track the same protocol.
+    /// retry-until-ack scheduling, the take escrow token, and the pending-add reservation set,
+    /// so a box and a shelf cannot drift apart in how they track the same protocol. Nothing is
+    /// ever resolved by a timeout: an entry leaves only on a real result or a session teardown.
     /// </summary>
     internal sealed class PendingTransferLedger<TKey>
     {
-        private const float TtlSeconds = 15f;
+        public const float ResendIntervalSeconds = 1f;
+        public const int EscalateAttempts = 15;
+        public const int HardAttempts = 60;
+        public const int MaxOutstanding = 256;
         private readonly Dictionary<uint, PendingTransfer<TKey>> _entries
             = new Dictionary<uint, PendingTransfer<TKey>>();
         private readonly HashSet<TKey> _pendingAdds = new HashSet<TKey>();
-        private readonly List<uint> _prune = new List<uint>();
+        private int _takeCount;
         private uint _seq;
 
         public int Count => _entries.Count;
 
         /// <summary>Raised for each entry the TTL prune removes, after the entry is out of
         /// the live table. Module-specific cleanup (e.g. a resync) belongs here.</summary>
-        public Action<PendingTransfer<TKey>> Expired;
+        public Action<PendingTransfer<TKey>> Resend;
+        public Action<PendingTransfer<TKey>> Escalate;
 
         /// <summary>Record a new transfer. A negative delta escrows the just-taken items out
         /// of the hand; a positive delta reserves the target against authoritative content
         /// overwrites until the result arrives. Returns the wire sequence to send.</summary>
         public uint Begin(TKey target, int requestedDelta, int transferType)
         {
-            Prune();
+            // Only takes need the cap: each one pins a real hand item. Adds carry no escrow
+            // and must always be tracked, or a failed Begin would silently drop the local add.
+            // Counting takes separately keeps an add backlog from starving new takes.
+            if (requestedDelta < 0 && _takeCount >= MaxOutstanding)
+            {
+                CoopPlugin.Log.LogError($"PendingTransferLedger.Begin: take outstanding limit {MaxOutstanding} reached; refusing transfer");
+                return 0;
+            }
             uint seq = ++_seq;
             if (seq == 0)
                 seq = ++_seq; // 0 means "no transfer" on the wire
@@ -48,16 +64,24 @@ namespace CardShopCoop.Sync
                 ? HandEscrow.ReserveTake(transferType, -requestedDelta)
                 : 0;
             if (requestedDelta < 0 && token == 0)
-                CoopPlugin.Log.LogWarning($"PendingTransferLedger.Begin: take of {-requestedDelta} type {transferType} could not be reserved; rejection will not be reconciliable");
+            {
+                CoopPlugin.Log.LogWarning($"PendingTransferLedger.Begin: take of {-requestedDelta} type {transferType} could not be reserved; refusing to track it");
+                return 0;
+            }
             if (requestedDelta > 0)
                 _pendingAdds.Add(target);
+            else if (requestedDelta < 0)
+                _takeCount++;
             _entries[seq] = new PendingTransfer<TKey>
             {
+                Seq = seq,
                 Target = target,
                 RequestedDelta = requestedDelta,
                 TransferType = transferType,
                 EscrowToken = token,
-                SentAt = Time.time,
+                FirstSentAt = Time.time,
+                LastSentAt = Time.time,
+                Attempts = 1,
             };
             return seq;
         }
@@ -69,6 +93,8 @@ namespace CardShopCoop.Sync
             if (!_entries.TryGetValue(seq, out entry))
                 return false;
             _entries.Remove(seq);
+            if (entry.RequestedDelta < 0)
+                _takeCount--;
             ReleaseAdd(entry.Target);
             return true;
         }
@@ -79,6 +105,8 @@ namespace CardShopCoop.Sync
         {
             return _pendingAdds.Contains(target);
         }
+
+        public bool TryGet(uint seq, out PendingTransfer<TKey> entry) => _entries.TryGetValue(seq, out entry);
 
         /// <summary>Resolve the escrow of a take from the host's accepted delta.</summary>
         public void ResolveTake(in PendingTransfer<TKey> entry, int acceptedDelta)
@@ -96,27 +124,47 @@ namespace CardShopCoop.Sync
             _pendingAdds.Remove(target);
         }
 
-        /// <summary>Drop entries whose result never arrived. Remove each from the live table
-        /// BEFORE resolving so ReleaseAdd cannot see the expiring entry as still pending.</summary>
-        public void Prune()
+        public void Tick()
         {
             if (_entries.Count == 0)
                 return;
-            _prune.Clear();
-            foreach (var kv in _entries)
-                if (Time.time - kv.Value.SentAt > TtlSeconds)
-                    _prune.Add(kv.Key);
-            for (int i = 0; i < _prune.Count; i++)
+            float now = Time.time;
+            var keys = new List<uint>(_entries.Keys);
+            for (int i = 0; i < keys.Count; i++)
             {
-                uint seq = _prune[i];
+                uint seq = keys[i];
                 if (!_entries.TryGetValue(seq, out var entry))
                     continue;
-                _entries.Remove(seq);
-                if (entry.RequestedDelta < 0)
-                    HandEscrow.ExpireTake(entry.EscrowToken);
-                else
-                    ReleaseAdd(entry.Target);
-                Expired?.Invoke(entry);
+                if (now - entry.LastSentAt < ResendIntervalSeconds)
+                    continue;
+
+                if (entry.Attempts >= HardAttempts)
+                {
+                    // Stop retransmitting but KEEP the obligation. Replay once so a host that
+                    // already holds the ack can answer it; the entry stays for a late result.
+                    if (!entry.Escalated)
+                    {
+                        entry.Escalated = true;
+                        entry.LastSentAt = now;
+                        _entries[seq] = entry;
+                        CoopPlugin.Log.LogError(
+                            $"PendingTransferLedger: transfer seq={seq} unresolved after {entry.Attempts} attempts; keeping obligation and replaying once");
+                        Escalate?.Invoke(entry);
+                        Resend?.Invoke(entry);
+                    }
+                    continue;
+                }
+
+                entry.Attempts++;
+                entry.LastSentAt = now;
+                _entries[seq] = entry;
+                if (entry.Attempts == EscalateAttempts)
+                {
+                    CoopPlugin.Log.LogWarning(
+                        $"PendingTransferLedger: transfer seq={seq} escalated after {entry.Attempts} attempts; requesting resync");
+                    Escalate?.Invoke(entry);
+                }
+                Resend?.Invoke(entry);
             }
         }
 
@@ -129,7 +177,10 @@ namespace CardShopCoop.Sync
                     HandEscrow.ExpireTake(entry.EscrowToken);
             _entries.Clear();
             _pendingAdds.Clear();
-            _seq = 0;
+            _takeCount = 0;
+            // Deliberately do NOT reset _seq: the host keeps its (connId, seq) ack map across a
+            // client scene reload, so reusing sequence numbers could collide with a stale ack
+            // and silently drop a later transfer.
         }
     }
 }

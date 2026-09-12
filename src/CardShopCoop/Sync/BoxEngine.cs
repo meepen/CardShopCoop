@@ -94,6 +94,9 @@ namespace CardShopCoop.Sync
         // echoes TransferSeq in a BoxTransferResult; the difference between the requested and
         // accepted delta is what the client must roll back in its own hand (last to pull loses).
         private readonly PendingTransferLedger<ushort> _transfers = new PendingTransferLedger<ushort>();
+        private readonly Dictionary<uint, BoxUpdateMessage> _pendingTransferMsgs
+            = new Dictionary<uint, BoxUpdateMessage>();
+        private readonly HostTransferAcks _hostAcks = new HostTransferAcks();
         private readonly HashSet<ushort> _suppressedSnapshotForBox = new HashSet<ushort>();
         private bool _resyncRequested;
         private readonly Dictionary<InteractablePackagingBox, float> _contentSentAt
@@ -188,20 +191,34 @@ namespace CardShopCoop.Sync
         public BoxEngine(IEnumerable<IBoxFamily> families)
         {
             _families = new List<IBoxFamily>(families);
-            _transfers.Expired = pending =>
+            _transfers.Resend = pending =>
             {
-                // A take was unreserved and remains in the hand. An unanswered add may
-                // have been accepted or rejected; either way force the host's truth so a
-                // suppressed mirror cannot keep optimistic content forever. Coalesce to one
-                // resync per tick: an unanswered add cannot conservatively refund its items
-                // (the host may already hold them), so converging to host truth is the safe
-                // outcome, but it must not be silent.
-                bool suppressed = _suppressedSnapshotForBox.Remove(pending.Target);
-                if (pending.RequestedDelta > 0)
-                    CoopPlugin.Log.LogWarning(
-                        $"BoxEngine: add transfer box={pending.Target} type={pending.TransferType} delta={pending.RequestedDelta} expired unresolved; resyncing host content");
-                if (suppressed || pending.RequestedDelta > 0)
+                if (!_pendingTransferMsgs.TryGetValue(pending.Seq, out var retry))
+                {
+                    // The payload was dropped (e.g. a reset raced the ledger); never throw out
+                    // of the per-frame tick. Converge to host truth instead of retrying blind.
+                    CoopPlugin.Log.LogError($"BoxEngine: missing transfer message seq={pending.Seq}; requesting resync instead of resending");
                     _resyncRequested = true;
+                    return;
+                }
+                if (retry.Box.Possession == BoxPossession.Free
+                    && _clientById.TryGetValue(pending.Target, out var box) && box != null
+                    && Family(FamilyOf(box)).TryReadLocal(box, out _, out var pos, out var yaw,
+                        out var vel, out var angVel, out _))
+                {
+                    retry.Box.Pos = pos;
+                    retry.Box.Yaw = yaw;
+                    retry.Box.Velocity = vel;
+                    retry.Box.AngularVelocity = angVel;
+                }
+                CoopPlugin.Log.LogDebug($"BoxEngine: resending transfer seq={pending.Seq} box={pending.Target}");
+                SendUpdate?.Invoke(retry);
+            };
+            _transfers.Escalate = pending =>
+            {
+                _resyncRequested = true;
+                CoopPlugin.Log.LogError(
+                    $"BoxEngine: transfer seq={pending.Seq} box={pending.Target} escalated after {pending.Attempts} attempts; requesting resync");
             };
         }
 
@@ -425,6 +442,9 @@ namespace CardShopCoop.Sync
             _baselineItemCount.Clear();
             _baselineItemType.Clear();
             _transfers.Clear();
+            _pendingTransferMsgs.Clear();
+            _hostAcks.Clear();
+            CardBoxOps.ClearCollectAcks();
             _suppressedSnapshotForBox.Clear();
             _contentSentAt.Clear();
             _lastSentAt.Clear();
@@ -795,6 +815,11 @@ namespace CardShopCoop.Sync
         {
             if (msg == null)
                 return;
+            if (msg.TransferSeq != 0 && _hostAcks.TryGet(connId, msg.TransferSeq, out int stored))
+            {
+                ReplyStoredTransfer(connId, msg, stored);
+                return;
+            }
             var w = msg.Box;
             // The host is the only id authority: a client cannot legitimately reference an id the
             // host has never assigned. Drop it (and any lingering lease) instead of seeding an
@@ -846,15 +871,23 @@ namespace CardShopCoop.Sync
                 && (lease.Owner == connId
                     || (currentOwner.Kind == PlayerKind.None && CanApplyContentOnly(knownBox, currentOwner)));
             bool itemDelta = senderMayEdit && msg.TransferSeq != 0;
+            bool lidOnly = senderMayEdit && !itemDelta && w.Possession == BoxPossession.Free;
             bool contentMerged = false;
             int acceptedDelta = 0;
             if (itemDelta)
                 contentMerged = itemFamily.ReconcileContent(knownBox, w, msg.ContentBaseItemCount,
                     msg.ContentTransferType, out acceptedDelta);
+            if (lidOnly)
+                itemFamily.ApplyLidOnly(knownBox, w.Open);
             // A refused delta (e.g. a conflicting type) must be corrected: drop the cached hash so
             // the authoritative re-assert is sent even though the host's content did not change.
             if (itemDelta && !contentMerged)
                 _hostHashes.Remove(w.Id);
+            // Store the ack as soon as the merge outcome is known, BEFORE any fallible apply
+            // step below, so a dispatch retry replays this result instead of re-applying the
+            // delta. Store keeps the first value, so the later ReplyTransfer is a silent no-op.
+            if (msg.TransferSeq != 0)
+                _hostAcks.Store(connId, msg.TransferSeq, contentMerged ? acceptedDelta : 0);
 
             if (!BoxAuthority.AcceptBoxUpdate(currentOwner, sender, w.Possession, lastOwner))
             {
@@ -915,7 +948,7 @@ namespace CardShopCoop.Sync
                 BoxPlacement.CancelRemoteMotion(knownBox);
             }
 
-            ReplyTransfer(connId, msg, acceptedDelta);
+            ReplyTransfer(connId, msg, contentMerged ? acceptedDelta : 0);
 
             if (w.Possession == BoxPossession.Removed && knownBox != null)
             {
@@ -936,6 +969,14 @@ namespace CardShopCoop.Sync
         /// <summary>Host: echo the outcome of one transfer to its sender when the request carried
         /// a sequence. A zero accepted delta tells the requester to roll the whole transfer back.</summary>
         private void ReplyTransfer(int connId, BoxUpdateMessage msg, int acceptedDelta)
+        {
+            if (msg == null || msg.TransferSeq == 0)
+                return;
+            _hostAcks.Store(connId, msg.TransferSeq, acceptedDelta);
+            ReplyStoredTransfer(connId, msg, acceptedDelta);
+        }
+
+        private void ReplyStoredTransfer(int connId, BoxUpdateMessage msg, int acceptedDelta)
         {
             if (msg == null || msg.TransferSeq == 0)
                 return;
@@ -960,6 +1001,7 @@ namespace CardShopCoop.Sync
                     $"resolve seq={msg.TransferSeq} box={msg.BoxId} no pending transfer (ignored)", msg.BoxId, 2f);
                 return;
             }
+            _pendingTransferMsgs.Remove(msg.TransferSeq);
             int rejected = pending.RequestedDelta - msg.AcceptedDelta;
             if (pending.RequestedDelta < 0)
             {
@@ -997,12 +1039,14 @@ namespace CardShopCoop.Sync
                         pending.Target, 2f);
                 }
             }
-            if (_suppressedSnapshotForBox.Remove(pending.Target))
+            bool suppressed = _suppressedSnapshotForBox.Remove(pending.Target);
+            if (suppressed || rejected > 0)
                 RequestBoxResync?.Invoke();
         }
 
         public void HostReleaseConn(int connId)
         {
+            _hostAcks.ReleaseConn(connId);
             var release = new List<ushort>();
             foreach (var kv in _leases)
                 // A box is released if the peer owned it OR was driving its push (a pushed
@@ -1168,6 +1212,21 @@ namespace CardShopCoop.Sync
                 }
 
                 bool hadEntry = _clientById.TryGetValue(w.Id, out var box);
+                if (hadEntry && box != null && FamilyOf(box) != w.Family)
+                {
+                    // The host re-used this id for a different box family (a host-side identity
+                    // reset). The old mirror is no longer this id's object: destroy it before
+                    // re-adopting, or it is orphaned and a duplicate is spawned. A content
+                    // mismatch within the SAME family is NOT an identity change - a pending
+                    // local add and ordinary drift keep the mirror and are handled below.
+                    BoxShared.DebugLog("box-rx",
+                        $"id={w.Id} fam={w.Family} family changed from {FamilyOf(box)}; recreating mirror",
+                        w.Id, 2f);
+                    DestroyClientBox(box);
+                    ForgetClientMirror(w.Id, box);
+                    box = null;
+                    hadEntry = false;
+                }
                 if (!hadEntry || box == null)
                 {
                     // The key existed but held a destroyed object: drop its stale per-box
@@ -1278,11 +1337,15 @@ namespace CardShopCoop.Sync
                     if (reservedAdd)
                     {
                         int localCount = family.ReadItemCount(box);
-                        if (localCount != w.ItemCount)
+                        int localType = EnumMap.ToWire(EnumKind.ItemType, family.ReadItemType(box));
+                        if (localCount != w.ItemCount || localType != w.ItemType)
                         {
                             w.ItemCount = localCount;
-                            w.ItemType = EnumMap.ToWire(EnumKind.ItemType, family.ReadItemType(box));
+                            w.ItemType = localType;
                             _suppressedSnapshotForBox.Add(w.Id);
+                            BoxShared.DebugLog("box-transfer",
+                                $"id={w.Id} pending add protected local content count={localCount} type={localType}",
+                                w.Id, 1f);
                         }
                     }
                     family.ApplyState(box, w, isOwner: false);
@@ -1383,7 +1446,7 @@ namespace CardShopCoop.Sync
                 return;
             // Expire transfers whose result never arrived even when the player is idle, so the
             // TTL is a real wall-clock bound and a take cannot stay escrowed indefinitely.
-            _transfers.Prune();
+            _transfers.Tick();
             if (_resyncRequested)
             {
                 _resyncRequested = false;
@@ -1583,18 +1646,37 @@ namespace CardShopCoop.Sync
                 int localTransfer = requestedDelta < 0 ? baseItemType : family.ReadItemType(box);
                 transferType = EnumMap.ToWire(EnumKind.ItemType, localTransfer);
                 transferSeq = _transfers.Begin(w.Id, requestedDelta, localTransfer);
+                if (transferSeq == 0 && requestedDelta < 0)
+                {
+                    // Reserve failure is fail-closed: never send an untracked content delta.
+                    // The local take already happened, so roll the just-noted item out of the
+                    // hand too; the host's re-assert then restores the box and the net change
+                    // is zero instead of a hand+box duplicate.
+                    CoopPlugin.Log.LogError(
+                        $"BoxEngine: take reserve failed box={w.Id} delta={requestedDelta}; rolling back and requesting resync");
+                    HandEscrow.RollbackUnreservedTake(localTransfer, -requestedDelta);
+                    transferType = -1;
+                    baseItemCount = w.ItemCount;
+                    _baselineItemCount[box] = w.ItemCount;
+                    _baselineItemType[box] = family.ReadItemType(box);
+                    _reportedContent[box] = sig;
+                    _resyncRequested = true;
+                }
             }
             _reported[box] = poss;
             _reportedContent[box] = sig;
             BoxShared.DebugLog("box-tx", $"id={w.Id} fam={w.Family} state={poss} open={w.Open} sig={sig} name={box.name}",
                 box.GetInstanceID(), 0.05f);
-            SendUpdate?.Invoke(new BoxUpdateMessage
+            var update = new BoxUpdateMessage
             {
                 Box = w,
                 ContentBaseItemCount = baseItemCount,
                 ContentTransferType = transferType,
                 TransferSeq = transferSeq,
-            });
+            };
+            if (transferSeq != 0)
+                _pendingTransferMsgs[transferSeq] = update;
+            SendUpdate?.Invoke(update);
             _baselineItemCount[box] = w.ItemCount;
             _baselineItemType[box] = family.ReadItemType(box);
             Guard(w.Id).OpenUntil = Time.time + ClientOpenBlockPeriod;

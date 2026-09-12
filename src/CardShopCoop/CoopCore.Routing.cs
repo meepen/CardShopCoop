@@ -48,7 +48,7 @@ namespace CardShopCoop
                     _world.ApplyTransferResult(result);
                 return;
             },
-                MessagePolicy.ClientOnlyInGame, true, heal: () => { _coinHeal = 999f; _progressHeal = 999f; });
+                MessagePolicy.ClientOnlyInGame, true, heal: () => _world.RequestResync?.Invoke());
             _messageRouter.Register<PriceListMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client)
@@ -382,7 +382,7 @@ namespace CardShopCoop
                     _boxEngine.ClientApplyTransferResult(result);
                 return;
             },
-                MessagePolicy.ClientOnlyInGame, true, heal: () => { _coinHeal = 999f; _progressHeal = 999f; });
+                MessagePolicy.ClientOnlyInGame, true, heal: () => _boxEngine?.RequestBoxResync?.Invoke());
             _messageRouter.Register<BoxSnapshotMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client || !InGameLevel())
@@ -391,7 +391,7 @@ namespace CardShopCoop
                     _boxEngine.ClientApplySnapshot(boxSnap);
                 return;
             },
-                MessagePolicy.ClientOnlyInGame, false, heal: () => { _coinHeal = 999f; _progressHeal = 999f; });
+                MessagePolicy.ClientOnlyInGame, false, heal: () => _boxEngine?.RequestBoxResync?.Invoke());
             _messageRouter.Register<JoinResyncRequestMessage>((context, message) =>
             {
                 if (Role != CoopRole.Host || !InGameLevel())
@@ -410,7 +410,7 @@ namespace CardShopCoop
                     CardBoxOps.HostApplyCollect(boxCollect, context.ConnectionId);
                 return;
             },
-                MessagePolicy.HostOnlyInGame, true, heal: () => _boxEngine?.ForceNextTick());
+                MessagePolicy.HostOnlyInGame, false, heal: () => _boxEngine?.ForceNextTick());
             _messageRouter.Register<BoxCollectResultMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client || !InGameLevel())
@@ -419,7 +419,7 @@ namespace CardShopCoop
                     CardBoxOps.ClientApplyResult(boxResult);
                 return;
             },
-                MessagePolicy.ClientOnlyInGame, false, heal: () => { _coinHeal = 999f; _progressHeal = 999f; });
+                MessagePolicy.ClientOnlyInGame, false, heal: () => _boxEngine?.RequestBoxResync?.Invoke());
             _messageRouter.Register<BoxMotionMessage>((context, message) =>
             {
                 if (Role != CoopRole.Host || !InGameLevel())
