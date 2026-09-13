@@ -3824,8 +3824,10 @@ namespace CardShopCoop
                         }
                         // A dropped BoxSnapshot is not self-healing (the host's content hash
                         // already advanced and it is never re-sent), so ask for a fresh one.
+                        // Use the coalesced/rate-limited request so a sustained flood cannot
+                        // form a request/response loop.
                         if (msg.Type == MsgType.BoxSnapshot)
-                            _boxEngine?.RequestBoxResync?.Invoke();
+                            _boxEngine?.RequestResyncCoalesced();
                         continue;
                     }
                 }

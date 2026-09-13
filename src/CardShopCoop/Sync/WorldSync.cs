@@ -97,6 +97,13 @@ namespace CardShopCoop.Sync
                     _locallyChanged[entry.Target] = Time.realtimeSinceStartupAsDouble;
                     OnLocalChanges?.Invoke(new List<Entry> { stored });
                 }
+                else
+                {
+                    // Payload lost (e.g. a reset raced the ledger); converge to host truth
+                    // instead of retrying blind.
+                    CoopPlugin.Log.LogError($"WorldSync: missing transfer entry seq={entry.Seq}; requesting resync instead of resending");
+                    RequestResync?.Invoke();
+                }
             };
             _transfers.Escalate = entry =>
             {

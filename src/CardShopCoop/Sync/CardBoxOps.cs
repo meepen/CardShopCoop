@@ -18,28 +18,30 @@ namespace CardShopCoop.Sync
         public static Action<int, BoxCollectResultMessage> SendResult;
         public static bool ApplyingRemote;
 
-        // A retryable collect can be re-dispatched after the cards were minted but before the
-        // reply/Destroyed completed. Remember (connId, boxId) so a retry replays the result
-        // instead of minting the same graded cards twice. Entries expire and are cleared on
-        // session teardown; the hash check refuses a replay for a recycled box id.
+        // A collect can be re-attempted after the cards were minted but before the reply/Destroyed
+        // completed. Remember the box content (id + card hash) so a re-attempt replays the result
+        // instead of minting the same graded cards twice. Keyed by content, not by connection, so
+        // a fault-retained box refuses every client, not just the original one. Entries are
+        // cleared on session teardown; the hash in the key refuses a recycled box id.
         private struct CollectAck
         {
-            public float At; public int Hash;
+            public float At;
         }
         private static readonly Dictionary<long, CollectAck> _collectAcks = new Dictionary<long, CollectAck>();
         private const float CollectAckTtl = 120f;
 
         public static void ClearCollectAcks() => _collectAcks.Clear();
 
-        private static long CollectKey(int connId, ushort boxId) => ((long)connId << 32) | boxId;
+        private static long CollectKey(ushort boxId, int hash) => ((long)boxId << 32) | (uint)hash;
+
+        private static ushort BoxIdOf(long key) => (ushort)(key >> 32);
 
         private static bool HostBoxResolves(long key)
         {
-            ushort boxId = (ushort)(key & 0xFFFF);
-            return CoopCore.Instance?.Boxes?.TryGetHostBox(boxId, out _) == true;
+            return CoopCore.Instance?.Boxes?.TryGetHostBox(BoxIdOf(key), out _) == true;
         }
 
-        private static bool TryReplayCollect(int connId, ushort boxId, int hash)
+        public static bool TryGetCollectAck(ushort boxId, int hash, out bool boxStillResolves)
         {
             float now = Time.time;
             if (_collectAcks.Count > 64)
@@ -54,15 +56,19 @@ namespace CardShopCoop.Sync
                 for (int i = 0; i < stale.Count; i++)
                     _collectAcks.Remove(stale[i]);
             }
-            // Do NOT expire a matching ack by age: a box retained after a fault must still refuse
-            // a re-mint on a later re-click. The hash check plus ClearCollectAcks on session
-            // reset are what prevent a recycled box id from replaying a stale result.
-            return _collectAcks.TryGetValue(CollectKey(connId, boxId), out var ack) && ack.Hash == hash;
+            long key = CollectKey(boxId, hash);
+            if (!_collectAcks.ContainsKey(key))
+            {
+                boxStillResolves = false;
+                return false;
+            }
+            boxStillResolves = HostBoxResolves(key);
+            return true;
         }
 
-        private static void RememberCollect(int connId, ushort boxId, int hash)
+        private static void RememberCollect(ushort boxId, int hash)
         {
-            _collectAcks[CollectKey(connId, boxId)] = new CollectAck { At = Time.time, Hash = hash };
+            _collectAcks[CollectKey(boxId, hash)] = new CollectAck { At = Time.time };
         }
 
         public static void ApplyPatches(Harmony h)
@@ -127,14 +133,18 @@ namespace CardShopCoop.Sync
         {
             if (CoopCore.Role != CoopRole.Host || msg == null)
                 return;
-            if (TryReplayCollect(connId, msg.Id, msg.CardsHash))
+            if (TryGetCollectAck(msg.Id, msg.CardsHash, out bool boxStillResolves))
             {
-                // Already minted on an earlier attempt; a dispatch retry must not mint again.
+                // Already minted on an earlier attempt; a re-attempt must not mint again. If the
+                // box is gone, report success; if a fault retained it, say so instead of the
+                // silent nothing an Accepted ack would produce.
                 SendResult?.Invoke(connId, new BoxCollectResultMessage
                 {
                     Id = msg.Id,
-                    Accepted = true,
-                    Reason = (byte)BoxCollectStatus.Accepted,
+                    Accepted = !boxStillResolves,
+                    Reason = (byte)(boxStillResolves ? BoxCollectStatus.ApplyFailed : BoxCollectStatus.Accepted),
+                    CardCount = msg.CardCount,
+                    CardsHash = msg.CardsHash,
                 });
                 return;
             }
@@ -236,7 +246,7 @@ namespace CardShopCoop.Sync
                 // Record the ack BEFORE any minting: if the loop throws part-way, the cards
                 // already minted must not be minted again by a re-click. This trades a possible
                 // stuck box for no duplication on an unexpected AddCard fault.
-                RememberCollect(connId, msg.Id, cardsHash);
+                RememberCollect(msg.Id, cardsHash);
                 for (int i = 0; i < cards.Count; i++)
                 {
                     if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
