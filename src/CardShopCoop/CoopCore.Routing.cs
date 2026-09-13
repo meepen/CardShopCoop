@@ -382,7 +382,7 @@ namespace CardShopCoop
                     _boxEngine.ClientApplyTransferResult(result);
                 return;
             },
-                MessagePolicy.ClientOnlyInGame, true, heal: () => _boxEngine?.RequestBoxResync?.Invoke());
+                MessagePolicy.ClientOnlyInGame, true, heal: () => _boxEngine?.RequestResyncCoalesced());
             _messageRouter.Register<BoxSnapshotMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client || !InGameLevel())
@@ -391,7 +391,7 @@ namespace CardShopCoop
                     _boxEngine.ClientApplySnapshot(boxSnap);
                 return;
             },
-                MessagePolicy.ClientOnlyInGame, false, heal: () => _boxEngine?.RequestBoxResync?.Invoke());
+                MessagePolicy.ClientOnlyInGame, false, heal: () => _boxEngine?.RequestResyncCoalesced());
             _messageRouter.Register<JoinResyncRequestMessage>((context, message) =>
             {
                 if (Role != CoopRole.Host || !InGameLevel())
@@ -422,7 +422,7 @@ namespace CardShopCoop
                     CardBoxOps.ClientApplyResult(boxResult);
                 return;
             },
-                MessagePolicy.ClientOnlyInGame, false, heal: () => _boxEngine?.RequestBoxResync?.Invoke());
+                MessagePolicy.ClientOnlyInGame, false, heal: () => _boxEngine?.RequestResyncCoalesced());
             _messageRouter.Register<BoxMotionMessage>((context, message) =>
             {
                 if (Role != CoopRole.Host || !InGameLevel())

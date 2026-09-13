@@ -184,6 +184,11 @@ namespace CardShopCoop.Sync
         /// protected from a stale snapshot and its transfer has resolved.</summary>
         public Action RequestBoxResync;
 
+        /// <summary>Receiver-local heal: coalesce into the next ClientTick instead of sending a
+        /// resync request immediately, so a persistently-failing snapshot cannot form a
+        /// request/response loop at the flush cadence.</summary>
+        public void RequestResyncCoalesced() => _resyncRequested = true;
+
         public override string Name => "boxes";
 
         public override void ForceResend() => RequestFullSnapshot();
@@ -1180,7 +1185,7 @@ namespace CardShopCoop.Sync
 
         public void ClientApplySnapshot(BoxSnapshotMessage msg)
         {
-            if (msg == null)
+            if (msg == null || msg.Boxes == null)
                 return;
             PruneExpiredLocalRemoved();
             bool full = msg.Full;
@@ -1367,6 +1372,7 @@ namespace CardShopCoop.Sync
                     }
                     if (w.Possession != BoxPossession.Removed)
                     {
+                        _reported[box] = w.Possession;
                         _reportedContent[box] = family.ContentSignature(box);
                         _baselineItemCount[box] = family.ReadItemCount(box);
                         _baselineItemType[box] = family.ReadItemType(box);
@@ -1684,9 +1690,12 @@ namespace CardShopCoop.Sync
             };
             if (transferSeq != 0)
                 _pendingTransferMsgs[transferSeq] = update;
-            SendUpdate?.Invoke(update);
+            // Advance the baseline BEFORE the send: if Send throws, the transfer is already
+            // tracked for retry and a second report would create a duplicate transfer for the
+            // same take (whose rollback could then destroy the item while the first is accepted).
             _baselineItemCount[box] = w.ItemCount;
             _baselineItemType[box] = family.ReadItemType(box);
+            SendUpdate?.Invoke(update);
             Guard(w.Id).OpenUntil = Time.time + ClientOpenBlockPeriod;
             return transferSeq;
         }

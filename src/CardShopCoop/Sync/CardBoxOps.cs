@@ -222,6 +222,10 @@ namespace CardShopCoop.Sync
             CoopPlugin.Log.LogInfo($"CardBoxOps: collect accepted connId={connId} id={msg.Id}");
             try
             {
+                // Record the ack BEFORE any minting: if the loop throws part-way, the cards
+                // already minted must not be minted again by a re-click. This trades a possible
+                // stuck box for no duplication on an unexpected AddCard fault.
+                RememberCollect(connId, msg.Id, cardsHash);
                 for (int i = 0; i < cards.Count; i++)
                 {
                     if (cards[i].cardGrade > 10 && Util.GradingInterop.Present)
@@ -230,10 +234,6 @@ namespace CardShopCoop.Sync
                     if (Util.GradingInterop.Actual(cards[i].cardGrade) == 10)
                         CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained++;
                 }
-                // Record the ack before the achievement calls: they can throw (e.g. an absent
-                // achievement index) and a throw after minting would otherwise let a re-click
-                // mint the same cards a second time.
-                RememberCollect(connId, msg.Id, cardsHash);
                 AchievementManager.OnCheckGemMintCardCount(CPlayerData.m_GameReportDataCollectPermanent.gemMintCardObtained);
                 AchievementManager.OnCheckCollectedGradedCardSet();
             }
@@ -302,7 +302,7 @@ namespace CardShopCoop.Sync
                         core.RegisterLine = "couldn't open that graded box - the host is handling it right now";
                         break;
                     case BoxCollectStatus.ApplyFailed:
-                        core.RegisterLine = "couldn't open that graded box on the host - please try again";
+                        core.RegisterLine = "couldn't open that graded box on the host - it was left in place";
                         break;
                     case BoxCollectStatus.UnknownBox:
                         core.RegisterLine = "couldn't open that graded box - it is stale on the host";

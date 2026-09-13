@@ -335,6 +335,9 @@ namespace CardShopCoop.Sync
                         // hand+container duplicate. Do NOT re-detect this take - the backing
                         // item is gone, so a retry could only be funded by a different item.
                         int rolledBack = HandEscrow.RollbackUnreservedTake(localTransfer, -delta);
+                        // Drop the local-edit guard, or the full-state answer to this resync is
+                        // skipped by ApplyRemote for the very key we need restored.
+                        _locallyChanged.Remove(key);
                         CoopPlugin.Log.LogError(
                             $"WorldSync: refused unreserved shelf take key={key:X}; rolled back {rolledBack} and requesting resync");
                         RequestResync?.Invoke();
