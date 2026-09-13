@@ -99,6 +99,8 @@ namespace CardShopCoop.Sync
         private readonly HostTransferAcks _hostAcks = new HostTransferAcks();
         private readonly HashSet<ushort> _suppressedSnapshotForBox = new HashSet<ushort>();
         private bool _resyncRequested;
+        private float _lastResyncRequestAt = -999f;
+        private const float ResyncCooldownSeconds = 2f;
         private readonly Dictionary<InteractablePackagingBox, float> _contentSentAt
             = new Dictionary<InteractablePackagingBox, float>();
         private readonly Dictionary<InteractablePackagingBox, float> _lastSentAt
@@ -456,6 +458,7 @@ namespace CardShopCoop.Sync
             _active.Clear();
             _clientDirty.Clear();
             _resyncRequested = false;
+            _lastResyncRequestAt = -999f;
             _clientFam = 0;
             _clientIdx = 0;
             _pushDriven.Clear();
@@ -1461,9 +1464,10 @@ namespace CardShopCoop.Sync
             // Expire transfers whose result never arrived even when the player is idle, so the
             // TTL is a real wall-clock bound and a take cannot stay escrowed indefinitely.
             _transfers.Tick();
-            if (_resyncRequested)
+            if (_resyncRequested && Time.time - _lastResyncRequestAt >= ResyncCooldownSeconds)
             {
                 _resyncRequested = false;
+                _lastResyncRequestAt = Time.time;
                 RequestBoxResync?.Invoke();
             }
             BoxVisuals.TickPending();

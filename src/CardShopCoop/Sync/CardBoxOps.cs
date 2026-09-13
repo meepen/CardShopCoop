@@ -33,6 +33,12 @@ namespace CardShopCoop.Sync
 
         private static long CollectKey(int connId, ushort boxId) => ((long)connId << 32) | boxId;
 
+        private static bool HostBoxResolves(long key)
+        {
+            ushort boxId = (ushort)(key & 0xFFFF);
+            return CoopCore.Instance?.Boxes?.TryGetHostBox(boxId, out _) == true;
+        }
+
         private static bool TryReplayCollect(int connId, ushort boxId, int hash)
         {
             float now = Time.time;
@@ -40,13 +46,18 @@ namespace CardShopCoop.Sync
             {
                 var stale = new List<long>();
                 foreach (var kv in _collectAcks)
-                    if (now - kv.Value.At > CollectAckTtl)
+                    // Never evict an ack whose box still exists: a box retained after a fault must
+                    // keep refusing a re-mint. Box ids only recycle on a host reset, which calls
+                    // ClearCollectAcks, so resolving-box acks are safe to keep for the session.
+                    if (now - kv.Value.At > CollectAckTtl && !HostBoxResolves(kv.Key))
                         stale.Add(kv.Key);
                 for (int i = 0; i < stale.Count; i++)
                     _collectAcks.Remove(stale[i]);
             }
-            return _collectAcks.TryGetValue(CollectKey(connId, boxId), out var ack)
-                && now - ack.At < CollectAckTtl && ack.Hash == hash;
+            // Do NOT expire a matching ack by age: a box retained after a fault must still refuse
+            // a re-mint on a later re-click. The hash check plus ClearCollectAcks on session
+            // reset are what prevent a recycled box id from replaying a stale result.
+            return _collectAcks.TryGetValue(CollectKey(connId, boxId), out var ack) && ack.Hash == hash;
         }
 
         private static void RememberCollect(int connId, ushort boxId, int hash)
