@@ -38,7 +38,7 @@ namespace CardShopCoop.Sync
 
         private static bool HostBoxResolves(long key)
         {
-            return CoopCore.Instance?.Boxes?.TryGetHostBox(BoxIdOf(key), out _) == true;
+            return CoopCore.Instance?.Boxes?.TryGetHostBox(BoxIdOf(key), out var box) == true && box != null;
         }
 
         public static bool TryGetCollectAck(ushort boxId, int hash, out bool boxStillResolves)
