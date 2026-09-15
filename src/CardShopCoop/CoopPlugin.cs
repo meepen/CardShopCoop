@@ -51,6 +51,8 @@ namespace CardShopCoop
         public static ConfigEntry<bool> PerfDebug;
         public static ConfigEntry<int> ArtificialLagMs;
         public static ConfigEntry<int> ArtificialJitterMs;
+        public static ConfigEntry<bool> EnableGameCheatMenu;
+        public static ConfigEntry<bool> ShowHiddenCategory;
 
         private void Awake()
         {
@@ -109,6 +111,10 @@ namespace CardShopCoop
                 "TESTING ONLY. Adds this many milliseconds of latency to every network message you RECEIVE. Set the same value on both PCs for symmetric lag (each hop adds one delay, so a round trip is roughly twice the value). 0 disables it.");
             ArtificialJitterMs = Config.Bind("Diagnostics", "ArtificialJitterMs", 0,
                 "TESTING ONLY. Randomly varies each received message's artificial latency by up to this many milliseconds, plus or minus, so the connection feels unstable. 0 is a steady delay. Only meaningful while ArtificialLagMs is above 0.");
+            EnableGameCheatMenu = Config.Bind("Hidden", "EnableGameCheatMenu", false,
+                "TESTING ONLY. Allows the game's 1.00 cheat menu to open in solo mode or for the HOST. Clients are always blocked. Requires ShowHiddenCategory=true as an additional safety gate.");
+            ShowHiddenCategory = Config.Bind("Hidden", "ShowHiddenCategory", false,
+                "TESTING ONLY. Shows the hidden category in the CardShopCoop window. The game cheat menu cannot open unless this and EnableGameCheatMenu are both enabled.");
 
             // PLATFORM LINE FIRST, ABOVE EVERYTHING THAT CAN FAIL. This is the line a Game
             // Pass player (or a support thread) is told to look for, and it is most useful

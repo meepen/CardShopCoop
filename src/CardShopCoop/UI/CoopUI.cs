@@ -35,11 +35,13 @@ namespace CardShopCoop.UI
             Session,
             Character,
             Settings,
+            Hidden,
         }
         private CoopTab _tab = CoopTab.Session;
         private Vector2 _sessionScroll;
         private Vector2 _characterScroll;
         private Vector2 _settingsScroll;
+        private Vector2 _hiddenScroll;
         private bool _characterSnapshotReady;
         private bool _characterFemale;
         private readonly List<string> _presetNames = new List<string>();
@@ -207,6 +209,8 @@ namespace CardShopCoop.UI
             // content, and the scroll offset all agree.
             if (_tab == CoopTab.Character && CoopCore.Role == CoopRole.None)
                 _tab = CoopTab.Session;
+            if (_tab == CoopTab.Hidden && !HiddenCategoryVisible())
+                _tab = CoopTab.Session;
 
             DrawTabs(core);
             core.SetCharacterPreview(_tab == CoopTab.Character && CoopCore.Role != CoopRole.None);
@@ -219,7 +223,8 @@ namespace CardShopCoop.UI
             // appears when the content actually overflows.
             GUILayout.BeginVertical(CoopTheme.ContentPanel, GUILayout.ExpandHeight(true));
             Vector2 scroll = _tab == CoopTab.Character ? _characterScroll
-                : _tab == CoopTab.Settings ? _settingsScroll : _sessionScroll;
+                : _tab == CoopTab.Settings ? _settingsScroll
+                : _tab == CoopTab.Hidden ? _hiddenScroll : _sessionScroll;
             scroll = GUILayout.BeginScrollView(scroll, CoopTheme.ScrollView, GUILayout.ExpandHeight(true));
             // Everything in the scroll view shares this minimum-height wrapper, seeded from the
             // viewport measured on the previous Repaint. A short tab therefore fills the space
@@ -240,6 +245,8 @@ namespace CardShopCoop.UI
                 DrawCharacterSelector(core);
             else if (_tab == CoopTab.Settings)
                 DrawSettings(core);
+            else if (_tab == CoopTab.Hidden)
+                DrawHidden(core);
             else
                 DrawSession(core, net);
             GUILayout.EndVertical();
@@ -257,6 +264,8 @@ namespace CardShopCoop.UI
                 _characterScroll = scroll;
             else if (_tab == CoopTab.Settings)
                 _settingsScroll = scroll;
+            else if (_tab == CoopTab.Hidden)
+                _hiddenScroll = scroll;
             else
                 _sessionScroll = scroll;
             GUILayout.EndVertical();
@@ -384,6 +393,13 @@ namespace CardShopCoop.UI
             if (GUILayout.Button("SETTINGS", _tab == CoopTab.Settings ? CoopTheme.TabSelected : CoopTheme.Tab,
                 GUILayout.Width(96f)))
                 _tab = CoopTab.Settings;
+            if (HiddenCategoryVisible())
+            {
+                GUI.enabled = _tab != CoopTab.Hidden;
+                if (GUILayout.Button("HIDDEN", _tab == CoopTab.Hidden ? CoopTheme.TabSelected : CoopTheme.Tab,
+                    GUILayout.Width(88f)))
+                    _tab = CoopTab.Hidden;
+            }
             GUI.enabled = true;
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
@@ -413,6 +429,17 @@ namespace CardShopCoop.UI
             GUILayout.Space(8f);
 
             GUILayout.Label("Settings are saved to BepInEx/config/com.zwhit.cardshopcoop.cfg.", CoopTheme.LabelDim);
+        }
+
+        private static bool HiddenCategoryVisible()
+        {
+            return CoopPlugin.ShowHiddenCategory != null && CoopPlugin.ShowHiddenCategory.Value;
+        }
+
+        private static void DrawHidden(CoopCore core)
+        {
+            DrawConfigToggle(CoopPlugin.ShowHiddenCategory, "Show hidden category");
+            DrawConfigToggle(CoopPlugin.EnableGameCheatMenu, "Enable game cheat menu");
         }
 
         private static void DrawConfigToggle(ConfigEntry<bool> entry, string label)

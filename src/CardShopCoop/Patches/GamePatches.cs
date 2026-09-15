@@ -83,6 +83,20 @@ namespace CardShopCoop.Patches
             Try(h, typeof(CGameManager), "SaveGameData",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(SaveGuardPrefix)));
 
+            var tCheat = AccessTools.TypeByName("CheatManager");
+            if (tCheat != null)
+            {
+                Try(h, tCheat, "SetMenuOpen",
+                    prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatMenuOpenPrefix)));
+                Try(h, tCheat, "Start",
+                    prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatManagerStartPrefix)));
+                Try(h, tCheat, "ApplyCheat",
+                    prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatApplyPrefix)));
+                Try(h, tCheat, "GiveAllCards",
+                    prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatGiveCardsPrefix)));
+                EnsureCheatManager();
+            }
+
             // No local customer simulation on the client (host streams the real economy).
             Try(h, typeof(CustomerManager), "Update",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(ClientBlockPrefix)));
@@ -1193,6 +1207,38 @@ namespace CardShopCoop.Patches
         public static bool ClientBlockPrefix()
         {
             return CoopCore.Role != CoopRole.Client;
+        }
+
+        public static bool CheatMenuOpenPrefix(bool open)
+        {
+            if (!open)
+                return true;
+            return CoopCore.Role != CoopRole.Client
+                && CoopPlugin.ShowHiddenCategory != null && CoopPlugin.ShowHiddenCategory.Value
+                && CoopPlugin.EnableGameCheatMenu != null && CoopPlugin.EnableGameCheatMenu.Value;
+        }
+
+        public static bool CheatManagerStartPrefix() => false;
+
+        private static void EnsureCheatManager()
+        {
+            if (UnityEngine.Object.FindObjectOfType<CheatManager>() != null)
+                return;
+            var go = new GameObject("CardShopCoopGameCheatManager");
+            UnityEngine.Object.DontDestroyOnLoad(go);
+            var manager = go.AddComponent<CheatManager>();
+            manager.m_CheatCanvasPrefab = Resources.Load<GameObject>("CheatUI_Root");
+        }
+
+        public static bool CheatApplyPrefix() => CheatsEnabled();
+
+        public static bool CheatGiveCardsPrefix() => CheatsEnabled();
+
+        private static bool CheatsEnabled()
+        {
+            return CoopCore.Role != CoopRole.Client
+                && CoopPlugin.ShowHiddenCategory != null && CoopPlugin.ShowHiddenCategory.Value
+                && CoopPlugin.EnableGameCheatMenu != null && CoopPlugin.EnableGameCheatMenu.Value;
         }
 
         public static void EconAddCoinPostfix(CEventPlayer_AddCoin evt)
