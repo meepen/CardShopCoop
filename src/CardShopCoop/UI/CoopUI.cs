@@ -421,6 +421,7 @@ namespace CardShopCoop.UI
             GUILayout.Label("LOGGING", CoopTheme.SectionHeader);
             DrawConfigToggle(CoopPlugin.BoxSyncDebug, "Verbose box-sync logging (BoxSyncDebug)");
             DrawConfigToggle(CoopPlugin.PerfDebug, "Per-frame stage timing (PerfDebug)");
+            DrawConfigToggle(CoopPlugin.LeakDebug, "Memory / object-pool counters (LeakDebug)");
             GUILayout.Space(8f);
 
             GUILayout.Label("LATENCY TESTING", CoopTheme.SectionHeader);

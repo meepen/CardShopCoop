@@ -1,0 +1,12 @@
+{
+  "mcp": {
+    "servers": {
+      "csharp": {
+        "type": "local",
+        "command": [
+          "C:\\Users\\meep\\.local\\share\\opencode\\mcp-tools\\csharp-lsp-mcp\\csharp-lsp-mcp.exe"
+        ]
+      }
+    }
+  }
+}

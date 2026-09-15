@@ -95,6 +95,13 @@ namespace CardShopCoop.Sync
                 prefix: new HarmonyMethod(typeof(TournamentSync), nameof(ScheduleBlockPrefix)));
             Try(h, typeof(HostTournamentScreen), "OnPressPrizeSetup",
                 prefix: new HarmonyMethod(typeof(TournamentSync), nameof(ScheduleBlockPrefix)));
+            // Game 1.0 added player sign-up / sign-out buttons. They mutate
+            // CPlayerData.m_IsPlayerRegisteredForTournament and the signed-up count, neither of
+            // which is on the tournament wire, so a guest's press would desync. Host-only.
+            Try(h, typeof(HostTournamentScreen), "OnPressPlayerSignUpTournament",
+                prefix: new HarmonyMethod(typeof(TournamentSync), nameof(ScheduleBlockPrefix)));
+            Try(h, typeof(HostTournamentScreen), "OnPressPlayerSignOutTournament",
+                prefix: new HarmonyMethod(typeof(TournamentSync), nameof(ScheduleBlockPrefix)));
         }
 
         public static bool ScheduleBlockPrefix()
@@ -184,6 +191,20 @@ namespace CardShopCoop.Sync
             td.m_TournamentMaxRound = message.MaxRound;
             td.m_TournamentFee = message.Fee;
             td.m_TournamentTotalValue = message.TotalValue;
+
+            // Player participation: host-authoritative. Sign-up/sign-out are blocked on clients,
+            // so without this the guest's registration flag and player round data would go stale.
+            CPlayerData.m_IsPlayerRegisteredForTournament = message.IsPlayerRegistered;
+            var pdata = CPlayerData.m_PlayerTournamentData;
+            if (pdata == null)
+                CPlayerData.m_PlayerTournamentData = pdata = new CustomerTournamentData();
+            pdata.m_IsTournamentCustomer = message.PlayerIsTournamentCustomer;
+            pdata.m_IsTournamentWin = message.PlayerIsTournamentWin;
+            pdata.m_HasRegisteredTournamentResult = message.PlayerHasRegisteredResult;
+            pdata.m_TournamentCustomerPlayTableIndex = message.PlayerTournamentCustomerPlayTableIndex;
+            pdata.m_TournamentWinCount = message.PlayerTournamentWinCount;
+            pdata.m_TournamentWinPoints = message.PlayerTournamentWinPoints;
+            pdata.m_TournamentPlacementIndex = message.PlayerTournamentPlacementIndex;
 
             // prize catalog: mutate the vanilla 4-slot list in place so screens that
             // index m_PrizeDataList[i] never see it shorter than they expect
@@ -345,7 +366,20 @@ namespace CardShopCoop.Sync
                 MaxRound = td.m_TournamentMaxRound,
                 Fee = td.m_TournamentFee,
                 TotalValue = td.m_TournamentTotalValue,
+                IsPlayerRegistered = CPlayerData.m_IsPlayerRegisteredForTournament,
             };
+
+            var pd = CPlayerData.m_PlayerTournamentData;
+            if (pd != null)
+            {
+                msg.PlayerIsTournamentCustomer = pd.m_IsTournamentCustomer;
+                msg.PlayerIsTournamentWin = pd.m_IsTournamentWin;
+                msg.PlayerHasRegisteredResult = pd.m_HasRegisteredTournamentResult;
+                msg.PlayerTournamentCustomerPlayTableIndex = pd.m_TournamentCustomerPlayTableIndex;
+                msg.PlayerTournamentWinCount = pd.m_TournamentWinCount;
+                msg.PlayerTournamentWinPoints = pd.m_TournamentWinPoints;
+                msg.PlayerTournamentPlacementIndex = pd.m_TournamentPlacementIndex;
+            }
 
             var lists = td.m_PrizeDataList;
             int lc = lists != null ? Mathf.Min(lists.Count, 8) : 0;
@@ -416,6 +450,18 @@ namespace CardShopCoop.Sync
             hash = hash * 31 + td.m_TournamentMaxRound;
             hash = hash * 31 + (int)(td.m_TournamentFee * 100f);
             hash = hash * 31 + (int)(td.m_TournamentTotalValue * 100f);
+            var pd = CPlayerData.m_PlayerTournamentData;
+            hash = hash * 31 + (CPlayerData.m_IsPlayerRegisteredForTournament ? 1 : 0);
+            if (pd != null)
+            {
+                hash = hash * 31 + (pd.m_IsTournamentCustomer ? 1 : 0);
+                hash = hash * 31 + (pd.m_IsTournamentWin ? 1 : 0);
+                hash = hash * 31 + (pd.m_HasRegisteredTournamentResult ? 1 : 0);
+                hash = hash * 31 + pd.m_TournamentCustomerPlayTableIndex;
+                hash = hash * 31 + pd.m_TournamentWinCount;
+                hash = hash * 31 + pd.m_TournamentWinPoints;
+                hash = hash * 31 + pd.m_TournamentPlacementIndex;
+            }
             var lists = td.m_PrizeDataList;
             if (lists != null)
             {

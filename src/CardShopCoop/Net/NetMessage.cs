@@ -82,13 +82,17 @@ namespace CardShopCoop.Net
             return Encoding.UTF8.GetByteCount(_lengthChars, 0, n);
         }
 
-        public static INetMessage Deserialize(Type type, byte[] payload)
+        /// <summary>Decodes a JSON payload that lives inside a larger frame buffer without
+        /// copying it out first: callers pass the exact (offset, count) slice instead of a
+        /// freshly allocated byte[]. The per-frame copy was pure garbage on the hot receive
+        /// path, where the same private frame byte[] already holds the payload.</summary>
+        public static INetMessage Deserialize(Type type, byte[] payload, int offset, int count)
         {
             if (type == null)
                 throw new ArgumentNullException("type");
             if (payload == null)
                 throw new ArgumentNullException("payload");
-            return (INetMessage)JsonConvert.DeserializeObject(Encoding.UTF8.GetString(payload), type, WireSettings.Settings);
+            return (INetMessage)JsonConvert.DeserializeObject(Encoding.UTF8.GetString(payload, offset, count), type, WireSettings.Settings);
         }
     }
 }

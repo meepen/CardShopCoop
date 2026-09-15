@@ -83,6 +83,16 @@ namespace CardShopCoop.Patches
             Try(h, typeof(CGameManager), "SaveGameData",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(SaveGuardPrefix)));
 
+            // Game 1.0 added SaveLoadGameSlotSelectScreen.UpdateSlot calls inside the save path
+            // (CGameManager.SaveGameData and CSaveLoad.Save's native callback) which index the
+            // save-slot UI list. The co-op host snapshot deliberately uses out-of-band slots 6/7
+            // that have no UI entry, so the refresh threw IndexOutOfRange. Skip our slots.
+            Try(h, typeof(SaveLoadGameSlotSelectScreen), "UpdateSlot",
+                prefix: new HarmonyMethod(typeof(GamePatches), nameof(UpdateSlotGuardPrefix)));
+
+            // Game 1.0's cheat canvas can add coins/XP and alter grades, prices and customers.
+            // The shared economy is host-owned, so a client must never open it or apply a cheat.
+            // Resolved by name so a build without the cheat system stays unaffected.
             var tCheat = AccessTools.TypeByName("CheatManager");
             if (tCheat != null)
             {
@@ -394,6 +404,8 @@ namespace CardShopCoop.Patches
             // running under the menu so nobody's pause freezes the shared shop.
             Try(h, typeof(PauseScreen), "OpenScreen",
                 prefix: null, postfix: new HarmonyMethod(typeof(GamePatches), nameof(PauseNoFreezePostfix)));
+            Try(h, typeof(PauseScreen), "CloseScreen",
+                prefix: null, postfix: new HarmonyMethod(typeof(GamePatches), nameof(PauseClosePostfix)));
 
             // Domain sync modules register their patch sets from the single module catalog.
             var patches = CoopCore.PatchCatalog;
@@ -412,11 +424,13 @@ namespace CardShopCoop.Patches
         }
 
         /// <summary>Suppress the CMF camera's raw mouse/gamepad look input while
-        /// the co-op window owns modal UI mode. Returning false prevents the original
-        /// method from reading the input axis at all.</summary>
+        /// the co-op window owns modal UI mode, or while the game's own pause menu is open.
+        /// The pause menu keeps the world running in co-op (see PauseNoFreezePostfix), so its
+        /// ShowCursor only disables the GAME camera - this independent CMF path would still look
+        /// around. Returning false prevents the original method from reading the input axis.</summary>
         public static bool CameraInputPrefix(ref float __result)
         {
-            if (!CoopCore.WindowBlocksInput)
+            if (!CoopCore.WindowBlocksInput && !PauseMenuOpen())
                 return true;
             __result = 0f;
             return false;
@@ -455,6 +469,10 @@ namespace CardShopCoop.Patches
         /// population broadcast.</summary>
         public static void InteractableObjectDestroyedPostfix(InteractableObject __instance)
         {
+            // Drop the per-object mirror baselines BEFORE the id is forgotten, so a destroyed
+            // placed object is not retained by ObjMoveSync/CardShelfSync for the whole session.
+            if (__instance != null && PlacedObjectIdentity.TryGet(__instance, out ushort destroyedId))
+                CoopCore.Instance?.PrunePlacedObjectState(destroyedId);
             PlacedObjectIdentity.Forget(__instance);
             if (CoopCore.Role != CoopRole.Host)
                 return;
@@ -780,7 +798,7 @@ namespace CardShopCoop.Patches
         /// also had at 0, so returning false leaves m_GenCardMarketPriceList as the join-time
         /// save transfer wrote it (the host's real bases).
         ///
-        /// But that transfer can fail to land: CGameData.PropagateLoadData restores all seven
+        /// But that transfer can fail to land: CGameData.PropagateLoadData restores all eight
         /// card price tables behind ONE gate (decompiled/CGameData.cs:758-773), so when that gate
         /// reads false every base in every table stays 0. Vanilla's own repair is this very
         /// method (it fills only indices still at zero, decompiled/RestockManager.cs:237), so
@@ -823,7 +841,10 @@ namespace CardShopCoop.Patches
                 case ECardExpansionType.CatJob:
                     landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListCatJob);
                     break;
-                // An expansion we can't name has no table among MarketSync's seven either, so a
+                case ECardExpansionType.Ascension:
+                    landed = AnyCardBase(CPlayerData.m_GenCardMarketPriceListAscension);
+                    break;
+                // An expansion we can't name has no table among MarketSync's eight either, so a
                 // local roll into it could never be corrected by the host's snapshot. Keep
                 // blocking: visible $0.00 beats prices that silently disagree with the host.
                 default:
@@ -863,7 +884,7 @@ namespace CardShopCoop.Patches
         {
             try
             {
-                var sm = CSingleton<ShelfManager>.Instance;
+                var sm = SceneRef<ShelfManager>.Get();
                 // no live preview model = no interactive move in progress = nothing to
                 // clean up; skipping avoids the NRE and lets the spawn finish
                 if (sm == null || sm.m_MoveObjectPreviewModel == null)
@@ -937,9 +958,9 @@ namespace CardShopCoop.Patches
                 NotEnoughResourceTextPopup.ShowText(ENotEnoughResourceText.NoDecoInventory);
                 return false;
             }
-            CSingleton<InteractionPlayerController>.Instance.CloseDecoInventoryScreen();
+            SceneRef<InteractionPlayerController>.Get()?.CloseDecoInventoryScreen();
             ShelfManager.SpawnDecoObjectOnHand(itemType);
-            var list = CSingleton<ShelfManager>.Instance.m_DecoObjectList;
+            var list = SceneRef<ShelfManager>.Get().m_DecoObjectList;
             if (list != null)
                 for (int i = list.Count - 1; i >= 0; i--)
                 {
@@ -1184,11 +1205,136 @@ namespace CardShopCoop.Patches
 
         /// <summary>Keep the world running while the pause menu is open during co-op, so a
         /// host (or guest) opening pause doesn't zero Time.timeScale and freeze the other
-        /// player's shop + the network tick. The menu still shows; only the freeze is undone.</summary>
+        /// player's shop + the network tick. The menu still shows; only the freeze is undone.
+        ///
+        /// Because the world is no longer frozen, the LOCAL player must be frozen explicitly or
+        /// they can keep walking/looking with the menu up (vanilla relied on timeScale = 0).</summary>
         public static void PauseNoFreezePostfix()
         {
-            if (CoopCore.Role != CoopRole.None)
-                UnityEngine.Time.timeScale = 1f;
+            // Track the menu even outside a session: a session that ends while the menu is open
+            // must not leave the walker latch set after it later closes.
+            RefreshPauseMenuOpen();
+            if (CoopCore.Role == CoopRole.None)
+            {
+                RestoreLocalWalkerIfIdle();
+                return;
+            }
+            UnityEngine.Time.timeScale = 1f;
+            // OpenScreen is a toggle: when it closes the menu it calls CloseScreen() and returns,
+            // so decide from the menu's ACTUAL state, not from "OpenScreen ran".
+            if (_pauseMenuOpen)
+                StopLocalWalkerForPause();
+            else
+                RestoreLocalWalkerIfIdle();
+        }
+
+        /// <summary>The pause menu closed (Escape toggle or a button); give the local player
+        /// their movement back unless another mode (register UI, UI mode) still needs it locked.
+        /// Runs regardless of role so a session that ended while paused still releases the
+        /// walker stop that StopLocalWalkerForPause latched on open (Shutdown does not touch it).</summary>
+        public static void PauseClosePostfix()
+        {
+            RefreshPauseMenuOpen();
+            RestoreLocalWalkerIfIdle();
+        }
+
+        // Cached so CameraInputPrefix (per look-input frame) never touches a singleton getter:
+        // CSingleton<PauseScreen>.Instance would fabricate an empty shadow screen if the real
+        // one is absent (boot, guest world reload) and disable the game's pause UI for the run.
+        private static bool _pauseMenuOpen;
+        private static PauseScreen _pauseScreen;
+
+        private static void RefreshPauseMenuOpen()
+        {
+            try
+            {
+                _pauseScreen = SceneRef<PauseScreen>.Get();
+                _pauseMenuOpen = _pauseScreen != null
+                    && _pauseScreen.m_ScreenGrp != null
+                    && _pauseScreen.m_ScreenGrp.activeSelf;
+            }
+            catch (System.Exception e) { Swallow.Log(e); _pauseMenuOpen = false; }
+        }
+
+        private static bool PauseMenuOpen()
+        {
+            if (!_pauseMenuOpen)
+                return false;
+            // Torn down without a CloseScreen (scene change): the cached Unity reference
+            // self-nullifies, so this clears the flag and unhooks the input block.
+            if (_pauseScreen == null || _pauseScreen.m_ScreenGrp == null || !_pauseScreen.m_ScreenGrp.activeSelf)
+            {
+                _pauseMenuOpen = false;
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>Pause claims the local walker's stop latch ONLY if it was free when the menu
+        /// opened. The card-album view (and every modal screen) also stops the walker, and the
+        /// register sets its own lock; closing pause must never clear a latch another state owns.
+        /// The walker exposes no getter, so read the backing field; the latched instance is
+        /// remembered so a stale flag from a destroyed walker can never clobber a fresh one.</summary>
+        private static readonly System.Reflection.FieldInfo FiWalkerStop =
+            AccessTools.Field(typeof(CMF.AdvancedWalkerController), "isStopMovement");
+        private static bool _pauseOwnsWalkerStop;
+        private static CMF.AdvancedWalkerController _pauseLatchedWalker;
+
+        private static void StopLocalWalkerForPause()
+        {
+            try
+            {
+                var ipc = SceneRef<InteractionPlayerController>.Get();
+                var walker = ipc != null ? ipc.m_WalkerCtrl : null;
+                if (walker == null)
+                {
+                    _pauseOwnsWalkerStop = false;
+                    _pauseLatchedWalker = null;
+                    return;
+                }
+                if (_pauseLatchedWalker != walker)
+                {
+                    // A previous claim belonged to a walker that no longer exists (scene reload).
+                    _pauseOwnsWalkerStop = false;
+                    _pauseLatchedWalker = null;
+                }
+                if (FiWalkerStop == null)
+                {
+                    CoopPlugin.Log.LogWarning("pause: AdvancedWalkerController.isStopMovement not found; leaving movement lock alone");
+                    return;
+                }
+                bool alreadyStopped = FiWalkerStop.GetValue(walker) is bool s && s;
+                if (alreadyStopped)
+                    return; // our own existing latch, or another owner's - never take over
+                walker.SetStopMovement(true);
+                _pauseOwnsWalkerStop = true;
+                _pauseLatchedWalker = walker;
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
+        }
+
+        private static void RestoreLocalWalkerIfIdle()
+        {
+            if (!_pauseOwnsWalkerStop)
+                return; // pause never latched it - never clobber another owner's stop
+            try
+            {
+                var ipc = SceneRef<InteractionPlayerController>.Get();
+                var walker = ipc != null ? ipc.m_WalkerCtrl : null;
+                if (walker == null || _pauseLatchedWalker != walker)
+                {
+                    // Our latched walker is gone (scene teardown); nothing to release.
+                    _pauseOwnsWalkerStop = false;
+                    _pauseLatchedWalker = null;
+                    return;
+                }
+                if (PauseMenuOpen())
+                    return; // still open - keep the latch
+                walker.SetStopMovement(false);
+                _pauseOwnsWalkerStop = false;
+                _pauseLatchedWalker = null;
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         public static bool SaveGuardPrefix()
@@ -1204,11 +1350,41 @@ namespace CardShopCoop.Patches
             return CoopCore.Role != CoopRole.Client && !CoopCore.GuestBorrowedWorld;
         }
 
-        public static bool ClientBlockPrefix()
+        private static readonly System.Reflection.FieldInfo FiSaveSlotPanels =
+            AccessTools.Field(typeof(SaveLoadGameSlotSelectScreen), "m_SaveLoadSlotPanelUIList");
+
+        /// <summary>Game 1.0's save path calls SaveLoadGameSlotSelectScreen.UpdateSlot(slot) and
+        /// indexes the save-UI panel list. The vanilla list holds one panel per real slot (0..3);
+        /// the co-op host snapshot deliberately uses out-of-band slot 6 (and the default client
+        /// world slot 7), which have no panel, so the refresh threw IndexOutOfRange mid-save. Skip
+        /// only slots the UI cannot represent - never a real slot, which may be the user's
+        /// configured ClientWorldSlot.</summary>
+        public static bool UpdateSlotGuardPrefix(int slot)
         {
-            return CoopCore.Role != CoopRole.Client;
+            try
+            {
+                if (CSingleton<SaveLoadGameSlotSelectScreen>.IsSet)
+                {
+                    var screen = CSingleton<SaveLoadGameSlotSelectScreen>.Instance;
+                    var list = screen == null
+                        ? null
+                        : FiSaveSlotPanels?.GetValue(screen) as System.Collections.IList;
+                    if (list != null)
+                    {
+                        // UpdateSlot indexes BOTH m_SaveLoadSlotPanelUIList and m_SavedDataList;
+                        // vanilla keeps exactly 4 real slots, so never admit more than 4 even if
+                        // the panel list is longer.
+                        int real = Math.Min(list.Count, 4);
+                        return slot >= 0 && slot < real;
+                    }
+                }
+            }
+            catch (Exception e) { Swallow.Log(e); }
+            return slot >= 0 && slot < 4;
         }
 
+        /// <summary>Client: never open the cheat canvas. The shared economy is host-owned, and the
+        /// canvas applies money/XP/grading changes directly. Closing is always allowed.</summary>
         public static bool CheatMenuOpenPrefix(bool open)
         {
             if (!open)
@@ -1218,8 +1394,18 @@ namespace CardShopCoop.Patches
                 && CoopPlugin.EnableGameCheatMenu != null && CoopPlugin.EnableGameCheatMenu.Value;
         }
 
-        public static bool CheatManagerStartPrefix() => false;
+        /// <summary>Game 1.00 destroys its CheatManager in Start in the production build. Keep
+        /// the component alive, but leave the actual menu and cheat actions behind the two
+        /// explicit host/testing gates in CheatMenuOpenPrefix and the action prefixes.</summary>
+        public static bool CheatManagerStartPrefix()
+        {
+            return false;
+        }
 
+        /// <summary>The release build contains CheatManager but does not leave an instance alive
+        /// for the production scene. Create one with the game's own cheat canvas prefab so F1 and
+        /// the built-in controller sequence have an input receiver. It remains dormant unless
+        /// both explicit testing settings are enabled on the host.</summary>
         private static void EnsureCheatManager()
         {
             if (UnityEngine.Object.FindObjectOfType<CheatManager>() != null)
@@ -1228,17 +1414,31 @@ namespace CardShopCoop.Patches
             UnityEngine.Object.DontDestroyOnLoad(go);
             var manager = go.AddComponent<CheatManager>();
             manager.m_CheatCanvasPrefab = Resources.Load<GameObject>("CheatUI_Root");
+            CoopPlugin.Log.LogInfo("game cheat manager enabled for gated testing; use F1 when both Hidden settings are true on the host");
         }
 
-        public static bool CheatApplyPrefix() => CheatsEnabled();
+        /// <summary>Client: never apply a cheat event (money/XP/etc.) locally.</summary>
+        public static bool CheatApplyPrefix()
+        {
+            return CheatsEnabledForHost();
+        }
 
-        public static bool CheatGiveCardsPrefix() => CheatsEnabled();
+        /// <summary>Client: never grant the cheat card set locally.</summary>
+        public static bool CheatGiveCardsPrefix()
+        {
+            return CheatsEnabledForHost();
+        }
 
-        private static bool CheatsEnabled()
+        private static bool CheatsEnabledForHost()
         {
             return CoopCore.Role != CoopRole.Client
                 && CoopPlugin.ShowHiddenCategory != null && CoopPlugin.ShowHiddenCategory.Value
                 && CoopPlugin.EnableGameCheatMenu != null && CoopPlugin.EnableGameCheatMenu.Value;
+        }
+
+        public static bool ClientBlockPrefix()
+        {
+            return CoopCore.Role != CoopRole.Client;
         }
 
         public static void EconAddCoinPostfix(CEventPlayer_AddCoin evt)

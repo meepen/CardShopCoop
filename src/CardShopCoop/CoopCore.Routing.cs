@@ -670,6 +670,15 @@ namespace CardShopCoop
                 return;
             },
                 MessagePolicy.HostOnlyInGame, true, heal: () => _shopState.ForceResend());
+            _messageRouter.Register<TutorialCreditMessage>((context, message) =>
+            {
+                if (Role != CoopRole.Host || !InGameLevel())
+                    return;
+                if (message is TutorialCreditMessage tutorialCredit)
+                    _shopState.HostApplyTutorialCredit(tutorialCredit);
+                return;
+            },
+                MessagePolicy.HostOnlyInGame, true, heal: () => _shopState.ForceResend());
             _messageRouter.Register<ShopStateMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client || !InGameLevel())
@@ -748,6 +757,33 @@ namespace CardShopCoop
                     return;
                 if (message is ContainerStateMessage containerState)
                     _containers.ClientApplyState(containerState);
+                return;
+            },
+                MessagePolicy.ClientOnlyInGame, false, heal: () => _world.RequestResyncCoalesced());
+            _messageRouter.Register<WarehouseStateMessage>((context, message) =>
+            {
+                if (Role != CoopRole.Client || !InGameLevel())
+                    return;
+                if (message is WarehouseStateMessage warehouseState)
+                    _warehouse.ClientApplyState(warehouseState);
+                return;
+            },
+                MessagePolicy.ClientOnlyInGame, false, heal: () => _world.RequestResyncCoalesced());
+            _messageRouter.Register<WarehouseOpMessage>((context, message) =>
+            {
+                if (Role != CoopRole.Host || !InGameLevel())
+                    return;
+                if (message is WarehouseOpMessage warehouseOp)
+                    _warehouse.HostApplyOp(warehouseOp, context.ConnectionId);
+                return;
+            },
+                MessagePolicy.HostOnlyInGame, true, heal: () => _warehouse.ForceResend());
+            _messageRouter.Register<WarehouseTakeResultMessage>((context, message) =>
+            {
+                if (Role != CoopRole.Client || !InGameLevel())
+                    return;
+                if (message is WarehouseTakeResultMessage takeResult)
+                    _warehouse.ClientApplyTakeResult(takeResult);
                 return;
             },
                 MessagePolicy.ClientOnlyInGame, false, heal: () => _world.RequestResyncCoalesced());

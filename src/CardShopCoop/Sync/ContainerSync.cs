@@ -1242,8 +1242,8 @@ namespace CardShopCoop.Sync
                 // This is deliberately the game's complete claim workflow: it adds the
                 // cards, builds the pages/new-card/value state, opens the modal, and queues
                 // the normal XP event for when the player closes it.
-                CSingleton<InteractionPlayerController>.Instance
-                    .m_ShowCardObtainedPage.ShowCardObtained(revealed);
+                SceneRef<InteractionPlayerController>.Get()
+                    ?.m_ShowCardObtainedPage.ShowCardObtained(revealed);
                 SendOp?.Invoke(new ContainerOpMessage
                 {
                     Op = OpPackCollect,

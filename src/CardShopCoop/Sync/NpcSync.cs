@@ -40,6 +40,11 @@ namespace CardShopCoop.Sync
         /// <summary>Names normally go out only on change; a periodic full refresh covers
         /// late joiners and name packets lost on the unreliable channel.</summary>
         private const float NameRefreshInterval = 5f;
+        /// <summary>Cap on NPC slots sampled in one frame. Credit accrues as
+        /// slots * dt / SendInterval, so a full ~8 Hz pass normally needs only
+        /// slots/8 slots per frame; the cap bounds a post-hitch catch-up, and for a crowd
+        /// larger than the cap it becomes the steady-state throughput ceiling.</summary>
+        private const int MaxCollectBudget = 32;
 
         // string-keyed animator calls hash the name on every call; cache the ids once
         private static readonly int HashMoveSpeed = Animator.StringToHash("MoveSpeed");
@@ -87,6 +92,12 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, byte> _workerActionKinds = new Dictionary<int, byte>();
         private readonly Dictionary<int, int> _workerGenerations = new Dictionary<int, int>();
         private readonly Dictionary<int, bool> _workerActive = new Dictionary<int, bool>();
+        // Gradual collection state: one cursor over the combined customer+worker slots, a
+        // fractional work credit, and the chunks accumulated since the last send beat.
+        private float _collectCredit;
+        private int _collectCursor;
+        private List<NpcStateMessage> _pendingChunks = new List<NpcStateMessage>(8);
+        private List<NpcStateMessage> _pendingChunksOut = new List<NpcStateMessage>(8);
         private readonly Dictionary<int, ExistingCustomer> _existing = new Dictionary<int, ExistingCustomer>();
         private static NpcSync _live;
         private bool _missingHoldFieldLogged;
@@ -103,6 +114,10 @@ namespace CardShopCoop.Sync
             _sendTimer = SendInterval;
             _sentNames.Clear();
             _sentIdentities.Clear();
+            _collectCredit = 0f;
+            _collectCursor = 0;
+            _pendingChunks.Clear();
+            _pendingChunksOut.Clear();
         }
 
         public override void Dispose()
@@ -152,6 +167,10 @@ namespace CardShopCoop.Sync
             _missingHoldFieldLogged = false;
             _sendTimer = 0f;
             _nameRefreshIn = 0f;
+            _collectCredit = 0f;
+            _collectCursor = 0;
+            _pendingChunks.Clear();
+            _pendingChunksOut.Clear();
             _sentNames.Clear();
             _sentIdentities.Clear();
             _customerGenerations.Clear();
@@ -169,135 +188,183 @@ namespace CardShopCoop.Sync
             ClearPuppets();
         }
 
-        /// <summary>Host only. Serializes active NPCs into one or more NpcState payloads,
-        /// each under the Steam unreliable packet limit (null when not due / nothing).</summary>
+        /// <summary>Host only. Samples a bounded slice of the combined customer+worker set
+        /// every frame and returns the chunks accumulated since the last 0.125 s send beat
+        /// (null when not due / nothing). Spreading the scan keeps every moving NPC at its
+        /// ~8 Hz cadence at normal frame rates while no single frame pays for the whole crowd
+        /// - the old whole-crowd scan was the host's npc-collect spike.</summary>
         public List<NpcStateMessage> HostCollect(float dt)
         {
             _live = this;
             _sendTimer += dt;
-            if (_sendTimer < SendInterval)
-                return null;
-            _sendTimer -= SendInterval; // preserve cadence across frame boundaries
-            if (_sendTimer > SendInterval)
-                _sendTimer = SendInterval; // clamp debt after a hitch
-
-            if (_cm == null)
-                _cm = Object.FindObjectOfType<CustomerManager>();
-            if (_cm == null)
-                return null;
-
-            _nameRefreshIn -= SendInterval;
+            _nameRefreshIn -= dt;
             if (_nameRefreshIn <= 0f)
             {
                 _sentNames.Clear();
                 _nameRefreshIn = NameRefreshInterval;
             }
 
-            var chunks = new List<NpcStateMessage>(1);
+            if (_cm == null)
+                _cm = Object.FindObjectOfType<CustomerManager>();
+            if (_cm == null)
+                return null;
+
+            CollectSlice(dt);
+
+            if (_sendTimer < SendInterval)
+                return null;
+            _sendTimer -= SendInterval; // preserve cadence across frame boundaries
+            if (_sendTimer > SendInterval)
+                _sendTimer = SendInterval; // clamp debt after a hitch
+
+            FlushChunk(_pendingChunks);
+            if (_pendingChunks.Count == 0)
+                return null;
+            // Hand the accumulated chunks to the caller and swap in a clean list; the caller
+            // broadcasts synchronously, so the returned list is free to be reused next beat.
+            var result = _pendingChunks;
+            _pendingChunks = _pendingChunksOut;
+            _pendingChunksOut = result;
+            _pendingChunks.Clear();
+            return result;
+        }
+
+        /// <summary>Host: sample this frame's budget of slots, appending entries to
+        /// <see cref="_pendingChunks"/>. Credit is earned as slots * dt / SendInterval, so
+        /// every slot is visited about once per send interval; the budget is capped so a
+        /// collapsed frame is clamped instead of paid back as one unbounded burst. A frame
+        /// rate too low for the cap (below roughly total / MaxCollectBudget per interval)
+        /// necessarily stretches the cadence rather than accumulating an unbounded backlog.</summary>
+        private void CollectSlice(float dt)
+        {
+            var customers = _cm.GetCustomerList();
+            var workers = WorkerManager.GetWorkerList();
+            int customerCount = customers != null ? customers.Count : 0;
+            int workerCount = workers != null ? workers.Count : 0;
+            int total = customerCount + workerCount;
+            if (total <= 0)
+                return;
+
+            _collectCredit += total * dt / SendInterval;
+            // Bound the credit before the int cast: a sustained low frame rate must not grow
+            // it without limit (which would eventually overflow to a negative budget and wedge
+            // collection) and one hitch must not trigger an unbounded catch-up burst.
+            if (_collectCredit > MaxCollectBudget)
+                _collectCredit = MaxCollectBudget;
+            int budget = (int)_collectCredit;
+            if (budget <= 0)
+                return;
+            if (budget >= total)
+            {
+                budget = total;          // never revisit a slot within one frame
+                _collectCredit = 0f;
+            }
+            else
+            {
+                _collectCredit -= budget;
+            }
+
             float hostTime = Time.unscaledTime;
             BeginChunk(hostTime);
-
-            var customers = _cm.GetCustomerList();
-            long tCustomers = Util.PerfProbe.Start();
-            for (int i = 0; i < customers.Count; i++)
+            for (int n = 0; n < budget; n++)
             {
-                var c = customers[i];
-                bool active = c != null && c.m_IsActive && c.gameObject.activeSelf;
-                bool wasActive = _customerActive.TryGetValue(i, out var oldActive) && oldActive;
-                if (active && !wasActive)
-                {
-                    _customerGenerations.TryGetValue(i, out int generation);
-                    _customerGenerations[i] = generation + 1;
-                }
-                _customerActive[i] = active;
-                if (!active)
-                    continue;
-                // m_CharacterCustom is momentarily null during pooled activation; skipping
-                // one tick is harmless (client despawn timeout is 1.5s) whereas an empty
-                // name would churn the puppet through a bogus re-dress
-                var cc = c.m_CharacterCustom;
-                if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
-                    continue;
-                var flags = CollectFlags(c.m_Anim);
-                int grabSequence = GetGrabSequence(i, c.m_CurrentState);
-                byte actionKind = c.m_CurrentState == ECustomerState.TournamentTakePrize ? (byte)2 : (byte)1;
-                // smelly is sim state, not an animator bool - without it the joiner
-                // can't see the stink cloud the host (and the cleansers) react to
-                try
-                {
-                    if (c.IsSmelly())
-                        flags |= NpcFlags.Smelly;
-                }
-                catch (System.Exception e) { Swallow.Log(e); }
-                // the red "!" trade/sell-in prompt is a plain mesh toggle, not an animator
-                // bool - mirror it so the guest can see which customer wants to be served
-                try
-                {
-                    if (c.m_ExclaimationMesh != null && c.m_ExclaimationMesh.activeSelf)
-                        flags |= NpcFlags.Exclaim;
-                }
-                catch (System.Exception e) { Swallow.Log(e); }
-                WriteEntry(chunks, hostTime, KindCustomer, (ushort)i, cc.CharacterName,
-                    c.transform, c.m_CurrentMoveSpeed, flags, _customerGenerations[i], grabSequence, actionKind);
+                if (_collectCursor >= total)
+                    _collectCursor = 0;
+                int slot = _collectCursor++;
+                if (slot < customerCount)
+                    CollectCustomerSlot(customers, slot, hostTime);
+                else
+                    CollectWorkerSlot(workers, slot - customerCount, hostTime);
             }
-            Util.PerfProbe.End("npc-customers", tCustomers);
+            FlushChunk(_pendingChunks);
+        }
 
-            var workers = WorkerManager.GetWorkerList();
-            long tWorkers = Util.PerfProbe.Start();
-            if (workers != null)
+        private void CollectCustomerSlot(List<Customer> customers, int i, float hostTime)
+        {
+            var c = customers[i];
+            bool active = c != null && c.m_IsActive && c.gameObject.activeSelf;
+            bool wasActive = _customerActive.TryGetValue(i, out var oldActive) && oldActive;
+            if (active && !wasActive)
             {
-                for (int i = 0; i < workers.Count; i++)
-                {
-                    var w = workers[i];
-                    bool workerActive = w != null && w.m_IsActive && w.gameObject.activeSelf;
-                    if (!workerActive)
-                    {
-                        _workerActive[i] = false;
-                        continue;
-                    }
-                    bool workerWasActive = _workerActive.TryGetValue(i, out var oldWorkerActive) && oldWorkerActive;
-                    if (!workerWasActive)
-                    {
-                        _workerGenerations.TryGetValue(i, out int generation);
-                        _workerGenerations[i] = generation + 1;
-                    }
-                    _workerActive[i] = true;
-                    var cc = w.m_CharacterCustom;
-                    if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
-                        continue;
-                    // worker names aren't prefixed "Female", so gender must ride a flag or
-                    // female workers spawn from the male customer prefab on the guest
-                    var wflags = CollectFlags(w.m_Anim);
-                    if (FiCurrentHoldItemBox == null && !_missingHoldFieldLogged)
-                    {
-                        _missingHoldFieldLogged = true;
-                        CoopPlugin.Log.LogError("NpcSync: Worker hold-item field is missing; holding-box visuals disabled");
-                    }
-                    var holdBox = FiCurrentHoldItemBox == null ? null : FiCurrentHoldItemBox.GetValue(w) as InteractablePackagingBox_Item;
-                    bool holdBig = false;
-                    int holdItemType = 0;
-                    if (holdBox != null)
-                    {
-                        wflags |= NpcFlags.IsHoldingBox;
-                        holdBig = holdBox.m_IsBigBox;
-                        holdItemType = (int)holdBox.GetItemType();
-                    }
-                    if (w.m_IsFemale)
-                        wflags |= NpcFlags.Female;
-                    _workerActionSequences.TryGetValue(i, out int workerAction);
-                    _workerActionKinds.TryGetValue(i, out byte workerActionKind);
-                    WriteEntry(chunks, hostTime, KindWorker, (ushort)i, cc.CharacterName,
-                        w.transform, 0f, wflags, speedFromAnim: w.m_Anim, identity: _workerGenerations[i],
-                        actionSequence: workerAction, actionKind: workerActionKind,
-                        holdBig: holdBig, holdItemType: holdItemType);
-                }
+                _customerGenerations.TryGetValue(i, out int generation);
+                _customerGenerations[i] = generation + 1;
             }
-            Util.PerfProbe.End("npc-workers", tWorkers);
+            _customerActive[i] = active;
+            if (!active)
+                return;
+            // m_CharacterCustom is momentarily null during pooled activation; skipping
+            // one tick is harmless (client despawn timeout is 1.5s) whereas an empty
+            // name would churn the puppet through a bogus re-dress
+            var cc = c.m_CharacterCustom;
+            if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
+                return;
+            var flags = CollectFlags(c.m_Anim);
+            int grabSequence = GetGrabSequence(i, c.m_CurrentState);
+            byte actionKind = c.m_CurrentState == ECustomerState.TournamentTakePrize ? (byte)2 : (byte)1;
+            // smelly is sim state, not an animator bool - without it the joiner
+            // can't see the stink cloud the host (and the cleansers) react to
+            try
+            {
+                if (c.IsSmelly())
+                    flags |= NpcFlags.Smelly;
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
+            // the red "!" trade/sell-in prompt is a plain mesh toggle, not an animator
+            // bool - mirror it so the guest can see which customer wants to be served
+            try
+            {
+                if (c.m_ExclaimationMesh != null && c.m_ExclaimationMesh.activeSelf)
+                    flags |= NpcFlags.Exclaim;
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
+            WriteEntry(_pendingChunks, hostTime, KindCustomer, (ushort)i, cc.CharacterName,
+                c.transform, c.m_CurrentMoveSpeed, flags, _customerGenerations[i], grabSequence, actionKind);
+        }
 
-            long tFlush = Util.PerfProbe.Start();
-            FlushChunk(chunks);
-            Util.PerfProbe.End("npc-flush", tFlush);
-            return chunks.Count > 0 ? chunks : null;
+        private void CollectWorkerSlot(List<Worker> workers, int i, float hostTime)
+        {
+            var w = workers[i];
+            bool workerActive = w != null && w.m_IsActive && w.gameObject.activeSelf;
+            if (!workerActive)
+            {
+                _workerActive[i] = false;
+                return;
+            }
+            bool workerWasActive = _workerActive.TryGetValue(i, out var oldWorkerActive) && oldWorkerActive;
+            if (!workerWasActive)
+            {
+                _workerGenerations.TryGetValue(i, out int generation);
+                _workerGenerations[i] = generation + 1;
+            }
+            _workerActive[i] = true;
+            var cc = w.m_CharacterCustom;
+            if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
+                return;
+            // worker names aren't prefixed "Female", so gender must ride a flag or
+            // female workers spawn from the male customer prefab on the guest
+            var wflags = CollectFlags(w.m_Anim);
+            if (FiCurrentHoldItemBox == null && !_missingHoldFieldLogged)
+            {
+                _missingHoldFieldLogged = true;
+                CoopPlugin.Log.LogError("NpcSync: Worker hold-item field is missing; holding-box visuals disabled");
+            }
+            var holdBox = FiCurrentHoldItemBox == null ? null : FiCurrentHoldItemBox.GetValue(w) as InteractablePackagingBox_Item;
+            bool holdBig = false;
+            int holdItemType = 0;
+            if (holdBox != null)
+            {
+                wflags |= NpcFlags.IsHoldingBox;
+                holdBig = holdBox.m_IsBigBox;
+                holdItemType = (int)holdBox.GetItemType();
+            }
+            if (w.m_IsFemale)
+                wflags |= NpcFlags.Female;
+            _workerActionSequences.TryGetValue(i, out int workerAction);
+            _workerActionKinds.TryGetValue(i, out byte workerActionKind);
+            WriteEntry(_pendingChunks, hostTime, KindWorker, (ushort)i, cc.CharacterName,
+                w.transform, 0f, wflags, speedFromAnim: w.m_Anim, identity: _workerGenerations[i],
+                actionSequence: workerAction, actionKind: workerActionKind,
+                holdBig: holdBig, holdItemType: holdItemType);
         }
 
         private void BeginChunk(float hostTime)
@@ -641,6 +708,7 @@ namespace CardShopCoop.Sync
             }
             catch (System.Exception e) { Swallow.Log(e); }
             p.BoxProp = null;
+            p.BoxPropBig = false;
             p.BoxPropType = 0;
         }
 
@@ -801,7 +869,7 @@ namespace CardShopCoop.Sync
             Transform anchor = ResolveCustomerAnchor(message.Index, message.Identity);
             if (anchor == null)
                 return;
-            var spawner = CSingleton<PricePopupSpawner>.Instance;
+            var spawner = SceneRef<PricePopupSpawner>.Get();
             if (spawner == null)
                 return;
             spawner.ShowTextPopup(message.Text, message.OffsetUp, anchor);
@@ -816,7 +884,7 @@ namespace CardShopCoop.Sync
             Transform anchor = ResolveCustomerAnchor(message.Index, message.Identity);
             if (anchor == null)
                 return;
-            var spawner = CSingleton<PricePopupSpawner>.Instance;
+            var spawner = SceneRef<PricePopupSpawner>.Get();
             if (spawner == null)
                 return;
             spawner.ShowPricePopup(message.Amount, message.OffsetUp, anchor);
@@ -1158,7 +1226,7 @@ namespace CardShopCoop.Sync
             }
             catch (System.Exception e)
             {
-                CoopPlugin.Log.LogWarning($"NPC re-dressing '{charName}': {e.Message}");
+                CoopPlugin.Log.LogWarning($"NPC re-dressing '{charName}': {e}");
             }
         }
 
@@ -1413,6 +1481,31 @@ namespace CardShopCoop.Sync
                 go.SetActive(on);
         }
 
+        /// <summary>Client: a real pooled customer of the requested gender to clone as a mirror,
+        /// preferring an inactive one. Returns null when the pool is empty/unavailable.</summary>
+        private static GameObject FindPooledCustomer(CustomerManager cm, bool female)
+        {
+            try
+            {
+                var list = cm.GetCustomerList();
+                if (list == null)
+                    return null;
+                GameObject any = null;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var c = list[i];
+                    if (c == null || c.m_IsFemale != female)
+                        continue;
+                    if (any == null)
+                        any = c.gameObject;
+                    if (!c.m_IsActive)
+                        return c.gameObject;
+                }
+                return any;
+            }
+            catch (System.Exception e) { Swallow.Log(e); return null; }
+        }
+
         private void Spawn(Puppet p, string charName, Vector3 pos, bool femaleHint, byte kind, ushort index)
         {
             // workers carry gender in the flag (their names aren't "Female"-prefixed);
@@ -1452,10 +1545,20 @@ namespace CardShopCoop.Sync
                     _cmClient = Object.FindObjectOfType<CustomerManager>();
                 if (_cmClient == null)
                     return;
-                var prefab = female ? _cmClient.m_CustomerFemalePrefab : _cmClient.m_CustomerPrefab;
-                if (prefab == null)
-                    return;
-                prefabObject = prefab.gameObject;
+                // Clone a REAL pooled customer rather than the template prefab. Since 1.0 the
+                // template can carry fewer wardrobe tables (and a different animator) than the
+                // live pool customers, so CharacterCustomization.Initialize threw
+                // IndexOutOfRange while dressing - leaving every mirror in the prefab default
+                // (uniform outfits) and without the sit/play states. Pooled customers initialize
+                // and animate correctly, exactly like the register carrier.
+                prefabObject = FindPooledCustomer(_cmClient, female);
+                if (prefabObject == null)
+                {
+                    var prefab = female ? _cmClient.m_CustomerFemalePrefab : _cmClient.m_CustomerPrefab;
+                    if (prefab == null)
+                        return;
+                    prefabObject = prefab.gameObject;
+                }
             }
 
             var holder = new GameObject("CoopNpcHolder_tmp");
@@ -1503,7 +1606,9 @@ namespace CardShopCoop.Sync
             }
             catch (System.Exception e)
             {
-                CoopPlugin.Log.LogWarning($"NPC dressing '{charName}': {e.Message}");
+                // Full exception (stack included): the 1.0 wardrobe can throw IndexOutOfRange
+                // while dressing a mirrored clone, and only the stack names the offending index.
+                CoopPlugin.Log.LogWarning($"NPC dressing '{charName}': {e}");
             }
 
             // capture prop children BEFORE stripping the Customer script

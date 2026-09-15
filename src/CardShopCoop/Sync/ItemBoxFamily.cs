@@ -201,7 +201,15 @@ namespace CardShopCoop.Sync
                     return;
                 var comp = box.GetBoxStoredCompartment();
                 if (comp != null)
-                    comp.RemoveBox(box);
+                {
+                    // RemoveBox decrements m_ItemAmount, so only call it when the box is really
+                    // registered in the compartment's live list. In 1.0 stored boxes are records
+                    // and AddBox is never called, so an unconditional RemoveBox double-decrements
+                    // the compartment's amount and can wedge it.
+                    var live = comp.GetInteractablePackagingBoxList();
+                    if (live != null && live.Contains(box))
+                        comp.RemoveBox(box);
+                }
                 box.m_IsStored = false;
             }
             catch (System.Exception e) { Swallow.Log(e); }
@@ -379,6 +387,17 @@ namespace CardShopCoop.Sync
         /// next snapshot retries.</summary>
         private static void ApplyStored(InteractablePackagingBox_Item b, in BoxWire w)
         {
+            if (WarehouseBoxSync.Available())
+            {
+                // Game 1.0 has no live stored box: a stored box is a ShelfCompartment record
+                // synced by WarehouseBoxSync, and the live object is destroyed by the game.
+                // Running the game's store recipe here would create a local record AND drive the
+                // data-only destroy (a spurious Removed). Park/hide the mirror; the host's retire
+                // sweep and the record channel finish the transition.
+                BoxLifecycle.ApplyEnabled(b, false);
+                BoxVisuals.SetVisible(b, false);
+                return;
+            }
             // Cheap path FIRST, before any scene search: if the box already sits at the
             // requested slot, the host pose is already the slot's. Without this, every
             // snapshot re-resolved the rack (a full FindObjectOfType) for every stored box,
@@ -416,9 +435,9 @@ namespace CardShopCoop.Sync
             catch (Exception e) { CoopPlugin.Log.LogWarning("ItemBoxFamily store: " + e.Message); }
             if (!b.m_IsStored)
             {
-                BoxShared.DebugLog("store-fail",
-                    $"box id {w.Id} not stored at rack {w.StoreShelf}/{w.StoreComp} ({StoreRejectReason(b, rack)})",
-                    w.Id, 5f);
+                if (BoxShared.ShouldDebugLog(w.Id, 5f))
+                    BoxShared.DebugLog("store-fail",
+                        $"box id {w.Id} not stored at rack {w.StoreShelf}/{w.StoreComp} ({StoreRejectReason(b, rack)})");
                 BoxLifecycle.ApplyEnabled(b, false); // stay kinematic at the host pose, not loose
                 if (BoxPlacement.IsSanePose(w.Pos, w.Yaw))
                     BoxPlacement.ApplyPhysicsPose(b, w.Pos, w.Yaw);

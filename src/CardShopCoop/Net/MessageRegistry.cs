@@ -37,7 +37,7 @@ namespace CardShopCoop.Net
             }
         }
 
-        public static INetMessage Deserialize(MsgType type, byte[] payload)
+        public static INetMessage Deserialize(MsgType type, byte[] payload, int offset, int count)
         {
             Type messageType;
             if (!Types.TryGetValue(type, out messageType))
@@ -46,7 +46,7 @@ namespace CardShopCoop.Net
                     "network: no DTO registered for message type " + type + " - frame dropped");
                 throw new InvalidDataException("No DTO registered for " + type);
             }
-            return WireCodec.Deserialize(messageType, payload ?? new byte[0]);
+            return WireCodec.Deserialize(messageType, payload, offset, count);
         }
 
         internal static bool IsKnown(MsgType type)

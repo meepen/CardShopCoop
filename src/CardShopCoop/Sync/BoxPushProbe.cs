@@ -75,11 +75,14 @@ namespace CardShopCoop.Sync
             var engine = CoopCore.Instance?.Boxes;
             if (engine == null || !engine.CanLocallyPush(box))
                 return;
-            _lastContact[box] = Time.time;
+            // Enforce the cap BEFORE remembering the contact: a box rejected because the pushed
+            // set is full must not leave a permanent _lastContact entry (Tick only prunes pushed
+            // boxes), which retained every box ever touched while already pushing MaxPushed).
             if (!_pushed.Contains(box) && _pushed.Count >= MaxPushed)
                 return;
-            if (_pushed.Add(box))
-                BoxShared.DebugLog("push-add", $"name={box.name} role={CoopCore.Role} count={_pushed.Count}", box.GetInstanceID(), 0.5f);
+            _lastContact[box] = Time.time;
+            if (_pushed.Add(box) && BoxShared.ShouldDebugLog(box.GetInstanceID(), 0.5f))
+                BoxShared.DebugLog("push-add", $"name={box.name} role={CoopCore.Role} count={_pushed.Count}");
         }
 
         /// <summary>Per-frame maintenance: drop boxes that are destroyed, or that lost contact

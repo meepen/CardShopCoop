@@ -41,6 +41,11 @@ namespace CardShopCoop.Net
         private readonly ICoopTransport _inner;
         private readonly ConcurrentQueue<InMsg> _incoming = new ConcurrentQueue<InMsg>();
         private readonly Queue<Pending> _delay = new Queue<Pending>();
+        internal int DelayCount => _delay.Count;
+        // Leak diagnostics passthrough: the wrapped transport's backlog (0 when it is not Steam).
+        internal int InnerReassemblyCount => (_inner as SteamTransport)?.ReassemblyCount ?? 0;
+        internal int InnerReliableOutboxCount => (_inner as SteamTransport)?.ReliableOutboxCount ?? 0;
+        internal int InnerTransientOutboxCount => (_inner as SteamTransport)?.TransientOutboxCount ?? 0;
         private readonly Random _random = new Random();
         private bool _overflowWarned;
         private long _delayBytes;

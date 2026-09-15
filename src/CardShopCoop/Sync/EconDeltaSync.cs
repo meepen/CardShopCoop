@@ -20,7 +20,7 @@ namespace CardShopCoop.Sync
         {
             if (CoopCore.Role != CoopRole.Client)
                 return;
-            GameUIScreen screen = CSingleton<GameUIScreen>.Instance;
+            GameUIScreen screen = SceneRef<GameUIScreen>.Get();
             if (screen == null)
                 return;
 

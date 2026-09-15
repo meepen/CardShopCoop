@@ -97,6 +97,10 @@ namespace CardShopCoop.Net
         ShelfTransferResult = 99, // host -> sender: how much of a shelf item delta was accepted
         RegisterRejected = 100, // host -> client: a register op was rejected; reset that counter
         ShelfBoxPull = 101, // client -> host: move one shelf item directly into a held box
+        WarehouseState = 102, // host -> client: authoritative warehouse StoredBoxRecord lists (game 1.0+)
+        WarehouseOp = 103,    // client -> host: store/take a warehouse box record (game 1.0+)
+        WarehouseTakeResult = 104, // host -> requesting client: warehouse take outcome (game 1.0+)
+        TutorialCredit = 105, // client -> host: a joiner's local tutorial task credit (host-authoritative)
     }
 
     /// <summary>One received message, already reassembled and decoded from the wire.
@@ -181,10 +185,7 @@ namespace CardShopCoop.Net
                 return false;
 
             int payloadLength = declared - TypeSize;
-            var payload = new byte[payloadLength];
-            if (payloadLength > 0)
-                Buffer.BlockCopy(frame, offset + FrameHeaderSize + TypeSize,
-                    payload, 0, payloadLength);
+            int payloadOffset = offset + FrameHeaderSize + TypeSize;
 
             message = new InMsg
             {
@@ -195,9 +196,14 @@ namespace CardShopCoop.Net
             // single bad frame can never unwind a transport pump thread - the same fail-safe
             // the transport used to get from the switch's per-message try/catch. Unknown
             // message types and malformed payloads are rate-limited per type.
+            //
+            // The payload is decoded straight out of the frame slice: an earlier version
+            // copied it into a new byte[] per frame, which was pure garbage on the hot
+            // receive path. The frame is private to this loop and deserialization is
+            // synchronous, so the slice cannot be mutated underneath Json.NET.
             try
             {
-                message.Message = MessageRegistry.Deserialize(message.Type, payload);
+                message.Message = MessageRegistry.Deserialize(message.Type, frame, payloadOffset, payloadLength);
             }
             catch (Exception e)
             {

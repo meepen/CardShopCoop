@@ -42,11 +42,12 @@ namespace CardShopCoop.Sync
         private struct SeatState
         {
             public bool Active;
+            public bool PlayerSeat; // game 1.0: real-player seat
             public int PlayMat, DeckBox, Comic; // EItemType values
 
             public bool Same(SeatState o)
             {
-                return Active == o.Active && PlayMat == o.PlayMat
+                return Active == o.Active && PlayerSeat == o.PlayerSeat && PlayMat == o.PlayMat
                     && DeckBox == o.DeckBox && Comic == o.Comic;
             }
         }
@@ -90,11 +91,33 @@ namespace CardShopCoop.Sync
         {
             var original = AccessTools.Method(typeof(InteractablePlayTable), "StartMoveObject");
             if (original == null)
-            {
                 CoopPlugin.Log.LogWarning("PlayTableSync patch target missing: InteractablePlayTable.StartMoveObject");
-                return;
+            else
+                h.Patch(original, prefix: new HarmonyMethod(typeof(PlayTableSync), nameof(StartMoveObjectPrefix)));
+
+            // Game 1.0 adds a playable player-vs-player duel started from the table's
+            // right-click (OnRightMouseButtonUp -> PlayCardGameManager.SetPlayTable). Its match
+            // state is NOT synchronized, so a client starting one locally would diverge from the
+            // host's shop. Gate it host-only until real duel sync exists.
+            var duel = AccessTools.Method(typeof(InteractablePlayTable), "OnRightMouseButtonUp");
+            if (duel == null)
+                CoopPlugin.Log.LogWarning("PlayTableSync patch target missing: InteractablePlayTable.OnRightMouseButtonUp");
+            else
+                h.Patch(duel, prefix: new HarmonyMethod(typeof(PlayTableSync), nameof(BlockClientPlayerDuelPrefix)));
+        }
+
+        /// <summary>Client: refuse to begin a local player duel - its game state is unsynchronized
+        /// and would diverge from the host. The host owns player matches for now.</summary>
+        public static bool BlockClientPlayerDuelPrefix()
+        {
+            if (CoopCore.Role != CoopRole.Client)
+                return true;
+            if (CoopCore.Instance != null)
+            {
+                CoopCore.Instance.RegisterLine = "player duels are not synchronized yet - the host runs them";
+                CoopCore.Instance.RegisterLineTimer = 3f;
             }
-            h.Patch(original, prefix: new HarmonyMethod(typeof(PlayTableSync), nameof(StartMoveObjectPrefix)));
+            return false;
         }
 
         public override void Reset()
@@ -177,6 +200,17 @@ namespace CardShopCoop.Sync
             });
         }
 
+        /// <summary>Game 1.0: read whether the host table marks this seat as a real player's.</summary>
+        private static bool IsPlayerSeat(InteractablePlayTable table, int seat)
+        {
+            try
+            {
+                var list = table != null ? table.m_IsPlayerSeat : null;
+                return list != null && seat >= 0 && seat < list.Count && list[seat];
+            }
+            catch (Exception e) { Swallow.Log(e); return false; }
+        }
+
         private static SeatState HostSeat(TableGameItemSet set)
         {
             if (set == null || !set.gameObject.activeSelf)
@@ -206,7 +240,7 @@ namespace CardShopCoop.Sync
                 for (int s = 0; s < seats; s++)
                 {
                     var st = HostSeat(sets[s]);
-                    var seat = new TableSeatEntry { Active = st.Active };
+                    var seat = new TableSeatEntry { Active = st.Active, PlayerSeat = IsPlayerSeat(table, s) };
                     if (st.Active)
                     {
                         // the three set pieces are EItemTypes, one of the id spaces
@@ -250,7 +284,7 @@ namespace CardShopCoop.Sync
                 for (int s = 0; s < seats.Count; s++)
                 {
                     var se = seats[s];
-                    var st = new SeatState { Active = se.Active };
+                    var st = new SeatState { Active = se.Active, PlayerSeat = se.PlayerSeat };
                     if (st.Active)
                     {
                         // host ids -> ours (already translated by the DTO deserialize), so
@@ -351,12 +385,30 @@ namespace CardShopCoop.Sync
                 {
                     set.gameObject.SetActive(false);
                 }
+                ApplyPlayerSeat(tableIdx, seat, want.PlayerSeat);
                 _applied[key] = want;
             }
             catch (Exception e)
             {
                 CoopPlugin.Log.LogWarning($"PlayTableSync seat {tableIdx}/{seat}: " + e.Message);
             }
+        }
+
+        /// <summary>Game 1.0: mirror the host's real-player seat flag onto the client table.</summary>
+        private void ApplyPlayerSeat(int tableIdx, int seat, bool playerSeat)
+        {
+            try
+            {
+                var sm = Sm();
+                var tables = sm != null ? sm.m_PlayTableList : null;
+                if (tables == null || tableIdx < 0 || tableIdx >= tables.Count)
+                    return;
+                var table = tables[tableIdx];
+                var list = table != null ? table.m_IsPlayerSeat : null;
+                if (list != null && seat >= 0 && seat < list.Count)
+                    list[seat] = playerSeat;
+            }
+            catch (Exception e) { Swallow.Log(e); }
         }
 
         /// <summary>Client: hide every mirror we activated (disconnect / scene reset).

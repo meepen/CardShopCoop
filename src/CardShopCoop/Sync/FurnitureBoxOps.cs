@@ -77,8 +77,8 @@ namespace CardShopCoop.Sync
                 return false;
             if (!engine.TryResolveClientBoxId(obj, out ushort boxId))
             {
-                BoxShared.DebugLog("furniture-place", $"client: placement not handled; box id unresolved object={obj.name}",
-                    obj.GetInstanceID(), 1f);
+                if (BoxShared.ShouldDebugLog(obj.GetInstanceID(), 1f))
+                    BoxShared.DebugLog("furniture-place", $"client: placement not handled; box id unresolved object={obj.name}");
                 return false;
             }
             bool isVertical = obj.m_IsDecorationVertical;
@@ -142,7 +142,8 @@ namespace CardShopCoop.Sync
                 return false;
 
             engine.ForgetClientBox(boxId);
-            BoxShared.DebugLog("furniture-op", $"client: forwarding sale of {obj.m_ObjectType}");
+            if (BoxShared.ShouldDebugLog())
+                BoxShared.DebugLog("furniture-op", $"client: forwarding sale of {obj.m_ObjectType}");
             SendOp?.Invoke(new FurnitureBoxOpMessage
             {
                 Op = FurnitureBoxOpMessage.OpSell,
@@ -293,7 +294,8 @@ namespace CardShopCoop.Sync
                 return;
             float salePrice = purchase.price / 2f;
             CoopPlugin.Log.LogInfo($"FurnitureBoxOps: sell accepted connId={connId} type={obj.m_ObjectType}");
-            BoxShared.DebugLog("furniture-op", $"host: accepting guest sale of {obj.m_ObjectType} for {salePrice}");
+            if (BoxShared.ShouldDebugLog())
+                BoxShared.DebugLog("furniture-op", $"host: accepting guest sale of {obj.m_ObjectType} for {salePrice}");
             var engine = Engine;
             ushort hostBoxId = 0;
             bool hasHostId = box != null && engine != null && engine.TryGetHostId(box, out hostBoxId);
@@ -342,7 +344,8 @@ namespace CardShopCoop.Sync
                 && FurnitureBoxFamily.Sm()?.m_CashierCounterList.Count <= 1)
                 return;
             CoopPlugin.Log.LogInfo($"FurnitureBoxOps: box-up accepted connId={connId} type={obj.m_ObjectType} index={msg.ObjIndex}");
-            BoxShared.DebugLog("furniture-op", $"host: accepting guest box-up of {obj.m_ObjectType}");
+            if (BoxShared.ShouldDebugLog())
+                BoxShared.DebugLog("furniture-op", $"host: accepting guest box-up of {obj.m_ObjectType}");
             ApplyingRemote = true;
             try
             {
@@ -432,7 +435,7 @@ namespace CardShopCoop.Sync
 
         private static bool InGameLevel()
         {
-            var gm = CSingleton<CGameManager>.Instance;
+            var gm = SceneRef<CGameManager>.Get();
             return gm != null && gm.m_IsGameLevel;
         }
 

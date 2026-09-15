@@ -174,6 +174,25 @@ namespace CardShopCoop.Net.Messages
         public float Value;
     }
 
+    // TutorialCredit (client -> host): a joiner's local tutorial task credit. The host owns
+    // tutorial progress, so it advances the condition to at least the client's value. Sending the
+    // absolute value (not the delta) lets the host reconcile by difference, so a credit the host
+    // already applied on the client's behalf is not double-counted.
+    [NetworkMessage(MsgType.TutorialCredit, Policy = MessagePolicy.HostOnlyInGame)]
+    public sealed class TutorialCreditMessage : INetMessage
+    {
+        public int Condition;
+        public float Value;
+
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.TutorialCredit;
+            }
+        }
+    }
+
     // ----------------------------------------------------------------------
     // Settings sync
     // ----------------------------------------------------------------------

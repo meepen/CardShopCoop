@@ -19,6 +19,53 @@ namespace CardShopCoop.Net
     public class SteamTransport : ICoopTransport
     {
         private const int Channel = 71; // stay clear of channel 0 (other mods)
+        // Per-pump receive/decode cap. Steam reports every queued packet at once, and each
+        // decode is a JSON deserialize; an uncapped burst could monopolize a frame (observed
+        // net-pump spikes up to 33 ms). See the receive loop in PumpMainThread.
+        private const int MaxInboundFramesPerPump = 64;
+
+        // ---- oversized reliable frame chunking ----
+        // Steam's reliable P2P lane refuses frames over roughly 1 MiB, and the old code
+        // retried one for 30 frames before dropping it, stalling the whole pump for hundreds
+        // of milliseconds (the 2.3 MB market snapshot did exactly this). Any RELIABLE frame
+        // too large for Steam is now split into fixed-size chunk envelopes and reassembled on
+        // the receiver before protocol decoding, so the application message layer is
+        // untouched. Only the reliable lane is chunked: every transient message is far below
+        // the threshold, and the transient coalescer keys on the message-type byte, which a
+        // chunk envelope would not carry.
+        private static readonly int ChunkMagic = unchecked((int)0xCC5A4D21); // negative: never a valid normal frame length
+        private const int ChunkPayloadBytes = 256 * 1024;
+        private const int ChunkHeaderInts = 6;               // magic, transfer, total, index, count, length
+        private const int ChunkHeaderBytes = ChunkHeaderInts * 4;
+        private const int MaxReassembledBytes = 8 * 1024 * 1024;
+        private const int MaxChunkCount = (MaxReassembledBytes + ChunkPayloadBytes - 1) / ChunkPayloadBytes;
+        private const double ReassemblyTimeoutSeconds = 10.0;
+
+        private sealed class Reassembly
+        {
+            public int TransferId;
+            public int TotalLength;
+            public int ChunkCount;
+            public int ReceivedCount;
+            // Chunks are held individually until the transfer completes, so a peer cannot
+            // force a full-size allocation by declaring a large total and sending one chunk.
+            public byte[][] Chunks;
+            public bool[] Received;
+            public double LastUpdate;
+        }
+
+        private readonly Dictionary<int, Reassembly> _reassembly = new Dictionary<int, Reassembly>();
+        // Highest transfer id seen per connection. Chunks of an older or already-completed
+        // transfer (a duplicate on the reliable lane) are ignored so they cannot displace a
+        // live newer transfer or resurrect a finished one.
+        private readonly Dictionary<int, int> _transferHigh = new Dictionary<int, int>();
+        private readonly List<int> _expiredReassembly = new List<int>();
+        private int _nextTransferId;
+        private double _lastChunkWarn = -10.0;
+        // A multi-chunk transfer must be enqueued as one uninterrupted run, or a concurrent
+        // send on another lane/thread could interleave its chunks and make the receiver
+        // supersede (and lose) one of the transfers. Send() may run on a worker thread.
+        private readonly object _chunkEnqueueLock = new object();
 
         public ConcurrentQueue<InMsg> Incoming { get; } = new ConcurrentQueue<InMsg>();
         public ConcurrentQueue<int> Disconnects { get; } = new ConcurrentQueue<int>();
@@ -128,7 +175,67 @@ namespace CardShopCoop.Net
 
         private void SendFrame(int connId, byte[] frame)
         {
-            _reliableOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = frame });
+            if (frame == null)
+                return;
+            if (frame.Length <= ChunkPayloadBytes)
+            {
+                _reliableOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = frame });
+                return;
+            }
+            // Build and enqueue under the lock so transfer ids are handed out in the same order
+            // the chunks reach the outbox. A concurrent oversized send cannot invert them (the
+            // receiver would then drop the older transfer as stale).
+            lock (_chunkEnqueueLock)
+            {
+                var chunks = BuildChunks(frame);
+                if (chunks == null)
+                    return;
+                for (int i = 0; i < chunks.Count; i++)
+                    _reliableOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = chunks[i] });
+            }
+        }
+
+        /// <summary>Split an oversized reliable frame into chunk envelopes sharing one transfer
+        /// id. The caller enqueues them contiguously on the reliable lane; Steam orders reliable
+        /// delivery, so the receiver sees them in order (duplicates are still tolerated).</summary>
+        private List<byte[]> BuildChunks(byte[] frame)
+        {
+            if (frame.Length > MaxReassembledBytes)
+            {
+                // Fail loud and fast: the receiver refuses a reassembly this large, so sending
+                // it would just log a rejection per chunk. No current message approaches this.
+                CoopPlugin.Log.LogError(
+                    $"steam: reliable frame {frame.Length} bytes exceeds the {MaxReassembledBytes}-byte chunking limit - not sent");
+                return null;
+            }
+            int chunkCount = (frame.Length + ChunkPayloadBytes - 1) / ChunkPayloadBytes;
+            int transferId = System.Threading.Interlocked.Increment(ref _nextTransferId);
+            var chunks = new List<byte[]>(chunkCount);
+            for (int i = 0; i < chunkCount; i++)
+            {
+                int offset = i * ChunkPayloadBytes;
+                int length = Math.Min(ChunkPayloadBytes, frame.Length - offset);
+                var chunk = new byte[ChunkHeaderBytes + length];
+                PutInt(chunk, 0, ChunkMagic);
+                PutInt(chunk, 4, transferId);
+                PutInt(chunk, 8, frame.Length);
+                PutInt(chunk, 12, i);
+                PutInt(chunk, 16, chunkCount);
+                PutInt(chunk, 20, length);
+                Buffer.BlockCopy(frame, offset, chunk, ChunkHeaderBytes, length);
+                chunks.Add(chunk);
+            }
+            CoopPlugin.Log.LogInfo(
+                $"steam: chunked reliable frame {frame.Length} bytes into {chunkCount} chunk(s) (transfer {transferId})");
+            return chunks;
+        }
+
+        private static void PutInt(byte[] buffer, int offset, int value)
+        {
+            buffer[offset] = (byte)value;
+            buffer[offset + 1] = (byte)(value >> 8);
+            buffer[offset + 2] = (byte)(value >> 16);
+            buffer[offset + 3] = (byte)(value >> 24);
         }
 
         public void Send(int connId, INetMessage message)
@@ -139,8 +246,25 @@ namespace CardShopCoop.Net
         /// <summary>Main thread only: iterates _peers directly to avoid a per-call snapshot.</summary>
         private void BroadcastFrame(byte[] frame)
         {
-            foreach (var kv in _peers)
-                _reliableOutbox.Enqueue(new Outgoing { ConnId = kv.Key, Frame = frame });
+            if (frame == null)
+                return;
+            if (frame.Length <= ChunkPayloadBytes)
+            {
+                foreach (var kv in _peers)
+                    _reliableOutbox.Enqueue(new Outgoing { ConnId = kv.Key, Frame = frame });
+                return;
+            }
+            // Build the chunks once and share the arrays across peers; each peer reassembles
+            // independently, so one transfer id is fine.
+            lock (_chunkEnqueueLock)
+            {
+                var chunks = BuildChunks(frame);
+                if (chunks == null)
+                    return;
+                foreach (var kv in _peers)
+                    for (int i = 0; i < chunks.Count; i++)
+                        _reliableOutbox.Enqueue(new Outgoing { ConnId = kv.Key, Frame = chunks[i] });
+            }
         }
 
         public void Broadcast(INetMessage message)
@@ -277,12 +401,24 @@ namespace CardShopCoop.Net
             }
 
             // ---- receives ----
-            while (SteamNetworking.IsP2PPacketAvailable(out uint size, Channel))
+            // Bound the receive/decode work per pump. Steam hands us every queued packet at
+            // once, and each decode is a JSON deserialize, so without a cap a burst lands in
+            // one frame and hitches gameplay (observed net-pump spikes up to 33 ms). Packets
+            // past the budget stay queued in Steam - ReadP2PPacket is what dequeues, while
+            // IsP2PPacketAvailable only reports availability - so the next pump resumes where
+            // this one stopped and nothing is lost by deferral. 64 is far above the normal
+            // ~15 PlayerState + ~8 NpcState chunks per second, well under the 256-unit
+            // dispatch budget, and the 180 s peer timeout dwarfs any deferral this can cause.
+            int inboundBudget = MaxInboundFramesPerPump;
+            while (inboundBudget > 0 && SteamNetworking.IsP2PPacketAvailable(out uint size, Channel))
             {
                 if (size > _readBuf.Length)
                     _readBuf = new byte[size];
                 if (!SteamNetworking.ReadP2PPacket(_readBuf, (uint)_readBuf.Length, out uint msgSize, out CSteamID remote, Channel))
                     break;
+                // Count every successful read, malformed and unknown frames included, so
+                // invalid traffic cannot slip past the cap.
+                inboundBudget--;
                 if (msgSize < Msg.MinimumFrameSize)
                     continue;
 
@@ -296,13 +432,131 @@ namespace CardShopCoop.Net
                 }
                 _lastRecv[cid] = Time.realtimeSinceStartupAsDouble;
 
+                // A chunk envelope is recognised by its negative magic; a normal frame's
+                // leading length is always positive. Reassemble before protocol decoding.
+                if (msgSize >= ChunkHeaderBytes && BitConverter.ToInt32(_readBuf, 0) == ChunkMagic)
+                {
+                    HandleChunk(cid, (int)msgSize);
+                    continue;
+                }
+
                 if (Msg.TryDecodeFrame(_readBuf, 0, (int)msgSize, cid,
                     Msg.MaxFrameSize, out var message))
                     Incoming.Enqueue(message);
             }
+            ExpireReassembly();
+        }
+
+        /// <summary>Receive-side reassembly of a chunk envelope previously written by
+        /// <see cref="BuildChunks"/>. Chunks arrive in order on the reliable lane, but
+        /// duplicates and stale transfers are tolerated; a complete frame is handed to the
+        /// normal protocol decoder exactly once.</summary>
+        private void HandleChunk(int connId, int size)
+        {
+            int transferId = BitConverter.ToInt32(_readBuf, 4);
+            int totalLength = BitConverter.ToInt32(_readBuf, 8);
+            int chunkIndex = BitConverter.ToInt32(_readBuf, 12);
+            int chunkCount = BitConverter.ToInt32(_readBuf, 16);
+            int chunkLength = BitConverter.ToInt32(_readBuf, 20);
+
+            // Every field must be consistent with the declared total: the chunk count and this
+            // chunk's length both follow from totalLength, so an inconsistent envelope cannot
+            // leave zero-filled gaps inside the reassembled frame.
+            if (totalLength <= 0 || totalLength > MaxReassembledBytes
+                || chunkCount <= 0 || chunkCount > MaxChunkCount
+                || chunkIndex < 0 || chunkIndex >= chunkCount
+                || chunkLength <= 0 || chunkLength > ChunkPayloadBytes
+                || ChunkHeaderBytes + chunkLength != size
+                || chunkCount != (totalLength + ChunkPayloadBytes - 1) / ChunkPayloadBytes
+                || chunkLength != Math.Min(ChunkPayloadBytes, totalLength - chunkIndex * ChunkPayloadBytes))
+            {
+                WarnChunk("malformed or inconsistent chunk envelope", connId, transferId);
+                return;
+            }
+
+            _reassembly.TryGetValue(connId, out var r);
+            if (r == null || r.TransferId != transferId)
+            {
+                // Ignore a chunk belonging to an older or already-finished transfer (a
+                // duplicate on the reliable lane); only a genuinely newer transfer may
+                // supersede the in-progress one.
+                if (_transferHigh.TryGetValue(connId, out int high) && transferId <= high)
+                    return;
+                if (r != null)
+                    WarnChunk($"abandoning incomplete transfer {r.TransferId}", connId, transferId);
+                r = new Reassembly
+                {
+                    TransferId = transferId,
+                    TotalLength = totalLength,
+                    ChunkCount = chunkCount,
+                    Chunks = new byte[chunkCount][],
+                    Received = new bool[chunkCount],
+                };
+                _reassembly[connId] = r;
+                _transferHigh[connId] = transferId;
+            }
+
+            double now = Time.realtimeSinceStartupAsDouble;
+            r.LastUpdate = now;
+            if (r.Received[chunkIndex])
+                return; // duplicate of a chunk we already have
+            var data = new byte[chunkLength];
+            Buffer.BlockCopy(_readBuf, ChunkHeaderBytes, data, 0, chunkLength);
+            r.Chunks[chunkIndex] = data;
+            r.Received[chunkIndex] = true;
+            r.ReceivedCount++;
+
+            if (r.ReceivedCount < r.ChunkCount)
+                return;
+            _reassembly.Remove(connId);
+
+            // Assemble only once every chunk is present, so an incomplete transfer never
+            // allocates the full declared size.
+            var full = new byte[r.TotalLength];
+            for (int i = 0; i < r.Chunks.Length; i++)
+                Buffer.BlockCopy(r.Chunks[i], 0, full, i * ChunkPayloadBytes, r.Chunks[i].Length);
+            if (Msg.TryDecodeFrame(full, 0, full.Length, connId, Msg.MaxFrameSize, out var message))
+                Incoming.Enqueue(message);
+            else
+                WarnChunk("reassembled frame failed to decode", connId, transferId);
+        }
+
+        private void WarnChunk(string what, int connId, int transferId)
+        {
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (now - _lastChunkWarn < 5.0)
+                return;
+            _lastChunkWarn = now;
+            CoopPlugin.Log.LogWarning($"steam: {what} (conn {connId}, transfer {transferId})");
+        }
+
+        /// <summary>Drop reassemblies whose chunks stopped arriving (a lost/corrupt chunk, a
+        /// peer that vanished mid-transfer). Runs once per pump.</summary>
+        private void ExpireReassembly()
+        {
+            if (_reassembly.Count == 0)
+                return;
+            double now = Time.realtimeSinceStartupAsDouble;
+            _expiredReassembly.Clear();
+            foreach (var kv in _reassembly)
+                if (now - kv.Value.LastUpdate > ReassemblyTimeoutSeconds)
+                    _expiredReassembly.Add(kv.Key);
+            for (int i = 0; i < _expiredReassembly.Count; i++)
+            {
+                int connId = _expiredReassembly[i];
+                var r = _reassembly[connId];
+                _reassembly.Remove(connId);
+                CoopPlugin.Log.LogWarning(
+                    $"steam: chunked transfer {r.TransferId} on conn {connId} timed out ({r.ReceivedCount}/{r.ChunkCount} chunks, {r.TotalLength} bytes expected)");
+            }
         }
 
         public int ConnectionCount => _peers.Count;
+
+        // Leak diagnostics: point-in-time backlog snapshots (approximate; ConcurrentQueue).
+        internal int ReassemblyCount => _reassembly.Count;
+        internal int ReliableOutboxCount => _reliableOutbox.Count;
+        internal int TransientOutboxCount => _transientOutbox.Count;
 
         public double SecondsSinceLastRecv(int connId)
         {
@@ -327,6 +581,8 @@ namespace CardShopCoop.Net
             _ids.Remove(sid);
             _connIdsCache = null;
             _lastRecv.Remove(connId);
+            _reassembly.Remove(connId);
+            _transferHigh.Remove(connId);
             Disconnects.Enqueue(connId);
         }
 
@@ -340,6 +596,8 @@ namespace CardShopCoop.Net
             _peers.Clear();
             _ids.Clear();
             _connIdsCache = null;
+            _reassembly.Clear();
+            _transferHigh.Clear();
             if (LobbyId != CSteamID.Nil)
             {
                 try

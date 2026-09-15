@@ -49,6 +49,7 @@ namespace CardShopCoop
         public static ConfigEntry<GradedAlertMode> GradedDriftAlert;
         public static ConfigEntry<bool> BoxSyncDebug;
         public static ConfigEntry<bool> PerfDebug;
+        public static ConfigEntry<bool> LeakDebug;
         public static ConfigEntry<int> ArtificialLagMs;
         public static ConfigEntry<int> ArtificialJitterMs;
         public static ConfigEntry<bool> EnableGameCheatMenu;
@@ -107,6 +108,8 @@ namespace CardShopCoop
                 "Log detailed box-sync activity: each possession report a client sends, each update the host accepts or rejects, and each box the client adopts or spawns. Verbose - enable temporarily (then restart) to diagnose boxes that will not pick up, move, or hide in sync.");
             PerfDebug = Config.Bind("Diagnostics", "PerfDebug", false,
                 "Log any per-frame sync stage that takes longer than 5 ms (rate-limited to one line per stage per 2 s). Enable temporarily to find lag spikes; it does not change gameplay.");
+            LeakDebug = Config.Bind("Diagnostics", "LeakDebug", false,
+                "Log periodic memory and object-pool counters (every 15 s while a co-op session is running, plus a whole-scene object count once a minute) so a support log can show what is growing. Enable temporarily while investigating memory use; it does not change gameplay.");
             ArtificialLagMs = Config.Bind("Diagnostics", "ArtificialLagMs", 0,
                 "TESTING ONLY. Adds this many milliseconds of latency to every network message you RECEIVE. Set the same value on both PCs for symmetric lag (each hop adds one delay, so a round trip is roughly twice the value). 0 disables it.");
             ArtificialJitterMs = Config.Bind("Diagnostics", "ArtificialJitterMs", 0,

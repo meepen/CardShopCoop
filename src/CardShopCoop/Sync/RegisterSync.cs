@@ -414,6 +414,7 @@ namespace CardShopCoop.Sync
             Try(h, typeof(InteractableCard3d), "OnMouseButtonUp",
                 postfix: new HarmonyMethod(typeof(RegisterSync), nameof(ScanCardPostfix)));
             Try(h, typeof(InteractableCustomerCash), "OnMouseButtonUp",
+                prefix: new HarmonyMethod(typeof(RegisterSync), nameof(TakePaymentPrefix)),
                 postfix: new HarmonyMethod(typeof(RegisterSync), nameof(TakePaymentPostfix)));
             Try(h, typeof(Customer), "EvaluateFinishScanItem",
                 prefix: new HarmonyMethod(typeof(RegisterSync), nameof(EvaluateFinishPrefix)));
@@ -538,7 +539,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var ipc = CSingleton<InteractionPlayerController>.Instance;
+                var ipc = SceneRef<InteractionPlayerController>.Get();
                 return ipc != null && ReferenceEquals(FiCurrentCashCounter?.GetValue(ipc), counter);
             }
             catch (System.Exception e) { Swallow.Log(e); return false; }
@@ -550,7 +551,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var ipc = CSingleton<InteractionPlayerController>.Instance;
+                var ipc = SceneRef<InteractionPlayerController>.Get();
                 if (ipc == null || !(FiInUIMode?.GetValue(ipc) is bool inUi) || !inUi)
                     return;
                 ipc.ExitUIMode();
@@ -714,6 +715,31 @@ namespace CardShopCoop.Sync
                 return;
             t.SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpScanCard, BagIndex = (byte)k });
             CoopPlugin.Log.LogDebug($"RegisterSync client: scan card {k} @ {idx}");
+        }
+
+        /// <summary>Client: before vanilla hands the payment over, make the counter's payment mode
+        /// match the cash/card the player actually clicked. A mirrored client customer never runs
+        /// vanilla's Customer.SetCustomerPaidAmount (its sim is blocked), so the counter can still
+        /// be on its default cash mode; StartGivingChange would then take the CASH branch and pop
+        /// the register drawer during a card checkout. The clicked object's own m_IsCard is the
+        /// authoritative branch selector; keep the counter's paid amount as-is.</summary>
+        public static void TakePaymentPrefix(InteractableCustomerCash __instance)
+        {
+            var t = _live;
+            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+                return;
+            var cust = FiCashCustomer?.GetValue(__instance) as Customer;
+            if (cust == null || !t._carrier.ContainsValue(cust))
+                return;
+            var counter = FiQueueCounter?.GetValue(cust) as InteractableCashierCounter;
+            if (counter == null)
+                return;
+            try
+            {
+                double paid = FiPaidAmount?.GetValue(counter) is double p ? p : 0.0;
+                counter.SetCustomerPaidAmount(__instance.m_IsCard, paid);
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
         }
 
         /// <summary>Client: the cash/card was clicked - forward the payment shot.</summary>
@@ -1778,6 +1804,7 @@ namespace CardShopCoop.Sync
         private Item SpawnBagItem(InteractableCashierCounter counter, Transform ctf, Transform placePos,
             EItemType type, float price, Customer carrier, int i)
         {
+            Item item = null;
             try
             {
                 if (type == EItemType.None)
@@ -1785,7 +1812,7 @@ namespace CardShopCoop.Sync
                 var meshData = InventoryBase.GetItemMeshData(type);
                 if (meshData == null)
                     return null;
-                var item = ItemSpawnManager.GetItem(ctf);
+                item = ItemSpawnManager.GetItem(ctf);
                 item.SetMesh(meshData.mesh, meshData.material, type,
                     meshData.meshSecondary, meshData.materialSecondary, meshData.materialList);
                 item.SetCurrentPrice(price);
@@ -1813,6 +1840,14 @@ namespace CardShopCoop.Sync
             }
             catch (System.Exception e)
             {
+                // A throw after GetItem would otherwise strand the pooled item, active and
+                // parented to the counter, outside ItemSpawnManager's reuse pool forever.
+                if (item != null)
+                    try
+                    {
+                        item.DisableItem();
+                    }
+                    catch (System.Exception e2) { Swallow.Log(e2); }
                 CoopPlugin.Log.LogWarning($"RegisterSync client: bag item spawn: {e.Message}");
                 return null;
             }
@@ -1821,14 +1856,24 @@ namespace CardShopCoop.Sync
         private InteractableCard3d SpawnBagCard(InteractableCashierCounter counter, Transform ctf, Transform placePos,
             CardData cardData, float price, Customer carrier, int j)
         {
+            Card3dUIGroup cardUI = null;
+            InteractableCard3d card = null;
             try
             {
                 if (cardData == null || cardData.monsterType == EMonsterType.None)
                     return null;
-                var cardUI = CSingleton<Card3dUISpawner>.Instance.GetCardUI();
-                var card = ShelfManager.SpawnInteractableObject(EObjectType.Card3d).GetComponent<InteractableCard3d>();
+                cardUI = SceneRef<Card3dUISpawner>.Get().GetCardUI();
+                card = ShelfManager.SpawnInteractableObject(EObjectType.Card3d).GetComponent<InteractableCard3d>();
                 if (card == null)
+                {
+                    if (cardUI != null)
+                        try
+                        {
+                            cardUI.DisableCard();
+                        }
+                        catch (System.Exception e2) { Swallow.Log(e2); }
                     return null;
+                }
                 cardUI.m_CardUI.SetCardUI(cardData);
                 card.SetCardUIFollow(cardUI);
                 card.SetEnableCollision(false);
@@ -1853,6 +1898,23 @@ namespace CardShopCoop.Sync
             }
             catch (System.Exception e)
             {
+                // A half-built pair must not escape into neither the carrier list nor the pools:
+                // OnDestroyed frees the card AND (when wired) its group; a card that never got
+                // that far leaves only the group to release.
+                if (card != null)
+                    try
+                    {
+                        card.OnDestroyed();
+                    }
+                    catch (System.Exception e2) { Swallow.Log(e2); }
+                // Always release the group too: OnDestroyed only frees it once SetCardUIFollow
+                // has run (a mid-build throw is before that), and DisableCard is idempotent.
+                if (cardUI != null)
+                    try
+                    {
+                        cardUI.DisableCard();
+                    }
+                    catch (System.Exception e2) { Swallow.Log(e2); }
                 CoopPlugin.Log.LogWarning($"RegisterSync client: bag card spawn: {e.Message}");
                 return null;
             }
@@ -1928,7 +1990,12 @@ namespace CardShopCoop.Sync
                     foreach (var money in counter.m_InteractableCounterMoneyChangeList)
                         if (money != null)
                             money.ResetAmountGiven();
-                if (counter.m_OpenCloseDrawerAnim != null)
+                // Mirror vanilla's teardown: the drawer only closes when CASH change was in
+                // progress. A card checkout never opened the drawer, so playing the close
+                // animation for it is exactly the "drawer still closes on card" artifact.
+                bool changeStarted = FiStartGivingChange?.GetValue(counter) is bool g && g;
+                bool cardMode = FiIsUsingCard?.GetValue(counter) is bool c && c;
+                if (changeStarted && !cardMode && counter.m_OpenCloseDrawerAnim != null)
                     counter.m_OpenCloseDrawerAnim.Play("CashRegisterCloseDrawer");
                 var cash = FiCashScreen?.GetValue(counter) as UI_CashCounterScreen;
                 if (cash != null)
@@ -1981,15 +2048,7 @@ namespace CardShopCoop.Sync
                     carrier.gameObject.SetActive(false);
                 }
                 catch (System.Exception e) { Swallow.Log(e); }
-                if (carrier.m_ItemInBagList != null)
-                    for (int i = carrier.m_ItemInBagList.Count - 1; i >= 0; i--)
-                        if (carrier.m_ItemInBagList[i] != null)
-                            carrier.m_ItemInBagList[i].gameObject.SetActive(false);
-                carrier.m_ItemInBagList.Clear();
-                if (carrier.m_CardInBagList != null)
-                    for (int i = carrier.m_CardInBagList.Count - 1; i >= 0; i--)
-                        ReleaseCard(carrier.m_CardInBagList[i]);
-                carrier.m_CardInBagList.Clear();
+                ReleaseCarrierContents(carrier);
             }
             _carrier.Remove(idx);
             _cartGen.Remove(idx);
@@ -2031,17 +2090,12 @@ namespace CardShopCoop.Sync
                     {
                         carrier.m_CustomerCash.gameObject.SetActive(false);
                         carrier.gameObject.SetActive(false);
-                        for (int i = carrier.m_ItemInBagList.Count - 1; i >= 0; i--)
-                            if (carrier.m_ItemInBagList[i] != null)
-                                carrier.m_ItemInBagList[i].gameObject.SetActive(false);
-                        carrier.m_ItemInBagList.Clear();
-                        if (carrier.m_CardInBagList != null)
-                            for (int i = carrier.m_CardInBagList.Count - 1; i >= 0; i--)
-                                ReleaseCard(carrier.m_CardInBagList[i]);
-                        carrier.m_CardInBagList.Clear();
                     }
                 }
                 catch (System.Exception e) { Swallow.Log(e); }
+                // Outside the try: a throw while deactivating the carrier must not skip the
+                // pool release, or the objects leak on module reset.
+                ReleaseCarrierContents(carrier);
             }
             // Release the NpcSync mirror registry too, or a module reset leaves _existing /
             // SuppressedCustomer pointing at carriers this method just deactivated.
@@ -2060,18 +2114,46 @@ namespace CardShopCoop.Sync
             _cardCounter.Clear();
         }
 
-        private static void ReleaseCard(InteractableCard3d card)
+        /// <summary>Client: return a register mirror carrier's spawned bag contents to the
+        /// game's own pools. Items must be released through DisableItem (it re-parents the
+        /// item under ItemSpawnManager's pool parent) and cards through InteractableCard3d's
+        /// OnDestroyed (it destroys the clone AND releases its Card3dUIGroup via DisableCard).
+        /// Merely deactivating them left both pools unable to reuse anything, so every sale
+        /// instantiated a fresh Item/Card3dUIGroup and grew memory for the whole session.</summary>
+        private static void ReleaseCarrierContents(Customer carrier)
         {
-            try
+            if (carrier == null)
+                return;
+            if (carrier.m_ItemInBagList != null)
             {
-                if (card != null)
+                for (int i = carrier.m_ItemInBagList.Count - 1; i >= 0; i--)
                 {
-                    if (card.m_Card3dUI != null)
-                        card.m_Card3dUI.gameObject.SetActive(false);
-                    card.gameObject.SetActive(false);
+                    var item = carrier.m_ItemInBagList[i];
+                    if (item == null)
+                        continue;
+                    try
+                    {
+                        item.DisableItem();
+                    }
+                    catch (System.Exception e) { Swallow.Log(e); }
                 }
+                carrier.m_ItemInBagList.Clear();
             }
-            catch (System.Exception e) { Swallow.Log(e); }
+            if (carrier.m_CardInBagList != null)
+            {
+                for (int i = carrier.m_CardInBagList.Count - 1; i >= 0; i--)
+                {
+                    var card = carrier.m_CardInBagList[i];
+                    if (card == null)
+                        continue;
+                    try
+                    {
+                        card.OnDestroyed();
+                    }
+                    catch (System.Exception e) { Swallow.Log(e); }
+                }
+                carrier.m_CardInBagList.Clear();
+            }
         }
     }
 }

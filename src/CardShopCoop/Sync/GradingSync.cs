@@ -562,7 +562,7 @@ namespace CardShopCoop.Sync
             catch (System.Exception e) { Swallow.Log(e); }
             try
             {
-                CSingleton<InteractionPlayerController>.Instance
+                SceneRef<InteractionPlayerController>.Get()
                     ?.m_CollectionBinderFlipAnimCtrl?.SetCanUpdateSort(canSort: true);
             }
             catch (System.Exception e) { Swallow.Log(e); }

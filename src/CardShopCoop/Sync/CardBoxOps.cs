@@ -104,9 +104,9 @@ namespace CardShopCoop.Sync
             // reconciliation destroys, which set ApplyingRemote.
             if (!BoxShared.ApplyingRemote)
             {
-                BoxShared.DebugLog("box-destroy",
-                    $"client card-box local destroy name={__instance.name}",
-                    __instance.GetInstanceID(), 1f);
+                if (BoxShared.ShouldDebugLog(__instance.GetInstanceID(), 1f))
+                    BoxShared.DebugLog("box-destroy",
+                        $"client card-box local destroy name={__instance.name}");
                 BoxShared.LocalBoxDestroyed?.Invoke(__instance);
             }
             return true;

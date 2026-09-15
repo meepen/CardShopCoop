@@ -178,6 +178,41 @@ namespace CardShopCoop.Sync
             // flips everyone's light (applied surgically in CoopCore's LightState handler).
             Try(h, typeof(InteractableLightSwitch), "OnMouseButtonUp",
                 prefix: new HarmonyMethod(typeof(ShopStateSync), nameof(LightSwitchPrefix)));
+
+            // Tutorial task credit is host-authoritative: the joiner's local credit is forwarded so
+            // the host advances and broadcasts it back. Without this, a joiner's tutorial progress
+            // was wiped by the host's next snapshot because the host never learned about it.
+            Try(h, typeof(TutorialManager), "AddTaskValue",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(TutorialCreditPostfix)));
+        }
+
+        /// <summary>Client: forward the task credit the local game just applied. Sends the ABSOLUTE
+        /// value for the condition so the host can reconcile by difference rather than increment.</summary>
+        public static void TutorialCreditPostfix(ETutorialTaskCondition tutorialTaskCondition)
+        {
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+                return;
+            var self = _instance;
+            if (self == null)
+                return;
+            self.SendOp?.Invoke(new TutorialCreditMessage
+            {
+                Condition = (int)tutorialTaskCondition,
+                Value = TutorialValue(tutorialTaskCondition),
+            });
+        }
+
+        /// <summary>Current value for a tutorial condition in the local (possibly optimistic)
+        /// list; 0 when the condition has no entry yet.</summary>
+        private static float TutorialValue(ETutorialTaskCondition condition)
+        {
+            var list = CPlayerData.m_TutorialDataList;
+            if (list == null)
+                return 0f;
+            for (int i = 0; i < list.Count; i++)
+                if (list[i] != null && list[i].tutorialTaskCondition == condition)
+                    return list[i].value;
+            return 0f;
         }
 
         private static void Try(Harmony h, Type type, string method,
@@ -371,9 +406,41 @@ namespace CardShopCoop.Sync
         /// LightState broadcaster then ships the flipped m_IsShopLightOn to all clients.</summary>
         private void HostToggleLight()
         {
-            var lm = CSingleton<LightManager>.Instance;
+            var lm = SceneRef<LightManager>.Get();
             if (lm != null)
                 lm.ToggleShopLight();
+        }
+
+        /// <summary>Host: apply a joiner's forwarded tutorial credit. Advances the condition to at
+        /// least the client's value, so a credit the host already applied for the same action is
+        /// not double-counted. The next ShopState broadcast carries the result back.</summary>
+        public void HostApplyTutorialCredit(TutorialCreditMessage message)
+        {
+            if (CoopCore.Role != CoopRole.Host || message == null)
+                return;
+            Guarded("tut-credit", () =>
+            {
+                // Never let a malformed credit mint a junk condition or a non-finite value into
+                // the host's persisted tutorial list (mirrors the economy-contribution guard).
+                if (!Enum.IsDefined(typeof(ETutorialTaskCondition), message.Condition)
+                    || float.IsNaN(message.Value) || float.IsInfinity(message.Value)
+                    || message.Value < 0f)
+                {
+                    CoopPlugin.Log.LogWarning(
+                        $"ShopStateSync: ignoring invalid tutorial credit condition={message.Condition} value={message.Value}");
+                    return;
+                }
+                var condition = (ETutorialTaskCondition)message.Condition;
+                float have = TutorialValue(condition);
+                float delta = message.Value - have;
+                if (delta > 0f)
+                {
+                    TutorialManager.AddTaskValue(condition, delta);
+                    CoopPlugin.Log.LogInfo(
+                        $"ShopStateSync: applied client tutorial credit {condition} +{delta:0.##} (now {message.Value:0.##})");
+                }
+            });
+            ForceResend(); // echo promptly so the joiner's optimistic value is confirmed
         }
 
         private void HostPayBill(byte billType)
@@ -413,7 +480,8 @@ namespace CardShopCoop.Sync
             var urm = Urm();
             if (urm == null)
                 return;
-            if (CSingleton<CGameManager>.Instance != null && CSingleton<CGameManager>.Instance.m_IsPrologue)
+            var gm = SceneRef<CGameManager>.Get();
+            if (gm != null && gm.m_IsPrologue)
                 return;
 
             if (kind == 2) // shop lot B
@@ -652,6 +720,24 @@ namespace CardShopCoop.Sync
         /// then re-feeds the snapshot value ONCE, which sets rather than accumulates.</summary>
         private void ApplyTutorial(int tutIndex, System.Collections.Generic.List<TutorialData> incoming)
         {
+            var tm = UnityEngine.Object.FindObjectOfType<TutorialManager>(); // NOT CSingleton (fake-manager trap)
+
+            // 1.0's shop-naming marker (m_TutorialTargetIndicator) is shown only while the tutorial
+            // is at step 0, and is cleared by the LOCAL naming trigger / OnPressConfirmShopName -
+            // neither of which a joiner runs - so a guest's marker stayed up after the host named
+            // the shop. Mirror the host's step on every apply (heals included), before the
+            // unchanged-data early return below.
+            if (tm != null && tm.m_TutorialTargetIndicator != null)
+            {
+                try
+                {
+                    bool want = tutIndex == 0;
+                    if (tm.m_TutorialTargetIndicator.activeSelf != want)
+                        tm.m_TutorialTargetIndicator.SetActive(want);
+                }
+                catch (Exception e) { Swallow.Log(e); }
+            }
+
             var cur = CPlayerData.m_TutorialDataList;
             // skip if identical to what we already have (avoids UI churn every heal)
             bool same = tutIndex == CPlayerData.m_TutorialIndex && cur != null && cur.Count == incoming.Count;
@@ -672,7 +758,6 @@ namespace CardShopCoop.Sync
             CPlayerData.m_TutorialDataList.AddRange(incoming);
             CPlayerData.m_TutorialIndex = tutIndex;
 
-            var tm = UnityEngine.Object.FindObjectOfType<TutorialManager>(); // NOT CSingleton (fake-manager trap)
             if (tm == null || tm.m_TutorialSubGroupList == null)
                 return;
             foreach (var sg in tm.m_TutorialSubGroupList)

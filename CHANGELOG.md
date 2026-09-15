@@ -5,6 +5,100 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 ---
 
+## 1.4.0
+**Co-op works again on the game's 1.0 update: joining no longer hangs on the loading screen, warehouse storage and Ascension card prices stay in sync, and the host's world snapshot is reliable.**
+
+- **Fixed: joining stalled forever on "Now Loading… 0%".** The 1.0 update renamed the scene the
+  game loads when entering the shop, and the mod still asked for the old name, so the joiner's
+  world load failed and never finished. The mod now reads the scene name from the game itself.
+- **Fixed: the host could not snapshot its world for a joining player.** 1.0 added a save-menu
+  refresh that the mod's hidden snapshot slot has no entry for, which made the snapshot save
+  throw and fall back to an older world file. That refresh is now skipped for the co-op slots.
+- **Fixed: warehouse storage desynced after 1.0 turned stored boxes into compact records.** A
+  stored warehouse box is no longer a live object, so the box sync could not see it. The host
+  now owns warehouse storage and broadcasts the stored-box lists, so stored warehouse stock is
+  visible to both players again instead of vanishing on the guest. Guests can bank and take
+  warehouse boxes again too: those clicks are sent to the host, which performs them and
+  broadcasts the result.
+- **Fixed: a guest could use the new cheat menu to change the shared shop.** The 1.0 cheat
+  canvas can add coins and XP and alter grades, prices and customers. It is now host-only, so a
+  guest cannot desync the shared economy.
+- **Fixed: tournament sign-up and a player's tournament progress could go stale on a guest.**
+  The sign-up buttons are host-owned and the player's registration, round and result state now
+  travels with the tournament sync. Play-table seat ownership (a 1.0 field) is mirrored too.
+- **Fixed: the tutorial desynced in a fresh co-op world.** The joiner's shop-naming objective
+  marker now clears when the host names the shop, and tutorial tasks the joiner completes
+  (opening packs, setting prices, placing items, buying items from the shop, and so on) are now
+  credited on the host as well, so both players advance together instead of the guest's progress
+  being overwritten.
+- **Fixed: Ascension card prices were not shared.** 1.0 added an eighth card expansion; its
+  generated-price table now travels with the rest of the market, so Ascension card values match
+  on both machines instead of sitting at zero on the guest.
+- **Fixed: a guest could sign up for a tournament locally.** The new sign-up and sign-out
+  buttons are host-owned like the rest of the tournament screen, so they can no longer desync.
+- **Fixed: a joining player's walking customers all looked the same.** The 1.0 customer prefab
+  the mirrors were cloned from carried fewer wardrobe slots than the real pool customers, so
+  re-dressing a clone threw and every one kept the default outfit. Mirrors are now cloned from a
+  real pooled customer, so outfits (and animations) match the host.
+- **Fixed: at a play table a guest placed, customers played but stood instead of sitting.** The
+  host's forwarded furniture purchase skipped the game's post-checkout shelf-data refresh, so a
+  table's saved data list was one entry short; seating a customer then hit an error before the
+  "sit" pose was applied. The host now performs the same refresh after a forwarded purchase
+  (this also fixes the same staleness for restock and scanner purchases).
+- **Fixed: a guest's card checkout briefly popped the cash drawer.** A mirrored customer never
+  ran the game's "pay by card" step that switches the register out of cash mode, so taking a
+  card payment momentarily used the cash path and opened the drawer. The register now adopts the
+  clicked cash/card mode first, and the drawer's close animation is only played for an actual
+  cash sale.
+- **Fixed: a guest standing at the register could still look around and walk after opening the
+  pause menu.** Co-op keeps the world running while paused, which (unlike single-player's frozen
+  time) no longer stopped the local player, and the pause menu only disables the game camera. The
+  local player's movement and the separate camera-look input are now suppressed while the pause
+  menu is open.
+ - **Fixed: the on-screen interaction hints showed the placeholder "F / Action Name" instead of
+   the real key and action.** The mod's per-frame manager lookup could create an empty stand-in for
+   the game's main manager before the real one had loaded, and that empty stand-in then hid the real
+   one (and its tooltip sprites/text) for the rest of the session. The mod now only ever looks the
+   manager up without creating one, so the normal HUD hints come back.
+ - **Added: an opt-in testing gate for the game's 1.00 cheat menu.** It is disabled by default and
+   requires both hidden configuration switches before the menu can open; solo players and hosts can
+   use it, while guests cannot. The hidden testing category is also off by default.
+ - **Guarded: the game's new playable card duels.** Their match state is not synchronized yet, so
+  only the host can start one for now.
+- **Note: the game now runs on Unity 6 and reports version 1.00.** Both players must run the
+  same game build and the same mod version.
+
+**Both players must update.**
+
+---
+
+## 1.3.0
+**Co-op no longer stutters, the host's market stays in sync, and long sessions no longer grow memory on the guest.**
+
+- **Fixed: a brief freeze every few seconds, worst on the host.** The host sent its whole
+  market table as one huge network message (~2.3 MB), which is larger than Steam can carry
+  reliably. Steam refused it, the mod retried for a while and then threw it away - so the
+  shared market never reached the other player live, and each retry stalled the host's
+  networking for up to a third of a second. Large network messages are now split into smaller
+  pieces and quietly rejoined on the other side, so the market (and every other big sync)
+  actually arrives without the hitch.
+- **Fixed: the joiner could hitch when a burst of updates arrived at once.** The receiver now
+  handles a limited number of incoming messages per frame, so a burst is spread over a few
+  frames instead of landing in one, and each message is decoded without making a throwaway
+  copy of its bytes first.
+- **Fixed: a long session could slowly grow memory on the joining player.** Each checkout the
+  guest mirrored was putting its items and cards back on the shelf instead of returning them
+  to the game's reusable pools, so the game kept making new ones for every sale. They are now
+  released the same way the game releases its own, so the pools get reused.
+- **Fixed: the host could hitch in a busy shop.** Every eighth of a second the host read and
+  packaged the whole customer crowd in one go. It now samples a small slice of the crowd each
+  frame, so everyone still moves just as smoothly while no single frame pays for all of them.
+- **Fixed: the detailed box-sync diagnostic (BoxSyncDebug) built its log text even while it
+  was switched off.** The text is now only built when it is actually going to be written, so
+  leaving the option off costs nothing during play.
+
+**Both players must update.**
+
 ## 1.2.0
 **Boxes and furniture now stay in sync through pickups, throws, placement, and joining, cards no longer vanish when a guest sets them out to sell or is holding them, and registers, workers, and served customers no longer get stuck or vanish during co-op.**
 

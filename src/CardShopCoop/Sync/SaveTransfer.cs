@@ -286,7 +286,7 @@ namespace CardShopCoop.Sync
         /// it in a finally to keep the host's notion of "current slot" from drifting to 6.</summary>
         public static byte[] BuildHostPayload()
         {
-            var gm = CSingleton<CGameManager>.Instance;
+            var gm = SceneRef<CGameManager>.Get();
             string path = SlotPath(HostSnapshotSlot);
             // delete the PREVIOUS join's snapshot first: SaveGameData silently bails on any of
             // its guards (loading error, mid scene-transition, day-report screen...), and a
@@ -524,7 +524,7 @@ namespace CardShopCoop.Sync
 
         private static void InjectAndForceLoad(byte[] saveBytes)
         {
-            var gm = CSingleton<CGameManager>.Instance;
+            var gm = SceneRef<CGameManager>.Get();
             gm.m_ForceNoCloudSaveLoad = true;
             bool injected = false;
             string json = new UTF8Encoding(false).GetString(saveBytes)
@@ -575,7 +575,7 @@ namespace CardShopCoop.Sync
         /// Approach contributed by Jburne10.</summary>
         public static void ApplyAndLoad(byte[] saveBytes)
         {
-            var gm = CSingleton<CGameManager>.Instance;
+            var gm = SceneRef<CGameManager>.Get();
             gm.m_ForceNoCloudSaveLoad = true; // keep Steam/Xbox cloud away from the borrowed world
 
             bool injected = false;
@@ -661,7 +661,7 @@ namespace CardShopCoop.Sync
         /// <summary>Drive the game's own title->shop load path for an arbitrary slot.</summary>
         public static void ForceLoadSlot(int slot)
         {
-            var gm = CSingleton<CGameManager>.Instance;
+            var gm = SceneRef<CGameManager>.Get();
             gm.m_CurrentSaveLoadSlotSelectedIndex = slot;
 
             // The load-on-scene-enter path only runs while m_InitLoaded is false.
@@ -669,7 +669,30 @@ namespace CardShopCoop.Sync
                 BindingFlags.NonPublic | BindingFlags.Static);
             initLoaded?.SetValue(null, false);
 
-            gm.LoadMainLevelAsync("Start", slot);
+            gm.LoadMainLevelAsync(StartSceneName(), slot);
+        }
+
+        private static string _startSceneName;
+
+        /// <summary>Game 1.0 renamed the shop-load scene "Start" -> "StartOptimized" (exposed as
+        /// CGameManager.k_StartSceneName). Resolve it from the running build and fall back to the
+        /// pre-1.0 name, so the join load path works on either. The scene name is a const, so it
+        /// is inlined into the game assembly - reflection reads the value baked into THIS build.</summary>
+        private static string StartSceneName()
+        {
+            if (_startSceneName != null)
+                return _startSceneName;
+            try
+            {
+                var f = typeof(CGameManager).GetField("k_StartSceneName",
+                    BindingFlags.Public | BindingFlags.Static);
+                _startSceneName = f != null ? f.GetValue(null) as string : null;
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
+            if (string.IsNullOrEmpty(_startSceneName))
+                _startSceneName = "Start";
+            CoopPlugin.Log.LogInfo("coop: loading co-op world via scene '" + _startSceneName + "'");
+            return _startSceneName;
         }
     }
 }

@@ -43,7 +43,7 @@ namespace CardShopCoop.Sync
             // assigned (the class extends CSingleton<T>), so the old lookup always failed and
             // permanently latched the 5m fallback. Use the real singleton, and only latch on a
             // successful read so a not-yet-spawned controller retries instead of freezing.
-            var controller = CSingleton<InteractionPlayerController>.Instance;
+            var controller = SceneRef<InteractionPlayerController>.Get();
             if (controller != null && FiRayDistance != null)
             {
                 _rayDistance = (float)FiRayDistance.GetValue(controller);

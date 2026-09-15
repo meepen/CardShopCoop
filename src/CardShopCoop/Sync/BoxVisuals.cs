@@ -69,7 +69,8 @@ namespace CardShopCoop.Sync
                 catch (System.Exception e) { Swallow.Log(e); }
             }
 
-            BoxShared.DebugLog("open-set", $"box={box.name} open={open} read={ReadOpen(box)}", box.GetInstanceID(), 0.25f);
+            if (BoxShared.ShouldDebugLog(box.GetInstanceID(), 0.25f))
+                BoxShared.DebugLog("open-set", $"box={box.name} open={open} read={ReadOpen(box)}");
             try
             {
                 switch (box)
@@ -153,6 +154,7 @@ namespace CardShopCoop.Sync
             {
                 Applied.Remove(box);
                 Pending.Remove(box);
+                BoxPlacement.ForgetBox(box);
             }
         }
 
@@ -193,10 +195,10 @@ namespace CardShopCoop.Sync
             if (visible && !wasVisible && box is InteractablePackagingBox_Shelf)
             {
                 bool open = ReadOpen(box);
-                if (BoxShared.Debug && box is InteractablePackagingBox_Shelf dbg)
+                if (box is InteractablePackagingBox_Shelf dbg
+                    && BoxShared.ShouldDebugLog(box.GetInstanceID(), 0.05f))
                     BoxShared.DebugLog("open-reassert",
-                        $"box={box.name} desired={open} meshOpen={dbg.m_OpenBox?.activeSelf} meshClosed={dbg.m_ClosedBox?.activeSelf}",
-                        box.GetInstanceID(), 0.05f);
+                        $"box={box.name} desired={open} meshOpen={dbg.m_OpenBox?.activeSelf} meshClosed={dbg.m_ClosedBox?.activeSelf}");
                 ApplyOpenEvent(box, open);
             }
         }

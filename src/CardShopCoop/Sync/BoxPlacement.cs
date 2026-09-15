@@ -73,6 +73,16 @@ namespace CardShopCoop.Sync
             = new Dictionary<InteractablePackagingBox, int>();
         private const int ThrowWaitMaxFrames = 10;
 
+        public static void ForgetBox(InteractablePackagingBox box)
+        {
+            // Use a CLR null check: a Unity-destroyed box is fake-null but is still the same
+            // reference key these sets were populated with, so it can and must be removed.
+            if (box is null)
+                return;
+            PlacementInvariantLogged.Remove(box);
+            PlacementRayLogged.Remove(box);
+        }
+
         public static void Reset()
         {
             RemoteMotions.Clear();
@@ -228,7 +238,7 @@ namespace CardShopCoop.Sync
                     Position = cameraPosition,
                     Rotation = cameraRotation,
                 }, box.m_BoxPhysicsDimension);
-                if (PlacementRayLogged.Add(box))
+                if (PlacementRayLogged.Add(box) && BoxShared.ShouldDebugLog())
                     BoxShared.DebugLog("q-ray", $"box={box.name} avatar={intent.AvatarId} cam={cameraPosition} camFwd={cameraRotation * Vector3.forward} solved={solved.Position} surface={solved.HasSurface} dist={Vector3.Distance(cameraPosition, solved.Position):F2} dim={box.m_BoxPhysicsDimension}");
                 ApplyPhysicsPose(box,
                     Vector3.Lerp(PhysicsPosition(box), solved.Position, Mathf.Clamp01(dt * 7.5f)),

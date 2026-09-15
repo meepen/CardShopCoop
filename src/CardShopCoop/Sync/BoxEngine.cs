@@ -63,6 +63,9 @@ namespace CardShopCoop.Sync
         private readonly BoxIdentityMap<InteractablePackagingBox> _hostIdentity
             = new BoxIdentityMap<InteractablePackagingBox>();
         private readonly Dictionary<ushort, Lease> _leases = new Dictionary<ushort, Lease>();
+        internal int ClientMirrorCount => _clientById.Count;
+        internal int HostBoxCount => _hostIdentity.ById.Count;
+        internal int LeaseCount => _leases.Count;
 
         // ---- host snapshot state ----
         private readonly Dictionary<ushort, int> _hostHashes = new Dictionary<ushort, int>();
@@ -321,8 +324,9 @@ namespace CardShopCoop.Sync
         /// <summary>Client: unbind a mirror id and drop all of its per-box state.</summary>
         private void ForgetClientMirror(ushort id, InteractablePackagingBox box)
         {
-            BoxShared.DebugLog("box-forget",
-                $"client forget id={id} name={(box != null ? box.name : "null")}", id, 1f);
+            if (BoxShared.ShouldDebugLog(id, 1f))
+                BoxShared.DebugLog("box-forget",
+                    $"client forget id={id} name={(box != null ? box.name : "null")}");
             ClearClientBoxEntries(box);
             _transfers.AbandonTarget(id);
             _clientById.Remove(id);
@@ -348,7 +352,8 @@ namespace CardShopCoop.Sync
         {
             if (box == null || !_clientIdOf.TryGetValue(box, out ushort id))
                 return;
-            BoxShared.DebugLog("box-destroy", $"client local destroy id={id} name={box.name}", id, 1f);
+            if (BoxShared.ShouldDebugLog(id, 1f))
+                BoxShared.DebugLog("box-destroy", $"client local destroy id={id} name={box.name}");
             SendUpdate?.Invoke(new BoxUpdateMessage
             {
                 Box = new BoxWire
@@ -825,13 +830,15 @@ namespace CardShopCoop.Sync
             }
             if (w.Family != FamilyOf(knownBox))
             {
-                BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} rejected=family-mismatch");
+                if (BoxShared.ShouldDebugLog())
+                    BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} rejected=family-mismatch");
                 ReplyTransfer(connId, msg, 0);
                 return;
             }
             if (!Enum.IsDefined(typeof(BoxPossession), w.Possession))
             {
-                BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} rejected=invalid-possession");
+                if (BoxShared.ShouldDebugLog())
+                    BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} rejected=invalid-possession");
                 ReplyTransfer(connId, msg, 0);
                 return;
             }
@@ -910,12 +917,14 @@ namespace CardShopCoop.Sync
                 if (itemFamily != null && senderMayEdit)
                 {
                     _hostDirty.Add(w.Id);
-                    BoxShared.DebugLog("box-rx",
-                        $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} content-preserved applied={contentMerged} base={msg.ContentBaseItemCount} count={w.ItemCount}");
+                    if (BoxShared.ShouldDebugLog())
+                        BoxShared.DebugLog("box-rx",
+                            $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} content-preserved applied={contentMerged} base={msg.ContentBaseItemCount} count={w.ItemCount}");
                 }
                 else
                 {
-                    BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} accepted=false owner={currentOwner} last={lastOwner}");
+                    if (BoxShared.ShouldDebugLog())
+                        BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} accepted=false owner={currentOwner} last={lastOwner}");
                 }
                 return;
             }
@@ -932,7 +941,8 @@ namespace CardShopCoop.Sync
             }
 
             var next = BoxAuthority.NextBoxOwner(sender, w.Possession);
-            BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} open={w.Open} accepted=true owner={lease.Owner}->{next}");
+            if (BoxShared.ShouldDebugLog())
+                BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} state={w.Possession} open={w.Open} accepted=true owner={lease.Owner}->{next}");
             // The client does not know the host's owner id for itself; stamp the sender so
             // the families resolve the correct avatar for a remote Held/Placing box.
             w.OwnerConn = connId;
@@ -1010,8 +1020,9 @@ namespace CardShopCoop.Sync
                 return;
             if (!_transfers.TryGet(msg.TransferSeq, out var pending))
             {
-                BoxShared.DebugLog("box-transfer",
-                    $"resolve seq={msg.TransferSeq} box={msg.BoxId} no pending transfer (ignored)", msg.BoxId, 2f);
+                if (BoxShared.ShouldDebugLog(msg.BoxId, 2f))
+                    BoxShared.DebugLog("box-transfer",
+                        $"resolve seq={msg.TransferSeq} box={msg.BoxId} no pending transfer (ignored)");
                 return;
             }
             int rejected = pending.RequestedDelta - msg.AcceptedDelta;
@@ -1024,8 +1035,8 @@ namespace CardShopCoop.Sync
                 {
                     reconciliationAttempted = true;
                     escrowResolved = _transfers.ResolveTake(pending, msg.AcceptedDelta);
-                    if (rejected < 0)
-                        BoxShared.DebugLog("box-transfer", $"box={pending.Target} take rejected={-rejected} type={pending.TransferType}", pending.Target, 2f);
+                    if (rejected < 0 && BoxShared.ShouldDebugLog(pending.Target, 2f))
+                        BoxShared.DebugLog("box-transfer", $"box={pending.Target} take rejected={-rejected} type={pending.TransferType}");
                 }
                 else if (rejected > 0 && _clientById.TryGetValue(pending.Target, out var box) && box != null)
                 {
@@ -1040,9 +1051,9 @@ namespace CardShopCoop.Sync
                         _baselineItemCount[box] = family.ReadItemCount(box);
                         _baselineItemType[box] = family.ReadItemType(box);
                     }
-                    BoxShared.DebugLog("box-transfer",
-                        $"box={pending.Target} add rejected={rejected} returnedToHand={returned} type={pending.TransferType}",
-                        pending.Target, 2f);
+                    if (BoxShared.ShouldDebugLog(pending.Target, 2f))
+                        BoxShared.DebugLog("box-transfer",
+                            $"box={pending.Target} add rejected={rejected} returnedToHand={returned} type={pending.TransferType}");
                 }
             }
             catch (Exception ex)
@@ -1274,9 +1285,9 @@ namespace CardShopCoop.Sync
                     // re-adopting, or it is orphaned and a duplicate is spawned. A content
                     // mismatch within the SAME family is NOT an identity change - a pending
                     // local add and ordinary drift keep the mirror and are handled below.
-                    BoxShared.DebugLog("box-rx",
-                        $"id={w.Id} fam={w.Family} family changed from {FamilyOf(box)}; recreating mirror",
-                        w.Id, 2f);
+                    if (BoxShared.ShouldDebugLog(w.Id, 2f))
+                        BoxShared.DebugLog("box-rx",
+                            $"id={w.Id} fam={w.Family} family changed from {FamilyOf(box)}; recreating mirror");
                     DestroyClientBox(box);
                     ForgetClientMirror(w.Id, box);
                     box = null;
@@ -1300,7 +1311,8 @@ namespace CardShopCoop.Sync
                     {
                         _clientById[w.Id] = box;
                         _clientIdOf[box] = w.Id;
-                        BoxShared.DebugLog("box-adopt", $"id={w.Id} fam={w.Family} state={w.Possession} open={w.Open} name={box.name} adopted=true");
+                        if (BoxShared.ShouldDebugLog())
+                            BoxShared.DebugLog("box-adopt", $"id={w.Id} fam={w.Family} state={w.Possession} open={w.Open} name={box.name} adopted=true");
                     }
                     else
                     {
@@ -1310,7 +1322,8 @@ namespace CardShopCoop.Sync
                         _clientById[w.Id] = box;
                         _clientIdOf[box] = w.Id;
                         (spawned ?? (spawned = new List<InteractablePackagingBox>())).Add(box);
-                        BoxShared.DebugLog("box-adopt", $"id={w.Id} fam={w.Family} state={w.Possession} name={box.name} adopted=false");
+                        if (BoxShared.ShouldDebugLog())
+                            BoxShared.DebugLog("box-adopt", $"id={w.Id} fam={w.Family} state={w.Possession} name={box.name} adopted=false");
                     }
                 }
                 // Local possession wins only while the wire still agrees we own the box: a
@@ -1330,8 +1343,9 @@ namespace CardShopCoop.Sync
                         && w.OwnerConn != CoopCore.LocalConnectionId;
                     if (!lostToAnotherOwner)
                         continue;
-                    BoxShared.DebugLog("box-rx",
-                        $"id={w.Id} fam={w.Family} local-held but authoritative owner={w.OwnerConn}; releasing local hold");
+                    if (BoxShared.ShouldDebugLog())
+                        BoxShared.DebugLog("box-rx",
+                            $"id={w.Id} fam={w.Family} local-held but authoritative owner={w.OwnerConn}; releasing local hold");
                     CoopCore.ForceExitHoldBox(box);
                     // fall through and apply the authoritative state (hides the box)
                 }
@@ -1357,9 +1371,9 @@ namespace CardShopCoop.Sync
                         // a content change. Recreating the mirror here multiplied boxes while
                         // the two saves' graded albums had drifted; keep the existing mirror
                         // and let the host's Removed retire it.
-                        BoxShared.DebugLog("box-content",
-                            $"id={w.Id} fam={w.Family} content mismatch on an immutable family; keeping mirror",
-                            w.Id, 5f);
+                        if (BoxShared.ShouldDebugLog(w.Id, 5f))
+                            BoxShared.DebugLog("box-content",
+                                $"id={w.Id} fam={w.Family} content mismatch on an immutable family; keeping mirror");
                     }
                     else
                     {
@@ -1403,9 +1417,9 @@ namespace CardShopCoop.Sync
                             w.ItemCount = localCount;
                             w.ItemType = localType;
                             _suppressedSnapshotForBox.Add(w.Id);
-                            BoxShared.DebugLog("box-transfer",
-                                $"id={w.Id} pending {(reservedTake ? "take" : "add")} protected local content count={localCount} type={localType}",
-                                w.Id, 1f);
+                            if (BoxShared.ShouldDebugLog(w.Id, 1f))
+                                BoxShared.DebugLog("box-transfer",
+                                    $"id={w.Id} pending {(reservedTake ? "take" : "add")} protected local content count={localCount} type={localType}");
                         }
                     }
                     family.ApplyState(box, w, isOwner: false);
@@ -1619,10 +1633,10 @@ namespace CardShopCoop.Sync
             {
                 // A box the local player is holding/placing but that has no host id cannot
                 // be reported at all - its pickup/throw will never reach the host.
-                if (read && (poss == BoxPossession.Held || poss == BoxPossession.Placing))
+                if (read && (poss == BoxPossession.Held || poss == BoxPossession.Placing)
+                    && BoxShared.ShouldDebugLog(box.GetInstanceID(), 1f))
                     BoxShared.DebugLog("box-orphan",
-                        $"fam={family.Family} name={box.name} state={poss} has no host id - local actions will NOT sync",
-                        box.GetInstanceID(), 1f);
+                        $"fam={family.Family} name={box.name} state={poss} has no host id - local actions will NOT sync");
                 return false;
             }
             if (!read)
@@ -1742,8 +1756,8 @@ namespace CardShopCoop.Sync
             }
             _reported[box] = poss;
             _reportedContent[box] = sig;
-            BoxShared.DebugLog("box-tx", $"id={w.Id} fam={w.Family} state={poss} open={w.Open} sig={sig} name={box.name}",
-                box.GetInstanceID(), 0.05f);
+            if (BoxShared.ShouldDebugLog(box.GetInstanceID(), 0.05f))
+                BoxShared.DebugLog("box-tx", $"id={w.Id} fam={w.Family} state={poss} open={w.Open} sig={sig} name={box.name}");
             var update = new BoxUpdateMessage
             {
                 Box = w,
@@ -1780,22 +1794,26 @@ namespace CardShopCoop.Sync
             var family = Family(FamilyOf(box));
             if (family == null)
             {
-                BoxShared.DebugLog("push-can", $"name={box.name} reject=no-family role={CoopCore.Role}", box.GetInstanceID(), 1f);
+                if (BoxShared.ShouldDebugLog(box.GetInstanceID(), 1f))
+                    BoxShared.DebugLog("push-can", $"name={box.name} reject=no-family role={CoopCore.Role}");
                 return false;
             }
             if (!family.TryReadLocal(box, out var poss, out _, out _, out _, out _, out var stored))
             {
-                BoxShared.DebugLog("push-can", $"name={box.name} reject=tryread-false fam={family.Family}", box.GetInstanceID(), 1f);
+                if (BoxShared.ShouldDebugLog(box.GetInstanceID(), 1f))
+                    BoxShared.DebugLog("push-can", $"name={box.name} reject=tryread-false fam={family.Family}");
                 return false;
             }
             if (poss != BoxPossession.Free || stored)
             {
-                BoxShared.DebugLog("push-can", $"name={box.name} reject=poss={poss} stored={stored} fam={family.Family}", box.GetInstanceID(), 1f);
+                if (BoxShared.ShouldDebugLog(box.GetInstanceID(), 1f))
+                    BoxShared.DebugLog("push-can", $"name={box.name} reject=poss={poss} stored={stored} fam={family.Family}");
                 return false;
             }
             if (CoopCore.Role == CoopRole.Client && !_clientIdOf.ContainsKey(box))
             {
-                BoxShared.DebugLog("push-can", $"name={box.name} reject=no-client-id fam={family.Family}", box.GetInstanceID(), 1f);
+                if (BoxShared.ShouldDebugLog(box.GetInstanceID(), 1f))
+                    BoxShared.DebugLog("push-can", $"name={box.name} reject=no-client-id fam={family.Family}");
                 return false;
             }
             return true;
@@ -1906,7 +1924,8 @@ namespace CardShopCoop.Sync
             }
             else
             {
-                BoxShared.DebugLog("box-motion-tx", $"id={id} name={box.name} pos={pos}", box.GetInstanceID(), 0.5f);
+                if (BoxShared.ShouldDebugLog(box.GetInstanceID(), 0.5f))
+                    BoxShared.DebugLog("box-motion-tx", $"id={id} name={box.name} pos={pos}");
                 SendMotion?.Invoke(new BoxMotionMessage
                 {
                     Id = id,
@@ -1970,13 +1989,15 @@ namespace CardShopCoop.Sync
             BoxPlacement.SanitizeVelocity(ref motionVelocity, ref motionAngularVelocity);
             if (!_hostIdentity.ById.TryGetValue(msg.Id, out var box) || box == null)
             {
-                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=unknown-box", msg.Id, 0.5f);
+                if (BoxShared.ShouldDebugLog(msg.Id, 0.5f))
+                    BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=unknown-box");
                 return; // unknown/removed box
             }
             Lease lease = _leases.TryGetValue(msg.Id, out var l) ? l : default(Lease);
             if (lease.Possession == BoxPossession.Held || lease.Possession == BoxPossession.Placing)
             {
-                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=poss={lease.Possession}", msg.Id, 0.5f);
+                if (BoxShared.ShouldDebugLog(msg.Id, 0.5f))
+                    BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=poss={lease.Possession}");
                 return; // in someone's hand; a push can't own it
             }
             var family = Family(FamilyOf(box));
@@ -1984,21 +2005,25 @@ namespace CardShopCoop.Sync
                 && family.TryReadLocal(box, out _, out _, out _, out _, out _, out var stored)
                 && stored)
             {
-                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=stored", msg.Id, 0.5f);
+                if (BoxShared.ShouldDebugLog(msg.Id, 0.5f))
+                    BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=stored");
                 return; // a racked (stored) box isn't pushed
             }
             if (_leaseClock < lease.MotionBlockedUntil)
             {
-                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=blocked", msg.Id, 0.5f);
+                if (BoxShared.ShouldDebugLog(msg.Id, 0.5f))
+                    BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=blocked");
                 return; // a reliable edge just landed; absorb late transient frames
             }
             if (lease.MotionDriven && lease.Driver != connId
                 && _leaseClock - lease.LastMotion < MotionLeaseTimeout)
             {
-                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=other-driver={lease.Driver}", msg.Id, 0.5f);
+                if (BoxShared.ShouldDebugLog(msg.Id, 0.5f))
+                    BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} reject=other-driver={lease.Driver}");
                 return; // another player already drives it (first-claim wins)
             }
-            BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} accept pos={msg.Pos}", msg.Id, 0.5f);
+            if (BoxShared.ShouldDebugLog(msg.Id, 0.5f))
+                BoxShared.DebugLog("box-motion-rx", $"id={msg.Id} sender={connId} accept pos={msg.Pos}");
 
             lease.MotionDriven = true;
             lease.Driver = connId;

@@ -340,7 +340,8 @@ namespace CardShopCoop.Sync
                 int cur = (kind == 5) ? (int)obj.m_DecoObjectType : (int)obj.m_ObjectType;
                 if (cur != want[i].ObjType)
                 {
-                    BoxShared.DebugLog("population", $"population: repairing index {i} (kind {kind}): {cur} -> {want[i].ObjType}");
+                    if (BoxShared.ShouldDebugLog())
+                        BoxShared.DebugLog("population", $"population: repairing index {i} (kind {kind}): {cur} -> {want[i].ObjType}");
                     obj.OnDestroyed();
                     OnClientStructureChanged?.Invoke(kind);
                     return; // re-align next tick
@@ -350,7 +351,8 @@ namespace CardShopCoop.Sync
                 // the transition explicitly or the client keeps the stale boxed mirror.
                 if (IsBoxed(obj) != want[i].IsBoxed)
                 {
-                    BoxShared.DebugLog("population", $"population: boxed state index {i} (kind {kind}) {IsBoxed(obj)} -> {want[i].IsBoxed}");
+                    if (BoxShared.ShouldDebugLog())
+                        BoxShared.DebugLog("population", $"population: boxed state index {i} (kind {kind}) {IsBoxed(obj)} -> {want[i].IsBoxed}");
                     if (want[i].IsBoxed)
                         FurnitureBoxOps.BoxUpPlacedObject(obj);
                     else
@@ -436,7 +438,8 @@ namespace CardShopCoop.Sync
                         CardShopCoop.Patches.GamePatches.AdoptPendingDeco(clientObjs[b]);
                     if (IsBoxed(clientObjs[b]) != want[w].IsBoxed)
                     {
-                        BoxShared.DebugLog("population", $"population: boxed transition id {want[w].Id} (kind {kind}) {IsBoxed(clientObjs[b])} -> {want[w].IsBoxed}");
+                        if (BoxShared.ShouldDebugLog())
+                            BoxShared.DebugLog("population", $"population: boxed transition id {want[w].Id} (kind {kind}) {IsBoxed(clientObjs[b])} -> {want[w].IsBoxed}");
                         if (want[w].IsBoxed)
                             FurnitureBoxOps.BoxUpPlacedObject(clientObjs[b]);
                         else
@@ -471,7 +474,8 @@ namespace CardShopCoop.Sync
                 if (IsBoxed(obj) && IsBoxEngineOwned(obj))
                     continue;
                 guard--;
-                BoxShared.DebugLog("population", $"population: removing unmatched {TypeName(kind, obj)} (kind {kind})");
+                if (BoxShared.ShouldDebugLog())
+                    BoxShared.DebugLog("population", $"population: removing unmatched {TypeName(kind, obj)} (kind {kind})");
                 obj.OnDestroyed();
                 OnClientStructureChanged?.Invoke(kind);
             }
@@ -532,7 +536,8 @@ namespace CardShopCoop.Sync
                 if (!e.IsBoxed)
                     spawned.transform.SetPositionAndRotation(e.Pos, e.Rot);
                 PlacedObjectIdentity.Bind(spawned, e.Id);
-                BoxShared.DebugLog("population", $"population: spawned {TypeName(kind, e.ObjType)} (kind {kind})");
+                if (BoxShared.ShouldDebugLog())
+                    BoxShared.DebugLog("population", $"population: spawned {TypeName(kind, e.ObjType)} (kind {kind})");
                 OnClientStructureChanged?.Invoke(kind);
             }
         }
@@ -692,7 +697,7 @@ namespace CardShopCoop.Sync
             // SpawnInteractableObjectInPackageBox does not return the object. Resolve
             // the newly registered object by its type and delivery-box pose; the
             // nearest match is deterministic because the host entry was just missing.
-            var sm = CSingleton<ShelfManager>.Instance;
+            var sm = SceneRef<ShelfManager>.Get();
             var list = GetList(sm, kind);
             InteractableObject found = null;
             float best = float.MaxValue;

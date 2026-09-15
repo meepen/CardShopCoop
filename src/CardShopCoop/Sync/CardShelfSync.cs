@@ -59,6 +59,7 @@ namespace CardShopCoop.Sync
         }
 
         private readonly Dictionary<int, SlotState> _last = new Dictionary<int, SlotState>();
+        private readonly List<int> _pruneScratch = new List<int>();
         private readonly Dictionary<int, double> _locallyChanged = new Dictionary<int, double>();
         private readonly HashSet<string> _snapshotErrors = new HashSet<string>();
         private float _timer;
@@ -117,6 +118,21 @@ namespace CardShopCoop.Sync
         }
 
         public override void ForceResend() => ForceNextTick();
+
+        /// <summary>Drop the per-compartment baselines for a shelf removed mid-session. Keys
+        /// embed the stable object id; without this the map retained destroyed shelves until
+        /// session reset.</summary>
+        public void PruneObjectId(ushort objectId)
+        {
+            if (_last.Count == 0)
+                return;
+            _pruneScratch.Clear();
+            foreach (var kv in _last)
+                if (PlacedObjectIdentity.ObjectIdFromCompartmentKey(kv.Key) == objectId)
+                    _pruneScratch.Add(kv.Key);
+            for (int i = 0; i < _pruneScratch.Count; i++)
+                _last.Remove(_pruneScratch[i]);
+        }
 
         public override void Reset()
         {
@@ -616,19 +632,43 @@ namespace CardShopCoop.Sync
             }
 
             // The game's save-load recipe for putting a card on display (CardShelf.LoadCardCompartment)
-            var cardUI = CSingleton<Card3dUISpawner>.Instance.GetCardUI();
-            var card3d = ShelfManager.SpawnInteractableObject(EObjectType.Card3d).GetComponent<InteractableCard3d>();
-            cardUI.m_IgnoreCulling = true;
-            cardUI.m_CardUI.SetFoilCullListVisibility(isActive: true);
-            cardUI.SetSimplifyCardDistanceCull(isCull: false);
-            cardUI.m_CardUI.ResetFarDistanceCull();
-            cardUI.m_CardUI.SetCardUI(e.Card);
-            cardUI.transform.position = card3d.transform.position;
-            cardUI.transform.rotation = card3d.transform.rotation;
-            card3d.SetCardUIFollow(cardUI);
-            card3d.SetEnableCollision(isEnable: false);
-            comp.SetCardOnShelf(card3d);
-            cardUI.m_IgnoreCulling = false;
+            Card3dUIGroup cardUI = null;
+            InteractableCard3d card3d = null;
+            try
+            {
+                cardUI = SceneRef<Card3dUISpawner>.Get().GetCardUI();
+                card3d = ShelfManager.SpawnInteractableObject(EObjectType.Card3d).GetComponent<InteractableCard3d>();
+                cardUI.m_IgnoreCulling = true;
+                cardUI.m_CardUI.SetFoilCullListVisibility(isActive: true);
+                cardUI.SetSimplifyCardDistanceCull(isCull: false);
+                cardUI.m_CardUI.ResetFarDistanceCull();
+                cardUI.m_CardUI.SetCardUI(e.Card);
+                cardUI.transform.position = card3d.transform.position;
+                cardUI.transform.rotation = card3d.transform.rotation;
+                card3d.SetCardUIFollow(cardUI);
+                card3d.SetEnableCollision(isEnable: false);
+                comp.SetCardOnShelf(card3d);
+                cardUI.m_IgnoreCulling = false;
+            }
+            catch (System.Exception)
+            {
+                // A throw mid-recipe must not strand the pooled card/group outside their pools.
+                if (card3d != null)
+                    try
+                    {
+                        card3d.OnDestroyed();
+                    }
+                    catch (System.Exception e2) { Swallow.Log(e2); }
+                // Always release the group too: OnDestroyed only frees it once SetCardUIFollow
+                // has run (a mid-recipe throw is before that), and DisableCard is idempotent.
+                if (cardUI != null)
+                    try
+                    {
+                        cardUI.DisableCard();
+                    }
+                    catch (System.Exception e2) { Swallow.Log(e2); }
+                throw;
+            }
         }
 
         /// <summary>Host: full authoritative slot state for the periodic heal broadcast.

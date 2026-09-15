@@ -31,7 +31,7 @@ DLL remains `CardShopCoop.dll`. The handshake also requires exact plugin-version
 so peers normally must run the identical CardShopCoop version.
 
 The mod is tested only against the newest game version available when documented here:
-**TCG Card Shop Simulator 0.70.3**.
+**TCG Card Shop Simulator 1.00** (Unity 6000.0.66f2).
 
 `CHANGELOG.md` is maintained in the repository as the player-facing release record. Add a
 section for every release using a version heading and a short, plain-language summary in the
@@ -89,13 +89,33 @@ Build the tool once:
 dotnet build tools\Decomp\Decomp.csproj -c Release
 ```
 
-Run it with an assembly path and output directory:
+Run it with an assembly path and output directory. Decompiled output is versioned by the
+game build it came from, so a new game update never overwrites the baseline used for
+diffs:
 
 ```powershell
 dotnet tools\Decomp\bin\Release\net9.0\Decomp.dll `
   "<GamePath>\Card Shop Simulator_Data\Managed\Assembly-CSharp.dll" `
-  "<repo-root>\decompiled\Assembly-CSharp"
+  "<repo-root>\decompiled\<gameversion>\Assembly-CSharp"
 ```
+
+Existing baselines: `decompiled\0.70.3` (pre-1.0) and `decompiled\1.00` (the 1.0 release;
+the game's `Application.version`/`PlayerSettings.bundleVersion` is exactly `1.00`). To see
+what a game update changed, diff two version directories directly
+(`git diff --no-index decompiled\0.70.3\Assembly-CSharp decompiled\1.00\Assembly-CSharp`).
+
+The game version is `Application.version` (Unity `PlayerSettings.bundleVersion`). It can be
+read offline from `Card Shop Simulator_Data\globalgamemanagers` with a Unity serialized-file
+parser (e.g. Python `UnityPy`: read the `PlayerSettings` object and take `bundleVersion`).
+The repo bundles a ready-made cross-platform helper:
+
+```powershell
+python scripts\game-version.py            # game + Unity version, and the suggested dir name
+python scripts\game-version.py --quiet     # just the version, for scripts/CI
+```
+
+It auto-detects the install via `--game-path`, `CARDSHOP_GAMEPATH`, the repo's `Directory.Build`
+props, or the usual Steam libraries on Windows/Linux/macOS.
 
 Other useful assemblies include `Heathen.Core.dll`, `Heathen.Steamworks.dll`,
 `AstarPathfindingProject.dll`, and `DOTween.dll`; Unity assemblies are usually needed

@@ -203,6 +203,8 @@ namespace CardShopCoop.Sync
         // client
         private readonly Dictionary<int, Offer> _offers = new Dictionary<int, Offer>();
         private readonly Dictionary<int, Customer> _carriers = new Dictionary<int, Customer>();
+        internal int OfferCount => _offers.Count;
+        internal int CarrierCount => _carriers.Count;
         private readonly Dictionary<int, int> _carrierSource = new Dictionary<int, int>();
         private readonly Dictionary<int, int> _carrierGeneration = new Dictionary<int, int>();
         private readonly Dictionary<int, Renderer[]> _carrierRenderers = new Dictionary<int, Renderer[]>();

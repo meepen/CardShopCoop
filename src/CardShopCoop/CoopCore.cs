@@ -178,6 +178,45 @@ namespace CardShopCoop
         private readonly MovePreviewSync _movePreview = new MovePreviewSync();
         private readonly PopulationSync _population = new PopulationSync();
 
+        /// <summary>Drop the per-object mirror baselines for a placed object removed
+        /// mid-session (called from the InteractableObject-destroyed patch).</summary>
+        internal void PrunePlacedObjectState(ushort objectId)
+        {
+            _objMoves.PruneObjectId(objectId);
+            _cardShelves.PruneObjectId(objectId);
+        }
+
+        /// <summary>Plugin-owned queue/mirror counts for the LeakDebug line. Every value is a
+        /// point-in-time snapshot read only from the main-thread diagnostic tick.</summary>
+        private string PluginLeakCounters()
+        {
+            int incoming = 0;
+            int lagDelay = 0;
+            int reliableOut = 0;
+            int transientOut = 0;
+            int reassembly = 0;
+            try
+            {
+                if (_net != null)
+                {
+                    incoming = _net.Incoming.Count;
+                    if (_net is Net.LagTransport lag)
+                    {
+                        lagDelay = lag.DelayCount;
+                        reliableOut = lag.InnerReliableOutboxCount;
+                        transientOut = lag.InnerTransientOutboxCount;
+                        reassembly = lag.InnerReassemblyCount;
+                    }
+                }
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
+            var boxes = _boxEngine;
+            return $" puppets={_npcs.PuppetCount} mirrors={NpcSync.ExistingMirrorCount} avatars={_avatars.Count}"
+                + $" boxClient={(boxes != null ? boxes.ClientMirrorCount : 0)} boxHost={(boxes != null ? boxes.HostBoxCount : 0)} boxLeases={(boxes != null ? boxes.LeaseCount : 0)}"
+                + $" incoming={incoming} lagDelay={lagDelay} reliableOut={reliableOut} transientOut={transientOut} reassembly={reassembly} toHand={HandEscrow.PendingToHandCount}"
+                + $" offers={_trades.OfferCount} tradeCarriers={_trades.CarrierCount} registerCarriers={RegisterSync.CarrierCount} boxDebug={BoxShared.DebugThrottleCount}";
+        }
+
         // domain sync modules (v0.15): each owns one game system end-to-end and talks
         // through the standard SendOp/BroadcastState/HostApplyOp/ClientApplyState contract
         private readonly GradingSync _grading = new GradingSync();
@@ -186,6 +225,7 @@ namespace CardShopCoop
         private readonly PlayerIntentBus _intents = new PlayerIntentBus();
         private readonly StaffSync _staff = new StaffSync();
         private readonly ShopStateSync _shopState = new ShopStateSync();
+        private readonly WarehouseBoxSync _warehouse = new WarehouseBoxSync();
         private readonly SettingsSync _settings = new SettingsSync();
         private readonly MarketSync _market = new MarketSync();
         private readonly ReportSync _report = new ReportSync();
@@ -316,6 +356,8 @@ namespace CardShopCoop
         private long _diagSent;
         private long _diagRecvStates;
         private float _diagTimer = -7.3f;
+        private float _leakDiagTimer = -3.7f;
+        private float _leakObjectScanTimer = -8.1f;
         // Per-tag rate-limited error logging lives in one place: Sync.ModuleGuard.
 
         private void Guarded(string stage, Action action)
@@ -654,6 +696,10 @@ namespace CardShopCoop
             _report.BroadcastState = Broadcast;
             _containers.SendOp = Send(1);
             _containers.BroadcastState = Broadcast;
+            _warehouse.BroadcastState = Broadcast;
+            _warehouse.SendOp = Send(1);
+            _warehouse.SendToClient = Send;
+            _warehouse.HoldClientBox = TryHoldClientBox;
             _containers.RequestBoxResync = () => _boxEngine?.RequestFullSnapshot();
             _containers.SendToClient = Send;
             _containers.HoldClientBox = TryHoldClientBox;
@@ -693,7 +739,11 @@ namespace CardShopCoop
             // Client: an authoritative re-assert is the only way to converge a box whose
             // content a pending local add had to protect from a stale snapshot.
             _boxEngine.RequestBoxResync = () => Send(1, new JoinResyncRequestMessage());
-            _boxEngine.OnClientBoxSpawned = box => _containers.TryAutoHoldTakenBox(box);
+            _boxEngine.OnClientBoxSpawned = box =>
+            {
+                _containers.TryAutoHoldTakenBox(box);
+                _warehouse.TryAutoHoldTakenBox(box);
+            };
             _boxEngine.LocalHeld = () =>
             {
                 if (_playerIpc == null)
@@ -1159,7 +1209,10 @@ namespace CardShopCoop
 
         private bool InGameLevel()
         {
-            var gm = CSingleton<CGameManager>.Instance;
+            // SceneRef, never CSingleton<CGameManager>.Instance: Update runs this every frame
+            // from plugin load, and the getter would fabricate an empty shadow manager before
+            // the boot scene's real one exists (see SceneRef).
+            var gm = SceneRef<CGameManager>.Get();
             return gm != null && gm.m_IsGameLevel;
         }
 
@@ -1653,13 +1706,12 @@ namespace CardShopCoop
             return true;
         }
 
-        // NEVER CSingleton<>.Instance for scene-lifetime managers (CGameManager above
-        // is a REAL persistent singleton and stays on the getter): touched while no
-        // real manager exists (client reload loading screen - InGameLevel() stays true
-        // there - or host mid-session save load) the getter fabricates a fake empty
-        // DontDestroyOnLoad manager that shadows the real one for the rest of the run
-        // (see WorldSync.ResolveShelfManager). Cached; the Unity fake-null re-resolves
-        // after scene loads, and OnSceneLoaded clears them besides.
+        // NEVER CSingleton<>.Instance for scene-lifetime managers (CGameManager included now -
+        // see Sync.SceneRef): touched while no real manager exists (client reload loading
+        // screen - InGameLevel() stays true there - or host mid-session save load) the getter
+        // fabricates a fake empty DontDestroyOnLoad manager that shadows the real one for the
+        // rest of the run (see WorldSync.ResolveShelfManager). Cached; the Unity fake-null
+        // re-resolves after scene loads, and OnSceneLoaded clears these cached fields besides.
         private static InventoryBase _inventory;
 
         private static InventoryBase Inv()
@@ -1792,6 +1844,7 @@ namespace CardShopCoop
                 new Sync.CoopModuleEntry(_market, "market", 6, 0, Sync.MarketSync.ApplyPatches),
                 new Sync.CoopModuleEntry(_report, "report", 7, -1, Sync.ReportSync.ApplyPatches),
                 new Sync.CoopModuleEntry(_containers, "containers", 8, 3, Sync.ContainerSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_warehouse, "warehouse", 12, 5, Sync.WarehouseBoxSync.ApplyPatches),
                 new Sync.CoopModuleEntry(_tournament, "tournament", 9, -1, Sync.TournamentSync.ApplyPatches),
                 new Sync.CoopModuleEntry(_register, "register", 10, 4, Sync.RegisterSync.ApplyPatches),
                 new Sync.CoopModuleEntry(_tv, "tv", 11, 1, Sync.TvSync.ApplyPatches),
@@ -3509,6 +3562,9 @@ namespace CardShopCoop
             // list") and would zero real prices on a later host whose ids mean something else.
             _clientPriced.Clear();
             _incomingPriced.Clear();
+            // The leak-diagnostic object census belongs to the dead world; drop it so the next
+            // session's first samples do not report a stale goAll.
+            Util.LeakDiagnostics.Reset();
             // 1.0.35 per-frame/per-session card state: retry stamps, an undelivered outbox and
             // a half-drained dispatch buffer must never leak into the NEXT session
             _cardDeltaOutbox.Clear();
@@ -4129,6 +4185,22 @@ namespace CardShopCoop
                 CoopPlugin.Log.LogInfo($"diag: role={Role} conns={_net.ConnectionCount} sentStates={_diagSent} recvStates={_diagRecvStates} inGame={InGameLevel()} pos={posStr}{npcStr}");
             }
 
+            // LeakDebug: a separate greppable line so the normal diag: format stays stable.
+            if (CoopPlugin.LeakDebug != null && CoopPlugin.LeakDebug.Value)
+            {
+                _leakDiagTimer += dt;
+                _leakObjectScanTimer += dt;
+                if (_leakDiagTimer >= 15f)
+                {
+                    _leakDiagTimer -= 15f;
+                    bool scan = _leakObjectScanTimer >= 60f;
+                    if (scan)
+                        _leakObjectScanTimer = 0f;
+                    Guarded("leak-diag", () =>
+                        CoopPlugin.Log.LogInfo("leakdiag:" + Util.LeakDiagnostics.Sample(scan) + PluginLeakCounters()));
+                }
+            }
+
             // deferred kicks (give a rejection Bye time to reach the peer first)
             for (int i = _pendingKicks.Count - 1; i >= 0; i--)
             {
@@ -4180,7 +4252,7 @@ namespace CardShopCoop
             if (_autoHostSlot >= 0)
             {
                 if (_autoPhase == 0 && _autoTimer > 6f && !InGameLevel()
-                    && CSingleton<CGameManager>.Instance != null)
+                    && SceneRef<CGameManager>.Get() != null)
                 {
                     CoopPlugin.Log.LogInfo($"AUTO: loading slot {_autoHostSlot}...");
                     Sync.SaveTransfer.ForceLoadSlot(_autoHostSlot);
@@ -4202,7 +4274,7 @@ namespace CardShopCoop
             else if (_autoJoinIp != null)
             {
                 if (_autoPhase == 0 && _autoTimer > 10f && !InGameLevel()
-                    && CSingleton<CGameManager>.Instance != null)
+                    && SceneRef<CGameManager>.Get() != null)
                 {
                     CoopPlugin.Log.LogInfo($"AUTO: joining {_autoJoinIp}...");
                     Join(_autoJoinIp);
@@ -4215,7 +4287,7 @@ namespace CardShopCoop
             else if (_autoJoinSteamLobby != 0 && _steam != null)
             {
                 if (_autoPhase == 0 && _autoTimer > 10f && !InGameLevel()
-                    && CSingleton<CGameManager>.Instance != null)
+                    && SceneRef<CGameManager>.Get() != null)
                 {
                     CoopPlugin.Log.LogInfo($"AUTO: joining Steam lobby {_autoJoinSteamLobby}...");
                     JoinSteam(_autoJoinSteamLobby);
@@ -5485,6 +5557,7 @@ namespace CardShopCoop
             // delivery when the wallet is checked again after spawning.
             _pendingReduceThisFrame += total;
             double deliveredTotal = 0.0;
+            int restockItems = 0;
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 var line = request.Lines[i];
@@ -5494,6 +5567,7 @@ namespace CardShopCoop
                     {
                         RestockManager.SpawnPackageBoxItemMultipleFrame(resolved[i], line.Count);
                         CEventManager.QueueEvent(new CEventPlayer_AddShopExp(line.Count * 5));
+                        restockItems += line.Count;
                     }
                     else if (request.Kind == 1)
                     {
@@ -5516,6 +5590,31 @@ namespace CardShopCoop
                 }
             }
 
+            // Vanilla's RestockItemScreen/ScannerRestockScreen.EvaluateCartCheckout credits the
+            // RestockItem tutorial task with the total box count. A client's purchase never runs
+            // that screen (it is blocked on the client and forwarded), so the host must credit it
+            // here or the joiner's "buy items" tutorial step never advances. The matching shop XP
+            // is queued above per line, so only the task credit is missing.
+            if (restockItems > 0)
+            {
+                try
+                {
+                    TutorialManager.AddTaskValue(ETutorialTaskCondition.RestockItem, restockItems);
+                }
+                catch (System.Exception e) { Swallow.Log(e); }
+            }
+
+            // Vanilla's furniture/restock/scanner checkouts each defer a ShelfManager
+            // .SaveInteractableObjectData() (FurnitureShopUIScreen.DelaySaveShelfData etc.). The
+            // forwarded path bypassed it, leaving ShelfManager's snapshot lists - notably
+            // m_PlayTableSaveDataList - shorter than the live lists. InteractablePlayTable
+            // .CustomerHasReached then calls ShelfManager.UpdatePlayTableSaveData, which indexes
+            // the stale list AFTER starting the table game but BEFORE Customer.SitDownAndStartPlay
+            // sets IsSitting, so the customers stand while the game runs (host, and the mirror
+            // follows). Mirror vanilla's deferred refresh so every snapshot list is rebuilt.
+            if (deliveredTotal > 0.0)
+                StartCoroutine(DelaySaveShelfDataAfterForwardedPurchase());
+
             // Release the reservation for failed lines; the remaining reservation is the
             // amount that will be backed by the queued authoritative coin reduction.
             _pendingReduceThisFrame -= total - deliveredTotal;
@@ -5535,6 +5634,24 @@ namespace CardShopCoop
                 string detail = string.Join(", ", failures);
                 string chargeNote = charged ? $" charged ${deliveredTotal:F0}" : " (not charged)";
                 result(false, $"purchase partially completed - {detail}; delivered items{chargeNote}");
+            }
+        }
+
+        /// <summary>Host: mirror vanilla's post-checkout shelf-data refresh (FurnitureShopUIScreen
+        /// .DelaySaveShelfData / RestockItemScreen / ScannerRestockScreen) for a forwarded purchase.
+        /// Without it ShelfManager's snapshot lists (m_PlayTableSaveDataList and friends) stay shorter
+        /// than the live lists, and InteractablePlayTable.CustomerHasReached throws while seating a
+        /// customer, leaving it standing during the game.</summary>
+        private System.Collections.IEnumerator DelaySaveShelfDataAfterForwardedPurchase()
+        {
+            yield return new WaitForSeconds(1f);
+            try
+            {
+                SceneRef<ShelfManager>.Get()?.SaveInteractableObjectData();
+            }
+            catch (System.Exception e)
+            {
+                CoopPlugin.Log.LogWarning("post-purchase SaveInteractableObjectData: " + e.Message);
             }
         }
 

@@ -23,22 +23,37 @@ namespace CardShopCoop.Sync
         public static bool Debug => CoopPlugin.BoxSyncDebug != null && CoopPlugin.BoxSyncDebug.Value;
 
         private static readonly Dictionary<int, double> _debugLast = new Dictionary<int, double>();
+        internal static int DebugThrottleCount => _debugLast.Count;
 
-        /// <summary>Throttled diagnostic line. key == 0 logs unthrottled; otherwise at most
-        /// one line per <paramref name="throttle"/> seconds for that key (avoids per-frame spam).</summary>
-        public static void DebugLog(string tag, string message, int key = 0, float throttle = 0.5f)
+        /// <summary>Two-phase diagnostic gate. Call this FIRST, then build the message and
+        /// pass it to <see cref="DebugLog"/>. Interpolating the message at the call site built
+        /// the string on every call even when the diagnostic was off - steady garbage on the
+        /// per-frame/per-box paths. key == 0 logs unthrottled; otherwise at most one line per
+        /// <paramref name="throttle"/> seconds for that key (avoids per-frame spam).</summary>
+        public static bool ShouldDebugLog(int key = 0, float throttle = 0.5f)
         {
             if (!Debug)
-                return;
+                return false;
             try
             {
                 if (key != 0 && throttle > 0f)
                 {
                     double now = Time.realtimeSinceStartupAsDouble;
                     if (_debugLast.TryGetValue(key, out var last) && now - last < throttle)
-                        return;
+                        return false;
                     _debugLast[key] = now;
                 }
+                return true;
+            }
+            catch (System.Exception e) { Swallow.Log(e); return false; }
+        }
+
+        /// <summary>Raw diagnostic emission. Only call from behind <see cref="ShouldDebugLog"/>,
+        /// so the message is built exactly when it is going to be written.</summary>
+        public static void DebugLog(string tag, string message)
+        {
+            try
+            {
                 CoopPlugin.Log.LogInfo($"[{tag}] {message}");
             }
             catch (System.Exception e) { Swallow.Log(e); }

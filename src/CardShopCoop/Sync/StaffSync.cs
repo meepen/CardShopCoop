@@ -637,7 +637,7 @@ namespace CardShopCoop.Sync
                 WorkerData workerData = WorkerManager.GetWorkerData(index);
                 if (CPlayerData.m_ShopLevel + 1 < workerData.shopLevelRequired)
                     return;
-                var gm = CSingleton<CGameManager>.Instance;
+                var gm = SceneRef<CGameManager>.Get();
                 if (gm != null && gm.m_IsPrologue && !workerData.prologueShow)
                     return;
                 if (CPlayerData.m_CoinAmountDouble < (double)workerData.hiringCost)

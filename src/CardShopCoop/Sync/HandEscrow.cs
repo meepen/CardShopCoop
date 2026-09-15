@@ -14,6 +14,7 @@ namespace CardShopCoop.Sync
             = new Dictionary<int, List<Item>>();
         private static readonly HashSet<Item> Reserved = new HashSet<Item>();
         private static readonly List<Item> ToHand = new List<Item>();
+        internal static int PendingToHandCount => ToHand.Count;
         private static readonly Dictionary<Item, RecentTake> Recent = new Dictionary<Item, RecentTake>();
         private static int _nextToken;
         private static bool _resetting;

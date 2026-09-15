@@ -105,6 +105,7 @@ namespace CardShopCoop.Sync
         private static CustomerManager _customers;
 
         private readonly Dictionary<int, RemoteAvatar> _avatars = new Dictionary<int, RemoteAvatar>();
+        internal int Count => _avatars.Count;
         private bool _loggedAnimParams;
         private GameObject _editorHolder;
         private CC.CharacterCustomization _editorCustomization;
@@ -1284,8 +1285,8 @@ namespace CardShopCoop.Sync
         {
             if (!CoopPlugin.AvatarsEnabled.Value)
                 return;
-            bool inGame = CSingleton<CGameManager>.Instance != null
-                          && CSingleton<CGameManager>.Instance.m_IsGameLevel;
+            var gm = SceneRef<CGameManager>.Get();
+            bool inGame = gm != null && gm.m_IsGameLevel;
             if (!inGame)
                 return;
 
@@ -1427,11 +1428,13 @@ namespace CardShopCoop.Sync
                     {
                         for (int i = 0; i < av.HoldCards.Count; i++)
                         {
+                            Card3dUIGroup cardUI = null;
+                            InteractableCard3d card3d = null;
                             try
                             {
                                 // the game's own card-visual recipe (same as display shelves)
-                                var cardUI = CSingleton<Card3dUISpawner>.Instance.GetCardUI();
-                                var card3d = ShelfManager.SpawnInteractableObject(EObjectType.Card3d)
+                                cardUI = SceneRef<Card3dUISpawner>.Get().GetCardUI();
+                                card3d = ShelfManager.SpawnInteractableObject(EObjectType.Card3d)
                                     .GetComponent<InteractableCard3d>();
                                 cardUI.m_CardUI.SetCardUI(av.HoldCards[i]);
                                 card3d.transform.SetParent(av.Go.transform, worldPositionStays: false);
@@ -1444,7 +1447,25 @@ namespace CardShopCoop.Sync
                                 card3d.SetEnableCollision(isEnable: false);
                                 av.HeldCards3d.Add(card3d);
                             }
-                            catch (System.Exception e) { Swallow.Log(e); }
+                            catch (System.Exception e)
+                            {
+                                if (card3d != null)
+                                    try
+                                    {
+                                        card3d.OnDestroyed();
+                                    }
+                                    catch (System.Exception e2) { Swallow.Log(e2); }
+                                // Always release the group too: OnDestroyed only frees it once
+                                // SetCardUIFollow has run (mid-build throws are before that),
+                                // and DisableCard is idempotent.
+                                if (cardUI != null)
+                                    try
+                                    {
+                                        cardUI.DisableCard();
+                                    }
+                                    catch (System.Exception e2) { Swallow.Log(e2); }
+                                Swallow.Log(e);
+                            }
                         }
                     }
                 }
@@ -1605,7 +1626,7 @@ namespace CardShopCoop.Sync
                 if (cust != null)
                 {
                     bool hasJson = !string.IsNullOrEmpty(av.CustomizationJson);
-                    if (BoxShared.Debug)
+                    if (BoxShared.ShouldDebugLog(av.GetHashCode(), 0.5f))
                     {
                         string apparelDbg = "n/a";
                         if (hasJson)
@@ -1621,8 +1642,7 @@ namespace CardShopCoop.Sync
                         }
                         BoxShared.DebugLog("avatar-censor",
                             $"name={av.Name} hasModel={av.HasModel} hasJson={hasJson} allow={CoopPlugin.AllowNsfw.Value} "
-                            + $"nude={(hasJson ? IsNude(av.CustomizationJson).ToString() : "n/a")} apparel={apparelDbg}",
-                            av.GetHashCode(), 0.5f);
+                            + $"nude={(hasJson ? IsNude(av.CustomizationJson).ToString() : "n/a")} apparel={apparelDbg}");
                     }
                     if (!av.HasModel)
                     {

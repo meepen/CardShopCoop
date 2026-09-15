@@ -59,6 +59,7 @@ namespace CardShopCoop.Sync
 
         private readonly Dictionary<int, Pose> _sent = new Dictionary<int, Pose>();      // last broadcast
         private readonly Dictionary<int, Pose> _candidate = new Dictionary<int, Pose>(); // settle window
+        private readonly List<int> _pruneScratch = new List<int>();
         private ShelfManager _sm;
         private float _timer;
         private float _heal;
@@ -96,6 +97,27 @@ namespace CardShopCoop.Sync
         public override string Name => "object-moves";
 
         public override void ForceResend() => ForceNextTick();
+
+        /// <summary>Drop the per-object baselines for a placed object removed mid-session. Keys
+        /// embed the stable object id; without this the maps retained destroyed objects until
+        /// session reset.</summary>
+        public void PruneObjectId(ushort objectId)
+        {
+            PruneMap(_sent, objectId);
+            PruneMap(_candidate, objectId);
+        }
+
+        private void PruneMap(Dictionary<int, Pose> map, ushort objectId)
+        {
+            if (map.Count == 0)
+                return;
+            _pruneScratch.Clear();
+            foreach (var kv in map)
+                if (PlacedObjectIdentity.ObjectIdFromObjectKey(kv.Key) == objectId)
+                    _pruneScratch.Add(kv.Key);
+            for (int i = 0; i < _pruneScratch.Count; i++)
+                map.Remove(_pruneScratch[i]);
+        }
 
         public override void Reset()
         {

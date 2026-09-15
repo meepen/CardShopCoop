@@ -66,6 +66,8 @@ namespace CardShopCoop.Net.Messages
         public List<MarketCardEntry> GenCardMarketPriceListMegabot = new List<MarketCardEntry>();
         public List<MarketCardEntry> GenCardMarketPriceListFantasyRPG = new List<MarketCardEntry>();
         public List<MarketCardEntry> GenCardMarketPriceListCatJob = new List<MarketCardEntry>();
+        // Game 1.0 added an eighth vanilla expansion (Ascension) with its own generated table.
+        public List<MarketCardEntry> GenCardMarketPriceListAscension = new List<MarketCardEntry>();
         // Card market multiplier table (GetMarketPrice reads it for GRADED cards). Generated
         // locally with Unity Random on the client by RestockManager.Init, so it must be
         // overwritten by the host's copy or graded binder prices diverge.
@@ -202,6 +204,15 @@ namespace CardShopCoop.Net.Messages
         public float TotalValue;
         public List<TournamentPrizeSlot> PrizeSlots = new List<TournamentPrizeSlot>();
         public List<TournamentBracketEntry> Bracket = new List<TournamentBracketEntry>();
+        // Game 1.0: the player's own tournament participation (host-authoritative).
+        public bool IsPlayerRegistered;
+        public bool PlayerIsTournamentCustomer;
+        public bool PlayerIsTournamentWin;
+        public bool PlayerHasRegisteredResult;
+        public int PlayerTournamentCustomerPlayTableIndex;
+        public int PlayerTournamentWinCount;
+        public int PlayerTournamentWinPoints;
+        public int PlayerTournamentPlacementIndex;
 
         public MsgType Type
         {
@@ -273,6 +284,7 @@ namespace CardShopCoop.Net.Messages
     public sealed class TableSeatEntry
     {
         public bool Active;
+        public bool PlayerSeat;   // game 1.0: this seat belongs to a real player (not a customer)
         public EItemType PlayMat;
         public EItemType DeckBox;
         public EItemType Comic;
