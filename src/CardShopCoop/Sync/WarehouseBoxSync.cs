@@ -53,6 +53,7 @@ namespace CardShopCoop.Sync
         /// guest needs a record host's entries materialized as live boxes, but must leave a live
         /// host's racks alone (the box channel already carries those).</summary>
         private static bool _hostLiveBoxes;
+        private static bool _hasHostState;
 
         /// <summary>Throttle for the "rack refused a materialised box" warning.</summary>
         private static double _lastMaterializeWarn;
@@ -203,6 +204,7 @@ namespace CardShopCoop.Sync
             _sweepTimer = 0f;
             _sweepCursor = 0;
             _hostLiveBoxes = false;
+            _hasHostState = false;
             _pendingStoreAt.Clear();
             _takeKeyByRequest.Clear();
             _pendingTakeCompartments.Clear();
@@ -267,6 +269,20 @@ namespace CardShopCoop.Sync
                 Probe();
                 return _tRecord != null;
             }
+        }
+
+        /// <summary>True when the warehouse channel owns rack materialization on this side.</summary>
+        public static bool RackOwnedByWarehouseChannel()
+        {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                return UsesRecords;
+            }
+            if (!_hasHostState)
+            {
+                return true;
+            }
+            return Available() && !_hostLiveBoxes;
         }
 
         private static void Probe()
@@ -562,7 +578,48 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>1.00 record model: a record was banked into a compartment.</summary>
-        public static void AddStoredBoxRecordPostfix() => NotifyWarehouseChanged();
+        /// <summary>1.00 record model: a record was banked into a compartment. Also logs the
+        /// resulting count and the call origin while BoxSyncDebug is on, because a store that
+        /// banks TWO records prints here TWICE and the stack names whoever made the second call -
+        /// that is the one datum the store logs could not provide.</summary>
+        public static void AddStoredBoxRecordPostfix(ShelfCompartment __instance)
+        {
+            if (BoxShared.Debug && __instance != null)
+            {
+                try
+                {
+                    string origin = "?";
+                    var st = new System.Diagnostics.StackTrace(1, false);
+                    var sb = new System.Text.StringBuilder();
+                    for (int i = 0; i < st.FrameCount && i < 6; i++)
+                    {
+                        var m = st.GetFrame(i) == null ? null : st.GetFrame(i).GetMethod();
+                        if (m == null)
+                            continue;
+                        if (sb.Length > 0)
+                            sb.Append(" < ");
+                        sb.Append(m.DeclaringType == null ? "?" : m.DeclaringType.Name).Append('.').Append(m.Name);
+                    }
+                    if (sb.Length > 0)
+                        origin = sb.ToString();
+                    int shelfIdx = -1;
+                    int compIdx = -1;
+                    try
+                    {
+                        if (__instance.GetWarehouseShelf() != null)
+                        {
+                            shelfIdx = __instance.GetWarehouseIndex();
+                            compIdx = __instance.GetIndex();
+                        }
+                    }
+                    catch (Exception e) { Swallow.Log(e); }
+                    BoxShared.DebugLog("record-add",
+                        $"comp={shelfIdx}/{compIdx} count={RecordCount(__instance)} at={origin}");
+                }
+                catch (Exception e) { Swallow.Log(e); }
+            }
+            NotifyWarehouseChanged();
+        }
 
         /// <summary>1.00 record model: a record was popped (only when the pop succeeded).</summary>
         public static void TryPopStoredBoxRecordPostfix(bool __result)
@@ -1084,6 +1141,7 @@ namespace CardShopCoop.Sync
             if (!Available() || message == null || message.Compartments == null)
                 return;
             _hostLiveBoxes = message.HostLiveBoxes;
+            _hasHostState = true;
             // A live-box host's racks are real stored objects the box channel already
             // synchronises: rewriting or materialising them here would give rack state two owners
             // (see ApplyPatches). A record host has no live boxes to deliver, so a live guest

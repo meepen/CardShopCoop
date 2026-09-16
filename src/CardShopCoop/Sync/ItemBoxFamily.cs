@@ -257,6 +257,11 @@ namespace CardShopCoop.Sync
                     BoxPlacement.ClearPlacementIntent(box);
                     if (w.IsStored)
                     {
+                        if (WarehouseBoxSync.RackOwnedByWarehouseChannel())
+                        {
+                            ParkStoredMirror(b);
+                            break;
+                        }
                         ApplyStored(b, w);
                         break;
                     }
@@ -396,7 +401,8 @@ namespace CardShopCoop.Sync
         /// next snapshot retries.</summary>
         private static void ApplyStored(InteractablePackagingBox_Item b, in BoxWire w)
         {
-            if (WarehouseBoxSync.HasRecordStorage)
+            if (WarehouseBoxSync.RackOwnedByWarehouseChannel()
+                || WarehouseBoxSync.HasRecordStorage)
             {
                 // The record STORAGE model owns warehouse storage: a stored box is a
                 // ShelfCompartment record synced by WarehouseBoxSync and the live object is
@@ -410,12 +416,7 @@ namespace CardShopCoop.Sync
                 // UsesRecords is false when StoredBoxRecord exists but a take symbol did not
                 // resolve - and running the live recipe against record storage would destroy the
                 // host's real box.
-                BoxLifecycle.ApplyEnabled(b, false);
-                BoxVisuals.SetVisible(b, false);
-                // The mirror just hidden may be the box the local player is holding (a forwarded
-                // store in a record-backed world leaves the object alive until the host retires
-                // it), and a hidden held box never converges - release the hold.
-                CoopCore.ForceExitHoldBox(b);
+                ParkStoredMirror(b);
                 return;
             }
             // Cheap path FIRST, before any scene search: if the box already sits at the
@@ -462,6 +463,16 @@ namespace CardShopCoop.Sync
                 if (BoxPlacement.IsSanePose(w.Pos, w.Yaw))
                     BoxPlacement.ApplyPhysicsPose(b, w.Pos, w.Yaw);
             }
+        }
+
+        private static void ParkStoredMirror(InteractablePackagingBox_Item b)
+        {
+            BoxLifecycle.ApplyEnabled(b, false);
+            BoxVisuals.SetVisible(b, false);
+            // The mirror just hidden may be the box the local player is holding (a forwarded
+            // store in a record-backed world leaves the object alive until the host retires
+            // it), and a hidden held box never converges - release the hold.
+            CoopCore.ForceExitHoldBox(b);
         }
 
         /// <summary>Diagnostic: which of DispenseItem's checks rejected the store.</summary>
