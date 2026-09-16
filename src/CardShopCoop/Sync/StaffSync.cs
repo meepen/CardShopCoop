@@ -22,9 +22,11 @@ namespace CardShopCoop.Sync
     /// inactive while puppet clones are stripped of colliders and scripts - those screens
     /// are physically unreachable, so ops for them would be dead code.
     ///
-    /// Host broadcasts the hired roster + per-worker save-data essentials, hash-gated
-    /// (on change + a slow heal), into the client's CPlayerData mirrors so the joiner's
-    /// phone shows the truth and salary-derived numbers (bills) agree.
+    /// Host pushes the hired roster + per-worker save-data essentials as two things: an immediate
+    /// per-worker slice on change (client ops, and the host's own hire/fire/bonus/task edits), and
+    /// an UNCONDITIONAL round-robin slice sweep that re-asserts one batch of workers every slice so
+    /// a frame a client dropped is repaired even though nothing changed since (see AGENTS.md,
+    /// "Sync scheduling: no periodic full resends").
     /// </summary>
     public class StaffSync : TickableCoopModule
     {
@@ -75,8 +77,20 @@ namespace CardShopCoop.Sync
         private WorkerManager _wm;
         private HireWorkerScreen _hireScreen;
         private bool _hireScreenSearched; // the screen may legitimately not exist yet
-        private readonly SnapshotGate _gate = new SnapshotGate(1.0f, 15f, -0.7f);
         private readonly List<Entry> _buf = new List<Entry>(MaxWorkers);
+
+        // Gradual slice sweep (AGENTS.md: no periodic full resends). Each pass re-asserts ONE
+        // batch of workers UNCONDITIONALLY - like WarehouseBoxSync, and deliberately NOT gated on
+        // a change hash. The sweep is the eventual-correctness safety net: a frame the client
+        // dropped must be re-sent on the next pass even though the worker has not changed since,
+        // whereas a change-gated sweep would never re-send it (the hash already matches). Push on
+        // change (the dirty hooks + SendWorkerNow) supplies the immediacy; this supplies the
+        // correctness. Sized so a full pass takes ~SweepCycleSeconds.
+        private const float SweepSliceSeconds = 0.5f;
+        private const float SweepCycleSeconds = 5f;
+        private float _sweepTimer;
+        private int _sweepCursor;
+
         private readonly Dictionary<int, int> _workerLeaseOwner = new Dictionary<int, int>();
         private static readonly Dictionary<int, bool> ClientWorkerBusy = new Dictionary<int, bool>();
         private static readonly HashSet<int> ClientWorkerLease = new HashSet<int>();
@@ -92,8 +106,6 @@ namespace CardShopCoop.Sync
         public override void Start() => Instance = this;
 
         public override string Name => nameof(StaffSync);
-
-        protected override void OnHostTick(in SyncFrame frame) => HostTick(frame.Dt, frame.InGame);
 
         private struct Entry
         {
@@ -122,16 +134,21 @@ namespace CardShopCoop.Sync
             _wm = null;
             _hireScreen = null;
             _hireScreenSearched = false;
-            _gate.Reset(-0.7f);
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
             _workerLeaseOwner.Clear();
             ClientWorkerBusy.Clear();
             ClientWorkerLease.Clear();
             _allowClientWorkerOpen = false;
         }
 
+        /// <summary>Our baseline is stale (join / router heal). NOT a periodic full resend: rewind
+        /// the sweep so a fresh pass starts immediately - every worker is re-asserted by that pass
+        /// anyway, because the sweep is unconditional.</summary>
         public override void ForceResend()
         {
-            _gate.Force();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
         }
 
         public override void Dispose()
@@ -158,7 +175,8 @@ namespace CardShopCoop.Sync
         public static void ApplyPatches(Harmony h)
         {
             Try(h, typeof(HireWorkerPanelUI), "OnPressHireButton",
-                prefix: new HarmonyMethod(typeof(StaffSync), nameof(HirePrefix)));
+                prefix: new HarmonyMethod(typeof(StaffSync), nameof(HirePrefix)),
+                postfix: new HarmonyMethod(typeof(StaffSync), nameof(HostHirePostfix)));
             Try(h, typeof(WorkerInteractUIScreen), "SetTaskAsPrimaryOrSecondary",
                 postfix: new HarmonyMethod(typeof(StaffSync), nameof(TaskChangedPostfix)));
             Try(h, typeof(WorkerOptionUIScreen), "OnPressRestockShelfWithNoLabel",
@@ -167,10 +185,15 @@ namespace CardShopCoop.Sync
                 postfix: new HarmonyMethod(typeof(StaffSync), nameof(PriceOptionPostfix)));
             Try(h, typeof(WorkerSetPackOpenerTypeOptionScreen), "OnPressConfirm",
                 postfix: new HarmonyMethod(typeof(StaffSync), nameof(PackOptionPostfix)));
+            // The host's own hire/fire/bonus go straight into the game (no op round-trip), so the
+            // matching postfixes push the affected worker slice at once. The prefixes above only
+            // intercept the CLIENT path; without these the host's edits wait for the sweep.
             Try(h, typeof(WorkerInteractUIScreen), "OnPressGiveBonus",
-                prefix: new HarmonyMethod(typeof(StaffSync), nameof(BonusPrefix)));
+                prefix: new HarmonyMethod(typeof(StaffSync), nameof(BonusPrefix)),
+                postfix: new HarmonyMethod(typeof(StaffSync), nameof(HostInteractWorkerPostfix)));
             Try(h, typeof(WorkerInteractUIScreen), "OnPressFire",
-                prefix: new HarmonyMethod(typeof(StaffSync), nameof(FirePrefix)));
+                prefix: new HarmonyMethod(typeof(StaffSync), nameof(FirePrefix)),
+                postfix: new HarmonyMethod(typeof(StaffSync), nameof(HostInteractWorkerPostfix)));
             Try(h, typeof(Worker), "OnMousePress",
                 prefix: new HarmonyMethod(typeof(StaffSync), nameof(WorkerMousePressPrefix)));
             Try(h, typeof(Worker), "OnPressStopInteract",
@@ -261,25 +284,57 @@ namespace CardShopCoop.Sync
             catch (Exception e) { CoopPlugin.Log.LogWarning("StaffSync update send: " + e.Message); }
         }
 
+        /// <summary>A local staff edit happened. On a client it is forwarded to the host; on the
+        /// host it pushes the affected worker slice straight out, because the host's own edit goes
+        /// directly into the game (no op round-trip) and the sweep would otherwise take up to one
+        /// full pass to reach the guests.</summary>
+        private static void HandleLocalWorkerChange(Worker worker)
+        {
+            if (worker == null)
+                return;
+            if (CoopCore.Role == CoopRole.Client)
+                SendUpdate(worker);
+            else if (CoopCore.Role == CoopRole.Host)
+                Instance?.SendWorkerNow(worker.m_WorkerIndex);
+        }
+
         public static void TaskChangedPostfix(WorkerInteractUIScreen __instance)
         {
-            if (CoopCore.Role == CoopRole.Client)
-                SendUpdate(WorkerFrom(FiInteractWorker, __instance));
+            HandleLocalWorkerChange(WorkerFrom(FiInteractWorker, __instance));
         }
         public static void OptionChangedPostfix(WorkerOptionUIScreen __instance)
         {
-            if (CoopCore.Role == CoopRole.Client)
-                SendUpdate(WorkerFrom(FiOptionWorker, __instance));
+            HandleLocalWorkerChange(WorkerFrom(FiOptionWorker, __instance));
         }
         public static void PriceOptionPostfix(WorkerOptionSetPriceUIScreen __instance)
         {
-            if (CoopCore.Role == CoopRole.Client)
-                SendUpdate(WorkerFrom(FiPriceWorker, __instance));
+            HandleLocalWorkerChange(WorkerFrom(FiPriceWorker, __instance));
         }
         public static void PackOptionPostfix(WorkerSetPackOpenerTypeOptionScreen __instance)
         {
-            if (CoopCore.Role == CoopRole.Client)
-                SendUpdate(WorkerFrom(FiPackWorker, __instance));
+            HandleLocalWorkerChange(WorkerFrom(FiPackWorker, __instance));
+        }
+
+        /// <summary>Host: the vanilla hire/bonus/fire already ran locally, so push the worker the
+        /// host just changed. (The client path is handled by the matching prefix.)</summary>
+        public static void HostHirePostfix(HireWorkerPanelUI __instance)
+        {
+            if (CoopCore.Role != CoopRole.Host)
+                return;
+            try
+            {
+                Instance?.SendWorkerNow((int)FiPanelIndex.GetValue(__instance));
+            }
+            catch (System.Exception caught) { Swallow.Log(caught); }
+        }
+
+        public static void HostInteractWorkerPostfix(WorkerInteractUIScreen __instance)
+        {
+            if (CoopCore.Role != CoopRole.Host)
+                return;
+            var worker = WorkerFrom(FiInteractWorker, __instance);
+            if (worker != null)
+                Instance?.SendWorkerNow(worker.m_WorkerIndex);
         }
 
         public static bool BonusPrefix(WorkerInteractUIScreen __instance)
@@ -576,7 +631,7 @@ namespace CardShopCoop.Sync
             w.SetTask(primary);
             w.SetLastTask(task);
             w.SetSecondaryTask(secondary);
-            ForceResend();
+            SendWorkerNow(index); // push the updated worker at once, no full resend
         }
 
         private void HostBonus(int index, int connId)
@@ -599,7 +654,7 @@ namespace CardShopCoop.Sync
             CPlayerData.m_GameReportDataCollect.employeeCost -= fee;
             CPlayerData.m_GameReportDataCollectPermanent.employeeCost -= fee;
             w.GiveSalaryBonus();
-            ForceResend();
+            SendWorkerNow(index); // push the updated worker at once, no full resend
         }
 
         private void HostFire(int index, int connId)
@@ -612,7 +667,7 @@ namespace CardShopCoop.Sync
                 return;
             workers[index].FireWorker();
             HostEndInteraction(index, connId);
-            ForceResend();
+            SendWorkerNow(index); // push the updated worker at once, no full resend
         }
 
         /// <summary>Host: run HireWorkerPanelUI.OnPressHireButton's happy path minus its
@@ -664,31 +719,96 @@ namespace CardShopCoop.Sync
                 AchievementManager.OnStaffHired(hiredCount);
                 SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
                 CoopPlugin.Log.LogInfo("StaffSync: joiner hired worker " + index);
-                ForceResend(); // the confirming echo rides the next tick
+                SendWorkerNow(index); // the confirming echo goes out at once, no full resend
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("StaffSync host hire: " + e.Message); }
         }
 
-        public void HostTick(float dt, bool inGame)
+        /// <summary>Gradual sweep: re-assert ONE batch of workers per slice, UNCONDITIONALLY. It is
+        /// the eventual-correctness safety net, so it must re-send even when nothing changed - a
+        /// change-gated sweep can never repair a frame the client dropped (the gate would already
+        /// consider the slice up to date). Push on change still supplies the immediacy. A full pass
+        /// takes ~<see cref="SweepCycleSeconds"/>.</summary>
+        public override void PeriodicUpdate(float delta)
         {
-            if (!inGame)
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
                 return;
-            if (!_gate.Due(dt))
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
                 return;
-            Guarded("host", () =>
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
             {
                 var wm = Wm();
                 if (wm == null || wm.m_WorkerDataList == null)
                     return;
-                Collect(wm, _buf);
-                int hash = HashEntries(_buf);
-                if (!_gate.ShouldSend(hash))
+                int total = Mathf.Min(wm.m_WorkerDataList.Count, MaxWorkers);
+                if (total <= 0)
+                {
+                    _sweepCursor = 0;
                     return;
-                var list = _buf; // serialized synchronously by Msg.Build; safe to close over
-                var entries = new List<StaffEntry>(list.Count);
-                for (int i = 0; i < list.Count; i++)
-                    entries.Add(ToStaffEntry(list[i]));
-                BroadcastState?.Invoke(new StaffStateMessage { Entries = entries });
+                }
+                int perSlice = Mathf.Max(1,
+                    Mathf.CeilToInt(total / Mathf.Max(1f, SweepCycleSeconds / SweepSliceSeconds)));
+                for (int k = 0; k < perSlice; k++)
+                {
+                    if (_sweepCursor < 0 || _sweepCursor >= total)
+                        _sweepCursor = 0;
+                    int i = _sweepCursor;
+                    _sweepCursor = (_sweepCursor + 1) % total;
+                    SendWorkerNow(i);
+                }
+            });
+        }
+
+        /// <summary>Host: send the COMPLETE roster to one connection - the join catch-up path.
+        /// Not periodic; the sweep is what guarantees eventual correctness.</summary>
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null)
+                return;
+            Guarded("full", () =>
+            {
+                var msg = BuildFull();
+                if (msg != null)
+                    SendToClient(connId, msg);
+            });
+        }
+
+        private StaffStateMessage BuildFull()
+        {
+            var wm = Wm();
+            if (wm == null || wm.m_WorkerDataList == null)
+                return null;
+            Collect(wm, _buf);
+            var entries = new List<StaffEntry>(_buf.Count);
+            for (int i = 0; i < _buf.Count; i++)
+            {
+                entries.Add(ToStaffEntry(_buf[i]));
+            }
+            return new StaffStateMessage { Full = true, Index = -1, Entries = entries };
+        }
+
+        /// <summary>Host: push ONE worker's authoritative slice to every client right now. This is
+        /// the push-on-change path; the sweep re-asserts the same slice unconditionally as the
+        /// safety net, so nothing here needs to remember "what was already sent".</summary>
+        private void SendWorkerNow(int index)
+        {
+            // Guarded: this is also called straight from Harmony postfixes on vanilla UI methods,
+            // so a transport/serialization throw must not escape into the game's UI code path.
+            Guarded("push", () =>
+            {
+                var wm = Wm();
+                if (wm == null || BroadcastState == null)
+                    return;
+                if (!TryCollectOne(wm, index, out Entry e))
+                    return;
+                BroadcastState(new StaffStateMessage
+                {
+                    Full = false,
+                    Index = index,
+                    Entries = new List<StaffEntry> { ToStaffEntry(e) },
+                });
             });
         }
 
@@ -699,83 +819,65 @@ namespace CardShopCoop.Sync
         {
             outList.Clear();
             int n = Mathf.Min(wm.m_WorkerDataList.Count, MaxWorkers);
-            var workers = WorkerManager.GetWorkerList();
-            var saved = CPlayerData.m_WorkerSaveDataList;
             for (int i = 0; i < n; i++)
-            {
-                var e = new Entry
-                {
-                    Hired = i < CPlayerData.m_IsWorkerHired.Count && CPlayerData.GetIsWorkerHired(i),
-                };
-                WorkerSaveData d = null;
-                var w = workers != null && i < workers.Count ? workers[i] : null;
-                if (w != null && w.m_IsActive)
-                {
-                    try
-                    {
-                        d = w.GetWorkerSaveData();
-                    }
-                    catch (System.Exception caught) { Swallow.Log(caught); }
-                }
-                if (d == null && saved != null && i < saved.Count)
-                    d = saved[i];
-                if (d != null)
-                {
-                    e.HasData = true;
-                    e.PrimaryTask = (byte)d.primaryTask;
-                    e.SecondaryTask = (byte)d.secondaryTask;
-                    e.WorkerTask = (byte)d.workerTask;
-                    e.CurrentState = (byte)d.currentState;
-                    e.GoingHome = d.isGoingHome;
-                    e.BonusCount = (byte)Mathf.Clamp(d.bonusBoostedCount, 0, 255);
-                    e.BonusBoosted = d.isBonusBoosted;
-                    e.FillNoLabel = d.isFillShelfWithoutLabel;
-                    e.RoundUpPrice = d.isRoundUpPrice;
-                    e.RoundUpCardPrice = d.isRoundUpCardPrice;
-                    e.AvoidSetCardPrice = d.isAvoidSetCardPrice;
-                    e.AvoidSetCardPriceRestock = d.isAvoidSetCardPriceWhileRestock;
-                    e.PriceMult = d.setPriceMultiplier;
-                    e.CardPriceMult = d.setCardPriceMultiplier;
-                    e.PackTypes = d.cardPackItemTypeEnabledList;
-                    e.ExpList = d.expList;
-                }
-                outList.Add(e);
-            }
+                outList.Add(CollectEntry(i));
         }
 
-        private static int HashEntries(List<Entry> list)
+        /// <summary>One worker's entry. Essentials come from the LIVE Worker when it's active (the
+        /// save-data list only refreshes on save), falling back to the saved copy for workers who
+        /// are hired but home for the night.</summary>
+        private static Entry CollectEntry(int i)
         {
-            int hash = 17;
-            for (int i = 0; i < list.Count; i++)
+            var e = new Entry
             {
-                var e = list[i];
-                hash = hash * 31 + (e.Hired ? 1 : 0);
-                if (!e.HasData)
+                Hired = i < CPlayerData.m_IsWorkerHired.Count && CPlayerData.GetIsWorkerHired(i),
+            };
+            WorkerSaveData d = null;
+            var workers = WorkerManager.GetWorkerList();
+            var w = workers != null && i < workers.Count ? workers[i] : null;
+            if (w != null && w.m_IsActive)
+            {
+                try
                 {
-                    hash = hash * 31;
-                    continue;
+                    d = w.GetWorkerSaveData();
                 }
-                hash = hash * 31 + e.PrimaryTask;
-                hash = hash * 31 + e.SecondaryTask;
-                hash = hash * 31 + e.WorkerTask;
-                hash = hash * 31 + e.CurrentState;
-                hash = hash * 31 + (e.GoingHome ? 1 : 0);
-                hash = hash * 31 + e.BonusCount;
-                hash = hash * 31 + PackFlags(e);
-                hash = hash * 31 + (int)(e.PriceMult * 100f);
-                hash = hash * 31 + (int)(e.CardPriceMult * 100f);
-                if (e.PackTypes != null)
-                {
-                    for (int k = 0; k < e.PackTypes.Count; k++)
-                        hash = hash * 31 + (e.PackTypes[k] ? 1 : 0);
-                }
-                if (e.ExpList != null)
-                {
-                    for (int k = 0; k < e.ExpList.Count; k++)
-                        hash = hash * 31 + e.ExpList[k];
-                }
+                catch (System.Exception caught) { Swallow.Log(caught); }
             }
-            return hash;
+            var saved = CPlayerData.m_WorkerSaveDataList;
+            if (d == null && saved != null && i < saved.Count)
+                d = saved[i];
+            if (d != null)
+            {
+                e.HasData = true;
+                e.PrimaryTask = (byte)d.primaryTask;
+                e.SecondaryTask = (byte)d.secondaryTask;
+                e.WorkerTask = (byte)d.workerTask;
+                e.CurrentState = (byte)d.currentState;
+                e.GoingHome = d.isGoingHome;
+                e.BonusCount = (byte)Mathf.Clamp(d.bonusBoostedCount, 0, 255);
+                e.BonusBoosted = d.isBonusBoosted;
+                e.FillNoLabel = d.isFillShelfWithoutLabel;
+                e.RoundUpPrice = d.isRoundUpPrice;
+                e.RoundUpCardPrice = d.isRoundUpCardPrice;
+                e.AvoidSetCardPrice = d.isAvoidSetCardPrice;
+                e.AvoidSetCardPriceRestock = d.isAvoidSetCardPriceWhileRestock;
+                e.PriceMult = d.setPriceMultiplier;
+                e.CardPriceMult = d.setCardPriceMultiplier;
+                e.PackTypes = d.cardPackItemTypeEnabledList;
+                e.ExpList = d.expList;
+            }
+            return e;
+        }
+
+        private static bool TryCollectOne(WorkerManager wm, int i, out Entry e)
+        {
+            e = default(Entry);
+            if (wm == null || wm.m_WorkerDataList == null)
+                return false;
+            if (i < 0 || i >= Mathf.Min(wm.m_WorkerDataList.Count, MaxWorkers))
+                return false;
+            e = CollectEntry(i);
+            return true;
         }
 
         // ---------------- client ----------------
@@ -798,9 +900,22 @@ namespace CardShopCoop.Sync
             // One scene lookup per state apply, not per worker: the interaction screen caches
             // the bonus count when it opens, so an open screen must be refreshed from the mirror.
             var interactScreen = UnityEngine.Object.FindObjectOfType<WorkerInteractUIScreen>(true);
-            for (int i = 0; i < n; i++)
+            // A partial carries exactly ONE entry, for message.Index. Omitted workers are
+            // unchanged - never treat absence as "fired", and never walk the roster for one.
+            bool partial = !message.Full && message.Index >= 0;
+            // A partial addresses exactly ONE worker. Validate that contract instead of trusting
+            // the wire index: an out-of-range index would grow the roster list without bound, and
+            // a multi-entry partial would be applied n times to the same worker.
+            if (partial && (n != 1 || message.Index >= MaxWorkers))
             {
-                var e = message.Entries[i];
+                CoopPlugin.Log.LogWarning("StaffSync: bad partial StaffState (index=" + message.Index
+                    + ", entries=" + n + ") - dropped");
+                return;
+            }
+            for (int k = 0; k < n; k++)
+            {
+                int i = partial ? message.Index : k;
+                var e = message.Entries[k];
                 if (i < CPlayerData.m_IsWorkerHired.Count && CPlayerData.GetIsWorkerHired(i) != e.Hired)
                 {
                     // roster only - no ActivateWorker: real workers stay suppressed on the

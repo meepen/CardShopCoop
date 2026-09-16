@@ -1,4 +1,5 @@
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -62,8 +63,6 @@ namespace CardShopCoop.Sync
         private readonly List<int> _pruneScratch = new List<int>();
         private ShelfManager _sm;
         private float _timer;
-        private float _heal;
-        private const float HealInterval = 10f;
         private bool _forceImmediate;
         private float _lastRejectLog = -999f; // throttle the identity-reject spam to ~1/5s
         private float _lastAcceptedLog = -999f;
@@ -73,10 +72,27 @@ namespace CardShopCoop.Sync
         private System.Collections.IList[] _groups;
         private bool _scanning;
         private List<Entry> _scanChanges;
+        private readonly List<int> _sweepKeys = new List<int>();
+        private readonly HashSet<int> _scanKeys = new HashSet<int>();
+        private readonly HashSet<int> _sweepSlice = new HashSet<int>();
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private bool _sweepRequested;
+        private bool _sweepPassActive;
+        private int _sweepPassStart;
+        private bool _sweepChangesWereAsserted;
         private bool _scanImmediate;
-        private bool _scanHeal;
+        private bool _scanSweep;
+
+        // One object-key slice is reasserted every five seconds. Six nominal slices target a
+        // 30-second pass; the 64-entry wire-batch cap makes the real window
+        // 5s * ceil(total / min(64, ceil(total / 6))). This rides Tick rather than
+        // PeriodicUpdate because ObjMoveSync is driven by the existing session-gated action.
+        private const float SweepSliceSeconds = 5f;
+        private const float SweepCycleSeconds = 30f;
 
         public Action<List<Entry>> OnLocalChanges;
+        public Action<int, INetMessage> SendToClient;
 
         // Client role: a fresh joiner must ADOPT every object's loaded pose as its silent
         // baseline instead of re-reporting it (see Walk). Read straight off the static role
@@ -96,7 +112,23 @@ namespace CardShopCoop.Sync
 
         public override string Name => "object-moves";
 
-        public override void ForceResend() => ForceNextTick();
+        public override void ForceResend()
+        {
+            _sweepRequested = true;
+            _sweepPassActive = true;
+            _sweepTimer = SweepSliceSeconds;
+        }
+
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null)
+                return;
+            Guarded("full", () =>
+            {
+                var entries = BuildFull();
+                SendToClient(connId, new ObjMoveDeltaMessage { Entries = entries });
+            });
+        }
 
         /// <summary>Drop the per-object baselines for a placed object removed mid-session. Keys
         /// embed the stable object id; without this the maps retained destroyed objects until
@@ -125,12 +157,20 @@ namespace CardShopCoop.Sync
             _candidate.Clear();
             _sm = null;
             _timer = -0.25f; // staggered phase vs the other snapshot engines
-            _heal = 0f;
             _forceImmediate = false;
             _lastAcceptedLog = -999f;
             _scanning = false;
             _groups = null;
             _scanChanges = null;
+            _sweepKeys.Clear();
+            _scanKeys.Clear();
+            _sweepSlice.Clear();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _sweepRequested = false;
+            _sweepPassActive = false;
+            _sweepPassStart = 0;
+            _sweepChangesWereAsserted = false;
             _cursor.Reset();
         }
 
@@ -146,6 +186,7 @@ namespace CardShopCoop.Sync
             if (!active)
                 return;
             _timer += dt;
+            _sweepTimer += dt;
             if (!_scanning)
             {
                 if (_timer < 1.0f)
@@ -153,16 +194,40 @@ namespace CardShopCoop.Sync
                 _timer -= 1.0f;
                 _scanImmediate = _forceImmediate;
                 _forceImmediate = false;
-                _heal += 1.0f;
-                _scanHeal = false;
-                if (_heal >= HealInterval)
+                _scanSweep = CoopCore.Role == CoopRole.Host
+                    && (_sweepRequested || _sweepTimer >= SweepSliceSeconds);
+                if (_scanSweep)
                 {
-                    _heal -= HealInterval;
-                    _scanHeal = true;
+                    _sweepTimer = 0f;
+                    _sweepSlice.Clear();
+                    _sweepChangesWereAsserted = false;
+                    int total = _sweepKeys.Count;
+                    int slicesPerCycle = Mathf.Max(1, Mathf.RoundToInt(SweepCycleSeconds / SweepSliceSeconds));
+                    // OnLocalChanges batches are capped at 64 entries below; keep a sweep
+                    // slice within that wire batch limit so an unconditional slice cannot be
+                    // truncated when a very large shop is loaded.
+                    int perSlice = Mathf.Min(64, Mathf.Max(1,
+                        (total + slicesPerCycle - 1) / slicesPerCycle));
+                    if (total > 0)
+                    {
+                        if (_sweepCursor >= total)
+                            _sweepCursor = 0;
+                        _sweepPassStart = _sweepCursor;
+                        for (int n = 0; n < perSlice; n++)
+                        {
+                            _sweepSlice.Add(_sweepKeys[_sweepCursor]);
+                            _sweepCursor = (_sweepCursor + 1) % total;
+                        }
+                    }
+                    else
+                    {
+                        _sweepPassActive = false;
+                    }
                 }
                 var sm = Sm();
                 if (sm == null)
                     return;
+                _sweepRequested = false;
                 if (_groups == null || _groups.Length != PopulationSync.KindCount)
                     _groups = new System.Collections.IList[PopulationSync.KindCount];
                 for (int k = 0; k < _groups.Length; k++)
@@ -170,6 +235,7 @@ namespace CardShopCoop.Sync
                 _cursor.Reset();
                 _scanning = true;
                 _scanChanges = null;
+                _scanKeys.Clear();
             }
             try
             {
@@ -184,8 +250,13 @@ namespace CardShopCoop.Sync
             if (_cursor.Done)
             {
                 _scanning = false;
+                _sweepKeys.Clear();
+                foreach (int key in _scanKeys)
+                    _sweepKeys.Add(key);
                 if (_scanChanges != null && _scanChanges.Count > 0)
                     OnLocalChanges?.Invoke(_scanChanges);
+                if (_scanSweep && _sweepPassActive && _sweepChangesWereAsserted)
+                    _sweepPassActive = _sweepCursor != _sweepPassStart;
             }
         }
 
@@ -198,6 +269,7 @@ namespace CardShopCoop.Sync
                 return;
             if (!PlacedObjectIdentity.TryMakeObjectKey(kind, obj as InteractableObject, out int key))
                 return;
+            _scanKeys.Add(key);
             // Never author a move for an object the game is actively moving (a drag in
             // progress). On the guest there is nothing legitimate to report mid-drag, and
             // reporting the pre-settle pose is exactly the packet that races the host's
@@ -213,7 +285,7 @@ namespace CardShopCoop.Sync
             bool knownSent = _sent.TryGetValue(key, out var sent);
             // Only the host emits periodic authoritative heals. A client must not turn a
             // heal into a request for every placed object.
-            bool forceHeal = _scanHeal && !IsClientRole;
+            bool forceHeal = _scanSweep && _sweepSlice.Contains(key);
             if (knownSent && sent.Same(p, r) && !forceHeal)
             {
                 _candidate.Remove(key);
@@ -237,18 +309,57 @@ namespace CardShopCoop.Sync
             {
                 if (_scanChanges == null)
                     _scanChanges = new List<Entry>();
-                // Do not advance the sent baseline until this entry is actually queued;
-                // otherwise the 65th move in a batch is lost forever.
-                if (_scanChanges.Count >= 64)
+                // Reserve room for the unconditional sweep slice. Do not advance the sent
+                // baseline until this entry is actually queued; otherwise a move is lost.
+                if (!forceHeal && _scanChanges.Count >= 64 - _sweepSlice.Count)
                     return;
                 _sent[key] = new Pose { P = p, R = r, Valid = true };
                 _candidate.Remove(key);
                 _scanChanges.Add(new Entry { Key = key, Type = TypeIdOf(obj, kind), Pos = p, Rot = r });
+                if (forceHeal)
+                    _sweepChangesWereAsserted = true;
             }
             else
             {
                 _candidate[key] = new Pose { P = p, R = r, Valid = true };
             }
+        }
+
+        private List<Entry> BuildFull()
+        {
+            var result = new List<Entry>();
+            var sm = Sm();
+            if (sm == null)
+                return result;
+            var groups = new System.Collections.IList[PopulationSync.KindCount];
+            for (int k = 0; k < groups.Length; k++)
+                groups[k] = PopulationSync.GetList(sm, k);
+            for (int k = 0; k < groups.Length; k++)
+            {
+                var list = groups[k];
+                if (list == null)
+                    continue;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var obj = list[i] as Component;
+                    if (obj == null || !obj.gameObject.activeInHierarchy || (k == 5 &&
+                        CardShopCoop.Patches.GamePatches.IsPendingDeco(obj as InteractableObject)))
+                        continue;
+                    if (!PlacedObjectIdentity.TryMakeObjectKey(k, obj as InteractableObject, out int key))
+                        continue;
+                    var io = obj as InteractableObject;
+                    if (io != null && io.GetIsMovingObject())
+                        continue;
+                    result.Add(new Entry
+                    {
+                        Key = key,
+                        Type = TypeIdOf(obj, k),
+                        Pos = obj.transform.position,
+                        Rot = obj.transform.rotation
+                    });
+                }
+            }
+            return result;
         }
 
         // the auto pack opener's world-space UI panel is NOT a child of the machine, so a

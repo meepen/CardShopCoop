@@ -5,6 +5,14 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.TvState, Policy = MessagePolicy.ClientOnly)]
     public sealed class TvStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public string SourceUrl;
         public string StreamUrl;
         public string StreamTitle;

@@ -180,15 +180,24 @@ namespace CardShopCoop.Sync
 
         public void DestroyBox(InteractablePackagingBox box)
         {
-            if (box == null)
+            DestroyOwned(box as InteractablePackagingBox_Item);
+        }
+
+        /// <summary>Static teardown for a box this module owns (the record-host -> live-guest
+        /// materialisation). Same recipe as <see cref="DestroyBox"/> but callable without the family
+        /// instance. A bare <c>Object.Destroy</c> must NOT be used: it skips <c>OnDestroyed()</c>,
+        /// which de-registers the box from <c>RestockManager</c>, so every replaced box would stay
+        /// in <c>m_ItemPackagingBoxList</c> as a dead entry.</summary>
+        internal static void DestroyOwned(InteractablePackagingBox_Item item)
+        {
+            if (item == null)
                 return;
-            var item = box as InteractablePackagingBox_Item;
             if (IsLocallyCarried(item))
-                CoopCore.ForceExitHoldBox(box);
+                CoopCore.ForceExitHoldBox(item);
             UnhookIfStored(item); // a stored box destroyed without unhooking leaks its rack slot
-            BoxVisuals.Forget(box);
-            BoxPlacement.ClearThrow(box);
-            box.OnDestroyed();
+            BoxVisuals.Forget(item);
+            BoxPlacement.ClearThrow(item);
+            item.OnDestroyed();
         }
 
         /// <summary>Detach a box from its warehouse rack slot before destroying it, so the
@@ -387,15 +396,26 @@ namespace CardShopCoop.Sync
         /// next snapshot retries.</summary>
         private static void ApplyStored(InteractablePackagingBox_Item b, in BoxWire w)
         {
-            if (WarehouseBoxSync.Available())
+            if (WarehouseBoxSync.HasRecordStorage)
             {
-                // Game 1.0 has no live stored box: a stored box is a ShelfCompartment record
-                // synced by WarehouseBoxSync, and the live object is destroyed by the game.
-                // Running the game's store recipe here would create a local record AND drive the
-                // data-only destroy (a spurious Removed). Park/hide the mirror; the host's retire
-                // sweep and the record channel finish the transition.
+                // The record STORAGE model owns warehouse storage: a stored box is a
+                // ShelfCompartment record synced by WarehouseBoxSync and the live object is
+                // destroyed by the game. Running the game's store recipe here would create a local
+                // record AND drive the data-only destroy (a spurious Removed). Park/hide the
+                // mirror; the host's retire sweep and the record channel finish the transition.
+                //
+                // HasRecordStorage, NOT Available() and NOT UsesRecords: a live-box build also
+                // exposes the box-list API so Available() is true there too (keying off it hid a
+                // box the box channel still owned and the guest's rack rendered empty), while
+                // UsesRecords is false when StoredBoxRecord exists but a take symbol did not
+                // resolve - and running the live recipe against record storage would destroy the
+                // host's real box.
                 BoxLifecycle.ApplyEnabled(b, false);
                 BoxVisuals.SetVisible(b, false);
+                // The mirror just hidden may be the box the local player is holding (a forwarded
+                // store in a record-backed world leaves the object alive until the host retires
+                // it), and a hidden held box never converges - release the hold.
+                CoopCore.ForceExitHoldBox(b);
                 return;
             }
             // Cheap path FIRST, before any scene search: if the box already sits at the

@@ -415,11 +415,11 @@ namespace CardShopCoop
                 // engine's ForceResend only re-arms a diff scan, so broadcast its full shelf
                 // state explicitly as well.
                 ModulesForceResend();
-                ModulesOnFullyJoin(context.ConnectionId);
+                ModulesFullUpdate(context.ConnectionId);
                 _world.RequestResync?.Invoke();
                 return;
             },
-                MessagePolicy.HostOnlyInGame, true, heal: () => { _boxEngine?.RequestFullSnapshot(); _market.ForceResend(); });
+                MessagePolicy.HostOnlyInGame, true, heal: () => { _boxEngine?.RequestFullSnapshot(); _market.ForceResend(); _warehouse.ForceResend(); });
             _messageRouter.Register<ShelfBoxPullMessage>((context, message) =>
             {
                 _world.HostApplyBoxPull(message, context.ConnectionId, _boxEngine);
@@ -470,11 +470,11 @@ namespace CardShopCoop
                     return;
                 if (message is PopStateMessage popState)
                 {
-                    if (popState.Entries == null)
-                        return;
-                    if (popState.Entries.Count != PopulationSync.KindCount)
-                        return;
-                    _population.ClientApply(popState.Entries);
+                    // Hand the WHOLE message to the module: it owns the Full/Index slice
+                    // semantics now (a partial carries one kind, a full carries every kind).
+                    // The old list overload + "Entries.Count == KindCount" guard assumed every
+                    // PopState was a complete 16-kind roster, which is no longer true.
+                    _population.ClientApply(popState);
                 }
                 return;
             },

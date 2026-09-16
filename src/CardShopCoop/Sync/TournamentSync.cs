@@ -23,6 +23,7 @@ namespace CardShopCoop.Sync
     /// </summary>
     public class TournamentSync : TickableCoopModule
     {
+        public static TournamentSync Instance;
         /// <summary>TournamentPrizeShelf.m_ScreenMesh (the shelf's little tournament display) is
         /// absent from the Game Pass Assembly-CSharp, which made a direct field access fail to
         /// COMPILE against that build - one cosmetic toggle taking the whole universal DLL down
@@ -34,13 +35,35 @@ namespace CardShopCoop.Sync
 
         /// <summary>Set by CoopCore: host -> clients state broadcast.</summary>
         public Action<INetMessage> BroadcastState;
+        public Action<int, INetMessage> SendToClient;
 
         /// <summary>True while ClientApplyState writes CPlayerData.m_TournamentData, so
         /// no patch mistakes the authoritative copy for a local scheduling action.</summary>
         public static bool ApplyingRemote;
 
-        private readonly SnapshotGate _gate = new SnapshotGate(1.5f, 15f, -6.1f);
-        private int _clientHash;
+        private const float SweepSliceSeconds = 0.5f;
+        // BuildState caps the bracket at 64 entries; eight-entry batches therefore fit exactly
+        // in the eight hash slots below, and SliceCount's maximum is 9 + 8 = 17 slices.
+        private const int BracketBatchSize = 8;
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private int _bracketEpoch = 1;
+        private int _lastHeaderHash;
+        private bool _hasHeader;
+        private readonly int[] _lastPrizeHash = new int[8];
+        private readonly bool[] _hasPrize = new bool[8];
+        private readonly int[] _lastBracketHash = new int[8];
+        private readonly bool[] _hasBracket = new bool[8];
+        private int _clientBracketEpoch;
+        private readonly List<PairingEntry> _clientBracket = new List<PairingEntry>();
+        public TournamentSync()
+        {
+            Instance = this;
+        }
+        public override void Start()
+        {
+            Instance = this;
+        }
 
         // NEVER CSingleton<CustomerManager>.Instance: touched while no real manager
         // exists (client reload loading screen, host mid-session save load) the getter
@@ -63,20 +86,38 @@ namespace CardShopCoop.Sync
         public override void Dispose()
         {
             base.Dispose();
+            if (ReferenceEquals(Instance, this))
+                Instance = null;
             ApplyingRemote = false;
             _cm = null;
         }
 
         public override void Reset()
         {
-            _gate.Reset(-6.1f);
-            _clientHash = 0;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _bracketEpoch = 1;
+            _hasHeader = false;
+            for (int i = 0; i < 8; i++)
+            {
+                _hasPrize[i] = false;
+                _hasBracket[i] = false;
+            }
+            _clientBracketEpoch = 0;
+            _clientBracket.Clear();
             _cm = null;
         }
 
         public override void ForceResend()
         {
-            _gate.Force();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _hasHeader = false;
+            for (int i = 0; i < 8; i++)
+            {
+                _hasPrize[i] = false;
+                _hasBracket[i] = false;
+            }
         }
 
         // ---------------- patches ----------------
@@ -102,6 +143,25 @@ namespace CardShopCoop.Sync
                 prefix: new HarmonyMethod(typeof(TournamentSync), nameof(ScheduleBlockPrefix)));
             Try(h, typeof(HostTournamentScreen), "OnPressPlayerSignOutTournament",
                 prefix: new HarmonyMethod(typeof(TournamentSync), nameof(ScheduleBlockPrefix)));
+            // These methods own the authoritative mutations in both game builds. Postfixes push
+            // only the affected block; the sweep below is the bounded loss-recovery path.
+            Try(h, typeof(HostTournamentScreen), "OnPressConfirm",
+                postfix: new HarmonyMethod(typeof(TournamentSync), nameof(HeaderChangedPostfix)));
+            Try(h, typeof(HostTournamentScreen), "ConfirmCancelTournament",
+                postfix: new HarmonyMethod(typeof(TournamentSync), nameof(HeaderChangedPostfix)));
+            Try(h, typeof(HostTournamentScreen), "OnPressPlayerSignUpTournament",
+                postfix: new HarmonyMethod(typeof(TournamentSync), nameof(HeaderChangedPostfix)));
+            Try(h, typeof(HostTournamentScreen), "OnPressPlayerSignOutTournament",
+                postfix: new HarmonyMethod(typeof(TournamentSync), nameof(HeaderChangedPostfix)));
+            Try(h, typeof(HostTournamentSelectPrizeScreen), "OnPressSelectPrizeItem",
+                postfix: new HarmonyMethod(typeof(TournamentSync), nameof(PrizeChangedPostfix)));
+            Try(h, typeof(HostTournamentSelectPrizeScreen), "OnPressSelectPrizeCard",
+                postfix: new HarmonyMethod(typeof(TournamentSync), nameof(PrizeChangedPostfix)));
+            Try(h, typeof(CustomerManager), "OnDayStarted",
+                prefix: new HarmonyMethod(typeof(TournamentSync), nameof(DayStartedPrefix)),
+                postfix: new HarmonyMethod(typeof(TournamentSync), nameof(DayStartedPostfix)));
+            Try(h, typeof(CustomerManager), "OnCustomerFinishTournamentRound",
+                postfix: new HarmonyMethod(typeof(TournamentSync), nameof(BracketChangedPostfix)));
         }
 
         public static bool ScheduleBlockPrefix()
@@ -114,6 +174,196 @@ namespace CardShopCoop.Sync
                 CoopCore.Instance.RegisterLineTimer = 3f;
             }
             return false;
+        }
+
+        private static void Notify(TournamentSync self, int kind)
+        {
+            if (self == null || ApplyingRemote || CoopCore.Role != CoopRole.Host || !CoopCore.InSessionWorld)
+                return;
+            self.Guarded("change", () =>
+            {
+                var td = CPlayerData.m_TournamentData;
+                if (td == null)
+                    return;
+                var state = self.BuildState(td);
+                if (kind == 0)
+                    self.SendSliceIfChanged(state, 0);
+                else if (kind == 1)
+                {
+                    for (int i = 0; i < Mathf.Min(8, state.PrizeSlots.Count); i++)
+                        self.SendSliceIfChanged(state, i + 1);
+                }
+                else
+                {
+                    int offset = 9;
+                    int batches = (state.Bracket.Count + BracketBatchSize - 1) / BracketBatchSize;
+                    for (int i = 0; i < batches; i++)
+                        self.SendSliceIfChanged(state, offset + i);
+                }
+            });
+        }
+
+        public static void HeaderChangedPostfix() => Notify(FindInstance(), 0);
+        public static void PrizeChangedPostfix() => Notify(FindInstance(), 1);
+        public static void BracketChangedPostfix() => Notify(FindInstance(), 2);
+        /// <summary>Advance the identity before vanilla clears the old bracket.</summary>
+        public static void DayStartedPrefix()
+        {
+            var self = FindInstance();
+            if (self != null)
+                self._bracketEpoch++;
+        }
+
+        public static void DayStartedPostfix()
+        {
+            var self = FindInstance();
+            Notify(self, 0);
+            Notify(self, 2);
+        }
+
+        private static TournamentSync FindInstance()
+        {
+            return Instance;
+        }
+
+        private void SendSliceIfChanged(TournamentStateMessage state, int index)
+        {
+            if (BroadcastState == null)
+                return;
+            if (index > 0 && index <= 8 && index > state.PrizeSlots.Count)
+                return;
+            int hash = SliceHash(state, index);
+            int slot = index - 1;
+            bool changed;
+            if (index == 0)
+            {
+                changed = !_hasHeader || _lastHeaderHash != hash;
+                _lastHeaderHash = hash;
+                _hasHeader = true;
+            }
+            else if (slot < 8)
+            {
+                changed = !_hasPrize[slot] || _lastPrizeHash[slot] != hash;
+                _lastPrizeHash[slot] = hash;
+                _hasPrize[slot] = true;
+            }
+            else
+            {
+                int b = slot - 8;
+                changed = !_hasBracket[b] || _lastBracketHash[b] != hash;
+                _lastBracketHash[b] = hash;
+                _hasBracket[b] = true;
+            }
+            if (!changed)
+                return;
+            SendSlice(state, index);
+        }
+
+        /// <summary>Periodic re-assertion deliberately bypasses all change detection.</summary>
+        private void SendSliceUnconditionally(TournamentStateMessage state, int index)
+        {
+            if (index > 0 && index <= 8 && index > state.PrizeSlots.Count)
+                return;
+            SendSlice(state, index);
+        }
+
+        private void SendSlice(TournamentStateMessage state, int index)
+        {
+            int slot = index - 1;
+            var slice = new TournamentStateMessage { Full = false, Index = index, BracketEpoch = state.BracketEpoch };
+            if (index == 0)
+                CopyHeader(state, slice);
+            else if (slot < state.PrizeSlots.Count)
+                slice.PrizeSlots.Add(state.PrizeSlots[slot]);
+            else
+            {
+                int start = (slot - 8) * BracketBatchSize;
+                for (int i = start; i < start + BracketBatchSize && i < state.Bracket.Count; i++)
+                    slice.Bracket.Add(state.Bracket[i]);
+            }
+            BroadcastState(slice);
+        }
+
+        private static void CopyHeader(TournamentStateMessage a, TournamentStateMessage b)
+        {
+            b.Flags = a.Flags;
+            b.MaxPlayerCount = a.MaxPlayerCount;
+            b.SignedUpCustomerCount = a.SignedUpCustomerCount;
+            b.FinishedCurrentRoundCustomerCount = a.FinishedCurrentRoundCustomerCount;
+            b.CurrentRound = a.CurrentRound;
+            b.MaxRound = a.MaxRound;
+            b.Fee = a.Fee;
+            b.TotalValue = a.TotalValue;
+            b.IsPlayerRegistered = a.IsPlayerRegistered;
+            b.PlayerIsTournamentCustomer = a.PlayerIsTournamentCustomer;
+            b.PlayerIsTournamentWin = a.PlayerIsTournamentWin;
+            b.PlayerHasRegisteredResult = a.PlayerHasRegisteredResult;
+            b.PlayerTournamentCustomerPlayTableIndex = a.PlayerTournamentCustomerPlayTableIndex;
+            b.PlayerTournamentWinCount = a.PlayerTournamentWinCount;
+            b.PlayerTournamentWinPoints = a.PlayerTournamentWinPoints;
+            b.PlayerTournamentPlacementIndex = a.PlayerTournamentPlacementIndex;
+        }
+
+        private static int SliceHash(TournamentStateMessage s, int index)
+        {
+            unchecked
+            {
+                int h = 17 + index * 31 + s.BracketEpoch;
+                if (index == 0)
+                    return HeaderHash(s, h);
+                int p = index - 1;
+                if (p < 8)
+                {
+                    if (p < s.PrizeSlots.Count)
+                    {
+                        var x = s.PrizeSlots[p];
+                        for (int i = 0; i < x.Prizes.Count; i++)
+                        {
+                            var e = x.Prizes[i];
+                            h = h * 31 + (e.HasCard ? 1 : 0);
+                            h = h * 31 + (int)e.ItemType;
+                            h = h * 31 + e.Count;
+                        }
+                    }
+                    return h;
+                }
+                int start = (p - 8) * BracketBatchSize;
+                for (int i = start; i < start + BracketBatchSize && i < s.Bracket.Count; i++)
+                {
+                    var e = s.Bracket[i];
+                    h = h * 31 + e.SortedIndex;
+                    h = h * 31 + e.ModelIndex;
+                    h = h * 31 + e.Flags;
+                    h = h * 31 + e.WinCount;
+                    h = h * 31 + e.WinPoints;
+                    h = h * 31 + e.OMW;
+                    h = h * 31 + e.OOMW;
+                }
+                return h;
+            }
+        }
+
+        private static int HeaderHash(TournamentStateMessage s, int h)
+        {
+            unchecked
+            {
+                h = h * 31 + s.Flags;
+                h = h * 31 + s.MaxPlayerCount;
+                h = h * 31 + s.SignedUpCustomerCount;
+                h = h * 31 + s.CurrentRound;
+                h = h * 31 + s.MaxRound;
+                h = h * 31 + (int)(s.Fee * 100);
+                h = h * 31 + (int)(s.TotalValue * 100);
+                h = h * 31 + (s.IsPlayerRegistered ? 1 : 0);
+                h = h * 31 + (s.PlayerIsTournamentCustomer ? 1 : 0);
+                h = h * 31 + (s.PlayerIsTournamentWin ? 1 : 0);
+                h = h * 31 + (s.PlayerHasRegisteredResult ? 1 : 0);
+                h = h * 31 + s.PlayerTournamentCustomerPlayTableIndex;
+                h = h * 31 + s.PlayerTournamentWinCount;
+                h = h * 31 + s.PlayerTournamentWinPoints;
+                h = h * 31 + s.PlayerTournamentPlacementIndex;
+                return h;
+            }
         }
 
         private static void Try(Harmony h, Type type, string method,
@@ -139,20 +389,55 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame)
+        }
+
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
                 return;
-            if (!_gate.Due(dt))
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
                 return;
-            Guarded("host", () =>
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
             {
                 var td = CPlayerData.m_TournamentData;
                 if (td == null)
                     return;
-                int hash = ComputeHash(td);
-                if (!_gate.ShouldSend(hash))
+                int total = SliceCount(td);
+                if (total == 0)
+                {
+                    _sweepCursor = 0;
                     return;
-                BroadcastState?.Invoke(BuildState(td));
+                }
+                if (_sweepCursor >= total)
+                    _sweepCursor = 0;
+                var state = BuildState(td);
+                int index = _sweepCursor++ % total;
+                // The sweep is deliberately unconditional: its job is to repair a lost
+                // message even when the host-side value has not changed since the last pass.
+                SendSliceUnconditionally(state, index);
             });
+        }
+
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null || !CoopCore.InSessionWorld)
+                return;
+            Guarded("full", () =>
+            {
+                var message = BuildState(CPlayerData.m_TournamentData);
+                message.Full = true;
+                message.Index = -1;
+                SendToClient(connId, message);
+            });
+        }
+
+        private static int SliceCount(TournamentData td)
+        {
+            var cm = Cm();
+            int bracket = cm == null || cm.m_TournamentSortedCustomerList == null ? 0 : Mathf.Min(64, cm.m_TournamentSortedCustomerList.Count);
+            return 9 + (bracket + BracketBatchSize - 1) / BracketBatchSize;
         }
 
         // No HostApplyOp / SendOp: the joiner never sends tournament ops - scheduling
@@ -172,12 +457,28 @@ namespace CardShopCoop.Sync
 
         private void ClientApplyInner(TournamentStateMessage message)
         {
+            if (message.BracketEpoch < _clientBracketEpoch)
+            {
+                CoopPlugin.Log.LogWarning("TournamentSync: ignored stale tournament state epoch "
+                    + message.BracketEpoch + " (current " + _clientBracketEpoch + ")");
+                return;
+            } // a delayed slice from the previous bracket must not roll state back
+            if (message.Full && message.BracketEpoch != _clientBracketEpoch)
+            {
+                _clientBracket.Clear();
+                _clientBracketEpoch = message.BracketEpoch;
+            }
             var td = CPlayerData.m_TournamentData;
             if (td == null)
             {
                 CPlayerData.m_TournamentData = td = new TournamentData();
             }
 
+            if (!message.Full)
+            {
+                ApplySlice(message, td);
+                return;
+            }
             byte flags = message.Flags;
             td.m_IsHostingTournament = (flags & 1) != 0;
             bool wasDay = td.m_IsTournamentDay;
@@ -237,6 +538,8 @@ namespace CardShopCoop.Sync
             }
 
             // bracket digest
+            _clientBracket.Clear();
+            _clientBracketEpoch = message.BracketEpoch;
             int n = message.Bracket.Count;
             var digest = new List<PairingEntry>(n);
             for (int i = 0; i < n; i++)
@@ -256,25 +559,101 @@ namespace CardShopCoop.Sync
                 digest.Add(e);
             }
 
-            // the heal broadcast repeats unchanged state every 15s; skip the UI churn
-            // (ShowPairingScreen resets every panel) when nothing actually moved
-            int hash = ComputeHash(td);
-            for (int i = 0; i < digest.Count; i++)
-            {
-                var e = digest[i];
-                hash = hash * 31 + e.SortedIndex;
-                hash = hash * 31 + e.ModelIndex;
-                hash = hash * 31 + ((e.IsFemale ? 1 : 0) | (e.IsWin ? 2 : 0) | (e.HasResult ? 4 : 0));
-                hash = hash * 31 + e.WinCount;
-                hash = hash * 31 + e.WinPoints;
-                hash = hash * 31 + e.OMW;
-                hash = hash * 31 + e.OOMW;
-            }
-            if (hash == _clientHash)
-                return;
-            _clientHash = hash;
-
             RefreshBoards(td, digest, wasDay != td.m_IsTournamentDay || wasOver != td.m_IsTournamentDayOver);
+        }
+
+        private void ApplySlice(TournamentStateMessage message, TournamentData td)
+        {
+            int prizeCount = 8;
+            if (message.Index <= prizeCount)
+            {
+                if (message.Index == 0)
+                {
+                    bool wasDay = td.m_IsTournamentDay;
+                    bool wasOver = td.m_IsTournamentDayOver;
+                    ApplyHeader(message, td);
+                    RefreshBoards(td, _clientBracket,
+                        wasDay != td.m_IsTournamentDay || wasOver != td.m_IsTournamentDayOver);
+                    return;
+                }
+                int slotIndex = message.Index - 1;
+                if (td.m_PrizeDataList == null)
+                    td.m_PrizeDataList = new List<TournamentPrizeDataList>();
+                while (td.m_PrizeDataList.Count <= slotIndex)
+                    td.m_PrizeDataList.Add(new TournamentPrizeDataList { m_PrizeDataList = new List<TournamentPrizeData>() });
+                var list = td.m_PrizeDataList[slotIndex].m_PrizeDataList;
+                list.Clear();
+                var source = message.PrizeSlots.Count == 0 ? null : message.PrizeSlots[0];
+                if (source != null)
+                    for (int i = 0; i < source.Prizes.Count; i++)
+                    {
+                        var p = source.Prizes[i];
+                        list.Add(new TournamentPrizeData { m_CardData = p.HasCard ? p.Card : null, m_ItemType = p.ItemType, m_Count = p.Count });
+                    }
+                return;
+            }
+            if (_clientBracketEpoch != message.BracketEpoch)
+            {
+                _clientBracket.Clear();
+                _clientBracketEpoch = message.BracketEpoch;
+            }
+            int batch = message.Index - 9;
+            if (batch < 0 || batch >= _lastBracketHash.Length)
+            {
+                CoopPlugin.Log.LogWarning("TournamentSync: bracket slice is outside the 64-entry bracket cap: "
+                    + message.Index);
+                return;
+            }
+            for (int i = 0; i < message.Bracket.Count; i++)
+            {
+                var b = message.Bracket[i];
+                int found = _clientBracket.FindIndex(x => x.SortedIndex == b.SortedIndex);
+                var e = ToPairingEntry(b);
+                if (found >= 0)
+                    _clientBracket[found] = e;
+                else
+                    _clientBracket.Add(e);
+            }
+            RefreshBoards(td, _clientBracket, false);
+        }
+
+        private static void ApplyHeader(TournamentStateMessage message, TournamentData td)
+        {
+            td.m_IsHostingTournament = (message.Flags & 1) != 0;
+            td.m_IsTournamentDay = (message.Flags & 2) != 0;
+            td.m_IsTournamentDayOver = (message.Flags & 4) != 0;
+            td.m_TournamentMaxPlayerCount = message.MaxPlayerCount;
+            td.m_TournamentSignedUpCustomerCount = message.SignedUpCustomerCount;
+            td.m_TournamentFinishedCurrentRoundCustomerCount = message.FinishedCurrentRoundCustomerCount;
+            td.m_TournamentCurrentRound = message.CurrentRound;
+            td.m_TournamentMaxRound = message.MaxRound;
+            td.m_TournamentFee = message.Fee;
+            td.m_TournamentTotalValue = message.TotalValue;
+            CPlayerData.m_IsPlayerRegisteredForTournament = message.IsPlayerRegistered;
+            var pd = CPlayerData.m_PlayerTournamentData ?? (CPlayerData.m_PlayerTournamentData = new CustomerTournamentData());
+            pd.m_IsTournamentCustomer = message.PlayerIsTournamentCustomer;
+            pd.m_IsTournamentWin = message.PlayerIsTournamentWin;
+            pd.m_HasRegisteredTournamentResult = message.PlayerHasRegisteredResult;
+            pd.m_TournamentCustomerPlayTableIndex = message.PlayerTournamentCustomerPlayTableIndex;
+            pd.m_TournamentWinCount = message.PlayerTournamentWinCount;
+            pd.m_TournamentWinPoints = message.PlayerTournamentWinPoints;
+            pd.m_TournamentPlacementIndex = message.PlayerTournamentPlacementIndex;
+        }
+
+        private static PairingEntry ToPairingEntry(TournamentBracketEntry b)
+        {
+            return new PairingEntry
+            {
+                SortedIndex = b.SortedIndex,
+                ModelIndex = b.ModelIndex,
+                IsFemale = (b.Flags & 1) != 0,
+                IsWin = (b.Flags & 2) != 0,
+                HasResult = (b.Flags & 4) != 0,
+                WinCount = b.WinCount,
+                WinPoints = b.WinPoints,
+                OMW = b.OMW,
+                OOMW = b.OOMW
+            };
         }
 
         /// <summary>Client: the pairing board and shelf screen mesh are normally driven
@@ -352,10 +731,11 @@ namespace CardShopCoop.Sync
 
         // ---------------- wire / hash ----------------
 
-        private static TournamentStateMessage BuildState(TournamentData td)
+        private TournamentStateMessage BuildState(TournamentData td)
         {
             var msg = new TournamentStateMessage
             {
+                BracketEpoch = _bracketEpoch,
                 Flags = (byte)((td.m_IsHostingTournament ? 1 : 0)
                              | (td.m_IsTournamentDay ? 2 : 0)
                              | (td.m_IsTournamentDayOver ? 4 : 0)),
@@ -416,7 +796,23 @@ namespace CardShopCoop.Sync
                 var ctd = c != null ? c.GetCustomerTournamentData() : null;
                 if (ctd == null)
                 {
-                    msg.Bracket.Add(new TournamentBracketEntry());
+                    var player = CPlayerData.m_PlayerTournamentData;
+                    if (player != null && player.m_IsTournamentCustomer
+                        && player.m_TournamentCustomerSortedIndex == i)
+                    {
+                        msg.Bracket.Add(new TournamentBracketEntry
+                        {
+                            SortedIndex = (byte)Mathf.Clamp(player.m_TournamentCustomerSortedIndex, 0, 255),
+                            ModelIndex = player.m_CharacterModelIndex,
+                            Flags = (byte)((player.m_IsFemale ? 1 : 0)
+                                | (player.m_IsTournamentWin ? 2 : 0)
+                                | (player.m_HasRegisteredTournamentResult ? 4 : 0)),
+                            WinCount = player.m_TournamentWinCount,
+                            WinPoints = player.m_TournamentWinPoints,
+                            OMW = player.m_TournamentOMW,
+                            OOMW = player.m_TournamentOOMW,
+                        });
+                    }
                     continue;
                 }
                 msg.Bracket.Add(new TournamentBracketEntry
@@ -435,83 +831,8 @@ namespace CardShopCoop.Sync
             return msg;
         }
 
-        /// <summary>Change detector over everything BuildState sends. The host also folds
-        /// in the live bracket; the client re-derives the same shape from the payload.</summary>
-        private static int ComputeHash(TournamentData td)
-        {
-            int hash = 17;
-            hash = hash * 31 + ((td.m_IsHostingTournament ? 1 : 0)
-                              | (td.m_IsTournamentDay ? 2 : 0)
-                              | (td.m_IsTournamentDayOver ? 4 : 0));
-            hash = hash * 31 + td.m_TournamentMaxPlayerCount;
-            hash = hash * 31 + td.m_TournamentSignedUpCustomerCount;
-            hash = hash * 31 + td.m_TournamentFinishedCurrentRoundCustomerCount;
-            hash = hash * 31 + td.m_TournamentCurrentRound;
-            hash = hash * 31 + td.m_TournamentMaxRound;
-            hash = hash * 31 + (int)(td.m_TournamentFee * 100f);
-            hash = hash * 31 + (int)(td.m_TournamentTotalValue * 100f);
-            var pd = CPlayerData.m_PlayerTournamentData;
-            hash = hash * 31 + (CPlayerData.m_IsPlayerRegisteredForTournament ? 1 : 0);
-            if (pd != null)
-            {
-                hash = hash * 31 + (pd.m_IsTournamentCustomer ? 1 : 0);
-                hash = hash * 31 + (pd.m_IsTournamentWin ? 1 : 0);
-                hash = hash * 31 + (pd.m_HasRegisteredTournamentResult ? 1 : 0);
-                hash = hash * 31 + pd.m_TournamentCustomerPlayTableIndex;
-                hash = hash * 31 + pd.m_TournamentWinCount;
-                hash = hash * 31 + pd.m_TournamentWinPoints;
-                hash = hash * 31 + pd.m_TournamentPlacementIndex;
-            }
-            var lists = td.m_PrizeDataList;
-            if (lists != null)
-            {
-                for (int i = 0; i < lists.Count; i++)
-                {
-                    var inner = lists[i] != null ? lists[i].m_PrizeDataList : null;
-                    if (inner == null)
-                        continue;
-                    for (int j = 0; j < inner.Count; j++)
-                    {
-                        var p = inner[j];
-                        if (p == null)
-                            continue;
-                        hash = hash * 31 + (int)p.m_ItemType;
-                        hash = hash * 31 + p.m_Count;
-                        if (p.m_CardData != null)
-                        {
-                            hash = hash * 31 + (int)p.m_CardData.expansionType;
-                            hash = hash * 31 + (int)p.m_CardData.monsterType;
-                            hash = hash * 31 + (int)p.m_CardData.borderType;
-                            hash = hash * 31 + ((p.m_CardData.isFoil ? 1 : 0) | (p.m_CardData.isDestiny ? 2 : 0));
-                        }
-                    }
-                }
-            }
-            // host side only: fold the live bracket so round results retrigger a send
-            if (CoopCore.Role == CoopRole.Host)
-            {
-                var cm = Cm();
-                var sorted = cm != null ? cm.m_TournamentSortedCustomerList : null;
-                if (sorted != null)
-                {
-                    for (int i = 0; i < sorted.Count; i++)
-                    {
-                        var ctd = sorted[i] != null ? sorted[i].GetCustomerTournamentData() : null;
-                        if (ctd == null)
-                            continue;
-                        hash = hash * 31 + ctd.m_TournamentCustomerSortedIndex;
-                        hash = hash * 31 + (sorted[i] != null ? sorted[i].GetCustomerModelIndex() : 0);
-                        hash = hash * 31 + (((sorted[i] != null && sorted[i].m_IsFemale) ? 1 : 0)
-                                          | (ctd.m_IsTournamentWin ? 2 : 0)
-                                          | (ctd.m_HasRegisteredTournamentResult ? 4 : 0));
-                        hash = hash * 31 + ctd.m_TournamentWinCount;
-                        hash = hash * 31 + ctd.m_TournamentWinPoints;
-                        hash = hash * 31 + ctd.m_TournamentOMW;
-                        hash = hash * 31 + ctd.m_TournamentOOMW;
-                    }
-                }
-            }
-            return hash;
-        }
     }
 }
+
+
+

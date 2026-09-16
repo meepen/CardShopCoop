@@ -573,14 +573,22 @@ namespace CardShopCoop
             {
                 CoopPlugin.Log.LogWarning("WorldSync requested authoritative shelf resync");
                 if (Role == CoopRole.Host)
-                    Broadcast(new ShelfDeltaMessage { Entries = _world.BuildFullState() });
+                    Broadcast(new ShelfDeltaMessage { Full = true, Index = -1, Entries = _world.BuildFullState() });
                 else if (Role == CoopRole.Client)
                     Send(1, new JoinResyncRequestMessage());
             };
+            _cardShelves.BroadcastState = message => Broadcast(message);
+            _cardShelves.SendToClient = (connId, message) => Send(connId, message);
             _cardShelves.OnLocalChanges = changes =>
             {
                 if (Role == CoopRole.Host)
-                    Broadcast(new CardShelfDeltaMessage { Entries = changes });
+                    Broadcast(new CardShelfDeltaMessage
+                    {
+                        Full = false,
+                        Index = -1,
+                        Echo = false,
+                        Entries = changes,
+                    });
                 else if (Role == CoopRole.Client)
                     Send(1, new CardShelfRequestMessage { Entries = changes });
             };
@@ -667,9 +675,12 @@ namespace CardShopCoop
 
             _grading.SendOp = Send(1);
             _grading.BroadcastState = Broadcast;
+            _grading.SendToClient = Send;
             _trades.SendOp = Send(1);
             _trades.BroadcastState = Broadcast;
+            _trades.SendToClient = Send;
             _tables.BroadcastState = Broadcast;
+            _tables.SendToClient = Send;
             _tables.RegisterIntents(_intents);
             _intents.SendOp = Send(1);
             _register.SendOp = Send(1);
@@ -683,8 +694,10 @@ namespace CardShopCoop
             _staff.BroadcastInteraction = Broadcast;
             _shopState.SendOp = Send(1);
             _shopState.BroadcastState = Broadcast;
+            _shopState.SendToClient = Send;
             _settings.SendOp = Send(1);
             _settings.BroadcastState = Broadcast;
+            _settings.SendToClient = Send;
             _market.BroadcastState = Broadcast;
             _market.RequestResync = () =>
             {
@@ -694,6 +707,7 @@ namespace CardShopCoop
                     _market.ForceResend();
             };
             _report.BroadcastState = Broadcast;
+            _report.SendToClient = Send;
             _containers.SendOp = Send(1);
             _containers.BroadcastState = Broadcast;
             _warehouse.BroadcastState = Broadcast;
@@ -704,9 +718,18 @@ namespace CardShopCoop
             _containers.SendToClient = Send;
             _containers.HoldClientBox = TryHoldClientBox;
             _tournament.BroadcastState = Broadcast;
+            _tournament.SendToClient = Send;
             _tv.SendOp = Send(1);
             _tv.BroadcastState = Broadcast;
+            _tv.SendToClient = Send;
             _tv.PeerCount = () => _net == null ? 0 : _net.ConnectionCount;
+            _world.BroadcastState = Broadcast;
+            _world.SendToClient = Send;
+            _objMoves.SendToClient = Send;
+            _population.SendToClient = Send;
+            // PopulationSync drives its own sweep from the population stage of the frame (before
+            // _actWorld) so a partial roster slice can never overtake index-keyed content state.
+            _population.OnHostSlice = message => Broadcast(message);
 
             FurnitureBoxOps.SendOp = Send(1);
             FurnitureBoxOps.IsLocallyCarried = box =>
@@ -1215,6 +1238,12 @@ namespace CardShopCoop
             var gm = SceneRef<CGameManager>.Get();
             return gm != null && gm.m_IsGameLevel;
         }
+
+        /// <summary>True while a live co-op session is running and the local player is inside the
+        /// shop world. Static so game-side event hooks (Harmony postfixes) can ask whether a
+        /// vanilla change is worth broadcasting before they touch the network - nothing is sent
+        /// during boot, a world load, or teardown.</summary>
+        public static bool InSessionWorld => Instance != null && Instance._sessionInGame;
 
         public PlayerModelEntry GetLocalPlayerModel()
         {
@@ -1991,6 +2020,10 @@ namespace CardShopCoop
                 // waiting for its normal heal interval.
                 _boxEngine?.ForceNextTick();
                 _register.ForceResend();
+                // The warehouse mirror is index/identity-keyed too (ResolveCompartment falls back
+                // to (GetWarehouseIndex, GetIndex)), so a re-spawned rack would leave a pending
+                // apply retrying against a stale address.
+                _warehouse.OnClientRosterChanged();
             };
             Util.GradingInterop.Reset();
             NpcSync.ActivateLive(_npcs);
@@ -2033,15 +2066,15 @@ namespace CardShopCoop
 
         /// <summary>Host: give one freshly-joined connection whatever per-conn catch-up its
         /// modules need, after the broadcast baselines were armed.</summary>
-        private void ModulesOnFullyJoin(int connId)
+        private void ModulesFullUpdate(int connId)
         {
             if (_moduleRegistry != null)
             {
-                _moduleRegistry.OnFullyJoin(connId);
+                _moduleRegistry.FullUpdate(connId);
                 return;
             }
             for (int i = 0; i < _allModules.Length; i++)
-                _allModules[i].OnFullyJoin(connId);
+                _allModules[i].FullUpdate(connId);
         }
 
         internal void SendTvOp(TvOpMessage message)
@@ -2355,13 +2388,14 @@ namespace CardShopCoop
         private static readonly FieldInfo FiHoldItemList = HarmonyLib.AccessTools.Field(typeof(InteractionPlayerController), "m_HoldItemList");
         private static readonly FieldInfo FiIsHoldBoxMode = HarmonyLib.AccessTools.Field(typeof(InteractionPlayerController), "m_IsHoldBoxMode");
 
-        /// <summary>A box the local player is actively holding is about to be destroyed by a
-        /// reconcile. The game's InteractablePackagingBox.OnDestroyed does NOT exit hold-box
-        /// mode (only Throw/Place/Store/Discard do), so m_IsHoldBoxMode + the HoldingBoxState
-        /// would stay set forever pointing at a fake-null box - and Update() then ONLY
-        /// dispatches RaycastHoldBoxState, so the player can't interact with anything, not even
-        /// the trash (the guest soft-lock report). Call the game's own public exit first so the
-        /// state clears cleanly. No-op unless the box really is one the player holds.</summary>
+        /// <summary>A box the local player is actively holding is being RETIRED (destroyed by a
+        /// reconcile) or PARKED (the warehouse mirror hid a box the authority banked). The game's
+        /// InteractablePackagingBox.OnDestroyed does NOT exit hold-box mode (only
+        /// Throw/Place/Store/Discard do), so m_IsHoldBoxMode + the HoldingBoxState would stay set
+        /// forever pointing at a fake-null box - and Update() then ONLY dispatches
+        /// RaycastHoldBoxState, so the player can't interact with anything, not even the trash
+        /// (the guest soft-lock report). Call the game's own public exit first so the state clears
+        /// cleanly. No-op unless the box really is one the player holds.</summary>
         public static void ForceExitHoldBox(UnityEngine.Object heldBox)
         {
             var self = Instance;
@@ -2376,7 +2410,13 @@ namespace CardShopCoop
                 if (!ReferenceEquals(a, heldBox) && !ReferenceEquals(b, heldBox) && !ReferenceEquals(c, heldBox))
                     return;
                 ipc.OnExitHoldBoxMode();
-                CoopPlugin.Log.LogInfo("ForceExitHoldBox: released hold-box mode for a box being retired by reconcile");
+                // The game's exit clears the CONTROLLER's refs but NOT the box's own m_IsBeingHold,
+                // which is what IsHeldByAnyone/TryReadLocal report. Without clearing it a
+                // force-exited box still reads Held - so it can never be picked up again
+                // (StartHoldBox early-returns while it is set) and the wire keeps claiming Held.
+                if (heldBox is InteractableObject io)
+                    BoxFields.BeingHold?.SetValue(io, false);
+                CoopPlugin.Log.LogInfo("ForceExitHoldBox: released hold-box mode for a box being retired or parked on the client");
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ForceExitHoldBox: " + e.Message); }
         }
@@ -3980,15 +4020,15 @@ namespace CardShopCoop
                 {
                     var t = _dispatchBuf[i].Type;
                     // Only full-replacement state may be coalesced: PlayerState is the latest
-                    // pose, RegisterState/RegisterCart and PopState are complete rosters, so the
-                    // newest frame fully supersedes older ones. BoxSnapshot is deliberately NOT
-                    // here: a Full carries every box while a Partial carries only changes, and
-                    // the box engine has no periodic full scan. Dropping a Full strands every
-                    // unchanged box; dropping an intermediate Partial strands that box's change
-                    // (the host's hash already advanced, so it is never re-sent). Apply the whole
-                    // reliable sequence in order instead.
-                    if (t != MsgType.PlayerState && t != MsgType.RegisterState
-                        && t != MsgType.RegisterCart && t != MsgType.PopState)
+                    // pose. RegisterState/RegisterCart and PopState are deliberately NOT here any
+                    // more: they used to be complete rosters, but they are now per-counter /
+                    // per-kind SLICES (AGENTS.md "no periodic full resends"), so a newer frame
+                    // supersedes only its own slice and dropping an older one strands that counter
+                    // or kind until the host's sweep comes round again - or, for a cart teardown,
+                    // corrupted a carrier's bag. BoxSnapshot is likewise excluded: a Full carries
+                    // every box while a Partial carries only changes, and the box engine has no
+                    // periodic full scan. Apply the whole reliable sequence in order instead.
+                    if (t != MsgType.PlayerState)
                         continue;
                     long key = ((long)t << 32) | (uint)_dispatchBuf[i].ConnId;
                     if (!_dispatchSeen.Add(key))
@@ -4309,9 +4349,11 @@ namespace CardShopCoop
         {
             for (int i = 0; i < _dispatchBuf.Count; i++)
             {
+                // PlayerState is the only true "newest supersedes all" snapshot left.
+                // RegisterState/RegisterCart/PopState are per-counter/per-kind slices now, so
+                // discarding an older one strands that slice.
                 var type = _dispatchBuf[i].Type;
-                if (type == MsgType.PlayerState || type == MsgType.RegisterState
-                    || type == MsgType.RegisterCart || type == MsgType.PopState)
+                if (type == MsgType.PlayerState)
                     return i;
             }
             return -1;
@@ -4478,86 +4520,11 @@ namespace CardShopCoop
                 catch (Exception e) { CoopPlugin.Log.LogWarning("light sync: " + e.Message); }
             }
 
-            // slow full-truth repaint of card display slots: heals any client whose local
-            // display diverged (population repairs, culled reads, missed deltas) without
-            // waiting for the host to touch a slot again
-            _cardResyncTimer += dt;
-            if (_cardResyncTimer >= 12f && InGameLevel())
-            {
-                _cardResyncTimer -= 12f;
-                try
-                {
-                    var full = _cardShelves.BuildFullState();
-                    if (full.Count > 0)
-                    {
-                        // change-gate the full repaint like every other heal (PriceList,
-                        // Population, Box): a big card wall was emitting a multi-KB reliable
-                        // packet every 12s even when nothing moved. Hash full card identity;
-                        // resend only on change, plus a 30s forced heal for a dropped delta.
-                        int h = 17;
-                        foreach (var e in full)
-                        {
-                            h = h * 31 + e.Key;
-                            h = h * 31 + (e.Occupied ? 1 : 0);
-                            var c = e.Card;
-                            if (e.Occupied && c != null)
-                            {
-                                h = h * 31 + (int)c.monsterType;
-                                h = h * 31 + (int)c.expansionType;
-                                h = h * 31 + (int)c.borderType;
-                                h = h * 31 + c.cardGrade;
-                                h = h * 31 + c.gradedCardIndex;
-                                h = h * 31 + (c.isFoil ? 1 : 0);
-                                h = h * 31 + (c.isDestiny ? 1 : 0);
-                                h = h * 31 + (c.isChampionCard ? 1 : 0);
-                            }
-                        }
-                        _cardResyncHeal += 12f;
-                        if (h != _lastCardResyncHash || _cardResyncHeal >= 30f)
-                        {
-                            _lastCardResyncHash = h;
-                            _cardResyncHeal = 0f;
-                            Broadcast(new CardShelfDeltaMessage { Entries = full });
-                        }
-                    }
-                }
-                catch (Exception e) { CoopPlugin.Log.LogWarning("card resync: " + e.Message); }
-
-                // ITEM-STOCK full-truth heal on the same 12s beat: item stock previously had
-                // NO periodic resync (only host local diffs), so a client that silently
-                // adopted a slightly-wrong baseline at join (WorldSync's first-sighting
-                // adoption - the mid-day-join wipe fix) stayed wrong until the host touched
-                // that compartment. A full-state broadcast IS just a ShelfDelta carrying
-                // every compartment (the client handler routes it through ApplyRemote), so
-                // no new wire type. Change-gated on the payload bytes + a 36s forced heal.
-                try
-                {
-                    var full = _world.BuildFullState();
-                    if (full != null && full.Count > 0)
-                    {
-                        var fullMessage = new ShelfDeltaMessage { Entries = full };
-                        // Hash the actual state fields. Serializing the complete shelf payload
-                        // merely to decide whether it changed created a large allocation every
-                        // 12 seconds in otherwise idle shops.
-                        int h = 17;
-                        for (int i = 0; i < full.Count; i++)
-                        {
-                            var e = full[i];
-                            h = h * 31 + e.Key;
-                            h = h * 31 + e.Type;
-                            h = h * 31 + e.Count;
-                        }
-                        _stockResyncHeal += 12f;
-                        if (h != _lastStockResyncHash || _stockResyncHeal >= 36f)
-                        {
-                            _lastStockResyncHash = h;
-                            _stockResyncHeal = 0f;
-                            Broadcast(fullMessage);
-                        }
-                    }
-                }
-                catch (Exception e) { CoopPlugin.Log.LogWarning("stock resync: " + e.Message); }
-            }
+            // Card display slots and item stock are no longer repainted on a timer here.
+            // CardShelfSync and WorldSync each re-assert every compartment through their own
+            // unconditional round-robin slice sweep (see AGENTS.md, "Sync scheduling: no periodic
+            // full resends"), which reaches a compartment every pass instead of every 12 s with a
+            // 30 s / 36 s forced heal.
 
             // card PRICE heal: card prices sync only via a single MsgType.CardPriceSet
             // broadcast with no re-send, so one dropped frame stranded a displayed card's

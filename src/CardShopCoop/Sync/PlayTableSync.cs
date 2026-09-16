@@ -31,11 +31,12 @@ namespace CardShopCoop.Sync
     /// </summary>
     public class PlayTableSync : TickableCoopModule
     {
-        private const float Cadence = 1.5f;
-        private const float HealInterval = 12f;
+        // A partial is one table, identified by TableEntry.Index. The sweep spreads a pass over
+        // ten seconds; normal shops have roughly 8-20 tables, so this is 2 messages per second.
+        private const float SweepSliceSeconds = 0.5f;
+        private const float SweepCycleSeconds = 10f;
         private const int MaxTables = 250;         // wire: table count is a byte
         private const int MaxSeats = 8;            // vanilla tables have 2; hard cap
-        private const int MaxTableBytes = 250;     // per-table budget (fixed format stays ~28B)
         private const byte IntentKindPlayTable = 1;
         private const byte IntentKickTable = 1;
 
@@ -54,12 +55,13 @@ namespace CardShopCoop.Sync
 
         /// <summary>Set by CoopCore: host -> clients state broadcast (MsgType.TableState).</summary>
         public Action<INetMessage> BroadcastState;
+        public Action<int, INetMessage> SendToClient;
         public static PlayTableSync Active;
         private static PlayerIntentBus _intents;
 
-        private readonly SnapshotGate _gate = new SnapshotGate(1.5f, 12f, -7.6f);
-        private bool _loggedDrop;   // budget overflow warned once, not every tick
         private ShelfManager _sm;
+        private float _sweepTimer;
+        private int _sweepCursor;
 
         // client: last state applied per (tableIdx<<8 | seat), so a heal broadcast
         // does not re-run SpecificSetup (it re-randomizes deckbox/comic positions
@@ -95,6 +97,25 @@ namespace CardShopCoop.Sync
             else
                 h.Patch(original, prefix: new HarmonyMethod(typeof(PlayTableSync), nameof(StartMoveObjectPrefix)));
 
+            // These methods own the authoritative table mutations in both supported builds.
+            // CustomerHasReached places the seat set-pieces; StopTableGame clears them; the
+            // right-click path marks the real player's seat and starts their match.
+            var seated = AccessTools.Method(typeof(InteractablePlayTable), "CustomerHasReached");
+            if (seated == null)
+                CoopPlugin.Log.LogWarning("PlayTableSync patch target missing: InteractablePlayTable.CustomerHasReached");
+            else
+                h.Patch(seated, postfix: new HarmonyMethod(typeof(PlayTableSync), nameof(TableChangedPostfix)));
+            var stopped = AccessTools.Method(typeof(InteractablePlayTable), "StopTableGame");
+            if (stopped == null)
+                CoopPlugin.Log.LogWarning("PlayTableSync patch target missing: InteractablePlayTable.StopTableGame");
+            else
+                h.Patch(stopped, postfix: new HarmonyMethod(typeof(PlayTableSync), nameof(TableChangedPostfix)));
+            var playerSat = AccessTools.Method(typeof(InteractablePlayTable), "OnRightMouseButtonUp");
+            if (playerSat == null)
+                CoopPlugin.Log.LogWarning("PlayTableSync patch target missing: InteractablePlayTable.OnRightMouseButtonUp");
+            else
+                h.Patch(playerSat, postfix: new HarmonyMethod(typeof(PlayTableSync), nameof(TableChangedPostfix)));
+
             // Game 1.0 adds a playable player-vs-player duel started from the table's
             // right-click (OnRightMouseButtonUp -> PlayCardGameManager.SetPlayTable). Its match
             // state is NOT synchronized, so a client starting one locally would diverge from the
@@ -120,19 +141,32 @@ namespace CardShopCoop.Sync
             return false;
         }
 
+        private static void TableChangedPostfix(InteractablePlayTable __instance)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                var self = Active;
+                if (self != null)
+                {
+                    self.Guarded("change", () => self.SendTableNow(__instance));
+                }
+            }
+        }
+
         public override void Reset()
         {
             ClearMirrors();
             _applied.Clear();
             _occupied.Clear();
-            _gate.Reset(-7.6f);
-            _loggedDrop = false;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
             _sm = null;
         }
 
         public override void ForceResend()
         {
-            _gate.Force();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
         }
 
         public override void Dispose()
@@ -154,49 +188,82 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame)
+        }
+
+        /// <summary>Gradually re-assert one table. This is host/session guarded because the
+        /// tick pipeline invokes it for clients and outside a loaded shop too.</summary>
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
                 return;
-            if (!_gate.Due(dt))
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
                 return;
-            Guarded("host", () =>
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
             {
                 var sm = Sm();
-                if (sm == null)
+                var tables = sm != null ? sm.m_PlayTableList : null;
+                if (tables == null)
                     return;
-                var tables = sm.m_PlayTableList;
-                // every table rides every broadcast (per-seat inactive flags clear the
-                // client), so match end / table move heal without a tombstone protocol
-                int hash = 17;
-                int count = Mathf.Min(tables.Count, MaxTables);
-                if (tables.Count > MaxTables && !_loggedDrop)
+                int total = Mathf.Min(tables.Count, MaxTables);
+                if (total <= 0)
                 {
-                    _loggedDrop = true;
-                    CoopPlugin.Log.LogWarning($"PlayTableSync: {tables.Count - MaxTables} play tables beyond the {MaxTables} cap are not mirrored");
+                    _sweepCursor = 0;
+                    return;
                 }
-                for (int i = 0; i < count; i++)
+                if (_sweepCursor >= total)
+                    _sweepCursor = 0;
+                int slicesPerCycle = Mathf.Max(1,
+                    Mathf.RoundToInt(SweepCycleSeconds / SweepSliceSeconds));
+                int perSlice = Mathf.Max(1, (total + slicesPerCycle - 1) / slicesPerCycle);
+                for (int n = 0; n < perSlice; n++)
                 {
-                    var table = tables[i];
-                    hash = hash * 31 + (table == null ? 0 : 1);
-                    if (table == null)
-                        continue;
-                    hash = hash * 31 + (table.GetCurrentPlayerCount() > 0 ? 1 : 0);
-                    var sets = table.m_TableGameItemSetList;
-                    int seats = sets != null ? Mathf.Min(sets.Count, MaxSeats) : 0;
-                    for (int s = 0; s < seats; s++)
-                    {
-                        var st = HostSeat(sets[s]);
-                        hash = hash * 31 + (st.Active ? 1 : 0);
-                        if (!st.Active)
-                            continue;
-                        hash = hash * 31 + st.PlayMat;
-                        hash = hash * 31 + st.DeckBox;
-                        hash = hash * 31 + st.Comic;
-                    }
+                    int index = _sweepCursor;
+                    _sweepCursor = (_sweepCursor + 1) % total;
+                    // Deliberately unconditional: this is the lost-frame repair path. The
+                    // push-on-change hooks remain separate and immediate below.
+                    SendTableNow(index);
                 }
+            });
+        }
 
-                if (!_gate.ShouldSend(hash))
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null)
+                return;
+            Guarded("full", () =>
+            {
+                var sm = Sm();
+                var tables = sm != null ? sm.m_PlayTableList : null;
+                if (tables == null)
                     return;
-                BroadcastState?.Invoke(BuildState(tables, count));
+                int count = Mathf.Min(tables.Count, MaxTables);
+                SendToClient(connId, BuildState(tables, count));
+            });
+        }
+
+        private void SendTableNow(InteractablePlayTable table)
+        {
+            var sm = Sm();
+            int index = sm != null && sm.m_PlayTableList != null
+                ? sm.m_PlayTableList.IndexOf(table) : -1;
+            if (index >= 0 && index < MaxTables)
+                SendTableNow(index);
+        }
+
+        private void SendTableNow(int index)
+        {
+            var sm = Sm();
+            var tables = sm != null ? sm.m_PlayTableList : null;
+            if (tables == null || index < 0 || index >= tables.Count || index >= MaxTables || BroadcastState == null)
+                return;
+            var entry = BuildEntry(tables[index], index);
+            BroadcastState(new TableStateMessage
+            {
+                Full = false,
+                Index = index,
+                Tables = new List<TableEntry> { entry }
             });
         }
 
@@ -229,33 +296,33 @@ namespace CardShopCoop.Sync
         {
             var msg = new TableStateMessage();
             for (int i = 0; i < count; i++)
-            {
-                var table = tables[i];
-                var sets = table != null ? table.m_TableGameItemSetList : null;
-                int seats = sets != null ? Mathf.Min(sets.Count, MaxSeats) : 0;
-                // fixed format: 2 + seats*(1|13) bytes - a vanilla 2-seat table is at
-                // most 28 bytes, far under the MaxTableBytes budget by construction
-                var entry = new TableEntry { Index = (byte)i };
-                entry.Occupied = table != null && table.GetCurrentPlayerCount() > 0;
-                for (int s = 0; s < seats; s++)
-                {
-                    var st = HostSeat(sets[s]);
-                    var seat = new TableSeatEntry { Active = st.Active, PlayerSeat = IsPlayerSeat(table, s) };
-                    if (st.Active)
-                    {
-                        // the three set pieces are EItemTypes, one of the id spaces
-                        // EnhancedPrefabLoader mints custom ids into - so they travel as
-                        // HOST ids like every other modded id (identity below the modded
-                        // floor, and identity here anyway: only the host writes this)
-                        seat.PlayMat = (EItemType)st.PlayMat;
-                        seat.DeckBox = (EItemType)st.DeckBox;
-                        seat.Comic = (EItemType)st.Comic;
-                    }
-                    entry.Seats.Add(seat);
-                }
-                msg.Tables.Add(entry);
-            }
+                msg.Tables.Add(BuildEntry(tables[i], i));
             return msg;
+        }
+
+        private static TableEntry BuildEntry(InteractablePlayTable table, int index)
+        {
+            var sets = table != null ? table.m_TableGameItemSetList : null;
+            int seats = sets != null ? Mathf.Min(sets.Count, MaxSeats) : 0;
+            // Entries are JSON on the wire; their size varies with seat contents.
+            var entry = new TableEntry
+            {
+                Index = (byte)index,
+                Occupied = table != null && table.GetCurrentPlayerCount() > 0
+            };
+            for (int s = 0; s < seats; s++)
+            {
+                var st = HostSeat(sets[s]);
+                var seat = new TableSeatEntry { Active = st.Active, PlayerSeat = IsPlayerSeat(table, s) };
+                if (st.Active)
+                {
+                    seat.PlayMat = (EItemType)st.PlayMat;
+                    seat.DeckBox = (EItemType)st.DeckBox;
+                    seat.Comic = (EItemType)st.Comic;
+                }
+                entry.Seats.Add(seat);
+            }
+            return entry;
         }
 
         // ---------------- client ----------------

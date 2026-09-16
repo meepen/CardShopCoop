@@ -483,6 +483,28 @@ namespace CardShopCoop.Sync
             }
         }
 
+        /// <summary>Host: drop the possession lease for a box so the next snapshot reports the
+        /// authority's own state instead of a guest's Held claim. The live-box warehouse store
+        /// needs this: the banked box stays alive there, so without clearing the lease the
+        /// snapshot keeps saying the guest holds it and the guest never yields - leaving the
+        /// player holding an invisible box while the rack shows it as stored.</summary>
+        public void ReleaseLease(InteractablePackagingBox box)
+        {
+            if (CoopCore.Role != CoopRole.Host || box == null)
+                return;
+            if (!_hostIdentity.TryGetId(box, out ushort id))
+                return;
+            if (_leases.TryGetValue(id, out var lease))
+            {
+                lease.Owner = NoOwner;
+                lease.Possession = BoxPossession.Free;
+                lease.LastSeen = _leaseClock;
+                _leases[id] = lease;
+            }
+            _hostDirty.Add(id);
+            ForceNextTick();
+        }
+
         /// <summary>Client: an open item box's contents live on its child ShelfCompartment, and
         /// vanilla's take/return paths run on the compartment, not the box. Mark the owning
         /// mirror dirty so the content delta is reported this frame (and can be escrowed)
@@ -839,6 +861,31 @@ namespace CardShopCoop.Sync
             {
                 if (BoxShared.ShouldDebugLog())
                     BoxShared.DebugLog("box-rx", $"id={w.Id} fam={w.Family} sender={connId} rejected=invalid-possession");
+                ReplyTransfer(connId, msg, 0);
+                return;
+            }
+            // A racked (stored) box is not held by anyone, so a Held/Placing claim for one is stale
+            // - e.g. the guest's lease renewal that was already in flight when the host banked the
+            // box. Accepting it would re-lease the box to the guest and emit Held+Stored, which keeps
+            // the client holding a box the rack owns. Mirrors HostApplyMotion's stored guard; this is
+            // what makes the warehouse store's lease release stick on the live backend.
+            var fam = Family(FamilyOf(knownBox));
+            if ((w.Possession == BoxPossession.Held || w.Possession == BoxPossession.Placing)
+                && fam != null
+                && fam.TryReadLocal(knownBox, out _, out _, out _, out _, out _, out var claimStored)
+                && claimStored)
+            {
+                if (BoxShared.ShouldDebugLog())
+                    BoxShared.DebugLog("box-rx", $"id={w.Id} sender={connId} rejected=stored");
+                // Re-assert the authority's own state. ProcessHostBox only emits when the hash
+                // changes, so dropping the claim silently would leave a client that missed the
+                // Free+Stored echo renewing into a rejection forever - still in hold-box mode with
+                // the box stuck in hand (the soft-lock class). Marking it dirty re-emits at the next
+                // flush (<= PartialPeriod). Deliberately NO ForceNextTick: that would let a peer
+                // spamming Held claims for a stored box raise the host's flush cadence to one per
+                // frame, and the 0.1 s path is already fast enough for a recovery edge.
+                _hostHashes.Remove(w.Id);
+                _hostDirty.Add(w.Id);
                 ReplyTransfer(connId, msg, 0);
                 return;
             }
@@ -1341,7 +1388,16 @@ namespace CardShopCoop.Sync
                     bool lostToAnotherOwner = localPoss == BoxPossession.Held
                         && (w.Possession == BoxPossession.Held || w.Possession == BoxPossession.Placing)
                         && w.OwnerConn != CoopCore.LocalConnectionId;
-                    if (!lostToAnotherOwner)
+                    // The authority BANKED the box we still think we are holding. Only that shape
+                    // qualifies: `Free` (nobody holds it) AND `Stored`. A `Held + Stored` entry is a
+                    // different thing - someone legitimately carries a box whose host-side copy is
+                    // still racked - and yielding there would yank a normal carry out of the hand.
+                    // On a record backend the banked box is destroyed, so a Removed edge covers this;
+                    // on a live-box backend it stays alive and arrives exactly as Free+Stored.
+                    bool storedWhileHeld = localPoss == BoxPossession.Held
+                        && w.Possession == BoxPossession.Free
+                        && w.Stored;
+                    if (!lostToAnotherOwner && !storedWhileHeld)
                         continue;
                     if (BoxShared.ShouldDebugLog())
                         BoxShared.DebugLog("box-rx",

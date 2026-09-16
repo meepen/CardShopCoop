@@ -4,16 +4,21 @@ namespace CardShopCoop.Net.Messages
 {
     // ------------------------------------------------------------------ warehouse records
 
-    /// <summary>Host -> clients (game 1.0+): the authoritative warehouse stored-box record
-    /// lists. In 1.0 a stored box is no longer a live InteractablePackagingBox_Item - it is a
-    /// serialized StoredBoxRecord owned by a ShelfCompartment - so it is invisible to the box
-    /// engine and needs its own channel. The host currently sends the full list on every change
-    /// (Full=true); partial-by-compartment is reserved for a future refinement.</summary>
+    /// <summary>Host -> clients: the authoritative warehouse stored-box lists, normalised to the
+    /// ordered (itemType, amount, big) form so a record-backed host (game 1.00) and a live-box host
+    /// (the public/legacy build) emit the same message. Sent on every real change, plus as a
+    /// gradual sweep of one batch of compartments per slice; <see cref="Full"/> marks the complete
+    /// state (join catch-up / explicit re-baseline) versus a partial sweep slice.</summary>
     [NetworkMessage(MsgType.WarehouseState, Policy = MessagePolicy.ClientOnlyInGame)]
     public sealed class WarehouseStateMessage : INetMessage
     {
         public bool Full;
         public List<WarehouseCompartmentEntry> Compartments = new List<WarehouseCompartmentEntry>();
+
+        /// <summary>True when the HOST's warehouse is live-box backed (game 1.0). A live guest then
+        /// leaves its racks to the normal box channel; false means the host is record backed and a
+        /// live guest must materialize these entries itself. Appended last: append-only wire.</summary>
+        public bool HostLiveBoxes;
 
         public MsgType Type
         {

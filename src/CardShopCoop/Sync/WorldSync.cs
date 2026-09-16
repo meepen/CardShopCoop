@@ -13,11 +13,8 @@ namespace CardShopCoop.Sync
     /// <summary>
     /// Shelf-stock synchronization by explicit vanilla mutation events. Both sides load identical saves,
     /// so a compartment is identified by (shelfKind, shelfIndex, compartmentIndex) into
-    /// ShelfManager's lists. Every 0.75s the world is snapshotted; whatever changed since
-    /// the last snapshot is reported. On the host those diffs are authoritative broadcasts
-    /// (they capture player actions, customers, workers - every mutation source, with no
-    /// per-interaction patches). On the client, diffs against the last host-applied state
-    /// are the local player's own actions and are sent to the host as requests.
+    /// ShelfManager's lists. Vanilla mutation hooks push affected compartments immediately;
+    /// the host also re-asserts bounded slices round-robin so dropped messages self-heal.
     /// </summary>
     public class WorldSync : CoopModule
     {
@@ -27,7 +24,7 @@ namespace CardShopCoop.Sync
             public int Type;  // EItemType
             public int Count;
             // A client's own take/restock is sent as a delta: the count it was based on and the
-            // sequence the host echoes in a ShelfTransferResult. Snapshots/host deltas leave
+            // sequence the host echoes in a ShelfTransferResult. Sweep/host deltas leave
             // BaseCount 0 and TransferSeq 0 (they are absolutes).
             public int BaseCount;
             public int TransferType; // EItemType actually moved, or -1
@@ -36,18 +33,18 @@ namespace CardShopCoop.Sync
 
         /// <summary>Client role only: when this machine last reported a change of its own for
         /// a compartment. Protects a fresh local edit from being rolled back by a host echo
-        /// (or the 12s full-state heal) that was built BEFORE our request landed - mirrors
+        /// (or a sweep slice) that was built BEFORE our request landed - mirrors
         /// CardShelfSync's guard.</summary>
-        /// <summary>Memoized "can this machine actually build this item type" verdicts. The 12s
-        /// full-state heal can carry every compartment in the shop, so the ItemData lookup must
-        /// not be repeated per entry per heal.</summary>
+        /// <summary>Memoized "can this machine actually build this item type" verdicts. State
+        /// messages can carry every compartment in the shop, so the ItemData lookup must not
+        /// be repeated unnecessarily.</summary>
         private readonly Dictionary<int, bool> _resolvable = new Dictionary<int, bool>();
         /// <summary>Compartments whose last rebuild could NOT hold everything that was asked
         /// for: same item type, fewer slots on this machine (EPL data packs are parity-exempt,
         /// so the same type id can carry a different itemDimension - and therefore a different
         /// m_MaxItemCount - on each PC). The read-back already stops us reporting the shortfall
-        /// back, but the 12s heal's change gate is hashed over the WHOLE shop, so during open
-        /// hours customers keep it moving and the same impossible entry arrives every beat -
+        /// back, but a sweep can carry every compartment in the shop. During open hours customers
+        /// keep it moving and the same impossible entry can arrive every beat -
         /// tearing that compartment down and rebuilding it forever. Remembering the request
         /// that clamped, plus what it clamped TO, lets ApplyRemote skip the identical rebuild
         /// while still reacting the moment either the request or the compartment changes.</summary>
@@ -66,6 +63,8 @@ namespace CardShopCoop.Sync
 
         /// <summary>Fired with locally-originated changes (host: broadcast; client: request).</summary>
         public Action<List<Entry>> OnLocalChanges;
+        public Action<INetMessage> BroadcastState;
+        public Action<int, INetMessage> SendToClient;
         /// <summary>Host: send the outcome of one client shelf transfer back to its sender so the
         /// requester can roll the unaccepted part out of its hand.</summary>
         public Action<ShelfTransferResultMessage, int> SendResult;
@@ -76,6 +75,13 @@ namespace CardShopCoop.Sync
         private bool _resyncRequested;
         private float _lastResyncRequestAt = -999f;
         private const float ResyncCooldownSeconds = 2f;
+        // Index is a slice ordinal in the deterministic BuildFullState ordering. Sixteen slices
+        // spread the safety pass over twelve seconds.
+        private const float SweepSliceSeconds = 0.75f;
+        private const float SweepCycleSeconds = 12f;
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private readonly List<Entry> _sweepEntries = new List<Entry>();
 
         private readonly PendingTransferLedger<int> _transfers = new PendingTransferLedger<int>();
         /// <summary>Local mutations held while an earlier transfer for the same key is
@@ -117,7 +123,10 @@ namespace CardShopCoop.Sync
 
         public override string Name => "world";
 
-        public override void ForceResend() => ForceNextTick();
+        public override void ForceResend()
+        {
+            _sweepTimer = 0f;
+        }
 
         public override void Reset()
         {
@@ -134,6 +143,8 @@ namespace CardShopCoop.Sync
             _boxPulls.Clear();
             _boxPullSequence = 0;
             _sm = null;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
         }
 
         /// <summary>Live structure change (a shelf/object was removed or spawned): every
@@ -149,10 +160,12 @@ namespace CardShopCoop.Sync
             _sm = null;
             _queued.Clear();
             _dirtyTakes.Clear();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
         }
 
-        /// <summary>Request a same-frame scan after a vanilla inventory/shelf mutation.
-        /// The normal timer remains as a recovery heal.</summary>
+        /// <summary>Request a same-frame scan after a vanilla inventory/shelf mutation. Explicit
+        /// mutation hooks perform the immediate push; the periodic sweep is the recovery heal.</summary>
         public void ForceNextTick()
         {
         }
@@ -174,6 +187,54 @@ namespace CardShopCoop.Sync
                 _lastResyncRequestAt = Time.time;
                 RequestResync?.Invoke();
             }
+            PeriodicUpdate(dt);
+        }
+
+        /// <summary>Host-only gradual re-assertion. Index is the slice ordinal in the current
+        /// deterministic full-state ordering. A partial updates only its entries; omitted
+        /// compartments remain unchanged and are never removed.</summary>
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
+                return;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
+                return;
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
+            {
+                int slices = Mathf.Max(1, Mathf.CeilToInt(SweepCycleSeconds / SweepSliceSeconds));
+                var sm = ResolveShelfManager();
+                if (sm == null)
+                {
+                    _sweepCursor = 0;
+                    return;
+                }
+                int total = CountStateCompartments(sm);
+                if (total <= 0)
+                {
+                    _sweepCursor = 0;
+                    return;
+                }
+                int perSlice = Mathf.Max(1, Mathf.CeilToInt((float)total / slices));
+                int slice = _sweepCursor++ % slices;
+                _sweepEntries.Clear();
+                CollectSlice(_sweepEntries, sm, slice * perSlice, (slice + 1) * perSlice);
+                if (_sweepEntries.Count > 0)
+                {
+                    BroadcastState(new ShelfDeltaMessage { Full = false, Index = slice, Entries = _sweepEntries });
+                }
+            });
+        }
+
+        /// <summary>Host: complete state to one connection only. This is join/heal catch-up, never
+        /// a timer-driven broadcast.</summary>
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null || !CoopCore.InSessionWorld)
+                return;
+            Guarded("full", () => SendToClient(connId,
+                new ShelfDeltaMessage { Full = true, Index = -1, Entries = BuildFullState() }));
         }
 
         private bool TryGetKey(ShelfCompartment comp, out int key)
@@ -787,8 +848,8 @@ namespace CardShopCoop.Sync
         /// content pack we don't have sends type ids our ItemData table can't answer for, and
         /// SetCompartmentItemType would then hand CalculatePositionList a zero itemDimension -
         /// a divide that leaves the compartment with no usable slots, so the clear-and-rebuild
-        /// clears and never rebuilds. Verdicts are memoized (the 12s full-state heal can carry
-        /// every compartment in the shop) and the warning is emitted once per type.
+        /// clears and never rebuilds. Verdicts are memoized (a state message can carry every
+        /// compartment in the shop) and the warning is emitted once per type.
         /// </summary>
         private bool CanResolve(int type)
         {
@@ -865,7 +926,7 @@ namespace CardShopCoop.Sync
 
             // same product, fewer items (a customer bought some): remove exactly the
             // difference - the full teardown/respawn for a 1-item sale was constant
-            // visible churn on the client every 0.75s during open hours
+            // visible churn on the client on every observed stock update during open hours
             if (curType == type && count < cur && count > 0)
             {
                 for (int k = cur - count; k > 0; k--)
@@ -932,7 +993,7 @@ namespace CardShopCoop.Sync
 
         // ---- wire format ----
 
-        // ---- full-state heal (FIX D-latent) ----
+        // ---- full-state / sweep source ----
 
         /// <summary>
         /// Host: serialize the COMPLETE item shelf-stock state - every compartment the delta
@@ -942,16 +1003,8 @@ namespace CardShopCoop.Sync
         /// Entry format the delta path uses (WriteEntries), so a full-state payload is
         /// byte-identical in shape to a ShelfDelta and rides the existing message type.
         ///
-        /// WIRING CONTRACT (CoopCore owns this - not this file): the host should broadcast
-        /// BuildFullState on a ~12s CHANGE-GATED cadence over MsgType.ShelfDelta (hash the
-        /// entries, resend only on change, with a longer forced heal for a dropped packet),
-        /// symmetric to the card-display full resync that reuses MsgType.CardShelfDelta on the
-        /// same 12s beat (see CoopCore's _cardResyncTimer block). Item stock previously had NO
-        /// periodic full-truth heal, so a client that adopted a slightly-wrong baseline at join
-        /// (see Visit's silent adoption) stayed wrong until the host happened to mutate that
-        /// compartment again; this closes that gap. The receiving client routes a ShelfDelta
-        /// through ApplyRemote already, so no separate full-state flag byte is required - a
-        /// full-state broadcast IS just a ShelfDelta carrying every compartment.
+        /// FullUpdate uses this source for a per-connection baseline. PeriodicUpdate uses the same
+        /// deterministic ordering but sends bounded partial slices instead of this complete list.
         /// </summary>
         public List<Entry> BuildFullState()
         {
@@ -985,6 +1038,70 @@ namespace CardShopCoop.Sync
             return all;
         }
 
+        private static int CountStateCompartments(ShelfManager sm)
+        {
+            int count = 0;
+            for (int i = 0; i < sm.m_ShelfList.Count; i++)
+                count += CountComps(sm.m_ShelfList[i]?.GetItemCompartmentList());
+            for (int i = 0; i < sm.m_CardItemCombiShelfList.Count; i++)
+                count += CountComps(sm.m_CardItemCombiShelfList[i]?.GetItemCompartmentList());
+            for (int i = 0; i < sm.m_TournamentPrizeShelfList.Count; i++)
+                count += CountComps(sm.m_TournamentPrizeShelfList[i]?.GetItemCompartmentList());
+            return count;
+        }
+
+        private static int CountComps(List<ShelfCompartment> comps)
+        {
+            if (comps == null)
+                return 0;
+            int count = 0;
+            for (int i = 0; i < comps.Count; i++)
+            {
+                if (comps[i] != null)
+                {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        private static void CollectSlice(List<Entry> into, ShelfManager sm, int start, int end)
+        {
+            int ordinal = 0;
+            for (int i = 0; i < sm.m_ShelfList.Count; i++)
+                CollectSliceComps(into, sm.m_ShelfList[i]?.GetItemCompartmentList(), 0,
+                    sm.m_ShelfList[i], ref ordinal, start, end);
+            for (int i = 0; i < sm.m_CardItemCombiShelfList.Count; i++)
+                CollectSliceComps(into, sm.m_CardItemCombiShelfList[i]?.GetItemCompartmentList(), 3,
+                    sm.m_CardItemCombiShelfList[i], ref ordinal, start, end);
+            for (int i = 0; i < sm.m_TournamentPrizeShelfList.Count; i++)
+                CollectSliceComps(into, sm.m_TournamentPrizeShelfList[i]?.GetItemCompartmentList(), 14,
+                    sm.m_TournamentPrizeShelfList[i], ref ordinal, start, end);
+        }
+
+        private static void CollectSliceComps(List<Entry> into, List<ShelfCompartment> comps, int kind,
+            InteractableObject shelf, ref int ordinal, int start, int end)
+        {
+            if (comps == null)
+                return;
+            for (int i = 0; i < comps.Count; i++)
+            {
+                var comp = comps[i];
+                if (comp == null)
+                    continue;
+                if (ordinal >= start && ordinal < end && TryKey(kind, shelf, i, out int key))
+                {
+                    into.Add(new Entry
+                    {
+                        Key = key,
+                        Type = (int)comp.GetItemType(),
+                        Count = comp.GetItemCount(),
+                    });
+                }
+                ordinal++;
+            }
+        }
+
         private static void CollectComps(List<Entry> into, List<ShelfCompartment> comps, int kind,
             InteractableObject shelf)
         {
@@ -1005,19 +1122,5 @@ namespace CardShopCoop.Sync
             }
         }
 
-        /// <summary>
-        /// Client: apply a full-state heal ABSOLUTELY. Each present entry drives its compartment
-        /// to exactly (type, count) through the same ApplyRemote/ApplyCompartment clear-and-rebuild
-        /// the delta path uses, and refreshes _last so the local baseline re-converges on host
-        /// truth. The keyed Entry format can't encode "every other compartment is already fine",
-        /// so - like CardShelfSync's full resync - this is a PARTIAL heal: compartments ABSENT from
-        /// the payload keep whatever they have. In practice the host emits every live compartment,
-        /// so an absent key only means an index the host doesn't have either. Reuses ReadEntries,
-        /// so it decodes an identical wire shape to a ShelfDelta.
-        /// </summary>
-        public void ApplyFullState(List<Entry> entries)
-        {
-            ApplyRemote(entries);
-        }
     }
 }

@@ -10,16 +10,22 @@ using UnityEngine;
 namespace CardShopCoop.Sync
 {
     /// <summary>
-    /// Game 1.0 replaced warehouse-stored boxes with serialized <c>StoredBoxRecord</c>s owned by
-    /// a <see cref="ShelfCompartment"/> and DESTROYS the live <c>InteractablePackagingBox_Item</c>.
-    /// A stored box is therefore no longer enumerable by the box engine, so it needs its own
-    /// authoritative channel: the host owns the record lists and clients mirror them. Client
-    /// store/take are forwarded as <see cref="WarehouseOpMessage"/> requests; the host validates
-    /// and runs vanilla, then the authoritative warehouse/box state is the echo.
+    /// Host-authoritative warehouse storage, with ONE channel and TWO backends so the same DLL
+    /// works on either game build:
     ///
-    /// Everything 1.0-specific is resolved by reflection, so a build without the record API
-    /// (0.70.3 / any stripped build) simply leaves the module inert and the old live stored-box
-    /// path in <see cref="BoxEngine"/> keeps working.
+    /// * record backend (game 1.00): a stored box is a serialized <c>StoredBoxRecord</c> owned by a
+    ///   <see cref="ShelfCompartment"/> and the live <c>InteractablePackagingBox_Item</c> is
+    ///   destroyed, so it is invisible to the box engine and needs this channel. Every
+    ///   record-specific symbol is reflection-only.
+    /// * live backend (legacy 1.0): a stored box is a real <c>InteractablePackagingBox_Item</c> the
+    ///   compartment holds, so the box channel already carries it; this module adds the host-side
+    ///   ops plus the normalised state a record-backed peer needs.
+    ///
+    /// Either way the wire is the same: the host owns the normalised ordered list
+    /// (<see cref="WarehouseStateMessage"/>), and client store/take are forwarded as
+    /// <see cref="WarehouseOpMessage"/> requests so rack membership has a single owner. Updates are
+    /// pushed from the game's own mutation events - no poll - and eventual correctness comes from
+    /// the gradual slice sweep in <see cref="PeriodicUpdate"/>, never a periodic full resend.
     /// </summary>
     public class WarehouseBoxSync : TickableCoopModule
     {
@@ -34,8 +40,6 @@ namespace CardShopCoop.Sync
         public Action<int, INetMessage> SendToClient; // set by CoopCore: host -> one client
         public Func<InteractablePackagingBox_Item, bool> HoldClientBox; // set by CoopCore
 
-        private readonly SnapshotGate _gate = new SnapshotGate(1.5f, 12f, -2.3f);
-
         // request bookkeeping
         private int _nextRequestId;
         private readonly Dictionary<ushort, float> _pendingStoreAt = new Dictionary<ushort, float>();
@@ -45,9 +49,40 @@ namespace CardShopCoop.Sync
         private readonly HashSet<ushort> _pendingTakeBoxes = new HashSet<ushort>();
         private readonly HashSet<long> _hostSeenRequests = new HashSet<long>();
 
-        // ---- 1.0 record API (optional) ----
+        /// <summary>The last warehouse state that could not be fully applied because one of its
+        /// compartments had not streamed in yet. Re-applied from OnClientTick until complete.</summary>
+        private WarehouseStateMessage _pendingApply;
+
+        /// <summary>Client: the host's warehouse backend as advertised by the last state. A live
+        /// guest needs a record host's entries materialized as live boxes, but must leave a live
+        /// host's racks alone (the box channel already carries those).</summary>
+        private static bool _hostLiveBoxes;
+
+        /// <summary>Compartments already applied for the current <see cref="_pendingApply"/>, so a
+        /// retry only touches the entries that were not applied yet instead of tearing every rack
+        /// down and rebuilding it again each frame.</summary>
+        private readonly HashSet<int> _pendingApplied = new HashSet<int>();
+
+        /// <summary>Retry passes spent on the current pending state; bounded so an entry that can
+        /// never resolve cannot churn forever.</summary>
+        private int _pendingAttempts;
+
+        /// <summary>How many client ticks a partial apply may retry before giving up (the next
+        /// warehouse change or a rejoin re-sends the state).</summary>
+        private const int PendingApplyAttemptCap = 600;
+
+        /// <summary>Throttle for the "rack refused a materialised box" warning.</summary>
+        private static double _lastMaterializeWarn;
+
+        // ---- capability: one of two warehouse backends ----
+        // 1.00 stores warehouse boxes as serialized StoredBoxRecord objects owned by a
+        // ShelfCompartment (all reflection; absent from the legacy build). Legacy builds store
+        // live InteractablePackagingBox_Item objects held by the compartment instead. The
+        // module is enabled when EITHER backend resolves and picks records when they exist.
         private static bool _probed;
-        private static bool _available;
+        private static bool _records; // the whole 1.00 record API resolved
+        private static bool _live;    // the live-box warehouse model resolved (both builds)
+        private static bool _liveUsable; // live model usable: resolved AND record storage absent
         private static Type _tRecord;
         private static MethodInfo _miCount;
         private static MethodInfo _miPeek;
@@ -59,6 +94,12 @@ namespace CardShopCoop.Sync
         private static FieldInfo _fiAmount;
         private static FieldInfo _fiBig;
         private static Type _tEnumType;
+        // The take path needs two more 1.00-only symbols - PackageBoxCandidate and
+        // RestockManager.MaterializeStoredCandidate - so they are resolved by name like the
+        // record API above and required by _records. Nothing may name them directly.
+        private static Type _tCandidate;
+        private static FieldInfo _fiCandidateCompartment;
+        private static MethodInfo _miMaterialize;
 
         public WarehouseBoxSync()
         {
@@ -69,12 +110,103 @@ namespace CardShopCoop.Sync
 
         public override void Start() => _instance = this;
 
-        protected override void OnHostTick(in SyncFrame frame) => HostTick(frame.Dt, frame.InGame);
+        /// <summary>Gradual re-assertion: a batch of compartments per slice, round-robin, sized so
+        /// one full pass completes within roughly SweepCycleSeconds regardless of warehouse size -
+        /// the removed heal re-asserted everything within 12 s, so an unbounded one-compartment-
+        /// per-5 s cursor would be a latency regression (40 compartments => 200 s). A periodic FULL
+        /// resend is still not sent (AGENTS.md): the pass is spread over slices.</summary>
+        private const float SweepSliceSeconds = 5f;
+        private const float SweepCycleSeconds = 30f;
+        private float _sweepTimer;
+        private int _sweepCursor;
+
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null
+                || !CoopCore.InSessionWorld || !Available())
+                return;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
+                return;
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
+            {
+                var comps = Compartments();
+                if (comps == null || comps.Count == 0)
+                {
+                    _sweepCursor = 0;
+                    return;
+                }
+                int total = comps.Count;
+                int slicesPerCycle = Mathf.Max(1, Mathf.RoundToInt(SweepCycleSeconds / SweepSliceSeconds));
+                int perSlice = Mathf.Max(1, (total + slicesPerCycle - 1) / slicesPerCycle);
+                if (_sweepCursor < 0 || _sweepCursor >= total)
+                    _sweepCursor = 0;
+                var msg = new WarehouseStateMessage { Full = false, HostLiveBoxes = !UsesRecords };
+                for (int n = 0; n < perSlice; n++)
+                {
+                    var comp = comps[_sweepCursor];
+                    _sweepCursor = (_sweepCursor + 1) % total;
+                    if (!IsWarehouse(comp))
+                        continue; // skipped this slice; the cursor still advanced
+                    var entry = new WarehouseCompartmentEntry
+                    {
+                        ShelfIndex = comp.GetWarehouseIndex(),
+                        CompartmentIndex = comp.GetIndex(),
+                    };
+                    var shelf = comp.GetWarehouseShelf();
+                    if (shelf != null)
+                        entry.ShelfId = PlacedObjectIdentity.AssignHost(shelf);
+                    ReadStored(comp, entry.Records);
+                    msg.Compartments.Add(entry);
+                }
+                if (msg.Compartments.Count > 0)
+                    BroadcastState(msg);
+            });
+        }
+
+        /// <summary>Host: send the COMPLETE warehouse to one connection - the join catch-up path.
+        /// Not periodic; the sweep above is what guarantees eventual correctness.</summary>
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null || !Available())
+                return;
+            Guarded("full", () => SendToClient(connId, BuildState()));
+        }
 
         /// <summary>Client: expire warehouse take requests that never got a result (a dropped
         /// frame or a host-side exception), so a compartment cannot stay un-clickable forever.</summary>
         protected override void OnClientTick(in SyncFrame frame)
         {
+            // A warehouse state that arrived before the client's racks existed was only partially
+            // applied; retry it locally until every compartment resolves. This replaces the old
+            // periodic heal without putting anything on the wire - the last received state is
+            // re-applied against the now-live scene.
+            if (_pendingApply != null)
+            {
+                ApplyingRemote = true;
+                try
+                {
+                    bool complete = false;
+                    Guarded("apply-retry", () => { complete = ClientApplyInner(_pendingApply); });
+                    if (complete)
+                    {
+                        _pendingApply = null;
+                        _pendingAttempts = 0;
+                    }
+                    else if (++_pendingAttempts > PendingApplyAttemptCap)
+                    {
+                        CoopPlugin.Log.LogWarning(
+                            $"WarehouseBoxSync: gave up re-applying a warehouse state after {PendingApplyAttemptCap} passes "
+                            + $"({_pendingApplied.Count}/{_pendingApply.Compartments.Count} compartments matched); "
+                            + "the next warehouse change or a rejoin re-sends it");
+                        _pendingApply = null;
+                        _pendingAttempts = 0;
+                    }
+                }
+                finally { ApplyingRemote = false; }
+            }
+
             if (_pendingTakeAt.Count == 0)
                 return;
             float now = (float)Time.realtimeSinceStartupAsDouble;
@@ -99,8 +231,13 @@ namespace CardShopCoop.Sync
 
         public override void Reset()
         {
-            _gate.Reset(-2.3f);
             _nextRequestId = 0;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _pendingApply = null;
+            _pendingApplied.Clear();
+            _pendingAttempts = 0;
+            _hostLiveBoxes = false;
             _pendingStoreAt.Clear();
             _takeKeyByRequest.Clear();
             _pendingTakeCompartments.Clear();
@@ -109,7 +246,21 @@ namespace CardShopCoop.Sync
             _hostSeenRequests.Clear();
         }
 
-        public override void ForceResend() => _gate.Force();
+        public override void ForceResend()
+        {
+            _sweepTimer = 0f; // a heal just went out; don't sweep immediately after
+            BroadcastNow();
+        }
+
+        /// <summary>Client: the placed-object roster changed, so every index-keyed compartment
+        /// address may now point at a different object. Drop the pending-apply memo instead of
+        /// retrying against stale addresses (the next state re-applies from scratch).</summary>
+        public void OnClientRosterChanged()
+        {
+            _pendingApply = null;
+            _pendingApplied.Clear();
+            _pendingAttempts = 0;
+        }
 
         public override void Dispose()
         {
@@ -121,11 +272,39 @@ namespace CardShopCoop.Sync
 
         // ---------------- capability probe ----------------
 
-        /// <summary>True only when the running game exposes the 1.0 stored-box-record API.</summary>
+        /// <summary>True when a warehouse backend is usable: the 1.00 stored-box records, or the
+        /// live-box model the legacy build (and any build without records) actually stores.</summary>
         internal static bool Available()
         {
             Probe();
-            return _available;
+            return _records || _liveUsable;
+        }
+
+        /// <summary>True when the 1.00 stored-box-record backend is the one to use. A client
+        /// realizes an incoming state in its OWN backend: a record-capable build rebuilds
+        /// records, a legacy build materializes live boxes.</summary>
+        internal static bool UsesRecords
+        {
+            get
+            {
+                Probe();
+                return _records;
+            }
+        }
+
+        /// <summary>True when the game has the record STORAGE model at all, even if part of its
+        /// API failed to resolve. The box family uses this (not <see cref="UsesRecords"/>) to
+        /// decide whether a stored box is a record or a live object: in a build with
+        /// StoredBoxRecord present but an unresolved take symbol the channel is inert, and
+        /// falling through to the live store recipe there would bank a local record and fire the
+        /// data-only destroy - destroying the host's real box.</summary>
+        internal static bool HasRecordStorage
+        {
+            get
+            {
+                Probe();
+                return _tRecord != null;
+            }
         }
 
         private static void Probe()
@@ -141,7 +320,7 @@ namespace CardShopCoop.Sync
                 _miPop = AccessTools.Method(typeof(ShelfCompartment), "TryPopLastStoredBoxRecord");
                 _miAdd = AccessTools.Method(typeof(ShelfCompartment), "AddStoredBoxRecord");
                 _miCompartments = AccessTools.Method(typeof(RestockManager), "GetWarehouseCompartmentList");
-                var tBatcher = AccessTools.TypeByName("StoredBoxVisualBatcher");
+                var tBatcher = typeof(ShelfCompartment).Assembly.GetType("StoredBoxVisualBatcher", false);
                 _miRebuild = tBatcher == null ? null : AccessTools.Method(tBatcher, "RebuildImmediate");
                 if (_tRecord != null)
                 {
@@ -150,31 +329,80 @@ namespace CardShopCoop.Sync
                     _fiBig = AccessTools.Field(_tRecord, "isBigBox");
                     _tEnumType = _fiItemType == null ? null : _fiItemType.FieldType;
                 }
-                _available = _tRecord != null && _miCount != null && _miPeek != null
+                // Resolve from the GAME assembly, never by bare name: a same-named type in another
+                // loaded plugin assembly would otherwise win, silently disabling the whole record
+                // channel on a 1.00 build (the same defence GamePatches.EnsureCheatManager uses).
+                _tCandidate = typeof(ShelfCompartment).Assembly.GetType("PackageBoxCandidate", false);
+                _miMaterialize = AccessTools.Method(typeof(RestockManager), "MaterializeStoredCandidate");
+                if (_tCandidate != null)
+                    _fiCandidateCompartment = AccessTools.Field(_tCandidate, "storedCompartment");
+                _records = _tRecord != null && _miCount != null && _miPeek != null
                     && _miPop != null && _miAdd != null && _miCompartments != null
-                    && _fiItemType != null && _fiAmount != null && _fiBig != null;
+                    && _fiItemType != null && _fiAmount != null && _fiBig != null
+                    && _tCandidate != null && _miMaterialize != null
+                    && _fiCandidateCompartment != null;
+                // Live-box model: the compartment's own box list, the warehouse enumeration, and
+                // the add/remove used to store and take. All four exist in both builds, so the
+                // probe only decides which backend owns warehouse storage.
+                _live = AccessTools.Method(typeof(ShelfCompartment), "GetInteractablePackagingBoxList") != null
+                    && AccessTools.Method(typeof(ShelfCompartment), "GetLastInteractablePackagingBox") != null
+                    && AccessTools.Method(typeof(ShelfCompartment), "AddBox") != null
+                    && AccessTools.Method(typeof(ShelfCompartment), "RemoveBox") != null
+                    && AccessTools.Method(typeof(WarehouseShelf), "GetStorageCompartmentList") != null;
+                // The live backend may only own warehouse storage when the record storage model is
+                // genuinely ABSENT. If StoredBoxRecord exists but part of its API did not resolve,
+                // the live path would run its store recipe against record-backed storage and bank
+                // records locally - the exact corruption this module exists to prevent. Stay inert
+                // and say so instead.
+                _liveUsable = _live && _tRecord == null;
             }
             catch (Exception e) { Swallow.Log(e); }
-            CoopPlugin.Log.LogInfo(_available
-                ? "WarehouseBoxSync: 1.0 stored-box records present - warehouse storage is host-authoritative"
-                : "WarehouseBoxSync: stored-box record API absent - live stored-box path unchanged");
+            if (_records)
+                CoopPlugin.Log.LogInfo("WarehouseBoxSync: stored-box records present - warehouse storage is record-backed and host-authoritative");
+            else if (_liveUsable)
+                CoopPlugin.Log.LogInfo("WarehouseBoxSync: no stored-box records - warehouse storage is live-box-backed and host-authoritative");
+            else if (_tRecord != null)
+                CoopPlugin.Log.LogError("WarehouseBoxSync: record storage is present but its API did not fully resolve - warehouse sync disabled rather than driving the live path against record storage");
+            else
+                CoopPlugin.Log.LogError("WarehouseBoxSync: no warehouse backend found on this build (no record storage, no live box API) - warehouse sync disabled");
         }
 
         // ---------------- patches ----------------
 
         public static void ApplyPatches(Harmony h)
         {
-            if (!Available())
+            Probe();
+            if (!_records && !_liveUsable)
                 return;
-            // A client must not bank a warehouse record locally: the host owns the record list,
-            // and a local DispenseItem would both create a record the host never sees and drive
-            // the 1.0 data-only destroy (a spurious box Removed). Gate store host-only.
+
+            // Client store/take are forwarded on BOTH backends, so warehouse rack membership has a
+            // single owner (the host) in every pairing. Letting a live guest take vanilla-locally
+            // was a bug: the host applies that Held claim WITHOUT un-hooking its own racked copy,
+            // so its snapshot read Held+Stored and the client's stored-while-held rule then undid
+            // the take. The prefixes still no-op when this machine is the host or a state is being
+            // applied.
             Try(h, typeof(InteractablePackagingBox_Item), "DispenseItem",
                 prefix: new HarmonyMethod(typeof(WarehouseBoxSync), nameof(ClientStorePrefix)));
-            // Same for taking a record out: popping locally would delete a record the host still
-            // owns (its next snapshot restores it) and spawn an unstamped box. Host-only.
             Try(h, typeof(InteractableStorageCompartment), "OnMouseButtonUp",
                 prefix: new HarmonyMethod(typeof(WarehouseBoxSync), nameof(ClientTakePrefix)));
+
+            if (UsesRecords)
+            {
+                // Event hooks: the mutation methods themselves push the new state - no poll, no
+                // deferred flush.
+                Try(h, typeof(ShelfCompartment), "AddStoredBoxRecord",
+                    postfix: new HarmonyMethod(typeof(WarehouseBoxSync), nameof(AddStoredBoxRecordPostfix)));
+                Try(h, typeof(ShelfCompartment), "TryPopLastStoredBoxRecord",
+                    postfix: new HarmonyMethod(typeof(WarehouseBoxSync), nameof(TryPopStoredBoxRecordPostfix)));
+                return;
+            }
+
+            // Live backend host hooks. AddBox/RemoveBox run for every shelf, so the postfix filters
+            // to warehouse racks first.
+            Try(h, typeof(ShelfCompartment), "AddBox",
+                postfix: new HarmonyMethod(typeof(WarehouseBoxSync), nameof(AddBoxPostfix)));
+            Try(h, typeof(ShelfCompartment), "RemoveBox",
+                postfix: new HarmonyMethod(typeof(WarehouseBoxSync), nameof(RemoveBoxPostfix)));
         }
 
         private static void Try(Harmony h, Type type, string method,
@@ -200,9 +428,16 @@ namespace CardShopCoop.Sync
         /// vanilla locally. Local vanilla would bank a record the host never sees and drive the
         /// 1.0 data-only destroy (a spurious box Removed).</summary>
         public static bool ClientStorePrefix(InteractablePackagingBox_Item __instance,
-            ShelfCompartment targetItemCompartment)
+            bool isPlayer, ShelfCompartment targetItemCompartment)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote || BoxShared.ApplyingRemote)
+                return true;
+            // Only a real PLAYER store (OnHoldStateLeftMousePress passes isPlayer:true) is
+            // forwarded. The SAME method also serves the world-load restore
+            // (ShelfManager calls DispenseItem(isPlayer:false, ...)) and the box channel's own
+            // mirror apply, so intercepting those left every restored rack box unregistered and
+            // spawned a duplicate mirror of it.
+            if (!isPlayer)
                 return true;
             if (!IsWarehouse(targetItemCompartment))
                 return true;
@@ -210,13 +445,14 @@ namespace CardShopCoop.Sync
             var boxes = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
             if (self == null || boxes == null || __instance == null)
             {
-                Notice("cannot store this box yet - try again");
+                Notice("couldn't store that box yet - try again");
                 return false;
             }
             ushort boxId;
             if (!boxes.TryGetClientId(__instance, out boxId))
             {
-                Notice("cannot store this box yet - try again");
+                CoopPlugin.Log.LogWarning("WarehouseBoxSync: client store ignored - no client id for the held box");
+                Notice("couldn't store that box yet - try again");
                 return false;
             }
             // Debounce a repeat click on the same box; if the request is dropped this self-heals.
@@ -229,7 +465,8 @@ namespace CardShopCoop.Sync
             int shelfIdx, compIdx;
             if (!TryAddress(targetItemCompartment, out shelfId, out shelfIdx, out compIdx))
             {
-                Notice("cannot resolve that warehouse slot");
+                CoopPlugin.Log.LogWarning("WarehouseBoxSync: client store ignored - warehouse compartment address did not resolve");
+                Notice("couldn't resolve that warehouse slot - try again");
                 return false;
             }
             EItemType type;
@@ -257,7 +494,6 @@ namespace CardShopCoop.Sync
                 Amount = amount,
                 IsBig = big,
             });
-            Notice("storing box...");
             return false;
         }
 
@@ -265,7 +501,7 @@ namespace CardShopCoop.Sync
         /// would delete a record the host still owns and spawn an unstamped box.</summary>
         public static bool ClientTakePrefix(InteractableStorageCompartment __instance)
         {
-            if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
+            if (CoopCore.Role != CoopRole.Client || ApplyingRemote || BoxShared.ApplyingRemote)
                 return true;
             var self = _instance;
             if (self == null || __instance == null)
@@ -282,7 +518,8 @@ namespace CardShopCoop.Sync
             int shelfIdx, compIdx;
             if (!TryAddress(comp, out shelfId, out shelfIdx, out compIdx))
             {
-                Notice("cannot resolve that warehouse slot");
+                CoopPlugin.Log.LogWarning("WarehouseBoxSync: client take ignored - warehouse compartment address did not resolve");
+                Notice("couldn't resolve that warehouse slot - try again");
                 return false;
             }
             int key = (shelfIdx << 16) ^ (compIdx & 0xffff);
@@ -299,7 +536,6 @@ namespace CardShopCoop.Sync
                 ShelfIndex = shelfIdx,
                 CompartmentIndex = compIdx,
             });
-            Notice("taking box...");
             return false;
         }
 
@@ -349,21 +585,62 @@ namespace CardShopCoop.Sync
             CoopCore.Instance.RegisterLineTimer = 3f;
         }
 
+        // ---------------- event hooks ----------------
+
+        /// <summary>Host: a warehouse compartment just changed through vanilla code, so push the
+        /// new authoritative state now. <c>ApplyingRemote</c> is checked so the client's own
+        /// mirrored writes (which go through the same vanilla methods) never echo back, and
+        /// <see cref="BroadcastNow"/> checks the role and that a session world is live.</summary>
+        private static void NotifyWarehouseChanged()
+        {
+            var self = _instance;
+            if (self == null || ApplyingRemote)
+                return;
+            self.BroadcastNow();
+        }
+
+        /// <summary>1.00 record model: a record was banked into a compartment.</summary>
+        public static void AddStoredBoxRecordPostfix() => NotifyWarehouseChanged();
+
+        /// <summary>1.00 record model: a record was popped (only when the pop succeeded).</summary>
+        public static void TryPopStoredBoxRecordPostfix(bool __result)
+        {
+            if (__result)
+                NotifyWarehouseChanged();
+        }
+
+        /// <summary>Live-box model: any shelf gained a box, so filter to warehouse compartments.
+        /// Only registered when the live backend owns warehouse storage.</summary>
+        public static void AddBoxPostfix(ShelfCompartment __instance)
+        {
+            if (IsWarehouse(__instance))
+                NotifyWarehouseChanged();
+        }
+
+        /// <summary>Live-box model: any shelf lost a box, so filter to warehouse compartments.</summary>
+        public static void RemoveBoxPostfix(ShelfCompartment __instance)
+        {
+            if (IsWarehouse(__instance))
+                NotifyWarehouseChanged();
+        }
+
         // ---------------- host ----------------
 
-        public void HostTick(float dt, bool inGame)
+        /// <summary>Host: broadcast the authoritative warehouse state right now. The wire is
+        /// driven entirely by the game-side change events below (plus <see cref="ForceResend"/>
+        /// on join and on a client's heal request), so there is no poll and no deferred flush: a
+        /// guest's store/take is reflected as soon as vanilla has really changed the warehouse.
+        /// Guarded because the hook can be invoked from inside vanilla game code.</summary>
+        internal void BroadcastNow()
         {
-            if (!inGame || BroadcastState == null || !Available())
+            // Available() covers the build with neither backend (record storage present but
+            // incomplete, and no live model): ForceResend() still lands here from the registry's
+            // join/heal resend, and without the guard Compartments() would throw and an empty
+            // state would be serialized.
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null
+                || !CoopCore.InSessionWorld || !Available())
                 return;
-            if (!_gate.Due(dt))
-                return;
-            Guarded("host", () =>
-            {
-                int hash = ComputeHash();
-                if (!_gate.ShouldSend(hash))
-                    return;
-                BroadcastState(BuildState());
-            });
+            Guarded("broadcast", () => BroadcastState(BuildState()));
         }
 
         // ---------------- host ops ----------------
@@ -385,7 +662,10 @@ namespace CardShopCoop.Sync
                 else if (message.Op == WarehouseOpMessage.OpTake)
                     HostApplyTake(message, connId);
             });
-            ForceResend(); // echo promptly even if refused (re-aligns the requester)
+            // No extra echo here: a successful mutation fires the record hook (AddStoredBoxRecord
+            // / TryPopLastStoredBoxRecord) which broadcasts the new state, and a take always
+            // answers with WarehouseTakeResultMessage. Echoing again here sent every accepted op
+            // twice; a refused op changes nothing, so the requester stays consistent regardless.
         }
 
         private static void HostApplyStore(WarehouseOpMessage m, int connId)
@@ -402,6 +682,15 @@ namespace CardShopCoop.Sync
             var comp = ResolveCompartment(Compartments(), m.ShelfId, m.ShelfIndex, m.CompartmentIndex);
             if (comp == null)
                 return;
+            // A repeat click must not register the same object twice. On the live backend
+            // DispenseItem appends to the compartment unconditionally, so a re-store would make
+            // the rack report the box twice; the record backend is only protected because the box
+            // is destroyed, which is not true here.
+            if (box.m_IsStored)
+            {
+                CoopPlugin.Log.LogWarning($"WarehouseBoxSync: store ignored - box id {m.BoxId} is already stored");
+                return;
+            }
             try
             {
                 if (box.m_IsBigBox != m.IsBig)
@@ -420,6 +709,27 @@ namespace CardShopCoop.Sync
                 box.DispenseItem(false, comp);
                 if (box.m_IsStored)
                 {
+                    // Restore the HOST's own view. While the guest held this box the host applied
+                    // that Held claim and hid it (SetVisible(false) deactivates the root), and a
+                    // forwarded store never runs vanilla on the guest - so the Free+Stored edge that
+                    // would normally re-show the object here is never sent. DispenseItem on an
+                    // inactive object leaves it inactive, which rendered an empty rack slot and
+                    // handed out an invisible box on a host take.
+                    try
+                    {
+                        BoxVisuals.SetVisible(box, true);
+                        BoxVisuals.EnsureOpenState(box, false);
+                    }
+                    catch (Exception e) { Swallow.Log(e); }
+                    if (!box.gameObject.activeSelf)
+                        CoopPlugin.Log.LogWarning($"WarehouseBoxSync: stored box id {m.BoxId} is still inactive on the host");
+                    // On the live backend the box stays alive, so the guest that sent this store is
+                    // still recorded as the lease owner and would keep holding it forever. Drop the
+                    // lease so the next snapshot is Free+Stored and the guest yields (see
+                    // BoxEngine's stored-while-held rule). On the record backend the box is
+                    // destroyed and retired by the game within the frame, so this only marks a
+                    // box that is about to vanish.
+                    boxes.ReleaseLease(box);
                     boxes.MarkBoxDirty(box);
                     boxes.ForceNextTick();
                     CoopPlugin.Log.LogInfo($"WarehouseBoxSync: host stored box id {m.BoxId} for conn {connId}");
@@ -437,21 +747,28 @@ namespace CardShopCoop.Sync
                 SendTakeResult(connId, m, false, 0, 0);
                 return;
             }
-            int count = RecordCount(comp);
+            int count = StoredCount(comp);
             if (count <= 0)
             {
                 SendTakeResult(connId, m, false, 0, 0);
                 return;
             }
+            if (!UsesRecords)
+            {
+                HostApplyTakeLive(comp, m, connId);
+                return;
+            }
             try
             {
                 // Canonical vanilla pop + visual rebuild + spawn, preserving last-record order.
-                var candidate = new PackageBoxCandidate
-                {
-                    storedCompartment = comp,
-                    storedRecordIndex = count - 1,
-                };
-                var box = RestockManager.MaterializeStoredCandidate(candidate);
+                // PackageBoxCandidate and MaterializeStoredCandidate are both 1.00-only, so the
+                // candidate is created and materialized by reflection (see Probe(), which requires
+                // both for _records). Only storedCompartment is read by the vanilla method - it
+                // recomputes the record index itself - so that is the only field we set.
+                object candidate = Activator.CreateInstance(_tCandidate);
+                _fiCandidateCompartment.SetValue(candidate, comp);
+                var box = _miMaterialize.Invoke(null, new[] { candidate })
+                    as InteractablePackagingBox_Item;
                 if (box == null)
                 {
                     SendTakeResult(connId, m, false, 0, count);
@@ -463,12 +780,52 @@ namespace CardShopCoop.Sync
                 ushort id = boxes.EnsureHostId(box);
                 boxes.MarkBoxDirty(box);
                 boxes.ForceNextTick();
-                SendTakeResult(connId, m, true, id, RecordCount(comp));
+                SendTakeResult(connId, m, true, id, StoredCount(comp));
                 CoopPlugin.Log.LogInfo($"WarehouseBoxSync: host took a record for conn {connId} -> box id {id}");
             }
             catch (Exception e)
             {
-                CoopPlugin.Log.LogWarning("WarehouseBoxSync host take: " + e.Message);
+                // MethodInfo.Invoke wraps a target throw in TargetInvocationException, which would
+                // hide the real take failure - the exact path that needs debugging on a legacy
+                // build. Log the cause, not the wrapper.
+                var cause = (e as System.Reflection.TargetInvocationException)?.InnerException ?? e;
+                CoopPlugin.Log.LogWarning("WarehouseBoxSync host take: " + cause);
+                SendTakeResult(connId, m, false, 0, 0);
+            }
+        }
+
+        /// <summary>Live backend take: pop the compartment's last live box and hand it to the box
+        /// authority as a free box. The requesting client auto-holds that authoritative id when
+        /// its mirror arrives, exactly like the record path.</summary>
+        private static void HostApplyTakeLive(ShelfCompartment comp, WarehouseOpMessage m, int connId)
+        {
+            var boxes = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
+            if (boxes == null)
+            {
+                SendTakeResult(connId, m, false, 0, 0);
+                return;
+            }
+            try
+            {
+                var last = comp.GetLastInteractablePackagingBox();
+                if (last == null)
+                {
+                    SendTakeResult(connId, m, false, 0, 0);
+                    return;
+                }
+                comp.RemoveBox(last);
+                // The box is still flagged stored; unhook it so it becomes a free live box the
+                // requester can hold instead of a box the store mirror re-banks.
+                ItemBoxFamily.UnhookIfStored(last);
+                ushort id = boxes.EnsureHostId(last);
+                boxes.MarkBoxDirty(last);
+                boxes.ForceNextTick();
+                SendTakeResult(connId, m, true, id, StoredCount(comp));
+                CoopPlugin.Log.LogInfo($"WarehouseBoxSync: host took a live warehouse box for conn {connId} -> box id {id}");
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("WarehouseBoxSync host take (live): " + e);
                 SendTakeResult(connId, m, false, 0, 0);
             }
         }
@@ -491,13 +848,116 @@ namespace CardShopCoop.Sync
             });
         }
 
+        /// <summary>The warehouse compartments the active backend owns, in shelf order. The
+        /// record backend asks RestockManager; the live backend walks the warehouse shelves and
+        /// takes each storage compartment's ShelfCompartment.</summary>
         private static List<ShelfCompartment> Compartments()
         {
+            if (!UsesRecords)
+                return LiveCompartments();
             try
             {
                 return _miCompartments.Invoke(null, null) as List<ShelfCompartment>;
             }
             catch (Exception e) { Swallow.Log(e); return null; }
+        }
+
+        private static List<ShelfCompartment> LiveCompartments()
+        {
+            var list = new List<ShelfCompartment>();
+            try
+            {
+                var sm = SceneRef<ShelfManager>.Get();
+                var shelves = sm == null ? null : sm.m_WarehouseShelfList;
+                if (shelves == null)
+                    return list;
+                for (int i = 0; i < shelves.Count; i++)
+                {
+                    var shelf = shelves[i];
+                    if (shelf == null)
+                        continue;
+                    var storages = shelf.GetStorageCompartmentList();
+                    if (storages == null)
+                        continue;
+                    for (int j = 0; j < storages.Count; j++)
+                    {
+                        var sc = storages[j];
+                        if (sc == null)
+                            continue;
+                        var comp = sc.GetShelfCompartment();
+                        if (comp != null)
+                            list.Add(comp);
+                    }
+                }
+            }
+            catch (Exception e) { Swallow.Log(e); }
+            return list;
+        }
+
+        /// <summary>How many stored boxes the active backend holds for a compartment. Used for the
+        /// take guard and the reply's remaining count, so it must count exactly what
+        /// <see cref="ReadStored"/> would emit (non-null, non-empty entries).</summary>
+        private static int StoredCount(ShelfCompartment comp)
+        {
+            if (UsesRecords)
+                return RecordCount(comp);
+            try
+            {
+                var boxes = comp.GetInteractablePackagingBoxList();
+                if (boxes == null)
+                    return 0;
+                int n = 0;
+                for (int i = 0; i < boxes.Count; i++)
+                {
+                    var b = boxes[i];
+                    if (b == null || b.m_ItemCompartment == null || b.m_ItemCompartment.GetItemCount() <= 0)
+                        continue;
+                    n++;
+                }
+                return n;
+            }
+            catch (Exception e) { Swallow.Log(e); return 0; }
+        }
+
+        /// <summary>Append the active backend's stored boxes for one compartment, in extraction
+        /// order (both models pop the LAST entry, so order is wire-significant).</summary>
+        private static void ReadStored(ShelfCompartment comp, List<StoredBoxEntry> into)
+        {
+            if (UsesRecords)
+            {
+                int n = RecordCount(comp);
+                for (int i = 0; i < n; i++)
+                {
+                    int type, amount;
+                    bool big;
+                    if (!TryPeek(comp, i, out type, out amount, out big))
+                        continue;
+                    into.Add(new StoredBoxEntry { ItemType = (EItemType)type, Amount = amount, Big = big });
+                }
+                return;
+            }
+            try
+            {
+                var boxes = comp.GetInteractablePackagingBoxList();
+                if (boxes == null)
+                    return;
+                for (int i = 0; i < boxes.Count; i++)
+                {
+                    var box = boxes[i];
+                    if (box == null || box.m_ItemCompartment == null)
+                        continue;
+                    int amount = box.m_ItemCompartment.GetItemCount();
+                    if (amount <= 0)
+                        continue;
+                    into.Add(new StoredBoxEntry
+                    {
+                        ItemType = box.m_ItemCompartment.GetItemType(),
+                        Amount = amount,
+                        Big = box.m_IsBigBox,
+                    });
+                }
+            }
+            catch (Exception e) { Swallow.Log(e); }
         }
 
         private static int RecordCount(ShelfCompartment comp)
@@ -528,58 +988,17 @@ namespace CardShopCoop.Sync
             catch (Exception e) { Swallow.Log(e); return false; }
         }
 
-        private static bool Usable(ShelfCompartment comp)
-        {
-            if (comp == null)
-                return false;
-            try
-            {
-                // GetWarehouseIndex()/GetIndex() dereference the owning WarehouseShelf, so a
-                // compartment whose shelf is gone must be skipped rather than throw.
-                return comp.GetWarehouseShelf() != null;
-            }
-            catch (Exception e) { Swallow.Log(e); return false; }
-        }
-
-        private static int ComputeHash()
-        {
-            int h = 17;
-            var comps = Compartments();
-            if (comps == null)
-                return h;
-            for (int c = 0; c < comps.Count; c++)
-            {
-                var comp = comps[c];
-                if (!Usable(comp))
-                    continue;
-                h = h * 31 + comp.GetWarehouseIndex();
-                h = h * 31 + comp.GetIndex();
-                int n = RecordCount(comp);
-                h = h * 31 + n;
-                for (int i = 0; i < n; i++)
-                {
-                    int type, amount;
-                    bool big;
-                    if (!TryPeek(comp, i, out type, out amount, out big))
-                        continue;
-                    h = h * 31 + type;
-                    h = h * 31 + amount;
-                    h = h * 31 + (big ? 1 : 0);
-                }
-            }
-            return h;
-        }
 
         private static WarehouseStateMessage BuildState()
         {
-            var msg = new WarehouseStateMessage { Full = true };
+            var msg = new WarehouseStateMessage { Full = true, HostLiveBoxes = !UsesRecords };
             var comps = Compartments();
             if (comps == null)
                 return msg;
             for (int c = 0; c < comps.Count; c++)
             {
                 var comp = comps[c];
-                if (!Usable(comp))
+                if (!IsWarehouse(comp))
                     continue;
                 var entry = new WarehouseCompartmentEntry
                 {
@@ -593,15 +1012,7 @@ namespace CardShopCoop.Sync
                         entry.ShelfId = PlacedObjectIdentity.AssignHost(shelf);
                 }
                 catch (Exception e) { Swallow.Log(e); }
-                int n = RecordCount(comp);
-                for (int i = 0; i < n; i++)
-                {
-                    int type, amount;
-                    bool big;
-                    if (!TryPeek(comp, i, out type, out amount, out big))
-                        continue;
-                    entry.Records.Add(new StoredBoxEntry { ItemType = (EItemType)type, Amount = amount, Big = big });
-                }
+                ReadStored(comp, entry.Records);
                 msg.Compartments.Add(entry);
             }
             return msg;
@@ -613,15 +1024,41 @@ namespace CardShopCoop.Sync
         {
             if (!Available() || message == null || message.Compartments == null)
                 return;
+            _hostLiveBoxes = message.HostLiveBoxes;
+            // A live-box host's racks are real stored objects the box channel already
+            // synchronises: rewriting or materialising them here would give rack state two owners
+            // (see ApplyPatches). A record host has no live boxes to deliver, so a live guest
+            // materializes the entries instead (ApplyCompartmentFromRecords).
+            if (!UsesRecords && _hostLiveBoxes)
+                return;
+            // A sweep slice must never discard an unresolved FULL baseline: clearing _pendingApply
+            // here would drop the compartments it still owes and strand them until the cursor came
+            // round again. Apply the slice directly and leave the baseline alone.
+            if (!message.Full && _pendingApply != null)
+            {
+                ApplyingRemote = true;
+                try
+                {
+                    Guarded("apply-partial", () => ApplyPartial(message));
+                }
+                finally { ApplyingRemote = false; }
+                return;
+            }
+            _pendingApplied.Clear();
+            _pendingAttempts = 0;
             ApplyingRemote = true;
             try
             {
-                Guarded("apply", () => ClientApplyInner(message));
+                bool complete = false;
+                Guarded("apply", () => { complete = ClientApplyInner(message); });
+                _pendingApply = complete ? null : message;
             }
             finally { ApplyingRemote = false; }
         }
 
-        private void ClientApplyInner(WarehouseStateMessage message)
+        /// <summary>Applies a partial (sweep) message directly, without touching the pending-baseline
+        /// bookkeeping. Used when a sweep slice arrives while a full baseline is still incomplete.</summary>
+        private void ApplyPartial(WarehouseStateMessage message)
         {
             var comps = Compartments();
             if (comps == null)
@@ -633,9 +1070,47 @@ namespace CardShopCoop.Sync
                     continue;
                 var comp = ResolveCompartment(comps, entry);
                 if (comp == null)
-                    continue; // rack not streamed in yet; the next heal retries
+                    continue;
                 ApplyCompartment(comp, entry);
             }
+        }
+
+        /// <summary>Applies a host state. Returns false when at least one compartment could not be
+        /// resolved yet (its rack has not streamed in), so the caller re-applies the same state
+        /// from OnClientTick instead of relying on a periodic heal.</summary>
+        private bool ClientApplyInner(WarehouseStateMessage message)
+        {
+            var comps = Compartments();
+            if (comps == null)
+                return false;
+            bool complete = true;
+            for (int e = 0; e < message.Compartments.Count; e++)
+            {
+                if (_pendingApplied.Contains(e))
+                    continue; // applied on an earlier pass; don't tear the rack down again
+                var entry = message.Compartments[e];
+                if (entry == null)
+                {
+                    _pendingApplied.Add(e);
+                    continue;
+                }
+                var comp = ResolveCompartment(comps, entry);
+                if (comp == null)
+                {
+                    complete = false; // rack not streamed in yet; retried from OnClientTick
+                    continue;
+                }
+                if (ApplyCompartment(comp, entry))
+                    _pendingApplied.Add(e);
+                else
+                {
+                    // The rack resolved but refused its entries (capacity/size/type). One attempt
+                    // is enough to know they don't fit: tear it down once, not once per tick. The
+                    // next state or a rejoin retries from scratch.
+                    _pendingApplied.Add(e);
+                }
+            }
+            return complete;
         }
 
         private static ShelfCompartment ResolveCompartment(List<ShelfCompartment> comps,
@@ -688,8 +1163,15 @@ namespace CardShopCoop.Sync
             return null;
         }
 
-        private static void ApplyCompartment(ShelfCompartment comp, WarehouseCompartmentEntry entry)
+        /// <summary>Applies one compartment. Returns false when it resolved but failed, so the caller
+        /// keeps it pending and retries (the failure log is rate-limited by ModuleGuard).</summary>
+        private static bool ApplyCompartment(ShelfCompartment comp, WarehouseCompartmentEntry entry)
         {
+            // Live guest of a record host: the entries have no live counterpart anywhere, so
+            // materialize them. ClientApplyState returns before reaching here for a live host
+            // (the box channel already owns those racks).
+            if (!UsesRecords)
+                return ApplyCompartmentFromRecords(comp, entry);
             try
             {
                 // Replace the list wholesale: the host's order is authoritative (extraction pops
@@ -718,8 +1200,82 @@ namespace CardShopCoop.Sync
                     _miAdd.Invoke(comp, new[] { rec });
                 }
                 Rebuild(comp);
+                return true;
             }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("WarehouseBoxSync apply: " + e.Message); }
+            catch (Exception e) { ModuleGuard.Log("warehouse:apply", e); return false; }
+        }
+
+        /// <summary>Live guest realizing a record host's entries: replace the compartment's racks
+        /// with live boxes. Only reached when the host is record backed, so the box channel has no
+        /// warehouse boxes of its own here - every box in these racks was spawned by this method and
+        /// is ours to destroy, which keeps it from lingering as an unbound ghost (the box engine
+        /// never adopts a box with no host id).</summary>
+        private static bool ApplyCompartmentFromRecords(ShelfCompartment comp, WarehouseCompartmentEntry entry)
+        {
+            bool ok = true;
+            // Mark the whole teardown+spawn as a remote apply: DestroyOwned must not be mistaken for
+            // a local gameplay destroy (that emits a spurious Removed for a box the host still
+            // owns) and the mirror DispenseItem must not be mistaken for a player store.
+            bool prevApplying = BoxShared.ApplyingRemote;
+            BoxShared.ApplyingRemote = true;
+            try
+            {
+                var boxes = comp.GetInteractablePackagingBoxList();
+                if (boxes != null)
+                {
+                    for (int i = boxes.Count - 1; i >= 0; i--)
+                    {
+                        var b = boxes[i];
+                        if (b == null)
+                            continue;
+                        // Ours, not the box channel's: tear it down through the game's own
+                        // de-registration (OnDestroyed) rather than a bare Destroy.
+                        ItemBoxFamily.DestroyOwned(b);
+                    }
+                }
+                for (int i = 0; i < entry.Records.Count; i++)
+                {
+                    var r = entry.Records[i];
+                    if (r.ItemType == EItemType.None || r.Amount <= 0
+                        || !Enum.IsDefined(typeof(EItemType), r.ItemType))
+                        continue;
+                    var box = RestockManager.SpawnPackageBoxItem(r.ItemType, r.Amount, r.Big);
+                    if (box == null)
+                    {
+                        ok = false;
+                        continue;
+                    }
+                    // Physics off BEFORE the store, exactly as the game's own 1.0 restore does
+                    // (ShelfManager) and as ItemBoxFamily.ApplyStored does. DispenseItem only lerps
+                    // for ~0.33 s and then nothing pins the transform, so a dynamic box would drop
+                    // out of the rack - and its live collider would let the player grab a box the
+                    // host still considers stored.
+                    BoxLifecycle.ApplyEnabled(box, false);
+                    box.DispenseItem(false, comp);
+                    if (!box.m_IsStored)
+                    {
+                        WarnMaterializeRefused(r.ItemType, r.Amount, r.Big);
+                        ItemBoxFamily.DestroyOwned(box);
+                        ok = false;
+                    }
+                }
+            }
+            catch (Exception e) { ModuleGuard.Log("warehouse:apply-live", e); return false; }
+            finally { BoxShared.ApplyingRemote = prevApplying; }
+            return ok;
+        }
+
+        /// <summary>The rack refused a materialised box. Rate-limited: a stuck compartment is
+        /// re-applied up to the pending cap (600 passes), so an unthrottled line would print 600
+        /// times.</summary>
+        private static void WarnMaterializeRefused(EItemType type, int amount, bool big)
+        {
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (now - _lastMaterializeWarn < 5.0)
+                return;
+            _lastMaterializeWarn = now;
+            CoopPlugin.Log.LogWarning(
+                $"WarehouseBoxSync: rack refused a materialised box ({type} x{amount}, big={big}) - dropped, will retry");
         }
 
         // ---------------- client take result ----------------
@@ -759,6 +1315,12 @@ namespace CardShopCoop.Sync
             ushort id;
             if (!boxes.TryGetClientId(box, out id) || !_pendingTakeBoxes.Contains(id))
                 return;
+            // The host has already removed this box from its rack and answered with the id, and a
+            // live host's rack box arrives as a real stored object. Detach our own copy from the
+            // rack before it goes to the hand - otherwise the local compartment keeps the slot and
+            // its amount, because the box channel skips a Free apply for a box we now hold. (On the
+            // record backend the accepted box is a fresh spawn, so this is a no-op.)
+            ItemBoxFamily.UnhookIfStored(item);
             if (HoldClientBox != null && HoldClientBox(item))
                 _pendingTakeBoxes.Remove(id);
         }

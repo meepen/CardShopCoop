@@ -36,8 +36,12 @@ namespace CardShopCoop.Sync
         public static bool ApplyingRemote;
 
         public Action<INetMessage> BroadcastState; // set by CoopCore: host -> clients
+        public Action<int, INetMessage> SendToClient; // set by CoopCore: host -> one client
 
         private const int ReviewTail = 15; // enough to bridge a missed heal; reviews are rare
+        // Partial Index: 0 counters (and transient OpenScreen), 1 money, 2 review tail and metrics.
+        private const int CounterSlice = 0, MoneySlice = 1, ReviewSlice = 2, SliceCount = 3;
+        private const float SweepSliceSeconds = 5f, SweepCycleSeconds = 15f;
 
         // host: set by patches (static, patches can't see the instance), drained by HostTick
         private static bool s_openPending;
@@ -73,7 +77,8 @@ namespace CardShopCoop.Sync
         private static readonly System.Reflection.FieldInfo FiCashMode =
             ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsCashCounterMode");
 
-        private readonly SnapshotGate _gate = new SnapshotGate(2f, 15f, -4.1f);
+        private float _sweepTimer;
+        private int _sweepCursor;
         private int _reviewSeq; // client: m_CustomerReviewCount high-water mark (dedup key)
 
         // NEVER CSingleton<>.Instance for these: the open-screen broadcast can land
@@ -103,7 +108,8 @@ namespace CardShopCoop.Sync
 
         public override void Reset()
         {
-            _gate.Reset(-4.1f);
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
             _reviewSeq = -1;
             s_openPending = false;
             s_openSnapshot = default(GameReportDataCollect);
@@ -118,7 +124,8 @@ namespace CardShopCoop.Sync
 
         public override void ForceResend()
         {
-            _gate.Force();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
         }
 
         // ---------------- patches ----------------
@@ -257,60 +264,66 @@ namespace CardShopCoop.Sync
                 var snap = s_openSnapshot;
                 Guarded("host", () =>
                 {
-                    BroadcastState(BuildState(snap, openScreen: true));
+                    var message = BuildState(snap, true, true);
+                    message.Full = true;
+                    message.Index = -1;
+                    BroadcastState(message);
                 });
                 return;
             }
-
-            if (!_gate.Due(dt))
-                return;
-            Guarded("host", () =>
+            if (s_reviewsDirty)
             {
-                if (s_reviewsDirty)
+                s_reviewsDirty = false;
+                Guarded("review", () => SendSlice(ReviewSlice, CPlayerData.m_GameReportDataCollect, false));
+            }
+        }
+
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
+                return;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
+                return;
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
+            {
+                int slicesPerPass = Mathf.Max(1,
+                    Mathf.CeilToInt(SliceCount / Mathf.Max(1f, SweepCycleSeconds / SweepSliceSeconds)));
+                for (int n = 0; n < slicesPerPass; n++)
                 {
-                    s_reviewsDirty = false;
-                    _gate.Force(); // bust the gate: ship the new review this tick
+                    int index = _sweepCursor++ % SliceCount;
+                    SendSlice(index, CPlayerData.m_GameReportDataCollect, false);
                 }
-                int hash = HashState();
-                if (!_gate.ShouldSend(hash))
-                    return;
-                var live = CPlayerData.m_GameReportDataCollect;
-                BroadcastState(BuildState(live, openScreen: false));
             });
         }
 
-        private static int HashState()
+        public override void FullUpdate(int connId)
         {
-            var r = CPlayerData.m_GameReportDataCollect;
-            int h = 17;
-            h = h * 31 + r.customerVisited;
-            h = h * 31 + r.checkoutCount;
-            h = h * 31 + r.customerDisatisfied;
-            h = h * 31 + r.customerBoughtItem;
-            h = h * 31 + r.customerBoughtCard;
-            h = h * 31 + r.customerPlayed;
-            h = h * 31 + r.storeExpGained;
-            h = h * 31 + r.storeLevelGained;
-            h = h * 31 + r.itemAmountSold;
-            h = h * 31 + r.cardAmountSold;
-            h = h * 31 + (int)(r.totalPlayTableTime * 100f);
-            h = h * 31 + (int)(r.totalItemEarning * 100f);
-            h = h * 31 + (int)(r.totalCardEarning * 100f);
-            h = h * 31 + (int)(r.totalPlayTableEarning * 100f);
-            h = h * 31 + (int)(r.supplyCost * 100f);
-            h = h * 31 + (int)(r.upgradeCost * 100f);
-            h = h * 31 + (int)(r.employeeCost * 100f);
-            h = h * 31 + (int)(r.rentCost * 100f);
-            h = h * 31 + (int)(r.billCost * 100f);
-            h = h * 31 + r.cardPackOpened;
-            h = h * 31 + r.smellyCustomerCleaned;
-            h = h * 31 + r.manualCheckoutCount;
-            h = h * 31 + r.gemMintCardObtained;
-            h = h * 31 + CPlayerData.m_CustomerReviewCount;
-            return h;
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null)
+                return;
+            Guarded("full", () =>
+            {
+                var message = BuildState(CPlayerData.m_GameReportDataCollect, false, true);
+                message.Full = true;
+                message.Index = -1;
+                SendToClient(connId, message);
+            });
         }
 
-        private static ReportStateMessage BuildState(GameReportDataCollect r, bool openScreen)
+        private void SendSlice(int index, GameReportDataCollect r, bool openScreen)
+        {
+            var message = BuildState(r, index == CounterSlice && openScreen);
+            message.Full = false;
+            message.Index = index;
+            if (index != CounterSlice)
+            {
+                message.OpenScreen = false;
+            }
+            BroadcastState?.Invoke(message);
+        }
+
+        private static ReportStateMessage BuildState(GameReportDataCollect r, bool openScreen, bool full = false)
         {
             var msg = new ReportStateMessage
             {
@@ -345,7 +358,8 @@ namespace CardShopCoop.Sync
             var reviews = CPlayerData.m_CustomerReviewDataList;
             msg.ReviewCount = CPlayerData.m_CustomerReviewCount;
             msg.ReviewScoreAverage = CPlayerData.m_CustomerReviewScoreAverage;
-            int n = Mathf.Min(reviews != null ? reviews.Count : 0, ReviewTail);
+            int maxReviews = full ? 50 : ReviewTail;
+            int n = Mathf.Min(reviews != null ? reviews.Count : 0, maxReviews);
             for (int i = 0; i < n; i++)
             {
                 var rv = reviews[reviews.Count - n + i]; // oldest-first tail
@@ -379,48 +393,83 @@ namespace CardShopCoop.Sync
 
         private void ClientApplyInner(ReportStateMessage message)
         {
-            bool openScreen = message.OpenScreen;
-
-            var r = default(GameReportDataCollect);
-            r.customerVisited = message.CustomerVisited;
-            r.checkoutCount = message.CheckoutCount;
-            r.customerDisatisfied = message.CustomerDisatisfied;
-            r.customerBoughtItem = message.CustomerBoughtItem;
-            r.customerBoughtCard = message.CustomerBoughtCard;
-            r.customerPlayed = message.CustomerPlayed;
-            r.storeExpGained = message.StoreExpGained;
-            r.storeLevelGained = message.StoreLevelGained;
-            r.itemAmountSold = message.ItemAmountSold;
-            r.cardAmountSold = message.CardAmountSold;
-            r.totalPlayTableTime = message.TotalPlayTableTime;
-            r.totalItemEarning = message.TotalItemEarning;
-            r.totalCardEarning = message.TotalCardEarning;
-            r.totalPlayTableEarning = message.TotalPlayTableEarning;
-            r.supplyCost = message.SupplyCost;
-            r.upgradeCost = message.UpgradeCost;
-            r.employeeCost = message.EmployeeCost;
-            r.rentCost = message.RentCost;
-            r.billCost = message.BillCost;
-            r.cardPackOpened = message.CardPackOpened;
-            r.smellyCustomerCleaned = message.SmellyCustomerCleaned;
-            r.manualCheckoutCount = message.ManualCheckoutCount;
-            r.gemMintCardObtained = message.GemMintCardObtained;
-            // host truth replaces the joiner's near-zero local counters (his own pack
-            // opens etc. are folded into the host numbers only where the host saw them;
-            // m_GameReportDataCollectPermanent stays local so achievements keep their
-            // per-player pacing)
+            if (!message.Full && (message.Index < CounterSlice || message.Index >= SliceCount))
+                return;
+            bool full = message.Full;
+            int index = message.Index;
+            bool counters = full || index == CounterSlice;
+            bool money = full || index == MoneySlice;
+            bool review = full || index == ReviewSlice;
+            bool openScreen = counters && message.OpenScreen;
+            var r = CPlayerData.m_GameReportDataCollect;
+            if (counters)
+                r.customerVisited = message.CustomerVisited;
+            if (counters)
+                r.checkoutCount = message.CheckoutCount;
+            if (counters)
+                r.customerDisatisfied = message.CustomerDisatisfied;
+            if (counters)
+                r.customerBoughtItem = message.CustomerBoughtItem;
+            if (counters)
+                r.customerBoughtCard = message.CustomerBoughtCard;
+            if (counters)
+                r.customerPlayed = message.CustomerPlayed;
+            if (counters)
+                r.storeExpGained = message.StoreExpGained;
+            if (counters)
+                r.storeLevelGained = message.StoreLevelGained;
+            if (counters)
+                r.itemAmountSold = message.ItemAmountSold;
+            if (counters)
+                r.cardAmountSold = message.CardAmountSold;
+            if (money)
+                r.totalPlayTableTime = message.TotalPlayTableTime;
+            if (money)
+                r.totalItemEarning = message.TotalItemEarning;
+            if (money)
+                r.totalCardEarning = message.TotalCardEarning;
+            if (money)
+                r.totalPlayTableEarning = message.TotalPlayTableEarning;
+            if (money)
+                r.supplyCost = message.SupplyCost;
+            if (money)
+                r.upgradeCost = message.UpgradeCost;
+            if (money)
+                r.employeeCost = message.EmployeeCost;
+            if (money)
+                r.rentCost = message.RentCost;
+            if (money)
+                r.billCost = message.BillCost;
+            if (counters)
+                r.cardPackOpened = message.CardPackOpened;
+            if (counters)
+                r.smellyCustomerCleaned = message.SmellyCustomerCleaned;
+            if (counters)
+                r.manualCheckoutCount = message.ManualCheckoutCount;
+            if (counters)
+                r.gemMintCardObtained = message.GemMintCardObtained;
             CPlayerData.m_GameReportDataCollect = r;
 
+            if (!review)
+                goto ApplyOpen;
             int totalCount = message.ReviewCount;
             float average = message.ReviewScoreAverage;
-            var entries = message.Reviews;
+            var entries = message.Reviews ?? new List<ReportReviewEntry>();
             var reviews = CPlayerData.m_CustomerReviewDataList;
-            if (_reviewSeq < 0)
-                _reviewSeq = CPlayerData.m_CustomerReviewCount; // join baseline = the save
-            int firstSeq = totalCount - entries.Count + 1; // sequence number of tail[0]
+            if (full)
+            {
+                if (reviews != null)
+                    reviews.Clear();
+                _reviewSeq = Mathf.Max(0, totalCount - entries.Count);
+            }
+            else if (_reviewSeq < 0)
+                _reviewSeq = CPlayerData.m_CustomerReviewCount;
+            int firstSeq = totalCount - entries.Count + 1;
             for (int i = 0; i < entries.Count; i++)
             {
                 var e = entries[i];
+                if (e == null)
+                    continue;
                 var rv = new CustomerReviewData();
                 rv.customerReviewType = (ECustomerReviewType)e.CustomerReviewType;
                 rv.starLevel = e.StarLevel;
@@ -429,28 +478,28 @@ namespace CardShopCoop.Sync
                 rv.day = e.Day;
                 rv.hour = e.Hour;
                 rv.minute = e.Minute;
-                // host id -> ours (already translated by the DTO deserialize); a review about
-                // an item from a pack only the host has reads back as EItemType.None, which
-                // the phone's review row renders as no icon - the review text itself is
-                // unaffected
                 rv.itemType = e.ItemType;
                 rv.customerName = e.CustomerName;
                 if (firstSeq + i > _reviewSeq && reviews != null)
-                    reviews.Add(rv); // in place: CustomerReviewManager aliases this list
+                    reviews.Add(rv);
             }
             if (totalCount > _reviewSeq)
                 _reviewSeq = totalCount;
             CPlayerData.m_CustomerReviewCount = totalCount;
             CPlayerData.m_CustomerReviewScoreAverage = average;
             if (reviews != null)
+            {
                 while (reviews.Count > 50)
-                    reviews.RemoveAt(0); // vanilla cap
+                    reviews.RemoveAt(0);
+            }
 
+        ApplyOpen:
             if (openScreen)
             {
-                s_clientOpenReport = r; // what CloseScreen must file into the history
+                s_clientOpenReport = CPlayerData.m_GameReportDataCollect;
                 TryOpenReportScreen();
             }
+            return;
         }
 
         private static void TryOpenReportScreen()

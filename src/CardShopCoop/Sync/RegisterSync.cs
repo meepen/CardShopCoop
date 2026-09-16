@@ -45,7 +45,7 @@ namespace CardShopCoop.Sync
         public const byte OpGiveChange = 7;
         public const byte OpFinishCash = 8;
         public const byte OpFinishCard = 9;
-        // host -> client catch-up (OnFullyJoin): zero a counter's change controls, then replay
+        // host -> client catch-up (FullUpdate): zero a counter's change controls, then replay
         // its clicks. Catch-up clicks bypass the own-echo skip and may arrive before the cart
         // that opens the change phase, so the client defers them until GivingChange.
         public const byte OpChangeReset = 10;
@@ -171,7 +171,14 @@ namespace CardShopCoop.Sync
         }
 
         // ---------------- host ----------------
-        private float _stateTimer;
+        // Gradual re-assertion: state is one counter per slice; carts are one counter per slice.
+        // A complete pass is bounded by the respective cycle windows, never a full broadcast.
+        private const float SweepSliceSeconds = 1f;
+        private const float StateSweepCycleSeconds = 5f;
+        private const float CartSweepCycleSeconds = 10f;
+        private float _sweepTimer;
+        private int _stateSweepCursor;
+        private int _cartSweepCursor;
         private readonly Dictionary<int, int> _guestManned = new Dictionary<int, int>(); // counter idx -> conn id
         private readonly Dictionary<int, int> _cartCustomer = new Dictionary<int, int>(); // counter idx -> customer instance
         // Register state is latency-sensitive, but it does not need a full 250-counter
@@ -190,6 +197,8 @@ namespace CardShopCoop.Sync
         private int _localManned = -1;                            // counter the local player is manning (or -1)
         private readonly Dictionary<int, byte> _mannedBy = new Dictionary<int, byte>();     // counter idx -> 0/1/2
         private readonly Dictionary<int, int> _cartGen = new Dictionary<int, int>();        // counter idx -> applied customer token
+        private readonly Dictionary<int, ushort> _cartCustomerIndex = new Dictionary<int, ushort>();
+        private readonly Dictionary<int, int> _cartCustomerGeneration = new Dictionary<int, int>();
         private readonly Dictionary<int, string> _cartScanSignature = new Dictionary<int, string>();
         private readonly Dictionary<int, int> _sourceIndex = new Dictionary<int, int>();    // counter idx -> served customer list index
         private readonly Dictionary<int, double> _authoritativeTotal = new Dictionary<int, double>();
@@ -204,7 +213,9 @@ namespace CardShopCoop.Sync
 
         public override void Reset()
         {
-            _stateTimer = 0f;
+            _sweepTimer = 0f;
+            _stateSweepCursor = 0;
+            _cartSweepCursor = 0;
             _cartPollTimer = 0f;
             _guestManned.Clear();
             _cartCustomer.Clear();
@@ -212,6 +223,8 @@ namespace CardShopCoop.Sync
             _localManned = -1;
             _mannedBy.Clear();
             _cartGen.Clear();
+            _cartCustomerIndex.Clear();
+            _cartCustomerGeneration.Clear();
             _cartScanSignature.Clear();
             // _sourceIndex is cleared inside TeardownCarriers after it detaches each mirror.
             _authoritativeTotal.Clear();
@@ -226,9 +239,12 @@ namespace CardShopCoop.Sync
 
         public override void ForceResend()
         {
+            _sweepTimer = 0f;
+            _stateSweepCursor = 0;
+            _cartSweepCursor = 0;
             _cartCustomer.Clear(); // force fresh RegisterCart digests on the next host tick
             _cartSignature.Clear();
-            _cartPollTimer = CartPollInterval;
+            _cartPollTimer = 0f;
         }
 
         /// <summary>Host: one connection just finished joining. Reconstruct any checkout that is
@@ -242,16 +258,27 @@ namespace CardShopCoop.Sync
         /// cannot lose them. Nothing here is broadcast - existing clients already have the state.
         /// Bounded: only counters actually in the change phase, and m_GivenAmount is capped by
         /// vanilla, so the burst is normally a handful of clicks.</summary>
-        public override void OnFullyJoin(int connId)
+        public override void FullUpdate(int connId)
         {
             if (CoopCore.Role != CoopRole.Host || SendToClient == null)
                 return;
             var sm = Sm();
             if (sm == null || sm.m_CashierCounterList == null)
                 return;
+            var state = WriteStates();
+            if (state != null)
+            {
+                state.Full = true;
+                state.Index = -1;
+                SendToClient(connId, state);
+            }
             var cart = WriteCarts();
             if (cart != null)
+            {
+                cart.Full = true;
+                cart.Index = -1;
                 SendToClient(connId, cart);
+            }
             int counters = 0, clicks = 0;
             for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
             {
@@ -260,7 +287,7 @@ namespace CardShopCoop.Sync
                     continue;
                 if (counter.m_CashierCounterState != ECashierCounterState.GivingChange)
                     continue;
-                // OnFullyJoin also fires from heal paths, not just a fresh join. Never reset or
+                // FullUpdate also fires from heal paths, not just a fresh join. Never reset or
                 // replay a counter the requesting connection mans - that would wipe their real
                 // in-flight change. A fresh joiner owns nothing, so join catch-up is unaffected.
                 if (_guestManned.TryGetValue(i, out int ownerConn) && ownerConn == connId)
@@ -314,6 +341,54 @@ namespace CardShopCoop.Sync
             base.Dispose();
             if (ReferenceEquals(_live, this))
                 ClearLive();
+        }
+
+        /// <summary>Gradual host re-assertion. Index is the counter ordinal; each invocation
+        /// advances one state and one cart batch. The state/cart full-pass windows are about
+        /// 5 and 10 seconds respectively; the one-second minimum tick prevents tiny shops
+        /// from returning to the old 0.5-second cadence.</summary>
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || !CoopCore.InSessionWorld
+                || (BroadcastState == null && BroadcastCart == null))
+                return;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
+                return;
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
+            {
+                var sm = Sm();
+                if (sm == null || sm.m_CashierCounterList == null || sm.m_CashierCounterList.Count == 0)
+                    return;
+                int total = Mathf.Min(sm.m_CashierCounterList.Count, 250);
+                int stateBatch = Mathf.Max(1, Mathf.CeilToInt(total / (StateSweepCycleSeconds / SweepSliceSeconds)));
+                int cartBatch = Mathf.Max(1, Mathf.CeilToInt(total / (CartSweepCycleSeconds / SweepSliceSeconds)));
+                var stateMessage = new RegisterStateMessage { Full = false, Index = -1 };
+                for (int n = 0; n < stateBatch; n++)
+                {
+                    int i = _stateSweepCursor++ % total;
+                    var slice = WriteStates(i);
+                    if (slice != null)
+                    {
+                        stateMessage.Entries.AddRange(slice.Entries);
+                    }
+                }
+                if (stateMessage.Entries.Count > 0 && BroadcastState != null)
+                    BroadcastState(stateMessage);
+                var cartMessage = new RegisterCartMessage { Full = false, Index = -1 };
+                for (int n = 0; n < cartBatch; n++)
+                {
+                    int i = _cartSweepCursor++ % total;
+                    var slice = WriteCarts(i);
+                    if (slice != null)
+                    {
+                        cartMessage.Entries.AddRange(slice.Entries);
+                    }
+                }
+                if (cartMessage.Entries.Count > 0 && BroadcastCart != null)
+                    BroadcastCart(cartMessage);
+            });
         }
 
         /// <summary>Host: a client disconnected - release whatever it was manning.</summary>
@@ -476,7 +551,19 @@ namespace CardShopCoop.Sync
         public static void ManningEnterPostfix(InteractableCashierCounter __instance)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+            if (t == null || __instance == null)
+                return;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                var hostSm = t.Sm();
+                int hostIdx = hostSm == null ? -1 : hostSm.m_CashierCounterList.IndexOf(__instance);
+                if (hostIdx >= 0)
+                {
+                    t.SendStateNow(hostIdx);
+                }
+                return;
+            }
+            if (CoopCore.Role != CoopRole.Client)
                 return;
             if (!__instance.IsMannedByPlayer())
                 return; // the block prefix stopped the vanilla entry
@@ -502,13 +589,20 @@ namespace CardShopCoop.Sync
         public static void ManningExitPostfix(InteractableCashierCounter __instance)
         {
             var t = _live;
-            if (t == null || CoopCore.Role != CoopRole.Client || __instance == null)
+            if (t == null || __instance == null)
                 return;
             var sm = t.Sm();
             if (sm == null)
                 return;
             int idx = sm.m_CashierCounterList.IndexOf(__instance);
             if (idx < 0)
+                return;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                t.SendStateNow(idx);
+                return;
+            }
+            if (CoopCore.Role != CoopRole.Client)
                 return;
             t.ReleaseLocalClaim(idx);
             CoopPlugin.Log.LogDebug($"RegisterSync client: left counter {idx}");
@@ -822,13 +916,11 @@ namespace CardShopCoop.Sync
         {
             if (!inGame)
                 return;
-            _stateTimer += dt;
             _cartPollTimer += dt;
             var sm = Sm();
             if (sm == null || sm.m_CashierCounterList == null)
                 return;
 
-            bool cartChanged = false;
             if (_cartPollTimer >= CartPollInterval)
             {
                 _cartPollTimer -= CartPollInterval;
@@ -847,31 +939,19 @@ namespace CardShopCoop.Sync
                         continue;
                     _cartCustomer[i] = custId;
                     _cartSignature[i] = signature;
-                    cartChanged = true;
+                    SendCartNow(i);
                 }
-            }
-            if (cartChanged)
-            {
-                var cartMsg = WriteCarts();
-                if (cartMsg != null)
-                    BroadcastCart?.Invoke(cartMsg);
-            }
-
-            if (_stateTimer >= 0.5f)
-            {
-                _stateTimer -= 0.5f;
-                var stateMsg = WriteStates();
-                if (stateMsg != null)
-                    BroadcastState?.Invoke(stateMsg);
             }
         }
 
-        private RegisterCartMessage WriteCarts()
+        private RegisterCartMessage WriteCarts(int onlyIndex = -1)
         {
             var sm = Sm();
             var message = new RegisterCartMessage();
             for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
             {
+                if (onlyIndex >= 0 && i != onlyIndex)
+                    continue;
                 var counter = sm.m_CashierCounterList[i];
                 if (counter == null)
                     continue;
@@ -924,9 +1004,42 @@ namespace CardShopCoop.Sync
             return message.Entries.Count > 0 ? message : null;
         }
 
+        private void SendStateNow(int index)
+        {
+            var sm = Sm();
+            if (sm == null || BroadcastState == null || index < 0 || index >= sm.m_CashierCounterList.Count)
+                return;
+            var full = WriteStates(index);
+            if (full == null)
+                return;
+            for (int i = 0; i < full.Entries.Count; i++)
+                if (full.Entries[i].Index == index)
+                {
+                    BroadcastState(new RegisterStateMessage
+                    {
+                        Full = false,
+                        Index = index,
+                        Entries = new List<RegisterStateEntry> { full.Entries[i] }
+                    });
+                    return;
+                }
+        }
+
+        private void SendCartNow(int index)
+        {
+            var msg = WriteCarts(index);
+            if (msg != null && BroadcastCart != null)
+                BroadcastCart(new RegisterCartMessage
+                {
+                    Full = false,
+                    Index = index,
+                    Entries = msg.Entries
+                });
+        }
+
         private static int CustomerListIndex(Customer cust)
         {
-            var cm = Object.FindObjectOfType<CustomerManager>();
+            var cm = SceneRef<CustomerManager>.Get();
             if (cm == null)
                 return 0;
             var list = cm.GetCustomerList();
@@ -997,12 +1110,14 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private RegisterStateMessage WriteStates()
+        private RegisterStateMessage WriteStates(int onlyIndex = -1)
         {
             var sm = Sm();
             var message = new RegisterStateMessage();
             for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
             {
+                if (onlyIndex >= 0 && i != onlyIndex)
+                    continue;
                 var counter = sm.m_CashierCounterList[i];
                 if (counter == null)
                     continue;
@@ -1023,7 +1138,11 @@ namespace CardShopCoop.Sync
         {
             var state = WriteStates();
             if (state != null)
+            {
+                state.Full = true;
+                state.Index = -1;
                 BroadcastState?.Invoke(state);
+            }
         }
 
         // ---------------- host op application ----------------
@@ -1144,9 +1263,14 @@ namespace CardShopCoop.Sync
                 }
                 catch (System.Exception e) { Swallow.Log(e); }
                 _cartSignature.Remove(idx);
-                var cartMsg = WriteCarts();
+                var cartMsg = WriteCarts(idx);
                 if (cartMsg != null)
-                    BroadcastCart?.Invoke(cartMsg);
+                    BroadcastCart?.Invoke(new RegisterCartMessage
+                    {
+                        Full = false,
+                        Index = idx,
+                        Entries = cartMsg.Entries
+                    });
                 CoopPlugin.Log.LogDebug($"RegisterSync host: guest {connId} manned counter {idx}");
                 return true;
             }
@@ -1271,11 +1395,16 @@ namespace CardShopCoop.Sync
         /// <summary>Client: the host's authoritative cart for a counter - rebuild a real scannable bag.</summary>
         public void ClientApplyCart(RegisterCartMessage message)
         {
+            if (message == null)
+                return;
             var entries = message.Entries;
+            var seen = message.Full ? new HashSet<int>() : null;
             for (int i = 0; i < entries.Count; i++)
             {
                 var entry = entries[i];
                 int idx = entry.Index;
+                if (seen != null)
+                    seen.Add(idx);
                 int cid = entry.CustomerId;
                 if (cid == 0)
                 {
@@ -1286,6 +1415,21 @@ namespace CardShopCoop.Sync
                     _deferredChange.Remove(idx);
                     if (_cartGen.Remove(idx))
                         ResetClientCounter(idx);
+                    _cartCustomerIndex.Remove(idx);
+                    _cartCustomerGeneration.Remove(idx);
+                    continue;
+                }
+                // A counter slice is an authoritative complete cart for that customer. Reject
+                // malformed/truncated list payloads before touching the client's mirror; omission
+                // is valid only at the message's counter level, never inside a cart.
+                if (entry.ItemTypes == null || entry.ItemPrices == null || entry.ItemScanned == null
+                    || entry.ItemTypes.Count != entry.ItemPrices.Count
+                    || entry.ItemTypes.Count != entry.ItemScanned.Count
+                    || entry.Cards == null || entry.CardPrices == null || entry.CardScanned == null
+                    || entry.Cards.Count != entry.CardPrices.Count
+                    || entry.Cards.Count != entry.CardScanned.Count)
+                {
+                    CoopPlugin.Log.LogWarning($"RegisterSync client: rejected malformed cart slice {idx}");
                     continue;
                 }
                 var c = new Cart
@@ -1312,6 +1456,15 @@ namespace CardShopCoop.Sync
                 };
                 c.ScanSignature = BuildCartSignature(c);
                 ApplyCart(c, cid);
+            }
+            if (seen != null)
+            {
+                var stale = new List<int>();
+                foreach (int idx in _cartGen.Keys)
+                    if (!seen.Contains(idx))
+                        stale.Add(idx);
+                for (int i = 0; i < stale.Count; i++)
+                    ResetClientCounter(stale[i]);
             }
         }
 
@@ -1420,7 +1573,7 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Client: zero a counter's change controls/scalars without changing its phase,
-        /// used by the OnFullyJoin catch-up primer.</summary>
+        /// used by the FullUpdate catch-up primer.</summary>
         private void ClearClientChange(int idx)
         {
             _deferredChange.Remove(idx);
@@ -1464,7 +1617,11 @@ namespace CardShopCoop.Sync
                 return;
             // only re-build when this counter's customer actually changed; an unrelated
             // counter's cart broadcast must never reset a sale in progress elsewhere
-            if (_cartGen.TryGetValue(c.Index, out int prev) && prev == cid)
+            if (_cartGen.TryGetValue(c.Index, out int prev) && prev == cid
+                && _cartCustomerIndex.TryGetValue(c.Index, out ushort previousIndex)
+                && previousIndex == c.CustomerIndex
+                && _cartCustomerGeneration.TryGetValue(c.Index, out int previousGeneration)
+                && previousGeneration == c.CustomerGeneration)
             {
                 if (!CartContentsMatch(c))
                 {
@@ -1494,12 +1651,19 @@ namespace CardShopCoop.Sync
                 ApplyAuthoritativeTotal(c);
                 return;
             }
-            _cartGen[c.Index] = cid;
-            _cartScanSignature[c.Index] = c.ScanSignature;
+            // A changed customer token is a replacement, not an update. Tear down the old
+            // carrier before resolving the new identity so a recycled list slot can never
+            // inherit the previous customer's mirror.
+            if (_cartGen.ContainsKey(c.Index))
+                Teardown(c.Index);
 
-            var carrier = GetCarrier(c.Index, c.CustomerIndex);
+            var carrier = GetCarrier(c.Index, c.CustomerIndex, c.CustomerGeneration);
             if (carrier == null)
                 return;
+            _cartGen[c.Index] = cid;
+            _cartCustomerIndex[c.Index] = c.CustomerIndex;
+            _cartCustomerGeneration[c.Index] = c.CustomerGeneration;
+            _cartScanSignature[c.Index] = c.ScanSignature;
             AllowClientCustomerLifecycle = true;
             try
             {
@@ -1572,20 +1736,26 @@ namespace CardShopCoop.Sync
             for (int i = 0; i < c.ItemTypes.Count; i++)
             {
                 var item = SpawnBagItem(counter, ctf, placePos, c.ItemTypes[i], c.ItemPrices[i], carrier, i);
-                if (item != null)
+                if (item == null)
                 {
-                    _itemBag[item] = i;
-                    _itemCounter[item] = c.Index;
+                    CoopPlugin.Log.LogWarning($"RegisterSync client: aborting cart {c.Index}; item {i} failed to spawn");
+                    Teardown(c.Index);
+                    return;
                 }
+                _itemBag[item] = i;
+                _itemCounter[item] = c.Index;
             }
             for (int j = 0; j < c.Cards.Count; j++)
             {
                 var card = SpawnBagCard(counter, ctf, placePos, c.Cards[j], c.CardPrices[j], carrier, j);
-                if (card != null)
+                if (card == null)
                 {
-                    _cardBag[card] = j;
-                    _cardCounter[card] = c.Index;
+                    CoopPlugin.Log.LogWarning($"RegisterSync client: aborting cart {c.Index}; card {j} failed to spawn");
+                    Teardown(c.Index);
+                    return;
                 }
+                _cardBag[card] = j;
+                _cardCounter[card] = c.Index;
             }
             ApplyScannedItems(c);
             ApplyAuthoritativePayment(c);
@@ -1920,24 +2090,19 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private Customer GetCarrier(int idx, ushort customerIndex)
+        private Customer GetCarrier(int idx, ushort customerIndex, int customerGeneration)
         {
-            if (_carrier.TryGetValue(idx, out var c) && c != null)
-                return c;
             Customer carrier = null;
             var cm = Object.FindObjectOfType<CustomerManager>();
             if (cm != null)
             {
                 var list = cm.GetCustomerList();
-                if (customerIndex < list.Count && IsCarrierAvailable(list[customerIndex]))
+                // The host's CustomerIndex + CustomerGeneration is the only valid identity.
+                // Never fall back to another pooled customer: doing so can bind a partial to a
+                // recycled list slot and write the wrong customer's cart into the counter.
+                if (customerIndex < list.Count && IsCarrierAvailable(list[customerIndex])
+                    && NpcSync.GetCustomerGeneration(list[customerIndex]) == customerGeneration)
                     carrier = list[customerIndex];
-                if (carrier == null)
-                    for (int i = 0; i < list.Count; i++)
-                        if (IsCarrierAvailable(list[i]))
-                        {
-                            carrier = list[i];
-                            break;
-                        }
             }
             _carrier[idx] = carrier;
             return carrier;
@@ -1953,10 +2118,15 @@ namespace CardShopCoop.Sync
         /// register visuals come from the real RegisterCart reconstruction, so no fake mirror.)</summary>
         public void ClientApplyState(RegisterStateMessage message)
         {
+            if (message == null)
+                return;
             var entries = message.Entries;
+            var seen = message.Full ? new HashSet<byte>() : null;
             for (int i = 0; i < entries.Count; i++)
             {
                 byte idx = entries[i].Index;
+                if (seen != null)
+                    seen.Add(idx);
                 byte manned = entries[i].Manned;
                 int owner = entries[i].OwnerConnId;
                 if (manned != 0)
@@ -1969,6 +2139,15 @@ namespace CardShopCoop.Sync
                     CoopPlugin.Log.LogInfo($"RegisterSync client: counter {idx} claim rejected; releasing local station");
                     ForceExitManned();
                 }
+            }
+            if (seen != null)
+            {
+                var stale = new List<int>();
+                foreach (var kv in _mannedBy)
+                    if (!seen.Contains((byte)kv.Key))
+                        stale.Add(kv.Key);
+                for (int i = 0; i < stale.Count; i++)
+                    _mannedBy.Remove(stale[i]);
             }
         }
 
@@ -2052,6 +2231,8 @@ namespace CardShopCoop.Sync
             }
             _carrier.Remove(idx);
             _cartGen.Remove(idx);
+            _cartCustomerIndex.Remove(idx);
+            _cartCustomerGeneration.Remove(idx);
             _cartScanSignature.Remove(idx);
             _authoritativeTotal.Remove(idx);
             if (_sourceIndex.TryGetValue(idx, out int src))

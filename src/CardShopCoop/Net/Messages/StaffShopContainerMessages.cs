@@ -48,10 +48,19 @@ namespace CardShopCoop.Net.Messages
 
     }
 
-    // StaffState (host -> client): [byte count][count x StaffEntry].
+    // StaffState (host -> client): the worker roster. Full = true carries the complete list; a
+    // partial carries ONE worker slice (Index) so a change is pushed without a full resend.
     [NetworkMessage(MsgType.StaffState, Policy = MessagePolicy.ClientOnlyInGame)]
     public sealed class StaffStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE roster (join catch-up / explicit re-baseline). False = one
+        /// worker slice identified by <see cref="Index"/>; workers omitted from a partial are
+        /// UNCHANGED, never fired.</summary>
+        public bool Full = true;
+
+        /// <summary>Worker index for a partial slice; -1 for a full message.</summary>
+        public int Index = -1;
+
         public List<StaffEntry> Entries = new List<StaffEntry>();
 
         public MsgType Type
@@ -60,20 +69,6 @@ namespace CardShopCoop.Net.Messages
             {
                 return MsgType.StaffState;
             }
-        }
-
-
-
-        private static byte PackFlags(StaffEntry e)
-        {
-            return (byte)((e.Hired ? 1 : 0)
-                | (e.HasData ? 2 : 0)
-                | (e.BonusBoosted ? 4 : 0)
-                | (e.FillNoLabel ? 8 : 0)
-                | (e.RoundUpPrice ? 16 : 0)
-                | (e.RoundUpCardPrice ? 32 : 0)
-                | (e.AvoidSetCardPrice ? 64 : 0)
-                | (e.AvoidSetCardPriceRestock ? 128 : 0));
         }
     }
 
@@ -140,6 +135,14 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.ShopState, Policy = MessagePolicy.ClientOnlyInGame)]
     public sealed class ShopStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public ShopBillEntry Rent = new ShopBillEntry();
         public ShopBillEntry Electric = new ShopBillEntry();
         public ShopBillEntry Employee = new ShopBillEntry();
@@ -241,6 +244,14 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.SettingsState, Policy = MessagePolicy.ClientOnlyInGame)]
     public sealed class SettingsStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public List<bool> WallUnlocked = new List<bool>();
         public List<bool> FloorUnlocked = new List<bool>();
         public List<bool> CeilingUnlocked = new List<bool>();
@@ -313,6 +324,14 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.ContainerState, Policy = MessagePolicy.ClientOnlyInGame)]
     public sealed class ContainerStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public List<ContainerRecord> Records = new List<ContainerRecord>();
 
         public MsgType Type

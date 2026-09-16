@@ -93,7 +93,15 @@ namespace CardShopCoop.Sync
         private float _timer;
         private readonly HashSet<string> _snapshotErrors = new HashSet<string>();
         private int _lastHash;
-        private float _heal;
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private bool _hasBaseline;
+        private bool _rosterComplete;
+        private int _sweepFrame = -1;
+
+        public Action<Net.Messages.PopStateMessage> OnHostSlice;
+        public Action<int, INetMessage> SendToClient;
+        private const float SweepSliceSeconds = 0.5f;
 
         // Time-sliced scan state: the roster is built in two passes (hash, then build),
         // each spread over frames so a large shop never walks everything in one frame.
@@ -104,6 +112,7 @@ namespace CardShopCoop.Sync
         private int _scanHash;
         private bool _sawError;
         private List<List<Entry>> _all;
+        private readonly HashSet<int> _pendingFullConnections = new HashSet<int>();
 
         public Action<List<List<Entry>>> OnHostSnapshot;
 
@@ -114,7 +123,19 @@ namespace CardShopCoop.Sync
 
         public override string Name => "population";
 
-        public override void ForceResend() => ForceNextTick();
+        /// <summary>Rewind the gradual re-assertion only. Immediate structure notifications use
+        /// <see cref="ForceNextTick"/>; a router heal must not broadcast a full roster.</summary>
+        public override void ForceResend()
+        {
+            if (_all == null)
+            {
+                ForceNextTick();
+                return;
+            }
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _sweepFrame = -1;
+        }
 
         public override void Reset()
         {
@@ -124,11 +145,17 @@ namespace CardShopCoop.Sync
             _snapshotErrors.Clear();
             _timer = -1.1f; // staggered phase vs the other snapshot engines
             _lastHash = 0;
-            _heal = 0f;
+            _hasBaseline = false;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _sweepFrame = -1;
             _scanning = false;
             _building = false;
             _groups = null;
             _all = null;
+            _rosterComplete = false;
+            _idsThisTick.Clear();
+            _pendingFullConnections.Clear();
             _cursor.Reset();
         }
 
@@ -136,6 +163,9 @@ namespace CardShopCoop.Sync
         {
             _timer = 3f;
             _lastHash = 0;
+            _hasBaseline = false;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
             _idsThisTick.Clear();
             _scanning = false;
         }
@@ -151,6 +181,9 @@ namespace CardShopCoop.Sync
         {
             if (!active)
                 return;
+            // This stage runs before all index-keyed content stages in CoopCore. Keep the
+            // population-first ordering even when the gradual sweep is due.
+            PeriodicUpdate(dt);
             _timer += dt;
             if (!_scanning)
             {
@@ -184,15 +217,15 @@ namespace CardShopCoop.Sync
                         _scanning = false; // retry the complete roster on the next cadence
                         return;
                     }
-                    _heal += 3f;
-                    if (_scanHash == _lastHash && _heal < 30f)
+                    if (_hasBaseline && _scanHash == _lastHash)
                     {
                         _scanning = false;
                         return;
                     }
                     _lastHash = _scanHash;
-                    _heal = 0f;
+                    _hasBaseline = true;
                     _all = new List<List<Entry>>(KindCount);
+                    _rosterComplete = false;
                     for (int k = 0; k < KindCount; k++)
                         _all.Add(new List<Entry>(_groups[k]?.Count ?? 0));
                     _building = true;
@@ -202,9 +235,14 @@ namespace CardShopCoop.Sync
                 _cursor.Scan(_groups, BuildVisit);
                 if (_cursor.Done)
                 {
+                    _building = false;
                     _scanning = false;
                     if (!_sawError)
+                    {
+                        _rosterComplete = true;
                         OnHostSnapshot?.Invoke(_all);
+                        FlushPendingFullUpdates();
+                    }
                 }
             }
             catch (Exception e)
@@ -278,6 +316,109 @@ namespace CardShopCoop.Sync
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning($"PopulationSync kind {kind}: {e.Message}"); }
             }
+        }
+
+        /// <summary>Client: apply a complete roster or merge exactly one kind slice. A partial
+        /// never enters the complete reconciliation path: these lists are index-keyed, so
+        /// omitted kinds must not be interpreted as removed entries.</summary>
+        public void ClientApply(Net.Messages.PopStateMessage message)
+        {
+            if (message == null || message.Entries == null)
+                return;
+            if (message.Full)
+            {
+                ClientApply(message.Entries);
+                return;
+            }
+            int kind = message.Index;
+            if (kind < 0 || kind >= KindCount)
+                return;
+            List<Entry> slice;
+            if (message.Entries.Count == 1)
+            {
+                slice = message.Entries[0];
+            }
+            else if (message.Entries.Count == KindCount)
+            {
+                slice = message.Entries[kind];
+            }
+            else
+            {
+                return;
+            }
+            if (slice == null)
+                return;
+            var sm = Sm();
+            if (sm == null)
+                return;
+            try
+            {
+                ReconcileKind(sm, kind, slice);
+            }
+            catch (Exception e) { CoopPlugin.Log.LogWarning($"PopulationSync kind {kind}: {e.Message}"); }
+        }
+
+        /// <summary>Re-assert one kind per slice unconditionally. Index is a kind ordinal, not a
+        /// list element; the sweep intentionally has no hash/dirty gate so a lost, unchanged
+        /// slice is repaired on the next pass.</summary>
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || !CoopCore.InSessionWorld || OnHostSlice == null)
+                return;
+            if (_sweepFrame == Time.frameCount)
+                return;
+            _sweepFrame = Time.frameCount;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds || _scanning || _building || !_rosterComplete
+                || _all == null || _all.Count != KindCount)
+                return;
+            _sweepTimer = 0f;
+            int kind = _sweepCursor++ % KindCount;
+            var envelope = new Net.Messages.PopStateMessage
+            {
+                Full = false,
+                Index = kind,
+                Entries = new List<List<Entry>>(KindCount),
+            };
+            envelope.Entries.Add(_all[kind]);
+            Guarded("sweep", () => OnHostSlice(envelope));
+        }
+
+        /// <summary>Host: complete roster to one connection; never called by a timer.</summary>
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null)
+                return;
+            if (_all == null)
+            {
+                _pendingFullConnections.Add(connId);
+                ForceNextTick();
+                return;
+            }
+            SendFullUpdate(connId);
+        }
+
+        private void SendFullUpdate(int connId)
+        {
+            var copy = new List<List<Entry>>(KindCount);
+            for (int i = 0; i < KindCount; i++)
+                copy.Add(new List<Entry>(_all[i]));
+            Guarded("full", () => SendToClient(connId, new Net.Messages.PopStateMessage
+            {
+                Full = true,
+                Index = -1,
+                Entries = copy
+            }));
+        }
+
+        private void FlushPendingFullUpdates()
+        {
+            if (SendToClient == null || _pendingFullConnections.Count == 0)
+                return;
+            var pending = new List<int>(_pendingFullConnections);
+            _pendingFullConnections.Clear();
+            for (int i = 0; i < pending.Count; i++)
+                SendFullUpdate(pending[i]);
         }
 
         private static void ReconcileKind(ShelfManager sm, int kind, List<Entry> want)

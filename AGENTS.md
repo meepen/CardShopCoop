@@ -30,8 +30,17 @@ unchanged. The current plugin identity is `com.zwhit.cardshopcoop`, while the sh
 DLL remains `CardShopCoop.dll`. The handshake also requires exact plugin-version equality,
 so peers normally must run the identical CardShopCoop version.
 
-The mod is tested only against the newest game version available when documented here:
-**TCG Card Shop Simulator 1.00** (Unity 6000.0.66f2).
+The mod must work on **both** live game builds from one DLL:
+
+- **The public/default branch** is the legacy build (Unity 2021.3.38f1, Steam buildid `25315983`).
+  It has **no** `StoredBoxRecord`/`PackageBoxCandidate`/animation-instancing, and warehouse storage
+  is live `InteractablePackagingBox_Item` objects (the "live backend"). Baseline:
+  `decompiled/1.0-25315983`.
+- **The `1.00` / `1.0newrender` beta** is Unity 6000.0.66f2 and stores warehouse boxes as
+  `StoredBoxRecord`s (the "record backend"). Baseline: `decompiled/1.00`.
+
+Anything present in only one of them must be reached by reflection (`WarehouseBoxSync.Probe` is the
+house pattern), never a direct reference, or the DLL will fail to load or run on the other build.
 
 `CHANGELOG.md` is maintained in the repository as the player-facing release record. Add a
 section for every release using a version heading and a short, plain-language summary in the
@@ -40,6 +49,61 @@ mention important safety or compatibility notes, and thank reporters by name whe
 Keep implementation details out unless they explain a user-visible behavior. Git history and
 GitHub releases remain the authoritative exact-diff record. When the wire version or required
 mod set changes, end the release section with **Both players must update.**
+
+## Sync scheduling: no periodic full resends
+
+**Target state, and the rule for anything new.** We do **not** re-send a module's full state on a
+timer during normal play. A periodic full resend serializes and allocates the entire state and spikes
+bandwidth for every client at the same instant, which reads as hitches and needless traffic.
+
+This applies to a module's *full* state. Two things that look similar are not covered and are
+correct as they are: `BoxEngine`'s 10 Hz dirty-list flush (only changed boxes, and the only full send
+is a join/heal `RequestFullSnapshot`), and the 1 Hz client possession heartbeat (a crash-safety lease
+renewal, not a state resend).
+
+Instead:
+
+- **Push on change.** A game-side mutation fires a Harmony hook, which sends the new state right
+  there. Nothing is sent when nothing changed.
+- **Gradual re-assertion for eventual correctness.** `CoopModule.PeriodicUpdate(float delta)` runs
+  once per co-op frame for every module in the per-frame tick pipeline (it is not role-gated or
+  in-game-gated, so a module must guard itself). A module that wants a safety net re-asserts ONE
+  slice of its state per call, round-robin (the warehouse sends a single compartment every few
+  seconds), so the whole state refreshes over time without a burst. Keep it cheap - it runs every
+  frame and must do nothing on most of them.
+- **Full sends are per-connection, never periodic.** `CoopModule.FullUpdate(int connId)` sends a
+  module's complete state to ONE connection; that is the join catch-up / explicit re-baseline path.
+- `ForceResend()` stays the event-driven "our baseline is stale" trigger (join, heal request). It is
+  not a timer.
+
+When adding a synced subsystem, prefer change hooks plus a `PeriodicUpdate` slice over any
+interval-based full broadcast. A subsystem that genuinely needs a full periodic resend is an
+exception and must be justified in review.
+
+**Migration status.** These are migrated to change hooks + a bounded, **unconditional** round-robin
+slice sweep + a per-connection `FullUpdate`: `WarehouseBoxSync`, `StaffSync`, `ShopStateSync`,
+`SettingsSync`, `ReportSync`, `PlayTableSync`, `TournamentSync`, `GradingSync`, `TradeServe`,
+`ContainerSync`, `TvSync`, `WorldSync`, `CardShelfSync`, `ObjMoveSync`, `PopulationSync`,
+`RegisterSync`. No module constructs a `SnapshotGate` any more (the type is still defined in
+`CoopModule.cs`, now unused). The `CoopCore` light / card-price loops keep their own cadences and
+are the remaining backlog.
+
+Two rules that are easy to get wrong — both were, in that migration:
+
+- **The sweep must be UNCONDITIONAL.** It is the eventual-correctness safety net, so it re-sends its
+  slice even when nothing has changed since. A sweep gated on a change hash can never repair a
+  frame the client dropped: the host's recorded hash already matches, so that slice is never
+  re-sent and the client stays wrong until a rejoin. Push on change supplies the immediacy; the
+  sweep supplies the correctness.
+- **A "slice" must not serialize the whole state.** Payloads are JSON (`WireCodec`), which writes
+  every populated public field, so a slice builder that fills every field of a flat DTO turns every
+  "slice" into a full-state send — one module reached ~85 KB/s that way. Populate only the slice's
+  fields, populate none of the others, and merge only that slice's fields on the client. Where a
+  message carries an incomplete roster, the receiver must treat omission as "unchanged", never as
+  "removed".
+
+The per-module pass windows differ (from ~4 s for a small roster to ~30 s for the warehouse); a
+module whose state outgrows its slice budget lengthens its pass rather than sending a burst.
 
 ## Build and CI
 

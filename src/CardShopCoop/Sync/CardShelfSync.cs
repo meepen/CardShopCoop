@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 using UnityEngine;
 
 namespace CardShopCoop.Sync
@@ -98,7 +99,18 @@ namespace CardShopCoop.Sync
         private List<Entry> _scanChanges;
         private bool _sawError;
 
+        // The slice ordinal is the deterministic walk of active card-display compartments:
+        // CardShelf, CardItemCombiShelf, then TournamentPrizeShelf, in list/compartment order.
+        private const float SweepSliceSeconds = 0.75f;
+        private const float SweepCycleSeconds = 12f;
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private bool _forceSweepArmed;
+        private readonly List<Entry> _sweepEntries = new List<Entry>();
+
         public Action<List<Entry>> OnLocalChanges;
+        public Action<INetMessage> BroadcastState;
+        public Action<int, INetMessage> SendToClient;
 
         /// <summary>Client role: adopt unknown slots silently instead of reporting them
         /// (a joiner only reports transitions it witnessed against a known baseline -
@@ -117,7 +129,16 @@ namespace CardShopCoop.Sync
             base.Dispose();
         }
 
-        public override void ForceResend() => ForceNextTick();
+        public override void ForceResend()
+        {
+            ForceNextTick();
+            if (!_forceSweepArmed)
+            {
+                _sweepCursor = 0;
+                _forceSweepArmed = true;
+            }
+            _sweepTimer = SweepSliceSeconds;
+        }
 
         /// <summary>Drop the per-compartment baselines for a shelf removed mid-session. Keys
         /// embed the stable object id; without this the map retained destroyed shelves until
@@ -157,6 +178,10 @@ namespace CardShopCoop.Sync
             _groups = null;
             _scanChanges = null;
             _cursor.Reset();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _forceSweepArmed = false;
+            _sweepEntries.Clear();
         }
 
         /// <summary>The local display structure changed under us (population repair
@@ -184,6 +209,7 @@ namespace CardShopCoop.Sync
         {
             if (!active)
                 return;
+            PeriodicUpdate(dt);
             _timer += dt;
             TickPendingResend(dt);
             if (!_scanning)
@@ -706,6 +732,126 @@ namespace CardShopCoop.Sync
                             Occupied = card != null,
                             Card = card,
                         });
+                }
+            }
+        }
+
+        /// <summary>Host-only unconditional recovery sweep. CardShelfSync is driven by its
+        /// existing session-gated Tick rather than the tickable-module pipeline, so the scan and
+        /// sweep share the same live-world guard. Every due pass sends its slice even when its
+        /// contents have not changed; that is what repairs a dropped frame.</summary>
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null
+                || !CoopCore.InSessionWorld)
+                return;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
+                return;
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
+            {
+                var sm = Sm();
+                if (sm == null)
+                {
+                    _sweepCursor = 0;
+                    return;
+                }
+                int total = CountStateCompartments(sm);
+                if (total <= 0)
+                {
+                    _sweepCursor = 0;
+                    return;
+                }
+                int slices = Mathf.Max(1, Mathf.CeilToInt(SweepCycleSeconds / SweepSliceSeconds));
+                int perSlice = Mathf.Max(1, Mathf.CeilToInt((float)total / slices));
+                if (_sweepCursor < 0 || _sweepCursor >= total)
+                    _sweepCursor = 0;
+                int start = _sweepCursor;
+                int end = Mathf.Min(total, start + perSlice);
+                _sweepEntries.Clear();
+                CollectSlice(sm, start, end, _sweepEntries);
+                _sweepCursor = end >= total ? 0 : end;
+                if (_sweepCursor == 0)
+                    _forceSweepArmed = false;
+                // Deliberately no hash, dirty flag, or already-sent test here.
+                BroadcastState(new CardShelfDeltaMessage
+                {
+                    Full = false,
+                    Index = start / perSlice,
+                    Entries = _sweepEntries,
+                });
+            });
+        }
+
+        /// <summary>Host: complete card-display state to one connection only; this is the join
+        /// catch-up/re-baseline path, never a periodic broadcast.</summary>
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null
+                || !CoopCore.InSessionWorld)
+                return;
+            Guarded("full", () => SendToClient(connId, new CardShelfDeltaMessage
+            {
+                Full = true,
+                Index = -1,
+                Entries = BuildFullState(),
+            }));
+        }
+
+        private static int CountStateCompartments(ShelfManager sm)
+        {
+            return CountGroup(sm.m_CardShelfList) + CountGroup(sm.m_CardItemCombiShelfList)
+                + CountGroup(sm.m_TournamentPrizeShelfList);
+        }
+
+        private static int CountGroup<T>(List<T> shelves) where T : CardShelf
+        {
+            int count = 0;
+            for (int i = 0; i < shelves.Count; i++)
+            {
+                var shelf = shelves[i];
+                if (shelf == null || !shelf.gameObject.activeInHierarchy)
+                    continue;
+                var comps = shelf.GetCardCompartmentList();
+                for (int j = 0; j < comps.Count; j++)
+                {
+                    if (comps[j] != null)
+                        count++;
+                }
+            }
+            return count;
+        }
+
+        private static void CollectSlice(ShelfManager sm, int start, int end, List<Entry> into)
+        {
+            int ordinal = 0;
+            CollectSliceGroup(sm.m_CardShelfList, 2, start, end, ref ordinal, into);
+            CollectSliceGroup(sm.m_CardItemCombiShelfList, 3, start, end, ref ordinal, into);
+            CollectSliceGroup(sm.m_TournamentPrizeShelfList, 14, start, end, ref ordinal, into);
+        }
+
+        private static void CollectSliceGroup<T>(List<T> shelves, int kind, int start, int end,
+            ref int ordinal, List<Entry> into) where T : CardShelf
+        {
+            for (int i = 0; i < shelves.Count; i++)
+            {
+                var shelf = shelves[i];
+                if (shelf == null || !shelf.gameObject.activeInHierarchy)
+                    continue;
+                var comps = shelf.GetCardCompartmentList();
+                for (int j = 0; j < comps.Count; j++)
+                {
+                    var comp = comps[j];
+                    if (comp == null)
+                        continue;
+                    int current = ordinal++;
+                    if (current < start || current >= end)
+                        continue;
+                    if (!TryReadSlot(comp, out CardData card))
+                        continue;
+                    if (PlacedObjectIdentity.TryMakeCompartmentKey(kind, shelf, j, out int key))
+                        into.Add(new Entry { Key = key, Occupied = card != null, Card = card });
                 }
             }
         }

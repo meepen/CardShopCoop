@@ -9,20 +9,30 @@ namespace CardShopCoop.Sync
 {
     /// <summary>Optional host-authoritative synchronization for RTCGO Custom TV streams.
     /// Local files, mute, and volume deliberately remain local; only stream playback controls
-    /// and best-effort stream position cross the wire.</summary>
+    /// and stream identity cross the wire.</summary>
     public sealed class TvSync : TickableCoopModule
     {
         private const byte Next = 1, Previous = 2, Pause = 3, Power = 4, Shuffle = 5, Seek = 6, Open = 7, Ready = 8;
-        private const float Interval = 1f;
-        private const float HealEvery = 15f;
+        // Slice 0 is playback controls/identity. The position field is retained in the DTO for
+        // wire compatibility, but the game bridge does not consume it, so no inert position slice
+        // is emitted. The one-slice safety pass is intentionally coarse to avoid a disguised full
+        // refresh while still repairing a lost unchanged control frame.
+        private const float SweepCycleSeconds = 30f;
+        private const float SweepSliceSeconds = SweepCycleSeconds;
+        private const int SweepSliceCount = 1;
+        private const float ControlSendFloor = 0.25f;
         private const float BarrierTimeout = 10f;
         private static TvSync Active;
 
         public Action<INetMessage> SendOp;
         public Action<INetMessage> BroadcastState;
         public Func<int> PeerCount;
-        private float _timer;
-        private float _heal;
+        public Action<int, INetMessage> SendToClient;
+        private float _sweepTimer;
+        private float _controlSendAge;
+        private int _sweepCursor;
+        private bool _hasHostState;
+        private bool _controlPending;
         private string _lastUrl;
         private string _lastSource;
         private string _lastTitle;
@@ -35,6 +45,9 @@ namespace CardShopCoop.Sync
         private readonly System.Collections.Generic.HashSet<int> _readyPeers = new System.Collections.Generic.HashSet<int>();
         private int _clientGeneration = -1;
         private bool _clientBarrier, _clientReported;
+        private string _clientSource, _clientUrl, _clientTitle, _clientPlaylist;
+        private bool _clientLive, _clientSegmented, _clientPaused, _clientPowered, _clientShuffle;
+        private int _clientPlaylistIndex;
 
         public TvSync()
         {
@@ -68,8 +81,11 @@ namespace CardShopCoop.Sync
         public override void Reset()
         {
             TvInterop.ResetSession();
-            _timer = -2.1f;
-            _heal = HealEvery;
+            _sweepTimer = 0f;
+            _controlSendAge = ControlSendFloor;
+            _sweepCursor = 0;
+            _hasHostState = false;
+            _controlPending = false;
             _lastUrl = _lastTitle = _lastPlaylist = null;
             _lastSource = null;
             _lastLive = _lastSegmented = _lastPaused = _lastPowered = _lastShuffle = false;
@@ -80,46 +96,58 @@ namespace CardShopCoop.Sync
             _readyPeers.Clear();
             _clientGeneration = -1;
             _clientBarrier = _clientReported = false;
+            _clientSource = _clientUrl = _clientTitle = _clientPlaylist = null;
+            _clientLive = _clientSegmented = _clientPaused = _clientPowered = _clientShuffle = false;
+            _clientPlaylistIndex = 0;
         }
 
         public override void ForceResend()
         {
-            _heal = HealEvery;
+            _sweepTimer = SweepSliceSeconds;
+            _sweepCursor = 0;
         }
 
         public void HostTick(float dt, bool inGame)
         {
             if (!inGame || !TvInterop.Present || BroadcastState == null)
                 return;
-            _timer += dt;
-            _heal += dt;
+            _controlSendAge += dt;
             if (_barrier)
                 _barrierAge += dt;
-            if (_timer < Interval)
-                return;
-            _timer -= Interval;
 
             try
             {
-                bool streaming = TvInterop.IsPlayingStream || TvInterop.IsFetching;
+                bool playing = TvInterop.IsPlayingStream;
+                bool fetching = TvInterop.IsFetching;
+                bool streaming = playing || fetching;
+                if (!streaming && !_hasHostState && !_barrier)
+                    return;
                 string url = streaming ? TvInterop.StreamUrl : null;
                 string source = streaming ? TvInterop.SourceUrl : null;
                 string title = streaming ? TvInterop.StreamTitle : null;
                 string playlist = streaming ? TvInterop.PlaylistUrl : null;
-                bool changed = source != _lastSource || url != _lastUrl || title != _lastTitle || playlist != _lastPlaylist
-                    || TvInterop.IsLive != _lastLive || TvInterop.IsSegmentedVod != _lastSegmented
-                    || TvInterop.Paused != _lastPaused || TvInterop.PoweredOff != _lastPowered
-                    || TvInterop.Shuffle != _lastShuffle || TvInterop.PlaylistIndex != _lastPlaylistIndex;
-                if (source != _lastSource && !string.IsNullOrEmpty(source))
+                bool live = streaming && TvInterop.IsLive;
+                bool segmented = streaming && TvInterop.IsSegmentedVod;
+                bool paused = streaming && TvInterop.Paused;
+                bool powered = streaming && TvInterop.PoweredOff;
+                bool shuffle = streaming && TvInterop.Shuffle;
+                int playlistIndex = streaming ? TvInterop.PlaylistIndex : 0;
+                bool changed = !_hasHostState || source != _lastSource || url != _lastUrl || title != _lastTitle || playlist != _lastPlaylist
+                    || live != _lastLive || segmented != _lastSegmented
+                    || paused != _lastPaused || powered != _lastPowered
+                    || shuffle != _lastShuffle || playlistIndex != _lastPlaylistIndex;
+                if (source != _lastSource)
                 {
                     _generation++;
-                    _barrier = true;
-                    _hostReady = false;
-                    _barrierAge = 0f;
-                    _readyPeers.Clear();
-                    TvInterop.SetSharedPaused(true);
-                    changed = true;
-                    CoopPlugin.Log.LogInfo("TV load barrier started (generation " + _generation + ")");
+                    if (!string.IsNullOrEmpty(source))
+                    {
+                        _barrier = true;
+                        _hostReady = false;
+                        _barrierAge = 0f;
+                        _readyPeers.Clear();
+                        TvInterop.SetSharedPaused(true);
+                        CoopPlugin.Log.LogInfo("TV load barrier started (generation " + _generation + ")");
+                    }
                 }
                 int peers = PeerCount == null ? 0 : Math.Max(0, PeerCount());
                 if (_barrier && ((_hostReady && _readyPeers.Count >= peers) || _barrierAge >= BarrierTimeout))
@@ -142,39 +170,25 @@ namespace CardShopCoop.Sync
                     changed = true;
                     CoopPlugin.Log.LogInfo("TV load barrier cancelled because the host returned to local playback");
                 }
-                if (!changed && _heal < HealEvery && TvInterop.IsLive)
-                    return;
-
                 _lastSource = source;
                 _lastUrl = url;
                 _lastTitle = title;
                 _lastPlaylist = playlist;
-                _lastLive = TvInterop.IsLive;
-                _lastSegmented = TvInterop.IsSegmentedVod;
-                _lastPaused = TvInterop.Paused;
-                _lastPowered = TvInterop.PoweredOff;
-                _lastShuffle = TvInterop.Shuffle;
-                _lastPlaylistIndex = TvInterop.PlaylistIndex;
-                _heal = 0f;
-                BroadcastState(new TvStateMessage
+                _lastLive = live;
+                _lastSegmented = segmented;
+                _lastPaused = paused;
+                _lastPowered = powered;
+                _lastShuffle = shuffle;
+                _lastPlaylistIndex = playlistIndex;
+                _hasHostState = true;
+                if (changed)
+                    _controlPending = true;
+                if (_controlPending && _controlSendAge >= ControlSendFloor && HasPeers())
                 {
-                    SourceUrl = source,
-                    StreamUrl = url,
-                    StreamTitle = title,
-                    PlaylistUrl = playlist,
-                    IsLive = TvInterop.IsLive,
-                    IsSegmentedVod = TvInterop.IsSegmentedVod,
-                    IsPlaylist = !string.IsNullOrEmpty(playlist),
-                    PlaylistIndex = TvInterop.PlaylistIndex,
-                    Position = TvInterop.Position,
-                    Paused = TvInterop.Paused,
-                    PoweredOff = TvInterop.PoweredOff,
-                    Shuffle = TvInterop.Shuffle,
-                    Barrier = _barrier,
-                    Resume = _resumePulse,
-                    Generation = _generation
-                });
-                _resumePulse = false;
+                    SendControlNow();
+                    _controlPending = false;
+                    _controlSendAge = 0f;
+                }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("TvSync host: " + e.Message); }
         }
@@ -196,16 +210,107 @@ namespace CardShopCoop.Sync
         {
             if (!TvInterop.Present || message == null)
                 return;
-            if (message.Generation != _clientGeneration)
+            if (message.Full || message.Index == 0)
             {
-                _clientGeneration = message.Generation;
-                _clientReported = false;
+                if (message.Generation < _clientGeneration)
+                    return;
+                if (message.Generation != _clientGeneration)
+                {
+                    _clientGeneration = message.Generation;
+                    _clientReported = false;
+                }
+                _clientSource = message.SourceUrl;
+                _clientUrl = message.StreamUrl;
+                _clientTitle = message.StreamTitle;
+                _clientPlaylist = message.PlaylistUrl;
+                _clientLive = message.IsLive;
+                _clientSegmented = message.IsSegmentedVod;
+                _clientPlaylistIndex = message.PlaylistIndex;
+                _clientPaused = message.Paused;
+                _clientPowered = message.PoweredOff;
+                _clientShuffle = message.Shuffle;
+                _clientBarrier = message.Barrier;
+                ApplyClientState(message.Resume);
             }
-            _clientBarrier = message.Barrier;
-            TvInterop.ApplyHostState(message.SourceUrl, message.StreamUrl, message.StreamTitle, message.PlaylistUrl,
-                message.IsLive, message.IsSegmentedVod, message.PlaylistIndex, message.Position,
-                message.Paused, message.PoweredOff, message.Shuffle,
-                message.Barrier, message.Resume, message.Generation);
+        }
+
+        private void ApplyClientState(bool resume = false)
+        {
+            TvInterop.ApplyHostState(_clientSource, _clientUrl, _clientTitle, _clientPlaylist,
+                _clientLive, _clientSegmented, _clientPlaylistIndex, 0.0,
+                _clientPaused, _clientPowered, _clientShuffle, _clientBarrier, resume,
+                _clientGeneration);
+        }
+
+        /// <summary>One host sweep ordinal: 0 is the playback-control/identity baseline. It is
+        /// reasserted unconditionally once per coarse safety pass.</summary>
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld
+                || !TvInterop.Present)
+                return;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
+                return;
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
+            {
+                int index = _sweepCursor;
+                _sweepCursor = (_sweepCursor + 1) % SweepSliceCount;
+                if (index == 0 && HasPeers())
+                {
+                    // Re-assert unconditionally: a lost unchanged control frame must heal.
+                    SendControlNow();
+                }
+            });
+        }
+
+        /// <summary>Host: complete state to one connection only (join/heal catch-up).</summary>
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null || !TvInterop.Present)
+                return;
+            Guarded("full", () =>
+            {
+                SendToClient(connId, BuildState(true, -1, TvInterop.Position));
+            });
+        }
+
+        private void SendControlNow()
+        {
+            if (BroadcastState == null || !_hasHostState)
+                return;
+            BroadcastState(BuildState(false, 0, 0.0));
+            _resumePulse = false;
+        }
+
+        private bool HasPeers()
+        {
+            return PeerCount != null && PeerCount() > 0;
+        }
+
+        private TvStateMessage BuildState(bool full, int index, double position)
+        {
+            return new TvStateMessage
+            {
+                Full = full,
+                Index = index,
+                SourceUrl = _lastSource,
+                StreamUrl = _lastUrl,
+                StreamTitle = _lastTitle,
+                PlaylistUrl = _lastPlaylist,
+                IsLive = _lastLive,
+                IsSegmentedVod = _lastSegmented,
+                IsPlaylist = !string.IsNullOrEmpty(_lastPlaylist),
+                PlaylistIndex = _lastPlaylistIndex,
+                Position = position,
+                Paused = _lastPaused,
+                PoweredOff = _lastPowered,
+                Shuffle = _lastShuffle,
+                Barrier = _barrier,
+                Resume = _resumePulse,
+                Generation = _generation
+            };
         }
 
         public void ClientTick(float dt, bool inGame)

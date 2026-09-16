@@ -60,8 +60,16 @@ namespace CardShopCoop.Sync
 
         public Action<INetMessage> SendOp;         // set by CoopCore: client -> host
         public Action<INetMessage> BroadcastState; // set by CoopCore: host -> clients
+        public Action<int, INetMessage> SendToClient; // set by CoopCore: host -> one client
 
-        private readonly SnapshotGate _gate = new SnapshotGate(1f, 15f, -1.9f);
+        // Partial indexes: 0 = all three bills, 1 = room/unlock/sign block, 2 = the
+        // complete tutorial index and list. The tutorial list is deliberately atomic:
+        // ApplyTutorial presents one coherent tutorial state to the joiner.
+        private const int SliceCount = 3;
+        private const float SweepCycleSeconds = 5f;
+        private const float SweepSliceSeconds = SweepCycleSeconds / SliceCount;
+        private float _sweepTimer;
+        private int _sweepCursor;
         private double _lastRoomRepaint;
         private RentBillScreen _billScreen;                        // phone screen, often inactive
         private InteractableOpenCloseSign _openSign;               // world object by the door
@@ -90,7 +98,8 @@ namespace CardShopCoop.Sync
 
         public override void Reset()
         {
-            _gate.Reset(-1.9f);
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
             _billScreen = null;
             _openSign = null;
             _warehouseSign = null;
@@ -100,7 +109,8 @@ namespace CardShopCoop.Sync
 
         public override void ForceResend()
         {
-            _gate.Force();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
         }
 
         public override void Dispose()
@@ -169,9 +179,13 @@ namespace CardShopCoop.Sync
             // gated on the HOST's CPlayerData booleans), so forward and let the echo
             // flip the local sign.
             Try(h, typeof(InteractableOpenCloseSign), "OnMouseButtonUp",
-                prefix: new HarmonyMethod(typeof(ShopStateSync), nameof(OpenSignPrefix)));
+                prefix: new HarmonyMethod(typeof(ShopStateSync), nameof(OpenSignPrefix)),
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(RoomChangedPostfix)));
             Try(h, typeof(InteractableWarehouseAllowEnterSign), "OnMouseButtonUp",
-                prefix: new HarmonyMethod(typeof(ShopStateSync), nameof(WarehouseSignPrefix)));
+                prefix: new HarmonyMethod(typeof(ShopStateSync), nameof(WarehouseSignPrefix)),
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(RoomChangedPostfix)));
+            Try(h, typeof(InteractableOpenCloseSign), "OnDayStarted",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(RoomChangedPostfix)));
 
             // Shop light: a joiner's wall-switch click only flipped its own local light.
             // Forward it; the host toggles authoritatively and the LightState broadcast
@@ -184,6 +198,44 @@ namespace CardShopCoop.Sync
             // was wiped by the host's next snapshot because the host never learned about it.
             Try(h, typeof(TutorialManager), "AddTaskValue",
                 postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(TutorialCreditPostfix)));
+            Try(h, typeof(CPlayerData), "UpdateBill",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(BillChangedPostfix)));
+            Try(h, typeof(CPlayerData), "SetBill",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(BillChangedPostfix)));
+            Try(h, typeof(UnlockRoomManager), "SetUnlockWarehouseRoom",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(RoomChangedPostfix)));
+            Try(h, typeof(UnlockRoomManager), "StartUnlockNextRoom",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(RoomChangedPostfix)));
+            Try(h, typeof(UnlockRoomManager), "StartUnlockNextWarehouseRoom",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(RoomChangedPostfix)));
+            Try(h, typeof(TutorialManager), "EvaluateTaskVisibility",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(TutorialChangedPostfix)));
+            Try(h, typeof(ShopRenamer), "OnPressConfirmShopName",
+                postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(TutorialChangedPostfix)));
+        }
+
+        public static void BillChangedPostfix(EBillType billType)
+        {
+            if (CoopCore.Role == CoopRole.Host && !ApplyingRemote)
+            {
+                _instance?.SendBillsNow();
+            }
+        }
+
+        public static void RoomChangedPostfix()
+        {
+            if (CoopCore.Role == CoopRole.Host && !ApplyingRemote)
+            {
+                _instance?.SendRoomNow();
+            }
+        }
+
+        public static void TutorialChangedPostfix()
+        {
+            if (CoopCore.Role == CoopRole.Host && !ApplyingRemote)
+            {
+                _instance?.SendTutorialNow();
+            }
         }
 
         /// <summary>Client: forward the task credit the local game just applied. Sends the ABSOLUTE
@@ -316,39 +368,33 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame || BroadcastState == null)
+            // HostTick remains for the existing tick lifecycle; state is pushed by mutation
+            // hooks and re-asserted by the unconditional gradual sweep below.
+        }
+
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
                 return;
-            if (!_gate.Due(dt))
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
                 return;
-            Guarded("host", () =>
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
             {
-                // tiny fixed-size snapshot: hash-gate so the wire stays quiet while
-                // nothing changes; the slow heal repairs any client that missed one
-                int hash = 17;
-                for (EBillType t = EBillType.Rent; t <= EBillType.Employee; t++)
-                {
-                    var bill = CPlayerData.GetBill(t);
-                    hash = hash * 31 + bill.billDayPassed;
-                    hash = hash * 31 + (int)(bill.amountToPay * 100f);
-                }
-                hash = hash * 31 + CPlayerData.m_UnlockRoomCount;
-                hash = hash * 31 + CPlayerData.m_UnlockWarehouseRoomCount;
-                hash = hash * 31 + ((CPlayerData.m_IsWarehouseRoomUnlocked ? 1 : 0)
-                                  | (CPlayerData.m_IsShopOpen ? 2 : 0)
-                                  | (CPlayerData.m_IsWarehouseDoorClosed ? 4 : 0));
-                // re-broadcast when task progress changes so the guest's panel advances
-                hash = hash * 31 + CPlayerData.m_TutorialIndex;
-                var tutList = CPlayerData.m_TutorialDataList;
-                if (tutList != null)
-                    foreach (var td in tutList)
-                        hash = hash * 31 + ((int)td.tutorialTaskCondition * 397) + (int)(td.value * 100f);
-                if (!_gate.ShouldSend(hash))
-                    return;
-                BroadcastState(BuildStateMessage());
+                SendSlice(_sweepCursor);
+                _sweepCursor = (_sweepCursor + 1) % SliceCount;
             });
         }
 
-        private static ShopStateMessage BuildStateMessage()
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null)
+                return;
+            Guarded("full", () => SendToClient(connId, BuildFullMessage()));
+        }
+
+        private static ShopStateMessage BuildFullMessage()
         {
             var msg = new ShopStateMessage();
             var rent = CPlayerData.GetBill(EBillType.Rent);
@@ -372,6 +418,47 @@ namespace CardShopCoop.Sync
                     msg.Tutorials.Add(new ShopTutorialEntry { Condition = (int)td.tutorialTaskCondition, Value = td.value });
             return msg;
         }
+
+        private static ShopStateMessage BuildSliceMessage(int index)
+        {
+            var msg = new ShopStateMessage { Full = false, Index = index };
+            if (index == 0)
+            {
+                var rent = CPlayerData.GetBill(EBillType.Rent);
+                msg.Rent = new ShopBillEntry { DayPassed = rent.billDayPassed, AmountToPay = rent.amountToPay };
+                var electric = CPlayerData.GetBill(EBillType.Electric);
+                msg.Electric = new ShopBillEntry { DayPassed = electric.billDayPassed, AmountToPay = electric.amountToPay };
+                var employee = CPlayerData.GetBill(EBillType.Employee);
+                msg.Employee = new ShopBillEntry { DayPassed = employee.billDayPassed, AmountToPay = employee.amountToPay };
+            }
+            else if (index == 1)
+            {
+                msg.UnlockRoomCount = CPlayerData.m_UnlockRoomCount;
+                msg.UnlockWarehouseRoomCount = CPlayerData.m_UnlockWarehouseRoomCount;
+                msg.IsWarehouseRoomUnlocked = CPlayerData.m_IsWarehouseRoomUnlocked;
+                msg.IsShopOpen = CPlayerData.m_IsShopOpen;
+                msg.IsWarehouseDoorClosed = CPlayerData.m_IsWarehouseDoorClosed;
+            }
+            else
+            {
+                msg.TutorialIndex = CPlayerData.m_TutorialIndex;
+                var tut = CPlayerData.m_TutorialDataList;
+                if (tut != null)
+                    foreach (var td in tut)
+                        msg.Tutorials.Add(new ShopTutorialEntry { Condition = (int)td.tutorialTaskCondition, Value = td.value });
+            }
+            return msg;
+        }
+
+        private void SendSlice(int index)
+        {
+            if (BroadcastState != null)
+                BroadcastState(BuildSliceMessage(index));
+        }
+
+        private void SendBillsNow() => SendSlice(0);
+        private void SendRoomNow() => SendSlice(1);
+        private void SendTutorialNow() => SendSlice(2);
 
         public void HostApplyOp(ShopOpMessage message)
         {
@@ -580,138 +667,74 @@ namespace CardShopCoop.Sync
 
         private void ClientApplyInner(ShopStateMessage message)
         {
-            // bills: dumb data copy - the fields are public and GetBill creates the
-            // record when missing, so the joiner's phone reads exactly the host's dues
-            bool billsChanged = false;
-            for (EBillType t = EBillType.Rent; t <= EBillType.Employee; t++)
+            if (message == null)
+                return;
+            if (message.Full || message.Index == 0)
+                ApplyBills(message);
+            if (message.Full || message.Index == 1)
+                ApplyRooms(message);
+            if (message.Full || message.Index == 2)
+                ApplyTutorialMessage(message);
+        }
+
+        private void ApplyBills(ShopStateMessage message)
+        {
+            bool changed = false;
+            ShopBillEntry[] entries = { message.Rent, message.Electric, message.Employee };
+            for (int i = 0; i < entries.Length; i++)
             {
-                int day;
-                float amount;
-                if (t == EBillType.Rent)
+                var bill = CPlayerData.GetBill((EBillType)i);
+                if (bill.billDayPassed != entries[i].DayPassed || bill.amountToPay != entries[i].AmountToPay)
                 {
-                    day = message.Rent.DayPassed;
-                    amount = message.Rent.AmountToPay;
-                }
-                else if (t == EBillType.Electric)
-                {
-                    day = message.Electric.DayPassed;
-                    amount = message.Electric.AmountToPay;
-                }
-                else
-                {
-                    day = message.Employee.DayPassed;
-                    amount = message.Employee.AmountToPay;
-                }
-                var bill = CPlayerData.GetBill(t);
-                if (bill.billDayPassed != day || bill.amountToPay != amount)
-                {
-                    bill.billDayPassed = day;
-                    bill.amountToPay = amount;
-                    billsChanged = true;
+                    bill.billDayPassed = entries[i].DayPassed;
+                    bill.amountToPay = entries[i].AmountToPay;
+                    changed = true;
                 }
             }
-            int wantRooms = message.UnlockRoomCount;
-            int wantWarehouseRooms = message.UnlockWarehouseRoomCount;
-            bool wantShopB = message.IsWarehouseRoomUnlocked;
-            bool wantShopOpen = message.IsShopOpen;
-            bool wantWarehouseClosed = message.IsWarehouseDoorClosed;
-
-            // tutorial snapshot (appended last in WriteState) - read here in wire order,
-            // apply after the rest of the state below
-            int tutIndex = message.TutorialIndex;
-            int tutN = message.Tutorials.Count;
-            var incomingTut = new System.Collections.Generic.List<TutorialData>();
-            for (int i = 0; i < tutN && i < 4096; i++)
+            if (changed && BillScreen() != null)
             {
-                var td = new TutorialData
-                {
-                    tutorialTaskCondition = (ETutorialTaskCondition)message.Tutorials[i].Condition,
-                    value = message.Tutorials[i].Value,
-                };
-                incomingTut.Add(td);
+                MiBillEvaluateUI?.Invoke(_billScreen, null);
+                MiBillNotification?.Invoke(_billScreen, null);
             }
+        }
 
-            if (billsChanged && BillScreen() != null)
-            {
-                // repaint the totals if the screen happens to be open, and keep the
-                // phone's red bill badge honest either way
-                try
-                {
-                    MiBillEvaluateUI?.Invoke(_billScreen, null);
-                }
-                catch (System.Exception e) { Swallow.Log(e); }
-                try
-                {
-                    MiBillNotification?.Invoke(_billScreen, null);
-                }
-                catch (System.Exception e) { Swallow.Log(e); }
-            }
-
-            // unlocks: the manager methods are pure world changes (blocker off, door
-            // anim, count++) - every coin charge lives in the UI handlers we never call
+        private void ApplyRooms(ShopStateMessage message)
+        {
             var urm = Urm();
-            if (urm != null)
+            if (urm == null)
+                return;
+            if (message.IsWarehouseRoomUnlocked && !CPlayerData.m_IsWarehouseRoomUnlocked)
+                urm.SetUnlockWarehouseRoom(isUnlocked: true);
+            for (int guard = 0; CPlayerData.m_UnlockRoomCount < message.UnlockRoomCount && guard < 64; guard++)
+                urm.StartUnlockNextRoom();
+            for (int guard = 0; CPlayerData.m_UnlockWarehouseRoomCount < message.UnlockWarehouseRoomCount && guard < 64; guard++)
+                urm.StartUnlockNextWarehouseRoom();
+            if (CPlayerData.m_IsShopOpen != message.IsShopOpen)
             {
-                bool unlocksChanged = (wantShopB && !CPlayerData.m_IsWarehouseRoomUnlocked)
-                    || CPlayerData.m_UnlockRoomCount < wantRooms
-                    || CPlayerData.m_UnlockWarehouseRoomCount < wantWarehouseRooms;
-                if (wantShopB && !CPlayerData.m_IsWarehouseRoomUnlocked)
-                    urm.SetUnlockWarehouseRoom(isUnlocked: true);
-                for (int guard = 0; CPlayerData.m_UnlockRoomCount < wantRooms && guard < 64; guard++)
-                    urm.StartUnlockNextRoom();
-                for (int guard = 0; CPlayerData.m_UnlockWarehouseRoomCount < wantWarehouseRooms && guard < 64; guard++)
-                    urm.StartUnlockNextWarehouseRoom();
-                // wall repaint heal: the incremental unlocks above animate wall pieces
-                // away, and an interrupted animation (or state applied while the scene
-                // was still streaming) leaves a wall MISSING with nothing to repair it
-                // (field screenshot: street visible through the shop front). The game's
-                // own load-time Init() is an idempotent full repaint of every blocker,
-                // glass door, and Shop-B hide/show list from the CPlayerData counts -
-                // re-run it after any unlock change, and at most once a minute otherwise
-                double nowT = Time.realtimeSinceStartupAsDouble;
-                if (unlocksChanged || nowT - _lastRoomRepaint > 60.0)
-                {
-                    _lastRoomRepaint = nowT;
-                    try
-                    {
-                        MiRoomInit?.Invoke(urm, null);
-                    }
-                    catch (Exception e) { CoopPlugin.Log.LogWarning("room repaint: " + e.Message); }
-                }
-            }
-
-            // signs: set the booleans the (suppressed) local sim would have written and
-            // re-evaluate the meshes so the physical sign matches what customers do
-            if (CPlayerData.m_IsShopOpen != wantShopOpen)
-            {
-                CPlayerData.m_IsShopOpen = wantShopOpen;
+                CPlayerData.m_IsShopOpen = message.IsShopOpen;
                 var sign = OpenSign();
                 if (sign != null)
-                {
-                    try
-                    {
-                        MiOpenSignMesh?.Invoke(sign, null);
-                    }
-                    catch (System.Exception e) { Swallow.Log(e); }
-                }
+                    MiOpenSignMesh?.Invoke(sign, null);
             }
-            if (CPlayerData.m_IsWarehouseDoorClosed != wantWarehouseClosed)
+            if (CPlayerData.m_IsWarehouseDoorClosed != message.IsWarehouseDoorClosed)
             {
-                CPlayerData.m_IsWarehouseDoorClosed = wantWarehouseClosed;
+                CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
                 var sign = WarehouseSign();
                 if (sign != null)
-                {
-                    try
-                    {
-                        MiWarehouseSignMesh?.Invoke(sign, null);
-                    }
-                    catch (System.Exception e) { Swallow.Log(e); }
-                }
-                else if (urm != null)
-                    urm.EvaluateWarehouseRoomOpenClose(); // entry gate still must move
+                    MiWarehouseSignMesh?.Invoke(sign, null);
+                else
+                    urm.EvaluateWarehouseRoomOpenClose();
             }
+            MiRoomInit?.Invoke(urm, null);
+        }
 
-            ApplyTutorial(tutIndex, incomingTut);
+        private void ApplyTutorialMessage(ShopStateMessage message)
+        {
+            var incoming = new System.Collections.Generic.List<TutorialData>();
+            int count = message.Tutorials == null ? 0 : Math.Min(message.Tutorials.Count, 4096);
+            for (int i = 0; i < count; i++)
+                incoming.Add(new TutorialData { tutorialTaskCondition = (ETutorialTaskCondition)message.Tutorials[i].Condition, value = message.Tutorials[i].Value });
+            ApplyTutorial(message.TutorialIndex, incoming);
         }
 
         /// <summary>Client: replay the host's authoritative task progress so the guest's
@@ -737,6 +760,17 @@ namespace CardShopCoop.Sync
                 }
                 catch (Exception e) { Swallow.Log(e); }
             }
+
+            // Same class of host-only local action as the marker above: at step 0 the tutorial
+            // calls ShopRenamer.SetIsTutorial(), which ADDS the seven movement key tooltips and
+            // fades GameUIScreen out. Completing the step runs the walk-in trigger (tooltips off)
+            // and OnPressConfirmShopName (GameUIScreen back on) - neither of which a joiner runs.
+            // SetIsTutorial() DOES run on a joiner (TutorialManager.OnGameDataFinishLoaded reaches
+            // it whenever the borrowed world was still at step 0), so without this a guest's HUD
+            // stayed faded out and its movement tooltips stayed stuck once the host named the shop.
+            // Mirror it on the frame the tutorial leaves step 0.
+            if (tutIndex != 0 && CPlayerData.m_TutorialIndex == 0)
+                ClearTutorialIntroPresentation();
 
             var cur = CPlayerData.m_TutorialDataList;
             // skip if identical to what we already have (avoids UI churn every heal)
@@ -781,6 +815,43 @@ namespace CardShopCoop.Sync
                 tm.EvaluateTaskVisibility();
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("tutorial visibility: " + e.Message); }
+        }
+
+        // Exactly the set ShopRenamer.SetIsTutorial() adds and its walk-in trigger removes.
+        private static readonly EGameAction[] TutorialIntroTooltips =
+        {
+            EGameAction.MoveForward,
+            EGameAction.MoveLeft,
+            EGameAction.MoveBackward,
+            EGameAction.MoveRight,
+            EGameAction.Jump,
+            EGameAction.Sprint,
+            EGameAction.Crouch,
+        };
+
+        /// <summary>Client: the local half of completing the shop-naming step. Reproduces
+        /// ShopRenamer.OnTriggerEnter (movement tooltips off) and OnPressConfirmShopName
+        /// (GameUIScreen visible again) so the joiner's presentation matches the host's.
+        /// Both lookups go through <see cref="SceneRef{T}"/> so a missing manager is a no-op
+        /// instead of a fabricated singleton.</summary>
+        private static void ClearTutorialIntroPresentation()
+        {
+            try
+            {
+                if (SceneRef<InteractionPlayerController>.Get() != null)
+                {
+                    for (int i = 0; i < TutorialIntroTooltips.Length; i++)
+                        InteractionPlayerController.RemoveToolTip(TutorialIntroTooltips[i]);
+                }
+            }
+            catch (Exception e) { Swallow.Log(e); }
+            try
+            {
+                if (SceneRef<GameUIScreen>.Get() != null)
+                    GameUIScreen.SetGameUIVisible(isVisible: true);
+            }
+            catch (Exception e) { Swallow.Log(e); }
+            CoopPlugin.Log.LogInfo("tutorial intro cleared: restored the game HUD and removed the movement tooltips");
         }
     }
 }

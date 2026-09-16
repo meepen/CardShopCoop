@@ -171,14 +171,37 @@ namespace CardShopCoop.Net
         {
             var m = (Messages.PopStateMessage)value;
             w.WriteStartObject();
+            w.WritePropertyName("Full");
+            w.WriteValue(m.Full);
+            w.WritePropertyName("Index");
+            w.WriteValue(m.Index);
             w.WritePropertyName("Entries");
             w.WriteStartArray();
-            for (int k = 0; k < m.Entries.Count; k++)
+            if (!m.Full)
             {
-                w.WriteStartArray();
-                foreach (var e in m.Entries[k])
+                var entries = m.Index >= 0 && m.Index < m.Entries.Count
+                    ? m.Entries[m.Index]
+                    : m.Entries.Count == 1 ? m.Entries[0] : null;
+                WriteEntries(w, s, m.Index, entries);
+            }
+            else
+            {
+                for (int k = 0; k < m.Entries.Count; k++)
+                    WriteEntries(w, s, k, m.Entries[k]);
+            }
+            w.WriteEndArray();
+            w.WriteEndObject();
+        }
+
+        private static void WriteEntries(JsonWriter w, JsonSerializer s, int kind,
+            System.Collections.Generic.List<PopulationSync.Entry> entries)
+        {
+            w.WriteStartArray();
+            if (entries != null)
+            {
+                foreach (var e in entries)
                 {
-                    var ek = k == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
+                    var ek = kind == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
                     w.WriteStartObject();
                     w.WritePropertyName("Id");
                     w.WriteValue(e.Id);
@@ -196,37 +219,53 @@ namespace CardShopCoop.Net
                     s.Serialize(w, e.BoxedRot);
                     w.WriteEndObject();
                 }
-                w.WriteEndArray();
             }
             w.WriteEndArray();
-            w.WriteEndObject();
         }
+
         public override object ReadJson(JsonReader r, Type t, object old, JsonSerializer s)
         {
             var o = SyncJson.Start(r);
-            var result = new Messages.PopStateMessage();
+            var result = new Messages.PopStateMessage
+            {
+                Full = o["Full"] == null || SyncJson.Bool(o, "Full"),
+                Index = o["Index"] == null ? -1 : SyncJson.Int(o, "Index")
+            };
             var a = o["Entries"] as JArray;
             if (a == null)
                 return result;
-            for (int k = 0; k < a.Count; k++)
+            if (!result.Full)
             {
-                var list = new System.Collections.Generic.List<PopulationSync.Entry>();
-                var row = a[k] as JArray;
-                if (row == null)
-                    return result;
-                foreach (var token in row)
-                {
-                    var x = token as JObject;
-                    if (x == null)
-                        return result;
-                    var ek = k == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
-                    int local;
-                    bool ok = Util.EnumMap.TryFromWire(ek, SyncJson.Int(x, "ObjType"), out local);
-                    list.Add(new PopulationSync.Entry { Id = (ushort)SyncJson.Int(x, "Id"), ObjType = local, Unresolved = !ok, Pos = SyncJson.Vector(x, "Pos", s), Rot = SyncJson.ReadQuaternion(x, "Rot", s), IsBoxed = SyncJson.Bool(x, "IsBoxed"), BoxedPos = SyncJson.Vector(x, "BoxedPos", s), BoxedRot = SyncJson.ReadQuaternion(x, "BoxedRot", s) });
-                }
-                result.Entries.Add(list);
+                JArray row = a.Count == 1
+                    ? a[0] as JArray
+                    : result.Index >= 0 && result.Index < a.Count
+                        ? a[result.Index] as JArray
+                        : null;
+                result.Entries.Add(ReadEntries(row, result.Index, s));
+                return result;
             }
+            for (int k = 0; k < a.Count; k++)
+                result.Entries.Add(ReadEntries(a[k] as JArray, k, s));
             return result;
+        }
+
+        private static System.Collections.Generic.List<PopulationSync.Entry> ReadEntries(
+            JArray row, int kind, JsonSerializer s)
+        {
+            var list = new System.Collections.Generic.List<PopulationSync.Entry>();
+            if (row == null)
+                return list;
+            foreach (var token in row)
+            {
+                var x = token as JObject;
+                if (x == null)
+                    continue;
+                var ek = kind == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
+                int local;
+                bool ok = Util.EnumMap.TryFromWire(ek, SyncJson.Int(x, "ObjType"), out local);
+                list.Add(new PopulationSync.Entry { Id = (ushort)SyncJson.Int(x, "Id"), ObjType = local, Unresolved = !ok, Pos = SyncJson.Vector(x, "Pos", s), Rot = SyncJson.ReadQuaternion(x, "Rot", s), IsBoxed = SyncJson.Bool(x, "IsBoxed"), BoxedPos = SyncJson.Vector(x, "BoxedPos", s), BoxedRot = SyncJson.ReadQuaternion(x, "BoxedRot", s) });
+            }
+            return list;
         }
     }
 }

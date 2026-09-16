@@ -5,12 +5,16 @@ using UnityEngine;
 
 namespace CardShopCoop.Net.Messages
 {
-    // Ordinary world-stock delta: host -> client. Reuses WorldSync's own wire writer so a
-    // delta and the 12s full-state heal stay byte-identical (both are MsgType.ShelfDelta).
+    // Ordinary world-stock delta: host -> client. Reuses WorldSync's own wire writer so event
+    // deltas and bounded sweep slices stay byte-identical (both are MsgType.ShelfDelta).
     [NetworkMessage(MsgType.ShelfDelta, Policy = MessagePolicy.ClientOnly)]
     public sealed class ShelfDeltaMessage : INetMessage
     {
         public List<WorldSync.Entry> Entries = new List<WorldSync.Entry>();
+        /// <summary>True for a complete per-connection baseline; false for one sweep slice.</summary>
+        public bool Full = false;
+        /// <summary>Sweep slice ordinal; -1 for a complete message.</summary>
+        public int Index = -1;
         public MsgType Type
         {
             get
@@ -84,6 +88,13 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.PopState, Policy = MessagePolicy.ClientOnly)]
     public sealed class PopStateMessage : INetMessage
     {
+        /// <summary>True for the complete roster; false for one kind slice. Omitted kinds in a
+        /// partial message are unchanged, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Kind ordinal carried by a partial message; -1 for a complete roster.</summary>
+        public int Index = -1;
+
         public List<List<PopulationSync.Entry>> Entries = new List<List<PopulationSync.Entry>>();
         public MsgType Type
         {
@@ -98,6 +109,12 @@ namespace CardShopCoop.Net.Messages
     public sealed class CardShelfDeltaMessage : INetMessage
     {
         public List<CardShelfSync.Entry> Entries = new List<CardShelfSync.Entry>();
+
+        /// <summary>True for a complete per-connection baseline; false for one slice.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a complete message.</summary>
+        public int Index = -1;
 
         /// <summary>True only on the direct reply the host sends after applying a
         /// <see cref="CardShelfRequestMessage"/>. A periodic/snapshot delta does NOT set it. The

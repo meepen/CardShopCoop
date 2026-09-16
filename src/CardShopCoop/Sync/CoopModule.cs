@@ -36,9 +36,23 @@ namespace CardShopCoop.Sync
         {
         }
 
-        /// <summary>Host: a specific connection finished joining. Default is nothing; modules
-        /// with per-connection catch-up override this.</summary>
-        public virtual void OnFullyJoin(int connId)
+        /// <summary>Gradual, spread-out maintenance, called once per co-op frame for every module
+        /// in the per-frame tick pipeline. (Only tickable modules are in that pipeline - the rest
+        /// are driven by their own <c>_act*</c> actions - and the callback is NOT role-gated or
+        /// in-game-gated, so a module must guard itself.)
+        ///
+        /// Re-assert ONE slice of state here (round-robin) so eventual correctness is guaranteed
+        /// without a periodic full resend - a full resend bursts serialization, allocations and
+        /// bandwidth across every client at once. Keep it cheap: it runs every frame, and it must
+        /// do nothing on most of them. See AGENTS.md.
+        /// Called from <see cref="TickableCoopModule.Tick"/>.</summary>
+        public virtual void PeriodicUpdate(float delta)
+        {
+        }
+
+        /// <summary>Host: send this module's COMPLETE state to one connection - the join
+        /// catch-up / explicit re-baseline path. Never called periodically.</summary>
+        public virtual void FullUpdate(int connId)
         {
         }
 
@@ -65,6 +79,9 @@ namespace CardShopCoop.Sync
                 OnHostTick(frame);
             else if (CoopCore.Role == CoopRole.Client)
                 OnClientTick(frame);
+            // Gradual re-assertion runs for both roles, after the role work, so a module's slice
+            // never races the change it is re-asserting.
+            PeriodicUpdate(frame.Dt);
         }
 
         protected virtual void OnHostTick(in SyncFrame frame)

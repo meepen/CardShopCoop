@@ -71,18 +71,18 @@ namespace CardShopCoop.Sync
             }
         }
 
-        public void OnFullyJoin(int connId)
+        public void FullUpdate(int connId)
         {
             ThrowIfDisposed();
             for (int i = 0; i < _modules.Count; i++)
             {
                 try
                 {
-                    _modules[i].OnFullyJoin(connId);
+                    _modules[i].FullUpdate(connId);
                 }
                 catch (Exception e)
                 {
-                    CoopPlugin.Log.LogError("co-op module OnFullyJoin failed (" + _modules[i].Name + "): " + e);
+                    CoopPlugin.Log.LogError("co-op module FullUpdate failed (" + _modules[i].Name + "): " + e);
                 }
             }
         }
@@ -123,7 +123,7 @@ namespace CardShopCoop.Sync
         private readonly Action _reset;
         private readonly Action _resend;
         private readonly Action _dispose;
-        private readonly Action<int> _fullyJoin;
+        private readonly Action<int> _fullUpdate;
 
         public string Name
         {
@@ -131,7 +131,7 @@ namespace CardShopCoop.Sync
         }
 
         public DelegateCoopModule(string name, Action start, Action reset, Action resend,
-            Action dispose = null, Action<int> fullyJoin = null)
+            Action dispose = null, Action<int> fullUpdate = null)
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException("Module name is required.", nameof(name));
@@ -140,13 +140,20 @@ namespace CardShopCoop.Sync
             _reset = reset ?? (() => { });
             _resend = resend ?? (() => { });
             _dispose = dispose ?? (() => { });
-            _fullyJoin = fullyJoin ?? (_ => { });
+            _fullUpdate = fullUpdate ?? (_ => { });
         }
 
         public void Start() => _start();
         public void ResetState() => _reset();
         public void ForceResend() => _resend();
-        public void OnFullyJoin(int connId) => _fullyJoin(connId);
+        public void FullUpdate(int connId) => _fullUpdate(connId);
         public void Dispose() => _dispose();
+
+        /// <summary>Unreachable: this adapter is never in a tick order (its catalog entries have no
+        /// role slots), and CoopCore rejects a slot for a non-tickable module at startup, so the
+        /// gradual hook cannot be needed. Present only to satisfy the contract.</summary>
+        public void PeriodicUpdate(float delta)
+        {
+        }
     }
 }

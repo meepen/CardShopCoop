@@ -91,6 +91,7 @@ namespace CardShopCoop.Sync
         public Action<INetMessage> SendOp;
         /// <summary>Set by CoopCore: host -> clients state (MsgType.TradeState).</summary>
         public Action<INetMessage> BroadcastState;
+        public Action<int, INetMessage> SendToClient;
 
         private const byte OpAccept = 1;
         private const byte OpDecline = 2;
@@ -182,8 +183,16 @@ namespace CardShopCoop.Sync
         }
 
         // host
-        private readonly SnapshotGate _gate = new SnapshotGate(0.5f, 6f, -0.83f);
-        private int _lastHash; // logging only; SnapshotGate owns send gating
+        // Partial Index is the cashier-counter index. ResultSliceIndex is a separate slice whose
+        // Offers list is empty and whose result fields are one complete, atomic result tail.
+        // Three counters per 0.5s slice keeps a full counter pass within six seconds (the old heal
+        // interval); Remaining is therefore re-asserted with at most six seconds of staleness.
+        private const int ResultSliceIndex = 1000;
+        private const float SweepSliceSeconds = 0.5f;
+        private const float SweepCycleSeconds = 6f;
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private readonly Dictionary<int, int> _lastHostGeneration = new Dictionary<int, int>();
         private byte _resultSeq;
         private string _result = "";
         private byte _resultCounter = NoCounter;  // counter the latest result belongs to
@@ -240,8 +249,9 @@ namespace CardShopCoop.Sync
 
         public override void Reset()
         {
-            _gate.Reset(-0.83f);
-            _lastHash = 0;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _lastHostGeneration.Clear();
             _resultSeq = 0;
             _result = "";
             _resultCounter = NoCounter;
@@ -269,8 +279,9 @@ namespace CardShopCoop.Sync
 
         public override void ForceResend()
         {
-            _gate.Force();
-            _lastHash = 0;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _lastHostGeneration.Clear();
         }
 
         public override void Dispose()
@@ -326,6 +337,12 @@ namespace CardShopCoop.Sync
 
         public static void ApplyPatches(Harmony h)
         {
+            Try(h, typeof(Customer), "SetState",
+                postfix: new HarmonyMethod(typeof(TradeServe), nameof(CustomerStateChangedPostfix)));
+            Try(h, typeof(CustomerTradeCardScreen), "OpenScreen",
+                postfix: new HarmonyMethod(typeof(TradeServe), nameof(TradeScreenChangedPostfix)));
+            Try(h, typeof(CustomerTradeCardScreen), "CloseScreen",
+                postfix: new HarmonyMethod(typeof(TradeServe), nameof(TradeScreenChangedPostfix)));
             // The joiner's world has puppet customers only; clicking one would run a
             // local trade that mutates the mirrored wallet/binder outside the host's
             // simulation. Block the vanilla entry point; the counter prompt + the
@@ -353,6 +370,22 @@ namespace CardShopCoop.Sync
             // player-restore half (Customer.cs:255-267) on the client.
             Try(h, typeof(Customer), "OnPressStopInteract",
                 prefix: new HarmonyMethod(typeof(TradeServe), nameof(ClientStopInteractPrefix)));
+        }
+
+        /// <summary>Host change hooks: SetState owns both entry into WaitingToTradeCard and the
+        /// transitions that remove a waiting customer. It exists with this signature in both
+        /// decompiled game builds; no build-specific symbol is referenced.</summary>
+        public static void CustomerStateChangedPostfix(Customer __instance)
+        {
+            if (CoopCore.Role != CoopRole.Host || _live == null || __instance == null)
+                return;
+            _live.NotifyCustomerChanged(__instance);
+        }
+
+        public static void TradeScreenChangedPostfix()
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                _live?.BroadcastResultSlice();
         }
 
         public static bool ClientTradeBlockPrefix(Customer __instance)
@@ -744,6 +777,8 @@ namespace CardShopCoop.Sync
 
         public void HostTick(float dt, bool inGame)
         {
+            return;
+#if false
             if (!inGame)
                 return;
             if (!_gate.Due(dt))
@@ -860,6 +895,7 @@ namespace CardShopCoop.Sync
                 }
                 BroadcastState?.Invoke(BuildState());
             });
+#endif
         }
 
         /// <summary>Host: roll the customer's offer WITHOUT opening the screen, using the
@@ -1001,8 +1037,170 @@ namespace CardShopCoop.Sync
             return msg;
         }
 
-        /// <summary>Host: publish a result. Increments ResultSeq so the change gate always
-        /// broadcasts it, and records the counter + outcome so the guest holding that
+        private bool TryCollectOffer(int counterIdx, out Offer offer)
+        {
+            offer = default(Offer);
+            var cm = Cm();
+            var sm = Sm();
+            if (cm == null || sm == null || counterIdx < 0 || counterIdx >= sm.m_CashierCounterList.Count)
+                return false;
+            var counter = sm.m_CashierCounterList[counterIdx];
+            var customers = cm.GetCustomerList();
+            for (int i = 0; i < customers.Count; i++)
+            {
+                var cust = customers[i];
+                if (cust == null || !cust.m_IsActive || cust.m_CurrentState != ECustomerState.WaitingToTradeCard
+                    || !ReferenceEquals(FiTradeCounter?.GetValue(cust), counter))
+                    continue;
+                if (_guestClaims.TryGetValue(counterIdx, out var claim)
+                    && Time.realtimeSinceStartupAsDouble - claim.Time < 5.0)
+                    FiCustTimer?.SetValue(cust, 0f);
+                var data = FiTradeData?.GetValue(cust) as CustomerTradeData ?? PreRoll(cm, cust);
+                bool known = data != null && data.m_CardData_L != null
+                    && (!data.m_IsTrading || data.m_CardData_R != null);
+                offer = new Offer
+                {
+                    CounterIdx = (byte)counterIdx,
+                    Known = known,
+                    Remaining = Mathf.Clamp(VanillaWait - (FiCustTimer?.GetValue(cust) is float t ? t : 0f), 0f, VanillaWait),
+                    CustomerIndex = (ushort)i,
+                    CustomerGeneration = NpcSync.GetCustomerGeneration(cust),
+                    Position = cust.transform.position,
+                    Yaw = cust.transform.eulerAngles.y,
+                };
+                if (known)
+                {
+                    offer.Trading = data.m_IsTrading;
+                    offer.CardL = data.m_CardData_L;
+                    offer.CardR = data.m_CardData_R;
+                    offer.Price = data.m_SellCardAskPrice;
+                    offer.PriceSet = data.m_PriceSet;
+                    offer.LastPriceSet = data.m_LastPriceSet;
+                    offer.MaxDeclineCount = data.m_MaxDeclineCount;
+                    offer.DeclineCount = data.m_DeclineCount;
+                }
+                _lastHostGeneration[counterIdx] = offer.CustomerGeneration;
+                return true;
+            }
+            return false;
+        }
+
+        private TradeStateMessage BuildCounterSlice(int counterIdx)
+        {
+            Offer offer;
+            var msg = new TradeStateMessage { Full = false, Index = counterIdx, HostBusy = HostIsBusy() };
+            if (TryCollectOffer(counterIdx, out offer))
+                msg.Offers.Add(ToEntry(offer));
+            else if (_lastHostGeneration.TryGetValue(counterIdx, out int generation))
+                msg.Offers.Add(new TradeOfferEntry
+                {
+                    CounterIdx = (byte)counterIdx,
+                    CustomerGeneration = generation,
+                    Remaining = -1f
+                }); // tombstone
+            return msg;
+        }
+
+        private static TradeOfferEntry ToEntry(Offer o) => new TradeOfferEntry
+        {
+            CounterIdx = o.CounterIdx,
+            Known = o.Known,
+            Trading = o.Trading,
+            CardL = o.Known ? o.CardL : null,
+            CardR = o.Known && o.Trading ? o.CardR : null,
+            Price = o.Known && !o.Trading ? o.Price : 0f,
+            PriceSet = o.PriceSet,
+            LastPriceSet = o.LastPriceSet,
+            MaxDeclineCount = o.MaxDeclineCount,
+            DeclineCount = o.DeclineCount,
+            Remaining = o.Remaining,
+            CustomerIndex = o.CustomerIndex,
+            CustomerGeneration = o.CustomerGeneration,
+            Position = o.Position,
+            Yaw = o.Yaw,
+        };
+
+        private bool HostIsBusy()
+        {
+            var cm = Cm();
+            return cm != null && (cm.m_IsPlayerTrading
+                || (cm.m_CustomerTradeCardScreen != null && cm.m_CustomerTradeCardScreen.IsScreenOpened()));
+        }
+
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
+                return;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
+                return;
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
+            {
+                var sm = Sm();
+                int total = sm == null ? 0 : Mathf.Min(sm.m_CashierCounterList.Count, 251);
+                if (total == 0)
+                {
+                    _sweepCursor = 0;
+                    return;
+                }
+                int perSlice = Mathf.Max(1, Mathf.CeilToInt(total / (SweepCycleSeconds / SweepSliceSeconds)));
+                for (int i = 0; i < perSlice; i++)
+                {
+                    if (_sweepCursor >= total)
+                        _sweepCursor = 0;
+                    BroadcastState(BuildCounterSlice(_sweepCursor++));
+                }
+                // Re-assert the complete result tail every pass as well. A lost result frame must
+                // converge even when no new trade result is produced afterward.
+                BroadcastResultSlice();
+            });
+        }
+
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null || !CoopCore.InSessionWorld)
+                return;
+            Guarded("full", () =>
+            {
+                var sm = Sm();
+                if (sm == null)
+                    return;
+                _hostBuf.Clear();
+                for (int i = 0; i < Mathf.Min(sm.m_CashierCounterList.Count, 251); i++)
+                    if (TryCollectOffer(i, out var offer))
+                        _hostBuf.Add(offer);
+                var msg = BuildState();
+                msg.Full = true;
+                msg.Index = -1;
+                SendToClient(connId, msg);
+            });
+        }
+
+        private void NotifyCustomerChanged(Customer customer)
+        {
+            if (customer == null || CoopCore.Role != CoopRole.Host || !CoopCore.InSessionWorld)
+                return;
+            var sm = Sm();
+            var counter = FiTradeCounter?.GetValue(customer) as InteractableCashierCounter;
+            int idx = counter == null || sm == null ? -1 : sm.m_CashierCounterList.IndexOf(counter);
+            if (idx >= 0)
+                BroadcastState?.Invoke(BuildCounterSlice(idx));
+        }
+
+        private void BroadcastResultSlice()
+        {
+            if (BroadcastState == null || CoopCore.Role != CoopRole.Host || !CoopCore.InSessionWorld)
+                return;
+            var msg = BuildState();
+            msg.Full = false;
+            msg.Index = ResultSliceIndex;
+            msg.Offers.Clear();
+            BroadcastState(msg);
+        }
+
+        /// <summary>Host: publish a result. Increments ResultSeq so the push path broadcasts it
+        /// immediately, and records the counter + outcome so the guest holding that
         /// counter's screen can replay the confirmed outcome on the native UI.</summary>
         private void Result(string text, byte outcome = OutcomeBlocked, int counter = -1)
         {
@@ -1010,6 +1208,7 @@ namespace CardShopCoop.Sync
             _result = text;
             _resultCounter = counter >= 0 && counter < NoCounter ? (byte)counter : NoCounter;
             _resultOutcome = _resultCounter == NoCounter ? OutcomeNone : outcome;
+            BroadcastResultSlice();
             // Trade outcomes are handled by the native trade screen.  Do not surface
             // the old co-op status-line hints (for example, "the customer moves on").
             CoopPlugin.Log.LogInfo("TradeServe: " + text);
@@ -1042,6 +1241,8 @@ namespace CardShopCoop.Sync
             }
             CoopPlugin.Log.LogInfo($"TradeServe host: received {(op == OpAccept ? "accept" : op == OpDecline ? "decline" : "op " + op)} @ counter {idx}, price {price:F2}");
             Guarded("apply", () => HostApplyOpInner(op, idx, price));
+            if (op == OpAccept || op == OpDecline)
+                BroadcastState?.Invoke(BuildCounterSlice(idx));
         }
 
         /// <summary>Host: a guest disconnected - drop any trade-screen claim it held, so the
@@ -1261,10 +1462,35 @@ namespace CardShopCoop.Sync
             byte seq = message.ResultSeq;
             string result = message.Result;
             int count = message.Offers.Count;
-            _offers.Clear();
+            bool full = message.Full;
+            if (full)
+                _offers.Clear();
+            if (!full && message.Index == ResultSliceIndex)
+            {
+                ApplyResult(message, seq, result);
+                _staleTimer = 0f;
+                return;
+            }
+            if (full)
+                _carrierGeneration.Clear();
             for (int i = 0; i < count; i++)
             {
                 var e = message.Offers[i];
+                if (!full && e.Remaining < 0f)
+                {
+                    if (!_offers.TryGetValue(message.Index, out var current)
+                        || current.CustomerGeneration == e.CustomerGeneration)
+                    {
+                        _offers.Remove(message.Index);
+                        ReleaseCarrier(message.Index);
+                    }
+                    continue;
+                }
+                if (!full && e.CounterIdx != message.Index)
+                    continue;
+                if (!full && _offers.TryGetValue(e.CounterIdx, out var oldOffer)
+                    && e.CustomerGeneration < oldOffer.CustomerGeneration)
+                    continue;
                 var o = new Offer
                 {
                     CounterIdx = e.CounterIdx,
@@ -1284,17 +1510,21 @@ namespace CardShopCoop.Sync
                     Remaining = e.Remaining,
                 };
                 _offers[o.CounterIdx] = o;
+                _carrierGeneration[o.CounterIdx] = o.CustomerGeneration;
                 if (o.Known)
                     PrepareCarrier(o);
                 else
                     ReleaseCarrier(o.CounterIdx);
             }
-            var staleCarriers = new List<int>();
-            foreach (var kv in _carriers)
-                if (!_offers.ContainsKey(kv.Key) && kv.Key != _pendingCounter)
-                    staleCarriers.Add(kv.Key);
-            for (int i = 0; i < staleCarriers.Count; i++)
-                ReleaseCarrier(staleCarriers[i]);
+            if (full)
+            {
+                var staleCarriers = new List<int>();
+                foreach (var kv in _carriers)
+                    if (!_offers.ContainsKey(kv.Key) && kv.Key != _pendingCounter)
+                        staleCarriers.Add(kv.Key);
+                for (int i = 0; i < staleCarriers.Count; i++)
+                    ReleaseCarrier(staleCarriers[i]);
+            }
             _staleTimer = 0f;
             if (count != _lastOfferCount) // change-only, so the 6s heal doesn't spam
             {
@@ -1302,28 +1532,33 @@ namespace CardShopCoop.Sync
                 CoopPlugin.Log.LogInfo($"TradeServe client: state received, {count} live offer(s)");
             }
 
-            if (seq != _seenSeq)
+            if (full && seq != _seenSeq)
             {
-                _seenSeq = seq;
-                byte outcome = message.ResultOutcome;
-                byte rc = message.ResultCounter;
-                if (rc != NoCounter && rc == _pendingCounter)
-                {
-                    // the host confirmed what happened at the counter whose screen we hold:
-                    // drive the REAL screen to the state single-player would have reached
-                    ApplyOutcome(outcome, rc);
-                    if (outcome == OutcomeBlocked && result.Length > 0 && CoopCore.Instance != null)
-                    {
-                        CoopCore.Instance.RegisterLine = result;
-                        CoopCore.Instance.RegisterLineTimer = 4f;
-                    }
-                }
-                else if (result.Length > 0 && CoopCore.Instance != null
-                    && (outcome == OutcomeBlocked || outcome == OutcomeNone))
+                ApplyResult(message, seq, result);
+            }
+        }
+
+        private void ApplyResult(TradeStateMessage message, byte seq, string result)
+        {
+            if (seq == _seenSeq)
+                return;
+            _seenSeq = seq;
+            byte outcome = message.ResultOutcome;
+            byte rc = message.ResultCounter;
+            if (rc != NoCounter && rc == _pendingCounter)
+            {
+                ApplyOutcome(outcome, rc);
+                if (outcome == OutcomeBlocked && result.Length > 0 && CoopCore.Instance != null)
                 {
                     CoopCore.Instance.RegisterLine = result;
                     CoopCore.Instance.RegisterLineTimer = 4f;
                 }
+            }
+            else if (result.Length > 0 && CoopCore.Instance != null
+                && (outcome == OutcomeBlocked || outcome == OutcomeNone))
+            {
+                CoopCore.Instance.RegisterLine = result;
+                CoopCore.Instance.RegisterLineTimer = 4f;
             }
         }
 

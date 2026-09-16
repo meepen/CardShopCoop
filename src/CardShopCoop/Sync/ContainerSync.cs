@@ -18,9 +18,11 @@ namespace CardShopCoop.Sync
     /// cards the joiner donated landed in a box the host saw as empty and the box
     /// station literally ate the joiner's boxes.
     ///
-    /// Host-authoritative, keyed by PopulationSync (kind, index): the host broadcasts
-    /// each container's state hash-gated (~1 Hz while anything changes, full heal every
-    /// 15s); joiner actions are blocked-and-forwarded as ops the host applies through
+    /// Host-authoritative, keyed by PopulationSync (kind, index): mutation hooks push
+    /// exactly one changed record, while a round-robin sweep re-asserts a batch every
+    /// 250ms for eventual correctness (at most 63 records/message and 1250 records / 5s
+    /// for a full pass at the wire's 250-item-per-kind cap); joiner actions are blocked-and-forwarded as ops
+    /// the host applies through
     /// the vanilla methods, and the next broadcast is the echo. Client edits carry a 6s
     /// locally-touched guard so a stale echo can't undo what the player just did.
     ///
@@ -56,9 +58,12 @@ namespace CardShopCoop.Sync
         private const byte OpCleanserRefill = 8;
         private const byte OpWorkerTakeFlag = 9;
 
-        private const float TickInterval = 1f;
-        private const float HealInterval = 15f;
         private const double TouchedGuard = 6.0;
+        // Unconditional batches keep the worst-case 1250-record pass near 5 seconds
+        // without recreating the old full-resend burst.
+        private const float SweepSliceSeconds = 0.25f;
+        private const float SweepCycleSeconds = 5f;
+        private const double ResyncCooldownSeconds = 2.0;
 
         /// <summary>Set by CoopCore: client -> host op (MsgType.ContainerOp).</summary>
         public Action<INetMessage> SendOp;
@@ -124,10 +129,14 @@ namespace CardShopCoop.Sync
         }
 
         private ShelfManager _sm;
-        private float _timer;
-        private float _heal;
         private readonly Dictionary<int, int> _lastHash = new Dictionary<int, int>();      // host
-        private readonly List<int> _dirty = new List<int>();                               // host
+        private readonly Dictionary<object, int> _hostKeys = new Dictionary<object, int>();
+        // A partial is exactly one ContainerRecord. Index is the packed kind/index identity;
+        // Records carries the record itself, so omitted records are never deletions.
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private double _lastResyncRequestAt = -999.0;
+        private double _lastApplyWarningAt = -999.0;
         private readonly Dictionary<int, double> _touched = new Dictionary<int, double>(); // client
         private readonly Dictionary<int, PackMirror> _packMirrors = new Dictionary<int, PackMirror>();
         private readonly Dictionary<int, int> _packClaimOwner = new Dictionary<int, int>();
@@ -193,7 +202,6 @@ namespace CardShopCoop.Sync
                 h = h * 31 + (int)((FiPoOpenTimer?.GetValue(p) as float? ?? 0f) * 2f);
                 h = h * 31 + p.GetPackOpenedCount();
                 h = h * 31 + HashCards(p.GetCompactCardDataAmountList());
-                h = h * 31 + (_packClaimOwner.ContainsKey((KindPackOpener << 8) | IndexOf(KindPackOpener, p)) ? 1 : 0);
                 return h;
             };
             _hashBoxStorage = obj => ((InteractableEmptyBoxStorage)obj).GetBoxStoredCount();
@@ -242,10 +250,10 @@ namespace CardShopCoop.Sync
         public override void Reset()
         {
             _sm = null;
-            _timer = -5.3f; // staggered phase vs the other snapshot engines
-            _heal = 0f;
             _lastHash.Clear();
-            _dirty.Clear();
+            _hostKeys.Clear();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
             _touched.Clear();
             _packMirrors.Clear();
             _packClaimOwner.Clear();
@@ -263,10 +271,74 @@ namespace CardShopCoop.Sync
 
         public override void ForceResend()
         {
-            // forgetting every hash makes the next HostTick rebroadcast the world -
-            // the on-join snapshot for containers
             _lastHash.Clear();
-            _heal = 0f;
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            if (CoopCore.Role == CoopRole.Client)
+            {
+                double now = Time.realtimeSinceStartupAsDouble;
+                if (now - _lastResyncRequestAt >= ResyncCooldownSeconds)
+                {
+                    _lastResyncRequestAt = now;
+                    Guarded("resync-request", () => SendOp?.Invoke(new JoinResyncRequestMessage()));
+                }
+            }
+            else if (CoopCore.Role == CoopRole.Host)
+            {
+                PeriodicUpdate(SweepSliceSeconds);
+            }
+        }
+
+        /// <summary>Re-assert a round-robin batch unconditionally. This is the replacement for
+        /// the old 15 second full heal; change hooks send records immediately.</summary>
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
+                return;
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
+                return;
+            _sweepTimer -= SweepSliceSeconds;
+            Guarded("sweep", () =>
+            {
+                var keys = GetContainerKeys();
+                if (keys.Count == 0)
+                {
+                    _sweepCursor = 0;
+                    return;
+                }
+                if (_sweepCursor >= keys.Count)
+                    _sweepCursor = 0;
+                int slicesPerCycle = Mathf.Max(1, Mathf.RoundToInt(SweepCycleSeconds / SweepSliceSeconds));
+                int perSlice = Mathf.Max(1, (keys.Count + slicesPerCycle - 1) / slicesPerCycle);
+                int firstKey = keys[_sweepCursor];
+                var records = new List<ContainerRecord>(perSlice);
+                for (int n = 0; n < perSlice; n++)
+                {
+                    records.Add(BuildRecord(keys[_sweepCursor] >> 8, keys[_sweepCursor] & 0xFF));
+                    _sweepCursor = (_sweepCursor + 1) % keys.Count;
+                }
+                BroadcastState(new ContainerStateMessage
+                {
+                    Full = false,
+                    Index = firstKey,
+                    Records = records,
+                });
+            });
+        }
+
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null || !CoopCore.InSessionWorld)
+                return;
+            Guarded("full", () =>
+            {
+                var records = new List<ContainerRecord>();
+                var keys = GetContainerKeys();
+                for (int i = 0; i < keys.Count; i++)
+                    records.Add(BuildRecord(keys[i] >> 8, keys[i] & 0xFF));
+                SendToClient(connId, new ContainerStateMessage { Full = true, Index = -1, Records = records });
+            });
         }
 
         /// <summary>Release a disconnected client's pack-opener claims so a failed
@@ -287,7 +359,7 @@ namespace CardShopCoop.Sync
             if (released.Count > 0)
             {
                 CoopPlugin.Log.LogInfo($"ContainerSync: released {released.Count} pack claim(s) from disconnected client {connId}");
-                _heal = 999f;
+                _sweepTimer = 0f;
             }
         }
 
@@ -400,96 +472,105 @@ namespace CardShopCoop.Sync
                 && Time.realtimeSinceStartupAsDouble - t < TouchedGuard;
         }
 
-        // ---------------- host: hash-gated broadcast ----------------
+        // ---------------- host: change pushes and gradual re-assertion ----------------
 
         public void HostTick(float dt, bool inGame)
         {
-            if (!inGame)
-                return;
-            _timer += dt;
-            if (_timer < TickInterval)
-                return;
-            _timer -= TickInterval;
-            if (_timer > TickInterval)
-                _timer = TickInterval; // clamp debt after a hitch
-            try
-            {
-                var sm = Sm();
-                if (sm == null)
-                    return;
-                bool sawError = false;
-                _heal += TickInterval;
-                if (_heal >= HealInterval)
-                {
-                    // periodic full rebroadcast repairs any client that missed an echo
-                    _heal = 0f;
-                    _lastHash.Clear();
-                }
-                _dirty.Clear();
-                CollectKind(sm, KindCardStorage, _hashCardStorage, ref sawError);
-                CollectKind(sm, KindDonation, _hashDonation, ref sawError);
-                CollectKind(sm, KindPackOpener, _hashPackOpener, ref sawError);
-                CollectKind(sm, KindBoxStorage, _hashBoxStorage, ref sawError);
-                CollectKind(sm, KindCleanser, _hashCleanser, ref sawError);
-                if (_dirty.Count == 0)
-                {
-                    if (sawError)
-                        ForceResend();
-                    return;
-                }
-                var dirty = new List<int>(_dirty); // snapshot for the closure
-                var records = new List<ContainerRecord>(dirty.Count);
-                for (int i = 0; i < dirty.Count; i++)
-                {
-                    int key = dirty[i];
-                    try
-                    {
-                        records.Add(BuildRecord(key >> 8, key & 0xFF));
-                    }
-                    catch (Exception e)
-                    {
-                        sawError = true;
-                        _lastHash.Remove(key); // retry this record on the next tick
-                        CoopPlugin.Log.LogWarning($"ContainerSync snapshot record {key >> 8}:{key & 0xFF}: {e.Message}");
-                    }
-                }
-                if (sawError)
-                {
-                    ForceResend();
-                    return; // never label the remaining records as a complete snapshot
-                }
-                BroadcastState?.Invoke(new ContainerStateMessage { Records = records });
-            }
-            catch (Exception e) { CoopPlugin.Log.LogWarning("ContainerSync host: " + e.Message); }
+            // Automatic simulation changes are observed by the Update postfixes below.
         }
 
-        private void CollectKind(ShelfManager sm, int kind, Func<object, int> hashFn, ref bool sawError)
+        private List<int> GetContainerKeys()
+        {
+            var result = new List<int>();
+            var sm = Sm();
+            if (sm == null)
+                return result;
+            _hostKeys.Clear();
+            AddKeys(result, sm, KindCardStorage);
+            AddKeys(result, sm, KindDonation);
+            AddKeys(result, sm, KindPackOpener);
+            AddKeys(result, sm, KindBoxStorage);
+            AddKeys(result, sm, KindCleanser);
+            return result;
+        }
+
+        private void AddKeys(List<int> result, ShelfManager sm, int kind)
         {
             var list = PopulationSync.GetList(sm, kind);
             if (list == null)
                 return;
             for (int i = 0; i < list.Count && i < 250; i++)
+                if (list[i] != null)
+                {
+                    int key = (kind << 8) | i;
+                    result.Add(key);
+                    _hostKeys[list[i]] = key;
+                }
+        }
+
+        private void SendHostRecord(int key, int hash = int.MinValue)
+        {
+            var record = BuildRecord(key >> 8, key & 0xFF);
+            BroadcastState?.Invoke(new ContainerStateMessage
             {
-                if (list[i] == null)
-                    continue;
-                int h;
-                try
-                {
-                    h = hashFn(list[i]);
-                }
-                catch (Exception e)
-                {
-                    sawError = true;
-                    CoopPlugin.Log.LogWarning($"ContainerSync snapshot record {kind}:{i}: {e.Message}");
-                    _lastHash.Remove((kind << 8) | i);
-                    continue;
-                }
-                int key = (kind << 8) | i;
-                if (_lastHash.TryGetValue(key, out int prev) && prev == h)
-                    continue;
-                _lastHash[key] = h;
-                _dirty.Add(key);
+                Full = false,
+                Index = key,
+                Records = new List<ContainerRecord> { record }
+            });
+            _lastHash[key] = hash == int.MinValue ? HashForKey(key) : hash;
+        }
+
+        private int HashForKey(int key)
+        {
+            object value = Get<object>(key >> 8, key & 0xFF);
+            if (value == null)
+                return 0;
+            switch (key >> 8)
+            {
+                case KindCardStorage:
+                    return _hashCardStorage(value);
+                case KindDonation:
+                    return _hashDonation(value);
+                case KindPackOpener:
+                    return _hashPackOpener(value) * 31
+                        + (_packClaimOwner.ContainsKey(key) ? 1 : 0);
+                case KindBoxStorage:
+                    return _hashBoxStorage(value);
+                case KindCleanser:
+                    return _hashCleanser(value);
+                default:
+                    return 0;
             }
+        }
+
+        private void HostChanged(int kind, object container)
+        {
+            if (CoopCore.Role != CoopRole.Host || !CoopCore.InSessionWorld
+                || container == null || BroadcastState == null)
+            {
+                return;
+            }
+            Guarded("change", () =>
+            {
+                if (!_hostKeys.TryGetValue(container, out int key)
+                    || (key >> 8) != kind
+                    || !ReferenceEquals(Get<object>(kind, key & 0xFF), container))
+                {
+                    GetContainerKeys();
+                    if (!_hostKeys.TryGetValue(container, out key)
+                        || (key >> 8) != kind
+                        || !ReferenceEquals(Get<object>(kind, key & 0xFF), container))
+                    {
+                        return;
+                    }
+                }
+                int hash = HashForKey(key);
+                if (_lastHash.TryGetValue(key, out int old) && old == hash)
+                {
+                    return;
+                }
+                SendHostRecord(key, hash);
+            });
         }
 
         private ContainerRecord BuildRecord(int kind, int idx)
@@ -689,6 +770,7 @@ namespace CardShopCoop.Sync
                             }
                             FiEbCount?.SetValue(s, s.GetBoxStoredCount() + 1);
                             MiEbEval?.Invoke(s, null);
+                            HostChanged(KindBoxStorage, s);
                             CoopPlugin.Log.LogInfo($"ContainerSync: accepted atomic empty-box store id {boxId} into storage id {storageId}");
                             break;
                         }
@@ -708,6 +790,7 @@ namespace CardShopCoop.Sync
                                 FiClCooldown?.SetValue(c, true);
                                 FiClTimer?.SetValue(c, 0f);
                             }
+                            HostChanged(KindCleanser, c);
                             break;
                         }
                     case OpCleanserRefill:
@@ -798,6 +881,7 @@ namespace CardShopCoop.Sync
             _lastHash.Remove((KindPackOpener << 8) | idx); // force an idle rebroadcast next tick
             _packClaimOwner.Remove(key);
             _packClaimToken.Remove(key);
+            HostChanged(KindPackOpener, p);
         }
 
         private void HostApplyBoxTake(ushort storageId, Vector3 reqPos, int connId)
@@ -886,18 +970,18 @@ namespace CardShopCoop.Sync
                                 var s = Get<InteractableCardStorageShelf>(kind, idx);
                                 // a container the player is editing right now (or edited in
                                 // the last 6s) is his; the host hears about it via the op
-                                if (s == null || s.IsEditingBulkBox() || IsTouched(kind, idx))
+                                if (s == null || (!s.IsEditingBulkBox() && IsTouched(kind, idx)))
                                     break;
-                                ApplyContent(kind, idx, cards, true, canTake);
+                                ApplyContentInPlace(s, cards, canTake);
                                 break;
                             }
                         case KindDonation:
                             {
                                 var cards = rec.Cards;
                                 var b = Get<InteractableBulkDonationBox>(kind, idx);
-                                if (b == null || b.IsEditingBulkBox() || IsTouched(kind, idx))
+                                if (b == null || (!b.IsEditingBulkBox() && IsTouched(kind, idx)))
                                     break;
-                                ApplyContent(kind, idx, cards, false, false);
+                                ApplyContentInPlace(b, cards);
                                 break;
                             }
                         case KindPackOpener:
@@ -965,19 +1049,66 @@ namespace CardShopCoop.Sync
                             }
                         default:
                             sawError = true;
-                            CoopPlugin.Log.LogWarning($"ContainerSync apply unknown kind {kind} at record {r}");
+                            WarnApply($"ContainerSync apply unknown kind {kind} at record {r}");
                             continue;
                     }
                 }
                 catch (Exception e)
                 {
-                    CoopPlugin.Log.LogWarning($"ContainerSync apply kind {kind}: {e.Message}");
+                    WarnApply($"ContainerSync apply kind {kind}: {e.Message}");
                     sawError = true;
                     continue; // records are already materialized; later records remain safe
                 }
             }
             if (sawError)
                 ForceResend();
+        }
+
+        private void WarnApply(string message)
+        {
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (now - _lastApplyWarningAt < ResyncCooldownSeconds)
+            {
+                return;
+            }
+            _lastApplyWarningAt = now;
+            CoopPlugin.Log.LogWarning(message);
+        }
+
+        private void ApplyContentInPlace(InteractableCardStorageShelf shelf,
+            List<CompactCardDataAmount> cards, bool canWorkerTake)
+        {
+            ApplyingRemote = true;
+            try
+            {
+                var target = shelf.GetCompactCardDataAmountList();
+                target.Clear();
+                if (cards != null)
+                {
+                    target.AddRange(cards);
+                }
+                shelf.SetCanWorkerTake(canWorkerTake);
+                shelf.OnCardStorageShelfSettingDone();
+            }
+            finally { ApplyingRemote = false; }
+        }
+
+        private void ApplyContentInPlace(InteractableBulkDonationBox box,
+            List<CompactCardDataAmount> cards)
+        {
+            ApplyingRemote = true;
+            try
+            {
+                var target = box.GetCompactCardDataAmountList();
+                target.Clear();
+                if (cards != null)
+                {
+                    target.AddRange(cards);
+                }
+                box.UpdateFillPercent(Mathf.Clamp01(
+                    (float)box.GetTotalCardAmount() / box.GetBoxTotalCardCountMax()));
+            }
+            finally { ApplyingRemote = false; }
         }
 
         private void ApplyContent(int kind, int idx, List<CompactCardDataAmount> cards,
@@ -1351,12 +1482,24 @@ namespace CardShopCoop.Sync
                 postfix: new HarmonyMethod(typeof(ContainerSync), nameof(DonationContentPostfix)));
             Try(h, typeof(InteractableCardStorageShelf), "SetCanWorkerTake",
                 postfix: new HarmonyMethod(typeof(ContainerSync), nameof(WorkerTakePostfix)));
+            Try(h, typeof(InteractableCardStorageShelf), "GetRandomCard",
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(CardStorageRandomCardPostfix)));
+            Try(h, typeof(InteractableCardStorageShelf), "RemoveRandomCardFromShelf",
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(CardStorageRandomCardPostfix)));
+            Try(h, typeof(InteractableBulkDonationBox), "RemoveRandomCardFromShelf",
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(DonationRandomCardPostfix)));
 
             // pack opener: the button and every item path are host-owned on the client
             Try(h, typeof(InteractableAutoPackOpener), "OnMouseButtonUp",
-                prefix: new HarmonyMethod(typeof(ContainerSync), nameof(PackOpenerClickPrefix)));
+                prefix: new HarmonyMethod(typeof(ContainerSync), nameof(PackOpenerClickPrefix)),
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(PackOpenerChangedPostfix)));
             Try(h, typeof(InteractableAutoPackOpener), "AddItem",
-                prefix: new HarmonyMethod(typeof(ContainerSync), nameof(PackOpenerAddItemPrefix)));
+                prefix: new HarmonyMethod(typeof(ContainerSync), nameof(PackOpenerAddItemPrefix)),
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(PackOpenerChangedPostfix)));
+            Try(h, typeof(InteractableAutoPackOpener), "RemoveItem",
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(PackOpenerChangedPostfix)));
+            Try(h, typeof(InteractableAutoPackOpener), "Update",
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(PackOpenerChangedPostfix)));
             Try(h, typeof(InteractableAutoPackOpener), "TakeItemToHand",
                 prefix: new HarmonyMethod(typeof(ContainerSync), nameof(TakeItemBlockPrefix)));
 
@@ -1365,7 +1508,8 @@ namespace CardShopCoop.Sync
             Try(h, typeof(InteractableEmptyBoxStorage), "OnMouseButtonUp",
                 prefix: new HarmonyMethod(typeof(ContainerSync), nameof(StorageMouseButtonPrefix)));
             Try(h, typeof(InteractableEmptyBoxStorage), "TakeBox",
-                prefix: new HarmonyMethod(typeof(ContainerSync), nameof(TakeBoxPrefix)));
+                prefix: new HarmonyMethod(typeof(ContainerSync), nameof(TakeBoxPrefix)),
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(BoxStorageChangedPostfix)));
             Try(h, typeof(InteractableEmptyBoxStorage), "StoreBox",
                 prefix: new HarmonyMethod(typeof(ContainerSync), nameof(StoreBoxPrefix)),
                 postfix: new HarmonyMethod(typeof(ContainerSync), nameof(StoreBoxPostfix)));
@@ -1375,7 +1519,12 @@ namespace CardShopCoop.Sync
             Try(h, typeof(InteractableAutoCleanser), "OnMouseButtonUp",
                 postfix: new HarmonyMethod(typeof(ContainerSync), nameof(CleanserTogglePostfix)));
             Try(h, typeof(InteractableAutoCleanser), "AddItem",
-                prefix: new HarmonyMethod(typeof(ContainerSync), nameof(CleanserAddItemPrefix)));
+                prefix: new HarmonyMethod(typeof(ContainerSync), nameof(CleanserAddItemPrefix)),
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(CleanserChangedPostfix)));
+            Try(h, typeof(InteractableAutoCleanser), "RemoveItem",
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(CleanserChangedPostfix)));
+            Try(h, typeof(InteractableAutoCleanser), "Update",
+                postfix: new HarmonyMethod(typeof(ContainerSync), nameof(CleanserChangedPostfix)));
             Try(h, typeof(InteractableAutoCleanser), "TakeItemToHand",
                 prefix: new HarmonyMethod(typeof(ContainerSync), nameof(TakeItemBlockPrefix)));
 
@@ -1389,6 +1538,11 @@ namespace CardShopCoop.Sync
 
         public static void StorageContentPostfix(InteractableCardStorageShelf __instance)
         {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.HostChanged(KindCardStorage, __instance);
+                return;
+            }
             if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
                 return;
             Instance?.ClientForwardContent(KindCardStorage, __instance,
@@ -1397,6 +1551,11 @@ namespace CardShopCoop.Sync
 
         public static void DonationContentPostfix(InteractableBulkDonationBox __instance)
         {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.HostChanged(KindDonation, __instance);
+                return;
+            }
             if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
                 return;
             Instance?.ClientForwardContent(KindDonation, __instance,
@@ -1405,6 +1564,11 @@ namespace CardShopCoop.Sync
 
         public static void WorkerTakePostfix(InteractableCardStorageShelf __instance, bool canWorkerTake)
         {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.HostChanged(KindCardStorage, __instance);
+                return;
+            }
             if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
                 return;
             var self = Instance;
@@ -1420,6 +1584,40 @@ namespace CardShopCoop.Sync
                 Index = (byte)idx,
                 CanWorkerTake = canWorkerTake,
             });
+        }
+
+        public static void CardStorageRandomCardPostfix(InteractableCardStorageShelf __instance)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.HostChanged(KindCardStorage, __instance);
+            }
+        }
+
+        public static void DonationRandomCardPostfix(InteractableBulkDonationBox __instance)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.HostChanged(KindDonation, __instance);
+            }
+        }
+
+        public static void PackOpenerChangedPostfix(InteractableAutoPackOpener __instance)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                Instance?.HostChanged(KindPackOpener, __instance);
+        }
+
+        public static void BoxStorageChangedPostfix(InteractableEmptyBoxStorage __instance)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                Instance?.HostChanged(KindBoxStorage, __instance);
+        }
+
+        public static void CleanserChangedPostfix(InteractableAutoCleanser __instance)
+        {
+            if (CoopCore.Role == CoopRole.Host)
+                Instance?.HostChanged(KindCleanser, __instance);
         }
 
         public static bool PackOpenerClickPrefix(InteractableAutoPackOpener __instance)
@@ -1608,6 +1806,11 @@ namespace CardShopCoop.Sync
 
         private static void StoreBoxPostfix(InteractableEmptyBoxStorage __instance, StoreBoxState __state)
         {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.HostChanged(KindBoxStorage, __instance);
+                return;
+            }
             if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
             {
                 if (__state.Atomic && ReferenceEquals(_suppressedStorageDestroy, __state.Box))
@@ -1647,6 +1850,11 @@ namespace CardShopCoop.Sync
 
         public static void CleanserTogglePostfix(InteractableAutoCleanser __instance)
         {
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.HostChanged(KindCleanser, __instance);
+                return;
+            }
             if (CoopCore.Role != CoopRole.Client || ApplyingRemote)
                 return;
             var self = Instance;

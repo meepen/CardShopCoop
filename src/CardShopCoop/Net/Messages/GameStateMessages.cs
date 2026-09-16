@@ -133,6 +133,13 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.ReportState, Policy = MessagePolicy.ClientOnly)]
     public sealed class ReportStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE report. False = ONE slice identified by <see cref="Index"/>;
+        /// report fields not carried by a partial slice are UNCHANGED.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public bool OpenScreen;
         public int CustomerVisited;
         public int CheckoutCount;
@@ -194,6 +201,17 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.TournamentState, Policy = MessagePolicy.ClientOnly)]
     public sealed class TournamentStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
+        /// <summary>Changes whenever the host starts a new tournament bracket.</summary>
+        public int BracketEpoch;
+
         public byte Flags; // bit0 IsHostingTournament, bit1 IsTournamentDay, bit2 IsTournamentDayOver
         public int MaxPlayerCount;
         public int SignedUpCustomerCount;
@@ -259,6 +277,14 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.TableState, Policy = MessagePolicy.ClientOnly)]
     public sealed class TableStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public List<TableEntry> Tables = new List<TableEntry>();
 
         public MsgType Type
@@ -341,6 +367,14 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.GradingState, Policy = MessagePolicy.ClientOnly)]
     public sealed class GradingStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public List<GradingSetEntry> Sets = new List<GradingSetEntry>();
 
         public MsgType Type
@@ -357,6 +391,8 @@ namespace CardShopCoop.Net.Messages
     /// <summary>One in-progress grading submission set.</summary>
     public sealed class GradingSetEntry
     {
+        public int Id; // host-assigned stable identity; never use the list position as identity
+        public bool Removed; // partial-only tombstone; the set with Id must be removed
         public int ServiceLevel; // Grading Overhaul encoded level is the full int
         public byte DayPassed;
         public float MinutePassed;
@@ -391,6 +427,14 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.TradeState, Policy = MessagePolicy.ClientOnly)]
     public sealed class TradeStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public bool HostBusy;
         public byte ResultSeq;
         public string Result = "";

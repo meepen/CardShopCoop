@@ -93,7 +93,10 @@ namespace CardShopCoop.Patches
             // Game 1.0's cheat canvas can add coins/XP and alter grades, prices and customers.
             // The shared economy is host-owned, so a client must never open it or apply a cheat.
             // Resolved by name so a build without the cheat system stays unaffected.
-            var tCheat = AccessTools.TypeByName("CheatManager");
+            // Pin to the GAME assembly, like the warehouse probes: a same-named MonoBehaviour from
+            // another plugin would otherwise win a bare name lookup, and the real menu's
+            // SetMenuOpen prefix would never be installed.
+            var tCheat = typeof(CGameManager).Assembly.GetType("CheatManager", false);
             if (tCheat != null)
             {
                 Try(h, tCheat, "SetMenuOpen",
@@ -104,7 +107,12 @@ namespace CardShopCoop.Patches
                     prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatApplyPrefix)));
                 Try(h, tCheat, "GiveAllCards",
                     prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatGiveCardsPrefix)));
-                EnsureCheatManager();
+                EnsureCheatManager(tCheat);
+                CoopPlugin.Log.LogInfo("CheatManager capability present: gated game cheat testing is available");
+            }
+            else
+            {
+                CoopPlugin.Log.LogInfo("CheatManager capability absent (legacy game build): game cheat testing disabled");
             }
 
             // No local customer simulation on the client (host streams the real economy).
@@ -1405,16 +1413,33 @@ namespace CardShopCoop.Patches
         /// <summary>The release build contains CheatManager but does not leave an instance alive
         /// for the production scene. Create one with the game's own cheat canvas prefab so F1 and
         /// the built-in controller sequence have an input receiver. It remains dormant unless
-        /// both explicit testing settings are enabled on the host.</summary>
-        private static void EnsureCheatManager()
+        /// both explicit testing settings are enabled on the host.
+        ///
+        /// CheatManager is absent from the legacy game build, so this method may not name the
+        /// type directly: the component is added through the resolved Type and its prefab field
+        /// is set by name, keeping the compiled assembly free of any CheatManager reference.
+        /// A same-named type from another assembly can win the name lookup, so the result is
+        /// validated as a Component and the whole bootstrap is contained - an unexpected throw
+        /// here would otherwise abort the rest of ApplyAll's patch registrations.</summary>
+        private static void EnsureCheatManager(Type cheatType)
         {
-            if (UnityEngine.Object.FindObjectOfType<CheatManager>() != null)
-                return;
-            var go = new GameObject("CardShopCoopGameCheatManager");
-            UnityEngine.Object.DontDestroyOnLoad(go);
-            var manager = go.AddComponent<CheatManager>();
-            manager.m_CheatCanvasPrefab = Resources.Load<GameObject>("CheatUI_Root");
-            CoopPlugin.Log.LogInfo("game cheat manager enabled for gated testing; use F1 when both Hidden settings are true on the host");
+            try
+            {
+                if (!typeof(Component).IsAssignableFrom(cheatType))
+                    return;
+                if (UnityEngine.Object.FindObjectOfType(cheatType) != null)
+                    return;
+                var go = new GameObject("CardShopCoopGameCheatManager");
+                UnityEngine.Object.DontDestroyOnLoad(go);
+                var manager = go.AddComponent(cheatType);
+                AccessTools.Field(cheatType, "m_CheatCanvasPrefab")
+                    ?.SetValue(manager, Resources.Load<GameObject>("CheatUI_Root"));
+                CoopPlugin.Log.LogInfo("game cheat manager enabled for gated testing; use F1 when both Hidden settings are true on the host");
+            }
+            catch (Exception e)
+            {
+                CoopPlugin.Log.LogWarning("game cheat manager bootstrap failed: " + e.Message);
+            }
         }
 
         /// <summary>Client: never apply a cheat event (money/XP/etc.) locally.</summary>

@@ -16,8 +16,10 @@ namespace CardShopCoop.Sync
     /// save is discarded, so anything he submits locally is simply lost. Instead the
     /// joiner's submit confirm is blocked BEFORE it charges, forwarded as a GradingOp,
     /// and enrolled on the HOST (fee + m_GradeCardInProgressList) where it matures on
-    /// real host days. The host broadcasts the pending list (GradingState, hash-gated)
-    /// so the joiner's phone grading app shows the truth, and the client's own copy of
+    /// real host days. The host broadcasts the pending list (GradingState, change pushes plus
+    /// an unconditional bounded sweep)
+    /// so the joiner's phone grading app shows the truth via immediate change pushes and a
+    /// bounded per-set sweep, and the client's own copy of
     /// RestockManager.OnDayStarted is blocked so the mirrored list never self-matures
     /// into a phantom result box.
     ///
@@ -70,6 +72,7 @@ namespace CardShopCoop.Sync
 
         /// <summary>Set by CoopCore: host -> clients state (MsgType.GradingState).</summary>
         public Action<INetMessage> BroadcastState;
+        public Action<int, INetMessage> SendToClient;
 
         /// <summary>True while ClientApplyState rewrites the mirrored pending list, so
         /// no patch mistakes the authoritative copy for local player action.</summary>
@@ -83,10 +86,8 @@ namespace CardShopCoop.Sync
         // submission cap and it is NOT a wire bound: with Grading Overhaul the submit screen
         // holds up to 52 cards (GradingInterop.MaxSubmitSlots, which reads GO's own MAX_SLOTS).
         // Every count that decides how many cards actually move - the submit op, the
-        // host->guest GradingState broadcast (BuildState / ClientApplyInner) and the change
-        // detector that gates it (ComputeHash) - reads MaxSubmitSlots. Using 8 in any of those
-        // silently dropped every card past the eighth.
-        private const int MaxSets = 8;
+        // host->guest GradingState broadcast (BuildState / ClientApplyInner) reads
+        // MaxSubmitSlots. Using 8 in any card-count path silently dropped every card past the eighth.
         private const int MaxSlots = 8;
         private const float DeliveryFee = 10f; // GradedCardSubmitSelectScreen.EvaluateTotalCost
 
@@ -179,7 +180,19 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private readonly SnapshotGate _gate = new SnapshotGate(1.5f, 15f, -6.8f);
+        // Partial Index is the host list ordinal at the time of the send. Id, not Index, is
+        // identity: RestockManager removes from the list, so positions can be reused.
+        private const float SweepSliceSeconds = 0.5f;
+        private const float SweepCycleSeconds = 5f;
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private int _nextSetId = 1;
+        private readonly Dictionary<GradeCardSubmitSet, int> _setIds = new Dictionary<GradeCardSubmitSet, int>();
+        private readonly HashSet<int> _knownSetIds = new HashSet<int>();
+        private readonly HashSet<int> _tombstones = new HashSet<int>();
+        private readonly List<int> _tombstoneOrder = new List<int>();
+        private int _tombstoneCursor;
+        private bool _clientBaselinePending = true;
         private GradeCardWebsiteUIScreen _website; // cached lookup (client UI refresh)
 
         // NEVER CSingleton<InventoryBase>.Instance: touched while no real manager
@@ -203,11 +216,10 @@ namespace CardShopCoop.Sync
 
         public override string Name => "grading";
 
-        protected override void OnHostTick(in SyncFrame frame) => HostTick(frame.Dt, frame.InGame);
-
         /// <summary>Disable static Harmony hooks before session state is torn down.</summary>
         public static void ClearLive()
         {
+            ClientSetIds.Clear();
             Instance = null;
             ApplyingRemote = false;
         }
@@ -219,14 +231,24 @@ namespace CardShopCoop.Sync
 
         public override void Reset()
         {
-            _gate.Reset(-6.8f);
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _nextSetId = 1;
+            _setIds.Clear();
+            _knownSetIds.Clear();
+            _tombstones.Clear();
+            _tombstoneOrder.Clear();
+            _tombstoneCursor = 0;
+            _clientBaselinePending = true;
+            ClientSetIds.Clear();
             _website = null;
             _inv = null;
         }
 
         public override void ForceResend()
         {
-            _gate.Force();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
         }
 
         // ---------------- patches ----------------
@@ -288,6 +310,8 @@ namespace CardShopCoop.Sync
                     priority = 1000,
                     before = new[] { "munch.gradingoverhaul" },
                 });
+            Try(h, typeof(RestockManager), "OnDayStarted",
+                postfix: new HarmonyMethod(typeof(GradingSync), nameof(DayStartedPostfix)));
 
             // THE ACTUAL GRADING OVERHAUL BLOCK: patch GO's OWN prefix method.
             //
@@ -595,22 +619,152 @@ namespace CardShopCoop.Sync
 
         // ---------------- host ----------------
 
-        public void HostTick(float dt, bool inGame)
+        public static void DayStartedPostfix()
         {
-            if (!inGame)
+            if (CoopCore.Role == CoopRole.Host)
+                Instance?.PushCurrentSets();
+        }
+
+        public override void PeriodicUpdate(float delta)
+        {
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
                 return;
-            if (!_gate.Due(dt))
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
                 return;
-            Guarded("host", () =>
+            _sweepTimer = 0f;
+            Guarded("sweep", () =>
+            {
+                var list = CPlayerData.m_GradeCardInProgressList;
+                if (list == null || list.Count == 0)
+                {
+                    PushRemovedSets(list);
+                    SendTombstoneSlice();
+                    _sweepCursor = 0;
+                    return;
+                }
+                int total = list.Count;
+                int perSlice = Mathf.Max(1, Mathf.CeilToInt(total / Mathf.Max(1f, SweepCycleSeconds / SweepSliceSeconds)));
+                for (int k = 0; k < perSlice; k++)
+                {
+                    if (_sweepCursor < 0 || _sweepCursor >= total)
+                        _sweepCursor = 0;
+                    int index = _sweepCursor++;
+                    var set = list[index];
+                    if (set == null)
+                        continue;
+                    int id = GetSetId(set);
+                    SendSetNow(set, index, id);
+                }
+                SendTombstoneSlice();
+                PushRemovedSets(list);
+            });
+        }
+
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null)
+                return;
+            Guarded("full", () =>
             {
                 var list = CPlayerData.m_GradeCardInProgressList;
                 if (list == null)
                     return;
-                int hash = ComputeHash(list);
-                if (!_gate.ShouldSend(hash))
-                    return;
-                BroadcastState?.Invoke(BuildState(list));
+                SendToClient(connId, BuildState(list, true, -1));
             });
+        }
+
+        private int GetSetId(GradeCardSubmitSet set)
+        {
+            if (!_setIds.TryGetValue(set, out int id))
+            {
+                id = _nextSetId++;
+                if (_nextSetId <= 0)
+                    _nextSetId = 1;
+                _setIds[set] = id;
+            }
+            _knownSetIds.Add(id);
+            return id;
+        }
+
+        private void PushCurrentSets()
+        {
+            Guarded("push", () =>
+            {
+                var list = CPlayerData.m_GradeCardInProgressList;
+                if (list == null)
+                {
+                    PushRemovedSets(list);
+                    return;
+                }
+                int count = list.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    if (list[i] == null)
+                        continue;
+                    int id = GetSetId(list[i]);
+                    SendSetNow(list[i], i, id);
+                }
+                PushRemovedSets(list);
+            });
+        }
+
+        private void PushRemovedSets(List<GradeCardSubmitSet> list)
+        {
+            var live = new HashSet<int>();
+            if (list != null)
+                for (int i = 0; i < list.Count; i++)
+                    if (list[i] != null)
+                        live.Add(GetSetId(list[i]));
+            foreach (int id in new List<int>(_knownSetIds))
+            {
+                if (live.Contains(id))
+                    continue;
+                BroadcastState?.Invoke(new GradingStateMessage
+                {
+                    Full = false,
+                    Index = -1,
+                    Sets = new List<GradingSetEntry> { new GradingSetEntry { Id = id, Removed = true } }
+                });
+                if (_tombstones.Add(id))
+                {
+                    _tombstoneOrder.Add(id);
+                }
+                _knownSetIds.Remove(id);
+                RemoveHostSetId(id);
+            }
+        }
+
+        private void SendTombstoneSlice()
+        {
+            if (_tombstoneOrder.Count == 0)
+                return;
+            if (_tombstoneCursor >= _tombstoneOrder.Count)
+                _tombstoneCursor = 0;
+            int id = _tombstoneOrder[_tombstoneCursor++];
+            if (!_tombstones.Contains(id))
+                return;
+            BroadcastState?.Invoke(new GradingStateMessage
+            {
+                Full = false,
+                Index = -1,
+                Sets = new List<GradingSetEntry> { new GradingSetEntry { Id = id, Removed = true } }
+            });
+        }
+
+        private void RemoveHostSetId(int id)
+        {
+            var removed = new List<GradeCardSubmitSet>();
+            foreach (var pair in _setIds)
+                if (pair.Value == id)
+                    removed.Add(pair.Key);
+            for (int i = 0; i < removed.Count; i++)
+                _setIds.Remove(removed[i]);
+        }
+
+        private void SendSetNow(GradeCardSubmitSet set, int index, int id)
+        {
+            BroadcastState?.Invoke(BuildState(new List<GradeCardSubmitSet> { set }, false, index, id));
         }
 
         /// <summary>Host: a joiner submitted cards for grading. Replicates the body of
@@ -973,7 +1127,9 @@ namespace CardShopCoop.Sync
                         set.m_CardDataList.Add(new CardData()); // vanilla sets carry 8 slots
                 }
 
-                ForceResend(); // the joiner sees his pending set on the next tick
+                int acceptedId = GetSetId(set);
+                SendSetNow(set, CPlayerData.m_GradeCardInProgressList.Count - 1,
+                    acceptedId); // push the accepted set immediately
 
                 // ...and the HOST's own grading app, if he happens to be standing in it. Vanilla
                 // repaints those progress panels only on screen OPEN, so a set enrolled off the
@@ -1019,68 +1175,59 @@ namespace CardShopCoop.Sync
 
         private void ClientApplyInner(GradingStateMessage message)
         {
-            int sets = Mathf.Min(message.Sets.Count, MaxSets);
-            var list = new List<GradeCardSubmitSet>(sets);
-            for (int i = 0; i < sets; i++)
+            if (message == null || message.Sets == null)
+                return;
+            if (message.Full)
             {
-                var se = message.Sets[i];
-                var set = new GradeCardSubmitSet
-                {
-                    // Int32 to match BuildState: a Grading Overhaul m_ServiceLevel is an encoded
-                    // (company, tier, jobId) value, not a 0..255 tier index.
-                    m_ServiceLevel = se.ServiceLevel,
-                    m_DayPassed = se.DayPassed,
-                    m_MinutePassed = se.MinutePassed,
-                    m_CardDataList = new List<CardData>(MaxSlots),
-                };
-                // The vanilla status UI draws days-left as (m_ServiceDays - m_DayPassed) with
-                // NO lower clamp. On the host a set is destroyed the instant it matures, so it
-                // never shows <=0. The guest doesn't run maturation, so a mirrored m_DayPassed
-                // that reaches/exceeds m_ServiceDays would render "-1 Jour". Clamp so days-left
-                // is always >= 1 for anything the guest can display (matches vanilla semantics).
-                //
-                // SKIPPED for a GO-encoded level. The clamp's bound comes from vanilla
-                // GetGradeCardServiceData, and GO's prefix on that method clamps any level past
-                // the vanilla list to Count-1 (decompiled-grading :13980-13992) - so for an
-                // encoded level it would answer with the LAST VANILLA TIER's m_ServiceDays, a
-                // number belonging to a different tier than the job is actually running. Clamping
-                // against it would corrupt the very display this is meant to protect. The
-                // alternative - decoding and asking GO's ServiceTierControlCenter.GetTier for the
-                // real Days - is the more accurate fix but needs two more reflected internals
-                // (GetTier plus the Tier.Days field) inside the receive path; skipping is chosen
-                // because it is the option that cannot throw and cannot be wrong: GO's own UI
-                // patches already own the display for an encoded level, so vanilla's day maths is
-                // not the thing rendering it.
-                if (set.m_ServiceLevel < Util.GradingInterop.EncodedLevelFloor)
-                {
-                    try
-                    {
-                        var svc = Inv()?.m_MonsterData_SO?.GetGradeCardServiceData(set.m_ServiceLevel);
-                        if (svc != null)
-                            set.m_DayPassed = Mathf.Clamp(set.m_DayPassed, 0, Mathf.Max(0, svc.m_ServiceDays - 1));
-                    }
-                    catch (System.Exception e) { Swallow.Log(e); }
-                }
-                // Read bound = MaxSubmitSlots, the same number BuildState uses. An 8 here would
-                // STOP READING mid-set on any Grading Overhaul job longer than eight cards and
-                // leave decoding the rest of the set's card blob from garbage. Both ends agree on
-                // the number: Version + PluginHash parity means a GO guest can only ever join a GO
-                // host.
-                int n = Mathf.Min(se.Cards.Count, Util.GradingInterop.MaxSubmitSlots);
-                for (int j = 0; j < n; j++)
-                    set.m_CardDataList.Add(se.Cards[j]);
-                // MaxSlots (8) is right HERE and only here: it is the vanilla SHAPE.
-                // GradedCardSetCheckStatusScreen repaints exactly m_CardDataList.Count
-                // panels; short lists would leave stale cards from the previous page. A set
-                // that already carries more than eight (a GO job) is left at its real length.
-                while (set.m_CardDataList.Count < MaxSlots)
-                    set.m_CardDataList.Add(new CardData());
-                list.Add(set);
+                ClientSetIds.Clear();
+                _clientBaselinePending = false;
+                int sets = message.Sets.Count;
+                var list = new List<GradeCardSubmitSet>(sets);
+                for (int i = 0; i < sets; i++)
+                    list.Add(ToGameSet(message.Sets[i]));
+                CPlayerData.m_GradeCardInProgressList = list;
             }
-            CPlayerData.m_GradeCardInProgressList = list;
+            else
+            {
+                var list = CPlayerData.m_GradeCardInProgressList ?? new List<GradeCardSubmitSet>();
+                if (_clientBaselinePending)
+                {
+                    // The normal save-load path can leave host-owned grading objects in this
+                    // guest list before the first partial arrives. They have no wire identity;
+                    // discard that stale baseline rather than allowing it to duplicate slices.
+                    ClientSetIds.Clear();
+                    list = new List<GradeCardSubmitSet>();
+                    _clientBaselinePending = false;
+                }
+                for (int i = 0; i < message.Sets.Count; i++)
+                {
+                    var se = message.Sets[i];
+                    int found = FindClientSet(list, se.Id);
+                    if (se.Removed)
+                    {
+                        if (found >= 0)
+                        {
+                            ClientSetIds.Remove(list[found]);
+                            list.RemoveAt(found);
+                        }
+                        continue;
+                    }
+                    var replacement = ToGameSet(se);
+                    if (found >= 0)
+                    {
+                        ClientSetIds.Remove(list[found]);
+                        list[found] = replacement;
+                    }
+                    else
+                    {
+                        int insert = Mathf.Clamp(message.Index, 0, list.Count);
+                        list.Insert(insert, replacement);
+                    }
+                }
+                CPlayerData.m_GradeCardInProgressList = list;
+            }
 
             // if the grading app is open right now, repaint its progress panels
-            // (they normally refresh only on screen open)
             try
             {
                 if (_website == null)
@@ -1091,17 +1238,85 @@ namespace CardShopCoop.Sync
             catch (System.Exception e) { Swallow.Log(e); }
         }
 
-        // ---------------- wire / hash ----------------
-
-        private static GradingStateMessage BuildState(List<GradeCardSubmitSet> list)
+        private static int FindClientSet(List<GradeCardSubmitSet> list, int id)
         {
-            var msg = new GradingStateMessage();
-            int count = Mathf.Min(list.Count, MaxSets);
+            // Client identity is carried in this side table because GradeCardSubmitSet is a
+            // game type and cannot be extended. The list itself is authoritative after a full.
+            for (int i = 0; i < list.Count; i++)
+                if (ClientSetIds.TryGetValue(list[i], out int existing) && existing == id)
+                    return i;
+            return -1;
+        }
+
+        private static readonly Dictionary<GradeCardSubmitSet, int> ClientSetIds = new Dictionary<GradeCardSubmitSet, int>();
+
+        private static GradeCardSubmitSet ToGameSet(GradingSetEntry se)
+        {
+            var set = new GradeCardSubmitSet
+            {
+                m_ServiceLevel = se.ServiceLevel,
+                m_DayPassed = se.DayPassed,
+                m_MinutePassed = se.MinutePassed,
+                m_CardDataList = new List<CardData>(MaxSlots),
+            };
+            // The vanilla status UI draws days-left as (m_ServiceDays - m_DayPassed) with
+            // NO lower clamp. On the host a set is destroyed the instant it matures, so it
+            // never shows <=0. The guest doesn't run maturation, so a mirrored m_DayPassed
+            // that reaches/exceeds m_ServiceDays would render "-1 Jour". Clamp so days-left
+            // is always >= 1 for anything the guest can display (matches vanilla semantics).
+            //
+            // SKIPPED for a GO-encoded level. The clamp's bound comes from vanilla
+            // GetGradeCardServiceData, and GO's prefix on that method clamps any level past
+            // the vanilla list to Count-1 (decompiled-grading :13980-13992) - so for an
+            // encoded level it would answer with the LAST VANILLA TIER's m_ServiceDays, a
+            // number belonging to a different tier than the job is actually running. Clamping
+            // against it would corrupt the very display this is meant to protect. The
+            // alternative - decoding and asking GO's ServiceTierControlCenter.GetTier for the
+            // real Days - is the more accurate fix but needs two more reflected internals
+            // (GetTier plus the Tier.Days field) inside the receive path; skipping is chosen
+            // because it is the option that cannot throw and cannot be wrong: GO's own UI
+            // patches already own the display for an encoded level, so vanilla's day maths is
+            // not the thing rendering it.
+            if (set.m_ServiceLevel < Util.GradingInterop.EncodedLevelFloor)
+            {
+                try
+                {
+                    var svc = Inv()?.m_MonsterData_SO?.GetGradeCardServiceData(set.m_ServiceLevel);
+                    if (svc != null)
+                        set.m_DayPassed = Mathf.Clamp(set.m_DayPassed, 0, Mathf.Max(0, svc.m_ServiceDays - 1));
+                }
+                catch (System.Exception e) { Swallow.Log(e); }
+            }
+            // Read bound = MaxSubmitSlots, the same number BuildState uses. An 8 here would
+            // STOP READING mid-set on any Grading Overhaul job longer than eight cards and
+            // leave decoding the rest of the set's card blob from garbage. Both ends agree on
+            // the number: Version + PluginHash parity means a GO guest can only ever join a GO
+            // host.
+            int n = Mathf.Min(se.Cards.Count, Util.GradingInterop.MaxSubmitSlots);
+            for (int j = 0; j < n; j++)
+                set.m_CardDataList.Add(se.Cards[j]);
+            // MaxSlots (8) is right HERE and only here: it is the vanilla SHAPE.
+            // GradedCardSetCheckStatusScreen repaints exactly m_CardDataList.Count
+            // panels; short lists would leave stale cards from the previous page. A set
+            // that already carries more than eight (a GO job) is left at its real length.
+            while (set.m_CardDataList.Count < MaxSlots)
+                set.m_CardDataList.Add(new CardData());
+            ClientSetIds[set] = se.Id;
+            return set;
+        }
+
+        // ---------------- wire / identity ----------------
+
+        private static GradingStateMessage BuildState(List<GradeCardSubmitSet> list, bool full, int index, int id = 0)
+        {
+            var msg = new GradingStateMessage { Full = full, Index = full ? -1 : index };
+            int count = list.Count;
             for (int i = 0; i < count; i++)
             {
                 var set = list[i];
                 var entry = new GradingSetEntry
                 {
+                    Id = full ? Instance.GetSetId(set) : id,
                     // Int32, NOT a clamped byte. With Grading Overhaul a live m_ServiceLevel is an
                     // ENCODED (company, tier, jobId) triple starting at 100000 (ServiceLevelCodec,
                     // decompiled-grading :5601) - every one of those truncated to 255 on the way out,
@@ -1127,41 +1342,5 @@ namespace CardShopCoop.Sync
             return msg;
         }
 
-        /// <summary>Change detector over everything BuildState sends. m_MinutePassed is
-        /// folded at hour granularity (LightManager bumps it +60 per game hour anyway),
-        /// so the rebroadcast cadence is one per game hour, not per frame.</summary>
-        private static int ComputeHash(List<GradeCardSubmitSet> list)
-        {
-            int hash = 17;
-            hash = hash * 31 + list.Count;
-            for (int i = 0; i < list.Count && i < MaxSets; i++)
-            {
-                var set = list[i];
-                if (set == null)
-                    continue;
-                hash = hash * 31 + set.m_ServiceLevel;
-                hash = hash * 31 + set.m_DayPassed;
-                hash = hash * 31 + (int)(set.m_MinutePassed / 60f);
-                var cards = set.m_CardDataList;
-                if (cards == null)
-                    continue;
-                // Same bound as BuildState. The change detector has to cover everything the wire
-                // carries: hashing only the first eight cards of a 52-card set meant an edit past
-                // the eighth produced an IDENTICAL hash, so the rebroadcast never fired and the
-                // guest kept a stale set until the 15s heal timer happened to come round.
-                for (int j = 0; j < cards.Count && j < Util.GradingInterop.MaxSubmitSlots; j++)
-                {
-                    var c = cards[j];
-                    if (c == null)
-                        continue;
-                    hash = hash * 31 + (int)c.monsterType;
-                    hash = hash * 31 + (int)c.expansionType;
-                    hash = hash * 31 + (int)c.borderType;
-                    hash = hash * 31 + ((c.isFoil ? 1 : 0) | (c.isDestiny ? 2 : 0) | (c.isChampionCard ? 4 : 0));
-                    hash = hash * 31 + c.cardGrade;
-                }
-            }
-            return hash;
-        }
     }
 }

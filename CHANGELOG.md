@@ -20,6 +20,15 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
   visible to both players again instead of vanishing on the guest. Guests can bank and take
   warehouse boxes again too: those clicks are sent to the host, which performs them and
   broadcasts the result.
+- **Improved: banking and taking warehouse boxes responds immediately.** The warehouse sync used to
+  run on a short repeating timer, so a guest's store or take could take up to a second and a half
+  to appear (and the state was re-sent whether or not anything had changed). It is now driven by
+  the game's own warehouse change events, so the update goes out the moment the warehouse really
+  changes. There is no repeating full re-send; a slow background pass re-checks one rack at a time.
+- **Removed: the "storing box…" and "taking box…" pop-ups.** They were progress noise for an action
+  that is now immediate. The failure messages still appear, with clearer wording ("couldn't store
+  that box yet", "couldn't resolve that warehouse slot"), and the repairable failures are also
+  written to the log.
 - **Fixed: a guest could use the new cheat menu to change the shared shop.** The 1.0 cheat
   canvas can add coins and XP and alter grades, prices and customers. It is now host-only, so a
   guest cannot desync the shared economy.
@@ -60,11 +69,40 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
    the game's main manager before the real one had loaded, and that empty stand-in then hid the real
    one (and its tooltip sprites/text) for the rest of the session. The mod now only ever looks the
    manager up without creating one, so the normal HUD hints come back.
+ - **Fixed: a guest's user interface stayed hidden in a fresh co-op world.** While a world is still
+   on the shop-naming step the game hides its on-screen HUD and shows the movement-key hints, then
+   restores them once the shop has a name - but a guest never runs the naming step itself, so it was
+   left with no HUD (and movement hints that never cleared). The guest now mirrors that restore the
+   moment the host finishes naming.
  - **Added: an opt-in testing gate for the game's 1.00 cheat menu.** It is disabled by default and
    requires both hidden configuration switches before the menu can open; solo players and hosts can
    use it, while guests cannot. The hidden testing category is also off by default.
  - **Guarded: the game's new playable card duels.** Their match state is not synchronized yet, so
   only the host can start one for now.
+- **Improved: shared state now updates when it actually changes, instead of being re-sent on a
+  timer.** Every synchronized system — shop unlocks and the tutorial, staff, settings and
+  decoration stock, the end-of-day report, play tables, tournaments, card grading, trade counters,
+  containers and pack machines, the TV, warehouse and card-display shelves, moved furniture, the
+  customer population and the checkout registers — used to re-broadcast its whole state on a
+  repeating timer. That caused regular bandwidth spikes and stutters for no benefit. Each system
+  now sends only what changed, the moment it changes, and a slow background pass re-checks one small
+  slice at a time, so a single dropped update still repairs itself without anyone noticing.
+- **Fixed: a guest's end-of-day report could show the wrong money, and then file it permanently.**
+  Opening the report let the guest's own screen draw its local numbers, which could be up to
+  fifteen seconds stale, and the guest's report history then recorded those stale figures. The
+  recap now arrives as one complete, host-authoritative snapshot before the screen opens, so the
+  guest's report and its history match the host.
+- **Fixed: a guest could resurrect cards a worker or a customer had already taken.** Card storage
+  and the bulk-donation box are changed by the host's workers and customers in ways the mod could
+  not see, so the guest's copy could stay stale and be pushed back to the host — putting the same
+  cards back on the shelf. Those changes are now observed directly, and a guest's open container
+  stays in sync instead of being left behind.
+- **Fixed: a guest's tournament pairing board could stay hidden for a whole tournament day.** The
+  board and its shelf screen are shown by a day-start event the guest never runs, and the guest
+  only re-showed them while receiving a full state, which no longer happens. A joining guest now
+  re-shows them from the ordinary update.
+- **Fixed: grading progress and the host's own staff edits could take a full background pass to
+  reach a guest.** Both are now pushed the moment they happen.
 - **Note: the game now runs on Unity 6 and reports version 1.00.** Both players must run the
   same game build and the same mod version.
 

@@ -94,6 +94,14 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.RegisterState, Policy = MessagePolicy.ClientOnly)]
     public sealed class RegisterStateMessage : INetMessage
     {
+        /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
+        /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
+        /// UNCHANGED, never removed.</summary>
+        public bool Full = true;
+
+        /// <summary>Slice ordinal for a partial message; -1 for a full message.</summary>
+        public int Index = -1;
+
         public System.Collections.Generic.List<RegisterStateEntry> Entries = new System.Collections.Generic.List<RegisterStateEntry>();
 
         public MsgType Type
@@ -119,7 +127,9 @@ namespace CardShopCoop.Net.Messages
     // host -> client (reliable). Authoritative bag + prices + phase + scanned slots
     // for every counter that currently has an active customer. Mirrors
     // RegisterSync.WriteCarts / ClientApplyCart:
-    // [byte count][count x entry]
+    // Header: [bool full][int index], where full messages contain the complete counter roster and
+    // partial messages contain one or more counter entries for a sweep batch; omitted counters
+    // remain unchanged. Then [byte count][count x entry].
     //   entry = (byte index, int customerId) then, when customerId != 0:
     //     (ushort customerIndex, int customerGeneration, string characterName,
     //      byte state, bool isCard, double paidAmount, double totalScanned,
@@ -131,6 +141,10 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.RegisterCart, Policy = MessagePolicy.ClientOnly)]
     public sealed class RegisterCartMessage : INetMessage
     {
+        /// <summary>True for the complete join/re-baseline cart; false for the one counter
+        /// identified by <see cref="Index"/>. Omitted counters are unchanged.</summary>
+        public bool Full = true;
+        public int Index = -1;
         public System.Collections.Generic.List<RegisterCartEntry> Entries = new System.Collections.Generic.List<RegisterCartEntry>();
 
         public MsgType Type

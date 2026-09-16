@@ -44,8 +44,15 @@ namespace CardShopCoop.Sync
 
         public Action<INetMessage> SendOp;         // set by CoopCore: client->host
         public Action<INetMessage> BroadcastState; // set by CoopCore: host->clients
+        public Action<int, INetMessage> SendToClient; // set by CoopCore: host->one client
 
-        private readonly SnapshotGate _gate = new SnapshotGate(1.5f, 15f, -2.6f, hasHashInitially: false);
+        // Partial Index: 0 wall, 1 floor, 2 ceiling ownership; 3 equips; 4 event;
+        // 5 prices, 6 cashier flags, 7 table numbers, 8+ one DecoStock entry.
+        private const float SweepSliceSeconds = 0.5f;
+        private float _sweepTimer;
+        private int _sweepCursor;
+        private int _stockCursor;
+        private readonly bool[] _stockWasNonZero = new bool[1000];
 
         // NEVER CSingleton<>.Instance for these: touched while no real manager exists
         // (client reload loading screen, host mid-session save load - ?. does NOT
@@ -86,11 +93,12 @@ namespace CardShopCoop.Sync
 
         public override void Start() => Instance = this;
 
-        protected override void OnHostTick(in SyncFrame frame) => HostTick(frame.Dt, frame.InGame);
-
         public override void Reset()
         {
-            _gate.Reset(-2.6f);
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
+            _stockCursor = 0;
+            Array.Clear(_stockWasNonZero, 0, _stockWasNonZero.Length);
             ApplyingRemote = false;
             _sm = null;
             _inv = null;
@@ -98,7 +106,8 @@ namespace CardShopCoop.Sync
 
         public override void ForceResend()
         {
-            _gate.Force();
+            _sweepTimer = 0f;
+            _sweepCursor = 0;
         }
 
         public override void Dispose()
@@ -110,20 +119,23 @@ namespace CardShopCoop.Sync
 
         // ---------------- host ----------------
 
-        public void HostTick(float dt, bool inGame)
+        public override void PeriodicUpdate(float delta)
         {
-            if (!inGame)
+            if (CoopCore.Role != CoopRole.Host || BroadcastState == null || !CoopCore.InSessionWorld)
                 return;
-            if (!_gate.Due(dt))
+            _sweepTimer += delta;
+            if (_sweepTimer < SweepSliceSeconds)
                 return;
-            Guarded("host", () =>
-            {
-                int hash = HashState();
-                if (!_gate.ShouldSend(hash))
-                    return;
-                var msg = BuildStateMessage();
-                BroadcastState?.Invoke(msg);
-            });
+            _sweepTimer = 0f;
+            SendSliceNow(_sweepCursor++ % 8);
+            SendNextStockSlice();
+        }
+
+        public override void FullUpdate(int connId)
+        {
+            if (CoopCore.Role != CoopRole.Host || SendToClient == null || !CoopCore.InSessionWorld)
+                return;
+            Guarded("full", () => SendToClient(connId, BuildStateMessage()));
         }
 
         public void HostApplyOp(SettingsOpMessage message)
@@ -154,6 +166,7 @@ namespace CardShopCoop.Sync
                                 ApplyEquips(w, wB, f, fB, c, cB);
                             }
                             finally { ApplyingRemote = false; }
+                            SendSliceNow(3);
                             break;
                         }
                     case OpGameEvent:
@@ -166,6 +179,7 @@ namespace CardShopCoop.Sync
                             // the vanilla confirm is exactly these two field writes
                             CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)fmt;
                             CPlayerData.m_PendingGameEventExpansionType = exp;
+                            SendSliceNow(4);
                             break;
                         }
                     case OpGameEventFee:
@@ -180,6 +194,7 @@ namespace CardShopCoop.Sync
                                     PriceChangeManager.SetGameEventPrice((EGameEventFormat)fmt, Mathf.Max(0f, fee));
                                 }
                                 finally { ApplyingRemote = false; }
+                                SendSliceNow(5);
                             }
                             break;
                         }
@@ -201,6 +216,7 @@ namespace CardShopCoop.Sync
                                         counters[idx].SetCanTradeCard(trade);
                                 }
                                 finally { ApplyingRemote = false; }
+                                SendSliceNow(6);
                             }
                             break;
                         }
@@ -218,6 +234,7 @@ namespace CardShopCoop.Sync
                                         tables[idx].SetTournamentPlayTableNumber(Mathf.Max(0, number));
                                 }
                                 finally { ApplyingRemote = false; }
+                                SendSliceNow(7);
                             }
                             break;
                         }
@@ -287,6 +304,11 @@ namespace CardShopCoop.Sync
             {
                 Guarded("apply", () =>
                 {
+                    if (!message.Full)
+                    {
+                        ApplyPartial(message);
+                        return;
+                    }
                     // deco ownership (host list sizes rule; extra local entries keep their state)
                     ApplyBoolList(message.WallUnlocked, CPlayerData.m_UnlockedDecoWallList, CPlayerData.SetUnlockDecoWall);
                     ApplyBoolList(message.FloorUnlocked, CPlayerData.m_UnlockedDecoFloorList, CPlayerData.SetUnlockDecoFloor);
@@ -361,6 +383,78 @@ namespace CardShopCoop.Sync
             finally { ApplyingRemote = false; }
             if (decoBefore != DecoStateHash())
                 RefreshOpenDecoUI();
+        }
+
+        private static void ApplyPartial(SettingsStateMessage message)
+        {
+            int index = message.Index;
+            if (index == 0)
+                ApplyBoolList(message.WallUnlocked, CPlayerData.m_UnlockedDecoWallList, CPlayerData.SetUnlockDecoWall);
+            else if (index == 1)
+                ApplyBoolList(message.FloorUnlocked, CPlayerData.m_UnlockedDecoFloorList, CPlayerData.SetUnlockDecoFloor);
+            else if (index == 2)
+                ApplyBoolList(message.CeilingUnlocked, CPlayerData.m_UnlockedDecoCeilingList, CPlayerData.SetUnlockDecoCeiling);
+            else if (index == 3)
+                ApplyEquips(message.EquippedWallIndex, message.EquippedWallIndexB,
+                    message.EquippedFloorIndex, message.EquippedFloorIndexB,
+                    message.EquippedCeilingIndex, message.EquippedCeilingIndexB);
+            else if (index == 4)
+            {
+                CPlayerData.m_GameEventFormat = (EGameEventFormat)message.GameEventFormat;
+                CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)message.PendingGameEventFormat;
+                CPlayerData.m_GameEventExpansionType = message.GameEventExpansion;
+                CPlayerData.m_PendingGameEventExpansionType = message.PendingGameEventExpansion;
+            }
+            else if (index == 5)
+                MergeFloatList(message.GameEventPrices, CPlayerData.m_SetGameEventPriceList);
+            else if (index == 6)
+                MergeCashiers(message.CashierFlags);
+            else if (index == 7)
+                MergeTables(message.TableNumbers);
+            else if (index >= 8 && message.DecoStock != null && message.DecoStock.Count > 0)
+            {
+                var entry = message.DecoStock[0];
+                int local;
+                var stock = CPlayerData.m_DecorationInventoryList;
+                if (stock != null && Util.EnumMap.TryFromWire(Util.EnumKind.DecoObject, entry.DecoType, out local)
+                    && local >= 0 && local < stock.Count)
+                    stock[local] = Mathf.Max(0, entry.Count);
+            }
+        }
+
+        private static void MergeFloatList(List<float> incoming, List<float> local)
+        {
+            if (incoming == null || local == null)
+                return;
+            for (int i = 0; i < incoming.Count && i < local.Count; i++)
+                local[i] = incoming[i];
+        }
+
+        private static void MergeCashiers(List<byte> flags)
+        {
+            var counters = Sm()?.m_CashierCounterList;
+            if (flags == null || counters == null)
+                return;
+            for (int i = 0; i < flags.Count && i < counters.Count; i++)
+            {
+                if (counters[i] == null)
+                    continue;
+                bool checkout = (flags[i] & 1) != 0, trade = (flags[i] & 2) != 0;
+                if (counters[i].CanCheckout() != checkout)
+                    counters[i].SetCanCheckout(checkout);
+                if (counters[i].CanTradeCard() != trade)
+                    counters[i].SetCanTradeCard(trade);
+            }
+        }
+
+        private static void MergeTables(List<byte> numbers)
+        {
+            var tables = Sm()?.m_PlayTableList;
+            if (numbers == null || tables == null)
+                return;
+            for (int i = 0; i < numbers.Count && i < tables.Count; i++)
+                if (tables[i] != null && tables[i].GetTournamentPlayTableNumber() != numbers[i])
+                    tables[i].SetTournamentPlayTableNumber(numbers[i]);
         }
 
         private static int DecoStateHash()
@@ -531,6 +625,119 @@ namespace CardShopCoop.Sync
             return msg;
         }
 
+        private static SettingsStateMessage BuildSlice(int index)
+        {
+            var msg = new SettingsStateMessage { Full = false, Index = index };
+            if (index == 0)
+                CopyBools(CPlayerData.m_UnlockedDecoWallList, msg.WallUnlocked);
+            else if (index == 1)
+                CopyBools(CPlayerData.m_UnlockedDecoFloorList, msg.FloorUnlocked);
+            else if (index == 2)
+                CopyBools(CPlayerData.m_UnlockedDecoCeilingList, msg.CeilingUnlocked);
+            else if (index == 3)
+            {
+                msg.EquippedWallIndex = CPlayerData.m_EquippedWallDecoIndex;
+                msg.EquippedWallIndexB = CPlayerData.m_EquippedWallDecoIndexB;
+                msg.EquippedFloorIndex = CPlayerData.m_EquippedFloorDecoIndex;
+                msg.EquippedFloorIndexB = CPlayerData.m_EquippedFloorDecoIndexB;
+                msg.EquippedCeilingIndex = CPlayerData.m_EquippedCeilingDecoIndex;
+                msg.EquippedCeilingIndexB = CPlayerData.m_EquippedCeilingDecoIndexB;
+            }
+            else if (index == 4)
+            {
+                msg.GameEventFormat = (int)CPlayerData.m_GameEventFormat;
+                msg.PendingGameEventFormat = (int)CPlayerData.m_PendingGameEventFormat;
+                msg.GameEventExpansion = CPlayerData.m_GameEventExpansionType;
+                msg.PendingGameEventExpansion = CPlayerData.m_PendingGameEventExpansionType;
+            }
+            else if (index == 5)
+            {
+                var fees = CPlayerData.m_SetGameEventPriceList;
+                if (fees != null)
+                    for (int i = 0; i < Mathf.Min(fees.Count, 255); i++)
+                        msg.GameEventPrices.Add(fees[i]);
+            }
+            else if (index == 6)
+            {
+                CopyCashiers(msg.CashierFlags);
+            }
+            else if (index == 7)
+            {
+                CopyTables(msg.TableNumbers);
+            }
+            return msg;
+        }
+
+        private static void CopyCashiers(List<byte> into)
+        {
+            var counters = Sm()?.m_CashierCounterList;
+            int count = counters == null ? 0 : Mathf.Min(counters.Count, 255);
+            for (int i = 0; i < count; i++)
+            {
+                byte flags = 3;
+                if (counters[i] != null)
+                    flags = (byte)((counters[i].CanCheckout() ? 1 : 0) | (counters[i].CanTradeCard() ? 2 : 0));
+                into.Add(flags);
+            }
+        }
+
+        private static void CopyTables(List<byte> into)
+        {
+            var tables = Sm()?.m_PlayTableList;
+            int count = tables == null ? 0 : Mathf.Min(tables.Count, 255);
+            for (int i = 0; i < count; i++)
+            {
+                int number = tables[i] == null ? 0 : tables[i].GetTournamentPlayTableNumber();
+                into.Add((byte)Mathf.Clamp(number, 0, 255));
+            }
+        }
+
+        private void SendNextStockSlice()
+        {
+            var stock = CPlayerData.m_DecorationInventoryList;
+            if (stock == null || stock.Count == 0)
+                return;
+            int count = Mathf.Min(stock.Count, _stockWasNonZero.Length);
+            for (int n = 0; n < count; n++)
+            {
+                int item = (_stockCursor + n) % count;
+                bool nonZero = stock[item] != 0;
+                if (!nonZero && !_stockWasNonZero[item])
+                    continue;
+                _stockCursor = (item + 1) % count;
+                _stockWasNonZero[item] = nonZero;
+                SendSliceNow(8 + item, stock[item]);
+                return;
+            }
+            _stockCursor = (_stockCursor + 1) % count;
+        }
+
+        private void SendSliceNow(int index)
+        {
+            if (BroadcastState == null)
+                return;
+            Guarded("slice", () => BroadcastState(BuildSlice(index)));
+        }
+
+        private void SendSliceNow(int index, int count)
+        {
+            if (BroadcastState == null)
+                return;
+            Guarded("slice", () => BroadcastState(new SettingsStateMessage
+            {
+                Full = false,
+                Index = index,
+                DecoStock = new List<DecoStockEntry>
+                {
+                    new DecoStockEntry
+                    {
+                        DecoType = Util.EnumMap.ToWire(Util.EnumKind.DecoObject, index - 8),
+                        Count = count,
+                    },
+                },
+            }));
+        }
+
         private static void HostBuyItemDeco(EDecoObject type)
         {
             var data = InventoryBase.GetItemDecoPurchaseData(type);
@@ -543,7 +750,6 @@ namespace CardShopCoop.Sync
             PriceChangeManager.AddTransaction(-data.price, ETransactionType.BuyDecoration, 3, id);
             CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(data.price));
             CPlayerData.AddDecoItemToInventory(type, 1);
-            Instance?.BroadcastState?.Invoke(BuildStateMessage());
         }
 
         private static void HostPlaceItemDeco(EDecoObject type, Vector3 pos, Quaternion rot)
@@ -562,7 +768,6 @@ namespace CardShopCoop.Sync
             CPlayerData.AddDecoItemToInventory(type, -1);
             PlacedObjectIdentity.AssignHost(obj);
             CoopPlugin.Log.LogInfo("partner placed item decoration: " + type);
-            Instance?.BroadcastState?.Invoke(BuildStateMessage());
             CoopCore.Instance?.NotifyHostStructureChanged();
         }
 
@@ -579,52 +784,7 @@ namespace CardShopCoop.Sync
             CPlayerData.AddDecoItemToInventory(obj.m_DecoObjectType, 1);
             CoopPlugin.Log.LogInfo("partner returned item decoration: " + obj.m_DecoObjectType);
             obj.OnDestroyed();
-            Instance?.BroadcastState?.Invoke(BuildStateMessage());
             CoopCore.Instance?.NotifyHostStructureChanged();
-        }
-
-        private static int HashState()
-        {
-            int h = 17;
-            HashBools(ref h, CPlayerData.m_UnlockedDecoWallList);
-            HashBools(ref h, CPlayerData.m_UnlockedDecoFloorList);
-            HashBools(ref h, CPlayerData.m_UnlockedDecoCeilingList);
-            h = h * 31 + CPlayerData.m_EquippedWallDecoIndex;
-            h = h * 31 + CPlayerData.m_EquippedWallDecoIndexB;
-            h = h * 31 + CPlayerData.m_EquippedFloorDecoIndex;
-            h = h * 31 + CPlayerData.m_EquippedFloorDecoIndexB;
-            h = h * 31 + CPlayerData.m_EquippedCeilingDecoIndex;
-            h = h * 31 + CPlayerData.m_EquippedCeilingDecoIndexB;
-            h = h * 31 + (int)CPlayerData.m_GameEventFormat;
-            h = h * 31 + (int)CPlayerData.m_PendingGameEventFormat;
-            h = h * 31 + (int)CPlayerData.m_GameEventExpansionType;
-            h = h * 31 + (int)CPlayerData.m_PendingGameEventExpansionType;
-            var fees = CPlayerData.m_SetGameEventPriceList;
-            int fn = fees == null ? 0 : Mathf.Min(fees.Count, 255);
-            h = h * 31 + fn;
-            for (int i = 0; i < fn; i++)
-                h = h * 31 + fees[i].GetHashCode();
-            var counters = Sm()?.m_CashierCounterList;
-            int cn = counters == null ? 0 : Mathf.Min(counters.Count, 255);
-            h = h * 31 + cn;
-            for (int i = 0; i < cn; i++)
-            {
-                byte flags = 3;
-                if (counters[i] != null)
-                    flags = (byte)((counters[i].CanCheckout() ? 1 : 0) | (counters[i].CanTradeCard() ? 2 : 0));
-                h = h * 31 + flags;
-            }
-            var tables = Sm()?.m_PlayTableList;
-            int tn = tables == null ? 0 : Mathf.Min(tables.Count, 255);
-            h = h * 31 + tn;
-            for (int i = 0; i < tn; i++)
-                h = h * 31 + (tables[i] == null ? 0 : Mathf.Clamp(tables[i].GetTournamentPlayTableNumber(), 0, 255));
-            var stock = CPlayerData.m_DecorationInventoryList;
-            h = h * 31 + (stock == null ? 0 : stock.Count);
-            if (stock != null)
-                for (int i = 0; i < stock.Count; i++)
-                    h = h * 31 + stock[i];
-            return h;
         }
 
         private static void HashBools(ref int hash, List<bool> list)
@@ -681,6 +841,14 @@ namespace CardShopCoop.Sync
                 postfix: new HarmonyMethod(typeof(SettingsSync), nameof(CashierPostfix)));
             Try(h, typeof(InteractablePlayTable), "SetTournamentPlayTableNumber",
                 postfix: new HarmonyMethod(typeof(SettingsSync), nameof(TableNumberPostfix)));
+            Try(h, typeof(CPlayerData), "SetUnlockDecoWall",
+                postfix: new HarmonyMethod(typeof(SettingsSync), nameof(WallUnlockPostfix)));
+            Try(h, typeof(CPlayerData), "SetUnlockDecoFloor",
+                postfix: new HarmonyMethod(typeof(SettingsSync), nameof(FloorUnlockPostfix)));
+            Try(h, typeof(CPlayerData), "SetUnlockDecoCeiling",
+                postfix: new HarmonyMethod(typeof(SettingsSync), nameof(CeilingUnlockPostfix)));
+            Try(h, typeof(CPlayerData), "AddDecoItemToInventory",
+                postfix: new HarmonyMethod(typeof(SettingsSync), nameof(DecoStockPostfix)));
         }
 
         public static bool BuyDecoPrefix(ShopBuyDecoUIScreen __instance, int shopDecoIndex, float price)
@@ -731,7 +899,14 @@ namespace CardShopCoop.Sync
 
         public static void EquipDecoPostfix()
         {
-            if (ApplyingRemote || CoopCore.Role != CoopRole.Client)
+            if (ApplyingRemote)
+                return;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.SendSliceNow(3);
+                return;
+            }
+            if (CoopCore.Role != CoopRole.Client)
                 return;
             var inst = Instance;
             if (inst?.SendOp == null)
@@ -750,7 +925,14 @@ namespace CardShopCoop.Sync
 
         public static void GameEventPostfix()
         {
-            if (ApplyingRemote || CoopCore.Role != CoopRole.Client)
+            if (ApplyingRemote)
+                return;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.SendSliceNow(4);
+                return;
+            }
+            if (CoopCore.Role != CoopRole.Client)
                 return;
             var inst = Instance;
             if (inst?.SendOp == null)
@@ -767,7 +949,14 @@ namespace CardShopCoop.Sync
 
         public static void GameEventFeePostfix(EGameEventFormat gameEventFormat, float price)
         {
-            if (ApplyingRemote || CoopCore.Role != CoopRole.Client)
+            if (ApplyingRemote)
+                return;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.SendSliceNow(5);
+                return;
+            }
+            if (CoopCore.Role != CoopRole.Client)
                 return;
             var inst = Instance;
             if (inst?.SendOp == null)
@@ -782,7 +971,14 @@ namespace CardShopCoop.Sync
 
         public static void CashierPostfix(InteractableCashierCounter __instance)
         {
-            if (ApplyingRemote || CoopCore.Role != CoopRole.Client)
+            if (ApplyingRemote)
+                return;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.SendSliceNow(6);
+                return;
+            }
+            if (CoopCore.Role != CoopRole.Client)
                 return;
             var inst = Instance;
             if (inst?.SendOp == null)
@@ -799,7 +995,14 @@ namespace CardShopCoop.Sync
 
         public static void TableNumberPostfix(InteractablePlayTable __instance, int tableNumber)
         {
-            if (ApplyingRemote || CoopCore.Role != CoopRole.Client)
+            if (ApplyingRemote)
+                return;
+            if (CoopCore.Role == CoopRole.Host)
+            {
+                Instance?.SendSliceNow(7);
+                return;
+            }
+            if (CoopCore.Role != CoopRole.Client)
                 return;
             var inst = Instance;
             if (inst?.SendOp == null)
@@ -811,6 +1014,34 @@ namespace CardShopCoop.Sync
             if (idx < 0 || idx > 254)
                 return;
             inst.SendOp(new SettingsOpMessage { Op = OpTableNumber, TableIndex = (byte)idx, TableNumber = tableNumber });
+        }
+
+        public static void WallUnlockPostfix(int decoIndex, bool isUnlocked)
+        {
+            if (!ApplyingRemote && CoopCore.Role == CoopRole.Host)
+                Instance?.SendSliceNow(0);
+        }
+        public static void FloorUnlockPostfix(int decoIndex, bool isUnlocked)
+        {
+            if (!ApplyingRemote && CoopCore.Role == CoopRole.Host)
+                Instance?.SendSliceNow(1);
+        }
+        public static void CeilingUnlockPostfix(int decoIndex, bool isUnlocked)
+        {
+            if (!ApplyingRemote && CoopCore.Role == CoopRole.Host)
+                Instance?.SendSliceNow(2);
+        }
+        public static void DecoStockPostfix(EDecoObject decoObject, int count)
+        {
+            if (!ApplyingRemote && CoopCore.Role == CoopRole.Host)
+            {
+                var instance = Instance;
+                int index = (int)decoObject;
+                var stock = CPlayerData.m_DecorationInventoryList;
+                if (instance != null && stock != null && index >= 0 && index < instance._stockWasNonZero.Length)
+                    instance._stockWasNonZero[index] = index < stock.Count && stock[index] != 0;
+                instance?.SendSliceNow(8 + index, stock != null && index >= 0 && index < stock.Count ? stock[index] : 0);
+            }
         }
 
         private static void Try(Harmony h, Type type, string method,
