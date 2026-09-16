@@ -100,7 +100,8 @@ namespace CardShopCoop.Patches
             if (tCheat != null)
             {
                 Try(h, tCheat, "SetMenuOpen",
-                    prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatMenuOpenPrefix)));
+                    prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatMenuOpenPrefix)),
+                    postfix: new HarmonyMethod(typeof(GamePatches), nameof(CheatNoFreezePostfix)));
                 Try(h, tCheat, "Start",
                     prefix: new HarmonyMethod(typeof(GamePatches), nameof(CheatManagerStartPrefix)));
                 Try(h, tCheat, "ApplyCheat",
@@ -432,13 +433,14 @@ namespace CardShopCoop.Patches
         }
 
         /// <summary>Suppress the CMF camera's raw mouse/gamepad look input while
-        /// the co-op window owns modal UI mode, or while the game's own pause menu is open.
-        /// The pause menu keeps the world running in co-op (see PauseNoFreezePostfix), so its
+        /// the co-op window owns modal UI mode, or while the game's own pause menu or cheat
+        /// canvas is open. Those keep the world running in co-op (see
+        /// <see cref="PauseNoFreezePostfix"/> and <see cref="CheatNoFreezePostfix"/>), so their
         /// ShowCursor only disables the GAME camera - this independent CMF path would still look
         /// around. Returning false prevents the original method from reading the input axis.</summary>
         public static bool CameraInputPrefix(ref float __result)
         {
-            if (!CoopCore.WindowBlocksInput && !PauseMenuOpen())
+            if (!CoopCore.WindowBlocksInput && !PauseMenuOpen() && !CheatMenuFreezeActive())
                 return true;
             __result = 0f;
             return false;
@@ -1252,6 +1254,11 @@ namespace CardShopCoop.Patches
         private static bool _pauseMenuOpen;
         private static PauseScreen _pauseScreen;
 
+        /// <summary>The cheat canvas's open state, latched by <see cref="CheatNoFreezePostfix"/>
+        /// from the game's own transition (and only when the open was actually allowed, since a
+        /// postfix runs even when the prefix blocked the original).</summary>
+        private static bool _cheatMenuOpen;
+
         private static void RefreshPauseMenuOpen()
         {
             try
@@ -1397,9 +1404,44 @@ namespace CardShopCoop.Patches
         {
             if (!open)
                 return true;
-            return CoopCore.Role != CoopRole.Client
-                && CoopPlugin.ShowHiddenCategory != null && CoopPlugin.ShowHiddenCategory.Value
-                && CoopPlugin.EnableGameCheatMenu != null && CoopPlugin.EnableGameCheatMenu.Value;
+            return CheatsEnabledForHost();
+        }
+
+        /// <summary>True while the cheat canvas is open AND a session is running - the state in
+        /// which the canvas's own freeze has been undone and the local player therefore needs
+        /// holding still (see <see cref="CheatNoFreezePostfix"/>).</summary>
+        private static bool CheatMenuFreezeActive()
+        {
+            return _cheatMenuOpen && CoopCore.Role != CoopRole.None;
+        }
+
+        /// <summary>Keep the world running while the cheat canvas is open during co-op, the same
+        /// way <see cref="PauseNoFreezePostfix"/> does for the pause menu: the canvas sets
+        /// <c>Time.timeScale = 0</c> on open, which zeroes deltaTime for the WHOLE process and so
+        /// freezes the shared shop and the network tick on everyone. The canvas still shows; only
+        /// the freeze is undone.
+        ///
+        /// Because the world no longer stops, the LOCAL player must be held still explicitly or
+        /// they keep walking behind the canvas (vanilla relied on timeScale = 0). The walker stop
+        /// is shared with the pause menu, so it is released only when NEITHER modal is open.</summary>
+        public static void CheatNoFreezePostfix(bool open)
+        {
+            // A prefix that returned false skipped the original (a blocked CLIENT open), but
+            // postfixes still run - so only trust `open` when the canvas was actually allowed to
+            // change state. Same rule as the pause patch, which decides from the menu's real
+            // state rather than from "OpenScreen ran".
+            _cheatMenuOpen = open && CheatsEnabledForHost();
+
+            if (CoopCore.Role == CoopRole.None)
+            {
+                RestoreLocalWalkerIfIdle();
+                return;
+            }
+            UnityEngine.Time.timeScale = 1f;
+            if (CheatMenuFreezeActive() || PauseMenuOpen())
+                StopLocalWalkerForPause();
+            else
+                RestoreLocalWalkerIfIdle();
         }
 
         /// <summary>Game 1.00 destroys its CheatManager in Start in the production build. Keep
