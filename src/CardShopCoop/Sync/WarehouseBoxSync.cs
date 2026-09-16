@@ -271,7 +271,17 @@ namespace CardShopCoop.Sync
             }
         }
 
-        /// <summary>True when the warehouse channel owns rack materialization on this side.</summary>
+        /// <summary>True when the warehouse channel owns rack materialization on this side, which
+        /// means the box channel must park/hide a stored mirror instead of running the store recipe
+        /// (two writers for one slot is exactly the duplicate this exists to prevent).
+        ///
+        /// Before the first host state the answer is deliberately FALSE, i.e. keep the box channel's
+        /// previous behaviour: parking on a guess is the risky direction, because if the host never
+        /// publishes a state (a build where a record symbol fails to resolve makes Available() false
+        /// and gates every send) a parked mirror is never materialised by anything and the guest's
+        /// warehouse racks render empty forever while the host's are full. Not parking can only cost
+        /// a brief double-writer window at join, and the first state arrives right after the world
+        /// load - long before anyone can store a box.</summary>
         public static bool RackOwnedByWarehouseChannel()
         {
             if (CoopCore.Role == CoopRole.Host)
@@ -280,7 +290,7 @@ namespace CardShopCoop.Sync
             }
             if (!_hasHostState)
             {
-                return true;
+                return false;
             }
             return Available() && !_hostLiveBoxes;
         }
@@ -738,27 +748,26 @@ namespace CardShopCoop.Sync
                 }
                 if (box.m_IsStored)
                 {
-                    // The game has TWO ways to finish this store, each banking the record exactly
-                    // once: Update when the lerp completes, and InteractableObject.OnDisable -
-                    // which LerpToTransform calls IMMEDIATELY when the box is not active in
-                    // hierarchy (decompiled 1.00: InteractableObject.cs:739-742 -> OnDisable
-                    // :772-788 -> OnFinishLerp). So the record is often already banked by the time
-                    // DispenseItem returns, and forcing the finish unconditionally banked a SECOND
-                    // one (in game: one box bought, two on the rack, and the rack's own box-type
-                    // gate then refusing the duplicate forever).
+                    // DispenseItem cannot have banked the record itself: it calls LerpToTransform
+                    // at :202 but only sets m_MarkForDataOnlyDestroy at :210, and the bank is gated
+                    // on that marker - so LerpToTransform's own OnDisable branch (which does call
+                    // OnFinishLerp when the object is not active in hierarchy) runs BEFORE the
+                    // marker exists. The count check below is therefore expected to be true on
+                    // every forwarded store to a record host; it is kept because it is the
+                    // condition under which forcing is correct, not because it is normally false.
                     //
-                    // Force it only when neither path ran - i.e. the compartment still shows the
-                    // count it had before the store - and then make sure neither can run later:
-                    // stop the lerp and clear the data-only-destroy marker, or the box's own Update
-                    // would add another record.
+                    // The forced invoke IS required, and not because of a race with Update: the
+                    // guest still holds the box after a forwarded store (vanilla was suppressed),
+                    // its next lease renewal can make the host's apply HIDE the box, and an
+                    // inactive root never runs Update - so the lerp would never complete. Finishing
+                    // the game's own sequence synchronously is the only deterministic path.
                     if (UsesRecords && _miOnFinishLerp != null && StoredCount(comp) == storedBefore)
                     {
-                        // Stop the lerp BEFORE the invoke. OnFinishLerp ends by calling OnDestroyed,
-                        // which deactivates the object; Unity then runs OnDisable, whose lerp branch
-                        // calls OnFinishLerp AGAIN while m_IsLerpingToPos is still true - and at that
-                        // point the destroy marker is still set, so the re-entrant call banks a
-                        // second record. Observed directly: one forced call, count 0 -> 2. Clearing
-                        // the lerp flag first makes that re-entrant OnDisable branch a no-op.
+                        // StopLerpToTransform BEFORE the invoke is load-bearing, not cosmetic: it
+                        // clears m_IsLerpingToPos, which is the flag OnFinishLerp's natural callers
+                        // (Update, and OnDisable) test. Without it, anything that deactivates the
+                        // object during the invoke could re-enter OnFinishLerp while the destroy
+                        // marker is still set and bank a second record. Do NOT remove it.
                         //
                         // The mark must NOT be cleared before the invoke - the record is only created
                         // under it - so it is cleared afterwards, defensively.
