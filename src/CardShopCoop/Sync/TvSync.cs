@@ -180,7 +180,7 @@ namespace CardShopCoop.Sync
                 _lastPowered = powered;
                 _lastShuffle = shuffle;
                 _lastPlaylistIndex = playlistIndex;
-                _hasHostState = true;
+                _hasHostState = streaming || _barrier;
                 if (changed)
                     _controlPending = true;
                 if (_controlPending && _controlSendAge >= ControlSendFloor && HasPeers())
@@ -278,12 +278,15 @@ namespace CardShopCoop.Sync
 
         private void SendControlNow()
         {
-            if (BroadcastState == null || !_hasHostState)
+            if (BroadcastState == null || (!_hasHostState && !_controlPending))
                 return;
             BroadcastState(BuildState(false, 0, 0.0));
             _resumePulse = false;
             if (string.IsNullOrEmpty(_lastSource) && !_barrier)
+            {
                 _hasHostState = false;
+                _controlPending = false;
+            }
         }
 
         private bool HasPeers()

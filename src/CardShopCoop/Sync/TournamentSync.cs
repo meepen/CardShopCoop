@@ -703,7 +703,8 @@ namespace CardShopCoop.Sync
             var screen = cm.m_TournamentPairingScreen;
             if (showBoard && !screen.gameObject.activeSelf)
                 screen.gameObject.SetActive(true);
-            int renderHash = RenderHash(digest);
+            int renderHash = RenderHash(digest, td.m_TournamentCurrentRound, td.m_TournamentMaxRound,
+                td.m_TournamentMaxPlayerCount);
             if (!visibilityChanged && _hasClientRenderHash && renderHash == _clientRenderHash)
                 return;
             _clientRenderHash = renderHash;
@@ -740,11 +741,14 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private static int RenderHash(List<PairingEntry> digest)
+        private static int RenderHash(List<PairingEntry> digest, int currentRound, int maxRound, int maxPlayerCount)
         {
             unchecked
             {
                 int hash = 17;
+                hash = hash * 31 + currentRound;
+                hash = hash * 31 + maxRound;
+                hash = hash * 31 + maxPlayerCount;
                 for (int i = 0; i < digest.Count; i++)
                 {
                     var e = digest[i];

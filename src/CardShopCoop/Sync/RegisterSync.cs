@@ -1038,18 +1038,6 @@ namespace CardShopCoop.Sync
                 }
         }
 
-        private void SendCartNow(int index)
-        {
-            var msg = WriteCarts(index);
-            if (msg != null && BroadcastCart != null)
-                BroadcastCart(new RegisterCartMessage
-                {
-                    Full = false,
-                    Index = index,
-                    Entries = msg.Entries
-                });
-        }
-
         private static int CustomerListIndex(Customer cust)
         {
             var cm = SceneRef<CustomerManager>.Get();
@@ -1764,7 +1752,7 @@ namespace CardShopCoop.Sync
                 if (card == null)
                 {
                     CoopPlugin.Log.LogWarning($"RegisterSync client: aborting cart {c.Index}; card {j} failed to spawn");
-                    Teardown(c.Index);
+                    ResetClientCounter(c.Index);
                     return;
                 }
                 _cardBag[card] = j;

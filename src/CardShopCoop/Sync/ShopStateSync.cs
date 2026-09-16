@@ -104,7 +104,7 @@ namespace CardShopCoop.Sync
             _forceSweepArmed = false;
             // Per-world timestamp: a value kept across a world reload would throttle the
             // fallback room repaint for a DIFFERENT world (the convention ContainerSync documents).
-            _lastRoomRepaint = 0.0;
+            _lastRoomRepaint = -999.0;
             _billScreen = null;
             _openSign = null;
             _warehouseSign = null;
