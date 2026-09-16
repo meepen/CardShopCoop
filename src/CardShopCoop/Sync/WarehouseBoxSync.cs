@@ -49,35 +49,10 @@ namespace CardShopCoop.Sync
         private readonly HashSet<ushort> _pendingTakeBoxes = new HashSet<ushort>();
         private readonly HashSet<long> _hostSeenRequests = new HashSet<long>();
 
-        /// <summary>The last warehouse state that could not be fully applied because one of its
-        /// compartments had not streamed in yet. Re-applied from OnClientTick until complete.</summary>
-        private WarehouseStateMessage _pendingApply;
-
         /// <summary>Client: the host's warehouse backend as advertised by the last state. A live
         /// guest needs a record host's entries materialized as live boxes, but must leave a live
         /// host's racks alone (the box channel already carries those).</summary>
         private static bool _hostLiveBoxes;
-
-        /// <summary>Compartments already applied for the current <see cref="_pendingApply"/>, so a
-        /// retry only touches the entries that were not applied yet instead of tearing every rack
-        /// down and rebuilding it again each frame.</summary>
-        private readonly HashSet<int> _pendingApplied = new HashSet<int>();
-
-        /// <summary>Retry passes spent on the current pending state; bounded so an entry that can
-        /// never resolve cannot churn forever.</summary>
-        private int _pendingAttempts;
-
-        /// <summary>How many client ticks a partial apply may retry before giving up (the next
-        /// warehouse change or a rejoin re-sends the state).</summary>
-        private const int PendingApplyAttemptCap = 600;
-
-        /// <summary>How long between retries of <see cref="_pendingApply"/>. Each retry re-runs
-        /// the whole apply, so this is deliberately slow - see <see cref="OnClientTick"/>.</summary>
-        private const double ApplyRetrySeconds = 0.5;
-
-        /// <summary>Earliest <c>realtimeSinceStartup</c> at which the pending state may be retried
-        /// again, so the retry runs on a timer instead of every frame.</summary>
-        private double _nextApplyRetryAt;
 
         /// <summary>Throttle for the "rack refused a materialised box" warning.</summary>
         private static double _lastMaterializeWarn;
@@ -194,41 +169,11 @@ namespace CardShopCoop.Sync
         /// frame or a host-side exception), so a compartment cannot stay un-clickable forever.</summary>
         protected override void OnClientTick(in SyncFrame frame)
         {
-            // A warehouse state that arrived before the client's racks existed was only partially
-            // applied; retry it locally until every compartment resolves. This replaces the old
-            // periodic heal without putting anything on the wire - the last received state is
-            // re-applied against the now-live scene.
-            //
-            // Retry on a slow timer, NOT every frame. Each retry re-runs the apply, and on a live
-            // guest of a record host that apply is a teardown+respawn of the rack's boxes, so a
-            // per-frame retry destroyed and recreated them 60x a second - visible in game as the
-            // boxes endlessly flying back into the shelf from a wrong position. Twice a second is
-            // still far quicker than the 15 s heal this replaced.
-            if (_pendingApply != null && Time.realtimeSinceStartupAsDouble >= _nextApplyRetryAt)
-            {
-                _nextApplyRetryAt = Time.realtimeSinceStartupAsDouble + ApplyRetrySeconds;
-                ApplyingRemote = true;
-                try
-                {
-                    bool complete = false;
-                    Guarded("apply-retry", () => { complete = ClientApplyInner(_pendingApply); });
-                    if (complete)
-                    {
-                        _pendingApply = null;
-                        _pendingAttempts = 0;
-                    }
-                    else if (++_pendingAttempts > PendingApplyAttemptCap)
-                    {
-                        CoopPlugin.Log.LogWarning(
-                            $"WarehouseBoxSync: gave up re-applying a warehouse state after {PendingApplyAttemptCap} passes "
-                            + $"({_pendingApplied.Count}/{_pendingApply.Compartments.Count} compartments matched); "
-                            + "the next warehouse change or a rejoin re-sends it");
-                        _pendingApply = null;
-                        _pendingAttempts = 0;
-                    }
-                }
-                finally { ApplyingRemote = false; }
-            }
+            // A warehouse state that arrives before the client's racks exist is not retried here:
+            // the host's unconditional slice sweep re-sends every live compartment on its next
+            // pass, and a joiner re-baselines through JoinResyncRequest once its world has loaded.
+            // A local retry loop was a second safety net for the same job, and because applying a
+            // compartment is a teardown+respawn of its boxes it rebuilt the rack over and over.
 
             if (_pendingTakeAt.Count == 0)
                 return;
@@ -257,9 +202,6 @@ namespace CardShopCoop.Sync
             _nextRequestId = 0;
             _sweepTimer = 0f;
             _sweepCursor = 0;
-            _pendingApply = null;
-            _pendingApplied.Clear();
-            _pendingAttempts = 0;
             _hostLiveBoxes = false;
             _pendingStoreAt.Clear();
             _takeKeyByRequest.Clear();
@@ -276,13 +218,10 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Client: the placed-object roster changed, so every index-keyed compartment
-        /// address may now point at a different object. Drop the pending-apply memo instead of
-        /// retrying against stale addresses (the next state re-applies from scratch).</summary>
+        /// address may now point at a different object. Nothing to drop any more: each state is
+        /// applied once, against the addresses as they are when it arrives.</summary>
         public void OnClientRosterChanged()
         {
-            _pendingApply = null;
-            _pendingApplied.Clear();
-            _pendingAttempts = 0;
         }
 
         public override void Dispose()
@@ -734,27 +673,35 @@ namespace CardShopCoop.Sync
                 // the data-only destroy whose OnDestroyed banks the record and retires the live
                 // box (ForgetHostBox -> authoritative Removed). We never hand-add a record.
                 box.DispenseItem(false, comp);
+                int afterDispense = StoredCount(comp);
+                if (BoxShared.Debug)
+                {
+                    BoxShared.DebugLog("box-store-step",
+                        $"id={m.BoxId} afterDispense count={storedBefore}->{afterDispense} stored={box.m_IsStored}");
+                }
                 if (box.m_IsStored)
                 {
-                    // On the record backend this is normally called by the box's Update after its
-                    // lerp. The host may have parked the box while the guest was holding it, in
-                    // which case Unity never runs that Update. Invoke the virtual method on the
-                    // concrete box so the game's override creates the record and retires the box.
-                    if (UsesRecords && _miOnFinishLerp != null)
+                    // The game has TWO ways to finish this store, each banking the record exactly
+                    // once: Update when the lerp completes, and InteractableObject.OnDisable -
+                    // which LerpToTransform calls IMMEDIATELY when the box is not active in
+                    // hierarchy (decompiled 1.00: InteractableObject.cs:739-742 -> OnDisable
+                    // :772-788 -> OnFinishLerp). So the record is often already banked by the time
+                    // DispenseItem returns, and forcing the finish unconditionally banked a SECOND
+                    // one (in game: one box bought, two on the rack, and the rack's own box-type
+                    // gate then refusing the duplicate forever).
+                    //
+                    // Force it only when neither path ran - i.e. the compartment still shows the
+                    // count it had before the store - and then make sure neither can run later:
+                    // stop the lerp and clear the data-only-destroy marker, or the box's own Update
+                    // would add another record.
+                    if (UsesRecords && _miOnFinishLerp != null && StoredCount(comp) == storedBefore)
                     {
                         _miOnFinishLerp.Invoke(box, null);
-                        // ...but OnFinishLerp is NOT idempotent, and the lerp that normally drives
-                        // it is still live: Update calls it again once m_LerpPosTimer reaches 1,
-                        // and it is still >= 0 here. The box is made visible just below, so that
-                        // Update does run - and a second call adds a SECOND StoredBoxRecord for one
-                        // store (seen in game as count 0 -> 2: one box bought, two on the rack, and
-                        // the rack's own box-type gate then refuses the duplicate).
-                        //
-                        // Make the sequence idempotent both ways: stop the lerp so Update cannot
-                        // re-enter OnFinishLerp at all, and clear the data-only-destroy marker so
-                        // that even an unexpected second call takes the harmless
-                        // "else if (m_IsStored)" branch (which only re-arranges) instead of
-                        // banking another record.
+                        if (BoxShared.Debug)
+                        {
+                            BoxShared.DebugLog("box-store-step",
+                                $"id={m.BoxId} forcedFinishLerp count={afterDispense}->{StoredCount(comp)}");
+                        }
                         try
                         {
                             box.StopLerpToTransform();
@@ -765,6 +712,11 @@ namespace CardShopCoop.Sync
                             _fiMarkForDataOnlyDestroy?.SetValue(box, false);
                         }
                         catch (Exception e) { Swallow.Log(e); }
+                    }
+                    else if (BoxShared.Debug)
+                    {
+                        BoxShared.DebugLog("box-store-step",
+                            $"id={m.BoxId} gameFinishedStore count={storedBefore}->{StoredCount(comp)}");
                     }
                     // Restore the HOST's own view. While the guest held this box the host applied
                     // that Held claim and hid it (SetVisible(false) deactivates the root), and a
@@ -1112,34 +1064,18 @@ namespace CardShopCoop.Sync
             // materializes the entries instead (ApplyCompartmentFromRecords).
             if (!UsesRecords && _hostLiveBoxes)
                 return;
-            // A sweep slice must never discard an unresolved FULL baseline: clearing _pendingApply
-            // here would drop the compartments it still owes and strand them until the cursor came
-            // round again. Apply the slice directly and leave the baseline alone.
-            if (!message.Full && _pendingApply != null)
-            {
-                ApplyingRemote = true;
-                try
-                {
-                    Guarded("apply-partial", () => ApplyPartial(message));
-                }
-                finally { ApplyingRemote = false; }
-                return;
-            }
-            _pendingApplied.Clear();
-            _pendingAttempts = 0;
             ApplyingRemote = true;
             try
             {
-                bool complete = false;
-                Guarded("apply", () => { complete = ClientApplyInner(message); });
-                _pendingApply = complete ? null : message;
+                Guarded("apply", () => ClientApplyInner(message));
             }
             finally { ApplyingRemote = false; }
         }
 
-        /// <summary>Applies a partial (sweep) message directly, without touching the pending-baseline
-        /// bookkeeping. Used when a sweep slice arrives while a full baseline is still incomplete.</summary>
-        private void ApplyPartial(WarehouseStateMessage message)
+        /// <summary>Applies a host state. A compartment whose rack has not streamed in yet is
+        /// simply skipped this time - the host's sweep re-sends every live compartment on its
+        /// next pass, so nothing needs to be remembered or retried here.</summary>
+        private void ClientApplyInner(WarehouseStateMessage message)
         {
             var comps = Compartments();
             if (comps == null)
@@ -1152,46 +1088,11 @@ namespace CardShopCoop.Sync
                 var comp = ResolveCompartment(comps, entry);
                 if (comp == null)
                     continue;
+                // One attempt per message: if the rack resolved but refused its entries
+                // (capacity/size/type) that is enough to know they do not fit. The next sweep
+                // slice or a rejoin re-sends the compartment from scratch.
                 ApplyCompartment(comp, entry);
             }
-        }
-
-        /// <summary>Applies a host state. Returns false when at least one compartment could not be
-        /// resolved yet (its rack has not streamed in), so the caller re-applies the same state
-        /// from OnClientTick instead of relying on a periodic heal.</summary>
-        private bool ClientApplyInner(WarehouseStateMessage message)
-        {
-            var comps = Compartments();
-            if (comps == null)
-                return false;
-            bool complete = true;
-            for (int e = 0; e < message.Compartments.Count; e++)
-            {
-                if (_pendingApplied.Contains(e))
-                    continue; // applied on an earlier pass; don't tear the rack down again
-                var entry = message.Compartments[e];
-                if (entry == null)
-                {
-                    _pendingApplied.Add(e);
-                    continue;
-                }
-                var comp = ResolveCompartment(comps, entry);
-                if (comp == null)
-                {
-                    complete = false; // rack not streamed in yet; retried from OnClientTick
-                    continue;
-                }
-                if (ApplyCompartment(comp, entry))
-                    _pendingApplied.Add(e);
-                else
-                {
-                    // The rack resolved but refused its entries (capacity/size/type). One attempt
-                    // is enough to know they don't fit: tear it down once, not once per tick. The
-                    // next state or a rejoin retries from scratch.
-                    _pendingApplied.Add(e);
-                }
-            }
-            return complete;
         }
 
         private static ShelfCompartment ResolveCompartment(List<ShelfCompartment> comps,
