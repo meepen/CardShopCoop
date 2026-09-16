@@ -696,17 +696,26 @@ namespace CardShopCoop.Sync
                     // would add another record.
                     if (UsesRecords && _miOnFinishLerp != null && StoredCount(comp) == storedBefore)
                     {
+                        // Stop the lerp BEFORE the invoke. OnFinishLerp ends by calling OnDestroyed,
+                        // which deactivates the object; Unity then runs OnDisable, whose lerp branch
+                        // calls OnFinishLerp AGAIN while m_IsLerpingToPos is still true - and at that
+                        // point the destroy marker is still set, so the re-entrant call banks a
+                        // second record. Observed directly: one forced call, count 0 -> 2. Clearing
+                        // the lerp flag first makes that re-entrant OnDisable branch a no-op.
+                        //
+                        // The mark must NOT be cleared before the invoke - the record is only created
+                        // under it - so it is cleared afterwards, defensively.
+                        try
+                        {
+                            box.StopLerpToTransform();
+                        }
+                        catch (Exception e) { Swallow.Log(e); }
                         _miOnFinishLerp.Invoke(box, null);
                         if (BoxShared.Debug)
                         {
                             BoxShared.DebugLog("box-store-step",
                                 $"id={m.BoxId} forcedFinishLerp count={afterDispense}->{StoredCount(comp)}");
                         }
-                        try
-                        {
-                            box.StopLerpToTransform();
-                        }
-                        catch (Exception e) { Swallow.Log(e); }
                         try
                         {
                             _fiMarkForDataOnlyDestroy?.SetValue(box, false);
