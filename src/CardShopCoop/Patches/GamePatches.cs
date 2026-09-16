@@ -1374,11 +1374,45 @@ namespace CardShopCoop.Patches
         /// world slot 7), which have no panel, so the refresh threw IndexOutOfRange mid-save. Skip
         /// only slots the UI cannot represent - never a real slot, which may be the user's
         /// configured ClientWorldSlot.</summary>
+        /// <summary>1.00 added CSingleton&lt;T&gt;.IsSet, which is what makes it safe to ask whether
+        /// the save screen exists at all - the legacy build's Instance getter FABRICATES a
+        /// component when none exists, so the legacy build cannot be asked this question. It has
+        /// no need to be: `UpdateSlot` itself does not exist there (the patch simply does not
+        /// apply), so this only has to return a safe answer. Resolved by reflection because a
+        /// direct reference to IsSet is a compile error against the legacy reference assemblies -
+        /// and would stop the DLL loading there, which is the failure the dual-build rule exists
+        /// to prevent.</summary>
+        private static System.Reflection.PropertyInfo _piSaveSlotIsSet;
+        private static bool _saveSlotIsSetProbed;
+
+        private static bool SaveSlotScreenIsSet()
+        {
+            if (!_saveSlotIsSetProbed)
+            {
+                _saveSlotIsSetProbed = true;
+                try
+                {
+                    _piSaveSlotIsSet = typeof(CSingleton<>)
+                        .MakeGenericType(typeof(SaveLoadGameSlotSelectScreen))
+                        .GetProperty("IsSet",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                }
+                catch (Exception e) { Swallow.Log(e); }
+            }
+            try
+            {
+                if (_piSaveSlotIsSet != null)
+                    return (bool)_piSaveSlotIsSet.GetValue(null, null);
+            }
+            catch (Exception e) { Swallow.Log(e); }
+            return false;
+        }
+
         public static bool UpdateSlotGuardPrefix(int slot)
         {
             try
             {
-                if (CSingleton<SaveLoadGameSlotSelectScreen>.IsSet)
+                if (SaveSlotScreenIsSet())
                 {
                     var screen = CSingleton<SaveLoadGameSlotSelectScreen>.Instance;
                     var list = screen == null
