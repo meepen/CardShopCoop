@@ -2,6 +2,7 @@ using CardShopCoop.Util;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Messages;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -113,6 +114,32 @@ namespace CardShopCoop.Sync
         // agreement rather than trust either one. See ApplyCleanserState.
         private static readonly FieldInfo FiClItemAmount =
             ReflectionSurface.RequiredField(typeof(InteractableAutoCleanser), "m_ItemAmount");
+        private static readonly FieldInfo FiScreenShelf =
+            AccessTools.Field(typeof(BulkDonationBoxUIScreen), "m_InteractableCardStorageShelf");
+        private static readonly FieldInfo FiScreenDonation =
+            AccessTools.Field(typeof(BulkDonationBoxUIScreen), "m_InteractableBulkDonationBox");
+        private static readonly FieldInfo FiScreenPage =
+            AccessTools.Field(typeof(BulkDonationBoxUIScreen), "m_PageIndex");
+        private static readonly FieldInfo FiScreenPageLimit =
+            AccessTools.Field(typeof(BulkDonationBoxUIScreen), "m_PageLimitIndex");
+        private static readonly FieldInfo FiScreenCurrentSlot =
+            AccessTools.Field(typeof(BulkDonationBoxUIScreen), "m_CurrentSelectedSlotIndex");
+        private static readonly FieldInfo FiScreenPanels =
+            AccessTools.Field(typeof(BulkDonationBoxUIScreen), "m_BulkDonationBoxCardPanelUIList");
+        private static readonly MethodInfo MiEvaluateCardPanelUI =
+            AccessTools.Method(typeof(BulkDonationBoxUIScreen), "EvaluateCardPanelUI", new[] { typeof(int) });
+        private static readonly FieldInfo FiModalParent =
+            AccessTools.Field(typeof(BulkDonationBoxPlusMinusScreen), "m_BulkDonationBoxUIScreen");
+        private static readonly FieldInfo FiModalCardData =
+            AccessTools.Field(typeof(BulkDonationBoxPlusMinusScreen), "m_CardData");
+        private static readonly FieldInfo FiModalStackCount =
+            AccessTools.Field(typeof(BulkDonationBoxPlusMinusScreen), "m_StackCardCount");
+        private static readonly FieldInfo FiModalBoxTotal =
+            AccessTools.Field(typeof(BulkDonationBoxPlusMinusScreen), "m_BoxTotalCardCount");
+        private static readonly MethodInfo MiModalIsOpened =
+            AccessTools.Method(typeof(UIScreenBase), "IsScreenOpened");
+        private static readonly MethodInfo MiModalClose =
+            AccessTools.Method(typeof(UIScreenBase), "CloseScreen");
 
         /// <summary>Client's copy of a pack opener's host-side truth. Kept OUTSIDE the
         /// game object because the machine's own fields must stay inert (see class doc).</summary>
@@ -137,6 +164,9 @@ namespace CardShopCoop.Sync
         private int _sweepCursor;
         private double _lastResyncRequestAt = -999.0;
         private double _lastApplyWarningAt = -999.0;
+        private const int MaxConsecutiveResyncErrors = 3;
+        private int _consecutiveResyncErrors;
+        private bool _resyncCapLogged;
         private readonly Dictionary<int, double> _touched = new Dictionary<int, double>(); // client
         private readonly Dictionary<int, PackMirror> _packMirrors = new Dictionary<int, PackMirror>();
         private readonly Dictionary<int, int> _packClaimOwner = new Dictionary<int, int>();
@@ -254,6 +284,10 @@ namespace CardShopCoop.Sync
             _hostKeys.Clear();
             _sweepTimer = 0f;
             _sweepCursor = 0;
+            _lastResyncRequestAt = -999.0;
+            _lastApplyWarningAt = -999.0;
+            _consecutiveResyncErrors = 0;
+            _resyncCapLogged = false;
             _touched.Clear();
             _packMirrors.Clear();
             _packClaimOwner.Clear();
@@ -550,27 +584,49 @@ namespace CardShopCoop.Sync
             {
                 return;
             }
-            Guarded("change", () =>
+            int key;
+            if (!TryResolveHostKey(kind, container, out key))
             {
-                if (!_hostKeys.TryGetValue(container, out int key)
-                    || (key >> 8) != kind
-                    || !ReferenceEquals(Get<object>(kind, key & 0xFF), container))
+                return;
+            }
+            int hash;
+            try
+            {
+                hash = HashForKey(key);
+            }
+            catch (Exception e)
+            {
+                ModuleGuard.Log("containers:change-hash", e);
+                return;
+            }
+            if (_lastHash.TryGetValue(key, out int old) && old == hash)
+            {
+                return;
+            }
+            Guarded("change", () => SendHostRecord(key, hash));
+        }
+
+        private bool TryResolveHostKey(int kind, object container, out int key)
+        {
+            key = 0;
+            try
+            {
+                if (_hostKeys.TryGetValue(container, out key)
+                    && (key >> 8) == kind
+                    && ReferenceEquals(Get<object>(kind, key & 0xFF), container))
                 {
-                    GetContainerKeys();
-                    if (!_hostKeys.TryGetValue(container, out key)
-                        || (key >> 8) != kind
-                        || !ReferenceEquals(Get<object>(kind, key & 0xFF), container))
-                    {
-                        return;
-                    }
+                    return true;
                 }
-                int hash = HashForKey(key);
-                if (_lastHash.TryGetValue(key, out int old) && old == hash)
-                {
-                    return;
-                }
-                SendHostRecord(key, hash);
-            });
+                GetContainerKeys();
+                return _hostKeys.TryGetValue(container, out key)
+                    && (key >> 8) == kind
+                    && ReferenceEquals(Get<object>(kind, key & 0xFF), container);
+            }
+            catch (Exception e)
+            {
+                ModuleGuard.Log("containers:resolve-key", e);
+                return false;
+            }
         }
 
         private ContainerRecord BuildRecord(int kind, int idx)
@@ -666,6 +722,7 @@ namespace CardShopCoop.Sync
                             // joiner's binder already paid these cards through the CardDelta
                             // mirror, so losing the list here would lose the cards for real
                             ApplyContent(kind, idx, cards, kind == KindCardStorage, canTake);
+                            HostChanged(kind, Get<object>(kind, idx));
                             break;
                         }
                     case OpWorkerTakeFlag:
@@ -1061,7 +1118,27 @@ namespace CardShopCoop.Sync
                 }
             }
             if (sawError)
-                ForceResend();
+            {
+                _consecutiveResyncErrors++;
+                if (_consecutiveResyncErrors <= MaxConsecutiveResyncErrors)
+                {
+                    ForceResend();
+                }
+                else if (!_resyncCapLogged)
+                {
+                    _resyncCapLogged = true;
+                    CoopPlugin.Log.LogError(
+                        $"ContainerSync: stopped automatic resync after {MaxConsecutiveResyncErrors} consecutive apply failures");
+                }
+            }
+            else
+            {
+                if (message.Full)
+                {
+                    _consecutiveResyncErrors = 0;
+                    _resyncCapLogged = false;
+                }
+            }
         }
 
         private void WarnApply(string message)
@@ -1089,6 +1166,7 @@ namespace CardShopCoop.Sync
                 }
                 shelf.SetCanWorkerTake(canWorkerTake);
                 shelf.OnCardStorageShelfSettingDone();
+                RefreshOpenContainerUI(shelf, null);
             }
             finally { ApplyingRemote = false; }
         }
@@ -1107,8 +1185,117 @@ namespace CardShopCoop.Sync
                 }
                 box.UpdateFillPercent(Mathf.Clamp01(
                     (float)box.GetTotalCardAmount() / box.GetBoxTotalCardCountMax()));
+                RefreshOpenContainerUI(null, box);
             }
             finally { ApplyingRemote = false; }
+        }
+
+        private static void RefreshOpenContainerUI(InteractableCardStorageShelf shelf,
+            InteractableBulkDonationBox donation)
+        {
+            var screen = UnityEngine.Object.FindObjectOfType<BulkDonationBoxUIScreen>();
+            if (screen == null || MiEvaluateCardPanelUI == null)
+            {
+                return;
+            }
+            object screenShelf = FiScreenShelf?.GetValue(screen);
+            object screenDonation = FiScreenDonation?.GetValue(screen);
+            if (!ReferenceEquals(screenShelf, shelf) || !ReferenceEquals(screenDonation, donation))
+            {
+                return;
+            }
+            var list = donation != null
+                ? donation.GetCompactCardDataAmountList()
+                : shelf.GetCompactCardDataAmountList();
+            int panelCount = (FiScreenPanels?.GetValue(screen) as IList)?.Count ?? 0;
+            if (panelCount <= 0)
+            {
+                return;
+            }
+            int pageLimit = FiScreenPageLimit?.GetValue(screen) as int? ?? 1;
+            int page = FiScreenPage?.GetValue(screen) as int? ?? 0;
+            int maxPage = Mathf.Max(0, list.Count / panelCount);
+            maxPage = Mathf.Min(maxPage, Mathf.Max(0, pageLimit - 1));
+            page = Mathf.Clamp(page, 0, maxPage);
+            FiScreenPage?.SetValue(screen, page);
+            int selected = FiScreenCurrentSlot?.GetValue(screen) as int? ?? 0;
+            var modal = UnityEngine.Object.FindObjectOfType<BulkDonationBoxPlusMinusScreen>();
+            bool modalOpen = modal != null && ReferenceEquals(FiModalParent?.GetValue(modal), screen)
+                && MiModalIsOpened != null && (bool)MiModalIsOpened.Invoke(modal, null);
+            if (modalOpen)
+            {
+                var modalCard = FiModalCardData?.GetValue(modal) as CardData;
+                int modalIndex = FindCardIndex(list, modalCard);
+                if (modalIndex < 0)
+                {
+                    FiScreenCurrentSlot?.SetValue(screen, -1);
+                    MiModalClose?.Invoke(modal, null);
+                }
+                else
+                {
+                    FiScreenCurrentSlot?.SetValue(screen, modalIndex);
+                    int modalAmount = list[modalIndex].gradedCardIndex > 0
+                        ? 1
+                        : list[modalIndex].amount;
+                    FiModalStackCount?.SetValue(modal, modalAmount);
+                    FiModalBoxTotal?.SetValue(modal, GetTotalCardAmount(list));
+                }
+            }
+            else
+            {
+                FiScreenCurrentSlot?.SetValue(screen, list.Count == 0
+                    ? -1
+                    : Mathf.Clamp(selected, 0, list.Count - 1));
+            }
+            MiEvaluateCardPanelUI.Invoke(screen, new object[] { page });
+        }
+
+        private static int FindCardIndex(List<CompactCardDataAmount> list, CardData card)
+        {
+            if (card == null || list == null)
+            {
+                return -1;
+            }
+            for (int i = 0; i < list.Count; i++)
+            {
+                var entry = list[i];
+                if (entry == null)
+                {
+                    continue;
+                }
+                if (entry.gradedCardIndex > 0)
+                {
+                    if (entry.gradedCardIndex == card.gradedCardIndex)
+                    {
+                        return i;
+                    }
+                    continue;
+                }
+                var entryCard = CPlayerData.GetCardData(
+                    entry.cardSaveIndex, entry.expansionType, entry.isDestiny);
+                if (entryCard != null && entryCard.IsSameCardDataType(card)
+                    && entryCard.expansionType == card.expansionType
+                    && entryCard.isDestiny == card.isDestiny)
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        private static int GetTotalCardAmount(List<CompactCardDataAmount> list)
+        {
+            int total = 0;
+            if (list == null)
+            {
+                return total;
+            }
+            for (int i = 0; i < list.Count; i++)
+            {
+                var entry = list[i];
+                total += entry == null || entry.gradedCardIndex > 0 ? 100 : entry.amount;
+            }
+            return total;
         }
 
         private void ApplyContent(int kind, int idx, List<CompactCardDataAmount> cards,
@@ -1122,11 +1309,13 @@ namespace CardShopCoop.Sync
                     var s = Get<InteractableCardStorageShelf>(kind, idx);
                     if (s == null)
                         return;
-                    s.SetCompactCardDataAmountList(cards);
                     if (hasFlag)
                     {
-                        s.SetCanWorkerTake(canWorkerTake);
-                        s.OnCardStorageShelfSettingDone();
+                        ApplyContentInPlace(s, cards, canWorkerTake);
+                    }
+                    else
+                    {
+                        ApplyContentInPlace(s, cards, s.CanWorkerTake());
                     }
                 }
                 else if (kind == KindDonation)
@@ -1134,9 +1323,7 @@ namespace CardShopCoop.Sync
                     var b = Get<InteractableBulkDonationBox>(kind, idx);
                     if (b == null)
                         return;
-                    b.SetCompactCardDataAmountList(cards);
-                    b.UpdateFillPercent(Mathf.Clamp01(
-                        (float)b.GetTotalCardAmount() / b.GetBoxTotalCardCountMax()));
+                    ApplyContentInPlace(b, cards);
                 }
             }
             finally { ApplyingRemote = false; }

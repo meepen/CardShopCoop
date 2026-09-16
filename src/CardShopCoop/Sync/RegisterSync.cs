@@ -926,6 +926,7 @@ namespace CardShopCoop.Sync
                 _cartPollTimer -= CartPollInterval;
                 if (_cartPollTimer > CartPollInterval)
                     _cartPollTimer = CartPollInterval;
+                int changedCount = 0;
                 for (int i = 0; i < sm.m_CashierCounterList.Count && i < 250; i++)
                 {
                     var counter = sm.m_CashierCounterList[i];
@@ -939,7 +940,19 @@ namespace CardShopCoop.Sync
                         continue;
                     _cartCustomer[i] = custId;
                     _cartSignature[i] = signature;
-                    SendCartNow(i);
+                    changedCount++;
+                }
+                if (changedCount > 0 && BroadcastCart != null)
+                {
+                    // A heal can invalidate every cached counter at once. Send one full cart
+                    // message rather than one O(N) cart scan and broadcast per changed counter.
+                    var cart = WriteCarts();
+                    if (cart != null)
+                    {
+                        cart.Full = false;
+                        cart.Index = -1;
+                        BroadcastCart(cart);
+                    }
                 }
             }
         }
@@ -1739,7 +1752,7 @@ namespace CardShopCoop.Sync
                 if (item == null)
                 {
                     CoopPlugin.Log.LogWarning($"RegisterSync client: aborting cart {c.Index}; item {i} failed to spawn");
-                    Teardown(c.Index);
+                    ResetClientCounter(c.Index);
                     return;
                 }
                 _itemBag[item] = i;
@@ -2093,7 +2106,7 @@ namespace CardShopCoop.Sync
         private Customer GetCarrier(int idx, ushort customerIndex, int customerGeneration)
         {
             Customer carrier = null;
-            var cm = Object.FindObjectOfType<CustomerManager>();
+            var cm = SceneRef<CustomerManager>.Get();
             if (cm != null)
             {
                 var list = cm.GetCustomerList();

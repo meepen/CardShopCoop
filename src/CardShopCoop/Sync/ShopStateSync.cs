@@ -70,6 +70,7 @@ namespace CardShopCoop.Sync
         private const float SweepSliceSeconds = SweepCycleSeconds / SliceCount;
         private float _sweepTimer;
         private int _sweepCursor;
+        private bool _forceSweepArmed;
         private double _lastRoomRepaint;
         private RentBillScreen _billScreen;                        // phone screen, often inactive
         private InteractableOpenCloseSign _openSign;               // world object by the door
@@ -100,6 +101,10 @@ namespace CardShopCoop.Sync
         {
             _sweepTimer = 0f;
             _sweepCursor = 0;
+            _forceSweepArmed = false;
+            // Per-world timestamp: a value kept across a world reload would throttle the
+            // fallback room repaint for a DIFFERENT world (the convention ContainerSync documents).
+            _lastRoomRepaint = 0.0;
             _billScreen = null;
             _openSign = null;
             _warehouseSign = null;
@@ -109,8 +114,12 @@ namespace CardShopCoop.Sync
 
         public override void ForceResend()
         {
-            _sweepTimer = 0f;
-            _sweepCursor = 0;
+            if (!_forceSweepArmed)
+            {
+                _sweepCursor = 0;
+                _sweepTimer = SweepSliceSeconds;
+                _forceSweepArmed = true;
+            }
         }
 
         public override void Dispose()
@@ -384,6 +393,10 @@ namespace CardShopCoop.Sync
             {
                 SendSlice(_sweepCursor);
                 _sweepCursor = (_sweepCursor + 1) % SliceCount;
+                if (_sweepCursor == 0)
+                {
+                    _forceSweepArmed = false;
+                }
             });
         }
 
@@ -396,7 +409,7 @@ namespace CardShopCoop.Sync
 
         private static ShopStateMessage BuildFullMessage()
         {
-            var msg = new ShopStateMessage();
+            var msg = new ShopStateMessage { Full = true, Index = -1 };
             var rent = CPlayerData.GetBill(EBillType.Rent);
             msg.Rent.DayPassed = rent.billDayPassed;
             msg.Rent.AmountToPay = rent.amountToPay;
@@ -679,18 +692,9 @@ namespace CardShopCoop.Sync
 
         private void ApplyBills(ShopStateMessage message)
         {
-            bool changed = false;
-            ShopBillEntry[] entries = { message.Rent, message.Electric, message.Employee };
-            for (int i = 0; i < entries.Length; i++)
-            {
-                var bill = CPlayerData.GetBill((EBillType)i);
-                if (bill.billDayPassed != entries[i].DayPassed || bill.amountToPay != entries[i].AmountToPay)
-                {
-                    bill.billDayPassed = entries[i].DayPassed;
-                    bill.amountToPay = entries[i].AmountToPay;
-                    changed = true;
-                }
-            }
+            bool changed = ApplyBill(EBillType.Rent, message.Rent);
+            changed |= ApplyBill(EBillType.Electric, message.Electric);
+            changed |= ApplyBill(EBillType.Employee, message.Employee);
             if (changed && BillScreen() != null)
             {
                 MiBillEvaluateUI?.Invoke(_billScreen, null);
@@ -698,11 +702,27 @@ namespace CardShopCoop.Sync
             }
         }
 
+        private static bool ApplyBill(EBillType billType, ShopBillEntry entry)
+        {
+            // Keep the protocol field and the game's non-zero-based enum mapping explicit.
+            var bill = CPlayerData.GetBill(billType);
+            if (bill.billDayPassed == entry.DayPassed && bill.amountToPay == entry.AmountToPay)
+            {
+                return false;
+            }
+            bill.billDayPassed = entry.DayPassed;
+            bill.amountToPay = entry.AmountToPay;
+            return true;
+        }
+
         private void ApplyRooms(ShopStateMessage message)
         {
             var urm = Urm();
             if (urm == null)
                 return;
+            bool unlocksChanged = (message.IsWarehouseRoomUnlocked && !CPlayerData.m_IsWarehouseRoomUnlocked)
+                || CPlayerData.m_UnlockRoomCount < message.UnlockRoomCount
+                || CPlayerData.m_UnlockWarehouseRoomCount < message.UnlockWarehouseRoomCount;
             if (message.IsWarehouseRoomUnlocked && !CPlayerData.m_IsWarehouseRoomUnlocked)
                 urm.SetUnlockWarehouseRoom(isUnlocked: true);
             for (int guard = 0; CPlayerData.m_UnlockRoomCount < message.UnlockRoomCount && guard < 64; guard++)
@@ -725,7 +745,12 @@ namespace CardShopCoop.Sync
                 else
                     urm.EvaluateWarehouseRoomOpenClose();
             }
-            MiRoomInit?.Invoke(urm, null);
+            double now = Time.realtimeSinceStartupAsDouble;
+            if (unlocksChanged || now - _lastRoomRepaint > 60.0)
+            {
+                _lastRoomRepaint = now;
+                MiRoomInit?.Invoke(urm, null);
+            }
         }
 
         private void ApplyTutorialMessage(ShopStateMessage message)

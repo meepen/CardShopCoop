@@ -123,18 +123,13 @@ namespace CardShopCoop.Sync
 
         public override string Name => "population";
 
-        /// <summary>Rewind the gradual re-assertion only. Immediate structure notifications use
-        /// <see cref="ForceNextTick"/>; a router heal must not broadcast a full roster.</summary>
+        /// <summary>Invalidate the cached roster and re-arm a clean build. Pending per-connection
+        /// full updates are released only after that build completes.</summary>
         public override void ForceResend()
         {
-            if (_all == null)
-            {
-                ForceNextTick();
-                return;
-            }
-            _sweepTimer = 0f;
-            _sweepCursor = 0;
-            _sweepFrame = -1;
+            _all = null;
+            _rosterComplete = false;
+            ForceNextTick();
         }
 
         public override void Reset()
@@ -166,6 +161,7 @@ namespace CardShopCoop.Sync
             _hasBaseline = false;
             _sweepTimer = 0f;
             _sweepCursor = 0;
+            _sweepFrame = -1;
             _idsThisTick.Clear();
             _scanning = false;
         }
@@ -217,7 +213,7 @@ namespace CardShopCoop.Sync
                         _scanning = false; // retry the complete roster on the next cadence
                         return;
                     }
-                    if (_hasBaseline && _scanHash == _lastHash)
+                    if (_hasBaseline && _rosterComplete && _scanHash == _lastHash)
                     {
                         _scanning = false;
                         return;
@@ -389,7 +385,7 @@ namespace CardShopCoop.Sync
         {
             if (CoopCore.Role != CoopRole.Host || SendToClient == null)
                 return;
-            if (_all == null)
+            if (_all == null || _scanning || _building || !_rosterComplete)
             {
                 _pendingFullConnections.Add(connId);
                 ForceNextTick();

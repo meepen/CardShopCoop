@@ -56,6 +56,8 @@ namespace CardShopCoop.Sync
         private readonly bool[] _hasBracket = new bool[8];
         private int _clientBracketEpoch;
         private readonly List<PairingEntry> _clientBracket = new List<PairingEntry>();
+        private int _clientRenderHash;
+        private bool _hasClientRenderHash;
         public TournamentSync()
         {
             Instance = this;
@@ -105,6 +107,8 @@ namespace CardShopCoop.Sync
             }
             _clientBracketEpoch = 0;
             _clientBracket.Clear();
+            _clientRenderHash = 0;
+            _hasClientRenderHash = false;
             _cm = null;
         }
 
@@ -463,7 +467,8 @@ namespace CardShopCoop.Sync
                     + message.BracketEpoch + " (current " + _clientBracketEpoch + ")");
                 return;
             } // a delayed slice from the previous bracket must not roll state back
-            if (message.Full && message.BracketEpoch != _clientBracketEpoch)
+            bool fullEpochChanged = message.Full && message.BracketEpoch != _clientBracketEpoch;
+            if (fullEpochChanged)
             {
                 _clientBracket.Clear();
                 _clientBracketEpoch = message.BracketEpoch;
@@ -559,7 +564,8 @@ namespace CardShopCoop.Sync
                 digest.Add(e);
             }
 
-            RefreshBoards(td, digest, wasDay != td.m_IsTournamentDay || wasOver != td.m_IsTournamentDayOver);
+            RefreshBoards(td, digest, fullEpochChanged
+                || wasDay != td.m_IsTournamentDay || wasOver != td.m_IsTournamentDayOver);
         }
 
         private void ApplySlice(TournamentStateMessage message, TournamentData td)
@@ -569,11 +575,17 @@ namespace CardShopCoop.Sync
             {
                 if (message.Index == 0)
                 {
+                    bool epochChanged = message.BracketEpoch > _clientBracketEpoch;
+                    if (epochChanged)
+                    {
+                        _clientBracket.Clear();
+                        _clientBracketEpoch = message.BracketEpoch;
+                    }
                     bool wasDay = td.m_IsTournamentDay;
                     bool wasOver = td.m_IsTournamentDayOver;
                     ApplyHeader(message, td);
                     RefreshBoards(td, _clientBracket,
-                        wasDay != td.m_IsTournamentDay || wasOver != td.m_IsTournamentDayOver);
+                        epochChanged || wasDay != td.m_IsTournamentDay || wasOver != td.m_IsTournamentDayOver);
                     return;
                 }
                 int slotIndex = message.Index - 1;
@@ -592,7 +604,8 @@ namespace CardShopCoop.Sync
                     }
                 return;
             }
-            if (_clientBracketEpoch != message.BracketEpoch)
+            bool bracketEpochChanged = _clientBracketEpoch != message.BracketEpoch;
+            if (bracketEpochChanged)
             {
                 _clientBracket.Clear();
                 _clientBracketEpoch = message.BracketEpoch;
@@ -614,7 +627,7 @@ namespace CardShopCoop.Sync
                 else
                     _clientBracket.Add(e);
             }
-            RefreshBoards(td, _clientBracket, false);
+            RefreshBoards(td, _clientBracket, bracketEpochChanged);
         }
 
         private static void ApplyHeader(TournamentStateMessage message, TournamentData td)
@@ -662,16 +675,17 @@ namespace CardShopCoop.Sync
         private void RefreshBoards(TournamentData td, List<PairingEntry> digest, bool visibilityChanged)
         {
             var cm = Cm();
-            if (cm == null || cm.m_TournamentPairingScreen == null)
-                return;
-            var screen = cm.m_TournamentPairingScreen;
             bool showBoard = td.m_IsTournamentDay || td.m_IsTournamentDayOver;
 
-            if (visibilityChanged)
+            // Visibility is independent of the pairing screen reference. The screen can be
+            // created after a header arrives, so do not consume a day transition before the
+            // board root and shelf meshes have had a chance to be activated.
+            if (cm != null)
             {
                 try
                 {
-                    screen.gameObject.SetActive(showBoard);
+                    if (cm.m_TournamentPairingScreen != null)
+                        cm.m_TournamentPairingScreen.gameObject.SetActive(showBoard);
                     var shelves = ShelfManager.GetTournamentPrizeShelfList();
                     for (int i = 0; i < shelves.Count; i++)
                     {
@@ -684,6 +698,16 @@ namespace CardShopCoop.Sync
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("TournamentSync board vis: " + e.Message); }
             }
+            if (cm == null || cm.m_TournamentPairingScreen == null)
+                return;
+            var screen = cm.m_TournamentPairingScreen;
+            if (showBoard && !screen.gameObject.activeSelf)
+                screen.gameObject.SetActive(true);
+            int renderHash = RenderHash(digest);
+            if (!visibilityChanged && _hasClientRenderHash && renderHash == _clientRenderHash)
+                return;
+            _clientRenderHash = renderHash;
+            _hasClientRenderHash = true;
             if (!showBoard)
             {
                 screen.ShowPairingScreen(isShow: false, 0);
@@ -713,6 +737,28 @@ namespace CardShopCoop.Sync
                     m_TournamentOOMW = e.OOMW,
                 };
                 screen.m_TournamentPairingUIGrpList[e.SortedIndex / 2].UpdateCustomerData(ctd);
+            }
+        }
+
+        private static int RenderHash(List<PairingEntry> digest)
+        {
+            unchecked
+            {
+                int hash = 17;
+                for (int i = 0; i < digest.Count; i++)
+                {
+                    var e = digest[i];
+                    hash = hash * 31 + e.SortedIndex;
+                    hash = hash * 31 + e.ModelIndex;
+                    hash = hash * 31 + (e.IsFemale ? 1 : 0);
+                    hash = hash * 31 + (e.IsWin ? 1 : 0);
+                    hash = hash * 31 + (e.HasResult ? 1 : 0);
+                    hash = hash * 31 + e.WinCount;
+                    hash = hash * 31 + e.WinPoints;
+                    hash = hash * 31 + e.OMW;
+                    hash = hash * 31 + e.OOMW;
+                }
+                return hash;
             }
         }
 

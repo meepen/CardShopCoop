@@ -78,9 +78,6 @@ namespace CardShopCoop.Sync
         private float _sweepTimer;
         private int _sweepCursor;
         private bool _sweepRequested;
-        private bool _sweepPassActive;
-        private int _sweepPassStart;
-        private bool _sweepChangesWereAsserted;
         private bool _scanImmediate;
         private bool _scanSweep;
 
@@ -114,8 +111,9 @@ namespace CardShopCoop.Sync
 
         public override void ForceResend()
         {
+            // Reassert the next slice immediately; ordinary timer-driven slices continue
+            // afterward. This is an event-driven nudge, not a request to broadcast the full state.
             _sweepRequested = true;
-            _sweepPassActive = true;
             _sweepTimer = SweepSliceSeconds;
         }
 
@@ -168,9 +166,6 @@ namespace CardShopCoop.Sync
             _sweepTimer = 0f;
             _sweepCursor = 0;
             _sweepRequested = false;
-            _sweepPassActive = false;
-            _sweepPassStart = 0;
-            _sweepChangesWereAsserted = false;
             _cursor.Reset();
         }
 
@@ -200,7 +195,6 @@ namespace CardShopCoop.Sync
                 {
                     _sweepTimer = 0f;
                     _sweepSlice.Clear();
-                    _sweepChangesWereAsserted = false;
                     int total = _sweepKeys.Count;
                     int slicesPerCycle = Mathf.Max(1, Mathf.RoundToInt(SweepCycleSeconds / SweepSliceSeconds));
                     // OnLocalChanges batches are capped at 64 entries below; keep a sweep
@@ -212,7 +206,6 @@ namespace CardShopCoop.Sync
                     {
                         if (_sweepCursor >= total)
                             _sweepCursor = 0;
-                        _sweepPassStart = _sweepCursor;
                         for (int n = 0; n < perSlice; n++)
                         {
                             _sweepSlice.Add(_sweepKeys[_sweepCursor]);
@@ -221,7 +214,6 @@ namespace CardShopCoop.Sync
                     }
                     else
                     {
-                        _sweepPassActive = false;
                     }
                 }
                 var sm = Sm();
@@ -245,6 +237,7 @@ namespace CardShopCoop.Sync
             {
                 CoopPlugin.Log.LogWarning("ObjMoveSync snapshot: " + e.Message);
                 _scanning = false;
+                _sweepSlice.Clear();
                 return;
             }
             if (_cursor.Done)
@@ -255,8 +248,7 @@ namespace CardShopCoop.Sync
                     _sweepKeys.Add(key);
                 if (_scanChanges != null && _scanChanges.Count > 0)
                     OnLocalChanges?.Invoke(_scanChanges);
-                if (_scanSweep && _sweepPassActive && _sweepChangesWereAsserted)
-                    _sweepPassActive = _sweepCursor != _sweepPassStart;
+                _sweepSlice.Clear();
             }
         }
 
@@ -311,13 +303,13 @@ namespace CardShopCoop.Sync
                     _scanChanges = new List<Entry>();
                 // Reserve room for the unconditional sweep slice. Do not advance the sent
                 // baseline until this entry is actually queued; otherwise a move is lost.
-                if (!forceHeal && _scanChanges.Count >= 64 - _sweepSlice.Count)
+                if (!_scanSweep && _scanChanges.Count >= 64)
+                    return;
+                if (_scanSweep && !forceHeal && _scanChanges.Count >= 64 - _sweepSlice.Count)
                     return;
                 _sent[key] = new Pose { P = p, R = r, Valid = true };
                 _candidate.Remove(key);
                 _scanChanges.Add(new Entry { Key = key, Type = TypeIdOf(obj, kind), Pos = p, Rot = r });
-                if (forceHeal)
-                    _sweepChangesWereAsserted = true;
             }
             else
             {

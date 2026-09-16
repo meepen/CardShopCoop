@@ -282,6 +282,8 @@ namespace CardShopCoop.Sync
                 return;
             BroadcastState(BuildState(false, 0, 0.0));
             _resumePulse = false;
+            if (string.IsNullOrEmpty(_lastSource) && !_barrier)
+                _hasHostState = false;
         }
 
         private bool HasPeers()
@@ -291,6 +293,8 @@ namespace CardShopCoop.Sync
 
         private TvStateMessage BuildState(bool full, int index, double position)
         {
+            // SweepSliceCount is currently one, so this slice intentionally carries the complete
+            // flat state. If slices are added, populate only the selected slice's fields here.
             return new TvStateMessage
             {
                 Full = full,
