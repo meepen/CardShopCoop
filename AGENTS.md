@@ -34,10 +34,13 @@ The mod must work on **both** live game builds from one DLL:
 
 - **The public/default branch** is the legacy build (Unity 2021.3.38f1, Steam buildid `25315983`).
   It has **no** `StoredBoxRecord`/`PackageBoxCandidate`/animation-instancing, and warehouse storage
-  is live `InteractablePackagingBox_Item` objects (the "live backend"). Baseline:
-  `decompiled/1.0-25315983`.
+  is live `InteractablePackagingBox_Item` objects (the "live backend").
 - **The `1.00` / `1.0newrender` beta** is Unity 6000.0.66f2 and stores warehouse boxes as
-  `StoredBoxRecord`s (the "record backend"). Baseline: `decompiled/1.00`.
+  `StoredBoxRecord`s (the "record backend").
+
+`decompiled/` is git-ignored, so which baseline directories exist locally — and which one is the
+public/default branch — differs machine to machine and is recorded in the machine-local notes
+rather than here. Name the baseline you verified against when reporting.
 
 Anything present in only one of them must be reached by reflection (`WarehouseBoxSync.Probe` is the
 house pattern), never a direct reference, or the DLL will fail to load or run on the other build.
@@ -173,19 +176,17 @@ dotnet tools\Decomp\bin\Release\net9.0\Decomp.dll `
   "<repo-root>\decompiled\<gameversion>\Assembly-CSharp"
 ```
 
-Existing baselines: `decompiled\0.70.3` (pre-1.0) and `decompiled\1.00` (the 1.0 release;
-the game's `Application.version`/`PlayerSettings.bundleVersion` is exactly `1.00`). To see
-what a game update changed, diff two version directories directly
-(`git diff --no-index decompiled\0.70.3\Assembly-CSharp decompiled\1.00\Assembly-CSharp`).
+Baselines are git-ignored, so the set that exists locally differs machine to machine. Which
+directories are present, which game build each came from, and which one is the public/default
+branch are recorded in the machine-local notes, not here.
 
-Also kept for diffing: `decompiled\1.0`, `decompiled\1.0-25119539`, `decompiled\1.0-25314665`
-and `decompiled\1.0-25315983`. **The public/default branch is `decompiled\1.0-25315983`** (Steam
-buildid `25315983`); the other `1.0-*` directories are intermediate builds of the same branch.
-This matters: the `1.0-*` siblings are *not* interchangeable. The file set is near-identical
-(638 of 639 files), but a handful of files differ in content between sibling buildids and from
-`1.00` — e.g. `CustomerTradeCardScreen.cs` and `InteractableAutoPackOpener.cs` differ between
-`1.0-25119539` and `1.0-25315983`, and `EndOfDayReportScreen.cs` differs across all three.
-Verify against the baseline you actually mean, and say which one you used.
+Two things are project-wide regardless. Decompiled output is versioned by the game build it
+came from, so a new game update never overwrites the baseline used for diffs; to see what an
+update changed, diff two version directories directly
+(`git diff --no-index decompiled\<a>\Assembly-CSharp decompiled\<b>\Assembly-CSharp`). And
+sibling builds of the same branch are **not** interchangeable — their file sets are
+near-identical but a handful of files differ in content between buildids, so verify against
+the baseline you actually mean and say which one you used.
 
 The game version is `Application.version` (Unity `PlayerSettings.bundleVersion`). It can be
 read offline from `Card Shop Simulator_Data\globalgamemanagers` with a Unity serialized-file
