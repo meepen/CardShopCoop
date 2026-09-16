@@ -118,6 +118,12 @@ Deployment is opt-in: `Deploy` defaults to `false` in `Directory.Build.props`. A
 plugins directory; omit it in CI or while the game is running. The repository has no
 solution file.
 
+Deploy target is always a single directory: `$(GamePath)/BepInEx/plugins/CardShopCoop`. Do
+**not** deploy to the sandbox install under `C:\Sandbox\...` — it mirrors the host install on
+its own, so writing to it fights the mirroring and is never wanted. Deploy to the host game
+directory only, and leave `C:\Sandbox` alone (it carries `DONT-USE.TXT` markers for that
+reason).
+
 Before submitting changes, check formatting from the repository root:
 
 ```powershell

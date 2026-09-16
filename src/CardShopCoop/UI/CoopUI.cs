@@ -418,6 +418,11 @@ namespace CardShopCoop.UI
                 core.SetNsfwAllowed(allowNsfw);
             GUILayout.Space(8f);
 
+            GUILayout.Label("JOINING", CoopTheme.SectionHeader);
+            DrawConfigToggle(CoopPlugin.AllowCrossBuildJoin,
+                "Let a joiner on a DIFFERENT game build in (host only - risky)");
+            GUILayout.Space(8f);
+
             GUILayout.Label("LOGGING", CoopTheme.SectionHeader);
             DrawConfigToggle(CoopPlugin.BoxSyncDebug, "Verbose box-sync logging (BoxSyncDebug)");
             DrawConfigToggle(CoopPlugin.PerfDebug, "Per-frame stage timing (PerfDebug)");
