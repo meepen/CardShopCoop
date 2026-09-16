@@ -8,8 +8,8 @@ namespace CardShopCoop.Net
 {
     /// <summary>Converters for the few legacy Sync DTOs whose integer type field belongs to
     /// different enum id spaces depending on the entry key/kind. Ordinary DTO enum fields use
-    /// EnumWireConverter; these converters retain the old TryFromWire behavior for unresolved
-    /// content-pack entries.</summary>
+    /// EnumWireConverter; these converters use the same name-based enum wire for their legacy
+    /// integer fields and retain unresolved flags for content-pack entries.</summary>
     internal static class SyncJson
     {
         public static JObject Start(JsonReader reader)
@@ -36,6 +36,10 @@ namespace CardShopCoop.Net
         {
             return JToken.FromObject(value, s);
         }
+        public static string EnumName(Util.EnumKind kind, int value)
+        {
+            return Util.EnumMap.ToWireName(kind, value);
+        }
     }
 
     internal sealed class WorldEntryConverter : JsonConverter
@@ -51,14 +55,14 @@ namespace CardShopCoop.Net
             w.WritePropertyName("Key");
             w.WriteValue(e.Key);
             w.WritePropertyName("Type");
-            w.WriteValue(Util.EnumMap.ToWire(Util.EnumKind.ItemType, e.Type));
+            w.WriteValue(SyncJson.EnumName(Util.EnumKind.ItemType, e.Type));
             w.WritePropertyName("Count");
             w.WriteValue(e.Count);
             w.WritePropertyName("BaseCount");
             w.WriteValue(e.BaseCount);
             w.WritePropertyName("TransferType");
             // -1 is "no transfer": keep the sentinel out of the enum id space so it survives.
-            w.WriteValue(e.TransferType < 0 ? -1 : Util.EnumMap.ToWire(Util.EnumKind.ItemType, e.TransferType));
+            w.WriteValue(e.TransferType < 0 ? -1 : SyncJson.EnumName(Util.EnumKind.ItemType, e.TransferType));
             w.WritePropertyName("TransferSeq");
             w.WriteValue(e.TransferSeq);
             w.WriteEndObject();
@@ -66,16 +70,16 @@ namespace CardShopCoop.Net
         public override object ReadJson(JsonReader r, Type t, object old, JsonSerializer s)
         {
             var o = SyncJson.Start(r);
-            int wireTransfer = SyncJson.Int(o, "TransferType");
+            JToken transfer = o["TransferType"];
             return new WorldSync.Entry
             {
                 Key = SyncJson.Int(o, "Key"),
-                Type = Util.EnumMap.FromWire(Util.EnumKind.ItemType, SyncJson.Int(o, "Type")),
+                Type = Util.EnumMap.ReadWireName(Util.EnumKind.ItemType, o["Type"]),
                 Count = SyncJson.Int(o, "Count"),
                 BaseCount = SyncJson.Int(o, "BaseCount"),
-                TransferType = wireTransfer < 0
+                TransferType = transfer != null && transfer.Type == JTokenType.Integer && transfer.Value<int>() < 0
                     ? -1
-                    : Util.EnumMap.FromWire(Util.EnumKind.ItemType, wireTransfer),
+                    : Util.EnumMap.ReadWireName(Util.EnumKind.ItemType, transfer),
                 TransferSeq = Convert.ToUInt32(o["TransferSeq"], System.Globalization.CultureInfo.InvariantCulture),
             };
         }
@@ -107,7 +111,7 @@ namespace CardShopCoop.Net
             w.WriteStartArray();
             if (m.HoldTypes != null)
                 foreach (var id in m.HoldTypes)
-                    w.WriteValue(Util.EnumMap.ToWire(Util.EnumKind.ItemType, id));
+                    w.WriteValue(SyncJson.EnumName(Util.EnumKind.ItemType, id));
             w.WriteEndArray();
             w.WritePropertyName("HoldCards");
             s.Serialize(w, m.HoldCards);
@@ -122,7 +126,11 @@ namespace CardShopCoop.Net
             {
                 m.HoldTypes = new System.Collections.Generic.List<int>();
                 foreach (var id in a)
-                    m.HoldTypes.Add(Util.EnumMap.FromWire(Util.EnumKind.ItemType, id.Value<int>()));
+                {
+                    int local;
+                    Util.EnumMap.TryReadWireName(Util.EnumKind.ItemType, id, out local);
+                    m.HoldTypes.Add(local);
+                }
             }
             m.HoldCards = o["HoldCards"] == null || o["HoldCards"].Type == JTokenType.Null ? null : o["HoldCards"].ToObject<System.Collections.Generic.List<CardData>>(s);
             return m;
@@ -144,7 +152,7 @@ namespace CardShopCoop.Net
             w.WritePropertyName("Key");
             w.WriteValue(e.Key);
             w.WritePropertyName("Type");
-            w.WriteValue(Util.EnumMap.ToWire(ek, e.Type));
+            w.WriteValue(SyncJson.EnumName(ek, e.Type));
             w.WritePropertyName("Pos");
             s.Serialize(w, e.Pos);
             w.WritePropertyName("Rot");
@@ -156,7 +164,7 @@ namespace CardShopCoop.Net
             var o = SyncJson.Start(r);
             int key = SyncJson.Int(o, "Key"), local;
             var ek = (key >> 24) == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
-            bool ok = Util.EnumMap.TryFromWire(ek, SyncJson.Int(o, "Type"), out local);
+            bool ok = Util.EnumMap.TryReadWireName(ek, o["Type"], out local);
             return new ObjMoveSync.Entry { Key = key, Type = local, Unresolved = !ok, Pos = SyncJson.Vector(o, "Pos", s), Rot = SyncJson.ReadQuaternion(o, "Rot", s) };
         }
     }
@@ -206,7 +214,7 @@ namespace CardShopCoop.Net
                     w.WritePropertyName("Id");
                     w.WriteValue(e.Id);
                     w.WritePropertyName("ObjType");
-                    w.WriteValue(Util.EnumMap.ToWire(ek, e.ObjType));
+                    w.WriteValue(SyncJson.EnumName(ek, e.ObjType));
                     w.WritePropertyName("Pos");
                     s.Serialize(w, e.Pos);
                     w.WritePropertyName("Rot");
@@ -262,7 +270,7 @@ namespace CardShopCoop.Net
                     continue;
                 var ek = kind == 5 ? Util.EnumKind.DecoObject : Util.EnumKind.ObjectType;
                 int local;
-                bool ok = Util.EnumMap.TryFromWire(ek, SyncJson.Int(x, "ObjType"), out local);
+                bool ok = Util.EnumMap.TryReadWireName(ek, x["ObjType"], out local);
                 list.Add(new PopulationSync.Entry { Id = (ushort)SyncJson.Int(x, "Id"), ObjType = local, Unresolved = !ok, Pos = SyncJson.Vector(x, "Pos", s), Rot = SyncJson.ReadQuaternion(x, "Rot", s), IsBoxed = SyncJson.Bool(x, "IsBoxed"), BoxedPos = SyncJson.Vector(x, "BoxedPos", s), BoxedRot = SyncJson.ReadQuaternion(x, "BoxedRot", s) });
             }
             return list;

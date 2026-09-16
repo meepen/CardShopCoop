@@ -67,13 +67,17 @@ namespace CardShopCoop.Net
         }
         public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
         {
-            writer.WriteValue(Util.EnumMap.ToWire(_kind, Convert.ToInt32(value, CultureInfo.InvariantCulture)));
+            writer.WriteValue(Util.EnumMap.ToWireName(_kind, Convert.ToInt32(value, CultureInfo.InvariantCulture)));
         }
         public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
         {
             if (reader.TokenType == JsonToken.Null)
                 throw new JsonSerializationException("Null enum " + objectType);
-            return (T)Enum.ToObject(typeof(T), Util.EnumMap.FromWire(_kind, Convert.ToInt32(reader.Value, CultureInfo.InvariantCulture)));
+            if (reader.TokenType != JsonToken.String)
+                throw new JsonSerializationException("Numeric/non-string " + objectType.Name + " value " + Convert.ToString(reader.Value, CultureInfo.InvariantCulture) + " received: peer is sending pre-name wire");
+            int local;
+            Util.EnumMap.TryFromWireName(typeof(T), _kind, (string)reader.Value, out local);
+            return (T)Enum.ToObject(typeof(T), local);
         }
     }
 

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace CardShopCoop.Util
 {
@@ -89,6 +91,32 @@ namespace CardShopCoop.Util
         /// re-sends every displayed card every ~30s, so without this memo a one-sided content
         /// pack would print the same line thousands of times in an evening.</summary>
         private static readonly HashSet<long> _loggedMisses = new HashSet<long>();
+        private static readonly HashSet<string> _loggedNameMisses = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly Dictionary<Type, NameTable> _nameTables = new Dictionary<Type, NameTable>();
+        private static readonly object _nameTableLock = new object();
+        private static int _nameWrites;
+        private static bool _nameSummaryLogged;
+
+        private sealed class NameTable
+        {
+            public readonly Dictionary<int, string> ValueToName;
+            public readonly Dictionary<string, int> NameToValue;
+            public NameTable(Type type)
+            {
+                ValueToName = new Dictionary<int, string>();
+                NameToValue = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var value in Enum.GetValues(type))
+                {
+                    int id = Convert.ToInt32(value);
+                    string name = Enum.GetName(type, value);
+                    if (name != null)
+                    {
+                        ValueToName[id] = name;
+                        NameToValue[name] = id;
+                    }
+                }
+            }
+        }
 
         /// <summary>The last "id translation ready" summary actually logged at Info, so an
         /// identical one is demoted to Debug instead of repeating.
@@ -117,7 +145,7 @@ namespace CardShopCoop.Util
         /// NOTE for anyone extending this: every one of these sentinels IS a defined enum
         /// member, so an Enum.IsDefined-style guard does NOT reject it on its own. Any skip
         /// path that has to refuse an unmappable id must test for None explicitly.</summary>
-        private static int Sentinel(EnumKind kind)
+        public static int Sentinel(EnumKind kind)
         {
             switch (kind)
             {
@@ -146,6 +174,7 @@ namespace CardShopCoop.Util
         /// existing skip paths refuse.</summary>
         public static int ToWire(EnumKind kind, int localId)
         {
+            // The co-op wire now uses enum member names; this legacy id API remains for registry machinery.
             return Translate(_outTables, kind, localId, "local->host");
         }
 
@@ -155,7 +184,98 @@ namespace CardShopCoop.Util
         /// "this PC does not have that content".</summary>
         public static int FromWire(EnumKind kind, int wireId)
         {
+            // The co-op wire now uses enum member names; this legacy id API remains for registry machinery.
             return Translate(_inTables, kind, wireId, "host->local");
+        }
+
+        internal static Type WireType(EnumKind kind)
+        {
+            switch (kind)
+            {
+                case EnumKind.ItemType:
+                    return typeof(EItemType);
+                case EnumKind.ObjectType:
+                    return typeof(EObjectType);
+                case EnumKind.DecoObject:
+                    return typeof(EDecoObject);
+                case EnumKind.CardExpansion:
+                    return typeof(ECardExpansionType);
+                case EnumKind.MonsterType:
+                    return typeof(EMonsterType);
+                default:
+                    throw new ArgumentOutOfRangeException("kind", kind, "Unknown enum kind");
+            }
+        }
+
+        internal static string ToWireName(EnumKind kind, int value)
+        {
+            return ToWireName(WireType(kind), kind, value);
+        }
+
+        internal static string ToWireName(Type type, EnumKind kind, int value)
+        {
+            NameTable table = Names(type);
+            string name;
+            if (!table.ValueToName.TryGetValue(value, out name))
+                throw new JsonSerializationException("Undefined " + type.Name + " value " + value + " cannot be sent on the wire");
+            lock (_nameTableLock)
+            {
+                _nameWrites++;
+                if (!_nameSummaryLogged)
+                {
+                    _nameSummaryLogged = true;
+                    Log("name wire active (values sent by name: " + _nameWrites + ")");
+                }
+            }
+            return name;
+        }
+
+        internal static bool TryFromWireName(EnumKind kind, string name, out int value)
+        {
+            return TryFromWireName(WireType(kind), kind, name, out value);
+        }
+
+        internal static bool TryFromWireName(Type type, EnumKind kind, string name, out int value)
+        {
+            if (name == null)
+                throw new JsonSerializationException("Null " + type.Name + " enum name");
+            NameTable table = Names(type);
+            if (table.NameToValue.TryGetValue(name, out value))
+                return true;
+            value = Sentinel(kind);
+            LogNameMissOnce(kind, name);
+            return false;
+        }
+
+        internal static int ReadWireName(EnumKind kind, JToken token)
+        {
+            int value;
+            TryReadWireName(kind, token, out value);
+            return value;
+        }
+
+        internal static bool TryReadWireName(EnumKind kind, JToken token, out int value)
+        {
+            Type type = WireType(kind);
+            if (token == null || token.Type == JTokenType.Null)
+                throw new JsonSerializationException("Null " + type.Name + " enum");
+            if (token.Type != JTokenType.String)
+                throw new JsonSerializationException("Numeric/non-string " + type.Name + " value " + token.ToString(Formatting.None) + " received: peer is sending pre-name wire");
+            return TryFromWireName(type, kind, token.Value<string>(), out value);
+        }
+
+        private static NameTable Names(Type type)
+        {
+            lock (_nameTableLock)
+            {
+                NameTable table;
+                if (!_nameTables.TryGetValue(type, out table))
+                {
+                    table = new NameTable(type);
+                    _nameTables.Add(type, table);
+                }
+                return table;
+            }
         }
 
         /// <summary>Like <see cref="FromWire"/>, but says whether the id actually RESOLVED.
@@ -192,6 +312,10 @@ namespace CardShopCoop.Util
             lock (_loggedMisses)
             {
                 _loggedMisses.Clear();
+            }
+            lock (_loggedNameMisses)
+            {
+                _loggedNameMisses.Clear();
             }
         }
 
@@ -373,6 +497,18 @@ namespace CardShopCoop.Util
             if (first)
                 Log("no local counterpart for " + kind + " id " + id + " (" + dir +
                     ") - one-sided content pack; sent as None, further ones for this id are silent");
+        }
+
+        private static void LogNameMissOnce(EnumKind kind, string name)
+        {
+            string key = ((int)kind) + ":" + name;
+            bool first;
+            lock (_loggedNameMisses)
+            {
+                first = _loggedNameMisses.Add(key);
+            }
+            if (first)
+                Log("no local counterpart for " + kind + " name " + name + " - one-sided content pack; sent as None, further ones for this name are silent");
         }
 
         /// <summary>"EnumType:Name=id" lines -&gt; one name-&gt;id dictionary per kind. Only the

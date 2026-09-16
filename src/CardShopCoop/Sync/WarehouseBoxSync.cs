@@ -94,6 +94,14 @@ namespace CardShopCoop.Sync
         private static FieldInfo _fiAmount;
         private static FieldInfo _fiBig;
         private static Type _tEnumType;
+        // The record build normally reaches this through the box's Update() lerp. A parked
+        // (inactive) host box never gets that Update, so finish the game's own path explicitly.
+        // This is present on both supported builds, but remains a reflected surface so the call
+        // is not coupled to the protected game method's accessibility.
+        private static readonly MethodInfo _miOnFinishLerp =
+            CardShopCoop.Util.ReflectionSurface.RequiredMethod(typeof(InteractableObject), "OnFinishLerp");
+        private static readonly FieldInfo _fiMarkForDataOnlyDestroy =
+            AccessTools.Field(typeof(InteractablePackagingBox_Item), "m_MarkForDataOnlyDestroy");
         // The take path needs two more 1.00-only symbols - PackageBoxCandidate and
         // RestockManager.MaterializeStoredCandidate - so they are resolved by name like the
         // record API above and required by _records. Nothing may name them directly.
@@ -703,12 +711,24 @@ namespace CardShopCoop.Sync
             catch (Exception e) { Swallow.Log(e); return; }
             try
             {
+                int storedBefore = StoredCount(comp);
+                BoxVisuals.SetVisible(box, true);
+                BoxVisuals.EnsureOpenState(box, false);
+                bool activeBefore = box.gameObject != null && box.gameObject.activeSelf;
                 // Vanilla does the store: sets m_IsStored, assigns the compartment, and schedules
                 // the data-only destroy whose OnDestroyed banks the record and retires the live
                 // box (ForgetHostBox -> authoritative Removed). We never hand-add a record.
                 box.DispenseItem(false, comp);
                 if (box.m_IsStored)
                 {
+                    // On the record backend this is normally called by the box's Update after its
+                    // lerp. The host may have parked the box while the guest was holding it, in
+                    // which case Unity never runs that Update. Invoke the virtual method on the
+                    // concrete box so the game's override creates the record and retires the box.
+                    if (UsesRecords && _miOnFinishLerp != null)
+                    {
+                        _miOnFinishLerp.Invoke(box, null);
+                    }
                     // Restore the HOST's own view. While the guest held this box the host applied
                     // that Held claim and hid it (SetVisible(false) deactivates the root), and a
                     // forwarded store never runs vanilla on the guest - so the Free+Stored edge that
@@ -723,6 +743,25 @@ namespace CardShopCoop.Sync
                     catch (Exception e) { Swallow.Log(e); }
                     if (!box.gameObject.activeSelf)
                         CoopPlugin.Log.LogWarning($"WarehouseBoxSync: stored box id {m.BoxId} is still inactive on the host");
+                    int storedAfter = StoredCount(comp);
+                    if (storedAfter <= storedBefore)
+                    {
+                        CoopPlugin.Log.LogError(
+                            $"WarehouseBoxSync: stored box was not banked id={m.BoxId} "
+                            + $"address=({m.ShelfId}/{m.ShelfIndex}/{m.CompartmentIndex}) "
+                            + $"countBefore={storedBefore} countAfter={storedAfter}");
+                    }
+                    if (BoxShared.ShouldDebugLog(m.BoxId, 0.5f))
+                    {
+                        string mark = _fiMarkForDataOnlyDestroy == null
+                            ? "unreadable"
+                            : Convert.ToString(_fiMarkForDataOnlyDestroy.GetValue(box));
+                        bool activeAfter = box.gameObject != null && box.gameObject.activeSelf;
+                        BoxShared.DebugLog("box-store",
+                            $"id={m.BoxId} address=({m.ShelfId}/{m.ShelfIndex}/{m.CompartmentIndex}) "
+                            + $"activeSelf={activeBefore}->{activeAfter} stored={box.m_IsStored} "
+                            + $"markForDataOnlyDestroy={mark} count={storedBefore}->{storedAfter}");
+                    }
                     // On the live backend the box stays alive, so the guest that sent this store is
                     // still recorded as the lease owner and would keep holding it forever. Drop the
                     // lease so the next snapshot is Free+Stored and the guest yields (see
