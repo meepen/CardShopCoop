@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using HarmonyLib;
+using TMPro;
 using UnityEngine;
 
 namespace CardShopCoop.Sync
@@ -132,6 +133,8 @@ namespace CardShopCoop.Sync
             AccessTools.Field(typeof(BulkDonationBoxPlusMinusScreen), "m_BulkDonationBoxUIScreen");
         private static readonly FieldInfo FiModalCardData =
             AccessTools.Field(typeof(BulkDonationBoxPlusMinusScreen), "m_CardData");
+        private static readonly FieldInfo FiModalInput =
+            AccessTools.Field(typeof(BulkDonationBoxPlusMinusScreen), "m_CardAmountInput");
         private static readonly FieldInfo FiModalStackCount =
             AccessTools.Field(typeof(BulkDonationBoxPlusMinusScreen), "m_StackCardCount");
         private static readonly FieldInfo FiModalBoxTotal =
@@ -162,6 +165,8 @@ namespace CardShopCoop.Sync
         // Records carries the record itself, so omitted records are never deletions.
         private float _sweepTimer;
         private int _sweepCursor;
+        private BulkDonationBoxUIScreen _cachedContainerScreen;
+        private BulkDonationBoxPlusMinusScreen _cachedAmountModal;
         private double _lastResyncRequestAt = -999.0;
         private double _lastApplyWarningAt = -999.0;
         private const int MaxConsecutiveResyncErrors = 3;
@@ -284,6 +289,8 @@ namespace CardShopCoop.Sync
             _hostKeys.Clear();
             _sweepTimer = 0f;
             _sweepCursor = 0;
+            _cachedContainerScreen = null;
+            _cachedAmountModal = null;
             _lastResyncRequestAt = -999.0;
             _lastApplyWarningAt = -999.0;
             _consecutiveResyncErrors = 0;
@@ -1008,6 +1015,7 @@ namespace CardShopCoop.Sync
 
         public void ClientApplyState(ContainerStateMessage message)
         {
+            CacheContainerScreens();
             var records = message.Records;
             bool sawError = false;
             for (int r = 0; r < records.Count; r++)
@@ -1190,10 +1198,23 @@ namespace CardShopCoop.Sync
             finally { ApplyingRemote = false; }
         }
 
-        private static void RefreshOpenContainerUI(InteractableCardStorageShelf shelf,
+        private void CacheContainerScreens()
+        {
+            if (_cachedContainerScreen == null)
+            {
+                _cachedContainerScreen = UnityEngine.Object.FindObjectOfType<BulkDonationBoxUIScreen>();
+            }
+            if (_cachedAmountModal == null)
+            {
+                _cachedAmountModal = UnityEngine.Object.FindObjectOfType<BulkDonationBoxPlusMinusScreen>();
+            }
+        }
+
+        private void RefreshOpenContainerUI(InteractableCardStorageShelf shelf,
             InteractableBulkDonationBox donation)
         {
-            var screen = UnityEngine.Object.FindObjectOfType<BulkDonationBoxUIScreen>();
+            CacheContainerScreens();
+            var screen = _cachedContainerScreen;
             if (screen == null || MiEvaluateCardPanelUI == null)
             {
                 return;
@@ -1219,7 +1240,7 @@ namespace CardShopCoop.Sync
             page = Mathf.Clamp(page, 0, maxPage);
             FiScreenPage?.SetValue(screen, page);
             int selected = FiScreenCurrentSlot?.GetValue(screen) as int? ?? 0;
-            var modal = UnityEngine.Object.FindObjectOfType<BulkDonationBoxPlusMinusScreen>();
+            var modal = _cachedAmountModal;
             bool modalOpen = modal != null && ReferenceEquals(FiModalParent?.GetValue(modal), screen)
                 && MiModalIsOpened != null && (bool)MiModalIsOpened.Invoke(modal, null);
             if (modalOpen)
@@ -1228,8 +1249,62 @@ namespace CardShopCoop.Sync
                 int modalIndex = FindCardIndex(list, modalCard);
                 if (modalIndex < 0)
                 {
-                    FiScreenCurrentSlot?.SetValue(screen, -1);
-                    MiModalClose?.Invoke(modal, null);
+                    if (MiModalClose == null || MiModalIsOpened == null
+                        || FiModalInput == null || FiModalStackCount == null
+                        || FiScreenCurrentSlot == null)
+                    {
+                        CoopPlugin.Log.LogWarning(
+                            "ContainerSync: could not safely close stale card amount modal; leaving its slot valid");
+                        return;
+                    }
+                    var amountInput = FiModalInput.GetValue(modal) as TMP_InputField;
+                    if (amountInput == null)
+                    {
+                        CoopPlugin.Log.LogWarning(
+                            "ContainerSync: card amount modal input was unavailable; leaving its slot valid");
+                        return;
+                    }
+                    // TMP sends onEndEdit synchronously while the modal closes. Neutralize that
+                    // callback before invalidating the parent index: OnInputTextUpdated("0")
+                    // reaches OnPressRemoveAllBtn, whose zero stack count takes no list path.
+                    bool previousRemoteCards = CardShopCoop.Patches.GamePatches.ApplyingRemoteCards;
+                    try
+                    {
+                        CardShopCoop.Patches.GamePatches.ApplyingRemoteCards = true;
+                        FiModalStackCount.SetValue(modal, 0);
+                        amountInput.text = "0";
+                        if (amountInput.isFocused)
+                        {
+                            amountInput.DeactivateInputField();
+                        }
+                        int oldSelected = selected;
+                        FiScreenCurrentSlot.SetValue(screen, -1);
+                        try
+                        {
+                            MiModalClose.Invoke(modal, null);
+                            bool stillOpen = (bool)MiModalIsOpened.Invoke(modal, null);
+                            if (stillOpen)
+                            {
+                                FiScreenCurrentSlot.SetValue(screen, list.Count == 0
+                                    ? -1
+                                    : Mathf.Clamp(oldSelected, 0, list.Count - 1));
+                                CoopPlugin.Log.LogWarning(
+                                    "ContainerSync: card amount modal did not close; restored its slot");
+                            }
+                        }
+                        catch (Exception e)
+                        {
+                            FiScreenCurrentSlot.SetValue(screen, list.Count == 0
+                                ? -1
+                                : Mathf.Clamp(oldSelected, 0, list.Count - 1));
+                            CoopPlugin.Log.LogWarning(
+                                "ContainerSync: card amount modal close failed: " + e.Message);
+                        }
+                    }
+                    finally
+                    {
+                        CardShopCoop.Patches.GamePatches.ApplyingRemoteCards = previousRemoteCards;
+                    }
                 }
                 else
                 {

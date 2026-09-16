@@ -856,7 +856,7 @@ namespace CardShopCoop
                     _trades.ClientApplyState(tradeState);
                 return;
             },
-                MessagePolicy.ClientOnlyInGame, false, heal: () => _world.RequestResyncCoalesced());
+                MessagePolicy.ClientOnlyInGame, false, heal: () => _trades.ForceResend());
             _messageRouter.Register<TableStateMessage>((context, message) =>
             {
                 if (Role != CoopRole.Client || !InGameLevel())
