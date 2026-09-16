@@ -718,20 +718,37 @@ namespace CardShopCoop.Sync
                         BoxShared.DebugLog("box-store-step",
                             $"id={m.BoxId} gameFinishedStore count={storedBefore}->{StoredCount(comp)}");
                     }
-                    // Restore the HOST's own view. While the guest held this box the host applied
+                    // Restore the HOST's own view - but ONLY on the live backend, where the box
+                    // itself is the stored representation. While the guest held it the host applied
                     // that Held claim and hid it (SetVisible(false) deactivates the root), and a
-                    // forwarded store never runs vanilla on the guest - so the Free+Stored edge that
-                    // would normally re-show the object here is never sent. DispenseItem on an
-                    // inactive object leaves it inactive, which rendered an empty rack slot and
-                    // handed out an invisible box on a host take.
-                    try
+                    // forwarded store never runs vanilla on the guest, so the Free+Stored edge that
+                    // would normally re-show it is never sent; left hidden, the rack looked empty
+                    // and a later host take handed out an invisible box.
+                    //
+                    // On the RECORD backend the box is retired by the store (OnFinishLerp's
+                    // data-only destroy) and the StoredBoxRecord owns the slot's visual. Re-showing
+                    // it there left a second, physical box sitting in the rack next to the record's
+                    // own - the duplicate a guest reported when IT put a box away. So hide it
+                    // instead: the record is the representation now.
+                    if (!UsesRecords)
                     {
-                        BoxVisuals.SetVisible(box, true);
-                        BoxVisuals.EnsureOpenState(box, false);
+                        try
+                        {
+                            BoxVisuals.SetVisible(box, true);
+                            BoxVisuals.EnsureOpenState(box, false);
+                        }
+                        catch (Exception e) { Swallow.Log(e); }
+                        if (!box.gameObject.activeSelf)
+                            CoopPlugin.Log.LogWarning($"WarehouseBoxSync: stored box id {m.BoxId} is still inactive on the host");
                     }
-                    catch (Exception e) { Swallow.Log(e); }
-                    if (!box.gameObject.activeSelf)
-                        CoopPlugin.Log.LogWarning($"WarehouseBoxSync: stored box id {m.BoxId} is still inactive on the host");
+                    else
+                    {
+                        try
+                        {
+                            BoxVisuals.SetVisible(box, false);
+                        }
+                        catch (Exception e) { Swallow.Log(e); }
+                    }
                     int storedAfter = StoredCount(comp);
                     if (storedAfter != storedBefore + 1)
                     {
