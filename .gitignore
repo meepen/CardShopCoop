@@ -18,3 +18,6 @@ tools/coop-vanilla-profile.ps1
 decompiled-grading/
 tests/**/bin/
 tests/**/obj/
+# Machine-local per-repo notes (nested AGENTS.md is loaded by OpenCode on exploration,
+# but these hold this PC's paths and must never be committed).
+src/CardShopCoop/AGENTS.md

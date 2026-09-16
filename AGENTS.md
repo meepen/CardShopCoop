@@ -118,11 +118,15 @@ Deployment is opt-in: `Deploy` defaults to `false` in `Directory.Build.props`. A
 plugins directory; omit it in CI or while the game is running. The repository has no
 solution file.
 
-Deploy target is always a single directory: `$(GamePath)/BepInEx/plugins/CardShopCoop`. Do
-**not** deploy to the sandbox install under `C:\Sandbox\...` — it mirrors the host install on
-its own, so writing to it fights the mirroring and is never wanted. Deploy to the host game
-directory only, and leave `C:\Sandbox` alone (it carries `DONT-USE.TXT` markers for that
-reason).
+Deploy target is always a single directory: `$(GamePath)/BepInEx/plugins/CardShopCoop`. Deploy
+only to the game install `GamePath` resolves to. Never deploy to a second, mirrored copy of
+the same install (a sandbox or a shadow copy): such a directory syncs itself from the real
+install, so writing to it fights the mirroring and is never wanted. If you find one, leave it
+alone.
+
+Machine-specific paths (the real `GamePath`, any mirrored/sandbox copy, and how to tell them
+apart) belong in `Directory.Build.user.props` and in the machine's global OpenCode
+instructions (`~/.config/opencode/AGENTS.md`), never in this file — it is committed and shared.
 
 Before submitting changes, check formatting from the repository root:
 
