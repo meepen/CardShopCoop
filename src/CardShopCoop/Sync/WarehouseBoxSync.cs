@@ -71,6 +71,14 @@ namespace CardShopCoop.Sync
         /// warehouse change or a rejoin re-sends the state).</summary>
         private const int PendingApplyAttemptCap = 600;
 
+        /// <summary>How long between retries of <see cref="_pendingApply"/>. Each retry re-runs
+        /// the whole apply, so this is deliberately slow - see <see cref="OnClientTick"/>.</summary>
+        private const double ApplyRetrySeconds = 0.5;
+
+        /// <summary>Earliest <c>realtimeSinceStartup</c> at which the pending state may be retried
+        /// again, so the retry runs on a timer instead of every frame.</summary>
+        private double _nextApplyRetryAt;
+
         /// <summary>Throttle for the "rack refused a materialised box" warning.</summary>
         private static double _lastMaterializeWarn;
 
@@ -190,8 +198,15 @@ namespace CardShopCoop.Sync
             // applied; retry it locally until every compartment resolves. This replaces the old
             // periodic heal without putting anything on the wire - the last received state is
             // re-applied against the now-live scene.
-            if (_pendingApply != null)
+            //
+            // Retry on a slow timer, NOT every frame. Each retry re-runs the apply, and on a live
+            // guest of a record host that apply is a teardown+respawn of the rack's boxes, so a
+            // per-frame retry destroyed and recreated them 60x a second - visible in game as the
+            // boxes endlessly flying back into the shelf from a wrong position. Twice a second is
+            // still far quicker than the 15 s heal this replaced.
+            if (_pendingApply != null && Time.realtimeSinceStartupAsDouble >= _nextApplyRetryAt)
             {
+                _nextApplyRetryAt = Time.realtimeSinceStartupAsDouble + ApplyRetrySeconds;
                 ApplyingRemote = true;
                 try
                 {
@@ -728,6 +743,28 @@ namespace CardShopCoop.Sync
                     if (UsesRecords && _miOnFinishLerp != null)
                     {
                         _miOnFinishLerp.Invoke(box, null);
+                        // ...but OnFinishLerp is NOT idempotent, and the lerp that normally drives
+                        // it is still live: Update calls it again once m_LerpPosTimer reaches 1,
+                        // and it is still >= 0 here. The box is made visible just below, so that
+                        // Update does run - and a second call adds a SECOND StoredBoxRecord for one
+                        // store (seen in game as count 0 -> 2: one box bought, two on the rack, and
+                        // the rack's own box-type gate then refuses the duplicate).
+                        //
+                        // Make the sequence idempotent both ways: stop the lerp so Update cannot
+                        // re-enter OnFinishLerp at all, and clear the data-only-destroy marker so
+                        // that even an unexpected second call takes the harmless
+                        // "else if (m_IsStored)" branch (which only re-arranges) instead of
+                        // banking another record.
+                        try
+                        {
+                            box.StopLerpToTransform();
+                        }
+                        catch (Exception e) { Swallow.Log(e); }
+                        try
+                        {
+                            _fiMarkForDataOnlyDestroy?.SetValue(box, false);
+                        }
+                        catch (Exception e) { Swallow.Log(e); }
                     }
                     // Restore the HOST's own view. While the guest held this box the host applied
                     // that Held claim and hid it (SetVisible(false) deactivates the root), and a
@@ -744,11 +781,16 @@ namespace CardShopCoop.Sync
                     if (!box.gameObject.activeSelf)
                         CoopPlugin.Log.LogWarning($"WarehouseBoxSync: stored box id {m.BoxId} is still inactive on the host");
                     int storedAfter = StoredCount(comp);
-                    if (storedAfter <= storedBefore)
+                    if (storedAfter != storedBefore + 1)
                     {
+                        // Exactly one record, every time. Fewer means the game's sequence did not
+                        // bank it; MORE means it banked twice - OnFinishLerp is not idempotent, and
+                        // the box's own Update can re-enter it once the box is visible again, which
+                        // showed up in game as one box bought and two on the rack (and the rack's
+                        // own box-type gate then refusing the duplicate forever).
                         CoopPlugin.Log.LogError(
-                            $"WarehouseBoxSync: stored box was not banked id={m.BoxId} "
-                            + $"address=({m.ShelfId}/{m.ShelfIndex}/{m.CompartmentIndex}) "
+                            $"WarehouseBoxSync: stored box banked {storedAfter - storedBefore} records (expected 1) "
+                            + $"id={m.BoxId} address=({m.ShelfId}/{m.ShelfIndex}/{m.CompartmentIndex}) "
                             + $"countBefore={storedBefore} countAfter={storedAfter}");
                     }
                     if (BoxShared.ShouldDebugLog(m.BoxId, 0.5f))
@@ -1249,8 +1291,72 @@ namespace CardShopCoop.Sync
         /// warehouse boxes of its own here - every box in these racks was spawned by this method and
         /// is ours to destroy, which keeps it from lingering as an unbound ghost (the box engine
         /// never adopts a box with no host id).</summary>
+        /// <summary>True when the compartment's live boxes already are exactly the wanted records,
+        /// so a re-apply can be skipped entirely.
+        ///
+        /// This matters because the apply below is a teardown+respawn: it destroys every box in
+        /// the rack and spawns fresh ones. Two things re-run it constantly on a live guest of a
+        /// record host - the unconditional slice sweep (every compartment is re-asserted once per
+        /// pass) and <see cref="OnClientTick"/>'s retry of the last state - so without this the
+        /// rack's boxes are destroyed and recreated over and over, and each new box runs
+        /// <c>DispenseItem</c>'s lerp. That is what a guest sees as the boxes repeatedly flying
+        /// back into the shelf from a wrong position.
+        ///
+        /// Compared as a multiset of (item type, amount, big): order in the rack is the game's own
+        /// arrangement and is not something a re-apply should be forcing.</summary>
+        private static bool CompartmentMatchesRecords(ShelfCompartment comp, WarehouseCompartmentEntry entry)
+        {
+            try
+            {
+                var have = new List<long>();
+                var boxes = comp.GetInteractablePackagingBoxList();
+                if (boxes != null)
+                {
+                    for (int i = 0; i < boxes.Count; i++)
+                    {
+                        var b = boxes[i];
+                        if (b == null)
+                            continue;
+                        have.Add(RecordKey(
+                            (int)b.m_ItemCompartment.GetItemType(),
+                            b.m_ItemCompartment.GetItemCount(),
+                            b.m_IsBigBox));
+                    }
+                }
+                var want = new List<long>(entry.Records.Count);
+                for (int i = 0; i < entry.Records.Count; i++)
+                {
+                    var r = entry.Records[i];
+                    // Same filter the spawn loop uses, so a record it skips is not counted as wanted.
+                    if (r.ItemType == EItemType.None || r.Amount <= 0
+                        || !Enum.IsDefined(typeof(EItemType), r.ItemType))
+                        continue;
+                    want.Add(RecordKey((int)r.ItemType, r.Amount, r.Big));
+                }
+                if (have.Count != want.Count)
+                    return false;
+                have.Sort();
+                want.Sort();
+                for (int i = 0; i < have.Count; i++)
+                {
+                    if (have[i] != want[i])
+                        return false;
+                }
+                return true;
+            }
+            catch (Exception e) { Swallow.Log(e); return false; }
+        }
+
+        private static long RecordKey(int itemType, int amount, bool big)
+        {
+            return ((long)itemType << 40) | ((long)amount << 8) | (big ? 1L : 0L);
+        }
+
         private static bool ApplyCompartmentFromRecords(ShelfCompartment comp, WarehouseCompartmentEntry entry)
         {
+            // Leave a matching rack completely alone - see CompartmentMatchesRecords.
+            if (CompartmentMatchesRecords(comp, entry))
+                return true;
             bool ok = true;
             // Mark the whole teardown+spawn as a remote apply: DestroyOwned must not be mistaken for
             // a local gameplay destroy (that emits a spurious Removed for a box the host still
