@@ -2020,10 +2020,6 @@ namespace CardShopCoop
                 // waiting for its normal heal interval.
                 _boxEngine?.ForceNextTick();
                 _register.ForceResend();
-                // The warehouse mirror is index/identity-keyed too (ResolveCompartment falls back
-                // to (GetWarehouseIndex, GetIndex)), so a re-spawned rack would leave a pending
-                // apply retrying against a stale address.
-                _warehouse.OnClientRosterChanged();
             };
             Util.GradingInterop.Reset();
             NpcSync.ActivateLive(_npcs);

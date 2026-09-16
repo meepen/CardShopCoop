@@ -46,8 +46,9 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, int> _takeKeyByRequest = new Dictionary<int, int>();
         private readonly HashSet<int> _pendingTakeCompartments = new HashSet<int>();
         private readonly Dictionary<int, float> _pendingTakeAt = new Dictionary<int, float>();
-        private readonly HashSet<ushort> _pendingTakeBoxes = new HashSet<ushort>();
+        private readonly Dictionary<ushort, float> _pendingTakeBoxes = new Dictionary<ushort, float>();
         private readonly HashSet<long> _hostSeenRequests = new HashSet<long>();
+        private readonly Queue<long> _hostSeenRequestOrder = new Queue<long>();
 
         /// <summary>Client: the host's warehouse backend as advertised by the last state. A live
         /// guest needs a record host's entries materialized as live boxes, but must leave a live
@@ -176,25 +177,37 @@ namespace CardShopCoop.Sync
             // A local retry loop was a second safety net for the same job, and because applying a
             // compartment is a teardown+respawn of its boxes it rebuilt the rack over and over.
 
-            if (_pendingTakeAt.Count == 0)
-                return;
             float now = (float)Time.realtimeSinceStartupAsDouble;
             List<int> stale = null;
             foreach (var kv in _pendingTakeAt)
+            {
                 if (now - kv.Value > 5f)
                     (stale ?? (stale = new List<int>())).Add(kv.Key);
-            if (stale == null)
-                return;
-            for (int i = 0; i < stale.Count; i++)
+            }
+            if (stale != null)
             {
-                int req = stale[i];
-                _pendingTakeAt.Remove(req);
-                int key;
-                if (_takeKeyByRequest.TryGetValue(req, out key))
+                for (int i = 0; i < stale.Count; i++)
                 {
-                    _takeKeyByRequest.Remove(req);
-                    _pendingTakeCompartments.Remove(key);
+                    int req = stale[i];
+                    _pendingTakeAt.Remove(req);
+                    int key;
+                    if (_takeKeyByRequest.TryGetValue(req, out key))
+                    {
+                        _takeKeyByRequest.Remove(req);
+                        _pendingTakeCompartments.Remove(key);
+                    }
                 }
+            }
+            List<ushort> staleBoxes = null;
+            foreach (var kv in _pendingTakeBoxes)
+            {
+                if (now - kv.Value > 5f)
+                    (staleBoxes ?? (staleBoxes = new List<ushort>())).Add(kv.Key);
+            }
+            if (staleBoxes != null)
+            {
+                for (int i = 0; i < staleBoxes.Count; i++)
+                    _pendingTakeBoxes.Remove(staleBoxes[i]);
             }
         }
 
@@ -211,19 +224,13 @@ namespace CardShopCoop.Sync
             _pendingTakeAt.Clear();
             _pendingTakeBoxes.Clear();
             _hostSeenRequests.Clear();
+            _hostSeenRequestOrder.Clear();
         }
 
         public override void ForceResend()
         {
             _sweepTimer = 0f; // a heal just went out; don't sweep immediately after
             BroadcastNow();
-        }
-
-        /// <summary>Client: the placed-object roster changed, so every index-keyed compartment
-        /// address may now point at a different object. Nothing to drop any more: each state is
-        /// applied once, against the addresses as they are when it arrives.</summary>
-        public void OnClientRosterChanged()
-        {
         }
 
         public override void Dispose()
@@ -681,11 +688,17 @@ namespace CardShopCoop.Sync
             long key = ((long)connId << 32) | (uint)message.RequestId;
             Guarded("op", () =>
             {
-                // Bound the replay-dedup set; a full resync re-aligns anything dropped by a clear.
-                if (_hostSeenRequests.Count > 8192)
-                    _hostSeenRequests.Clear();
                 if (!_hostSeenRequests.Add(key))
                     return; // duplicate/replayed request
+                _hostSeenRequestOrder.Enqueue(key);
+                // Evict the oldest half at the bound: recent requests remain protected while
+                // both the set and its order queue stay bounded for the session lifetime.
+                if (_hostSeenRequests.Count > 8192)
+                {
+                    int remove = _hostSeenRequestOrder.Count / 2;
+                    for (int i = 0; i < remove; i++)
+                        _hostSeenRequests.Remove(_hostSeenRequestOrder.Dequeue());
+                }
                 if (message.Op == WarehouseOpMessage.OpStore)
                     HostApplyStore(message, connId);
                 else if (message.Op == WarehouseOpMessage.OpTake)
@@ -776,7 +789,15 @@ namespace CardShopCoop.Sync
                             box.StopLerpToTransform();
                         }
                         catch (Exception e) { Swallow.Log(e); }
-                        _miOnFinishLerp.Invoke(box, null);
+                        try
+                        {
+                            _miOnFinishLerp.Invoke(box, null);
+                        }
+                        catch (Exception e)
+                        {
+                            var cause = (e as TargetInvocationException)?.InnerException ?? e;
+                            CoopPlugin.Log.LogWarning("WarehouseBoxSync: forced store finish failed; continuing store bookkeeping: " + cause);
+                        }
                         if (BoxShared.Debug)
                         {
                             BoxShared.DebugLog("box-store-step",
@@ -1203,9 +1224,10 @@ namespace CardShopCoop.Sync
                 return null;
             // Stable shelf identity first: ShelfManager re-indexes racks when a shelf is added or
             // removed, so the host's (shelf, compartment) indices can transiently point at the
-            // wrong rack. Fall back to indices when identity is unavailable (unbound client).
+            // wrong rack. Fall back to indices only when identity does not resolve (unbound client).
             if (shelfId != 0)
             {
+                bool shelfResolved = false;
                 for (int i = 0; i < comps.Count; i++)
                 {
                     var comp = comps[i];
@@ -1215,12 +1237,17 @@ namespace CardShopCoop.Sync
                     {
                         var shelf = comp.GetWarehouseShelf();
                         if (shelf != null && PlacedObjectIdentity.TryGet(shelf, out ushort id)
-                            && id == shelfId
-                            && comp.GetIndex() == compIdx)
-                            return comp;
+                            && id == shelfId)
+                        {
+                            shelfResolved = true;
+                            if (comp.GetIndex() == compIdx)
+                                return comp;
+                        }
                     }
                     catch (Exception e) { Swallow.Log(e); }
                 }
+                if (shelfResolved)
+                    return null;
             }
             for (int i = 0; i < comps.Count; i++)
             {
@@ -1238,17 +1265,18 @@ namespace CardShopCoop.Sync
             return null;
         }
 
-        /// <summary>Applies one compartment. Returns false when it resolved but failed, so the caller
-        /// keeps it pending and retries (the failure log is rate-limited by ModuleGuard).</summary>
+        /// <summary>Applies one compartment. A state message is authoritative for this compartment.</summary>
         private static bool ApplyCompartment(ShelfCompartment comp, WarehouseCompartmentEntry entry)
         {
             // Live guest of a record host: the entries have no live counterpart anywhere, so
-            // materialize them. ClientApplyState returns before reaching here for a live host
-            // (the box channel already owns those racks).
+            // materialize them. A live client of a live host returns from ClientApplyState before
+            // reaching here (the box channel already owns those racks).
             if (!UsesRecords)
                 return ApplyCompartmentFromRecords(comp, entry);
             try
             {
+                if (RecordListMatches(comp, entry))
+                    return true;
                 // Replace the list wholesale: the host's order is authoritative (extraction pops
                 // the LAST record, so order decides which box comes out next).
                 while (RecordCount(comp) > 0)
@@ -1280,19 +1308,45 @@ namespace CardShopCoop.Sync
             catch (Exception e) { ModuleGuard.Log("warehouse:apply", e); return false; }
         }
 
+        private static bool RecordListMatches(ShelfCompartment comp, WarehouseCompartmentEntry entry)
+        {
+            int wanted = 0;
+            for (int i = 0; i < entry.Records.Count; i++)
+            {
+                var r = entry.Records[i];
+                if (r.ItemType != EItemType.None && r.Amount > 0
+                    && Enum.IsDefined(typeof(EItemType), r.ItemType))
+                    wanted++;
+            }
+            if (RecordCount(comp) != wanted)
+                return false;
+            int current = 0;
+            for (int i = 0; i < entry.Records.Count; i++)
+            {
+                var r = entry.Records[i];
+                if (r.ItemType == EItemType.None || r.Amount <= 0
+                    || !Enum.IsDefined(typeof(EItemType), r.ItemType))
+                    continue;
+                int type, amount;
+                bool big;
+                if (!TryPeek(comp, current++, out type, out amount, out big)
+                    || type != (int)r.ItemType || amount != r.Amount || big != r.Big)
+                    return false;
+            }
+            return true;
+        }
+
         /// <summary>Live guest realizing a record host's entries: replace the compartment's racks
-        /// with live boxes. Only reached when the host is record backed, so the box channel has no
-        /// warehouse boxes of its own here - every box in these racks was spawned by this method and
-        /// is ours to destroy, which keeps it from lingering as an unbound ghost (the box engine
-        /// never adopts a box with no host id).</summary>
+        /// with live boxes. Boxes already owned by the box channel are retained and unhooked from
+        /// the rack, because they may mirror a host restock worker currently carrying a box.</summary>
         /// <summary>True when the compartment's live boxes already are exactly the wanted records,
         /// so a re-apply can be skipped entirely.
         ///
         /// This matters because the apply below is a teardown+respawn: it destroys every box in
         /// the rack and spawns fresh ones. Two things re-run it constantly on a live guest of a
         /// record host - the unconditional slice sweep (every compartment is re-asserted once per
-        /// pass) and <see cref="OnClientTick"/>'s retry of the last state - so without this the
-        /// rack's boxes are destroyed and recreated over and over, and each new box runs
+        /// pass) - so without this the rack's boxes are destroyed and recreated over and over, and
+        /// each new box runs
         /// <c>DispenseItem</c>'s lerp. That is what a guest sees as the boxes repeatedly flying
         /// back into the shelf from a wrong position.
         ///
@@ -1309,7 +1363,8 @@ namespace CardShopCoop.Sync
                     for (int i = 0; i < boxes.Count; i++)
                     {
                         var b = boxes[i];
-                        if (b == null)
+                        if (b == null || b.m_ItemCompartment == null || !b.m_IsStored
+                            || b.gameObject == null || !b.gameObject.activeSelf)
                             continue;
                         have.Add(RecordKey(
                             (int)b.m_ItemCompartment.GetItemType(),
@@ -1367,8 +1422,16 @@ namespace CardShopCoop.Sync
                         var b = boxes[i];
                         if (b == null)
                             continue;
-                        // Ours, not the box channel's: tear it down through the game's own
-                        // de-registration (OnDestroyed) rather than a bare Destroy.
+                        var boxEngine = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
+                        if (boxEngine != null && boxEngine.TryGetClientId(b, out _))
+                        {
+                            // Preserve the box-channel authority object; remove only its local
+                            // rack hook so it cannot satisfy the stored-record comparison.
+                            ItemBoxFamily.UnhookIfStored(b);
+                            continue;
+                        }
+                        // Unowned mirror: tear it down through the game's own de-registration
+                        // (OnDestroyed) rather than a bare Destroy.
                         ItemBoxFamily.DestroyOwned(b);
                     }
                 }
@@ -1404,9 +1467,8 @@ namespace CardShopCoop.Sync
             return ok;
         }
 
-        /// <summary>The rack refused a materialised box. Rate-limited: a stuck compartment is
-        /// re-applied up to the pending cap (600 passes), so an unthrottled line would print 600
-        /// times.</summary>
+        /// <summary>The rack refused a materialised box. Rate-limited so a stuck compartment does
+        /// not flood the log while later state sweeps continue to re-assert it.</summary>
         private static void WarnMaterializeRefused(EItemType type, int amount, bool big)
         {
             double now = Time.realtimeSinceStartupAsDouble;
@@ -1432,7 +1494,7 @@ namespace CardShopCoop.Sync
             }
             if (!message.Accepted || message.BoxId == 0)
                 return;
-            _pendingTakeBoxes.Add(message.BoxId);
+            _pendingTakeBoxes[message.BoxId] = (float)Time.realtimeSinceStartupAsDouble;
             var boxes = CoopCore.Instance != null ? CoopCore.Instance.Boxes : null;
             InteractablePackagingBox box;
             if (boxes != null && boxes.TryGetClientBox(message.BoxId, out box))
@@ -1452,8 +1514,15 @@ namespace CardShopCoop.Sync
             if (boxes == null)
                 return;
             ushort id;
-            if (!boxes.TryGetClientId(box, out id) || !_pendingTakeBoxes.Contains(id))
+            float requestedAt;
+            if (!boxes.TryGetClientId(box, out id)
+                || !_pendingTakeBoxes.TryGetValue(id, out requestedAt))
                 return;
+            if ((float)Time.realtimeSinceStartupAsDouble - requestedAt > 5f)
+            {
+                _pendingTakeBoxes.Remove(id);
+                return;
+            }
             // The host has already removed this box from its rack and answered with the id, and a
             // live host's rack box arrives as a real stored object. Detach our own copy from the
             // rack before it goes to the hand - otherwise the local compartment keeps the slot and
