@@ -168,6 +168,15 @@ the game's `Application.version`/`PlayerSettings.bundleVersion` is exactly `1.00
 what a game update changed, diff two version directories directly
 (`git diff --no-index decompiled\0.70.3\Assembly-CSharp decompiled\1.00\Assembly-CSharp`).
 
+Also kept for diffing: `decompiled\1.0`, `decompiled\1.0-25119539`, `decompiled\1.0-25314665`
+and `decompiled\1.0-25315983`. **The public/default branch is `decompiled\1.0-25315983`** (Steam
+buildid `25315983`); the other `1.0-*` directories are intermediate builds of the same branch.
+This matters: the `1.0-*` siblings are *not* interchangeable. The file set is near-identical
+(638 of 639 files), but a handful of files differ in content between sibling buildids and from
+`1.00` — e.g. `CustomerTradeCardScreen.cs` and `InteractableAutoPackOpener.cs` differ between
+`1.0-25119539` and `1.0-25315983`, and `EndOfDayReportScreen.cs` differs across all three.
+Verify against the baseline you actually mean, and say which one you used.
+
 The game version is `Application.version` (Unity `PlayerSettings.bundleVersion`). It can be
 read offline from `Card Shop Simulator_Data\globalgamemanagers` with a Unity serialized-file
 parser (e.g. Python `UnityPy`: read the `PlayerSettings` object and take `bundleVersion`).
