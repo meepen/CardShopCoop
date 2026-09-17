@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>ConnectionState</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/CardShopCoop/CardShopCoop.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The production wire settings instantiate converters for game and Unity types. -->
+    <Reference Include="Assembly-CSharp" HintPath="$(GamePath)\Card Shop Simulator_Data\Managed\Assembly-CSharp.dll" Private="true" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(GamePath)\Card Shop Simulator_Data\Managed\UnityEngine.CoreModule.dll" Private="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>

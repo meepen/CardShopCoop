@@ -1,4 +1,5 @@
 using System;
+using CardShopCoop.Net;
 
 namespace CardShopCoop.Sync
 {
@@ -13,6 +14,9 @@ namespace CardShopCoop.Sync
 
         /// <summary>Called when the module becomes part of a live session.</summary>
         void Start();
+        void OnConnect(Connection connection);
+        void OnFullyJoined(Connection connection);
+        void OnDisconnect(Connection connection, DisconnectInfo info);
 
         /// <summary>Clears state associated with the current world or save.</summary>
         void ResetState();
@@ -33,7 +37,7 @@ namespace CardShopCoop.Sync
         /// catch-up / re-baseline path (a peer that just finished joining, or an explicit
         /// resync), never a periodic one. Runs after <see cref="ForceResend"/>, so a module can
         /// rely on its baseline having been armed first.</summary>
-        void FullUpdate(int connId);
+        void FullUpdate(Connection connection);
     }
 
     /// <summary>A module that participates in the per-frame co-op sync pipeline. CoopCore

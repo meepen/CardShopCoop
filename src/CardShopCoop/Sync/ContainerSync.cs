@@ -368,8 +368,9 @@ namespace CardShopCoop.Sync
             });
         }
 
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null || !CoopCore.InSessionWorld)
                 return;
             Guarded("full", () =>

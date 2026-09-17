@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/CardShopCoop/Sync/PlayTableStateModel.cs" Link="PlayTableStateModel.cs" />
+    <Compile Include="../../src/CardShopCoop/Net/NetMessage.cs" Link="NetMessage.cs" />
+    <Compile Include="../../src/CardShopCoop/Net/Messages/PlayTableMatchMessages.cs" Link="PlayTableMatchMessages.cs" />
+    <Compile Include="../../src/CardShopCoop/Sync/PlayTableRequestReplayGuard.cs" Link="PlayTableRequestReplayGuard.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>

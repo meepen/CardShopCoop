@@ -1001,6 +1001,14 @@ namespace CardShopCoop.Sync
                     var existing = existingMirror;
                     if (existing != null)
                     {
+                        // Reject a delayed/duplicate packet BEFORE it touches LastSeen, flags,
+                        // animation triggers or either snapshot buffer - the same ordering rule
+                        // as the normal puppet path. The mirror is generation-keyed, so a stale
+                        // packet here is the same incarnation arriving out of order; ReDress and
+                        // the trigger must not be driven by it.
+                        if (existing.BufCount > 0
+                            && snapTime <= existing.Buf[existing.BufHead].Time + 0.0005f)
+                            continue;
                         existing.LastSeen = _now;
                         if (existing.BufCount == 0 || snapTime > existing.Buf[existing.BufHead].Time + 0.0005f)
                         {
@@ -1117,6 +1125,17 @@ namespace CardShopCoop.Sync
                     _puppets[key] = p;
                 }
 
+                // Reject stale/duplicate packets (the unreliable lane can reorder) BEFORE any
+                // mutation. A delayed packet from a previous incarnation of this slot must not
+                // reach the identity block below: destroying the current puppet and re-dressing
+                // it with the old customer's wardrobe is exactly the "wrong model" symptom. The
+                // timestamp test catches a delayed same-incarnation packet; the generation test
+                // catches an older incarnation even after a newer packet reset the buffer.
+                bool stale = (p.BufCount > 0 && snapTime <= p.Buf[p.BufHead].Time + 0.0005f)
+                    || (p.HasIdentity && identity < p.Identity);
+                if (stale)
+                    continue;
+
                 bool identityChanged = p.HasIdentity && p.Identity != identity;
                 if (identityChanged)
                 {
@@ -1142,21 +1161,17 @@ namespace CardShopCoop.Sync
                 else if (p.Go == null && p.CharName.Length > 0)
                     Spawn(p, p.CharName, pos, female, kind, index); // retry a spawn that failed (e.g. manager not ready)
 
-                // reject stale/duplicate packets (unreliable channel can reorder)
-                if (p.BufCount == 0 || snapTime > p.Buf[p.BufHead].Time + 0.0005f)
+                p.BufHead = (p.BufHead + 1) & 3;
+                p.Buf[p.BufHead] = new Snap
                 {
-                    p.BufHead = (p.BufHead + 1) & 3;
-                    p.Buf[p.BufHead] = new Snap
-                    {
-                        Pos = pos,
-                        Yaw = yaw,
-                        Speed = speed,
-                        Flags = flags,
-                        Time = snapTime,
-                    };
-                    if (p.BufCount < 4)
-                        p.BufCount++;
-                }
+                    Pos = pos,
+                    Yaw = yaw,
+                    Speed = speed,
+                    Flags = flags,
+                    Time = snapTime,
+                };
+                if (p.BufCount < 4)
+                    p.BufCount++;
                 p.Flags = flags;
                 if (actionSequence != p.GrabSequence && p.Anim != null)
                 {
@@ -1217,8 +1232,6 @@ namespace CardShopCoop.Sync
                 Spawn(p, charName, pos, femaleHint, kind, index);
                 return;
             }
-            p.CharName = charName;
-            p.Go.name = "CoopNpc_" + charName;
             try
             {
                 p.Custom.CharacterName = charName;
@@ -1226,8 +1239,14 @@ namespace CardShopCoop.Sync
             }
             catch (System.Exception e)
             {
+                // Do NOT record the name: the clone still shows its previous wardrobe, so the
+                // next name-bearing packet (the periodic name refresh) retries this dress
+                // instead of accepting a stale model as current.
                 CoopPlugin.Log.LogWarning($"NPC re-dressing '{charName}': {e}");
+                return;
             }
+            p.CharName = charName;
+            p.Go.name = "CoopNpc_" + charName;
         }
 
         /// <summary>Client only. Interpolate puppets; despawn ones the host stopped sending.</summary>
@@ -1596,6 +1615,7 @@ namespace CardShopCoop.Sync
             }
             p.Custom = cust != null ? cust.m_CharacterCustom
                 : worker != null ? worker.m_CharacterCustom : null;
+            bool dressed = true;
             try
             {
                 if (p.Custom != null && charName.Length > 0 && !clonedLiveWorker)
@@ -1608,6 +1628,10 @@ namespace CardShopCoop.Sync
             {
                 // Full exception (stack included): the 1.0 wardrobe can throw IndexOutOfRange
                 // while dressing a mirrored clone, and only the stack names the offending index.
+                // Mark the dress failed so p.CharName is not committed below: the clone keeps its
+                // source appearance, and leaving the name unset lets the periodic name refresh
+                // retry instead of silently accepting the stale model.
+                dressed = false;
                 CoopPlugin.Log.LogWarning($"NPC dressing '{charName}': {e}");
             }
 
@@ -1704,7 +1728,10 @@ namespace CardShopCoop.Sync
             // hierarchy; GetComponentInChildren alone can select the wrong one.
             p.Anim = worker != null && worker.m_Anim != null
                 ? worker.m_Anim : clone.GetComponentInChildren<Animator>(true);
-            p.CharName = charName;
+            // Commit the name only when the clone actually wears it. On a failed dress the clone
+            // keeps its source pooled look, so leaving the name unset makes the next name-bearing
+            // packet run ReDress against the existing clone instead of accepting the stale model.
+            p.CharName = dressed ? charName : "";
             p.PrevRenderedPos = pos;
             p.RenderYaw = 0f;
             p.AnimSpeed = 0f;

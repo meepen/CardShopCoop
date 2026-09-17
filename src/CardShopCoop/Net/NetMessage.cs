@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 using Newtonsoft.Json;
+using CardShopCoop.Util;
 
 namespace CardShopCoop.Net
 {
@@ -22,12 +23,20 @@ namespace CardShopCoop.Net
         {
             if (message == null)
                 throw new ArgumentNullException("message");
-            var payload = WireCodec.Serialize(message);
-            var frame = new byte[Msg.FrameHeaderSize + Msg.TypeSize + payload.Length];
-            Buffer.BlockCopy(BitConverter.GetBytes(payload.Length + Msg.TypeSize), 0, frame, 0, Msg.FrameHeaderSize);
-            frame[Msg.FrameHeaderSize] = (byte)message.Type;
-            Buffer.BlockCopy(payload, 0, frame, Msg.FrameHeaderSize + Msg.TypeSize, payload.Length);
-            return frame;
+            long perfStart = PerfProbe.StartThreadMetric();
+            try
+            {
+                var payload = WireCodec.Serialize(message);
+                var frame = new byte[Msg.FrameHeaderSize + Msg.TypeSize + payload.Length];
+                Buffer.BlockCopy(BitConverter.GetBytes(payload.Length + Msg.TypeSize), 0, frame, 0, Msg.FrameHeaderSize);
+                frame[Msg.FrameHeaderSize] = (byte)message.Type;
+                Buffer.BlockCopy(payload, 0, frame, Msg.FrameHeaderSize + Msg.TypeSize, payload.Length);
+                return frame;
+            }
+            finally
+            {
+                PerfProbe.EndThreadMetric("net.encode.", message.Type, perfStart);
+            }
         }
     }
 

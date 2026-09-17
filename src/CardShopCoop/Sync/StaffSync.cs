@@ -763,8 +763,9 @@ namespace CardShopCoop.Sync
 
         /// <summary>Host: send the COMPLETE roster to one connection - the join catch-up path.
         /// Not periodic; the sweep is what guarantees eventual correctness.</summary>
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null)
                 return;
             Guarded("full", () =>
@@ -897,9 +898,6 @@ namespace CardShopCoop.Sync
             int n = message.Entries.Count;
             bool rosterChanged = false;
             var saved = CPlayerData.m_WorkerSaveDataList;
-            // One scene lookup per state apply, not per worker: the interaction screen caches
-            // the bonus count when it opens, so an open screen must be refreshed from the mirror.
-            var interactScreen = UnityEngine.Object.FindObjectOfType<WorkerInteractUIScreen>(true);
             // A partial carries exactly ONE entry, for message.Index. Omitted workers are
             // unchanged - never treat absence as "fired", and never walk the roster for one.
             bool partial = !message.Full && message.Index >= 0;
@@ -912,19 +910,51 @@ namespace CardShopCoop.Sync
                     + ", entries=" + n + ") - dropped");
                 return;
             }
+
+            // Compare the complete incoming slice before looking up scene objects or touching
+            // save data.  Sweeps are intentionally unconditional on the wire, but an unchanged
+            // healing slice must be cheap on the receiving client.
+            var changed = new bool[n];
+            var dataChanged = new bool[n];
             for (int k = 0; k < n; k++)
             {
                 int i = partial ? message.Index : k;
                 var e = message.Entries[k];
+                bool hired = i < CPlayerData.m_IsWorkerHired.Count && CPlayerData.GetIsWorkerHired(i);
+                WorkerSaveData local = saved != null && i < saved.Count ? saved[i] : null;
+                changed[k] = !EntryMatchesLocal(e, local, hired);
+                if (hired != e.Hired)
+                    rosterChanged = true;
+                dataChanged[k] = e.HasData && saved != null && !SameWorkerData(e, local);
+            }
+
+            // One scene lookup per state apply, not per worker: the interaction screen caches
+            // the bonus count when it opens, so an open screen must be refreshed from the mirror.
+            // Do not even search for it when this state contains no changed worker data.
+            WorkerInteractUIScreen interactScreen = null;
+            for (int k = 0; k < n; k++)
+            {
+                if (dataChanged[k] && changed[k])
+                {
+                    interactScreen = UnityEngine.Object.FindObjectOfType<WorkerInteractUIScreen>(true);
+                    break;
+                }
+            }
+
+            for (int k = 0; k < n; k++)
+            {
+                int i = partial ? message.Index : k;
+                var e = message.Entries[k];
+                if (!changed[k])
+                    continue;
                 if (i < CPlayerData.m_IsWorkerHired.Count && CPlayerData.GetIsWorkerHired(i) != e.Hired)
                 {
                     // roster only - no ActivateWorker: real workers stay suppressed on the
                     // client, puppets carry the visuals; this flag is what the hire screen
                     // and the salary totals (bills) read
                     CPlayerData.SetIsWorkerHired(i, e.Hired);
-                    rosterChanged = true;
                 }
-                if (!e.HasData || saved == null)
+                if (!dataChanged[k])
                     continue;
                 // WorkerManager.m_WorkerSaveDataList aliases this list after load, so
                 // writing entries in place updates both mirrors
@@ -951,14 +981,55 @@ namespace CardShopCoop.Sync
                 d.setPriceMultiplier = e.PriceMult;
                 d.setCardPriceMultiplier = e.CardPriceMult;
                 if (e.PackTypes != null)
-                    d.cardPackItemTypeEnabledList = e.PackTypes;
+                    d.cardPackItemTypeEnabledList = new List<bool>(e.PackTypes);
                 if (e.ExpList != null)
-                    d.expList = e.ExpList;
+                    d.expList = new List<int>(e.ExpList);
                 NpcSync.RefreshWorkerUi(i, d);
                 RefreshInteractScreen(interactScreen, i);
             }
             if (rosterChanged)
                 RefreshHirePanels();
+        }
+
+        private static bool EntryMatchesLocal(StaffEntry e, WorkerSaveData d, bool hired)
+        {
+            return e.Hired == hired && (!e.HasData || SameWorkerData(e, d));
+        }
+
+        private static bool SameWorkerData(StaffEntry e, WorkerSaveData d)
+        {
+            if (d == null)
+                return false;
+            return (byte)d.primaryTask == e.PrimaryTask
+                && (byte)d.secondaryTask == e.SecondaryTask
+                && (byte)d.workerTask == e.WorkerTask
+                && (byte)d.currentState == e.CurrentState
+                && d.isGoingHome == e.GoingHome
+                && Mathf.Clamp(d.bonusBoostedCount, 0, 255) == e.BonusCount
+                && d.isBonusBoosted == e.BonusBoosted
+                && d.isFillShelfWithoutLabel == e.FillNoLabel
+                && d.isRoundUpPrice == e.RoundUpPrice
+                && d.isRoundUpCardPrice == e.RoundUpCardPrice
+                && d.isAvoidSetCardPrice == e.AvoidSetCardPrice
+                && d.isAvoidSetCardPriceWhileRestock == e.AvoidSetCardPriceRestock
+                && d.setPriceMultiplier == e.PriceMult
+                && d.setCardPriceMultiplier == e.CardPriceMult
+                && SameList(d.cardPackItemTypeEnabledList, e.PackTypes)
+                && SameList(d.expList, e.ExpList);
+        }
+
+        private static bool SameList<T>(List<T> local, List<T> incoming)
+        {
+            if (ReferenceEquals(local, incoming))
+                return true;
+            if (local == null || incoming == null || local.Count != incoming.Count)
+                return false;
+            for (int i = 0; i < local.Count; i++)
+            {
+                if (!EqualityComparer<T>.Default.Equals(local[i], incoming[i]))
+                    return false;
+            }
+            return true;
         }
 
         /// <summary>The hire screen Init()s its panels on every open, but an echo that

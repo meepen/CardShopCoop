@@ -213,8 +213,13 @@ namespace CardShopCoop.Sync
         internal int OfferCount => _offers.Count;
         internal int CarrierCount => _carriers.Count;
         private readonly Dictionary<int, int> _carrierSource = new Dictionary<int, int>();
+        private readonly Dictionary<int, int> _carrierGeneration = new Dictionary<int, int>();
         private readonly Dictionary<int, Renderer[]> _carrierRenderers = new Dictionary<int, Renderer[]>();
         private readonly Dictionary<int, bool[]> _carrierRendererStates = new Dictionary<int, bool[]>();
+        // counter -> the last reason a Known offer had no clickable carrier yet. Setup is
+        // retried on every state frame, so this dedupes the diagnostic instead of logging
+        // once per sweep slice.
+        private readonly Dictionary<int, string> _carrierPendingReason = new Dictionary<int, string>();
         private readonly List<int> _keyBuf = new List<int>();
         private float _staleTimer;
         private float _opThrottle;
@@ -365,6 +370,19 @@ namespace CardShopCoop.Sync
             // player-restore half (Customer.cs:255-267) on the client.
             Try(h, typeof(Customer), "OnPressStopInteract",
                 prefix: new HarmonyMethod(typeof(TradeServe), nameof(ClientStopInteractPrefix)));
+            // DIAGNOSTIC (client): vanilla Customer.Start() disables m_InteractCollider; log when
+            // it runs on a client pooled customer so the re-arm path above is provable.
+            Try(h, typeof(Customer), "Start",
+                postfix: new HarmonyMethod(typeof(TradeServe), nameof(CustomerStartPostfix)));
+        }
+
+        /// <summary>DIAGNOSTIC (client): vanilla Customer.Start() disables m_InteractCollider.</summary>
+        public static void CustomerStartPostfix(Customer __instance)
+        {
+            if (CoopCore.Role != CoopRole.Client || __instance == null || _live == null)
+                return;
+            CoopPlugin.Log.LogInfo(
+                $"TradeServe client: Customer.Start ran on '{__instance.name}' tradeCarrier={_live.IsCarrier(__instance)}");
         }
 
         /// <summary>Host change hooks: SetState owns both entry into WaitingToTradeCard and the
@@ -1031,8 +1049,11 @@ namespace CardShopCoop.Sync
                     if (_sweepCursor >= total)
                         _sweepCursor = 0;
                     BroadcastState(BuildCounterSlice(_sweepCursor++));
-                    if (_sweepCursor == 0)
+                    if (_sweepCursor >= total)
+                    {
+                        _sweepCursor = 0;
                         completedPass = true;
+                    }
                 }
                 // Re-assert the complete result tail once per completed pass. A lost result frame
                 // must converge even when no new trade result is produced afterward.
@@ -1041,8 +1062,9 @@ namespace CardShopCoop.Sync
             });
         }
 
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null || !CoopCore.InSessionWorld)
                 return;
             Guarded("full", () =>
@@ -1069,7 +1091,27 @@ namespace CardShopCoop.Sync
             var counter = FiTradeCounter?.GetValue(customer) as InteractableCashierCounter;
             int idx = counter == null || sm == null ? -1 : sm.m_CashierCounterList.IndexOf(counter);
             if (idx >= 0)
+            {
                 BroadcastState?.Invoke(BuildCounterSlice(idx));
+                return;
+            }
+
+            // SetState is the event-driven offer hook, but during a pooled-customer
+            // transition the counter field can briefly still be unset. Resolve the
+            // waiting customer from the live counter list so a new offer is still
+            // broadcast immediately rather than waiting for the heal sweep.
+            var cm = Cm();
+            var customers = cm?.GetCustomerList();
+            int customerIndex = customers == null ? -1 : customers.IndexOf(customer);
+            if (sm == null || customerIndex < 0)
+                return;
+            for (int i = 0; i < sm.m_CashierCounterList.Count; i++)
+            {
+                if (!TryCollectOffer(i, out var offer) || offer.CustomerIndex != customerIndex)
+                    continue;
+                BroadcastState?.Invoke(BuildCounterSlice(i));
+                return;
+            }
         }
 
         private void BroadcastResultSlice()
@@ -1134,9 +1176,15 @@ namespace CardShopCoop.Sync
                 return;
             }
             CoopPlugin.Log.LogInfo($"TradeServe host: received {(op == OpAccept ? "accept" : op == OpDecline ? "decline" : "op " + op)} @ counter {idx}, price {price:F2}");
-            Guarded("apply", () => HostApplyOpInner(op, idx, price));
+            bool counterSliceAlreadyBroadcast = false;
+            Guarded("apply", () => counterSliceAlreadyBroadcast = HostApplyOpInner(op, idx, price));
             if (op == OpAccept || op == OpDecline)
-                BroadcastState?.Invoke(BuildCounterSlice(idx));
+            {
+                // A refusal must be preceded by the changed ask/decline state. Otherwise
+                // the result can arrive first and the client presents the old asking price.
+                if (!counterSliceAlreadyBroadcast)
+                    BroadcastState?.Invoke(BuildCounterSlice(idx));
+            }
         }
 
         /// <summary>Host: a guest disconnected - drop any trade-screen claim it held, so the
@@ -1155,7 +1203,7 @@ namespace CardShopCoop.Sync
             CoopPlugin.Log.LogInfo($"TradeServe host: released {drop.Count} trade claim(s) for departing conn {connId}");
         }
 
-        private void HostApplyOpInner(byte op, int idx, float price)
+        private bool HostApplyOpInner(byte op, int idx, float price)
         {
             _guestClaims.Remove(idx); // an answer means the joiner's screen at THIS counter is closing
             var cm = Cm();
@@ -1163,7 +1211,7 @@ namespace CardShopCoop.Sync
             if (cm == null || sm == null || idx < 0 || idx >= sm.m_CashierCounterList.Count)
             {
                 Result("no counter there", OutcomeBlocked, idx);
-                return;
+                return false;
             }
             var counter = sm.m_CashierCounterList[idx];
 
@@ -1183,12 +1231,12 @@ namespace CardShopCoop.Sync
             if (counter == null || cust == null)
             {
                 Result("the customer already left", OutcomeWalkOff, idx);
-                return;
+                return false;
             }
             if (cm.m_IsPlayerTrading)
             {
                 Result("the host is talking to that customer right now", OutcomeBlocked, idx);
-                return;
+                return false;
             }
 
             if (op == OpDecline)
@@ -1196,10 +1244,10 @@ namespace CardShopCoop.Sync
                 _preRollFailUntil.Remove(cust.GetInstanceID()); // pooled id reuse must not carry backoff
                 FinishCustomer(cust, counter);
                 Result("trade declined - the customer moves on", OutcomeWalkOff, idx);
-                return;
+                return false;
             }
             if (op != OpAccept)
-                return;
+                return false;
 
             var data = FiTradeData?.GetValue(cust) as CustomerTradeData;
             if (data == null)
@@ -1207,7 +1255,7 @@ namespace CardShopCoop.Sync
             if (data == null || data.m_CardData_L == null)
             {
                 Result("couldn't read the offer - the host must serve this one", OutcomeBlocked, idx);
-                return;
+                return false;
             }
 
             // a garbage/absent price means "accept at the asking price" (the prompt+key
@@ -1225,13 +1273,13 @@ namespace CardShopCoop.Sync
                 if (!haveR)
                 {
                     Result($"the binder no longer has {CardName(r)} to trade", OutcomeMissingCard, idx);
-                    return;
+                    return false;
                 }
             }
             else if (CPlayerData.m_CoinAmountDouble < (double)bid)
             {
                 Result($"not enough money to pay {Price(bid)}", OutcomeInsufficientMoney, idx);
-                return;
+                return false;
             }
 
             // headless vanilla accept: SetCustomer replays the stored offer onto the
@@ -1244,7 +1292,7 @@ namespace CardShopCoop.Sync
             if (screen == null || screen.IsScreenOpened())
             {
                 Result("the host has the trade screen open", OutcomeBlocked, idx);
-                return;
+                return false;
             }
             float preAsk = data.m_SellCardAskPrice;
             int preDecline = data.m_DeclineCount;
@@ -1290,14 +1338,14 @@ namespace CardShopCoop.Sync
                 Result(data.m_IsTrading
                     ? $"traded {CardName(data.m_CardData_R)} for {CardName(data.m_CardData_L)}"
                     : $"bought {CardName(data.m_CardData_L)} for {Price(bid)}", OutcomeAccepted, idx);
-                return;
+                return false;
             }
             if (data.m_IsTrading)
             {
                 // both trading branches either accept or hit the have-no-card popup,
                 // which the pre-check above already covers - belt-and-braces report
                 Result("the trade fell through - the host must serve this one", OutcomeBlocked, idx);
-                return;
+                return false;
             }
             if (postDecline == preDecline)
             {
@@ -1307,13 +1355,17 @@ namespace CardShopCoop.Sync
                 _preRollFailUntil.Remove(cust.GetInstanceID()); // pooled id reuse must not carry backoff
                 FinishCustomer(cust, counter);
                 Result("the customer lost patience and left", OutcomeWalkOff, idx);
-                return;
+                return false;
             }
             bool askMoved = Mathf.Abs(postAsk - preAsk) > 0.005f;
+            // Publish the updated offer before the result. The client applies the result
+            // immediately and reads the offer to render the authoritative new ask.
+            BroadcastState?.Invoke(BuildCounterSlice(idx));
             Result(askMoved
                 ? $"they refuse {Price(bid)} - now asking {Price(postAsk)}"
                 : $"they refuse {Price(bid)} - try higher",
                 askMoved ? OutcomeRefusedAsk : OutcomeRefusedSame, idx);
+            return true;
         }
 
         /// <summary>Host: resolve the waiting customer exactly like the vanilla 60s
@@ -1365,49 +1417,62 @@ namespace CardShopCoop.Sync
                 _staleTimer = 0f;
                 return;
             }
-            if (full)
-                for (int i = 0; i < count; i++)
+            // Full frames contain the complete offer roster; partial frames contain one
+            // counter (or a tombstone).  This loop must handle both.  The old migration
+            // accidentally left the loop guarded by `if (full)`, so every change-driven
+            // counter slice was discarded and newly waiting customers never got a carrier
+            // on the client until a full re-baseline happened.
+            for (int i = 0; i < count; i++)
+            {
+                var e = message.Offers[i];
+                if (!full && e.Remaining < 0f)
                 {
-                    var e = message.Offers[i];
-                    if (!full && e.Remaining < 0f)
+                    if (!_offers.TryGetValue(message.Index, out var current)
+                        || current.CustomerGeneration == e.CustomerGeneration)
                     {
-                        if (!_offers.TryGetValue(message.Index, out var current)
-                            || current.CustomerGeneration == e.CustomerGeneration)
-                        {
-                            _offers.Remove(message.Index);
-                            ReleaseCarrier(message.Index);
-                        }
-                        continue;
+                        _offers.Remove(message.Index);
+                        ReleaseCarrier(message.Index);
                     }
-                    if (!full && e.CounterIdx != message.Index)
-                        continue;
-                    if (!full && _offers.TryGetValue(e.CounterIdx, out var oldOffer)
-                        && e.CustomerGeneration < oldOffer.CustomerGeneration)
-                        continue;
-                    var o = new Offer
-                    {
-                        CounterIdx = e.CounterIdx,
-                        Known = e.Known,
-                        Trading = e.Trading,
-                        CustomerIndex = e.CustomerIndex,
-                        CustomerGeneration = e.CustomerGeneration,
-                        Position = e.Position,
-                        Yaw = e.Yaw,
-                        PriceSet = e.PriceSet,
-                        LastPriceSet = e.LastPriceSet,
-                        MaxDeclineCount = e.MaxDeclineCount,
-                        DeclineCount = e.DeclineCount,
-                        CardL = e.Known ? e.CardL : null,
-                        CardR = (e.Known && e.Trading) ? e.CardR : null,
-                        Price = (e.Known && !e.Trading) ? e.Price : 0f,
-                        Remaining = e.Remaining,
-                    };
-                    _offers[o.CounterIdx] = o;
-                    if (o.Known)
-                        PrepareCarrier(o);
-                    else
-                        ReleaseCarrier(o.CounterIdx);
+                    continue;
                 }
+                if (!full && e.CounterIdx != message.Index)
+                    continue;
+                if (!full && _offers.TryGetValue(e.CounterIdx, out var oldOffer)
+                    && e.CustomerGeneration < oldOffer.CustomerGeneration)
+                    continue;
+                var o = new Offer
+                {
+                    CounterIdx = e.CounterIdx,
+                    Known = e.Known,
+                    Trading = e.Trading,
+                    CustomerIndex = e.CustomerIndex,
+                    CustomerGeneration = e.CustomerGeneration,
+                    Position = e.Position,
+                    Yaw = e.Yaw,
+                    PriceSet = e.PriceSet,
+                    LastPriceSet = e.LastPriceSet,
+                    MaxDeclineCount = e.MaxDeclineCount,
+                    DeclineCount = e.DeclineCount,
+                    CardL = e.Known ? e.CardL : null,
+                    CardR = (e.Known && e.Trading) ? e.CardR : null,
+                    Price = (e.Known && !e.Trading) ? e.Price : 0f,
+                    Remaining = e.Remaining,
+                };
+                _offers[o.CounterIdx] = o;
+                if (o.Known)
+                    // Attempt to (re)create the carrier on EVERY Known offer, not only on a
+                    // new customer identity. The carrier is the joiner's only clickable trade
+                    // surface, and its setup is skipped while a pooled customer is
+                    // temporarily unavailable (counter/pool still settling, or the slot is a
+                    // register carrier). PrepareCarrier's own `attached` + per-generation
+                    // ownership invariants make repeated calls idempotent, so the old
+                    // one-shot gate turned a transient miss into "the `!` is visible but the
+                    // customer can never be clicked" until a rejoin. Change hooks need an
+                    // unconditional re-assertion safety net (see AGENTS.md).
+                    PrepareCarrier(o);
+                else
+                    ReleaseCarrier(o.CounterIdx);
+            }
             if (full)
             {
                 var staleCarriers = new List<int>();
@@ -1582,27 +1647,45 @@ namespace CardShopCoop.Sync
         {
             var cm = Cm();
             if (cm == null)
-                return;
-            var list = cm.GetCustomerList();
-            if (offer.CustomerIndex >= list.Count || list[offer.CustomerIndex] == null)
-                return;
-            var carrier = list[offer.CustomerIndex];
-            if (_carriers.TryGetValue(offer.CounterIdx, out var old) && !ReferenceEquals(old, carrier))
-                ReleaseCarrier(offer.CounterIdx);
-            _carriers[offer.CounterIdx] = carrier;
-            _carrierSource[offer.CounterIdx] = offer.CustomerIndex;
-            bool carrierVisualsCaptured = _carrierRenderers.ContainsKey(offer.CounterIdx);
-            RegisterSync.AllowClientCustomerLifecycle = true;
-            try
             {
-                carrier.ActivateCustomer(false, false);
+                LogCarrierPending(offer, "the customer manager is not available yet");
+                return;
             }
-            finally { RegisterSync.AllowClientCustomerLifecycle = false; }
+            var list = cm.GetCustomerList();
+            if (list == null || offer.CustomerIndex >= list.Count || list[offer.CustomerIndex] == null)
+            {
+                LogCarrierPending(offer, $"pooled customer {offer.CustomerIndex} is not available yet");
+                return;
+            }
+            var carrier = list[offer.CustomerIndex];
+            bool attached = _carriers.TryGetValue(offer.CounterIdx, out var old)
+                && ReferenceEquals(old, carrier)
+                && _carrierSource.TryGetValue(offer.CounterIdx, out var source)
+                && source == offer.CustomerIndex
+                && _carrierGeneration.TryGetValue(offer.CounterIdx, out var generation)
+                && generation == offer.CustomerGeneration
+                && _carrierRenderers.ContainsKey(offer.CounterIdx)
+                && _carrierRendererStates.ContainsKey(offer.CounterIdx);
             var sm = Sm();
             var counter = sm != null && offer.CounterIdx < sm.m_CashierCounterList.Count
                 ? sm.m_CashierCounterList[offer.CounterIdx] : null;
             if (counter == null)
+            {
+                LogCarrierPending(offer, $"counter {offer.CounterIdx} is not available yet");
                 return;
+            }
+
+            // RegisterSync and TradeServe draw from the same pooled customer list. Never
+            // steal a customer that is already being used as a register carrier. This is a
+            // deferral, not a permanent decision: ClientApplyState re-attempts every Known
+            // offer, so the trade carrier is created as soon as the register releases the
+            // slot instead of staying absent for the offer's whole lifetime.
+            if (RegisterSync.IsCarrier(carrier))
+            {
+                LogCarrierPending(offer, $"pooled customer {offer.CustomerIndex} is a register carrier");
+                return;
+            }
+
             FiTradeCounter?.SetValue(carrier, counter);
             FiTradeData?.SetValue(carrier, new CustomerTradeData
             {
@@ -1617,38 +1700,98 @@ namespace CardShopCoop.Sync
             });
             carrier.transform.position = offer.Position;
             carrier.transform.rotation = Quaternion.Euler(0f, offer.Yaw, 0f);
-            carrier.gameObject.SetActive(true);
-            if (carrier.m_ExclaimationMesh != null)
-                carrier.m_ExclaimationMesh.SetActive(true);
-            if (carrier.m_InteractCollider != null)
+            // Vanilla Customer.Start() turns m_ExclaimationMesh and m_InteractCollider OFF the
+            // first time a pooled customer becomes active (Customer.cs:233-238). On the host that
+            // Start has long since run by trade time, but a client carrier can be activated here
+            // for the first time and get disarmed on the very next frame, after PrepareCarrier
+            // enabled its click surface. Because the enable only lived inside `if (!attached)`,
+            // the carrier then stayed unclickable for the offer's whole lifetime ("the ! is
+            // visible but nothing happens"). Re-assert the click surface on every state frame;
+            // the carrier is a live, clickable offer while it is attached.
+            if (carrier.m_InteractCollider != null && !carrier.m_InteractCollider.activeSelf)
+            {
                 carrier.m_InteractCollider.SetActive(true);
-            if (!carrierVisualsCaptured)
+                CoopPlugin.Log.LogInfo(
+                    $"TradeServe client: re-armed interact collider for counter {offer.CounterIdx} (customer {offer.CustomerIndex} gen {offer.CustomerGeneration})");
+            }
+            if (!attached)
             {
-                var renderers = carrier.GetComponentsInChildren<Renderer>(true);
-                var states = new bool[renderers.Length];
-                for (int i = 0; i < renderers.Length; i++)
+                // Do not publish _carriers until every part of the setup has completed.
+                // A counter can arrive while the customer pool/scene is still settling;
+                // publishing first makes the next update mistake this half-prepared
+                // customer for an attached carrier and skip the work below forever.
+                Renderer[] renderers = null;
+                bool[] states = null;
+                bool npcAttached = false;
+                try
                 {
-                    states[i] = renderers[i] != null && renderers[i].enabled;
-                    if (renderers[i] != null)
-                        renderers[i].enabled = false;
+                    RegisterSync.AllowClientCustomerLifecycle = true;
+                    try
+                    {
+                        carrier.ActivateCustomer(false, false);
+                    }
+                    finally { RegisterSync.AllowClientCustomerLifecycle = false; }
+                    carrier.gameObject.SetActive(true);
+                    if (carrier.m_ExclaimationMesh != null)
+                        carrier.m_ExclaimationMesh.SetActive(true);
+                    if (carrier.m_InteractCollider != null)
+                        carrier.m_InteractCollider.SetActive(true);
+                    renderers = carrier.GetComponentsInChildren<Renderer>(true);
+                    states = new bool[renderers.Length];
+                    for (int i = 0; i < renderers.Length; i++)
+                    {
+                        states[i] = renderers[i] != null && renderers[i].enabled;
+                        if (renderers[i] != null)
+                            renderers[i].enabled = false;
+                    }
+                    NpcSync.SuppressedCustomer.Add(offer.CustomerIndex);
+                    NpcSync.AttachExistingCustomer(offer.CustomerIndex, offer.CustomerGeneration, carrier, keepPuppetVisible: true);
+                    npcAttached = NpcSync.IsExistingCustomer(carrier);
+                    if (!npcAttached)
+                        throw new InvalidOperationException("NpcSync did not accept the carrier attachment");
+
+                    // Commit ownership last. Every retry sees the readiness invariants
+                    // above and remains idempotent for an already-complete generation.
+                    if (_carriers.ContainsKey(offer.CounterIdx) && !attached
+                        && !ReferenceEquals(old, carrier))
+                        ReleaseCarrier(offer.CounterIdx);
+                    _carriers[offer.CounterIdx] = carrier;
+                    _carrierSource[offer.CounterIdx] = offer.CustomerIndex;
+                    _carrierGeneration[offer.CounterIdx] = offer.CustomerGeneration;
+                    _carrierRenderers[offer.CounterIdx] = renderers;
+                    _carrierRendererStates[offer.CounterIdx] = states;
+                    _carrierPendingReason.Remove(offer.CounterIdx);
+                    CoopPlugin.Log.LogInfo(
+                        $"TradeServe client: carrier ready for counter {offer.CounterIdx} (customer {offer.CustomerIndex} gen {offer.CustomerGeneration})");
                 }
-                _carrierRenderers[offer.CounterIdx] = renderers;
-                _carrierRendererStates[offer.CounterIdx] = states;
+                catch (Exception e)
+                {
+                    RegisterSync.AllowClientCustomerLifecycle = false;
+                    if (npcAttached)
+                        NpcSync.DetachExistingCustomer(offer.CustomerIndex, carrier);
+                    else if (!NpcSync.IsExistingCustomer(carrier))
+                        // The attach never took, so do not leave the pooled customer
+                        // suppressed: SuppressedCustomer hides the NpcSync puppet, and a
+                        // retry that keeps failing would otherwise make the waiting customer
+                        // invisible on top of being unclickable.
+                        NpcSync.SuppressedCustomer.Remove(offer.CustomerIndex);
+                    if (renderers != null && states != null)
+                        for (int i = 0; i < renderers.Length && i < states.Length; i++)
+                            if (renderers[i] != null)
+                                renderers[i].enabled = states[i];
+                    carrier.gameObject.SetActive(false);
+                    CoopPlugin.Log.LogWarning($"TradeServe client: carrier setup for counter {offer.CounterIdx} will retry: {e.Message}");
+                }
             }
-            else if (_carrierRenderers.TryGetValue(offer.CounterIdx, out var existingRenderers))
-            {
-                for (int i = 0; i < existingRenderers.Length; i++)
-                    if (existingRenderers[i] != null)
-                        existingRenderers[i].enabled = false;
-            }
-            NpcSync.SuppressedCustomer.Add(offer.CustomerIndex);
-            NpcSync.AttachExistingCustomer(offer.CustomerIndex, offer.CustomerGeneration, carrier, keepPuppetVisible: true);
         }
 
         private void ReleaseCarrier(int counterIdx)
         {
             if (!_carriers.TryGetValue(counterIdx, out var carrier))
+            {
+                _carrierPendingReason.Remove(counterIdx);
                 return;
+            }
             if (_carrierRenderers.TryGetValue(counterIdx, out var renderers)
                 && _carrierRendererStates.TryGetValue(counterIdx, out var states))
             {
@@ -1661,8 +1804,24 @@ namespace CardShopCoop.Sync
             carrier.gameObject.SetActive(false);
             _carriers.Remove(counterIdx);
             _carrierSource.Remove(counterIdx);
+            _carrierGeneration.Remove(counterIdx);
             _carrierRenderers.Remove(counterIdx);
             _carrierRendererStates.Remove(counterIdx);
+            _carrierPendingReason.Remove(counterIdx);
+        }
+
+        /// <summary>Client: a Known offer has no clickable carrier yet. Setup is re-attempted
+        /// on every state frame, so log only when the reason changes for a counter instead of
+        /// once per sweep slice. The key includes the offer identity so a recycled counter
+        /// (new customer or generation) always gets its own diagnostic.</summary>
+        private void LogCarrierPending(Offer offer, string reason)
+        {
+            string key = offer.CustomerIndex + ":" + offer.CustomerGeneration + ":" + reason;
+            if (_carrierPendingReason.TryGetValue(offer.CounterIdx, out var last) && last == key)
+                return;
+            _carrierPendingReason[offer.CounterIdx] = key;
+            CoopPlugin.Log.LogWarning(
+                $"TradeServe client: no carrier for counter {offer.CounterIdx} (customer {offer.CustomerIndex} gen {offer.CustomerGeneration}) yet - {reason}; will retry");
         }
 
         private void TeardownCarriers()
@@ -1672,8 +1831,10 @@ namespace CardShopCoop.Sync
                 ReleaseCarrier(keys[i]);
             _carriers.Clear();
             _carrierSource.Clear();
+            _carrierGeneration.Clear();
             _carrierRenderers.Clear();
             _carrierRendererStates.Clear();
+            _carrierPendingReason.Clear();
         }
 
         /// <summary>True while a trade/sell-in offer is live at this counter.</summary>
@@ -1763,7 +1924,17 @@ namespace CardShopCoop.Sync
                 _staleTimer += dt;
                 if (_staleTimer > StaleAfter)
                 {
+                    // Keep the carrier for the screen currently being answered until the
+                    // screen has closed; its native close path still owns that customer.
+                    // Every other carrier belongs to an offer being discarded here and
+                    // must be returned to the customer pool immediately.
+                    _keyBuf.Clear();
+                    foreach (var kv in _carriers)
+                        if (kv.Key != _pendingCounter)
+                            _keyBuf.Add(kv.Key);
                     _offers.Clear();
+                    for (int i = 0; i < _keyBuf.Count; i++)
+                        ReleaseCarrier(_keyBuf[i]);
                 }
                 else
                 {
@@ -1781,7 +1952,10 @@ namespace CardShopCoop.Sync
                         var o = _offers[_keyBuf[i]];
                         o.Remaining -= dt;
                         if (o.Remaining <= 0f)
+                        {
                             _offers.Remove(_keyBuf[i]);
+                            ReleaseCarrier(_keyBuf[i]);
+                        }
                         else
                             _offers[_keyBuf[i]] = o;
                     }
@@ -1796,9 +1970,12 @@ namespace CardShopCoop.Sync
                 var screen = cm != null ? cm.m_CustomerTradeCardScreen : null;
                 if (screen == null || !screen.IsScreenOpened())
                 {
+                    int closedCounter = _pendingCounter;
                     _pendingCounter = -1; // closed by Esc/back/Done; no op = offer stays live
                     _awaitingResult = false;
                     _acceptedShown = false;
+                    if (!_offers.ContainsKey(closedCounter))
+                        ReleaseCarrier(closedCounter);
                     return;
                 }
 
@@ -1821,11 +1998,16 @@ namespace CardShopCoop.Sync
                 // close only if the offer died and we are NOT showing a confirmed accept:
                 // after an accept the offer is gone on purpose and Done owns the close
                 if (!_acceptedShown && !_offers.ContainsKey(_pendingCounter))
+                {
+                    int resolvedCounter = _pendingCounter;
                     CloseFromRemote(screen);
+                    ReleaseCarrier(resolvedCounter);
+                }
                 return;
             }
             _awaitingResult = false;
             _acceptedShown = false;
+
         }
 
         /// <summary>Client: tear down the native trade screen exactly like the vanilla close

@@ -14,29 +14,34 @@ namespace CardShopCoop.Net
         {
             get;
         }
-        ConcurrentQueue<int> Disconnects
+        ConcurrentQueue<ConnectionEvent> Disconnects
         {
             get;
         }
-        ConcurrentQueue<int> Connects
+        ConcurrentQueue<ConnectionEvent> Connects
         {
             get;
         }
 
-        void Send(int connId, INetMessage message);
+        void Send(Connection connection, INetMessage message);
         void Broadcast(INetMessage message);
 
         /// <summary>Fast lane for transient state (positions, NPC batches): may be sent
         /// unreliably and never delays behind bulk transfers. TCP treats it as Send.</summary>
-        void SendTransient(int connId, INetMessage message);
+        void SendTransient(Connection connection, INetMessage message);
         void BroadcastTransient(INetMessage message);
         int ConnectionCount
         {
             get;
         }
-        double SecondsSinceLastRecv(int connId);
-        List<int> ConnIds();
-        void Kick(int connId);
+        double SecondsSinceLastRecv(Connection connection);
+        IReadOnlyList<Connection> Connections
+        {
+            get;
+        }
+        void Kick(Connection connection, DisconnectInfo info = null);
+        /// <summary>Send a bounded protocol disconnect, then tear down the connection.</summary>
+        void GracefulDisconnect(Connection connection, DisconnectInfo info = null);
         void Stop();
 
         /// <summary>Called every frame from the Unity main thread. TCP ignores it;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
@@ -86,6 +87,7 @@ namespace CardShopCoop.UI
         private bool _publicLobby;
         private string _lobbyNameField = "";
         private string _hostPwField = "";
+        private string _hostPlayersField = SteamLobbyLimits.DefaultPlayers.ToString(CultureInfo.InvariantCulture);
         private string _joinPwField = "";
         private ulong _pwPromptLobby; // 0 = no password prompt open
         private const int PageSize = 6;
@@ -1005,6 +1007,16 @@ namespace CardShopCoop.UI
                 GUILayout.Label("<size=10>(blank = open)</size>", CoopTheme.LabelDim, GUILayout.Width(80f));
                 GUILayout.EndHorizontal();
             }
+            if (core.Steam != null)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Players:", CoopTheme.Label, GUILayout.Width(80f));
+                GUI.SetNextControlName("coop_hostplayers");
+                _hostPlayersField = GUILayout.TextField(_hostPlayersField, 3, CoopTheme.TextField,
+                    GUILayout.Width(48f));
+                GUILayout.Label("(2-250)", CoopTheme.LabelDim);
+                GUILayout.EndHorizontal();
+            }
             // core.Steam == null means this build has NO Steamworks assembly (Game Pass /
             // DRM-free), so Steam can never work and there is nothing the player could do
             // about it. Hide the control entirely rather than leaving a dead button that
@@ -1014,7 +1026,21 @@ namespace CardShopCoop.UI
             if (core.Steam != null)
             {
                 if (GUILayout.Button("Host via Steam", CoopTheme.ButtonPrimary))
-                    core.StartHostingSteam(_publicLobby, _lobbyNameField, _publicLobby ? _hostPwField : "");
+                {
+                    if (int.TryParse(_hostPlayersField, NumberStyles.None, CultureInfo.InvariantCulture,
+                        out int maxPlayers)
+                        && maxPlayers >= SteamLobbyLimits.MinPlayers
+                        && maxPlayers <= SteamLobbyLimits.MaxPlayers)
+                    {
+                        core.StartHostingSteam(_publicLobby, _lobbyNameField,
+                            _publicLobby ? _hostPwField : "", maxPlayers);
+                    }
+                    else
+                    {
+                        core.ErrorLine = $"Player count must be between {SteamLobbyLimits.MinPlayers} and "
+                            + $"{SteamLobbyLimits.MaxPlayers}.";
+                    }
+                }
                 if (GUILayout.Button("Host via LAN", CoopTheme.ButtonSecondary, GUILayout.Width(110f)))
                     core.StartHosting();
             }
@@ -1052,7 +1078,10 @@ namespace CardShopCoop.UI
             }
 
             // wrong-password retry for invites into protected lobbies
-            if (core.ErrorLine == "wrong password" && core.LastFailedLobby != 0UL)
+            if (core.LastDisconnectRetryable
+                && core.LastDisconnectCode == "rejected"
+                && core.LastDisconnectReason == "wrong password"
+                && core.LastFailedLobby != 0UL)
             {
                 GUILayout.BeginHorizontal();
                 GUILayout.Label("Password:", CoopTheme.Label, GUILayout.Width(80f));

@@ -277,6 +277,9 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage(MsgType.TableState, Policy = MessagePolicy.ClientOnly)]
     public sealed class TableStateMessage : INetMessage
     {
+        /// <summary>Incarnation of the host's table state. Revisions from another epoch are stale.</summary>
+        public long Epoch;
+
         /// <summary>True = the COMPLETE state (join catch-up / explicit re-baseline). False = ONE
         /// slice identified by <see cref="Index"/>; state not carried by a partial slice is
         /// UNCHANGED, never removed.</summary>
@@ -286,6 +289,9 @@ namespace CardShopCoop.Net.Messages
         public int Index = -1;
 
         public List<TableEntry> Tables = new List<TableEntry>();
+
+        /// <summary>Latest per-table revision watermark, including omitted tables in a full frame.</summary>
+        public Dictionary<byte, long> TableRevisions = new Dictionary<byte, long>();
 
         public MsgType Type
         {
@@ -302,6 +308,7 @@ namespace CardShopCoop.Net.Messages
     public sealed class TableEntry
     {
         public byte Index;
+        public long Revision;
         public bool Occupied;
         public List<TableSeatEntry> Seats = new List<TableSeatEntry>();
     }

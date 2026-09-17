@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using CardShopCoop.Net;
+using CardShopCoop.Util;
 
 namespace CardShopCoop.Sync
 {
@@ -19,6 +21,16 @@ namespace CardShopCoop.Sync
 
         /// <summary>Called when the module becomes part of a live session.</summary>
         public virtual void Start()
+        {
+        }
+
+        public virtual void OnConnect(Connection connection)
+        {
+        }
+        public virtual void OnFullyJoined(Connection connection)
+        {
+        }
+        public virtual void OnDisconnect(Connection connection, DisconnectInfo info)
         {
         }
 
@@ -52,7 +64,7 @@ namespace CardShopCoop.Sync
 
         /// <summary>Host: send this module's COMPLETE state to one connection - the join
         /// catch-up / explicit re-baseline path. Never called periodically.</summary>
-        public virtual void FullUpdate(int connId)
+        public virtual void FullUpdate(Connection connection)
         {
         }
 
@@ -73,15 +85,72 @@ namespace CardShopCoop.Sync
     /// <see cref="OnHostTick"/> / <see cref="OnClientTick"/>.</summary>
     public abstract class TickableCoopModule : CoopModule, ITickableCoopModule
     {
+        // Build these names only when probing is enabled; Tick runs every co-op frame.
+        private string _hostTickProbe;
+        private string _clientTickProbe;
+
+        private string _rolePerfProbe;
+        private string _periodicPerfProbe;
+
         public void Tick(in SyncFrame frame)
         {
-            if (CoopCore.Role == CoopRole.Host)
-                OnHostTick(frame);
-            else if (CoopCore.Role == CoopRole.Client)
-                OnClientTick(frame);
+            long roleStart = Util.PerfProbe.Start();
+            try
+            {
+                if (CoopCore.Role == CoopRole.Host)
+                {
+                    long start = PerfProbe.Start();
+                    if (start != 0L && _hostTickProbe == null)
+                        _hostTickProbe = Name + ":host-tick";
+                    try
+                    {
+                        OnHostTick(frame);
+                    }
+                    finally
+                    {
+                        PerfProbe.End(_hostTickProbe, start);
+                    }
+                }
+                else if (CoopCore.Role == CoopRole.Client)
+                {
+                    long start = PerfProbe.Start();
+                    if (start != 0L && _clientTickProbe == null)
+                        _clientTickProbe = Name + ":client-tick";
+                    try
+                    {
+                        OnClientTick(frame);
+                    }
+                    finally
+                    {
+                        PerfProbe.End(_clientTickProbe, start);
+                    }
+                }
+            }
+            finally
+            {
+                if (roleStart != 0L)
+                {
+                    if (_rolePerfProbe == null)
+                        _rolePerfProbe = "itickable." + Name + ".role";
+                    Util.PerfProbe.End(_rolePerfProbe, roleStart);
+                }
+            }
             // Gradual re-assertion runs for both roles, after the role work, so a module's slice
             // never races the change it is re-asserting.
-            PeriodicUpdate(frame.Dt);
+            long periodicStart = Util.PerfProbe.Start();
+            try
+            {
+                PeriodicUpdate(frame.Dt);
+            }
+            finally
+            {
+                if (periodicStart != 0L)
+                {
+                    if (_periodicPerfProbe == null)
+                        _periodicPerfProbe = "itickable." + Name + ".periodic";
+                    Util.PerfProbe.End(_periodicPerfProbe, periodicStart);
+                }
+            }
         }
 
         protected virtual void OnHostTick(in SyncFrame frame)

@@ -786,8 +786,9 @@ namespace CardShopCoop.Sync
 
         /// <summary>Host: complete card-display state to one connection only; this is the join
         /// catch-up/re-baseline path, never a periodic broadcast.</summary>
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null
                 || !CoopCore.InSessionWorld)
                 return;

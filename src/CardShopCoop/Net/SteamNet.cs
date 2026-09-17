@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
 using Steamworks;
 using UnityEngine;
+using CardShopCoop.Net.Messages;
 
 namespace CardShopCoop.Net
 {
@@ -23,6 +25,30 @@ namespace CardShopCoop.Net
         // decode is a JSON deserialize; an uncapped burst could monopolize a frame (observed
         // net-pump spikes up to 33 ms). See the receive loop in PumpMainThread.
         private const int MaxInboundFramesPerPump = 64;
+        private const int MaxControlFramesPerPump = 32;
+        private const int MaxTransientBacklog = 2048;
+        private const int MaxReliableFrames = 4096;
+        private const long MaxReliableBytes = 16L * 1024 * 1024;
+        private const long MaxTransientBytes = 2L * 1024 * 1024;
+        private const int MaxInboundDecodedFrames = 4096;
+        private const int ReservedInboundControlFrames = 256;
+        private const int ReservedInboundTerminalFrames = 32;
+        private const int MaxInboundControlFrames = ReservedInboundControlFrames - ReservedInboundTerminalFrames;
+        private const int MaxInboundFramesPerPeer = 512;
+        private const int MaxReliableFramesPerPeer = 1024;
+        // Ordinary reliable traffic retains a bounded 2 MiB lane.  Atomic chunked
+        // transfers have a separate bounded allowance: the market snapshot is about
+        // 2.3 MiB on the wire, and chunk headers add a little more.
+        private const long MaxReliableBytesPerPeer = 2L * 1024 * 1024;
+        // Transfer messages are normally below ChunkPayloadBytes after JSON/base64 encoding,
+        // so they must not be identified only by the oversized-frame path.  Keep their lane
+        // bounded, but large enough for the largest permitted reassembled transfer plus chunk
+        // envelope/JSON expansion. Producers wait for PumpMainThread to drain this allowance.
+        private const long MaxAtomicTransferBytesPerPeer = 12L * 1024 * 1024;
+        private const long MaxAtomicTransferBytes = 12L * 1024 * 1024;
+        private const int ReservedReliableFrames = 256;
+        private const long ReservedReliableBytes = 1024 * 1024;
+        private const double DisconnectGraceSeconds = 2.0;
 
         // ---- oversized reliable frame chunking ----
         // Steam's reliable P2P lane refuses frames over roughly 1 MiB, and the old code
@@ -68,8 +94,20 @@ namespace CardShopCoop.Net
         private readonly object _chunkEnqueueLock = new object();
 
         public ConcurrentQueue<InMsg> Incoming { get; } = new ConcurrentQueue<InMsg>();
-        public ConcurrentQueue<int> Disconnects { get; } = new ConcurrentQueue<int>();
-        public ConcurrentQueue<int> Connects { get; } = new ConcurrentQueue<int>();
+        public ConcurrentQueue<ConnectionEvent> Disconnects { get; } = new ConcurrentQueue<ConnectionEvent>();
+        public ConcurrentQueue<ConnectionEvent> Connects { get; } = new ConcurrentQueue<ConnectionEvent>();
+        private readonly Dictionary<int, Connection> _connections = new Dictionary<int, Connection>();
+        private readonly object _connectionsLock = new object();
+        public IReadOnlyList<Connection> Connections
+        {
+            get
+            {
+                lock (_connectionsLock)
+                    return new List<Connection>(_connections.Values);
+            }
+        }
+        private readonly Dictionary<int, DisconnectInfo> _pendingDisconnects = new Dictionary<int, DisconnectInfo>();
+        private readonly Dictionary<int, double> _disconnectDeadlines = new Dictionary<int, double>();
 
         public INetMessage KeepaliveMessage;
         public double TimeoutSeconds => 180.0; // keepalives freeze with the main thread
@@ -78,27 +116,46 @@ namespace CardShopCoop.Net
         private readonly Dictionary<int, CSteamID> _peers = new Dictionary<int, CSteamID>();
         private readonly Dictionary<CSteamID, int> _ids = new Dictionary<CSteamID, int>();
         private readonly Dictionary<int, double> _lastRecv = new Dictionary<int, double>();
+        private readonly Dictionary<int, int> _reliableFramesByPeer = new Dictionary<int, int>();
+        private readonly Dictionary<int, long> _reliableBytesByPeer = new Dictionary<int, long>();
+        private readonly Dictionary<int, long> _atomicBytesByPeer = new Dictionary<int, long>();
+        private readonly HashSet<int> _terminalQueued = new HashSet<int>();
+        private long _atomicBytes;
+        private int _generation = 1;
         private struct Outgoing
         {
-            public int ConnId; public byte[] Frame;
+            public int ConnId; public byte[] Frame; public bool AtomicTransfer;
         }
 
         private readonly ConcurrentQueue<Outgoing> _transientOutbox = new ConcurrentQueue<Outgoing>();
+        // Disconnects have their own control lane so a bulk reliable backlog cannot hide the
+        // frame that tells the peer why this session is ending.
+        private readonly ConcurrentQueue<Outgoing> _controlOutbox = new ConcurrentQueue<Outgoing>();
         private readonly ConcurrentQueue<Outgoing> _reliableOutbox = new ConcurrentQueue<Outgoing>();
+        // Steamworks is main-thread-only in the Unity integration.  Transport callers may
+        // disconnect from worker threads, so only this queue crosses that boundary.
+        private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
+        private int _reliableFrames;
+        private long _reliableBytes;
+        private int _transientFrames;
+        private long _transientBytes;
         private Outgoing? _stalled; // reliable frame Steam refused; retried first
-        private int _stallRetries;  // consecutive refusals of _stalled; drop after N so one
-                                    // doomed (e.g. >1MB) frame can't wedge the whole lane
+        // Consecutive refusals of _stalled; drop after N so one doomed (e.g. >1MB) frame
+        // cannot wedge the whole lane.
+        private int _stallRetries;
+        private bool _inboundOverflowWarned;
 
         // transient coalescing scratch, reused every pump (main thread only)
         private readonly List<Outgoing> _transientScratch = new List<Outgoing>(32);
         private readonly Dictionary<int, int> _newestTransient = new Dictionary<int, int>(32);
         private double _lastTransientRefusedLog = -10.0;
-
-        private List<int> _connIdsCache; // snapshot handed out by ConnIds(); rebuilt on membership change
         private int _nextConnId = 1;
         private byte[] _readBuf = new byte[600 * 1024];
         private float _keepaliveTimer;
         private bool _stopped;
+        private volatile bool _stopping;
+        private int _stopRequestQueued;
+        private readonly int _mainThreadId = Thread.CurrentThread.ManagedThreadId;
 
         private Callback<P2PSessionRequest_t> _cbSessionReq;
         private Callback<P2PSessionConnectFail_t> _cbSessionFail;
@@ -110,13 +167,14 @@ namespace CardShopCoop.Net
         {
             _isHost = isHost;
             SteamNetworking.AllowP2PPacketRelay(true);
-            _cbSessionReq = Callback<P2PSessionRequest_t>.Create(OnSessionRequest);
-            _cbSessionFail = Callback<P2PSessionConnectFail_t>.Create(OnSessionFail);
+            int callbackGeneration = _generation;
+            _cbSessionReq = Callback<P2PSessionRequest_t>.Create(req => OnSessionRequest(req, callbackGeneration));
+            _cbSessionFail = Callback<P2PSessionConnectFail_t>.Create(fail => OnSessionFail(fail, callbackGeneration));
         }
 
-        private void OnSessionRequest(P2PSessionRequest_t req)
+        private void OnSessionRequest(P2PSessionRequest_t req, int callbackGeneration)
         {
-            if (_stopped)
+            if (_stopped || _stopping || callbackGeneration != _generation)
                 return;
             bool allowed;
             if (_isHost)
@@ -125,7 +183,8 @@ namespace CardShopCoop.Net
             }
             else
             {
-                allowed = _ids.ContainsKey(req.m_steamIDRemote); // only the host we connected to
+                lock (_connectionsLock)
+                    allowed = _ids.ContainsKey(req.m_steamIDRemote); // only the host we connected to
             }
             if (!allowed)
             {
@@ -133,7 +192,10 @@ namespace CardShopCoop.Net
                 return;
             }
             SteamNetworking.AcceptP2PSessionWithUser(req.m_steamIDRemote);
-            if (!_ids.ContainsKey(req.m_steamIDRemote))
+            bool known;
+            lock (_connectionsLock)
+                known = _ids.ContainsKey(req.m_steamIDRemote);
+            if (!known)
                 AddPeer(req.m_steamIDRemote);
         }
 
@@ -146,23 +208,45 @@ namespace CardShopCoop.Net
             return false;
         }
 
-        private void OnSessionFail(P2PSessionConnectFail_t fail)
+        private void OnSessionFail(P2PSessionConnectFail_t fail, int callbackGeneration)
         {
-            if (_ids.TryGetValue(fail.m_steamIDRemote, out int cid))
+            if (_stopped || _stopping || callbackGeneration != _generation)
+                return;
+            int cid;
+            Connection failedConnection;
+            lock (_connectionsLock)
+            {
+                if (!_ids.TryGetValue(fail.m_steamIDRemote, out cid))
+                    return;
+                _connections.TryGetValue(cid, out failedConnection);
+            }
+            if (failedConnection != null)
             {
                 CoopPlugin.Log.LogWarning($"steam: session failed with {fail.m_steamIDRemote} (err {fail.m_eP2PSessionError})");
-                Kick(cid);
+                Kick(failedConnection);
             }
         }
 
         private int AddPeer(CSteamID sid)
         {
-            int cid = _nextConnId++;
-            _peers[cid] = sid;
-            _ids[sid] = cid;
-            _connIdsCache = null;
-            _lastRecv[cid] = Time.realtimeSinceStartupAsDouble;
-            Connects.Enqueue(cid);
+            if (_stopping || _stopped)
+                return 0;
+            int cid;
+            Connection connection;
+            lock (_connectionsLock)
+            {
+                cid = _nextConnId++;
+                _peers[cid] = sid;
+                _ids[sid] = cid;
+                _lastRecv[cid] = Time.realtimeSinceStartupAsDouble;
+                connection = new Connection(cid);
+                _connections[cid] = connection;
+                _reliableFramesByPeer[cid] = 0;
+                _reliableBytesByPeer[cid] = 0;
+                _atomicBytesByPeer[cid] = 0;
+                _terminalQueued.Remove(cid);
+            }
+            Connects.Enqueue(new ConnectionEvent(connection));
             CoopPlugin.Log.LogInfo($"steam: peer {sid} connected as {cid}");
             return cid;
         }
@@ -170,7 +254,8 @@ namespace CardShopCoop.Net
         /// <summary>Client: bind connId 1 to the lobby owner. The first Send opens the session.</summary>
         public void ConnectToHost(CSteamID host)
         {
-            AddPeer(host);
+            if (!_stopping && !_stopped)
+                AddPeer(host);
         }
 
         private void SendFrame(int connId, byte[] frame)
@@ -179,7 +264,8 @@ namespace CardShopCoop.Net
                 return;
             if (frame.Length <= ChunkPayloadBytes)
             {
-                _reliableOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = frame });
+                if (!EnqueueReliable(connId, frame) && IsCriticalFrame(frame))
+                    FailAdmission(connId, frame.Length, 1);
                 return;
             }
             // Build and enqueue under the lock so transfer ids are handed out in the same order
@@ -190,9 +276,28 @@ namespace CardShopCoop.Net
                 var chunks = BuildChunks(frame);
                 if (chunks == null)
                     return;
-                for (int i = 0; i < chunks.Count; i++)
-                    _reliableOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = chunks[i] });
+                if (!EnqueueReliableBatch(connId, chunks, true))
+                    FailAdmission(connId, frame.Length, chunks.Count);
             }
+        }
+
+        private static bool IsCriticalFrame(byte[] frame)
+        {
+            if (!Msg.TryGetType(frame, out var type))
+                return false;
+            return type == MsgType.Hello || type == MsgType.Welcome
+                || type == MsgType.SaveChunk || type == MsgType.SaveDone
+                || type == MsgType.BundleChunk || type == MsgType.BundleDone
+                || type == MsgType.EnumSync || type == MsgType.FullyJoined
+                || type == MsgType.FullyJoinedAck || type == MsgType.Disconnect;
+        }
+
+        private static bool IsTransferFrame(byte[] frame)
+        {
+            if (frame == null || !Msg.TryGetType(frame, out var type))
+                return false;
+            return type == MsgType.SaveChunk || type == MsgType.SaveDone
+                || type == MsgType.BundleChunk || type == MsgType.BundleDone;
         }
 
         /// <summary>Split an oversized reliable frame into chunk envelopes sharing one transfer
@@ -238,9 +343,10 @@ namespace CardShopCoop.Net
             buffer[offset + 3] = (byte)(value >> 24);
         }
 
-        public void Send(int connId, INetMessage message)
+        public void Send(Connection connection, INetMessage message)
         {
-            SendFrame(connId, NetMessageCodec.Encode(message));
+            if (IsActive(connection))
+                SendFrame(connection.Id, NetMessageCodec.Encode(message));
         }
 
         /// <summary>Main thread only: iterates _peers directly to avoid a per-call snapshot.</summary>
@@ -250,8 +356,9 @@ namespace CardShopCoop.Net
                 return;
             if (frame.Length <= ChunkPayloadBytes)
             {
-                foreach (var kv in _peers)
-                    _reliableOutbox.Enqueue(new Outgoing { ConnId = kv.Key, Frame = frame });
+                foreach (int id in PeerIds())
+                    if (!EnqueueReliable(id, frame) && IsCriticalFrame(frame))
+                        FailAdmission(id, frame.Length, 1);
                 return;
             }
             // Build the chunks once and share the arrays across peers; each peer reassembles
@@ -261,9 +368,9 @@ namespace CardShopCoop.Net
                 var chunks = BuildChunks(frame);
                 if (chunks == null)
                     return;
-                foreach (var kv in _peers)
-                    for (int i = 0; i < chunks.Count; i++)
-                        _reliableOutbox.Enqueue(new Outgoing { ConnId = kv.Key, Frame = chunks[i] });
+                foreach (int id in PeerIds())
+                    if (!EnqueueReliableBatch(id, chunks, true))
+                        FailAdmission(id, frame.Length, chunks.Count);
             }
         }
 
@@ -274,19 +381,227 @@ namespace CardShopCoop.Net
 
         private void SendTransientFrame(int connId, byte[] frame)
         {
-            _transientOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = frame });
+            lock (_connectionsLock)
+            {
+                if (!CanEnqueue(connId) || _transientFrames >= MaxTransientBacklog
+                    || _transientBytes + frame.Length > MaxTransientBytes)
+                    return;
+                _transientOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = frame });
+                _transientFrames++;
+                _transientBytes += frame.Length;
+            }
         }
 
-        public void SendTransient(int connId, INetMessage message)
+        private bool CanEnqueue(int connId)
         {
-            SendTransientFrame(connId, NetMessageCodec.Encode(message));
+            return !_stopping && !_stopped && _peers.ContainsKey(connId)
+                && _connections.TryGetValue(connId, out var c)
+                && !c.IsDisconnectingOrDisconnected && !_pendingDisconnects.ContainsKey(connId);
+        }
+        private List<int> PeerIds()
+        {
+            lock (_connectionsLock)
+                return new List<int>(_peers.Keys);
+        }
+        private bool EnqueueReliable(int connId, byte[] frame)
+        {
+            if (frame == null)
+                return false;
+            bool transfer = IsTransferFrame(frame);
+            lock (_connectionsLock)
+            {
+                // Transfer production runs on a worker.  Waiting here is deliberate
+                // backpressure: a healthy peer must not be disconnected merely because the
+                // worker produced chunks faster than the Unity/Steam pump could drain them.
+                // The predicate also makes admission all-or-nothing for each frame.
+                while (CanEnqueue(connId)
+                    && !HasReliableCapacity(connId, 1, frame.Length, false, transfer))
+                {
+                    if (!transfer)
+                        return false;
+                    Monitor.Wait(_connectionsLock, 100);
+                }
+                if (!CanEnqueue(connId)
+                    || !HasReliableCapacity(connId, 1, frame.Length, false, transfer))
+                    return false;
+                _reliableOutbox.Enqueue(new Outgoing
+                {
+                    ConnId = connId,
+                    Frame = frame,
+                    AtomicTransfer = transfer
+                });
+                _reliableFrames++;
+                _reliableBytes += frame.Length;
+                _reliableFramesByPeer[connId]++;
+                _reliableBytesByPeer[connId] += frame.Length;
+                if (transfer)
+                {
+                    _atomicBytes += frame.Length;
+                    _atomicBytesByPeer[connId] += frame.Length;
+                }
+                return true;
+            }
+        }
+
+        private bool HasReliableCapacity(int connId, int frames, long bytes, bool controlReserve,
+            bool atomicTransfer = false)
+        {
+            if (!_reliableFramesByPeer.ContainsKey(connId))
+                return false;
+            int frameLimit = MaxReliableFrames - (controlReserve ? 0 : ReservedReliableFrames);
+            long byteLimit = MaxReliableBytes - (controlReserve ? 0 : ReservedReliableBytes);
+            if (_reliableFrames + frames > frameLimit || _reliableBytes + bytes > byteLimit
+                || _reliableFramesByPeer[connId] + frames > MaxReliableFramesPerPeer)
+                return false;
+            if (atomicTransfer)
+            {
+                return _atomicBytes + bytes <= MaxAtomicTransferBytes
+                    && _atomicBytesByPeer[connId] + bytes <= MaxAtomicTransferBytesPerPeer;
+            }
+            return _reliableBytesByPeer[connId] + bytes <= MaxReliableBytesPerPeer;
+        }
+
+        private bool EnqueueReliableBatch(int connId, List<byte[]> frames, bool atomicTransfer)
+        {
+            if (frames == null || frames.Count == 0)
+                return false;
+            long bytes = 0;
+            for (int i = 0; i < frames.Count; i++)
+                bytes += frames[i].Length;
+            lock (_connectionsLock)
+            {
+                while (CanEnqueue(connId)
+                    && !HasReliableCapacity(connId, frames.Count, bytes, false, atomicTransfer))
+                {
+                    if (!atomicTransfer)
+                        return false;
+                    Monitor.Wait(_connectionsLock, 100);
+                }
+                if (!CanEnqueue(connId)
+                    || !HasReliableCapacity(connId, frames.Count, bytes, false, atomicTransfer))
+                    return false;
+                for (int i = 0; i < frames.Count; i++)
+                    _reliableOutbox.Enqueue(new Outgoing
+                    {
+                        ConnId = connId,
+                        Frame = frames[i],
+                        AtomicTransfer = atomicTransfer
+                    });
+                _reliableFrames += frames.Count;
+                _reliableBytes += bytes;
+                _reliableFramesByPeer[connId] += frames.Count;
+                _reliableBytesByPeer[connId] += bytes;
+                if (atomicTransfer)
+                {
+                    _atomicBytes += bytes;
+                    _atomicBytesByPeer[connId] += bytes;
+                }
+                return true;
+            }
+        }
+
+        private void FailAdmission(int connId, int originalBytes, int chunkCount)
+        {
+            CoopPlugin.Log.LogError($"steam: rejected atomic reliable transfer on conn {connId} ({originalBytes} bytes, {chunkCount} chunks); disconnecting to avoid partial transfer");
+            if (TryGetConnection(connId, out var connection))
+                GracefulDisconnect(connection, new DisconnectInfo("reliable transfer queue full", false, "queue_full", true));
+        }
+
+        private bool TryGetConnection(int connId, out Connection connection)
+        {
+            lock (_connectionsLock)
+                return _connections.TryGetValue(connId, out connection);
+        }
+        private void AccountReliable(Outgoing entry)
+        {
+            lock (_connectionsLock)
+            {
+                _reliableFrames--;
+                _reliableBytes -= entry.Frame.Length;
+                if (_reliableFramesByPeer.TryGetValue(entry.ConnId, out int frames))
+                    _reliableFramesByPeer[entry.ConnId] = Math.Max(0, frames - 1);
+                if (_reliableBytesByPeer.TryGetValue(entry.ConnId, out long bytes))
+                    _reliableBytesByPeer[entry.ConnId] = Math.Max(0, bytes - entry.Frame.Length);
+                if (entry.AtomicTransfer)
+                {
+                    _atomicBytes = Math.Max(0, _atomicBytes - entry.Frame.Length);
+                    if (_atomicBytesByPeer.TryGetValue(entry.ConnId, out long atomicBytes))
+                        _atomicBytesByPeer[entry.ConnId] = Math.Max(0, atomicBytes - entry.Frame.Length);
+                }
+                Monitor.PulseAll(_connectionsLock);
+            }
+        }
+        private void AccountTransient(int delta)
+        {
+            lock (_connectionsLock)
+            {
+                _transientFrames--;
+                _transientBytes += delta;
+            }
+        }
+        private bool IsPending(int connId)
+        {
+            lock (_connectionsLock)
+                return _pendingDisconnects.ContainsKey(connId);
+        }
+
+        // Admission and terminal ownership use the same lock.  This closes the small race
+        // where PumpMainThread checked a live peer and a worker claimed disconnect before the
+        // Steam call was made.
+        private bool SendPacket(int connId, byte[] frame, EP2PSend sendType, bool control)
+        {
+            lock (_connectionsLock)
+            {
+                if (!_peers.TryGetValue(connId, out var sid)
+                    || !_connections.TryGetValue(connId, out var connection))
+                    return false;
+                bool pending = _pendingDisconnects.ContainsKey(connId);
+                if (control ? !pending : pending || connection.IsDisconnectingOrDisconnected)
+                    return false;
+                return SteamNetworking.SendP2PPacket(sid, frame, (uint)frame.Length, sendType, Channel);
+            }
+        }
+
+        private List<KeyValuePair<int, DisconnectInfo>> PendingDisconnects()
+        {
+            lock (_connectionsLock)
+            {
+                var result = new List<KeyValuePair<int, DisconnectInfo>>(_pendingDisconnects.Count);
+                foreach (var pending in _pendingDisconnects)
+                    result.Add(pending);
+                return result;
+            }
+        }
+        private bool TryGetPeer(int connId, out CSteamID sid)
+        {
+            lock (_connectionsLock)
+                return _peers.TryGetValue(connId, out sid);
+        }
+
+        public void SendTransient(Connection connection, INetMessage message)
+        {
+            if (IsActive(connection))
+                SendTransientFrame(connection.Id, NetMessageCodec.Encode(message));
+        }
+
+        private bool IsActive(Connection connection)
+        {
+            if (connection == null)
+                return false;
+            lock (_connectionsLock)
+                return _connections.TryGetValue(connection.Id, out var current)
+                    && ReferenceEquals(current, connection)
+                    && connection.State != ConnectionState.Disconnecting
+                    && connection.State != ConnectionState.Disconnected;
         }
 
         /// <summary>Main thread only: iterates _peers directly to avoid a per-call snapshot.</summary>
         private void BroadcastTransientFrame(byte[] frame)
         {
-            foreach (var kv in _peers)
-                _transientOutbox.Enqueue(new Outgoing { ConnId = kv.Key, Frame = frame });
+            if (_stopping || _stopped)
+                return;
+            foreach (int id in PeerIds())
+                SendTransientFrame(id, frame);
         }
 
         public void BroadcastTransient(INetMessage message)
@@ -299,7 +614,27 @@ namespace CardShopCoop.Net
             if (_stopped)
                 return;
 
-            // ---- transient lane: drained fully every frame, ahead of the reliable lane,
+            while (_mainThreadActions.TryDequeue(out var action))
+                action();
+
+            // ---- bounded control lane: always attempt disconnect frames before any other
+            // traffic. A control backlog is bounded per pump so it cannot monopolize the frame.
+            int controlBudget = MaxControlFramesPerPump;
+            while (controlBudget-- > 0 && _controlOutbox.TryDequeue(out var control))
+            {
+                if (SendPacket(control.ConnId, control.Frame, EP2PSend.k_EP2PSendReliable, true))
+                {
+                }
+                else
+                {
+                    lock (_connectionsLock)
+                        if (_disconnectDeadlines.TryGetValue(control.ConnId, out var deadline)
+                            && Time.realtimeSinceStartupAsDouble < deadline)
+                            _controlOutbox.Enqueue(control);
+                }
+            }
+
+            // ---- transient lane: drained fully every frame, after control traffic,
             // so a clogged bulk transfer can never delay position updates. States replace
             // themselves (PlayerState/NpcState), so when several frames for the same
             // (conn, MsgType) are queued only the newest is worth sending. A refused send
@@ -309,6 +644,11 @@ namespace CardShopCoop.Net
             _newestTransient.Clear();
             while (_transientOutbox.TryDequeue(out var tr))
             {
+                AccountTransient(-tr.Frame.Length);
+                // Once a close is claimed, position/state updates are useless and can otherwise
+                // consume the whole pump while the disconnect deadline is waiting.
+                if (IsPending(tr.ConnId))
+                    continue;
                 if (!Msg.TryGetType(tr.Frame, out MsgType transientType))
                     continue; // malformed outbound data must not affect lane scheduling
                 byte msgType = (byte)transientType;
@@ -334,10 +674,7 @@ namespace CardShopCoop.Net
                 var t = _transientScratch[i];
                 if (t.Frame == null)
                     continue;
-                if (!_peers.TryGetValue(t.ConnId, out var tsid))
-                    continue; // peer gone
-                if (!SteamNetworking.SendP2PPacket(tsid, t.Frame, (uint)t.Frame.Length,
-                        EP2PSend.k_EP2PSendUnreliableNoDelay, Channel))
+                if (!SendPacket(t.ConnId, t.Frame, EP2PSend.k_EP2PSendUnreliableNoDelay, false))
                 {
                     double now = Time.realtimeSinceStartupAsDouble;
                     if (now - _lastTransientRefusedLog >= 10.0)
@@ -349,12 +686,33 @@ namespace CardShopCoop.Net
             }
             _transientScratch.Clear();
 
+            // Expiry is checked only after the control lane has had its attempt. This is also
+            // important when the reliable lane is stalled: a disconnect is never hidden behind
+            // a bulk frame or removed before its dedicated control packet is considered.
+            var pendingDisconnects = PendingDisconnects();
+            if (pendingDisconnects.Count > 0)
+            {
+                double nowDisconnect = Time.realtimeSinceStartupAsDouble;
+                foreach (var pending in pendingDisconnects)
+                    if (IsDisconnectExpired(pending.Key, nowDisconnect))
+                        CompleteDisconnect(pending.Key, pending.Value);
+            }
+
             // ---- reliable lane (byte-budgeted per frame; a refused frame stalls until
             // Steam accepts it). Plain Reliable (NOT WithBuffering, which adds ~200ms).
             int budget = 1024 * 1024;
             while (budget > 0)
             {
+                pendingDisconnects = PendingDisconnects();
+                if (pendingDisconnects.Count > 0)
+                {
+                    double deadlineNow = Time.realtimeSinceStartupAsDouble;
+                    foreach (var pending in pendingDisconnects)
+                        if (IsDisconnectExpired(pending.Key, deadlineNow))
+                            CompleteDisconnect(pending.Key, pending.Value);
+                }
                 Outgoing entry;
+                bool retryingStalled = _stalled.HasValue;
                 if (_stalled.HasValue)
                 {
                     entry = _stalled.Value;
@@ -363,13 +721,14 @@ namespace CardShopCoop.Net
                 else if (!_reliableOutbox.TryDequeue(out entry))
                     break;
 
-                if (!_peers.TryGetValue(entry.ConnId, out var sid))
+                if (!retryingStalled)
+                    AccountReliable(entry);
+                if (IsPending(entry.ConnId))
                 {
                     _stallRetries = 0;
                     continue;
                 } // peer gone
-                if (!SteamNetworking.SendP2PPacket(sid, entry.Frame, (uint)entry.Frame.Length,
-                        EP2PSend.k_EP2PSendReliable, Channel))
+                if (!SendPacket(entry.ConnId, entry.Frame, EP2PSend.k_EP2PSendReliable, false))
                 {
                     // Steam refused it. Transient backpressure clears in a frame or two, but a
                     // frame Steam will NEVER accept (e.g. one that exceeds its ~1MB reliable
@@ -391,16 +750,20 @@ namespace CardShopCoop.Net
 
             // ---- keepalive ----
             _keepaliveTimer += Time.unscaledDeltaTime;
-            if (_keepaliveTimer >= 2f && KeepaliveMessage != null && _peers.Count > 0)
+            if (!_stopping && _keepaliveTimer >= 2f && KeepaliveMessage != null && ConnectionCount > 0)
             {
                 _keepaliveTimer = 0f;
                 var frame = NetMessageCodec.Encode(KeepaliveMessage);
-                foreach (var kv in _peers)
-                    SteamNetworking.SendP2PPacket(kv.Value, frame, (uint)frame.Length,
-                        EP2PSend.k_EP2PSendReliable, Channel);
+                foreach (int id in PeerIds())
+                    SendPacket(id, frame, EP2PSend.k_EP2PSendReliable, false);
             }
 
             // ---- receives ----
+            if (_stopping)
+            {
+                ExpireReassembly();
+                return;
+            }
             // Bound the receive/decode work per pump. Steam hands us every queued packet at
             // once, and each decode is a JSON deserialize, so without a cap a burst lands in
             // one frame and hitches gameplay (observed net-pump spikes up to 33 ms). Packets
@@ -412,8 +775,27 @@ namespace CardShopCoop.Net
             int inboundBudget = MaxInboundFramesPerPump;
             while (inboundBudget > 0 && SteamNetworking.IsP2PPacketAvailable(out uint size, Channel))
             {
+                // Never trust a peer-controlled size for an allocation.  A packet larger
+                // than the protocol hard cap is malformed; read it into the bounded scratch
+                // buffer when Steam permits that, then terminate the offending peer.
+                if (size > Msg.MaxFrameSize)
+                {
+                    CoopPlugin.Log.LogWarning("steam: discarding oversized raw packet (" + size + " bytes)");
+                    if (!SteamNetworking.ReadP2PPacket(_readBuf, (uint)_readBuf.Length,
+                        out _, out CSteamID oversizedRemote, Channel))
+                        break;
+                    Connection oversizedConnection = null;
+                    lock (_connectionsLock)
+                        if (_ids.TryGetValue(oversizedRemote, out int oversizedId))
+                            _connections.TryGetValue(oversizedId, out oversizedConnection);
+                    if (oversizedConnection != null)
+                        GracefulDisconnect(oversizedConnection,
+                            new DisconnectInfo("oversized packet", true, "frame_too_large", false));
+                    inboundBudget--;
+                    continue;
+                }
                 if (size > _readBuf.Length)
-                    _readBuf = new byte[size];
+                    _readBuf = new byte[(int)size];
                 if (!SteamNetworking.ReadP2PPacket(_readBuf, (uint)_readBuf.Length, out uint msgSize, out CSteamID remote, Channel))
                     break;
                 // Count every successful read, malformed and unknown frames included, so
@@ -422,7 +804,10 @@ namespace CardShopCoop.Net
                 if (msgSize < Msg.MinimumFrameSize)
                     continue;
 
-                if (!_ids.TryGetValue(remote, out int cid))
+                int cid;
+                lock (_connectionsLock)
+                    _ids.TryGetValue(remote, out cid);
+                if (cid == 0)
                 {
                     // packet can beat the session callback on the host side
                     if (_isHost && LobbyId != CSteamID.Nil && IsLobbyMember(remote))
@@ -430,7 +815,9 @@ namespace CardShopCoop.Net
                     else
                         continue;
                 }
-                _lastRecv[cid] = Time.realtimeSinceStartupAsDouble;
+                lock (_connectionsLock)
+                    if (_lastRecv.ContainsKey(cid))
+                        _lastRecv[cid] = Time.realtimeSinceStartupAsDouble;
 
                 // A chunk envelope is recognised by its negative magic; a normal frame's
                 // leading length is always positive. Reassemble before protocol decoding.
@@ -440,9 +827,14 @@ namespace CardShopCoop.Net
                     continue;
                 }
 
-                if (Msg.TryDecodeFrame(_readBuf, 0, (int)msgSize, cid,
+                if (TryGetConnection(cid, out var connection)
+                    && Msg.TryDecodeFrame(_readBuf, 0, (int)msgSize, connection,
                     Msg.MaxFrameSize, out var message))
-                    Incoming.Enqueue(message);
+                {
+                    if (RecordRemoteDisconnect(connection, message))
+                        CompleteDisconnect(connection.Id, connection.DisconnectReason);
+                    EnqueueIncoming(message);
+                }
             }
             ExpireReassembly();
         }
@@ -515,8 +907,13 @@ namespace CardShopCoop.Net
             var full = new byte[r.TotalLength];
             for (int i = 0; i < r.Chunks.Length; i++)
                 Buffer.BlockCopy(r.Chunks[i], 0, full, i * ChunkPayloadBytes, r.Chunks[i].Length);
-            if (Msg.TryDecodeFrame(full, 0, full.Length, connId, Msg.MaxFrameSize, out var message))
-                Incoming.Enqueue(message);
+            if (TryGetConnection(connId, out var connection)
+                && Msg.TryDecodeFrame(full, 0, full.Length, connection, Msg.MaxFrameSize, out var message))
+            {
+                if (RecordRemoteDisconnect(connection, message))
+                    CompleteDisconnect(connection.Id, connection.DisconnectReason);
+                EnqueueIncoming(message);
+            }
             else
                 WarnChunk("reassembled frame failed to decode", connId, transferId);
         }
@@ -551,53 +948,318 @@ namespace CardShopCoop.Net
             }
         }
 
-        public int ConnectionCount => _peers.Count;
+        public int ConnectionCount
+        {
+            get
+            {
+                lock (_connectionsLock)
+                    return _peers.Count;
+            }
+        }
+
+        private static bool IsInboundControl(MsgType type)
+        {
+            return type == MsgType.Disconnect || type == MsgType.Hello || type == MsgType.Welcome
+                || type == MsgType.FullyJoined || type == MsgType.FullyJoinedAck
+                || type == MsgType.SaveDone || type == MsgType.BundleDone;
+        }
+
+        private static bool IsTerminalFrame(MsgType type)
+        {
+            return type == MsgType.Disconnect || type == MsgType.Bye;
+        }
+
+        private static bool IsInboundDroppableTransient(MsgType type)
+        {
+            return type == MsgType.PlayerState || type == MsgType.NpcState
+                || type == MsgType.RelayState || type == MsgType.MovePreview
+                || type == MsgType.BoxMotionState;
+        }
+
+        private static bool RecordRemoteDisconnect(Connection connection, InMsg message)
+        {
+            if (message.Message is DisconnectMessage disconnect)
+            {
+                ConnectionState phase = Enum.IsDefined(typeof(ConnectionState), disconnect.Phase)
+                    ? (ConnectionState)disconnect.Phase
+                    : ConnectionState.Disconnecting;
+                return connection.RecordRemoteDisconnect(new DisconnectInfo(disconnect.Reason, true,
+                    disconnect.Code, disconnect.Retryable, phase));
+            }
+            return false;
+        }
+
+        private void EnqueueIncoming(InMsg message)
+        {
+            int count = Incoming.Count;
+            bool control = IsInboundControl(message.Type);
+            bool terminal = IsTerminalFrame(message.Type);
+            if (terminal && !_terminalQueued.Add(message.Connection.Id))
+                return;
+            // Keep the terminal reserve unavailable to ordinary controls.  Counting the
+            // bounded queue here avoids per-message bookkeeping that could drift when the
+            // main thread drains it, while still enforcing a hard peer quota.
+            var queued = Incoming.ToArray();
+            int peerCount = 0;
+            int controlCount = 0;
+            for (int i = 0; i < queued.Length; i++)
+            {
+                if (queued[i].Connection.Id == message.Connection.Id)
+                    peerCount++;
+                if (IsInboundControl(queued[i].Type))
+                    controlCount++;
+            }
+            if (!terminal && (peerCount >= MaxInboundFramesPerPeer
+                || (control && controlCount >= MaxInboundControlFrames)))
+            {
+                if (!control && TryGetConnection(message.Connection.Id, out var overLimit))
+                    GracefulDisconnect(overLimit,
+                        new DisconnectInfo("decoded inbound peer queue full", false, "queue_full", true));
+                return;
+            }
+            int limit = control ? MaxInboundDecodedFrames - ReservedInboundTerminalFrames
+                : MaxInboundDecodedFrames - ReservedInboundControlFrames;
+            // Terminal reasons have a reserved lane.  The transport has already
+            // atomically claimed the peer for Disconnect, and Bye is handled once;
+            // admitting this one frame is bounded and cannot be displaced by state spam.
+            if (count >= limit && !terminal)
+            {
+                if (!_inboundOverflowWarned)
+                {
+                    _inboundOverflowWarned = true;
+                    CoopPlugin.Log.LogWarning($"steam: decoded inbound queue cap reached ({MaxInboundDecodedFrames}); dropping {(control ? "control" : "non-control")} frame");
+                }
+                // A decoded transient is replaceable and will be reasserted by the
+                // normal state sweep.  Reliable transfer admission is atomic at the
+                // outbound boundary; never silently fabricate a partial inbound
+                // transfer.  For a non-transient reliable message, tear down rather
+                // than acknowledging a frame that the application never sees.
+                if (!control && !IsInboundDroppableTransient(message.Type)
+                    && TryGetConnection(message.Connection.Id, out var connection))
+                    GracefulDisconnect(connection,
+                        new DisconnectInfo("decoded inbound queue full", false, "queue_full", true));
+                return;
+            }
+            Incoming.Enqueue(message);
+        }
 
         // Leak diagnostics: point-in-time backlog snapshots (approximate; ConcurrentQueue).
         internal int ReassemblyCount => _reassembly.Count;
         internal int ReliableOutboxCount => _reliableOutbox.Count;
         internal int TransientOutboxCount => _transientOutbox.Count;
 
-        public double SecondsSinceLastRecv(int connId)
+        public double SecondsSinceLastRecv(Connection connection)
         {
-            return _lastRecv.TryGetValue(connId, out double t)
-                ? Time.realtimeSinceStartupAsDouble - t
-                : double.MaxValue;
+            if (connection == null)
+                return double.MaxValue;
+            int connId = connection.Id;
+            lock (_connectionsLock)
+            {
+                if (!_connections.TryGetValue(connId, out var current) || !ReferenceEquals(current, connection))
+                    return double.MaxValue;
+                return _lastRecv.TryGetValue(connId, out double t)
+                    ? Time.realtimeSinceStartupAsDouble - t
+                    : double.MaxValue;
+            }
         }
 
         /// <summary>Returns a snapshot that is never mutated (callers Kick mid-iteration);
         /// membership changes swap in a fresh list instead of touching the old one.</summary>
-        public List<int> ConnIds()
+        public IReadOnlyList<Connection> ConnectionList
         {
-            return _connIdsCache ?? (_connIdsCache = new List<int>(_peers.Keys));
+            get
+            {
+                return Connections;
+            }
         }
 
-        public void Kick(int connId)
+        public void Kick(Connection connection, DisconnectInfo info = null)
         {
-            if (!_peers.TryGetValue(connId, out var sid))
+            GracefulDisconnect(connection, info);
+        }
+
+        public void GracefulDisconnect(Connection connection, DisconnectInfo info = null)
+        {
+            if (connection == null)
+                return;
+            int connId = connection.Id;
+            lock (_connectionsLock)
+                if (!_connections.TryGetValue(connId, out var current) || !ReferenceEquals(current, connection)
+                    || !_peers.ContainsKey(connId))
+                    return;
+            var disconnect = info ?? new DisconnectInfo("connection closed");
+            bool claimed = connection.BeginDisconnect(disconnect);
+            if (!claimed)
+            {
+                if (connection.State != ConnectionState.Disconnecting)
+                    return;
+                disconnect = connection.DisconnectReason ?? disconnect;
+            }
+            lock (_connectionsLock)
+                Monitor.PulseAll(_connectionsLock);
+            if (!claimed)
+                return;
+
+            var packet = NetMessageCodec.Encode(new DisconnectMessage
+            {
+                Code = disconnect.Code,
+                Reason = disconnect.Reason,
+                Retryable = disconnect.Retryable,
+                Phase = (int)disconnect.Phase
+            });
+            // Do not call Steamworks here: this method is also called by queue workers.
+            // Terminal ownership is already claimed, preventing any later normal admission.
+            Action populate = () =>
+            {
+                lock (_connectionsLock)
+                {
+                    if (!_connections.TryGetValue(connId, out var current)
+                        || !ReferenceEquals(current, connection))
+                        return;
+                    _pendingDisconnects[connId] = disconnect;
+                    _disconnectDeadlines[connId] = Time.realtimeSinceStartupAsDouble
+                        + DisconnectGraceSeconds;
+                    if (!disconnect.Remote && _peers.ContainsKey(connId))
+                        _controlOutbox.Enqueue(new Outgoing { ConnId = connId, Frame = packet });
+                }
+            };
+            if (Thread.CurrentThread.ManagedThreadId == _mainThreadId)
+                populate();
+            else
+                _mainThreadActions.Enqueue(populate);
+        }
+
+        private void CompleteDisconnect(int connId, DisconnectInfo disconnect)
+        {
+            if (!TryGetPeer(connId, out var sid))
+                return;
+            if (!TryGetConnection(connId, out var connection))
+                return;
+            // The terminal claim is the event de-duplication gate.  It must happen before
+            // touching Steam or removing maps so every teardown route has exactly one event.
+            if (!connection.TryMarkDisconnected())
                 return;
             SteamNetworking.CloseP2PSessionWithUser(sid);
-            _peers.Remove(connId);
-            _ids.Remove(sid);
-            _connIdsCache = null;
-            _lastRecv.Remove(connId);
+            lock (_connectionsLock)
+            {
+                _peers.Remove(connId);
+                _ids.Remove(sid);
+                _lastRecv.Remove(connId);
+                _reliableFramesByPeer.Remove(connId);
+                _reliableBytesByPeer.Remove(connId);
+                _atomicBytesByPeer.Remove(connId);
+                _terminalQueued.Remove(connId);
+                _pendingDisconnects.Remove(connId);
+                _disconnectDeadlines.Remove(connId);
+                _connections.Remove(connId);
+            }
             _reassembly.Remove(connId);
             _transferHigh.Remove(connId);
-            Disconnects.Enqueue(connId);
+            // BeginDisconnect atomically captured the first reason. Never publish a second
+            // terminal event if a transport callback races the shutdown sweep.
+            Disconnects.Enqueue(new ConnectionEvent(connection, connection.DisconnectReason ?? disconnect));
+        }
+
+        private bool IsDisconnectExpired(int connId, double now)
+        {
+            lock (_connectionsLock)
+                return _disconnectDeadlines.TryGetValue(connId, out double deadline) && deadline <= now;
         }
 
         public void Stop()
         {
-            if (_stopped)
+            // Steamworks is main-thread-only.  A worker may request teardown, but must not
+            // remove peers or call Steam while the Unity thread is pumping the transport.
+            if (Thread.CurrentThread.ManagedThreadId != _mainThreadId)
+            {
+                // Do not let a worker-owned Dispose abandon the Steam transport.  The
+                // owner remains alive until the main-thread action runs; waiting briefly
+                // also makes the Stop contract honest for callers that need teardown to
+                // be complete before releasing their owner.
+                if (Interlocked.Exchange(ref _stopRequestQueued, 1) != 0)
+                    return;
+                var completed = new ManualResetEventSlim(false);
+                _mainThreadActions.Enqueue(() =>
+                {
+                    try
+                    {
+                        Stop();
+                    }
+                    finally
+                    {
+                        Volatile.Write(ref _stopRequestQueued, 0);
+                        completed.Set();
+                    }
+                });
+                bool finished = completed.Wait(5000);
+                completed.Dispose();
+                if (!finished)
+                    CoopPlugin.Log.LogWarning("steam: worker Stop is waiting for the main-thread pump; transport remains owned and active");
                 return;
+            }
+            if (_stopped || _stopping)
+                return;
+            // Publish this before PumpMainThread and before any Steam callback can add a peer.
+            _stopping = true;
+            lock (_connectionsLock)
+                _generation++;
+            List<Connection> connections;
+            lock (_connectionsLock)
+                connections = new List<Connection>(_connections.Values);
+            foreach (var connection in connections)
+                GracefulDisconnect(connection, new DisconnectInfo("transport stopped", false, "shutdown", true));
+            // GracefulDisconnect populated the control lane synchronously on this thread.
+            // Drain it before identities are removed, so shutdown actually gets one bounded
+            // terminal attempt instead of enqueueing a frame and immediately deleting peers.
+            int controlBudget = MaxControlFramesPerPump;
+            while (controlBudget-- > 0 && _controlOutbox.TryDequeue(out var control))
+                SendPacket(control.ConnId, control.Frame, EP2PSend.k_EP2PSendReliable, true);
+
+            // Complete every peer explicitly after the control attempt.
+            foreach (int peerId in PeerIds())
+            {
+                if (TryGetConnection(peerId, out var connection))
+                {
+                    if (connection.State != ConnectionState.Disconnecting
+                        && connection.State != ConnectionState.Disconnected)
+                        connection.BeginDisconnect(new DisconnectInfo("transport stopped", false, "shutdown", true));
+                    CompleteDisconnect(peerId, connection.DisconnectReason
+                        ?? new DisconnectInfo("transport stopped", false, "shutdown", true));
+                }
+            }
             _stopped = true;
-            foreach (var kv in _peers)
-                SteamNetworking.CloseP2PSessionWithUser(kv.Value);
-            _peers.Clear();
-            _ids.Clear();
-            _connIdsCache = null;
+            lock (_connectionsLock)
+            {
+                foreach (var kv in _peers)
+                    SteamNetworking.CloseP2PSessionWithUser(kv.Value);
+                _peers.Clear();
+                _ids.Clear();
+                _pendingDisconnects.Clear();
+                _disconnectDeadlines.Clear();
+                _reliableFramesByPeer.Clear();
+                _reliableBytesByPeer.Clear();
+                _lastRecv.Clear();
+            }
+            lock (_connectionsLock)
+                _connections.Clear();
             _reassembly.Clear();
             _transferHigh.Clear();
+            _terminalQueued.Clear();
+            while (_controlOutbox.TryDequeue(out _))
+            {
+            }
+            while (_transientOutbox.TryDequeue(out _))
+            {
+            }
+            while (_reliableOutbox.TryDequeue(out _))
+            {
+            }
+            _stalled = null;
+            _reliableFrames = 0;
+            _reliableBytes = 0;
+            _atomicBytes = 0;
+            _transientFrames = 0;
+            _transientBytes = 0;
             if (LobbyId != CSteamID.Nil)
             {
                 try
@@ -626,19 +1288,24 @@ namespace CardShopCoop.Net
     /// </summary>
     public class SteamLobby
     {
-        private Callback<LobbyCreated_t> _cbCreated;
+        private CallResult<LobbyCreated_t> _createLobby;
         private Callback<LobbyEnter_t> _cbEnter;
         private Callback<GameLobbyJoinRequested_t> _cbJoinRequested;
         private CallResult<LobbyMatchList_t> _lobbyList;
 
         public CSteamID LobbyId = CSteamID.Nil;
         private bool _joining;
+        private CSteamID _pendingLobbyId = CSteamID.Nil;
+        private long _operationGeneration;
+        private long _pendingOperationGeneration;
+        private long _listOperationGeneration;
         private bool _pendingPublic;
         private string _pendingName = "";
         private bool _pendingHasPw;
 
         public Action<CSteamID> OnLobbyCreated;   // host: lobby is live
         public Action<CSteamID> OnEnteredLobby;   // client: joined; arg = lobby owner
+        public Action<CSteamID, long, string> OnJoinFailed;
         public Action<CSteamID> OnInviteAccepted; // local player accepted someone's invite
         public Action<string> OnError;
         public Action OnListUpdated;
@@ -661,26 +1328,10 @@ namespace CardShopCoop.Net
 
         public void Init()
         {
-            _cbCreated = Callback<LobbyCreated_t>.Create(e =>
-            {
-                if (e.m_eResult != EResult.k_EResultOK)
-                {
-                    OnError?.Invoke("Steam lobby creation failed: " + e.m_eResult);
-                    return;
-                }
-                LobbyId = new CSteamID(e.m_ulSteamIDLobby);
-                SteamMatchmaking.SetLobbyData(LobbyId, "coopmod", "communitymultiplayer");
-                SteamMatchmaking.SetLobbyData(LobbyId, "coopver", CoopPlugin.Version);
-                string ownerName = CoopCore.Instance == null
-                    ? CoopPlugin.PlayerName.Value
-                    : CoopCore.Instance.EffectivePlayerName;
-                SteamMatchmaking.SetLobbyData(LobbyId, "name",
-                    string.IsNullOrEmpty(_pendingName) ? (ownerName + "'s shop") : _pendingName);
-                SteamMatchmaking.SetLobbyData(LobbyId, "pw", _pendingHasPw ? "1" : "0");
-                OnLobbyCreated?.Invoke(LobbyId);
-            });
             _lobbyList = CallResult<LobbyMatchList_t>.Create((e, ioFail) =>
             {
+                if (_listOperationGeneration == 0 || _listOperationGeneration != _operationGeneration)
+                    return; // stale list result must not clear or publish a newer operation
                 ListRefreshing = false;
                 Lobbies.Clear();
                 if (ioFail)
@@ -707,10 +1358,23 @@ namespace CardShopCoop.Net
             });
             _cbEnter = Callback<LobbyEnter_t>.Create(e =>
             {
-                if (!_joining)
+                CSteamID enteredLobby = new CSteamID(e.m_ulSteamIDLobby);
+                if (!IsCurrentJoin(enteredLobby, out long operation))
                     return; // our own host-side enter
+
+                // LobbyEnter is also delivered for rejected joins.  Do not expose a
+                // rejected lobby to the bridge: that would start P2P and send Hello as
+                // though the join had succeeded.  Re-check the token in the failure
+                // path so an old callback cannot tear down a newer join.
+                if (e.m_EChatRoomEnterResponse != 1u) // EChatRoomEnterResponseSuccess
+                {
+                    FailJoin(operation, enteredLobby, e.m_EChatRoomEnterResponse);
+                    return;
+                }
                 _joining = false;
-                LobbyId = new CSteamID(e.m_ulSteamIDLobby);
+                _pendingLobbyId = CSteamID.Nil;
+                _pendingOperationGeneration = 0;
+                LobbyId = enteredLobby;
                 var owner = SteamMatchmaking.GetLobbyOwner(LobbyId);
                 OnEnteredLobby?.Invoke(owner);
             });
@@ -729,13 +1393,46 @@ namespace CardShopCoop.Net
             catch (System.Exception e) { Swallow.Log(e); return false; }
         }
 
-        public void Host(bool isPublic, string lobbyName, bool hasPassword)
+        public void Host(bool isPublic, string lobbyName, bool hasPassword, int maxPlayers)
         {
+            if (maxPlayers < SteamLobbyLimits.MinPlayers || maxPlayers > SteamLobbyLimits.MaxPlayers)
+                throw new ArgumentOutOfRangeException(nameof(maxPlayers), maxPlayers,
+                    "Steam lobby player count must be between 2 and 250.");
+            AbortPendingOperation();
             _pendingPublic = isPublic;
             _pendingName = lobbyName ?? "";
             _pendingHasPw = hasPassword;
-            SteamMatchmaking.CreateLobby(
-                isPublic ? ELobbyType.k_ELobbyTypePublic : ELobbyType.k_ELobbyTypeFriendsOnly, 4);
+            long operation = ++_operationGeneration;
+            _pendingOperationGeneration = operation;
+            // CreateLobby is asynchronous. A process-wide Callback<LobbyCreated_t> cannot
+            // identify which request produced a result, so bind this CallResult to this
+            // exact SteamAPICall and also retain the immutable operation token.
+            string name = _pendingName;
+            bool password = _pendingHasPw;
+            string ownerName = CoopCore.Instance == null
+                ? CoopPlugin.PlayerName.Value
+                : CoopCore.Instance.EffectivePlayerName;
+            _createLobby = CallResult<LobbyCreated_t>.Create((e, ioFail) =>
+            {
+                if (operation != _operationGeneration || _pendingOperationGeneration != operation || _joining)
+                    return; // result from an abandoned CreateLobby operation
+                _createLobby = null;
+                if (ioFail || e.m_eResult != EResult.k_EResultOK)
+                {
+                    OnError?.Invoke("Steam lobby creation failed: " + e.m_eResult);
+                    return;
+                }
+                LobbyId = new CSteamID(e.m_ulSteamIDLobby);
+                SteamMatchmaking.SetLobbyData(LobbyId, "coopmod", "communitymultiplayer");
+                SteamMatchmaking.SetLobbyData(LobbyId, "coopver", CoopPlugin.Version);
+                SteamMatchmaking.SetLobbyData(LobbyId, "name",
+                    string.IsNullOrEmpty(name) ? (ownerName + "'s shop") : name);
+                SteamMatchmaking.SetLobbyData(LobbyId, "pw", password ? "1" : "0");
+                OnLobbyCreated?.Invoke(LobbyId);
+            });
+            var call = SteamMatchmaking.CreateLobby(
+                isPublic ? ELobbyType.k_ELobbyTypePublic : ELobbyType.k_ELobbyTypeFriendsOnly, maxPlayers);
+            _createLobby.Set(call);
         }
 
         /// <summary>Fetch public lobbies of THIS mod (server-side filtered by our key).</summary>
@@ -744,6 +1441,7 @@ namespace CardShopCoop.Net
             if (ListRefreshing)
                 return;
             ListRefreshing = true;
+            _listOperationGeneration = ++_operationGeneration;
             SteamMatchmaking.AddRequestLobbyListStringFilter("coopmod", "communitymultiplayer", ELobbyComparison.k_ELobbyComparisonEqual);
             SteamMatchmaking.AddRequestLobbyListResultCountFilter(100);
             SteamMatchmaking.AddRequestLobbyListDistanceFilter(ELobbyDistanceFilter.k_ELobbyDistanceFilterWorldwide);
@@ -751,10 +1449,14 @@ namespace CardShopCoop.Net
             _lobbyList.Set(call);
         }
 
-        public void Join(CSteamID lobby)
+        public long Join(CSteamID lobby)
         {
+            AbortPendingOperation();
             _joining = true;
+            _pendingLobbyId = lobby;
+            _pendingOperationGeneration = ++_operationGeneration;
             SteamMatchmaking.JoinLobby(lobby);
+            return _pendingOperationGeneration;
         }
 
         public void OpenInviteDialog()
@@ -765,6 +1467,71 @@ namespace CardShopCoop.Net
 
         public void Leave()
         {
+            AbortPendingOperation();
+        }
+
+        private bool IsCurrentJoin(CSteamID lobby, out long operation)
+        {
+            operation = _pendingOperationGeneration;
+            return _joining && operation != 0 && operation == _operationGeneration
+                && (_pendingLobbyId == CSteamID.Nil || _pendingLobbyId == lobby);
+        }
+
+        private void FailJoin(long operation, CSteamID lobby, uint response)
+        {
+            if (!_joining || operation == 0 || operation != _operationGeneration
+                || _pendingOperationGeneration != operation || _pendingLobbyId != lobby)
+                return;
+
+            CoopPlugin.Log.LogWarning("Steam lobby join rejected (" + DescribeJoinFailure(response) + ").");
+            _joining = false;
+            _pendingLobbyId = CSteamID.Nil;
+            _pendingOperationGeneration = 0;
+            ++_operationGeneration;
+
+            // Steam can report an enter response after creating a local lobby
+            // membership.  Always leave that exact lobby, but never touch a newer
+            // operation's LobbyId.
+            try
+            {
+                SteamMatchmaking.LeaveLobby(lobby);
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
+            if (LobbyId == lobby)
+                LobbyId = CSteamID.Nil;
+            OnJoinFailed?.Invoke(lobby, operation,
+                "Unable to join Steam lobby: " + DescribeJoinFailure(response) + ".");
+        }
+
+        private static string DescribeJoinFailure(uint response)
+        {
+            switch (response)
+            {
+                case 2u:
+                    return "the lobby no longer exists";
+                case 3u:
+                    return "you are not allowed to join this lobby";
+                case 4u:
+                    return "the lobby is full";
+                case 6u:
+                    return "you are banned from this lobby";
+                case 7u:
+                    return "the lobby is temporarily unavailable";
+                default:
+                    return "Steam rejected the join (response " + response + ")";
+            }
+        }
+
+        private void AbortPendingOperation()
+        {
+            ++_operationGeneration;
+            _createLobby?.Dispose();
+            _createLobby = null;
+            _pendingOperationGeneration = 0;
+            _listOperationGeneration = 0;
+            ListRefreshing = false;
+            _joining = false;
+            _pendingLobbyId = CSteamID.Nil;
             if (LobbyId != CSteamID.Nil)
             {
                 try
@@ -774,7 +1541,6 @@ namespace CardShopCoop.Net
                 catch (System.Exception e) { Swallow.Log(e); }
                 LobbyId = CSteamID.Nil;
             }
-            _joining = false;
         }
     }
 
@@ -895,11 +1661,17 @@ namespace CardShopCoop.Net
         {
             get; set;
         }
+        public Action<ulong, long, ICoopTransport, string> OnJoinFailed
+        {
+            get; set;
+        }
 
         public void Init()
         {
             _lobby.Init();
             _lobby.OnError = e => OnError?.Invoke(e);
+            _lobby.OnJoinFailed = (lobby, operation, error) =>
+                OnJoinFailed?.Invoke(lobby.m_SteamID, operation, _tx, error);
             _lobby.OnLobbyCreated = id =>
             {
                 // Host side. The transport is always created BEFORE Host() is called
@@ -980,14 +1752,14 @@ namespace CardShopCoop.Net
             return _tx;
         }
 
-        public void Host(bool isPublic, string lobbyName, bool hasPassword)
+        public void Host(bool isPublic, string lobbyName, bool hasPassword, int maxPlayers)
         {
-            _lobby.Host(isPublic, lobbyName, hasPassword);
+            _lobby.Host(isPublic, lobbyName, hasPassword, maxPlayers);
         }
 
-        public void Join(ulong lobbyId)
+        public long Join(ulong lobbyId)
         {
-            _lobby.Join(new CSteamID(lobbyId));
+            return _lobby.Join(new CSteamID(lobbyId));
         }
 
         public void Leave()

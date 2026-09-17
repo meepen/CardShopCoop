@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
+using CardShopCoop.Util;
 
 namespace CardShopCoop.Net
 {
@@ -57,7 +58,7 @@ namespace CardShopCoop.Net
         GradingState = 57,     // host -> client: pending grading submissions
         TradeOp = 58,          // client -> host: joiner accepts/declines a counter trade/sell-in
         TradeState = 59,       // host -> client: live trade/sell-in offer at a counter
-        TableState = 60,       // host -> client: play-table card layout digest (visuals)
+        TableState = 60,       // host -> client: play-table snapshot/slice/reset (epoch+revision)
         EnumSync = 63,         // host -> client: the host's enum_values.json (card-ID registry)
         Toast = 64,            // host -> client: one-line on-screen notice
         CatalogDigest = 65,    // client -> host: restock catalog identities (mismatch diagnosis)
@@ -101,13 +102,21 @@ namespace CardShopCoop.Net
         WarehouseOp = 103,    // client -> host: store/take a warehouse box record (game 1.0+)
         WarehouseTakeResult = 104, // host -> requesting client: warehouse take outcome (game 1.0+)
         TutorialCredit = 105, // client -> host: a joiner's local tutorial task credit (host-authoritative)
+        // These IDs are the redesigned 1.4.0 play-table protocol. Keep the IDs: 1.4.0 is
+        // unreleased, so adding parallel compatibility messages would only create baggage.
+        PlayTableMatchRequest = 106, // client -> host: start/cancel/started + observed epoch/revision
+        PlayTableMatchState = 107,  // host -> clients: reservation snapshot/delta/reset
+        PlayTableMatchResult = 108, // client -> host: result + reservation epoch/revision
+        FullyJoined = 109,
+        FullyJoinedAck = 110,
+        Disconnect = 111,
     }
 
     /// <summary>One received message, already reassembled and decoded from the wire.
     /// Transports never expose stream fragments to callers.</summary>
     public struct InMsg
     {
-        public int ConnId;
+        public Connection Connection;
         public MsgType Type;
         public INetMessage Message;
         // Local-only dispatch bookkeeping; never serialized.
@@ -170,7 +179,7 @@ namespace CardShopCoop.Net
         /// frame and receive the same result, so neither transport knows about the
         /// message-type byte or payload layout.
         /// </summary>
-        public static bool TryDecodeFrame(byte[] frame, int offset, int count, int connId,
+        public static bool TryDecodeFrame(byte[] frame, int offset, int count, Connection connection,
             int maxFrame, out InMsg message)
         {
             message = default(InMsg);
@@ -189,7 +198,7 @@ namespace CardShopCoop.Net
 
             message = new InMsg
             {
-                ConnId = connId,
+                Connection = connection,
                 Type = (MsgType)frame[offset + FrameHeaderSize]
             };
             // Decode centrally. A malformed or unknown DTO is DROPPED (return false) so a
@@ -201,6 +210,7 @@ namespace CardShopCoop.Net
             // copied it into a new byte[] per frame, which was pure garbage on the hot
             // receive path. The frame is private to this loop and deserialization is
             // synchronous, so the slice cannot be mutated underneath Json.NET.
+            long perfStart = PerfProbe.StartThreadMetric();
             try
             {
                 message.Message = MessageRegistry.Deserialize(message.Type, frame, payloadOffset, payloadLength);
@@ -211,6 +221,10 @@ namespace CardShopCoop.Net
                 if (MessageRegistry.IsKnown(type))
                     LogDecodeWarning(type, $"discarding malformed {type} frame: {e.GetType().Name}: {e.Message}");
                 return false;
+            }
+            finally
+            {
+                PerfProbe.EndThreadMetric("net.decode.", message.Type, perfStart);
             }
             return true;
         }

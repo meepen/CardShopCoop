@@ -67,6 +67,9 @@ namespace CardShopCoop.Sync
         private static readonly FieldInfo FiCreditMachineOriginalPos = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_CreditCardMachineOriginalPos");
         private static readonly FieldInfo FiCreditMachineOriginalRot = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_CreditCardMachineOriginalRot");
         private static readonly FieldInfo FiCreditCardModel = ReflectionSurface.RequiredField(typeof(InteractableCashierCounter), "m_CreditCardModel");
+        // Read-only diagnostic: lets the teardown log say whether the number pad was actually
+        // open. Optional so a build whose UI_CreditCardScreen layout changed cannot break load.
+        private static readonly FieldInfo FiCreditCardMode = ReflectionSurface.OptionalField(typeof(UI_CreditCardScreen), "m_IsCreditCardMode");
         // ---- reflection: Customer privates ----
         private static readonly FieldInfo FiScannedCount = ReflectionSurface.RequiredField(typeof(Customer), "m_ItemScannedCount");
         private static readonly FieldInfo FiCustTotal = ReflectionSurface.RequiredField(typeof(Customer), "m_TotalScannedItemCost");
@@ -95,6 +98,14 @@ namespace CardShopCoop.Sync
         public static bool AllowClientCustomerLifecycle;
         public static bool SuppressClientRegisterEvents;
         public static bool ApplyingAuthoritativePayment;
+
+        // The true card-screen ("screen owner") home position, captured before a duplicate
+        // StartGivingChange overwrites the game's m_CreditCardMachineOriginalPos with the
+        // already-forward transform (see StartGivingChangePrefix).
+        private static Vector3 _cardHomeStashPos;
+        private static Quaternion _cardHomeStashRot;
+        private static int _cardHomeStashId;
+        private static bool _cardHomeStashed;
 
         public RegisterSync()
         {
@@ -200,6 +211,10 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, ushort> _cartCustomerIndex = new Dictionary<int, ushort>();
         private readonly Dictionary<int, int> _cartCustomerGeneration = new Dictionary<int, int>();
         private readonly Dictionary<int, string> _cartScanSignature = new Dictionary<int, string>();
+        // counter idx -> the character name last applied to its carrier. Lets a late-arriving
+        // authoritative name re-dress a carrier that was bound while the host's customization
+        // was still momentarily empty, instead of leaving the pooled default for the whole sale.
+        private readonly Dictionary<int, string> _cartCharacterName = new Dictionary<int, string>();
         private readonly Dictionary<int, int> _sourceIndex = new Dictionary<int, int>();    // counter idx -> served customer list index
         private readonly Dictionary<int, double> _authoritativeTotal = new Dictionary<int, double>();
         // counter idx -> change clicks this client sent that the host has not echoed back yet.
@@ -208,8 +223,22 @@ namespace CardShopCoop.Sync
         private readonly Dictionary<int, int> _pendingLocalChange = new Dictionary<int, int>();
         // counter idx -> change clicks that arrived before the cart opened GivingChange. They
         // are replayed once the counter enters the change phase, so catch-up is order-proof.
-        private readonly Dictionary<int, List<KeyValuePair<int, bool>>> _deferredChange =
-            new Dictionary<int, List<KeyValuePair<int, bool>>>();
+        private readonly Dictionary<int, List<DeferredChange>> _deferredChange =
+            new Dictionary<int, List<DeferredChange>>();
+
+        private readonly struct DeferredChange
+        {
+            public readonly double Value;
+            public readonly bool IsCoin;
+            public readonly bool TakingBack;
+
+            public DeferredChange(double value, bool isCoin, bool takingBack)
+            {
+                Value = value;
+                IsCoin = isCoin;
+                TakingBack = takingBack;
+            }
+        }
 
         public override void Reset()
         {
@@ -226,6 +255,7 @@ namespace CardShopCoop.Sync
             _cartCustomerIndex.Clear();
             _cartCustomerGeneration.Clear();
             _cartScanSignature.Clear();
+            _cartCharacterName.Clear();
             // _sourceIndex is cleared inside TeardownCarriers after it detaches each mirror.
             _authoritativeTotal.Clear();
             _pendingLocalChange.Clear();
@@ -258,8 +288,9 @@ namespace CardShopCoop.Sync
         /// cannot lose them. Nothing here is broadcast - existing clients already have the state.
         /// Bounded: only counters actually in the change phase, and m_GivenAmount is capped by
         /// vanilla, so the burst is normally a handful of clicks.</summary>
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null)
                 return;
             var sm = Sm();
@@ -323,6 +354,7 @@ namespace CardShopCoop.Sync
                             Op = OpGiveChangeCatchUp,
                             ChangeIndex = button.m_Index,
                             ChangeValue = button.m_ValueDouble,
+                            ChangeIsCoin = button.m_IsCoin,
                             TakingBack = false,
                         });
                         clicks++;
@@ -476,6 +508,9 @@ namespace CardShopCoop.Sync
                 postfix: new HarmonyMethod(typeof(RegisterSync), nameof(ManningEnterPostfix)));
             Try(h, typeof(InteractableCashierCounter), "OnPressEsc",
                 postfix: new HarmonyMethod(typeof(RegisterSync), nameof(ManningExitPostfix)));
+            Try(h, typeof(InteractableCashierCounter), "StartGivingChange",
+                prefix: new HarmonyMethod(typeof(RegisterSync), nameof(StartGivingChangePrefix)),
+                postfix: new HarmonyMethod(typeof(RegisterSync), nameof(StartGivingChangePostfix)));
             Try(h, typeof(InteractableCashierCounter), "NPCStartManCounter",
                 prefix: new HarmonyMethod(typeof(RegisterSync), nameof(WorkerGatePrefix)));
             Try(h, typeof(InteractableCashierCounter), "OnPressSpaceBar",
@@ -605,7 +640,7 @@ namespace CardShopCoop.Sync
             if (CoopCore.Role != CoopRole.Client)
                 return;
             t.ReleaseLocalClaim(idx);
-            CoopPlugin.Log.LogDebug($"RegisterSync client: left counter {idx}");
+            CoopPlugin.Log.LogInfo($"RegisterSync client: left counter {idx}");
         }
 
         /// <summary>Client: drop the local register claim and tell the host, exactly once.
@@ -620,6 +655,10 @@ namespace CardShopCoop.Sync
             _pendingLocalChange.Remove(idx);
             _deferredChange.Remove(idx);
             SendOp?.Invoke(new RegisterOpMessage { Index = (byte)idx, Op = OpExit });
+            // The player has left the station: release the card reader / number pad too. This is
+            // the path the stale-claim reconciler, the day rollover and the end-of-day report
+            // force-exit all take, and vanilla's OnPressEsc never touches the card presentation.
+            ClearCardPresentation(idx, "claim released");
             // Vanilla's OnExitCashCounterMode does not clear m_IsInUIMode, and the card payment
             // path sets it. A lingering UI mode blocks InteractionPlayerController.Update before
             // it reaches its phone-mode branch, so the phone could not be closed. Clear it.
@@ -649,9 +688,116 @@ namespace CardShopCoop.Sync
                 if (ipc == null || !(FiInUIMode?.GetValue(ipc) is bool inUi) || !inUi)
                     return;
                 ipc.ExitUIMode();
-                CoopPlugin.Log.LogDebug($"RegisterSync client: cleared lingering UI mode at counter {idx}");
+                CoopPlugin.Log.LogInfo($"RegisterSync client: cleared lingering UI mode at counter {idx}");
             }
             catch (System.Exception e) { Swallow.Log(e); }
+        }
+
+        /// <summary>Client: release a counter's card-payment presentation - the number-entry
+        /// credit screen and the moved card machine/card model. Idempotent and safe when no card
+        /// checkout is (or ever was) in progress. Vanilla restores these only inside
+        /// OnPressSpaceBar's card branch and only while m_IsUsingCard is still set, and its
+        /// day-start ForceResetCounter clears m_IsUsingCard without touching the visuals, so a
+        /// terminal path that does not run this can leave the card reader standing in front of
+        /// the player and the number pad open after the sale ended.</summary>
+        private static void ClearCardPresentation(int idx, string reason)
+        {
+            var t = _live;
+            if (t == null)
+                return;
+            var sm = t.Sm();
+            if (sm == null || sm.m_CashierCounterList == null
+                || idx < 0 || idx >= sm.m_CashierCounterList.Count)
+                return;
+            var counter = sm.m_CashierCounterList[idx];
+            if (counter == null)
+                return;
+            try
+            {
+                var credit = FiCreditScreen?.GetValue(counter) as UI_CreditCardScreen;
+                bool creditOpen = credit != null && FiCreditCardMode != null
+                    && FiCreditCardMode.GetValue(credit) is bool open && open;
+                if (credit != null)
+                    credit.ResetCounter();
+
+                // Restore from the baseline StartGivingChange recorded, even when m_IsUsingCard has
+                // already been cleared (the day-start reset does that before the visuals are put
+                // back). A zero baseline means the local player never manned a card checkout here,
+                // so the machine is left alone rather than teleported to the origin.
+                bool visualsUp = false;
+                if (FiCreditMachineOriginalPos?.GetValue(counter) is Vector3 original && original != Vector3.zero)
+                {
+                    var machine = FiCreditMachineModel?.GetValue(counter) as Transform;
+                    if (machine != null)
+                    {
+                        visualsUp = (machine.position - original).sqrMagnitude > 0.000001f;
+                        machine.position = original;
+                        machine.rotation = (Quaternion)FiCreditMachineOriginalRot.GetValue(counter);
+                    }
+                    var cardModel = FiCreditCardModel?.GetValue(counter) as GameObject;
+                    if (cardModel != null && cardModel.activeSelf)
+                    {
+                        visualsUp = true;
+                        cardModel.SetActive(false);
+                    }
+                    // Vanilla never invalidates this baseline after a sale. Leaving it set would
+                    // let a later terminal cleanup teleport a counter that has since been moved,
+                    // so consume it here; StartGivingChange records a fresh one per card sale.
+                    FiCreditMachineOriginalPos.SetValue(counter, Vector3.zero);
+                }
+                if (creditOpen || visualsUp)
+                    CoopPlugin.Log.LogInfo(
+                        $"RegisterSync client: cleared card presentation at counter {idx} ({reason}) screen={creditOpen} reader={visualsUp}");
+            }
+            catch (System.Exception e) { Swallow.Log(e); }
+        }
+
+        /// <summary>Client/host: the game records the card-screen home position inside
+        /// StartGivingChange every time it runs. A second run in the same card checkout (a stale
+        /// cart rewinding the client to TakingCash and the next GivingChange cart re-taking
+        /// payment, a re-man click, or a worker hand-off) records the ALREADY-FORWARD position as
+        /// "home", so the vanilla finish restores the screen to the camera and it stays there.
+        /// The prefix stashes the genuine home just before the body would overwrite it; the
+        /// postfix puts it back so every later restore (vanilla and the mod's) is correct.</summary>
+        public static void StartGivingChangePrefix(InteractableCashierCounter __instance)
+        {
+            _cardHomeStashed = false;
+            if (__instance == null)
+                return;
+            bool card = FiIsUsingCard?.GetValue(__instance) is bool c && c;
+            bool alreadyGivingChange = FiStartGivingChange?.GetValue(__instance) is bool g && g;
+            if (!card || !alreadyGivingChange || !__instance.IsMannedByPlayer())
+                return;
+            if (FiCreditMachineOriginalPos?.GetValue(__instance) is Vector3 home && home != Vector3.zero)
+            {
+                _cardHomeStashPos = home;
+                _cardHomeStashRot = (Quaternion)FiCreditMachineOriginalRot.GetValue(__instance);
+                _cardHomeStashId = __instance.GetInstanceID();
+                _cardHomeStashed = true;
+            }
+        }
+
+        public static void StartGivingChangePostfix(InteractableCashierCounter __instance)
+        {
+            if (!_cardHomeStashed || __instance == null || __instance.GetInstanceID() != _cardHomeStashId)
+                return;
+            _cardHomeStashed = false;
+            FiCreditMachineOriginalPos.SetValue(__instance, _cardHomeStashPos);
+            FiCreditMachineOriginalRot.SetValue(__instance, _cardHomeStashRot);
+            CoopPlugin.Log.LogInfo(
+                $"RegisterSync: preserved the card-screen home position across a duplicate accept at counter {CounterIndexOf(__instance)}");
+        }
+
+        /// <summary>Counter index in the shared ShelfManager list, or -1.</summary>
+        private static int CounterIndexOf(InteractableCashierCounter counter)
+        {
+            var t = _live;
+            if (t == null || counter == null)
+                return -1;
+            var sm = t.Sm();
+            if (sm == null || sm.m_CashierCounterList == null)
+                return -1;
+            return sm.m_CashierCounterList.IndexOf(counter);
         }
 
         /// <summary>Host: a worker must never serve a guest-claimed station.</summary>
@@ -691,7 +837,7 @@ namespace CardShopCoop.Sync
                 return true; // let vanilla show its wrong-amount popup
 
             double total = FiTotalScanned?.GetValue(__instance) is double d ? d : 0.0;
-            CoopPlugin.Log.LogDebug($"RegisterSync client: finish counter {idx} card={isCard}");
+            CoopPlugin.Log.LogInfo($"RegisterSync client: finishing counter {idx} card={isCard} total={total}");
             t.SendOp?.Invoke(new RegisterOpMessage
             {
                 Index = (byte)idx,
@@ -706,16 +852,40 @@ namespace CardShopCoop.Sync
             return true;
         }
 
-        public static void FinishPostfix()
+        public static void FinishPostfix(InteractableCashierCounter __instance)
         {
             SuppressClientRegisterEvents = false;
+            FinishCleanup(__instance);
         }
 
         /// <summary>Harmony finalizer: release the contribution gate even if vanilla
         /// OnPressSpaceBar throws, where a postfix would not run.</summary>
-        public static void FinishFinalizer()
+        public static void FinishFinalizer(InteractableCashierCounter __instance)
         {
             SuppressClientRegisterEvents = false;
+            FinishCleanup(__instance);
+        }
+
+        /// <summary>Client: after OnPressSpaceBar, guarantee no card presentation survives a
+        /// completed sale. Vanilla clears m_CurrentCustomer/sets Idle inside OnPayingDone, so a
+        /// null customer means the checkout really finished; its card branch then restores the
+        /// reader only while m_IsUsingCard is set, which a stale authoritative cart can clear.
+        /// A refused finish (customer still present) leaves the live number pad untouched.</summary>
+        private static void FinishCleanup(InteractableCashierCounter counter)
+        {
+            var t = _live;
+            if (t == null || CoopCore.Role != CoopRole.Client || counter == null)
+                return;
+            if (counter.m_CurrentCustomer != null)
+                return;
+            var sm = t.Sm();
+            if (sm == null || sm.m_CashierCounterList == null)
+                return;
+            int idx = sm.m_CashierCounterList.IndexOf(counter);
+            if (idx < 0)
+                return;
+            ClearCardPresentation(idx, "finished sale");
+            ClearClientUIMode(t, idx);
         }
 
         public static bool EvaluateFinishPrefix(Customer __instance)
@@ -767,7 +937,7 @@ namespace CardShopCoop.Sync
 
             bool isCard = FiIsUsingCard?.GetValue(__instance) is bool c && c;
             double paid = FiPaidAmount?.GetValue(__instance) is double p ? p : 0.0;
-            CoopPlugin.Log.LogDebug($"RegisterSync client: taking payment counter {idx} card={isCard} paid={paid}");
+            CoopPlugin.Log.LogInfo($"RegisterSync client: taking payment counter {idx} card={isCard} paid={paid}");
             t.SendOp?.Invoke(new RegisterOpMessage
             {
                 Index = (byte)idx,
@@ -881,6 +1051,7 @@ namespace CardShopCoop.Sync
                     Op = OpGiveChange,
                     ChangeIndex = __instance.m_Index,
                     ChangeValue = __instance.m_ValueDouble,
+                    ChangeIsCoin = __instance.m_IsCoin,
                     TakingBack = takingBack,
                 });
                 return;
@@ -897,6 +1068,7 @@ namespace CardShopCoop.Sync
                 Op = OpGiveChange,
                 ChangeIndex = __instance.m_Index,
                 ChangeValue = __instance.m_ValueDouble,
+                ChangeIsCoin = __instance.m_IsCoin,
                 TakingBack = takingBack,
             });
             t.PendingLocalChange(idx, +1);
@@ -984,6 +1156,7 @@ namespace CardShopCoop.Sync
                 entry.CustomerIndex = (ushort)CustomerListIndex(cust); // for the client's carrier pick + NpcSync suppression
                 entry.CustomerGeneration = NpcSync.GetCustomerGeneration(cust);
                 entry.CharacterName = cust.m_CharacterCustom != null ? cust.m_CharacterCustom.CharacterName : "";
+                entry.CustomerFemale = cust.m_IsFemale;
                 entry.State = (byte)counter.m_CashierCounterState;
                 entry.IsCard = FiIsUsingCard?.GetValue(counter) is bool card && card;
                 entry.PaidAmount = FiPaidAmount?.GetValue(counter) is double paid ? paid : 0.0;
@@ -1078,6 +1251,12 @@ namespace CardShopCoop.Sync
                 h = h * 31 + (FiTotalScanned?.GetValue(counter)?.GetHashCode() ?? 0);
                 if (cust == null)
                     return h;
+                // The character name and gender are the client's appearance identity. A named
+                // customer arriving after a momentarily-null customization must re-broadcast,
+                // or the client carrier would be bound by index without a name to dress it.
+                h = h * 31 + (cust.m_CharacterCustom != null && cust.m_CharacterCustom.CharacterName != null
+                    ? cust.m_CharacterCustom.CharacterName.GetHashCode() : 0);
+                h = h * 31 + (cust.m_IsFemale ? 1 : 0);
                 var items = cust.GetItemInBagList();
                 h = h * 31 + items.Count;
                 for (int i = 0; i < items.Count; i++)
@@ -1333,11 +1512,9 @@ namespace CardShopCoop.Sync
                     {
                         if (counter.m_CashierCounterState != ECashierCounterState.GivingChange)
                             return false;
-                        int buttonIndex = message.ChangeIndex;
-                        var money = counter.m_InteractableCounterMoneyChangeList;
-                        if (buttonIndex < 0 || buttonIndex >= money.Count)
+                        var button = FindChangeButton(counter, message.ChangeValue, message.ChangeIsCoin);
+                        if (button == null)
                             return false;
-                        var button = money[buttonIndex];
                         if (message.TakingBack)
                             button.OnRightMouseButtonUp();
                         else
@@ -1375,6 +1552,7 @@ namespace CardShopCoop.Sync
             public ushort CustomerIndex;
             public int CustomerGeneration;
             public string CharacterName;
+            public bool CustomerFemale;
             public byte State;
             public bool IsCard;
             public double PaidAmount;
@@ -1418,6 +1596,7 @@ namespace CardShopCoop.Sync
                         ResetClientCounter(idx);
                     _cartCustomerIndex.Remove(idx);
                     _cartCustomerGeneration.Remove(idx);
+                    _cartCharacterName.Remove(idx);
                     continue;
                 }
                 // A counter slice is an authoritative complete cart for that customer. Reject
@@ -1439,6 +1618,7 @@ namespace CardShopCoop.Sync
                     CustomerIndex = entry.CustomerIndex,
                     CustomerGeneration = entry.CustomerGeneration,
                     CharacterName = entry.CharacterName,
+                    CustomerFemale = entry.CustomerFemale,
                     State = entry.State,
                     IsCard = entry.IsCard,
                     PaidAmount = entry.PaidAmount,
@@ -1521,23 +1701,38 @@ namespace CardShopCoop.Sync
                 // arrive after the clicks. Queue them and replay when the phase exists.
                 if (!_deferredChange.TryGetValue(message.Index, out var list))
                 {
-                    list = new List<KeyValuePair<int, bool>>();
+                    list = new List<DeferredChange>();
                     _deferredChange[message.Index] = list;
                 }
-                list.Add(new KeyValuePair<int, bool>(message.ChangeIndex, message.TakingBack));
+                list.Add(new DeferredChange(message.ChangeValue, message.ChangeIsCoin,
+                    message.TakingBack));
                 return;
             }
-            ReplayChange(counter, message.ChangeIndex, message.TakingBack);
+            ReplayChange(counter, message.ChangeValue, message.ChangeIsCoin, message.TakingBack);
+        }
+
+        private static InteractableCounterMoneyChange FindChangeButton(
+            InteractableCashierCounter counter, double value, bool isCoin)
+        {
+            var money = counter?.m_InteractableCounterMoneyChangeList;
+            if (money == null || value <= 0.0)
+                return null;
+            for (int i = 0; i < money.Count; i++)
+            {
+                var button = money[i];
+                if (button != null && button.m_IsCoin == isCoin
+                    && System.Math.Abs(button.m_ValueDouble - value) <= 0.0001)
+                    return button;
+            }
+            return null;
         }
 
         /// <summary>Client: replay one money click on a counter that is already in the change
         /// phase. The applying guard stops the replay from emitting an op of its own.</summary>
-        private static void ReplayChange(InteractableCashierCounter counter, int changeIndex, bool takingBack)
+        private static void ReplayChange(InteractableCashierCounter counter, double changeValue,
+            bool changeIsCoin, bool takingBack)
         {
-            var money = counter.m_InteractableCounterMoneyChangeList;
-            if (money == null || changeIndex < 0 || changeIndex >= money.Count)
-                return;
-            var button = money[changeIndex];
+            var button = FindChangeButton(counter, changeValue, changeIsCoin);
             if (button == null)
                 return;
             ApplyingAuthoritativePayment = true;
@@ -1570,7 +1765,7 @@ namespace CardShopCoop.Sync
                 return;
             }
             for (int i = 0; i < list.Count; i++)
-                ReplayChange(counter, list[i].Key, list[i].Value);
+                ReplayChange(counter, list[i].Value, list[i].IsCoin, list[i].TakingBack);
         }
 
         /// <summary>Client: zero a counter's change controls/scalars without changing its phase,
@@ -1639,6 +1834,21 @@ namespace CardShopCoop.Sync
                     }
                     CoopPlugin.Log.LogWarning($"RegisterSync client: cart contents differ during active sale at counter {c.Index}; preserving local bag");
                 }
+                // The host's customization is momentarily empty during pooled activation, so the
+                // first cart for a customer can arrive without a name. Dress (or re-dress) the
+                // carrier as soon as the authoritative name is available; otherwise the pooled
+                // body would keep whatever appearance it last had for the whole sale.
+                if (!string.IsNullOrEmpty(c.CharacterName)
+                    && (!_cartCharacterName.TryGetValue(c.Index, out var appliedName)
+                        || appliedName != c.CharacterName)
+                    && _carrier.TryGetValue(c.Index, out var existingCarrier)
+                    && existingCarrier != null)
+                {
+                    CoopPlugin.Log.LogDebug(
+                        $"RegisterSync client: dressing carrier {c.Index} as '{c.CharacterName}'");
+                    if (DressCarrier(existingCarrier, c.CharacterName))
+                        _cartCharacterName[c.Index] = c.CharacterName;
+                }
                 ApplyCartPrices(c);
                 if (!_cartScanSignature.TryGetValue(c.Index, out var oldScan) || oldScan != c.ScanSignature)
                 {
@@ -1656,9 +1866,15 @@ namespace CardShopCoop.Sync
             // carrier before resolving the new identity so a recycled list slot can never
             // inherit the previous customer's mirror.
             if (_cartGen.ContainsKey(c.Index))
+            {
+                // The replacement can arrive without a CustomerId=0 slice when the host's
+                // 0.12 s poll skips the empty slot; drop the old card presentation here or a
+                // stale card reader / number pad survives into the new sale.
+                ClearCardPresentation(c.Index, "customer replaced");
                 Teardown(c.Index);
+            }
 
-            var carrier = GetCarrier(c.Index, c.CustomerIndex, c.CustomerGeneration);
+            var carrier = GetCarrier(c.Index, c.CustomerIndex, c.CustomerFemale);
             if (carrier == null)
                 return;
             _cartGen[c.Index] = cid;
@@ -1671,11 +1887,11 @@ namespace CardShopCoop.Sync
                 carrier.ActivateCustomer(canSpawnSmelly: false, randomizeCharacterMesh: false);
             }
             finally { AllowClientCustomerLifecycle = false; }
-            if (carrier.m_CharacterCustom != null && !string.IsNullOrEmpty(c.CharacterName))
-            {
-                carrier.m_CharacterCustom.CharacterName = c.CharacterName;
-                carrier.m_CharacterCustom.Initialize();
-            }
+            if (DressCarrier(carrier, c.CharacterName))
+                _cartCharacterName[c.Index] = c.CharacterName;
+            else if (!string.IsNullOrEmpty(c.CharacterName))
+                CoopPlugin.Log.LogWarning(
+                    $"RegisterSync client: carrier {c.Index} bound without a usable wardrobe (name '{c.CharacterName}')");
             try
             {
                 FiQueueCounter?.SetValue(carrier, counter);
@@ -1958,10 +2174,24 @@ namespace CardShopCoop.Sync
                 counter.SetCustomerPaidAmount(c.IsCard, c.PaidAmount);
                 if (c.State == (byte)ECashierCounterState.TakingCash)
                 {
-                    customer.m_CustomerCash.SetIsCard(c.IsCard);
-                    customer.m_CustomerCash.gameObject.SetActive(true);
-                    customer.m_Anim.SetBool("HandingOverCash", true);
-                    counter.UpdateCashierCounterState(ECashierCounterState.TakingCash);
+                    // A cart built before the host learned we already took payment keeps arriving
+                    // (host poll plus the 1 s sweep). Rewinding a sale we advanced locally re-runs
+                    // OnCashTaken/StartGivingChange on the next GivingChange cart, which moves the
+                    // card screen forward a second time - and the game re-records the already-moved
+                    // position as "home", so the finish restore is a no-op and the screen is left
+                    // in front of the camera. Never rewind past GivingChange.
+                    if (counter.m_CashierCounterState != ECashierCounterState.GivingChange)
+                    {
+                        customer.m_CustomerCash.SetIsCard(c.IsCard);
+                        customer.m_CustomerCash.gameObject.SetActive(true);
+                        customer.m_Anim.SetBool("HandingOverCash", true);
+                        counter.UpdateCashierCounterState(ECashierCounterState.TakingCash);
+                    }
+                    else
+                    {
+                        CoopPlugin.Log.LogInfo(
+                            $"RegisterSync client: ignored stale taking-payment cart at counter {c.Index} (already giving change)");
+                    }
                 }
                 else if (c.State == (byte)ECashierCounterState.GivingChange
                     && counter.m_CashierCounterState != ECashierCounterState.GivingChange)
@@ -2091,22 +2321,92 @@ namespace CardShopCoop.Sync
             }
         }
 
-        private Customer GetCarrier(int idx, ushort customerIndex, int customerGeneration)
+        /// <summary>Client: apply the host's authoritative wardrobe name to a carrier.
+        /// CharacterCustomization.Initialize() cannot change the base male/female hierarchy, so
+        /// the caller must have selected a carrier whose m_IsFemale already matches the
+        /// transmitted gender. A wardrobe failure is logged rather than fatal - the rest of the
+        /// cart must still build - and returns false so the name is not recorded and a later
+        /// cart retries.</summary>
+        private static bool DressCarrier(Customer carrier, string characterName)
+        {
+            if (carrier == null || carrier.m_CharacterCustom == null || string.IsNullOrEmpty(characterName))
+                return false;
+            try
+            {
+                carrier.m_CharacterCustom.CharacterName = characterName;
+                carrier.m_CharacterCustom.Initialize();
+                return true;
+            }
+            catch (System.Exception e)
+            {
+                CoopPlugin.Log.LogWarning($"RegisterSync client: carrier dressing '{characterName}': {e}");
+                return false;
+            }
+        }
+
+        private Customer GetCarrier(int idx, ushort customerIndex, bool female)
         {
             Customer carrier = null;
             var cm = SceneRef<CustomerManager>.Get();
             if (cm != null)
             {
                 var list = cm.GetCustomerList();
-                // The host's CustomerIndex + CustomerGeneration is the only valid identity.
-                // Never fall back to another pooled customer: doing so can bind a partial to a
-                // recycled list slot and write the wrong customer's cart into the counter.
-                if (customerIndex < list.Count && IsCarrierAvailable(list[customerIndex])
-                    && NpcSync.GetCustomerGeneration(list[customerIndex]) == customerGeneration)
+                // The host's CustomerIndex is only a slot in the HOST's pool. The client's
+                // per-index gender layout is not guaranteed to match: the supported builds ship
+                // different per-index gender prefab patterns, both sides append randomly-gendered
+                // customers when the pool is exhausted, and save-load assigns saved customers to
+                // the first free LOCAL slot. CharacterCustomization.Initialize() cannot swap the
+                // base male/female hierarchy, so binding the host slot when it holds the opposite
+                // gender on this machine renders the wrong body. Prefer the host slot only when
+                // its base prefab matches the transmitted gender; otherwise take any available
+                // body of the right gender, exactly like NpcSync.FindPooledCustomer does for
+                // puppets.
+                //
+                // The host's activation-generation must NOT be re-derived here: NpcSync's
+                // generation counter is advanced by the host-only CollectSlice (and by
+                // GetCustomerGeneration's own false->true transition), and on a client the
+                // pooled customer is sampled BEFORE ActivateCustomer runs, so its active
+                // interval is never observed and the client's counter stays at its default 1.
+                // Comparing against it therefore rejects every customer whose host slot has
+                // been activated more than once - no cart items spawn at the register. The
+                // wire's CustomerGeneration is recorded per counter by ApplyCart instead
+                // (same model as TradeServe.PrepareCarrier); recycled slots are already kept
+                // apart by IsCarrierAvailable plus the _cartGen cid-change teardown.
+                if (customerIndex < list.Count && list[customerIndex] != null
+                    && list[customerIndex].m_IsFemale == female
+                    && IsCarrierAvailable(list[customerIndex]))
+                {
                     carrier = list[customerIndex];
+                }
+                else
+                {
+                    carrier = FindAvailableCarrier(list, female);
+                    if (carrier != null)
+                        CoopPlugin.Log.LogDebug(
+                            $"RegisterSync client: counter {idx} host slot {customerIndex} is unavailable or wrong gender (want female={female}); using a gender-matched pooled carrier");
+                }
             }
             _carrier[idx] = carrier;
             return carrier;
+        }
+
+        /// <summary>Client: an unused pooled customer of the requested base gender, preferring
+        /// an inactive one. Returns null when the pool has none (the next authoritative cart
+        /// retries).</summary>
+        private Customer FindAvailableCarrier(List<Customer> list, bool female)
+        {
+            Customer any = null;
+            for (int i = 0; i < list.Count; i++)
+            {
+                var candidate = list[i];
+                if (candidate == null || candidate.m_IsFemale != female || !IsCarrierAvailable(candidate))
+                    continue;
+                if (any == null)
+                    any = candidate;
+                if (!candidate.m_IsActive)
+                    return candidate;
+            }
+            return any;
         }
 
         private bool IsCarrierAvailable(Customer customer)
@@ -2180,28 +2480,16 @@ namespace CardShopCoop.Sync
                 var cash = FiCashScreen?.GetValue(counter) as UI_CashCounterScreen;
                 if (cash != null)
                     cash.ResetCounter();
-                var credit = FiCreditScreen?.GetValue(counter) as UI_CreditCardScreen;
-                if (credit != null)
-                    credit.ResetCounter();
-                if (FiIsUsingCard?.GetValue(counter) is bool usingCard && usingCard)
-                {
-                    // Only the locally-manning player ever moved the card model / entered UI
-                    // mode, and the baseline only exists in that case.
-                    bool hasBaseline = FiCreditMachineOriginalPos?.GetValue(counter) is Vector3 original
-                        && original != Vector3.zero;
-                    var machine = FiCreditMachineModel?.GetValue(counter) as Transform;
-                    if (hasBaseline && machine != null)
-                    {
-                        machine.position = (Vector3)FiCreditMachineOriginalPos.GetValue(counter);
-                        machine.rotation = (Quaternion)FiCreditMachineOriginalRot.GetValue(counter);
-                        var cardModel = FiCreditCardModel?.GetValue(counter) as GameObject;
-                        if (cardModel != null)
-                            cardModel.SetActive(false);
-                    }
-                }
-                // Clear a lingering game-UI mode for the manning player (card payment sets it,
-                // OnExitCashCounterMode does not clear it) so pause/phone are not blocked.
-                if (counter.IsMannedByPlayer())
+                // Release the card reader / number pad regardless of the live mode flag: the
+                // day-start reset clears m_IsUsingCard before the visuals are put back, and the
+                // vanilla finish only restores them while the flag is set.
+                ClearCardPresentation(idx, "reset counter");
+                // Clear a lingering game-UI mode only when this station is (or was just) the
+                // local player's. m_IsInUIMode is global, so an unconditional ExitUIMode here
+                // could close an unrelated screen (price/storage) opened while some other
+                // player's register customer left. Walking away mid-card-checkout is already
+                // covered by the claim-release path.
+                if (counter.IsMannedByPlayer() || _localManned == idx)
                     ClearClientUIMode(this, idx);
                 FiIsUsingCard?.SetValue(counter, false);
                 FiStartGivingChange?.SetValue(counter, false);
@@ -2235,6 +2523,7 @@ namespace CardShopCoop.Sync
             _cartCustomerIndex.Remove(idx);
             _cartCustomerGeneration.Remove(idx);
             _cartScanSignature.Remove(idx);
+            _cartCharacterName.Remove(idx);
             _authoritativeTotal.Remove(idx);
             if (_sourceIndex.TryGetValue(idx, out int src))
             {

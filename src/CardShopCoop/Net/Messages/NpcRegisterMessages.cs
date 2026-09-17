@@ -131,7 +131,7 @@ namespace CardShopCoop.Net.Messages
     // partial messages contain one or more counter entries for a sweep batch; omitted counters
     // remain unchanged. Then [byte count][count x entry].
     //   entry = (byte index, int customerId) then, when customerId != 0:
-    //     (ushort customerIndex, int customerGeneration, string characterName,
+    //     (ushort customerIndex, int customerGeneration, string characterName, bool customerFemale,
     //      byte state, bool isCard, double paidAmount, double totalScanned,
     //      float customerTotalScanned,
     //      double currentMoneyChange, bool changeReady, bool changeStarted, bool tooMuchChange,
@@ -167,6 +167,11 @@ namespace CardShopCoop.Net.Messages
         public ushort CustomerIndex;
         public int CustomerGeneration;
         public string CharacterName;
+        // The host customer's base gender. The local customer pool's per-index gender layout is
+        // NOT guaranteed to match the host's (prefab tiers, save-load assignment, growth), and
+        // CharacterCustomization cannot swap the base male/female hierarchy, so the client must
+        // pick the carrier body by this bit rather than by list index.
+        public bool CustomerFemale;
         public byte State;
         public bool IsCard;
         public double PaidAmount;
@@ -220,8 +225,12 @@ namespace CardShopCoop.Net.Messages
         public byte BagIndex;      // OpScanItem / OpScanCard
         public bool IsCard;        // OpTakingPayment / OpTookPayment
         public double PaidAmount;  // OpTakingPayment (host's own payment is authoritative)
-        public int ChangeIndex;    // OpGiveChange
-        public double ChangeValue; // OpGiveChange
+        // ChangeIndex is retained for wire compatibility with the original 1.4.0 event, but is
+        // not a denomination identity: the game's m_Index is a visual stack offset. Replays use
+        // ChangeValue together with ChangeIsCoin instead.
+        public int ChangeIndex;    // legacy OpGiveChange field; never use as a list position
+        public double ChangeValue; // OpGiveChange denomination value
+        public bool ChangeIsCoin;  // OpGiveChange denomination kind
         public bool TakingBack;    // OpGiveChange
         public double TotalAmount; // OpFinishCard (EvaluateCreditCard total)
 

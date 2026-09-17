@@ -160,8 +160,9 @@ namespace CardShopCoop.Sync
 
         /// <summary>Host: send the COMPLETE warehouse to one connection - the join catch-up path.
         /// Not periodic; the sweep above is what guarantees eventual correctness.</summary>
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null || !Available())
                 return;
             Guarded("full", () => SendToClient(connId, BuildState()));

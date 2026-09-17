@@ -48,6 +48,7 @@ namespace CardShopCoop
         public static ConfigEntry<bool> AutoLanPassword;
         public static ConfigEntry<GradedAlertMode> GradedDriftAlert;
         public static ConfigEntry<bool> BoxSyncDebug;
+        public static ConfigEntry<bool> PlayTableSpectatorProbe;
         public static ConfigEntry<bool> PerfDebug;
         public static ConfigEntry<bool> LeakDebug;
         public static ConfigEntry<int> ArtificialLagMs;
@@ -106,6 +107,8 @@ namespace CardShopCoop
                 "How loudly to announce that your graded albums have drifted apart. THIS CONTROLS THE HOST'S SCREEN. While you are HOSTING it decides both your own on-screen line and the heads-up sent to the joiner. While you are JOINING it does nothing at all: the host's setting alone decides whether you get that heads-up, because the drift is only ever announced from the host's side. Always: announce every check that finds a difference. OncePerSession: say it once per player per session and then stay quiet - including for a later, bigger difference. Never: never put it on screen at all. The log records every check whichever you pick and on both PCs, so a support log stays complete whatever you choose; this only controls the screen, and it never changes what the co-op panel's adopt button offers.");
             BoxSyncDebug = Config.Bind("Diagnostics", "BoxSyncDebug", false,
                 "Log detailed box-sync activity: each possession report a client sends, each update the host accepts or rejects, and each box the client adopts or spawns. Verbose - enable temporarily (then restart) to diagnose boxes that will not pick up, move, or hide in sync.");
+            PlayTableSpectatorProbe = Config.Bind("Diagnostics", "PlayTableSpectatorProbe", false,
+                "TESTING ONLY. Copy the visible cards from a local card-table match to a nearby table. No gameplay or network state is changed.");
             PerfDebug = Config.Bind("Diagnostics", "PerfDebug", false,
                 "Log any per-frame sync stage that takes longer than 5 ms (rate-limited to one line per stage per 2 s). Enable temporarily to find lag spikes; it does not change gameplay.");
             LeakDebug = Config.Bind("Diagnostics", "LeakDebug", false,

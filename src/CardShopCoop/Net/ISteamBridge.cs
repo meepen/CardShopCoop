@@ -43,6 +43,14 @@ namespace CardShopCoop.Net
         public string Ver;
     }
 
+    /// <summary>Steam lobby size limits exposed without crossing the Steamworks boundary.</summary>
+    public static class SteamLobbyLimits
+    {
+        public const int DefaultPlayers = 4;
+        public const int MinPlayers = 2;
+        public const int MaxPlayers = 250;
+    }
+
     /// <summary>
     /// Everything CoopCore and CoopUI are allowed to know about Steam. Every member is
     /// Steam-free BY CONSTRUCTION - ulong / string / bool / int / Action / Action&lt;ulong&gt;
@@ -90,8 +98,8 @@ namespace CardShopCoop.Net
         /// connects - on the Steam build, where nobody is looking for it.</summary>
         ICoopTransport CreateTransport(bool isHost, INetMessage keepalive);
 
-        void Host(bool isPublic, string lobbyName, bool hasPassword);
-        void Join(ulong lobbyId);
+        void Host(bool isPublic, string lobbyName, bool hasPassword, int maxPlayers);
+        long Join(ulong lobbyId);
         void Leave();
         void OpenInviteDialog();
         void RefreshList();
@@ -131,6 +139,14 @@ namespace CardShopCoop.Net
         /// <summary>Client: we entered a lobby and the transport is already wired to its
         /// owner. The ROLE CHECK IS THE SUBSCRIBER'S JOB - see CoopCore.</summary>
         Action OnConnectedToHost
+        {
+            get; set;
+        }
+
+        /// <summary>Client: a current lobby join was rejected. The operation and
+        /// transport identify the exact attempt so a late callback cannot tear down a
+        /// newer session.</summary>
+        Action<ulong, long, ICoopTransport, string> OnJoinFailed
         {
             get; set;
         }

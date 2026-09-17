@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Net;
 
 namespace CardShopCoop.Sync
 {
@@ -39,6 +40,36 @@ namespace CardShopCoop.Sync
             _started = true;
         }
 
+        public void OnConnect(Connection connection)
+        {
+            ThrowIfDisposed();
+            for (int i = 0; i < _modules.Count; i++)
+                InvokeIsolated(_modules[i], () => _modules[i].OnConnect(connection), "connect");
+        }
+
+        public void OnFullyJoined(Connection connection)
+        {
+            ThrowIfDisposed();
+            for (int i = 0; i < _modules.Count; i++)
+                InvokeIsolated(_modules[i], () => _modules[i].OnFullyJoined(connection), "fully joined");
+        }
+
+        public void OnDisconnect(Connection connection, DisconnectInfo info)
+        {
+            ThrowIfDisposed();
+            for (int i = _modules.Count - 1; i >= 0; i--)
+                InvokeIsolated(_modules[i], () => _modules[i].OnDisconnect(connection, info), "disconnect");
+        }
+
+        private static void InvokeIsolated(ICoopModule module, Action action, string operation)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception e) { CoopPlugin.Log.LogError("co-op module " + operation + " failed (" + module.Name + "): " + e); }
+        }
+
         public void ResetState()
         {
             ThrowIfDisposed();
@@ -71,14 +102,14 @@ namespace CardShopCoop.Sync
             }
         }
 
-        public void FullUpdate(int connId)
+        public void FullUpdate(Connection connection)
         {
             ThrowIfDisposed();
             for (int i = 0; i < _modules.Count; i++)
             {
                 try
                 {
-                    _modules[i].FullUpdate(connId);
+                    _modules[i].FullUpdate(connection);
                 }
                 catch (Exception e)
                 {
@@ -123,7 +154,7 @@ namespace CardShopCoop.Sync
         private readonly Action _reset;
         private readonly Action _resend;
         private readonly Action _dispose;
-        private readonly Action<int> _fullUpdate;
+        private readonly Action<Connection> _fullUpdate;
 
         public string Name
         {
@@ -131,7 +162,7 @@ namespace CardShopCoop.Sync
         }
 
         public DelegateCoopModule(string name, Action start, Action reset, Action resend,
-            Action dispose = null, Action<int> fullUpdate = null)
+            Action dispose = null, Action<Connection> fullUpdate = null)
         {
             if (string.IsNullOrEmpty(name))
                 throw new ArgumentException("Module name is required.", nameof(name));
@@ -144,9 +175,18 @@ namespace CardShopCoop.Sync
         }
 
         public void Start() => _start();
+        public void OnConnect(Connection connection)
+        {
+        }
+        public void OnFullyJoined(Connection connection)
+        {
+        }
+        public void OnDisconnect(Connection connection, DisconnectInfo info)
+        {
+        }
         public void ResetState() => _reset();
         public void ForceResend() => _resend();
-        public void FullUpdate(int connId) => _fullUpdate(connId);
+        public void FullUpdate(Connection connection) => _fullUpdate(connection);
         public void Dispose() => _dispose();
 
         /// <summary>Unreachable: this adapter is never in a tick order (its catalog entries have no

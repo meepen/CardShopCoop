@@ -42,10 +42,10 @@ namespace CardShopCoop.Net
         private readonly ConcurrentQueue<InMsg> _incoming = new ConcurrentQueue<InMsg>();
         private readonly Queue<Pending> _delay = new Queue<Pending>();
         internal int DelayCount => _delay.Count;
-        // Leak diagnostics passthrough: the wrapped transport's backlog (0 when it is not Steam).
-        internal int InnerReassemblyCount => (_inner as SteamTransport)?.ReassemblyCount ?? 0;
-        internal int InnerReliableOutboxCount => (_inner as SteamTransport)?.ReliableOutboxCount ?? 0;
-        internal int InnerTransientOutboxCount => (_inner as SteamTransport)?.TransientOutboxCount ?? 0;
+        // The decorator deliberately knows only the transport contract, never Steam.
+        internal int InnerReassemblyCount => 0;
+        internal int InnerReliableOutboxCount => 0;
+        internal int InnerTransientOutboxCount => 0;
         private readonly Random _random = new Random();
         private bool _overflowWarned;
         private long _delayBytes;
@@ -72,7 +72,7 @@ namespace CardShopCoop.Net
             }
         }
 
-        public ConcurrentQueue<int> Disconnects
+        public ConcurrentQueue<ConnectionEvent> Disconnects
         {
             get
             {
@@ -80,7 +80,7 @@ namespace CardShopCoop.Net
             }
         }
 
-        public ConcurrentQueue<int> Connects
+        public ConcurrentQueue<ConnectionEvent> Connects
         {
             get
             {
@@ -104,9 +104,9 @@ namespace CardShopCoop.Net
             }
         }
 
-        public void Send(int connId, INetMessage message)
+        public void Send(Connection connection, INetMessage message)
         {
-            _inner.Send(connId, message);
+            _inner.Send(connection, message);
         }
 
         public void Broadcast(INetMessage message)
@@ -114,9 +114,9 @@ namespace CardShopCoop.Net
             _inner.Broadcast(message);
         }
 
-        public void SendTransient(int connId, INetMessage message)
+        public void SendTransient(Connection connection, INetMessage message)
         {
-            _inner.SendTransient(connId, message);
+            _inner.SendTransient(connection, message);
         }
 
         public void BroadcastTransient(INetMessage message)
@@ -124,19 +124,27 @@ namespace CardShopCoop.Net
             _inner.BroadcastTransient(message);
         }
 
-        public double SecondsSinceLastRecv(int connId)
+        public double SecondsSinceLastRecv(Connection connection)
         {
-            return _inner.SecondsSinceLastRecv(connId);
+            return _inner.SecondsSinceLastRecv(connection);
         }
 
-        public List<int> ConnIds()
+        public IReadOnlyList<Connection> Connections
         {
-            return _inner.ConnIds();
+            get
+            {
+                return _inner.Connections;
+            }
         }
 
-        public void Kick(int connId)
+        public void Kick(Connection connection, DisconnectInfo info = null)
         {
-            _inner.Kick(connId);
+            _inner.Kick(connection, info);
+        }
+
+        public void GracefulDisconnect(Connection connection, DisconnectInfo info = null)
+        {
+            _inner.GracefulDisconnect(connection, info);
         }
 
         public void Stop()
@@ -170,7 +178,7 @@ namespace CardShopCoop.Net
                 _overflowWarned = false;
 
                 while (_inner.Incoming.TryDequeue(out InMsg msg))
-                    _incoming.Enqueue(msg);
+                    EnqueueReceived(msg);
                 return;
             }
 
@@ -178,6 +186,15 @@ namespace CardShopCoop.Net
 
             while (_inner.Incoming.TryDequeue(out InMsg msg))
             {
+                // Disconnect control is terminal, not gameplay traffic. Do not let the
+                // artificial receive delay keep a peer alive after the inner transport has
+                // already published its terminal event.
+                if (msg.Message is CardShopCoop.Net.Messages.DisconnectMessage)
+                {
+                    DropDelayedConnection(msg.Connection);
+                    EnqueueReceived(msg);
+                    continue;
+                }
                 if (_delay.Count >= MaxBufferedFrames || _delayBytes >= MaxBufferedBytes)
                 {
                     // Safety valve: a huge delay must never let the buffer grow without
@@ -213,6 +230,31 @@ namespace CardShopCoop.Net
             }
             if (_delay.Count < MaxBufferedFrames / 2 && _delayBytes < MaxBufferedBytes / 2)
                 _overflowWarned = false;
+        }
+
+        private void EnqueueReceived(InMsg message)
+        {
+            _incoming.Enqueue(message);
+        }
+
+        private void DropDelayedConnection(Connection connection)
+        {
+            if (connection == null || _delay.Count == 0)
+                return;
+            var keep = new Queue<Pending>(_delay.Count);
+            while (_delay.Count > 0)
+            {
+                var pending = _delay.Dequeue();
+                if (pending.Message.Connection == null
+                    || !ReferenceEquals(pending.Message.Connection, connection))
+                {
+                    keep.Enqueue(pending);
+                    continue;
+                }
+                _delayBytes = Math.Max(0, _delayBytes - EstimateBytes(pending.Message));
+            }
+            while (keep.Count > 0)
+                _delay.Enqueue(keep.Dequeue());
         }
 
         private static int ClampMs(int value)

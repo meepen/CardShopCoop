@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using CardShopCoop.Util;
 
 namespace CardShopCoop.Net
 {
@@ -46,7 +47,15 @@ namespace CardShopCoop.Net
                     "network: no DTO registered for message type " + type + " - frame dropped");
                 throw new InvalidDataException("No DTO registered for " + type);
             }
-            return WireCodec.Deserialize(messageType, payload, offset, count);
+            long perfStart = PerfProbe.StartThreadMetric();
+            try
+            {
+                return WireCodec.Deserialize(messageType, payload, offset, count);
+            }
+            finally
+            {
+                PerfProbe.EndThreadMetric("net.deserialize.", type, perfStart);
+            }
         }
 
         internal static bool IsKnown(MsgType type)

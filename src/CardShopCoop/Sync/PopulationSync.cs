@@ -381,8 +381,9 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Host: complete roster to one connection; never called by a timer.</summary>
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null)
                 return;
             if (_all == null || _scanning || _building || !_rosterComplete)

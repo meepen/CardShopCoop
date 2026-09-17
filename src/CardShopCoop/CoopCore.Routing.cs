@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Messages;
 using CardShopCoop.Sync;
+using HarmonyLib;
 using UnityEngine;
 
 namespace CardShopCoop
@@ -415,11 +417,77 @@ namespace CardShopCoop
                 // engine's ForceResend only re-arms a diff scan, so broadcast its full shelf
                 // state explicitly as well.
                 ModulesForceResend();
-                ModulesFullUpdate(context.ConnectionId);
+                ModulesFullUpdate(context.Connection);
                 _world.RequestResync?.Invoke();
                 return;
             },
                 MessagePolicy.HostOnlyInGame, true, heal: () => { _boxEngine?.RequestFullSnapshot(); _market.ForceResend(); _warehouse.ForceResend(); });
+            _messageRouter.Register<FullyJoinedMessage>((context, message) =>
+            {
+                if (Role != CoopRole.Host || context.Connection == null)
+                    return;
+                // The peer must have passed Hello and completed the world transfer. A
+                // duplicate is a protocol violation, not a request to replay metadata.
+                // FullyJoined is valid once the authenticated handshake has entered the
+                // transfer phase.  The client may still be finishing its scene load here;
+                // gating this signal on InSessionWorld strands otherwise valid joins.
+                // Every other phase is an idempotently ignored late, duplicate, or
+                // unauthenticated signal.
+                if (context.Connection.State != ConnectionState.Transferring)
+                {
+                    CoopPlugin.Log.LogWarning("Ignoring late/duplicate FullyJoined from connection "
+                        + context.Connection.Id + " in phase " + context.Connection.State);
+                    return;
+                }
+                _moduleRegistry?.OnFullyJoined(context.Connection);
+                ModulesForceResend();
+                ModulesFullUpdate(context.Connection);
+                Send(context.ConnectionId, new FullyJoinedAckMessage());
+                // Keep the host in Transferring while the ordered baseline and ACK are
+                // queued.  This is what lets the client consume the baseline before its
+                // transition, and makes the ACK the final handshake frame.
+                if (!context.Connection.TryTransition(ConnectionState.FullyJoined))
+                    CoopPlugin.Log.LogWarning("Could not complete FullyJoined transition for connection "
+                        + context.Connection.Id + " in phase " + context.Connection.State);
+            }, MessagePolicy.HostOnly);
+            _messageRouter.Register<FullyJoinedAckMessage>((context, message) =>
+            {
+                if (Role == CoopRole.Client && context.Connection != null)
+                {
+                    if (context.Connection.State != ConnectionState.Transferring)
+                    {
+                        CoopPlugin.Log.LogWarning("Ignoring late/duplicate FullyJoinedAck from connection "
+                            + context.Connection.Id + " in phase " + context.Connection.State);
+                        return;
+                    }
+                    if (context.Connection.TryTransition(ConnectionState.FullyJoined))
+                        _moduleRegistry?.OnFullyJoined(context.Connection);
+                }
+            }, MessagePolicy.ClientOnly);
+            _messageRouter.Register<DisconnectMessage>((context, message) =>
+            {
+                var reason = message as DisconnectMessage;
+                if (reason == null)
+                    return;
+                if (context.Connection == null)
+                {
+                    CoopPlugin.Log.LogWarning("Ignoring disconnect control without a connection");
+                    return;
+                }
+                // Phase is advisory peer data.  Normalize only that field; retain the
+                // bounded remote code/reason so malformed peers still explain the close.
+                var phase = Enum.IsDefined(typeof(ConnectionState), reason.Phase)
+                    ? (ConnectionState)reason.Phase : ConnectionState.Disconnecting;
+                var info = new DisconnectInfo(reason.Reason, true, reason.Code,
+                    reason.Retryable, phase);
+                // A disconnect is transport-owned on both sides. In particular, hosts must
+                // not ignore a client that is leaving. The first reason atomically wins in the
+                // connection, so Shutdown/Stop cannot replace this structured remote detail.
+                // The transport already completed this remote disconnect, including the
+                // exactly-once terminal event and connection removal.
+                if (Role == CoopRole.Client)
+                    Shutdown("remote: " + info.Reason, info);
+            }, MessagePolicy.Any);
             _messageRouter.Register<ShelfBoxPullMessage>((context, message) =>
             {
                 _world.HostApplyBoxPull(message, context.ConnectionId, _boxEngine);
@@ -866,6 +934,33 @@ namespace CardShopCoop
                 return;
             },
                 MessagePolicy.ClientOnlyInGame, false, heal: () => _world.RequestResyncCoalesced());
+            _messageRouter.Register<PlayTableMatchRequest>((context, message) =>
+            {
+                if (Role != CoopRole.Host || !InGameLevel())
+                    return;
+                if (message is PlayTableMatchRequest request)
+                    RoutePlayTableMatchRequest(request, context.ConnectionId);
+                return;
+            },
+                MessagePolicy.HostOnlyInGame, true, heal: () => _tableMatches.ForceResend());
+            _messageRouter.Register<PlayTableMatchResult>((context, message) =>
+            {
+                if (Role != CoopRole.Host || !InGameLevel())
+                    return;
+                if (message is PlayTableMatchResult result)
+                    RoutePlayTableMatchResult(result, context.ConnectionId);
+                return;
+            },
+                MessagePolicy.HostOnlyInGame, true, heal: () => _tableMatches.ForceResend());
+            _messageRouter.Register<PlayTableMatchState>((context, message) =>
+            {
+                if (Role != CoopRole.Client || !InGameLevel())
+                    return;
+                if (message is PlayTableMatchState matchState)
+                    _tableMatches.ClientApplyState(matchState);
+                return;
+            },
+                MessagePolicy.ClientOnlyInGame, false, heal: () => _world.RequestResyncCoalesced());
             _messageRouter.Register<PlayerIntentMessage>((context, message) =>
             {
                 if (Role != CoopRole.Host || !InGameLevel())
@@ -1172,6 +1267,250 @@ namespace CardShopCoop
                     _register.ClientApplyChange(message);
             },
                 MessagePolicy.InGameOnly, true, heal: () => _register.ForceResend());
+        }
+
+        private static readonly FieldInfo FiPlayTableMode =
+            AccessTools.Field(typeof(PlayTableGame), "m_IsPlayTableGameMode");
+        private static readonly FieldInfo FiCurrentPlayTable =
+            AccessTools.Field(typeof(PlayTableGame), "m_CurrentInteractablePlayTable");
+        private readonly Dictionary<string, int> _playTableResultNonces =
+            new Dictionary<string, int>();
+        private int _playTableNonceGeneration = -1;
+        private float _lastPlayTableMatchRejectLog = -1f;
+
+        private void LogPlayTableMatchReject(string message)
+        {
+            if (Time.realtimeSinceStartup - _lastPlayTableMatchRejectLog < 1f)
+                return;
+            _lastPlayTableMatchRejectLog = Time.realtimeSinceStartup;
+            CoopPlugin.Log.LogWarning(message);
+        }
+
+        private void RoutePlayTableMatchRequest(PlayTableMatchRequest request, int ownerConn)
+        {
+            _tableMatches.PruneExpiredHostReservations();
+            EnsurePlayTableNonceSession();
+            if (request.Op == PlayTableMatchRequest.OpCancel)
+            {
+                if (_tableMatches.IsAuthenticatedCancel(request.TableKey, request.MatchId, ownerConn,
+                    request.Epoch, out var cancelled))
+                {
+                    // A released match is an authenticated tombstone. It is an explicit
+                    // idempotent no-op; there is no live entry to inspect or release.
+                    if (cancelled == null)
+                    {
+                        CoopPlugin.Log.LogInfo($"play-table match cancel already applied: table={request.TableKey} owner={ownerConn}");
+                        return;
+                    }
+                    if (!_tableMatches.TryAcceptRequestSequence(ownerConn, request.RequestSequence))
+                    {
+                        LogPlayTableMatchReject($"play-table match stale cancel ignored: table={request.TableKey} sequence={request.RequestSequence}");
+                        return;
+                    }
+                    CoopPlugin.Log.LogInfo($"play-table match cancel: table={request.TableKey} owner={ownerConn}");
+                    // Once STARTED has been accepted, the host advances the phase revision.
+                    // A leave packet may contain the pre-start revision, so authenticate it by
+                    // match/owner/epoch and make repeated cancels harmless. Reserved cancels
+                    // still require the observed revision when one was supplied.
+                    if (cancelled.Phase == PlayTableMatchEntry.StateReserved
+                        && request.Revision != 0 && request.Revision != cancelled.Revision)
+                    {
+                        LogPlayTableMatchReject($"play-table match stale cancel ignored: table={request.TableKey} revision={request.Revision}");
+                        return;
+                    }
+                    _tableMatches.Release(request.TableKey, request.MatchId, "cancelled");
+                }
+                else
+                    LogPlayTableMatchReject($"play-table match cancel rejected: table={request.TableKey} owner={ownerConn} not authenticated");
+                return;
+            }
+            if (!_tableMatches.TryAcceptRequestSequence(ownerConn, request.RequestSequence))
+            {
+                LogPlayTableMatchReject($"play-table match replay rejected: owner={ownerConn} sequence={request.RequestSequence}");
+                return;
+            }
+            if (request.Op == 2)
+            {
+                if (!_tableMatches.TryGetHostMatch(request.TableKey, out var started)
+                    || started.OwnerConn != ownerConn
+                    || started.MatchId != request.MatchId)
+                {
+                    LogPlayTableMatchReject($"play-table match started rejected: table={request.TableKey} owner={ownerConn} match={request.MatchId} not owner");
+                    return;
+                }
+                // Started is a transition of this exact reservation. Zero was previously
+                // treated as "no revision supplied", allowing a delayed/forged launch to
+                // advance a newer reservation.
+                if (request.Epoch <= 0 || request.Revision <= 0
+                    || request.Epoch != started.Epoch || request.Revision != started.Revision
+                    || (started.Phase != PlayTableMatchEntry.StateReserved
+                        && started.Phase != PlayTableMatchEntry.StateStarted))
+                {
+                    LogPlayTableMatchReject($"play-table match started rejected: table={request.TableKey} match={request.MatchId} stale reservation");
+                    return;
+                }
+                bool accepted = started.Phase == PlayTableMatchEntry.StateStarted
+                    ? _tableMatches.RenewHostMatchLease(request.TableKey, request.MatchId,
+                        request.Epoch, request.Revision, ownerConn)
+                    : _tableMatches.MarkHostMatchStarted(request.TableKey, request.MatchId, request.Revision);
+                if (!accepted)
+                    LogPlayTableMatchReject($"play-table match started rejected: table={request.TableKey} match={request.MatchId} no live reservation");
+                else if (started.Phase == PlayTableMatchEntry.StateReserved)
+                    CoopPlugin.Log.LogInfo($"play-table match started: table={request.TableKey} owner={ownerConn}");
+                return;
+            }
+            if (request.Op != PlayTableMatchRequest.OpStart)
+            {
+                LogPlayTableMatchReject($"play-table match rejected: owner={ownerConn} invalid op={request.Op}");
+                return;
+            }
+            var sm = SceneRef<ShelfManager>.Get();
+            var tables = sm != null ? sm.m_PlayTableList : null;
+            if (tables == null || request.TableIndex >= tables.Count || tables[request.TableIndex] == null)
+            {
+                LogPlayTableMatchReject($"play-table match rejected: owner={ownerConn} table index={request.TableIndex} unavailable");
+                return;
+            }
+            var table = tables[request.TableIndex];
+            if (!PlacedObjectIdentity.TryMakeObjectKey(6, table, out int computedKey)
+                || request.TableKey != computedKey)
+            {
+                LogPlayTableMatchReject($"play-table match rejected: owner={ownerConn} table key mismatch table={request.TableKey} computed={computedKey}");
+                return;
+            }
+            if (_tableMatches.TryGetHostMatch(request.TableKey, out _))
+            {
+                LogPlayTableMatchReject($"play-table match rejected: table={request.TableKey} already reserved");
+                return;
+            }
+            if (_tableMatches.HasHostReservationByOwner(ownerConn))
+            {
+                LogPlayTableMatchReject($"play-table match rejected: owner={ownerConn} already has a match");
+                return;
+            }
+            if (HostPlayingAt(table))
+            {
+                LogPlayTableMatchReject($"play-table match rejected: host is playing table={request.TableKey}");
+                return;
+            }
+            if (request.Seat > 1)
+            {
+                LogPlayTableMatchReject($"play-table match rejected: table={request.TableKey} invalid seat={request.Seat}");
+                return;
+            }
+            var occupied = table.m_IsSeatOccupied;
+            int customerSeat = request.Seat == 0 ? 1 : 0;
+            if (occupied == null || occupied.Count <= request.Seat || occupied[request.Seat]
+                || occupied.Count <= customerSeat || !occupied[customerSeat])
+            {
+                LogPlayTableMatchReject($"play-table match rejected: table={request.TableKey} requested seat={request.Seat} must be free and customer seat={customerSeat} must be occupied");
+                return;
+            }
+            if (request.SideA != (request.Seat == 0))
+            {
+                LogPlayTableMatchReject($"play-table match rejected: table={request.TableKey} seat={request.Seat} sideA={request.SideA} geometry mismatch");
+                return;
+            }
+            int maxDeck = GameInstance.GetMaxDeckCardCount();
+            if (request.DeckCardCount < 1 || request.DeckCardCount > maxDeck)
+            {
+                LogPlayTableMatchReject($"play-table match rejected: table={request.TableKey} deck={request.DeckCardCount} max={maxDeck}");
+                return;
+            }
+            if (string.IsNullOrEmpty(request.MatchId) || request.MatchId.Length > 64)
+            {
+                LogPlayTableMatchReject($"play-table match rejected: owner={ownerConn} invalid match id length={request.MatchId?.Length ?? 0}");
+                return;
+            }
+            if (_tableMatches.TryGetHostReservationByMatch(request.MatchId, out _, out int matchTableKey))
+            {
+                LogPlayTableMatchReject($"play-table match rejected: match={request.MatchId} already reserved table={matchTableKey}");
+                return;
+            }
+            CoopPlugin.Log.LogInfo($"play-table match accepted: table={request.TableKey} owner={ownerConn} seat={request.Seat} sideA={request.SideA}");
+            _tableMatches.Reserve(request, ownerConn);
+        }
+
+        private void RoutePlayTableMatchResult(PlayTableMatchResult result, int sender)
+        {
+            if (result == null)
+            {
+                CoopPlugin.Log.LogWarning("play-table result rejected: null payload");
+                return;
+            }
+            if (!IsFinite(result.DurationSeconds))
+            {
+                CoopPlugin.Log.LogWarning($"play-table result rejected: match={result.MatchId} non-finite duration={result.DurationSeconds}");
+                return;
+            }
+            if (result.Result < PlayTableMatchResult.ResultWin || result.Result > PlayTableMatchResult.ResultDraw)
+            {
+                CoopPlugin.Log.LogWarning($"play-table result rejected: match={result.MatchId} invalid result={result.Result}");
+                return;
+            }
+            if (result.Gifts == null)
+            {
+                CoopPlugin.Log.LogWarning($"play-table result rejected: match={result.MatchId} gifts payload is null");
+                return;
+            }
+            _tableMatches.PruneExpiredHostReservations();
+            if (!_tableMatches.TryGetHostReservationByMatch(result.MatchId, out int reservationOwner, out int reservationTableKey)
+                || reservationOwner != sender
+                || !_tableMatches.TryGetHostMatch(reservationTableKey, out var reservation)
+                || reservation.TableKey != reservationTableKey)
+            {
+                CoopPlugin.Log.LogWarning($"play-table result rejected: match={result.MatchId} sender={sender} not owner");
+                return;
+            }
+            EnsurePlayTableNonceSession();
+            if (_playTableResultNonces.TryGetValue(result.MatchId, out int lastNonce)
+                && result.Nonce <= lastNonce)
+            {
+                CoopPlugin.Log.LogWarning($"play-table result ignored: match={result.MatchId} nonce={result.Nonce} last={lastNonce}");
+                return;
+            }
+            if (result.DurationSeconds <= 0f)
+            {
+                CoopPlugin.Log.LogWarning($"play-table result rejected: match={result.MatchId} invalid duration={result.DurationSeconds}");
+                return;
+            }
+            if (result.DurationSeconds > 7200f)
+            {
+                CoopPlugin.Log.LogWarning($"play-table result duration clamped: match={result.MatchId} duration={result.DurationSeconds}");
+                result.DurationSeconds = 7200f;
+            }
+            if (result.Gifts != null && result.Gifts.Count > 10)
+            {
+                CoopPlugin.Log.LogWarning($"play-table result rejected: match={result.MatchId} gifts={result.Gifts.Count}");
+                return;
+            }
+            _playTableResultNonces[result.MatchId] = result.Nonce;
+            CoopPlugin.Log.LogInfo($"play-table result accepted: match={result.MatchId} result={result.Result} duration={result.DurationSeconds} gifts={result.Gifts?.Count ?? 0}");
+            _tableMatches.ApplyResult(result, sender);
+            _playTableResultNonces.Remove(result.MatchId);
+        }
+
+        private bool HostPlayingAt(InteractablePlayTable table)
+        {
+            var manager = SceneRef<PlayCardGameManager>.Get();
+            var game = manager != null ? manager.m_PlayTableGame : null;
+            return game != null && FiPlayTableMode != null && (bool)FiPlayTableMode.GetValue(game)
+                && ReferenceEquals(FiCurrentPlayTable?.GetValue(game), table);
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        private void EnsurePlayTableNonceSession()
+        {
+            int generation = SessionGeneration;
+            if (_playTableNonceGeneration != generation)
+            {
+                _playTableResultNonces.Clear();
+                _playTableNonceGeneration = generation;
+            }
         }
     }
 }

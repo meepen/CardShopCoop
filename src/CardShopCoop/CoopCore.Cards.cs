@@ -833,9 +833,9 @@ namespace CardShopCoop
             if (Role != CoopRole.Host || _net == null || _net.ConnectionCount <= 1)
                 return;
             FlushCardDeltaOutbox();
-            foreach (int cid in _net.ConnIds())
+            foreach (int cid in ConnectionIds())
                 if (cid != senderConn)
-                    _net.Send(cid, message);
+                    Send(cid, message);
         }
 
         private void RelayCardDeltaBatchToOthers(int senderConn, List<PendingCard> deltas)
@@ -851,9 +851,9 @@ namespace CardShopCoop
                     Amount = deltas[i].Amount,
                     Card = deltas[i].Card
                 });
-            foreach (int cid in _net.ConnIds())
+            foreach (int cid in ConnectionIds())
                 if (cid != senderConn)
-                    _net.Send(cid, relay);
+                    Send(cid, relay);
         }
 
         /// <summary>Send everything the card-delta outbox holds, at most CardDeltaBatchMax

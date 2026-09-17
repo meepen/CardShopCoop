@@ -266,8 +266,9 @@ namespace CardShopCoop.Sync
         }
 
         /// <summary>Host: complete state to one connection only (join/heal catch-up).</summary>
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null || !TvInterop.Present)
                 return;
             Guarded("full", () =>

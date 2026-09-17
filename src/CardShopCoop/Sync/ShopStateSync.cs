@@ -79,6 +79,7 @@ namespace CardShopCoop.Sync
         private ShelfManager _shelfMgr;                            // it fabricates a fake empty
                                                                    // manager if touched during a
                                                                    // loading screen (see WorldSync)
+        private TutorialManager _tutorialManager;
 
         private UnlockRoomManager Urm()
         {
@@ -110,6 +111,7 @@ namespace CardShopCoop.Sync
             _warehouseSign = null;
             _urm = null;
             _shelfMgr = null;
+            _tutorialManager = null;
         }
 
         public override void ForceResend()
@@ -400,8 +402,9 @@ namespace CardShopCoop.Sync
             });
         }
 
-        public override void FullUpdate(int connId)
+        public override void FullUpdate(Connection connection)
         {
+            int connId = connection.Id;
             if (CoopCore.Role != CoopRole.Host || SendToClient == null)
                 return;
             Guarded("full", () => SendToClient(connId, BuildFullMessage()));
@@ -755,8 +758,32 @@ namespace CardShopCoop.Sync
 
         private void ApplyTutorialMessage(ShopStateMessage message)
         {
-            var incoming = new System.Collections.Generic.List<TutorialData>();
             int count = message.Tutorials == null ? 0 : Math.Min(message.Tutorials.Count, 4096);
+            var cur = CPlayerData.m_TutorialDataList;
+            bool same = message.TutorialIndex == CPlayerData.m_TutorialIndex
+                && cur != null && cur.Count == count;
+            if (same)
+                for (int i = 0; i < count; i++)
+                    if (cur[i].tutorialTaskCondition != (ETutorialTaskCondition)message.Tutorials[i].Condition
+                        || Mathf.Abs(cur[i].value - message.Tutorials[i].Value) > 0.001f)
+                    {
+                        same = false;
+                        break;
+                    }
+            bool leavingIntro = message.TutorialIndex != 0 && CPlayerData.m_TutorialIndex == 0;
+            if (same)
+            {
+                // Normally an unchanged sweep slice needs no scene work at all. The one
+                // exception is the host-only transition out of the naming step, whose HUD
+                // presentation must still be repaired even when task data is unchanged.
+                if (leavingIntro)
+                    ApplyTutorialPresentation(message.TutorialIndex);
+                else
+                    SyncTutorialMarker(_tutorialManager, message.TutorialIndex);
+                return;
+            }
+
+            var incoming = new System.Collections.Generic.List<TutorialData>(count);
             for (int i = 0; i < count; i++)
                 incoming.Add(new TutorialData { tutorialTaskCondition = (ETutorialTaskCondition)message.Tutorials[i].Condition, value = message.Tutorials[i].Value });
             ApplyTutorial(message.TutorialIndex, incoming);
@@ -766,25 +793,44 @@ namespace CardShopCoop.Sync
         /// tutorial panel advances in step. No-ops when nothing changed (so a routine
         /// ShopState heal doesn't churn the panel). Resets each subgroup's private progress
         /// then re-feeds the snapshot value ONCE, which sets rather than accumulates.</summary>
+        private TutorialManager GetTutorialManager()
+        {
+            if (_tutorialManager == null)
+                _tutorialManager = UnityEngine.Object.FindObjectOfType<TutorialManager>(); // NOT CSingleton (fake-manager trap)
+            return _tutorialManager;
+        }
+
+        private void ApplyTutorialPresentation(int tutIndex)
+        {
+            var tm = GetTutorialManager();
+            SyncTutorialMarker(tm, tutIndex);
+            if (tutIndex != 0 && CPlayerData.m_TutorialIndex == 0)
+                ClearTutorialIntroPresentation();
+        }
+
+        private static void SyncTutorialMarker(TutorialManager tm, int tutIndex)
+        {
+            if (tm == null || tm.m_TutorialTargetIndicator == null)
+                return;
+            try
+            {
+                bool want = tutIndex == 0;
+                if (tm.m_TutorialTargetIndicator.activeSelf != want)
+                    tm.m_TutorialTargetIndicator.SetActive(want);
+            }
+            catch (Exception e) { Swallow.Log(e); }
+        }
+
         private void ApplyTutorial(int tutIndex, System.Collections.Generic.List<TutorialData> incoming)
         {
-            var tm = UnityEngine.Object.FindObjectOfType<TutorialManager>(); // NOT CSingleton (fake-manager trap)
+            var tm = GetTutorialManager();
 
             // 1.0's shop-naming marker (m_TutorialTargetIndicator) is shown only while the tutorial
             // is at step 0, and is cleared by the LOCAL naming trigger / OnPressConfirmShopName -
             // neither of which a joiner runs - so a guest's marker stayed up after the host named
             // the shop. Mirror the host's step on every apply (heals included), before the
             // unchanged-data early return below.
-            if (tm != null && tm.m_TutorialTargetIndicator != null)
-            {
-                try
-                {
-                    bool want = tutIndex == 0;
-                    if (tm.m_TutorialTargetIndicator.activeSelf != want)
-                        tm.m_TutorialTargetIndicator.SetActive(want);
-                }
-                catch (Exception e) { Swallow.Log(e); }
-            }
+            SyncTutorialMarker(tm, tutIndex);
 
             // Same class of host-only local action as the marker above: at step 0 the tutorial
             // calls ShopRenamer.SetIsTutorial(), which ADDS the seven movement key tooltips and
