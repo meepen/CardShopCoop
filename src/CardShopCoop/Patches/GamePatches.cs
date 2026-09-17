@@ -342,6 +342,8 @@ namespace CardShopCoop.Patches
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
             Try(h, typeof(InteractablePackagingBox_Item), "RemoveItemFromShelf",
                 prefix: new HarmonyMethod(typeof(GamePatches), nameof(ShelfBoxPullPrefix)),
+                postfix: new HarmonyMethod(typeof(GamePatches), nameof(ShelfBoxPullPostfix)));
+            Try(h, typeof(InteractablePackagingBox_Item), "RemoveItemFromShelf",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(ObjectMutationPostfix)));
             Try(h, typeof(InteractablePackagingBox_Item), "SetOpenCloseBox",
                 postfix: new HarmonyMethod(typeof(GamePatches), nameof(BoxOpenClosePostfix)));
@@ -509,14 +511,44 @@ namespace CardShopCoop.Patches
                 CoopCore.RequestImmediateObjectSync();
         }
 
-        public static bool ShelfBoxPullPrefix(InteractablePackagingBox_Item __instance,
-            ShelfCompartment targetItemCompartment)
+        public struct ShelfBoxPullState
         {
-            if (CoopCore.Role != CoopRole.Client)
+            public ShelfCompartment Source;
+            public int Before;
+            public ushort BoxId;
+            public bool Began;
+        }
+
+        /// <summary>Client: let the vanilla shelf->box pull run locally for an immediate update,
+        /// but correlate the shelf take it produces with the destination box (WorldSync) and hold
+        /// the box's optimistic add (BoxEngine) until the host accepts the source take. A refused
+        /// source take must not leave the pulled item in the box, so the pull is then rolled back
+        /// instead of creating stock. The move itself is still host-authoritative: the ordinary
+        /// delta merge and result reconciliation decide whether it stands.</summary>
+        public static bool ShelfBoxPullPrefix(InteractablePackagingBox_Item __instance,
+            ShelfCompartment targetItemCompartment, out ShelfBoxPullState __state)
+        {
+            __state = default;
+            if (CoopCore.Role != CoopRole.Client || __instance == null || targetItemCompartment == null)
                 return true;
-            // Do not remove from the guest shelf or add to its box before host authorization.
-            CoopCore.Instance?.RequestShelfBoxPull(__instance, targetItemCompartment);
-            return false;
+            var core = CoopCore.Instance;
+            if (core?.World == null || core.Boxes == null
+                || !core.Boxes.TryGetClientId(__instance, out ushort boxId))
+                return true;
+            __state.Began = true;
+            __state.Source = targetItemCompartment;
+            __state.Before = targetItemCompartment.GetItemCount();
+            __state.BoxId = boxId;
+            core.World.BeginPull(boxId, targetItemCompartment);
+            core.Boxes.HoldPullAdd(boxId);
+            return true; // run vanilla; its RemoveItem hook reports the source take
+        }
+
+        public static void ShelfBoxPullPostfix(ShelfCompartment targetItemCompartment, ShelfBoxPullState __state)
+        {
+            if (!__state.Began)
+                return;
+            CoopCore.Instance?.World?.EndPull(__state.Source, __state.Before, __state.BoxId);
         }
 
         public struct ShelfMutationState
@@ -1680,12 +1712,12 @@ namespace CardShopCoop.Patches
 
         public static void LightStateChangedPostfix(LightManager __instance)
         {
-            CoopCore.Instance?.ObserveHostLightState(__instance);
+            TimeSync.Instance?.ObserveHostLightState(__instance);
         }
 
         public static void ClientLightClockPrefix(LightManager __instance)
         {
-            CoopCore.Instance?.EnforceClientClock(__instance);
+            TimeSync.Instance?.OnLightManagerUpdate(__instance);
         }
 
         /// <summary>Set by CoopCore right before it mirrors a host day-change, so exactly

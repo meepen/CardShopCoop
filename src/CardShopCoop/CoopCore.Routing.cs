@@ -170,51 +170,8 @@ namespace CardShopCoop
             {
                 if (Role != CoopRole.Client)
                     return;
-                var timeMessage = message as DayTimeMessage;
-                if (timeMessage == null)
-                    return;
-                {
-                    int day = timeMessage.Day;
-                    int hour = timeMessage.Hour;
-                    int min = timeMessage.Minute;
-                    float minFloat = timeMessage.MinuteFloat;
-                    bool shopOnceOpen = timeMessage.ShopOnceOpen;
-                    if (!_loggedTimeLink)
-                    {
-                        _loggedTimeLink = true;
-                        CoopPlugin.Log.LogInfo($"Time link active (Day {day} {hour:00}:{min:00})");
-                    }
-                    HostTimeLine = $"Day {day + 1}  {hour:00}:{min:00}"; // HUD shows day+1
-                    bool dayChanged = day != CPlayerData.m_CurrentDay;
-                    CPlayerData.m_CurrentDay = day;
-                    // Match the host's clock gate. Forcing this true made a client advance
-                    // through a new morning while the host was still waiting to open shop.
-                    CPlayerData.m_IsShopOnceOpen = shopOnceOpen;
-                    if (dayChanged)
-                        MarkClientDayResetPending();
-                    try
-                    {
-                        if (_lightManager == null)
-                            _lightManager = FindObjectOfType<LightManager>();
-                        if (_lightManager != null)
-                        {
-                            EnforceClientClock(_lightManager);
-                            // Always apply the host clock, even while a morning reset is
-                            // pending. The old gate let the local clock run unchecked until
-                            // it reached night, then dropped every lighting correction.
-                            FiTimeHour?.SetValue(_lightManager, hour);
-                            FiTimeMin?.SetValue(_lightManager, min);
-                            FiTimeMinFloat?.SetValue(_lightManager, minFloat);
-                            MiEvaluateTimeClock?.Invoke(_lightManager, null);
-                            if (hour < 21)
-                                FiHasDayEnded?.SetValue(_lightManager, false);
-
-                            if (dayChanged || _clientDayResetPending)
-                                TryStartClientDayReset();
-                        }
-                    }
-                    catch (Exception e) { CoopPlugin.Log.LogWarning("day-time apply: " + e.Message); }
-                }
+                if (message is DayTimeMessage dayTime)
+                    _time.ClientApplyDayTime(dayTime);
                 return;
             },
                 MessagePolicy.ClientOnly, false, heal: null);
@@ -975,91 +932,7 @@ namespace CardShopCoop
                 if (Role != CoopRole.Client || !InGameLevel())
                     return;
                 if (message is LightStateMessage lightState)
-                {
-                    try
-                    {
-                        if (string.IsNullOrEmpty(lightState.LightJson))
-                        {
-                            _world.RequestResyncCoalesced();
-                            return;
-                        }
-                        LightTimeData data;
-                        try
-                        {
-                            data = JsonUtility.FromJson<LightTimeData>(lightState.LightJson);
-                        }
-                        catch (Exception e)
-                        {
-                            CoopPlugin.Log.LogWarning("light state parse: " + e.Message);
-                            _world.RequestResyncCoalesced();
-                            return;
-                        }
-                        if (data == null)
-                            return;
-                        // Reject an older heartbeat that was already queued before a
-                        // rollover. A newer day heartbeat is the fallback for a missed
-                        // DayTime packet and must schedule the same full environment reset.
-                        if (lightState.HasDay)
-                        {
-                            if (lightState.Day < CPlayerData.m_CurrentDay)
-                                return;
-                            if (lightState.Day > CPlayerData.m_CurrentDay)
-                            {
-                                CPlayerData.m_CurrentDay = lightState.Day;
-                                MarkClientDayResetPending();
-                                TryStartClientDayReset();
-                                return;
-                            }
-                        }
-                        if (_lightManager == null)
-                            _lightManager = FindObjectOfType<LightManager>();
-                        if (_lightManager == null)
-                            return;
-                        EnforceClientClock(_lightManager);
-                        int localIdx = FiTimeOfDayIdx?.GetValue(_lightManager) is int idx ? idx : -1;
-                        int localHour = FiTimeHour?.GetValue(_lightManager) is int h ? h : -1;
-                        int localMin = FiTimeMin?.GetValue(_lightManager) is int m2 ? m2 : 0;
-                        int driftMin = Math.Abs((data.m_TimeHour * 60 + data.m_TimeMin) - (localHour * 60 + localMin));
-                        bool phaseDiffer = localIdx != data.m_TImeOfDayIndex;
-
-                        // LightState is the complete authoritative snapshot. Apply its
-                        // clock before evaluating brightness so a client that already ran
-                        // into night cannot remain dark while the reset latch is pending.
-                        CPlayerData.m_LightTimeData = data;
-                        FiTimeHour?.SetValue(_lightManager, data.m_TimeHour);
-                        FiTimeMin?.SetValue(_lightManager, data.m_TimeMin);
-                        FiTimeMinFloat?.SetValue(_lightManager, data.m_TimeMinFloat);
-                        FiTimeOfDayIdx?.SetValue(_lightManager, data.m_TImeOfDayIndex);
-                        bool groupsDiffer = _lightManager.m_NightlightGrp == null
-                            || _lightManager.m_ShoplightGrp == null
-                            || _lightManager.m_SunlightGrp == null
-                            || _lightManager.m_NightlightGrp.activeSelf != data.m_IsNightLightOn
-                            || _lightManager.m_ShoplightGrp.activeSelf != data.m_IsShopLightOn
-                            || _lightManager.m_SunlightGrp.activeSelf != data.m_IsSunlightOn;
-
-                        // Apply every authoritative light group, not just the shop-light
-                        // switch. This also repairs mods that change the groups directly.
-                        if (groupsDiffer)
-                        {
-                            _lightManager.m_NightlightGrp?.SetActive(data.m_IsNightLightOn);
-                            _lightManager.m_ShoplightGrp?.SetActive(data.m_IsShopLightOn);
-                            _lightManager.m_SunlightGrp?.SetActive(data.m_IsSunlightOn);
-                        }
-                        if (groupsDiffer || phaseDiffer)
-                            MiEvaluateWorldUIBrightness?.Invoke(_lightManager, null);
-                        ApplyClientLightSwitchModels(data.m_IsShopLightOn);
-                        // re-run the game's own lighting restore only when the sky
-                        // phase actually differs (avoids music/blend churn)
-                        if (phaseDiffer || driftMin > 4)
-                        {
-                            FiFinishLoading?.SetValue(_lightManager, false);
-                            MiLightInit?.Invoke(_lightManager, null);
-                            CoopPlugin.Log.LogInfo($"lighting re-synced (phase {localIdx}->{data.m_TImeOfDayIndex}, drift {driftMin}min)");
-                        }
-                        FiHasDayEnded?.SetValue(_lightManager, false);
-                    }
-                    catch (Exception e) { CoopPlugin.Log.LogWarning("light apply: " + e.Message); }
-                }
+                    _time.ClientApplyLightState(lightState);
                 return;
             },
                 MessagePolicy.ClientOnlyInGame, false, heal: () => _world.RequestResyncCoalesced());

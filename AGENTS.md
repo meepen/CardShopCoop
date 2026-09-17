@@ -87,9 +87,16 @@ exception and must be justified in review.
 slice sweep + a per-connection `FullUpdate`: `WarehouseBoxSync`, `StaffSync`, `ShopStateSync`,
 `SettingsSync`, `ReportSync`, `PlayTableSync`, `TournamentSync`, `GradingSync`, `TradeServe`,
 `ContainerSync`, `TvSync`, `WorldSync`, `CardShelfSync`, `ObjMoveSync`, `PopulationSync`,
-`RegisterSync`. No module constructs a `SnapshotGate` any more (the type is still defined in
-`CoopModule.cs`, now unused). The `CoopCore` light / card-price loops keep their own cadences and
-are the remaining backlog.
+`RegisterSync`, `TimeSync`. No module constructs a `SnapshotGate` any more (the type is still defined
+in `CoopModule.cs`, now unused). The `CoopCore` card-price loop keeps its own cadence and is the
+remaining backlog.
+
+`TimeSync` is the justified small-scalar exception to the "no periodic full resend" rule: its clock
+state is five fields (day, hour, minute, fractional minute, shop-open gate), so the 2 s beat that
+carries them is a few dozen bytes and exists to repair a dropped gate push, not to burst a large
+state. Time-of-day itself is a deterministic real-time integrator, so the client predicts it with the
+game's own clock (see `Sync/ClockPrediction.cs`) and only nudges its rate for small drift; the host
+reasserts the clock on the beat and pushes immediately when a gate flips.
 
 Two rules that are easy to get wrong — both were, in that migration:
 

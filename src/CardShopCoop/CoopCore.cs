@@ -235,6 +235,7 @@ namespace CardShopCoop
         private readonly ContainerSync _containers = new ContainerSync();
         private readonly TournamentSync _tournament = new TournamentSync();
         private readonly TvSync _tv = new TvSync();
+        private readonly Sync.TimeSync _time = new Sync.TimeSync();
         private readonly ItemBoxFamily _itemBoxFamily = new ItemBoxFamily();
         private readonly CardBoxFamily _cardBoxFamily = new CardBoxFamily();
         private readonly FurnitureBoxFamily _furnBoxFamily = new FurnitureBoxFamily();
@@ -250,7 +251,7 @@ namespace CardShopCoop
         private Sync.TickEntry[] _hostTickOrder;
         private Sync.TickEntry[] _clientTickOrder;
         private string _lastShopNameSent;
-        private float _shopNameTimer = -1.0f; // staggered phase (see _lightSyncTimer note)
+        private float _shopNameTimer = -1.0f; // staggered phase: periodic sends must not bunch
         private float _npcSweepTimer = -1.3f;
 
         // ---- invite code / UPnP (LAN hosting only) ----
@@ -324,7 +325,6 @@ namespace CardShopCoop
         private float _stateTimer;
         private float _pingTimer;
         private float _econTimer = -0.11f;
-        private float _dayTimer = -0.9f;
 
         // local movement measurement
         private Vector3 _lastPos;
@@ -355,7 +355,6 @@ namespace CardShopCoop
         // one-time link confirmation logging
         private readonly HashSet<int> _gotStateFrom = new HashSet<int>();
         private bool _loggedEconLink;
-        private bool _loggedTimeLink;
 
         // pipeline diagnostics: prove where sync stalls instead of guessing
         private long _diagSent;
@@ -377,22 +376,8 @@ namespace CardShopCoop
             }
         }
 
-        // LightManager reflection (time of day)
-        private static readonly FieldInfo FiTimeHour = Util.ReflectionSurface.RequiredField(typeof(LightManager), "m_TimeHour");
-        private static readonly FieldInfo FiTimeMin = Util.ReflectionSurface.RequiredField(typeof(LightManager), "m_TimeMin");
-        private static readonly FieldInfo FiTimeMinFloat = Util.ReflectionSurface.RequiredField(typeof(LightManager), "m_TimeMinFloat");
-        private static readonly FieldInfo FiTimerLerpSpeed = Util.ReflectionSurface.RequiredField(typeof(LightManager), "m_TimerLerpSpeed");
-        private static readonly FieldInfo FiHasDayEnded = Util.ReflectionSurface.RequiredField(typeof(LightManager), "m_HasDayEnded");
-        private static readonly System.Reflection.MethodInfo MiDayReset = Util.ReflectionSurface.RequiredMethod(typeof(LightManager), "DelayUpdateEnv");
-        private static readonly FieldInfo FiTimeOfDayIdx = Util.ReflectionSurface.RequiredField(typeof(LightManager), "m_TImeOfDayIndex");
-        private static readonly FieldInfo FiFinishLoading = Util.ReflectionSurface.RequiredField(typeof(LightManager), "m_FinishLoading");
-        private static readonly System.Reflection.MethodInfo MiLightInit = Util.ReflectionSurface.RequiredMethod(typeof(LightManager), "Init");
-        private static readonly System.Reflection.MethodInfo MiUpdateLightData = Util.ReflectionSurface.RequiredMethod(typeof(LightManager), "UpdateLightTimeData");
-        private static readonly System.Reflection.MethodInfo MiEvaluateTimeClock = Util.ReflectionSurface.RequiredMethod(typeof(LightManager), "EvaluateTimeClock");
-        private static readonly System.Reflection.MethodInfo MiEvaluateWorldUIBrightness = Util.ReflectionSurface.RequiredMethod(typeof(LightManager), "EvaluateWorldUIBrightness");
-        private float _lightSyncTimer = -2.3f;   // timers carry staggered phases so the
-        private LightManager _lightManager;      // periodic broadcasts never bunch into
-        private float _cardResyncTimer = -5.2f;  // one frame (the rhythmic-hitch bug)
+        private LightManager _lightManager;
+        private float _cardResyncTimer = -5.2f;  // change-gate for the 12s full card repaint
         private int _lastCardResyncHash;         // change-gate for the 12s full card repaint
         private float _cardResyncHeal;           // forces a repaint every 30s regardless
         private float _cardPriceHealTimer = -2.1f; // periodic displayed-card price rebroadcast
@@ -404,18 +389,9 @@ namespace CardShopCoop
         private readonly List<KeyValuePair<CardData, float>> _cardPriceBuf = new List<KeyValuePair<CardData, float>>();
         private float _licenseSyncTimer = -3.7f;
         private double _lastLicenseBuyTime = -999.0;
-        private string _lastLightJson;
-        private float _lightHeal;
-        private bool _lightForceResend;
-        private bool _observedShopLight;
-        private bool _observedNightLight;
-        private bool _observedSunlight;
-        private bool _observedLightState;
         private bool _clientDayResetPending;
         private bool _clientDayResetInFlight;
         private float _clientDayResetDeadline;
-        private bool _clientClockFrozen;
-        private float _clientClockOriginalSpeed = 1f;
         private int _lastLicenseHash;
         private float _licenseHeal;
 
@@ -586,6 +562,9 @@ namespace CardShopCoop
             _world.OnLocalChanges = OnLocalWorldChanges;
             _world.SendResult = (result, connId) => Send(connId, result);
             _world.SendBoxPull = message => Send(1, message);
+            // A guest's optimistic shelf->box pull resolves its box add with the source take:
+            // keep the item when the host took the source, drop it when the stock was gone.
+            _world.PullTakeResolved = (boxId, type, accepted) => _boxEngine?.OnPullTakeResolved(boxId, type, accepted);
             _world.RequestResync = () =>
             {
                 CoopPlugin.Log.LogWarning("WorldSync requested authoritative shelf resync");
@@ -743,6 +722,8 @@ namespace CardShopCoop
             _tv.BroadcastState = Broadcast;
             _tv.SendToClient = Send;
             _tv.PeerCount = () => _net == null ? 0 : _net.ConnectionCount;
+            _time.BroadcastState = Broadcast;
+            _time.SendToClient = Send;
             _world.BroadcastState = Broadcast;
             _world.SendToClient = Send;
             _objMoves.SendToClient = Send;
@@ -1253,7 +1234,6 @@ namespace CardShopCoop
                 ResetAllModules();
             }
             _lightManager = null;
-            _clientClockFrozen = false;
             // Unity stops scene-owned coroutines during a load. If that interrupted the
             // mirrored morning reset, make it retry against the newly loaded manager.
             if (_clientDayResetInFlight)
@@ -1824,6 +1804,23 @@ namespace CardShopCoop
             return _inventory;
         }
 
+        /// <summary>The single cached LightManager, resolved lazily and re-resolved after a
+        /// scene load (Unity's fake-null makes a destroyed instance compare equal to null).
+        /// Shared by the day/night module and the client day-reset path.</summary>
+        internal LightManager ResolveLightManager()
+        {
+            if (_lightManager == null)
+                _lightManager = FindObjectOfType<LightManager>();
+            return _lightManager;
+        }
+
+        /// <summary>Coalesced world re-baseline, for modules whose payload did not parse or was
+        /// incomplete and which cannot otherwise repair themselves.</summary>
+        internal void RequestWorldResync()
+        {
+            _world.RequestResyncCoalesced();
+        }
+
         private void ModulesTick()
         {
             if (_moduleRegistry == null)
@@ -1952,6 +1949,7 @@ namespace CardShopCoop
                 new Sync.CoopModuleEntry(_tournament, "tournament", 9, -1, Sync.TournamentSync.ApplyPatches),
                 new Sync.CoopModuleEntry(_register, "register", 10, 4, Sync.RegisterSync.ApplyPatches),
                 new Sync.CoopModuleEntry(_tv, "tv", 11, 1, Sync.TvSync.ApplyPatches),
+                new Sync.CoopModuleEntry(_time, "time", 14, 8),
                 new Sync.CoopModuleEntry(new Sync.DelegateCoopModule("join-heal", null, null,
                     () => _priceFullPending = true), "join-heal"),
                 new Sync.CoopModuleEntry(new Sync.DelegateCoopModule("live-hooks",
@@ -4659,41 +4657,8 @@ namespace CardShopCoop
                 }
             }
 
-            // lighting-state heal: normal light changes are event-driven; this slow fallback
-            // repairs scene-loads, unusual mods, or a missed change notification
-            _lightSyncTimer += dt;
-            if (_lightSyncTimer >= 30f || _lightForceResend)
-            {
-                bool forced = _lightForceResend;
-                _lightSyncTimer = forced ? 0f : _lightSyncTimer - 30f;
-                _lightForceResend = false;
-                try
-                {
-                    if (_lightManager == null)
-                        _lightManager = FindObjectOfType<LightManager>();
-                    if (_lightManager != null && MiUpdateLightData != null && CPlayerData.m_LightTimeData != null)
-                    {
-                        MiUpdateLightData.Invoke(_lightManager, null); // refresh bundle from live state
-                        string lightJson = JsonUtility.ToJson(CPlayerData.m_LightTimeData);
-                        // the client CORRECTS ITS DRIFT only when a packet arrives - a pure
-                        // changed-only gate silenced the corrector whenever the host's sky
-                        // was static (pre-open mornings) and the joiner drifted to sunset
-                        _lightHeal += 30f;
-                        if (lightJson != _lastLightJson || _lightHeal >= 60f)
-                        {
-                            _lastLightJson = lightJson;
-                            _lightHeal = 0f;
-                            Broadcast(new LightStateMessage
-                            {
-                                LightJson = lightJson,
-                                Day = CPlayerData.m_CurrentDay,
-                                HasDay = true,
-                            });
-                        }
-                    }
-                }
-                catch (Exception e) { CoopPlugin.Log.LogWarning("light sync: " + e.Message); }
-            }
+            // Lighting state (and the day/night clock) are owned by Sync.TimeSync, which pushes
+            // on gate changes and re-asserts on its own slices. See that module.
 
             // Card display slots and item stock are no longer repainted on a timer here.
             // CardShelfSync and WorldSync each re-assert every compartment through their own
@@ -4814,36 +4779,6 @@ namespace CardShopCoop
                     }
                 }
                 catch (Exception e) { CoopPlugin.Log.LogWarning("license sync: " + e.Message); }
-            }
-
-            _dayTimer += dt;
-            if (_dayTimer >= 2f)
-            {
-                _dayTimer -= 2f;
-                int hour = 8, min = 0;
-                try
-                {
-                    if (_lightManager == null)
-                        _lightManager = FindObjectOfType<LightManager>();
-                    if (_lightManager != null)
-                    {
-                        if (FiTimeHour != null)
-                            hour = (int)FiTimeHour.GetValue(_lightManager);
-                        if (FiTimeMin != null)
-                            min = (int)FiTimeMin.GetValue(_lightManager);
-                    }
-                }
-                catch (System.Exception e) { Swallow.Log(e); }
-                int day = CPlayerData.m_CurrentDay;
-                float minFloat = min;
-                try
-                {
-                    if (_lightManager != null && FiTimeMinFloat != null)
-                        minFloat = (float)FiTimeMinFloat.GetValue(_lightManager);
-                }
-                catch (System.Exception e) { Swallow.Log(e); }
-                bool shopOnceOpen = CPlayerData.m_IsShopOnceOpen;
-                Broadcast(new DayTimeMessage { Day = day, Hour = hour, Minute = min, MinuteFloat = minFloat, ShopOnceOpen = shopOnceOpen });
             }
         }
 

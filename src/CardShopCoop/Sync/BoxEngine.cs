@@ -99,6 +99,11 @@ namespace CardShopCoop.Sync
         private readonly PendingTransferLedger<ushort> _transfers = new PendingTransferLedger<ushort>();
         private readonly HostTransferAcks _hostAcks = new HostTransferAcks();
         private readonly HashSet<ushort> _suppressedSnapshotForBox = new HashSet<ushort>();
+        /// <summary>Client: boxes with one or more correlated shelf->box pulls in flight. The
+        /// optimistic add already sits in the local box, but the source take has not been
+        /// accepted yet, so the box must not report that add until every pull resolves (otherwise
+        /// a refused source take would leave a phantom item on the host).</summary>
+        private readonly Dictionary<ushort, int> _pullAddHolds = new Dictionary<ushort, int>();
         private bool _resyncRequested;
         private float _lastResyncRequestAt = -999f;
         private const float ResyncCooldownSeconds = 2f;
@@ -440,6 +445,7 @@ namespace CardShopCoop.Sync
             _hostAcks.Clear();
             CardBoxOps.ClearCollectAcks();
             _suppressedSnapshotForBox.Clear();
+            _pullAddHolds.Clear();
             _contentSentAt.Clear();
             _lastSentAt.Clear();
             _active.Clear();
@@ -522,6 +528,76 @@ namespace CardShopCoop.Sync
                     return;
                 }
             }
+        }
+
+        /// <summary>Client: reserve a correlated shelf->box pull on this box. The vanilla pull has
+        /// already added the item locally; the add stays unreported until the source take's
+        /// result either commits it or rolls it back.</summary>
+        public void HoldPullAdd(ushort boxId)
+        {
+            if (CoopCore.Role != CoopRole.Client || boxId == 0)
+                return;
+            _pullAddHolds.TryGetValue(boxId, out int count);
+            _pullAddHolds[boxId] = count + 1;
+        }
+
+        /// <summary>Client: a pull that moved nothing (or could not be tracked) releases its
+        /// reservation without changing the box.</summary>
+        public void CancelPullAdd(ushort boxId) => ReleasePullHold(boxId);
+
+        /// <summary>Client: a correlated source take resolved. accepted is how much of the source
+        /// the host really took; a refused take drops this pull's optimistic box item so stock is
+        /// never created.</summary>
+        public void OnPullTakeResolved(ushort boxId, int type, int accepted)
+        {
+            if (!_pullAddHolds.ContainsKey(boxId))
+                return;
+            if (accepted <= 0)
+                RemoveOneFromClientBox(boxId, type);
+            ReleasePullHold(boxId);
+        }
+
+        private void ReleasePullHold(ushort boxId)
+        {
+            if (!_pullAddHolds.TryGetValue(boxId, out int count))
+                return;
+            if (count > 1)
+            {
+                _pullAddHolds[boxId] = count - 1;
+                return;
+            }
+            _pullAddHolds.Remove(boxId);
+            // Every correlated pull has resolved: let the ordinary scan report the net content
+            // delta (accepted pulls kept, refused ones already removed). Invalidate the content
+            // signature first, because a lease renewal during the hold recorded the post-pull
+            // signature while sending the pre-pull count - without this the net add would look
+            // "already reported" and never reach the host.
+            if (_clientById.TryGetValue(boxId, out var box) && box != null)
+            {
+                _reportedContent.Remove(box);
+                _clientDirty.Add(box);
+                ForceNextTick();
+            }
+        }
+
+        private static void RemoveOneFromClientBox(ushort boxId, int type)
+        {
+            BoxEngine self = CoopCore.Instance?.Boxes;
+            if (self == null || !self._clientById.TryGetValue(boxId, out var box)
+                || !(box is InteractablePackagingBox_Item item) || item.m_ItemCompartment == null)
+                return;
+            var comp = item.m_ItemCompartment;
+            var last = comp.GetLastItem();
+            if (last == null)
+            {
+                CoopPlugin.Log.LogWarning($"BoxEngine: pull rollback found no item to remove from box {boxId}");
+                return;
+            }
+            if (type != (int)EItemType.None && (int)last.GetItemType() != type)
+                CoopPlugin.Log.LogWarning(
+                    $"BoxEngine: pull rollback box {boxId} removed {last.GetItemType()} but the pull moved {(EItemType)type}");
+            comp.RemoveItem(last);
+            ItemSpawnManager.DisableItem(last);
         }
 
         /// <summary>Host: force the next flush to be a complete snapshot (join/resync).</summary>
@@ -1706,6 +1782,31 @@ namespace CardShopCoop.Sync
                 else
                     BoxPlacement.ClearThrow(box);
             }
+            // A correlated shelf->box pull: the optimistic add is already in the local box, but
+            // its source take has not been accepted. Keep the host lease alive with the PRE-PULL
+            // content (a held report carries no content delta) and defer reporting the add until
+            // every pending pull resolves. A possession edge ends the correlation and reports
+            // the real state, letting normal reconciliation settle any divergence.
+            if (_clientIdOf.TryGetValue(box, out ushort pullBox) && _pullAddHolds.ContainsKey(pullBox))
+            {
+                bool pullActive = poss == BoxPossession.Held || poss == BoxPossession.Placing;
+                bool possessionEdge = !_reported.TryGetValue(box, out var prevPull) || prevPull != poss;
+                if (possessionEdge)
+                    _pullAddHolds.Remove(pullBox); // stop correlating; fall through to report
+                else
+                {
+                    bool renewPull = pullActive
+                        && (!_lastSentAt.TryGetValue(box, out var lastPull) || Time.time - lastPull >= LeaseRenewPeriod);
+                    if (renewPull)
+                    {
+                        _lastSentAt[box] = Time.time;
+                        _contentSentAt[box] = Time.time;
+                        SendClientBoxReport(family, box, poss, pos, yaw, vel, angVel,
+                            family.ContentSignature(box), freezeContent: true);
+                    }
+                    return pullActive;
+                }
+            }
             // First sighting of a box we have never reported: seed the local baseline instead
             // of transmitting it. A joiner mirrors the host's own save, so its initial Free
             // pose/content is not a change - sending it would let a client that never owned
@@ -1743,7 +1844,8 @@ namespace CardShopCoop.Sync
         }
 
         private uint SendClientBoxReport(IBoxFamily family, InteractablePackagingBox box,
-            BoxPossession poss, Vector3 pos, float yaw, Vector3 vel, Vector3 angVel, int sig)
+            BoxPossession poss, Vector3 pos, float yaw, Vector3 vel, Vector3 angVel, int sig,
+            bool freezeContent = false)
         {
             var w = new BoxWire
             {
@@ -1758,9 +1860,16 @@ namespace CardShopCoop.Sync
                 w.Velocity = vel;
                 w.AngularVelocity = angVel;
             }
-            family.FillContent(box, ref w);
-            int baseItemCount = _baselineItemCount.TryGetValue(box, out var bc) ? bc : w.ItemCount;
+            int baseItemCount = _baselineItemCount.TryGetValue(box, out var bc) ? bc : family.ReadItemCount(box);
             int baseItemType = _baselineItemType.TryGetValue(box, out var bt) ? bt : (int)EItemType.None;
+            family.FillContent(box, ref w);
+            // A held lease renewal during a correlated pull reports the PRE-PULL content so the
+            // optimistic add is not sent as a transfer (requestedDelta becomes 0 below).
+            if (freezeContent)
+            {
+                w.ItemCount = baseItemCount;
+                w.ItemType = EnumMap.ToWire(EnumKind.ItemType, baseItemType);
+            }
             // An item content delta (loose edit, or the current owner editing while
             // held/placing) is tracked as a transfer so the host can merge exactly that much
             // and tell us what it accepted; the rest is rolled back out of our hand. Invariant:

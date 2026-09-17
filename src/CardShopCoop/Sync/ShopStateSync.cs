@@ -497,7 +497,7 @@ namespace CardShopCoop.Sync
                         break;
                     case OpToggleLight:
                         HostToggleLight();
-                        CoopCore.Instance?.ForceLightResend();
+                        TimeSync.Instance?.ForceLightResend();
                         break;
                 }
             }

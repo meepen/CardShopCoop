@@ -40,13 +40,29 @@ namespace CardShopCoop.Net.Messages
 
     /// <summary>Host -> sender: the outcome of one client shelf item delta. AcceptedDelta is how
     /// much of the requested delta the host applied, so the requester can roll back the rest of
-    /// its hand (last to pull loses). Sent only in reply to an Entry whose TransferSeq is non-zero.</summary>
+    /// its hand (last to pull loses). Sent only in reply to an Entry whose TransferSeq is non-zero.
+    /// <para>
+    /// HasHostState/HostType/HostCount carry the host's authoritative contents for that
+    /// compartment after the delta was merged. The requester applies them once this transfer's
+    /// reservation is released, which is the only deterministic repair for an optimistic mirror
+    /// that drifted while the transfer was in flight (a host-side sale the client never applied).
+    /// The result is the requester's sole truth source when it is the only client, because the
+    /// host deliberately does not echo applied entries back to a single connection.</para></summary>
     [NetworkMessage(MsgType.ShelfTransferResult, Policy = MessagePolicy.ClientOnlyInGame)]
     public sealed class ShelfTransferResultMessage : INetMessage
     {
         public int Key;
         public uint TransferSeq;
         public int AcceptedDelta;
+
+        /// <summary>True when HostType/HostCount were filled from a resolvable compartment.</summary>
+        public bool HasHostState;
+        /// <summary>Host-local EItemType. Typed as the enum (not an int) on purpose: the
+        /// registered EnumWireConverter sends the member NAME, so a modded id minted in a
+        /// different order on each PC translates through EnumMap exactly like
+        /// WorldSync.Entry.Type, and an id this PC does not have degrades to None.</summary>
+        public EItemType HostType;
+        public int HostCount;
 
         public MsgType Type
         {
