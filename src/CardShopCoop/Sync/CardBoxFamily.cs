@@ -157,7 +157,7 @@ namespace CardShopCoop.Sync
                         BoxPlacement.ApplyPhysicsPose(box, w.Pos, w.Yaw);
                     if (box.m_Rigidbody != null)
                     {
-                        box.m_Rigidbody.velocity = w.Velocity;
+                        Util.UnityCompat.SetVelocity(box.m_Rigidbody, w.Velocity);
                         box.m_Rigidbody.angularVelocity = w.AngularVelocity;
                         box.m_Rigidbody.WakeUp();
                     }
@@ -172,7 +172,7 @@ namespace CardShopCoop.Sync
             possession = BoxPossession.Free;
             pos = BoxPlacement.PhysicsPosition(box);
             yaw = BoxPlacement.PhysicsRotation(box).eulerAngles.y;
-            velocity = box.m_Rigidbody != null ? box.m_Rigidbody.velocity : Vector3.zero;
+            velocity = box.m_Rigidbody != null ? Util.UnityCompat.Velocity(box.m_Rigidbody) : Vector3.zero;
             angularVelocity = box.m_Rigidbody != null ? box.m_Rigidbody.angularVelocity : Vector3.zero;
             stored = false;
             if (IsLocallyCarried(box as InteractablePackagingBox_Card) || BoxShared.IsHeldByAnyone(box))

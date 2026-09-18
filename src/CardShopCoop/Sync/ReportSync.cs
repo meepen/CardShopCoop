@@ -510,14 +510,14 @@ namespace CardShopCoop.Sync
                 // a REAL screen in the scene means the vanilla statics below resolve
                 // it too; without one they would auto-create a fake (see class fields)
                 if (_screen == null)
-                    _screen = UnityEngine.Object.FindObjectOfType<EndOfDayReportScreen>();
+                    _screen = UnityEngine.Object.FindFirstObjectByType<EndOfDayReportScreen>();
                 if (_screen == null)
                     return;
                 if (EndOfDayReportScreen.IsActive())
                     return; // OpenScreen is a toggle: don't close it
 
                 if (_ipc == null)
-                    _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
+                    _ipc = UnityEngine.Object.FindFirstObjectByType<InteractionPlayerController>();
                 var pc = _ipc;
                 if (pc != null)
                 {
@@ -586,7 +586,7 @@ namespace CardShopCoop.Sync
                 // REAL screen exists in the scene, or CSingleton fabricates a fake one
                 // that shadows the real screen for the rest of the run
                 if (_screen == null)
-                    _screen = UnityEngine.Object.FindObjectOfType<EndOfDayReportScreen>();
+                    _screen = UnityEngine.Object.FindFirstObjectByType<EndOfDayReportScreen>();
                 if (_screen == null)
                     return;
                 if (!EndOfDayReportScreen.IsActive())

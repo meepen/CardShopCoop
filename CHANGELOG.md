@@ -3,10 +3,8 @@
 True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 **same version** — the join handshake enforces it.
 
----
-
 ## 1.4.0
-**Co-op works again on the game's 1.0 update: joining no longer hangs, the shop you share stays in sync, and a guest can now play the card tables.**
+**Co-op works again on the game's 1.0 update: joining no longer hangs, the shop you share stays in sync, and a guest can now play the card tables. Performance and shop feedback are smoother too.**
 
 **The card tables**
 - **Added: a guest can now play the card tables.** Clicking a free seat used to be refused, because player duels were not synchronized yet. The guest now asks the host for the seat, and the host checks that the table really has a free seat and a waiting customer before reserving it, so a guest can play the table game the same way the host can. Both players see the same table, and a table in use cannot be moved or taken out from under a duel.
@@ -50,6 +48,18 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 
 **Smoother play**
 - **Improved: shared state is sent as it changes, instead of being re-sent on a timer.** Every synchronized system used to re-broadcast its whole state on a repeating timer, which caused regular bandwidth spikes and stutters for no benefit. Each now sends only what changed, the moment it changes, with a slow background pass re-checking one small slice at a time so a dropped update still repairs itself.
+
+- **Fixed: the joining player's frame rate could sag during a busy session.** Updates now avoid
+  repeatedly searching the whole scene, and crowded work is spread across frames so one slow frame
+  does not make the next one worse.
+- **Fixed: a diagnostic could cause a recurring hitch for the joining player.** The unused memory
+  check has been removed.
+- **Fixed: shop-opening refusals could appear on the host instead of the player who clicked.**
+  The message now appears for the player who made the request.
+- **Fixed: the shop and warehouse signs could snap instead of animating for the joining player.**
+  They now play their normal flip animation when they open or close.
+- **Fixed: a renovation menu could keep showing a room as available after the host unlocked it.**
+  An open menu now refreshes when the host's unlock reaches the joining player.
 
 - **Note: the 1.0newrender branch now runs on Unity 6 and reports version 1.00.**
 

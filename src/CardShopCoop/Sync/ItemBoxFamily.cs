@@ -272,7 +272,7 @@ namespace CardShopCoop.Sync
                         BoxPlacement.ApplyPhysicsPose(box, w.Pos, w.Yaw);
                     if (b.m_Rigidbody != null)
                     {
-                        b.m_Rigidbody.velocity = w.Velocity;
+                        Util.UnityCompat.SetVelocity(b.m_Rigidbody, w.Velocity);
                         b.m_Rigidbody.angularVelocity = w.AngularVelocity;
                         b.m_Rigidbody.WakeUp();
                     }
@@ -353,7 +353,7 @@ namespace CardShopCoop.Sync
             possession = BoxPossession.Free;
             pos = BoxPlacement.PhysicsPosition(box);
             yaw = BoxPlacement.PhysicsRotation(box).eulerAngles.y;
-            velocity = b != null && b.m_Rigidbody != null ? b.m_Rigidbody.velocity : Vector3.zero;
+            velocity = b != null && b.m_Rigidbody != null ? Util.UnityCompat.Velocity(b.m_Rigidbody) : Vector3.zero;
             angularVelocity = b != null && b.m_Rigidbody != null ? b.m_Rigidbody.angularVelocity : Vector3.zero;
             stored = b != null && b.m_IsStored;
             if (b == null)
@@ -421,7 +421,7 @@ namespace CardShopCoop.Sync
             }
             // Cheap path FIRST, before any scene search: if the box already sits at the
             // requested slot, the host pose is already the slot's. Without this, every
-            // snapshot re-resolved the rack (a full FindObjectOfType) for every stored box,
+            // snapshot re-resolved the rack (a full FindFirstObjectByType) for every stored box,
             // which stalled the client on every box change.
             if (b.m_IsStored)
             {
@@ -503,12 +503,12 @@ namespace CardShopCoop.Sync
         private static ShelfManager _sm;
 
         /// <summary>Cached scene lookup. Unity's fake-null self-invalidates across a scene
-        /// change, so this needs no explicit reset. FindObjectOfType per stored box per
+        /// change, so this needs no explicit reset. FindFirstObjectByType per stored box per
         /// snapshot was a per-change client stall.</summary>
         private static ShelfManager Sm()
         {
             if (_sm == null)
-                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 

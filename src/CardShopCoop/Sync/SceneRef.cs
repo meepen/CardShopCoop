@@ -13,7 +13,7 @@ namespace CardShopCoop.Sync
     /// refs), which silently disables whole systems: the HUD tooltip list then falls back to its
     /// prefab placeholder ("Action Name" + the default key image) for the whole session.
     ///
-    /// <c>FindObjectOfType</c> never creates anything; the cache invalidates through Unity's
+    /// <c>FindFirstObjectByType</c> never creates anything; the cache invalidates through Unity's
     /// fake-null when the real object is destroyed and re-resolves on the next call.
     /// </summary>
     internal static class SceneRef<T> where T : Component
@@ -23,7 +23,7 @@ namespace CardShopCoop.Sync
         internal static T Get()
         {
             if (_cached == null)
-                _cached = UnityEngine.Object.FindObjectOfType<T>();
+                _cached = UnityEngine.Object.FindFirstObjectByType<T>();
             return _cached;
         }
     }

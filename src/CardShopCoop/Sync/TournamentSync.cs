@@ -77,7 +77,7 @@ namespace CardShopCoop.Sync
         private static CustomerManager Cm()
         {
             if (_cm == null)
-                _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
+                _cm = UnityEngine.Object.FindFirstObjectByType<CustomerManager>();
             return _cm;
         }
 

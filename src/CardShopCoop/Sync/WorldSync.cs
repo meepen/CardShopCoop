@@ -136,7 +136,7 @@ namespace CardShopCoop.Sync
         private ShelfManager ResolveShelfManager()
         {
             if (_sm == null)
-                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 

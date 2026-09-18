@@ -102,6 +102,7 @@ namespace CardShopCoop.Net
         WarehouseOp = 103,    // client -> host: store/take a warehouse box record (game 1.0+)
         WarehouseTakeResult = 104, // host -> requesting client: warehouse take outcome (game 1.0+)
         TutorialCredit = 105, // client -> host: a joiner's local tutorial task credit (host-authoritative)
+        ShopPopup = 112,       // host -> requesting client: local shop-operation refusal popup
         // These IDs are the redesigned 1.4.0 play-table protocol. Keep the IDs: 1.4.0 is
         // unreleased, so adding parallel compatibility messages would only create baggage.
         PlayTableMatchRequest = 106, // client -> host: start/cancel/started + observed epoch/revision

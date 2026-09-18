@@ -1,5 +1,6 @@
 using CardShopCoop.Net;
 using CardShopCoop.Net.Messages;
+using CardShopCoop.Util;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -75,8 +76,25 @@ namespace CardShopCoop.Sync
             AccessTools.Field(typeof(WorkerSetPackOpenerTypeOptionScreen), "m_Worker");
 
         private WorkerManager _wm;
-        private HireWorkerScreen _hireScreen;
-        private bool _hireScreenSearched; // the screen may legitimately not exist yet
+
+        // The screens persist for the whole session (they only toggle SetActive), so one
+        // include-inactive scene search each is enough. Re-resolving the worker interaction screen
+        // per state apply was a full-scene scan (~29 ms) on every changed worker sweep - the
+        // client's hottest handler. Cleared from Reset() on a scene/session boundary.
+        private sealed class InteractScreenCache : Cached<WorkerInteractUIScreen>
+        {
+            protected override WorkerInteractUIScreen GetRawValue() =>
+                UnityEngine.Object.FindFirstObjectByType<WorkerInteractUIScreen>(FindObjectsInactive.Include);
+        }
+
+        private sealed class HireScreenCache : Cached<HireWorkerScreen>
+        {
+            protected override HireWorkerScreen GetRawValue() =>
+                UnityEngine.Object.FindFirstObjectByType<HireWorkerScreen>(FindObjectsInactive.Include);
+        }
+
+        private readonly InteractScreenCache _interactScreen = new InteractScreenCache();
+        private readonly HireScreenCache _hireScreen = new HireScreenCache();
         private readonly List<Entry> _buf = new List<Entry>(MaxWorkers);
 
         // Gradual slice sweep (AGENTS.md: no periodic full resends). Each pass re-asserts ONE
@@ -132,8 +150,8 @@ namespace CardShopCoop.Sync
         public override void Reset()
         {
             _wm = null;
-            _hireScreen = null;
-            _hireScreenSearched = false;
+            _hireScreen.Clear();
+            _interactScreen.Clear();
             _sweepTimer = 0f;
             _sweepCursor = 0;
             _workerLeaseOwner.Clear();
@@ -166,7 +184,7 @@ namespace CardShopCoop.Sync
             // DontDestroyOnLoad manager that shadows the real one for the rest of the
             // run (see WorldSync.ResolveShelfManager)
             if (_wm == null)
-                _wm = UnityEngine.Object.FindObjectOfType<WorkerManager>();
+                _wm = UnityEngine.Object.FindFirstObjectByType<WorkerManager>();
             return _wm;
         }
 
@@ -936,7 +954,7 @@ namespace CardShopCoop.Sync
             {
                 if (dataChanged[k] && changed[k])
                 {
-                    interactScreen = UnityEngine.Object.FindObjectOfType<WorkerInteractUIScreen>(true);
+                    interactScreen = _interactScreen.Get();
                     break;
                 }
             }
@@ -1037,17 +1055,13 @@ namespace CardShopCoop.Sync
         /// press Hire) must flip the panel to "Hired" without a reopen.</summary>
         private void RefreshHirePanels()
         {
-            if (!_hireScreenSearched)
-            {
-                _hireScreenSearched = true;
-                _hireScreen = UnityEngine.Object.FindObjectOfType<HireWorkerScreen>(true);
-            }
-            if (_hireScreen == null || _hireScreen.m_HireWorkerPanelUIList == null
+            var hireScreen = _hireScreen.Get();
+            if (hireScreen == null || hireScreen.m_HireWorkerPanelUIList == null
                 || MiPanelEvaluateHired == null || FiPanelScreen == null)
                 return;
-            for (int i = 0; i < _hireScreen.m_HireWorkerPanelUIList.Count; i++)
+            for (int i = 0; i < hireScreen.m_HireWorkerPanelUIList.Count; i++)
             {
-                var panel = _hireScreen.m_HireWorkerPanelUIList[i];
+                var panel = hireScreen.m_HireWorkerPanelUIList[i];
                 if (panel == null)
                     continue;
                 // a panel that was never Init'd has index 0 and no screen ref; skip it -

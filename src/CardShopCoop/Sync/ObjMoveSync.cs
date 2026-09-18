@@ -173,7 +173,7 @@ namespace CardShopCoop.Sync
         private ShelfManager Sm()
         {
             if (_sm == null)
-                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 
@@ -487,7 +487,7 @@ namespace CardShopCoop.Sync
         /// mutate its gameplay state.</summary>
         public static Component ResolveObjectByKey(int key)
         {
-            var sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            var sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return sm == null ? null : Resolve(sm, key);
         }
 

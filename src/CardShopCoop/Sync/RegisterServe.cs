@@ -6,7 +6,7 @@ namespace CardShopCoop.Sync
     /// <summary>Shared helpers for the register.</summary>
     public static class RegisterServe
     {
-        // FindObjectOfType walks every loaded object; callers here fire a few times a second,
+        // FindFirstObjectByType walks every loaded object; callers here fire a few times a second,
         // so the manager is cached. Unity's destroyed-object == null overload makes the lazy
         // re-resolve self-healing across scene loads.
         private static ShelfManager _sm;
@@ -14,7 +14,7 @@ namespace CardShopCoop.Sync
         private static ShelfManager Shelf()
         {
             if (_sm == null)
-                _sm = Object.FindObjectOfType<ShelfManager>();
+                _sm = Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 

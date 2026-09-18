@@ -177,7 +177,7 @@ namespace CardShopCoop.Sync
         private ShelfManager Sm()
         {
             if (_sm == null)
-                _sm = Object.FindObjectOfType<ShelfManager>();
+                _sm = Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 

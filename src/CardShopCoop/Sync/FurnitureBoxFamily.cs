@@ -69,9 +69,9 @@ namespace CardShopCoop.Sync
         public static ShelfManager Sm()
         {
             // Cached: Unity's fake-null self-invalidates across a scene change, so a stale
-            // reference needs no explicit reset. FindObjectOfType per box was a snapshot stall.
+            // reference needs no explicit reset. FindFirstObjectByType per box was a snapshot stall.
             if (_sm == null)
-                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 
@@ -241,7 +241,7 @@ namespace CardShopCoop.Sync
                         BoxPlacement.ApplyPhysicsPose(box, w.Pos, w.Yaw);
                     if (box.m_Rigidbody != null)
                     {
-                        box.m_Rigidbody.velocity = w.Velocity;
+                        Util.UnityCompat.SetVelocity(box.m_Rigidbody, w.Velocity);
                         box.m_Rigidbody.angularVelocity = w.AngularVelocity;
                         box.m_Rigidbody.WakeUp();
                     }
@@ -261,7 +261,7 @@ namespace CardShopCoop.Sync
             possession = BoxPossession.Free;
             pos = BoxPlacement.PhysicsPosition(box);
             yaw = BoxPlacement.PhysicsRotation(box).eulerAngles.y;
-            velocity = box.m_Rigidbody != null ? box.m_Rigidbody.velocity : Vector3.zero;
+            velocity = box.m_Rigidbody != null ? Util.UnityCompat.Velocity(box.m_Rigidbody) : Vector3.zero;
             angularVelocity = box.m_Rigidbody != null ? box.m_Rigidbody.angularVelocity : Vector3.zero;
             stored = false;
             var boxed = BoxedObject(box);

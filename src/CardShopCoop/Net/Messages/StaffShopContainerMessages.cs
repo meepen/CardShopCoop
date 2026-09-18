@@ -131,6 +131,22 @@ namespace CardShopCoop.Net.Messages
         }
     }
 
+    // ShopPopup (host -> one client): a shop operation was refused by the host's
+    // vanilla handler and its local-only popup belongs to the requesting player.
+    [NetworkMessage(MsgType.ShopPopup, Policy = MessagePolicy.ClientOnlyInGame)]
+    public sealed class ShopPopupMessage : INetMessage
+    {
+        public int Text;
+
+        public MsgType Type
+        {
+            get
+            {
+                return MsgType.ShopPopup;
+            }
+        }
+    }
+
     // ShopState (host -> client): bills + room unlocks + sign states + tutorial snapshot.
     [NetworkMessage(MsgType.ShopState, Policy = MessagePolicy.ClientOnlyInGame)]
     public sealed class ShopStateMessage : INetMessage

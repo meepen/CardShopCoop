@@ -53,6 +53,11 @@ Keep implementation details out unless they explain a user-visible behavior. Git
 GitHub releases remain the authoritative exact-diff record. When the wire version or required
 mod set changes, end the release section with **Both players must update.**
 
+When release history is consolidated, fold changes from releases newer than the target release
+into that target's player-facing section, remove the superseded release sections, and keep only
+user-visible fixes and compatibility notes. Do not preserve internal diagnostics, commit history,
+or implementation detail in the changelog merely to mirror the git history.
+
 ## Sync scheduling: no periodic full resends
 
 **Target state, and the rule for anything new.** We do **not** re-send a module's full state on a

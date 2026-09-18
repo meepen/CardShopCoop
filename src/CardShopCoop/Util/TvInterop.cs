@@ -88,7 +88,7 @@ namespace CardShopCoop.Util
                 var list = FiEnrolled?.GetValue(null) as IList;
                 if (list != null && list.Count > 0)
                     return list[0] as Component;
-                return UnityEngine.Object.FindObjectOfType(T) as Component;
+                return UnityEngine.Object.FindFirstObjectByType(T) as Component;
             }
             catch (System.Exception e) { Swallow.Log(e); return null; }
         }

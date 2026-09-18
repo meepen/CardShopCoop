@@ -47,10 +47,28 @@ namespace CardShopCoop.Sync
             AccessTools.Method(typeof(RentBillScreen), "EvaluateBillNotification");
         private static readonly System.Reflection.MethodInfo MiOpenSignMesh =
             AccessTools.Method(typeof(InteractableOpenCloseSign), "EvaluateSignOpenCloseMesh");
+        private static readonly System.Reflection.FieldInfo FiOpenSignAnim =
+            AccessTools.Field(typeof(InteractableOpenCloseSign), "m_Anim");
+        private static readonly System.Reflection.FieldInfo FiOpenSignSwapping =
+            AccessTools.Field(typeof(InteractableOpenCloseSign), "m_IsSwapping");
+        private static readonly System.Reflection.MethodInfo MiOpenSignDelaySwap =
+            AccessTools.Method(typeof(InteractableOpenCloseSign), "DelaySwapMesh");
         private static readonly System.Reflection.MethodInfo MiWarehouseSignMesh =
             AccessTools.Method(typeof(InteractableWarehouseAllowEnterSign), "EvaluateSignOpenCloseMesh");
+        private static readonly System.Reflection.FieldInfo FiWarehouseSignAnim =
+            AccessTools.Field(typeof(InteractableWarehouseAllowEnterSign), "m_Anim");
+        private static readonly System.Reflection.FieldInfo FiWarehouseSignSwapping =
+            AccessTools.Field(typeof(InteractableWarehouseAllowEnterSign), "m_IsSwapping");
+        private static readonly System.Reflection.MethodInfo MiWarehouseSignDelaySwap =
+            AccessTools.Method(typeof(InteractableWarehouseAllowEnterSign), "DelaySwapMesh");
         private static readonly System.Reflection.MethodInfo MiRoomInit =
             AccessTools.Method(typeof(UnlockRoomManager), "Init"); // idempotent wall/door repaint
+        // The renovation menu only recomputes its lock/purchased panels inside the private
+        // EvaluateShopPanelUI, which vanilla reaches from Init/OnPressShopSubButton and from
+        // the local purchase handlers. A client forwards its purchase, so nothing re-runs it
+        // when the host's echo lands - see RefreshOpenExpansionScreen.
+        private static readonly System.Reflection.MethodInfo MiExpansionPanelRefresh =
+            AccessTools.Method(typeof(ExpansionShopUIScreen), "EvaluateShopPanelUI");
         // tutorial/task progress mirror: the subgroup progress fields are private, so we
         // reset them by reflection before re-feeding the host's authoritative values
         private static readonly System.Reflection.FieldInfo FiSgCurrent =
@@ -79,12 +97,15 @@ namespace CardShopCoop.Sync
         private ShelfManager _shelfMgr;                            // it fabricates a fake empty
                                                                    // manager if touched during a
                                                                    // loading screen (see WorldSync)
+        private ExpansionShopUIScreen _expansionShopScreen;        // renovation menu, refreshed
+                                                                   // only while open
         private TutorialManager _tutorialManager;
+        private int _forwardedShopRequester;
 
         private UnlockRoomManager Urm()
         {
             if (_urm == null)
-                _urm = UnityEngine.Object.FindObjectOfType<UnlockRoomManager>();
+                _urm = UnityEngine.Object.FindFirstObjectByType<UnlockRoomManager>();
             return _urm;
         }
 
@@ -111,7 +132,9 @@ namespace CardShopCoop.Sync
             _warehouseSign = null;
             _urm = null;
             _shelfMgr = null;
+            _expansionShopScreen = null;
             _tutorialManager = null;
+            _forwardedShopRequester = 0;
         }
 
         public override void ForceResend()
@@ -138,21 +161,21 @@ namespace CardShopCoop.Sync
         {
             // phone screens live disabled until opened - the plain overload misses them
             if (_billScreen == null)
-                _billScreen = UnityEngine.Object.FindObjectOfType<RentBillScreen>(true);
+                _billScreen = UnityEngine.Object.FindFirstObjectByType<RentBillScreen>(FindObjectsInactive.Include);
             return _billScreen;
         }
 
         private InteractableOpenCloseSign OpenSign()
         {
             if (_openSign == null)
-                _openSign = UnityEngine.Object.FindObjectOfType<InteractableOpenCloseSign>(true);
+                _openSign = UnityEngine.Object.FindFirstObjectByType<InteractableOpenCloseSign>(FindObjectsInactive.Include);
             return _openSign;
         }
 
         private InteractableWarehouseAllowEnterSign WarehouseSign()
         {
             if (_warehouseSign == null)
-                _warehouseSign = UnityEngine.Object.FindObjectOfType<InteractableWarehouseAllowEnterSign>(true);
+                _warehouseSign = UnityEngine.Object.FindFirstObjectByType<InteractableWarehouseAllowEnterSign>(FindObjectsInactive.Include);
             return _warehouseSign;
         }
 
@@ -197,6 +220,8 @@ namespace CardShopCoop.Sync
                 postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(RoomChangedPostfix)));
             Try(h, typeof(InteractableOpenCloseSign), "OnDayStarted",
                 postfix: new HarmonyMethod(typeof(ShopStateSync), nameof(RoomChangedPostfix)));
+            Try(h, typeof(NotEnoughResourceTextPopup), "ShowText",
+                prefix: new HarmonyMethod(typeof(ShopStateSync), nameof(ShopPopupPrefix)));
 
             // Shop light: a joiner's wall-switch click only flipped its own local light.
             // Forward it; the host toggles authoritatively and the LightState broadcast
@@ -476,7 +501,7 @@ namespace CardShopCoop.Sync
         private void SendRoomNow() => SendSlice(1);
         private void SendTutorialNow() => SendSlice(2);
 
-        public void HostApplyOp(ShopOpMessage message)
+        public void HostApplyOp(ShopOpMessage message, int requesterId)
         {
             if (CoopCore.Role != CoopRole.Host)
                 return;
@@ -484,6 +509,7 @@ namespace CardShopCoop.Sync
             byte arg = message.Arg;
             try
             {
+                _forwardedShopRequester = requesterId;
                 switch (op)
                 {
                     case OpPayBill:
@@ -502,7 +528,28 @@ namespace CardShopCoop.Sync
                 }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("ShopStateSync op " + op + ": " + e.Message); }
+            finally { _forwardedShopRequester = 0; }
             ForceResend(); // echo promptly even if the op was refused (re-aligns the joiner)
+        }
+
+        /// <summary>Redirect a host-side vanilla refusal popup to the guest who requested
+        /// the operation. The host still shows popups from its own local actions.</summary>
+        public static bool ShopPopupPrefix(ENotEnoughResourceText text)
+        {
+            var self = _instance;
+            if (CoopCore.Role != CoopRole.Host || self == null || self._forwardedShopRequester <= 0
+                || self.SendToClient == null)
+                return true;
+            self.SendToClient(self._forwardedShopRequester,
+                new ShopPopupMessage { Text = (int)text });
+            return false;
+        }
+
+        public void ClientShowPopup(ShopPopupMessage message)
+        {
+            if (message == null || !Enum.IsDefined(typeof(ENotEnoughResourceText), message.Text))
+                return;
+            NotEnoughResourceTextPopup.ShowText((ENotEnoughResourceText)message.Text);
         }
 
         /// <summary>Host: run the guest's forwarded shop-light toggle in the real sim. The
@@ -643,7 +690,7 @@ namespace CardShopCoop.Sync
             try
             {
                 if (_shelfMgr == null)
-                    _shelfMgr = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                    _shelfMgr = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
                 if (_shelfMgr != null)
                     _shelfMgr.SaveInteractableObjectData();
             }
@@ -688,7 +735,7 @@ namespace CardShopCoop.Sync
             if (message.Full || message.Index == 0)
                 ApplyBills(message);
             if (message.Full || message.Index == 1)
-                ApplyRooms(message);
+                ApplyRooms(message, !message.Full);
             if (message.Full || message.Index == 2)
                 ApplyTutorialMessage(message);
         }
@@ -718,7 +765,7 @@ namespace CardShopCoop.Sync
             return true;
         }
 
-        private void ApplyRooms(ShopStateMessage message)
+        private void ApplyRooms(ShopStateMessage message, bool animateSigns)
         {
             var urm = Urm();
             if (urm == null)
@@ -732,19 +779,30 @@ namespace CardShopCoop.Sync
                 urm.StartUnlockNextRoom();
             for (int guard = 0; CPlayerData.m_UnlockWarehouseRoomCount < message.UnlockWarehouseRoomCount && guard < 64; guard++)
                 urm.StartUnlockNextWarehouseRoom();
+            // The host's echo is what actually advances the local unlock counts (the client's
+            // own checkout was forwarded, not run), so an already-open renovation menu has not
+            // seen these counts change and still shows the bought panel as purchasable.
+            if (unlocksChanged)
+                RefreshOpenExpansionScreen();
             if (CPlayerData.m_IsShopOpen != message.IsShopOpen)
             {
                 CPlayerData.m_IsShopOpen = message.IsShopOpen;
                 var sign = OpenSign();
                 if (sign != null)
-                    MiOpenSignMesh?.Invoke(sign, null);
+                {
+                    if (!animateSigns || !PlayOpenSignAnimation(sign))
+                        MiOpenSignMesh?.Invoke(sign, null);
+                }
             }
             if (CPlayerData.m_IsWarehouseDoorClosed != message.IsWarehouseDoorClosed)
             {
                 CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
                 var sign = WarehouseSign();
                 if (sign != null)
-                    MiWarehouseSignMesh?.Invoke(sign, null);
+                {
+                    if (!animateSigns || !PlayWarehouseSignAnimation(sign))
+                        MiWarehouseSignMesh?.Invoke(sign, null);
+                }
                 else
                     urm.EvaluateWarehouseRoomOpenClose();
             }
@@ -754,6 +812,52 @@ namespace CardShopCoop.Sync
                 _lastRoomRepaint = now;
                 MiRoomInit?.Invoke(urm, null);
             }
+        }
+
+        private static bool PlayOpenSignAnimation(InteractableOpenCloseSign sign)
+        {
+            return PlaySignAnimation(sign, FiOpenSignAnim, FiOpenSignSwapping, MiOpenSignDelaySwap);
+        }
+
+        private static bool PlayWarehouseSignAnimation(InteractableWarehouseAllowEnterSign sign)
+        {
+            return PlaySignAnimation(sign, FiWarehouseSignAnim, FiWarehouseSignSwapping,
+                MiWarehouseSignDelaySwap);
+        }
+
+        private static bool PlaySignAnimation(MonoBehaviour sign,
+            System.Reflection.FieldInfo animationField,
+            System.Reflection.FieldInfo swappingField,
+            System.Reflection.MethodInfo delaySwapMethod)
+        {
+            if (sign == null || animationField == null || swappingField == null || delaySwapMethod == null)
+                return false;
+            var animation = animationField.GetValue(sign) as Animation;
+            var delaySwap = delaySwapMethod.Invoke(sign, null) as System.Collections.IEnumerator;
+            if (animation == null || delaySwap == null)
+                return false;
+            if (swappingField.GetValue(sign) is bool && (bool)swappingField.GetValue(sign))
+                return false;
+            swappingField.SetValue(sign, true);
+            animation.Play();
+            sign.StartCoroutine(delaySwap);
+            return true;
+        }
+
+        /// <summary>Client: push a host-driven unlock change into the renovation menu when it
+        /// is ALREADY open. The menu reads CPlayerData only when EvaluateShopPanelUI runs, and
+        /// vanilla runs it from Init (open), OnPressShopSubButton (tab switch) and the local
+        /// purchase handlers - none of which a joiner executes, since its checkout is forwarded
+        /// and the resulting state arrives here. A closed menu needs nothing: its own
+        /// OnOpenScreen -> Init path picks up the counts. The includeInactive lookup still
+        /// gates on IsScreenOpened() so a hidden instance is not poked.</summary>
+        private void RefreshOpenExpansionScreen()
+        {
+            if (_expansionShopScreen == null)
+                _expansionShopScreen = UnityEngine.Object.FindFirstObjectByType<ExpansionShopUIScreen>(FindObjectsInactive.Include);
+            if (_expansionShopScreen == null || !_expansionShopScreen.IsScreenOpened())
+                return;
+            MiExpansionPanelRefresh?.Invoke(_expansionShopScreen, null);
         }
 
         private void ApplyTutorialMessage(ShopStateMessage message)
@@ -796,7 +900,7 @@ namespace CardShopCoop.Sync
         private TutorialManager GetTutorialManager()
         {
             if (_tutorialManager == null)
-                _tutorialManager = UnityEngine.Object.FindObjectOfType<TutorialManager>(); // NOT CSingleton (fake-manager trap)
+                _tutorialManager = UnityEngine.Object.FindFirstObjectByType<TutorialManager>(); // NOT CSingleton (fake-manager trap)
             return _tutorialManager;
         }
 

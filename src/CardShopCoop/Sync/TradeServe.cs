@@ -703,21 +703,21 @@ namespace CardShopCoop.Sync
         private ShelfManager Sm()
         {
             if (_sm == null)
-                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 
         private CustomerManager Cm()
         {
             if (_cm == null)
-                _cm = UnityEngine.Object.FindObjectOfType<CustomerManager>();
+                _cm = UnityEngine.Object.FindFirstObjectByType<CustomerManager>();
             return _cm;
         }
 
         private InteractionPlayerController Ipc()
         {
             if (_ipc == null)
-                _ipc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
+                _ipc = UnityEngine.Object.FindFirstObjectByType<InteractionPlayerController>();
             return _ipc;
         }
 

@@ -408,7 +408,7 @@ namespace CardShopCoop.Sync
         private ShelfManager Sm()
         {
             if (_sm == null)
-                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 
@@ -1203,11 +1203,11 @@ namespace CardShopCoop.Sync
         {
             if (_cachedContainerScreen == null)
             {
-                _cachedContainerScreen = UnityEngine.Object.FindObjectOfType<BulkDonationBoxUIScreen>();
+                _cachedContainerScreen = UnityEngine.Object.FindFirstObjectByType<BulkDonationBoxUIScreen>();
             }
             if (_cachedAmountModal == null)
             {
-                _cachedAmountModal = UnityEngine.Object.FindObjectOfType<BulkDonationBoxPlusMinusScreen>();
+                _cachedAmountModal = UnityEngine.Object.FindFirstObjectByType<BulkDonationBoxPlusMinusScreen>();
             }
         }
 

@@ -691,10 +691,19 @@ namespace CardShopCoop
                 if (Role != CoopRole.Host || !InGameLevel())
                     return;
                 if (message is ShopOpMessage shopOp)
-                    _shopState.HostApplyOp(shopOp);
+                    _shopState.HostApplyOp(shopOp, context.ConnectionId);
                 return;
             },
                 MessagePolicy.HostOnlyInGame, true, heal: () => _shopState.ForceResend());
+            _messageRouter.Register<ShopPopupMessage>((context, message) =>
+            {
+                if (Role != CoopRole.Client || !InGameLevel())
+                    return;
+                if (message is ShopPopupMessage shopPopup)
+                    _shopState.ClientShowPopup(shopPopup);
+                return;
+            },
+                MessagePolicy.ClientOnlyInGame, false, heal: null);
             _messageRouter.Register<TutorialCreditMessage>((context, message) =>
             {
                 if (Role != CoopRole.Host || !InGameLevel())

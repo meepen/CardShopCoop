@@ -320,7 +320,7 @@ namespace CardShopCoop.Sync
         private ShelfManager ShelfManagerInstance()
         {
             if (_shelfManager == null)
-                _shelfManager = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _shelfManager = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _shelfManager;
         }
 
@@ -335,7 +335,7 @@ namespace CardShopCoop.Sync
                 if (identityObject == null)
                     return false;
             }
-            var sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            var sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             if (sm == null)
                 return false;
             for (int i = 0; i < PopulationSync.KindCount; i++)
@@ -363,7 +363,7 @@ namespace CardShopCoop.Sync
                 return null;
             if (!isBox)
                 return identity;
-            var boxes = UnityEngine.Object.FindObjectsOfType<InteractablePackagingBox_Shelf>();
+            var boxes = UnityEngine.Object.FindObjectsByType<InteractablePackagingBox_Shelf>(FindObjectsSortMode.InstanceID);
             for (int i = 0; i < boxes.Length; i++)
             {
                 var boxed = FiBoxedObject?.GetValue(boxes[i]) as InteractableObject;

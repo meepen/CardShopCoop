@@ -75,14 +75,14 @@ namespace CardShopCoop.Sync
         private static ShelfManager Sm()
         {
             if (_sm == null)
-                _sm = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _sm = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _sm;
         }
 
         private static InventoryBase Inv()
         {
             if (_inv == null)
-                _inv = UnityEngine.Object.FindObjectOfType<InventoryBase>();
+                _inv = UnityEngine.Object.FindFirstObjectByType<InventoryBase>();
             return _inv;
         }
 
@@ -485,11 +485,11 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var place = UnityEngine.Object.FindObjectOfType<PlaceDecoUIScreen>(true);
+                var place = UnityEngine.Object.FindFirstObjectByType<PlaceDecoUIScreen>(FindObjectsInactive.Include);
                 if (place != null && place.IsScreenOpened() && FiPlacePage != null && MiPlacePage != null)
                     MiPlacePage.Invoke(place, new object[] { (int)FiPlacePage.GetValue(place) });
 
-                var buy = UnityEngine.Object.FindObjectOfType<ShopBuyDecoUIScreen>(true);
+                var buy = UnityEngine.Object.FindFirstObjectByType<ShopBuyDecoUIScreen>(FindObjectsInactive.Include);
                 if (buy != null && buy.IsScreenOpened() && FiBuyPage != null && MiBuyPage != null)
                     MiBuyPage.Invoke(buy, new object[] { (int)FiBuyPage.GetValue(buy) });
             }

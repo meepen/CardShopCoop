@@ -577,7 +577,7 @@ namespace CardShopCoop.Sync
                 Object.DestroyImmediate(_editorHolder);
             _editorCustomization = null;
             if (_customers == null)
-                _customers = Object.FindObjectOfType<CustomerManager>();
+                _customers = Object.FindFirstObjectByType<CustomerManager>();
             if (_customers == null)
                 return null;
             var prefab = female ? _customers.m_CustomerFemalePrefab : _customers.m_CustomerPrefab;
@@ -756,7 +756,7 @@ namespace CardShopCoop.Sync
                 return found;
             // Some game builds keep the visual body beside, rather than below, the CMF
             // walker. Resolve the nearest customization once the selector is opened.
-            var all = Object.FindObjectsOfType<CC.CharacterCustomization>(true);
+            var all = Object.FindObjectsByType<CC.CharacterCustomization>(FindObjectsInactive.Include, FindObjectsSortMode.InstanceID);
             float best = 9f;
             for (int i = 0; i < all.Length; i++)
             {
@@ -961,7 +961,7 @@ namespace CardShopCoop.Sync
         private void SpawnPreview(PlayerModelEntry model)
         {
             if (_customers == null)
-                _customers = Object.FindObjectOfType<CustomerManager>();
+                _customers = Object.FindFirstObjectByType<CustomerManager>();
             if (_customers == null)
                 return;
             var prefab = model.Female ? _customers.m_CustomerFemalePrefab : _customers.m_CustomerPrefab;
@@ -1146,7 +1146,7 @@ namespace CardShopCoop.Sync
             try
             {
                 if (_restock == null)
-                    _restock = Object.FindObjectOfType<RestockManager>();
+                    _restock = Object.FindFirstObjectByType<RestockManager>();
                 var rm = _restock;
                 var prefab = isBig ? rm?.m_PackageBoxPrefab : rm?.m_PackageBoxSmallPrefab;
                 if (prefab == null)
@@ -1588,7 +1588,7 @@ namespace CardShopCoop.Sync
         private void TrySpawn(RemoteAvatar av)
         {
             if (_customers == null)
-                _customers = Object.FindObjectOfType<CustomerManager>();
+                _customers = Object.FindFirstObjectByType<CustomerManager>();
             var cm = _customers;
             if (cm == null)
                 return;
@@ -1788,7 +1788,7 @@ namespace CardShopCoop.Sync
         {
             try
             {
-                var src = Object.FindObjectOfType<CollectionBinderFlipAnimCtrl>();
+                var src = Object.FindFirstObjectByType<CollectionBinderFlipAnimCtrl>();
                 if (src == null)
                     return;
                 var holder = new GameObject("CoopBinderHolder_tmp");
@@ -1833,7 +1833,7 @@ namespace CardShopCoop.Sync
             tmp.alignment = TMPro.TextAlignmentOptions.Center;
             tmp.fontSize = 1.8f;
             tmp.color = color;
-            tmp.enableWordWrapping = false;
+            Util.UnityCompat.SetWordWrapping(tmp, false);
             tmp.overflowMode = TMPro.TextOverflowModes.Overflow;
             tmp.rectTransform.sizeDelta = new Vector2(4f, 1f);
             if (_tagFont == null)
@@ -1842,7 +1842,7 @@ namespace CardShopCoop.Sync
                 if (_tagFont == null)
                 {
                     // borrow the font any of the game's own TMP labels use
-                    var any = UnityEngine.Object.FindObjectOfType<TMPro.TMP_Text>(true);
+                    var any = UnityEngine.Object.FindFirstObjectByType<TMPro.TMP_Text>(FindObjectsInactive.Include);
                     if (any != null)
                         _tagFont = any.font;
                 }

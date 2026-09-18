@@ -372,7 +372,7 @@ namespace CardShopCoop
             // it forever, so the fake permanently shadows the real inventory for the rest of the
             // run. Same house rule as everywhere else in this file - see the comment above Inv()
             // (~"NEVER CSingleton<>.Instance for scene-lifetime managers"). Asking Inv() first
-            // (FindObjectOfType, fabricates nothing) both avoids that and makes the no-latch
+            // (FindFirstObjectByType, fabricates nothing) both avoids that and makes the no-latch
             // not-ready refusal below actually reachable: without it this window threw an NRE
             // out of the fake's empty fields and landed in CardSetInstalledHere's catch.
             if (Inv() == null)
@@ -610,7 +610,7 @@ namespace CardShopCoop
             try
             {
                 if (_deltaIpc == null)
-                    _deltaIpc = FindObjectOfType<InteractionPlayerController>();
+                    _deltaIpc = FindFirstObjectByType<InteractionPlayerController>();
                 var ctrl = _deltaIpc != null ? _deltaIpc.m_CollectionBinderFlipAnimCtrl : null;
                 if (ctrl == null)
                     return;

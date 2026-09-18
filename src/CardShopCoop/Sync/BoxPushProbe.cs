@@ -115,7 +115,7 @@ namespace CardShopCoop.Sync
                     continue;
                 var rb = box.m_Rigidbody;
                 bool resting = rb == null || rb.isKinematic || rb.IsSleeping()
-                    || rb.velocity.sqrMagnitude < settleSq;
+                    || Util.UnityCompat.Velocity(rb).sqrMagnitude < settleSq;
                 if (resting)
                     _scratch.Add(box);
             }

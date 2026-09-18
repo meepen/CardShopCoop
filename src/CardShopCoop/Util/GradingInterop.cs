@@ -956,7 +956,7 @@ namespace CardShopCoop.Util
         private static ShelfManager Shelves()
         {
             if (_shelfMgr == null)
-                _shelfMgr = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+                _shelfMgr = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             return _shelfMgr;
         }
 
@@ -967,7 +967,7 @@ namespace CardShopCoop.Util
         private static RestockManager Restock()
         {
             if (_restockMgr == null)
-                _restockMgr = UnityEngine.Object.FindObjectOfType<RestockManager>();
+                _restockMgr = UnityEngine.Object.FindFirstObjectByType<RestockManager>();
             return _restockMgr;
         }
 

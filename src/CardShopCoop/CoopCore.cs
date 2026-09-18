@@ -188,37 +188,6 @@ namespace CardShopCoop
             _cardShelves.PruneObjectId(objectId);
         }
 
-        /// <summary>Plugin-owned queue/mirror counts for the LeakDebug line. Every value is a
-        /// point-in-time snapshot read only from the main-thread diagnostic tick.</summary>
-        private string PluginLeakCounters()
-        {
-            int incoming = 0;
-            int lagDelay = 0;
-            int reliableOut = 0;
-            int transientOut = 0;
-            int reassembly = 0;
-            try
-            {
-                if (_net != null)
-                {
-                    incoming = _net.Incoming.Count;
-                    if (_net is Net.LagTransport lag)
-                    {
-                        lagDelay = lag.DelayCount;
-                        reliableOut = lag.InnerReliableOutboxCount;
-                        transientOut = lag.InnerTransientOutboxCount;
-                        reassembly = lag.InnerReassemblyCount;
-                    }
-                }
-            }
-            catch (System.Exception e) { Swallow.Log(e); }
-            var boxes = _boxEngine;
-            return $" puppets={_npcs.PuppetCount} mirrors={NpcSync.ExistingMirrorCount} avatars={_avatars.Count}"
-                + $" boxClient={(boxes != null ? boxes.ClientMirrorCount : 0)} boxHost={(boxes != null ? boxes.HostBoxCount : 0)} boxLeases={(boxes != null ? boxes.LeaseCount : 0)}"
-                + $" incoming={incoming} lagDelay={lagDelay} reliableOut={reliableOut} transientOut={transientOut} reassembly={reassembly} toHand={HandEscrow.PendingToHandCount}"
-                + $" offers={_trades.OfferCount} tradeCarriers={_trades.CarrierCount} registerCarriers={RegisterSync.CarrierCount} boxDebug={BoxShared.DebugThrottleCount}";
-        }
-
         // domain sync modules (v0.15): each owns one game system end-to-end and talks
         // through the standard SendOp/BroadcastState/HostApplyOp/ClientApplyState contract
         private readonly GradingSync _grading = new GradingSync();
@@ -360,8 +329,6 @@ namespace CardShopCoop
         private long _diagSent;
         private long _diagRecvStates;
         private float _diagTimer = -7.3f;
-        private float _leakDiagTimer = -3.7f;
-        private float _leakObjectScanTimer = -8.1f;
         // Per-tag rate-limited error logging lives in one place: Sync.ModuleGuard.
 
         private void Guarded(string stage, Action action)
@@ -377,15 +344,10 @@ namespace CardShopCoop
         }
 
         private LightManager _lightManager;
-        private float _cardResyncTimer = -5.2f;  // change-gate for the 12s full card repaint
-        private int _lastCardResyncHash;         // change-gate for the 12s full card repaint
-        private float _cardResyncHeal;           // forces a repaint every 30s regardless
         private float _cardPriceHealTimer = -2.1f; // periodic displayed-card price rebroadcast
         private int _lastCardPriceHash;            // change-gate for the card-price heal
         private float _cardPriceHealBeat;          // forces a card-price resend every 30s
         private bool _cardPriceHealDirty;           // marked-price writes need a near-term heal
-        private int _lastStockResyncHash;          // change-gate for the 12s item-STOCK full heal
-        private float _stockResyncHeal;            // forces a stock resend every 36s regardless
         private readonly List<KeyValuePair<CardData, float>> _cardPriceBuf = new List<KeyValuePair<CardData, float>>();
         private float _licenseSyncTimer = -3.7f;
         private double _lastLicenseBuyTime = -999.0;
@@ -1749,7 +1711,7 @@ namespace CardShopCoop
 
         /// <summary>
         /// Ends the guest's load hold from the game's actual completion signal rather than
-        /// from a guessed number of seconds.  FindObjectOfType is deliberate here: asking
+        /// from a guessed number of seconds.  FindFirstObjectByType is deliberate here: asking
         /// CSingleton&lt;ShelfManager&gt;.Instance during a scene transition can create a fake,
         /// empty manager and make the readiness check lie.
         /// </summary>
@@ -1762,7 +1724,7 @@ namespace CardShopCoop
             if (Time.frameCount <= _reloadStartedFrame || Time.realtimeSinceStartup - _reloadStartedAt < 0.25f)
                 return false;
 
-            var shelfManager = UnityEngine.Object.FindObjectOfType<ShelfManager>();
+            var shelfManager = UnityEngine.Object.FindFirstObjectByType<ShelfManager>();
             if (shelfManager == null || !shelfManager.m_FinishLoadingObjectData)
                 return false;
 
@@ -1800,7 +1762,7 @@ namespace CardShopCoop
         private static InventoryBase Inv()
         {
             if (_inventory == null)
-                _inventory = FindObjectOfType<InventoryBase>();
+                _inventory = FindFirstObjectByType<InventoryBase>();
             return _inventory;
         }
 
@@ -1810,7 +1772,7 @@ namespace CardShopCoop
         internal LightManager ResolveLightManager()
         {
             if (_lightManager == null)
-                _lightManager = FindObjectOfType<LightManager>();
+                _lightManager = FindFirstObjectByType<LightManager>();
             return _lightManager;
         }
 
@@ -2189,16 +2151,16 @@ namespace CardShopCoop
         private void NpcSweepTick()
         {
             // the shop-naming world trigger (and its "!" marker) is host-only; find it
-            // ONCE - once disabled, FindObjectOfType can never see it again and each
+            // ONCE - once disabled, FindFirstObjectByType can never see it again and each
             // retry was a full-scene scan for nothing
             if (!_renamerHandled)
             {
                 _renamerHandled = true;
-                var renamer = FindObjectOfType<ShopRenamer>();
+                var renamer = FindFirstObjectByType<ShopRenamer>();
                 if (renamer != null && renamer.gameObject.activeSelf)
                 {
                     // FIX E2: cache the 3D sign TMP BEFORE disabling - once the renamer
-                    // GameObject is inactive, FindObjectOfType can't reach it again.
+                    // GameObject is inactive, FindFirstObjectByType can't reach it again.
                     try
                     {
                         _shopSign = renamer.m_ShopName;
@@ -2219,7 +2181,7 @@ namespace CardShopCoop
                 }
             }
             if (_cmSweep == null)
-                _cmSweep = FindObjectOfType<CustomerManager>();
+                _cmSweep = FindFirstObjectByType<CustomerManager>();
             if (_cmSweep != null)
             {
                 var list = _cmSweep.GetCustomerList();
@@ -2318,7 +2280,7 @@ namespace CardShopCoop
 
         /// <summary>The game assigns neither CGameManager.Player nor
         /// InteractionPlayerController.m_Instance (both are dead statics), so find the
-        /// player controller in the scene once and cache its transform. FindObjectOfType
+        /// player controller in the scene once and cache its transform. FindFirstObjectByType
         /// never auto-creates, unlike CSingleton&lt;T&gt;.Instance.</summary>
         private Transform _playerTf;   // the MOVING body: IPC.m_WalkerCtrl (CMF walker)
         private Transform _playerCamTf; // player camera, for look yaw
@@ -2337,7 +2299,7 @@ namespace CardShopCoop
                 return _playerTf;
             var ipc = InteractionPlayerController.m_Instance;
             if (ipc == null)
-                ipc = FindObjectOfType<InteractionPlayerController>();
+                ipc = FindFirstObjectByType<InteractionPlayerController>();
             if (ipc != null)
             {
                 _playerIpc = ipc;
@@ -2413,7 +2375,7 @@ namespace CardShopCoop
 
                 var ipc = InteractionPlayerController.m_Instance;
                 if (ipc == null)
-                    ipc = FindObjectOfType<InteractionPlayerController>();
+                    ipc = FindFirstObjectByType<InteractionPlayerController>();
                 if (ipc == null)
                     return;
 
@@ -3317,7 +3279,7 @@ namespace CardShopCoop
         {
             try
             {
-                var panels = FindObjectsOfType<RestockItemPanelUI>(); // active = phone open
+                var panels = FindObjectsByType<RestockItemPanelUI>(FindObjectsSortMode.InstanceID); // active = phone open
                 foreach (var p in panels)
                 {
                     if (!(FiPanelIndex?.GetValue(p) is int idx) || idx < 0)
@@ -3728,9 +3690,6 @@ namespace CardShopCoop
             // list") and would zero real prices on a later host whose ids mean something else.
             _clientPriced.Clear();
             _incomingPriced.Clear();
-            // The leak-diagnostic object census belongs to the dead world; drop it so the next
-            // session's first samples do not report a stale goAll.
-            Util.LeakDiagnostics.Reset();
             // 1.0.35 per-frame/per-session card state: retry stamps, an undelivered outbox and
             // a half-drained dispatch buffer must never leak into the NEXT session
             _cardDeltaOutbox.Clear();
@@ -4410,22 +4369,6 @@ namespace CardShopCoop
                     catch (System.Exception e) { Swallow.Log(e); }
                 }
                 CoopPlugin.Log.LogInfo($"diag: role={Role} conns={_net.ConnectionCount} sentStates={_diagSent} recvStates={_diagRecvStates} inGame={InGameLevel()} pos={posStr}{npcStr}");
-            }
-
-            // LeakDebug: a separate greppable line so the normal diag: format stays stable.
-            if (CoopPlugin.LeakDebug != null && CoopPlugin.LeakDebug.Value)
-            {
-                _leakDiagTimer += dt;
-                _leakObjectScanTimer += dt;
-                if (_leakDiagTimer >= 15f)
-                {
-                    _leakDiagTimer -= 15f;
-                    bool scan = _leakObjectScanTimer >= 60f;
-                    if (scan)
-                        _leakObjectScanTimer = 0f;
-                    Guarded("leak-diag", () =>
-                        CoopPlugin.Log.LogInfo("leakdiag:" + Util.LeakDiagnostics.Sample(scan) + PluginLeakCounters()));
-                }
             }
 
             // heartbeat + timeout
@@ -5899,7 +5842,7 @@ namespace CardShopCoop
         private void ApplySprayHit(SprayHitMessage message)
         {
             if (_cmSpray == null)
-                _cmSpray = FindObjectOfType<CustomerManager>();
+                _cmSpray = FindFirstObjectByType<CustomerManager>();
             if (_cmSpray == null)
                 return;
             var customers = _cmSpray.GetCustomerList();

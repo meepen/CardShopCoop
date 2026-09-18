@@ -50,6 +50,11 @@ namespace CardShopCoop.Sync
         private bool _observedNightLight;
         private bool _observedSunlight;
         private bool _observedLightState;
+        // Client: the last switch-model state we applied (1 on, 0 off, -1 unknown/never).
+        // Tracked separately from the light GROUPS because the game's day reset flips the groups
+        // without touching the InteractableLightSwitch meshes (verified in LightManager.
+        // ResetSunlightIntensity), so the mesh state must be mirrored from the flag itself.
+        private int _appliedSwitchLight = -1;
 
         // ---- client prediction ----
         private bool _clockInit;
@@ -83,6 +88,8 @@ namespace CardShopCoop.Sync
             _lastLightJson = null;
             _lightHeal = 0f;
             _forceLight = false;
+            _lightSwitches.Clear();
+            _appliedSwitchLight = -1;
             _observedShopLight = false;
             _observedNightLight = false;
             _observedSunlight = false;
@@ -494,7 +501,19 @@ namespace CardShopCoop.Sync
                 }
                 if (groupsDiffer || phaseDiffer)
                     LightClockInterop.EvaluateWorldUIBrightness.Invoke(manager, null);
-                ApplyClientLightSwitchModels(data.m_IsShopLightOn);
+                // Mirror the switch meshes whenever the authoritative flag differs from what we
+                // last applied - NOT only when the light groups/phase changed. The game's day
+                // reset flips the light groups but never touches the InteractableLightSwitch
+                // meshes, so a group-only gate could leave the guest's switches stuck on after a
+                // rollover. Refreshing them used to cost a full-scene FindObjectsOfType on EVERY
+                // LightState apply (~27 ms); the switch array is now cached, so this is a cheap
+                // comparison on the common (unchanged) path.
+                int switchState = data.m_IsShopLightOn ? 1 : 0;
+                if (_appliedSwitchLight != switchState)
+                {
+                    ApplyClientLightSwitchModels(data.m_IsShopLightOn);
+                    _appliedSwitchLight = switchState;
+                }
                 // Re-run the game's own lighting restore only when the sky phase actually
                 // differs (avoids music/blend churn).
                 if (phaseDiffer || driftMinutes > 4)
@@ -587,11 +606,21 @@ namespace CardShopCoop.Sync
             return core == null ? null : core.ResolveLightManager();
         }
 
-        private static void ApplyClientLightSwitchModels(bool isOn)
+        // The switch set only changes on a scene load, which invalidates the cache through
+        // Reset(), so it is resolved once per scene instead of once per LightState apply.
+        private sealed class LightSwitchCache : Cached<InteractableLightSwitch[]>
+        {
+            protected override InteractableLightSwitch[] GetRawValue() =>
+                UnityEngine.Object.FindObjectsByType<InteractableLightSwitch>(FindObjectsInactive.Include, FindObjectsSortMode.InstanceID);
+        }
+
+        private readonly LightSwitchCache _lightSwitches = new LightSwitchCache();
+
+        private void ApplyClientLightSwitchModels(bool isOn)
         {
             try
             {
-                var switches = UnityEngine.Object.FindObjectsOfType<InteractableLightSwitch>(true);
+                var switches = _lightSwitches.Get();
                 for (int i = 0; i < switches.Length; i++)
                 {
                     var sw = switches[i];

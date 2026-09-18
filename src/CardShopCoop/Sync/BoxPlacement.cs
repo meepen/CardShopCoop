@@ -430,7 +430,7 @@ namespace CardShopCoop.Sync
             var rb = box != null ? box.m_Rigidbody : null;
             if (rb != null)
             {
-                rb.velocity = velocity;
+                Util.UnityCompat.SetVelocity(rb, velocity);
                 rb.angularVelocity = angularVelocity;
                 rb.WakeUp();
             }
@@ -477,7 +477,7 @@ namespace CardShopCoop.Sync
                 var r = box.transform.rotation;
                 box.m_Rigidbody.position = p;
                 box.m_Rigidbody.rotation = r;
-                box.m_Rigidbody.velocity = Vector3.zero;
+                Util.UnityCompat.SetVelocity(box.m_Rigidbody, Vector3.zero);
                 box.m_Rigidbody.angularVelocity = Vector3.zero;
                 box.transform.SetPositionAndRotation(p, r);
             }
@@ -493,7 +493,7 @@ namespace CardShopCoop.Sync
             {
                 var rb = box != null ? box.m_Rigidbody : null;
                 return rb == null || rb.isKinematic || rb.IsSleeping()
-                    || rb.velocity.sqrMagnitude < 0.04f;
+                    || Util.UnityCompat.Velocity(rb).sqrMagnitude < 0.04f;
             }
             catch (System.Exception e) { Swallow.Log(e); return true; }
         }
@@ -514,7 +514,7 @@ namespace CardShopCoop.Sync
                     rb.rotation = rotation;
                     if (!rb.isKinematic)
                     {
-                        rb.velocity = Vector3.zero;
+                        Util.UnityCompat.SetVelocity(rb, Vector3.zero);
                         rb.angularVelocity = Vector3.zero;
                         rb.WakeUp();
                     }

@@ -40,11 +40,19 @@ namespace CardShopCoop.Sync
         /// <summary>Names normally go out only on change; a periodic full refresh covers
         /// late joiners and name packets lost on the unreliable channel.</summary>
         private const float NameRefreshInterval = 5f;
-        /// <summary>Cap on NPC slots sampled in one frame. Credit accrues as
+        /// <summary>Cap on accrued sampling credit. Credit accrues as
         /// slots * dt / SendInterval, so a full ~8 Hz pass normally needs only
-        /// slots/8 slots per frame; the cap bounds a post-hitch catch-up, and for a crowd
-        /// larger than the cap it becomes the steady-state throughput ceiling.</summary>
+        /// slots/8 slots per frame. This bounds how much debt a hitch can leave behind; how much
+        /// of that debt a single frame may spend is separately capped by
+        /// <see cref="MaxCollectPerFrame"/>.</summary>
         private const int MaxCollectBudget = 32;
+
+        /// <summary>Hard ceiling on slots sampled in ONE frame, independent of accrued credit.
+        /// Without it a long frame's dt inflated the credit enough to sample the WHOLE crowd in a
+        /// single frame (a &gt;120 ms scan), which deepened the very hitch that produced it - a
+        /// positive feedback loop. Excess credit drains over the following frames; a frame rate
+        /// too low for this ceiling stretches the pass rather than bursting.</summary>
+        private const int MaxCollectPerFrame = 6;
 
         // string-keyed animator calls hash the name on every call; cache the ids once
         private static readonly int HashMoveSpeed = Animator.StringToHash("MoveSpeed");
@@ -205,7 +213,7 @@ namespace CardShopCoop.Sync
             }
 
             if (_cm == null)
-                _cm = Object.FindObjectOfType<CustomerManager>();
+                _cm = Object.FindFirstObjectByType<CustomerManager>();
             if (_cm == null)
                 return null;
 
@@ -254,15 +262,17 @@ namespace CardShopCoop.Sync
             int budget = (int)_collectCredit;
             if (budget <= 0)
                 return;
-            if (budget >= total)
-            {
-                budget = total;          // never revisit a slot within one frame
+            // Bound this frame's work BEFORE spending credit. A slow frame (large dt) earns more
+            // credit, but must never convert it into a whole-crowd scan - that is the feedback
+            // loop (slow frame -> full scan -> slower frame). The cap also keeps the cursor from
+            // revisiting a slot within one frame while total exceeds it.
+            if (budget > MaxCollectPerFrame)
+                budget = MaxCollectPerFrame;
+            if (budget > total)
+                budget = total;
+            _collectCredit -= budget;
+            if (_collectCredit < 0f)
                 _collectCredit = 0f;
-            }
-            else
-            {
-                _collectCredit -= budget;
-            }
 
             float hostTime = Time.unscaledTime;
             BeginChunk(hostTime);
@@ -519,7 +529,7 @@ namespace CardShopCoop.Sync
             _live.ReleaseWorkerBoxProp(p);
             try
             {
-                var rm = Object.FindObjectOfType<RestockManager>();
+                var rm = Object.FindFirstObjectByType<RestockManager>();
                 var prefab = isBig ? rm?.m_PackageBoxPrefab : rm?.m_PackageBoxSmallPrefab;
                 if (prefab == null || p.HoldBox == null)
                     return;
@@ -626,7 +636,7 @@ namespace CardShopCoop.Sync
         private static InventoryBase Inv()
         {
             if (_inv == null)
-                _inv = Object.FindObjectOfType<InventoryBase>();
+                _inv = Object.FindFirstObjectByType<InventoryBase>();
             return _inv;
         }
 
@@ -735,7 +745,7 @@ namespace CardShopCoop.Sync
         {
             // cached across calls; Unity's overloaded == re-resolves after scene changes
             if (s_diagCm == null)
-                s_diagCm = Object.FindObjectOfType<CustomerManager>();
+                s_diagCm = Object.FindFirstObjectByType<CustomerManager>();
             int n = 0;
             if (s_diagCm != null)
             {
@@ -757,7 +767,7 @@ namespace CardShopCoop.Sync
         public static int CountUnexpectedActiveNpcs()
         {
             if (s_diagCm == null)
-                s_diagCm = Object.FindObjectOfType<CustomerManager>();
+                s_diagCm = Object.FindFirstObjectByType<CustomerManager>();
             int n = 0;
             if (s_diagCm != null)
             {
@@ -799,7 +809,7 @@ namespace CardShopCoop.Sync
             if (_live == null || customer == null)
                 return 0;
             if (_live._cm == null)
-                _live._cm = Object.FindObjectOfType<CustomerManager>();
+                _live._cm = Object.FindFirstObjectByType<CustomerManager>();
             var list = _live._cm != null ? _live._cm.GetCustomerList() : null;
             if (list == null)
                 return 0;
@@ -829,7 +839,7 @@ namespace CardShopCoop.Sync
             if (_live == null || transform == null)
                 return false;
             if (_live._cm == null)
-                _live._cm = Object.FindObjectOfType<CustomerManager>();
+                _live._cm = Object.FindFirstObjectByType<CustomerManager>();
             var list = _live._cm != null ? _live._cm.GetCustomerList() : null;
             if (list == null)
                 return false;
@@ -1537,7 +1547,7 @@ namespace CardShopCoop.Sync
             if (kind == KindWorker)
             {
                 if (_wmClient == null)
-                    _wmClient = Object.FindObjectOfType<WorkerManager>();
+                    _wmClient = Object.FindFirstObjectByType<WorkerManager>();
                 if (_wmClient == null)
                     return;
                 var workers = WorkerManager.GetWorkerList();
@@ -1561,7 +1571,7 @@ namespace CardShopCoop.Sync
             else
             {
                 if (_cmClient == null)
-                    _cmClient = Object.FindObjectOfType<CustomerManager>();
+                    _cmClient = Object.FindFirstObjectByType<CustomerManager>();
                 if (_cmClient == null)
                     return;
                 // Clone a REAL pooled customer rather than the template prefab. Since 1.0 the

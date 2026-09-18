@@ -1082,7 +1082,7 @@ namespace CardShopCoop.Patches
             try
             {
                 if (_sprayIpc == null)
-                    _sprayIpc = UnityEngine.Object.FindObjectOfType<InteractionPlayerController>();
+                    _sprayIpc = UnityEngine.Object.FindFirstObjectByType<InteractionPlayerController>();
                 var ipc = _sprayIpc;
                 bool handheld = ipc != null
                     && FiHoldSprayItem?.GetValue(ipc) != null
@@ -1535,7 +1535,7 @@ namespace CardShopCoop.Patches
             {
                 if (!typeof(Component).IsAssignableFrom(cheatType))
                     return;
-                if (UnityEngine.Object.FindObjectOfType(cheatType) != null)
+                if (UnityEngine.Object.FindFirstObjectByType(cheatType) != null)
                     return;
                 var go = new GameObject("CardShopCoopGameCheatManager");
                 UnityEngine.Object.DontDestroyOnLoad(go);

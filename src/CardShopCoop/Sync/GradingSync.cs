@@ -205,7 +205,7 @@ namespace CardShopCoop.Sync
         private static InventoryBase Inv()
         {
             if (_inv == null)
-                _inv = UnityEngine.Object.FindObjectOfType<InventoryBase>();
+                _inv = UnityEngine.Object.FindFirstObjectByType<InventoryBase>();
             return _inv;
         }
 
@@ -1137,13 +1137,13 @@ namespace CardShopCoop.Sync
                 // wire while the host had the website up did not appear until he backed out and
                 // reopened it. Grading Overhaul's panel patches hang off this same call, so the
                 // company/tier text repaints with it. Same move ClientSubmit makes for the guest
-                // after its own submit; cached lookup, because FindObjectOfType is not free and
+                // after its own submit; cached lookup, because FindFirstObjectByType is not free and
                 // this runs on a message. try/catch: a UI refresh must never lose the enrollment
                 // that already happened above.
                 try
                 {
                     if (_website == null)
-                        _website = UnityEngine.Object.FindObjectOfType<GradeCardWebsiteUIScreen>();
+                        _website = UnityEngine.Object.FindFirstObjectByType<GradeCardWebsiteUIScreen>();
                     if (_website != null && _website.gameObject.activeInHierarchy)
                         _website.UpdateSubmissionProgressPanelUI();
                 }
@@ -1232,7 +1232,7 @@ namespace CardShopCoop.Sync
             try
             {
                 if (_website == null)
-                    _website = UnityEngine.Object.FindObjectOfType<GradeCardWebsiteUIScreen>();
+                    _website = UnityEngine.Object.FindFirstObjectByType<GradeCardWebsiteUIScreen>();
                 if (_website != null && _website.gameObject.activeInHierarchy)
                     _website.UpdateSubmissionProgressPanelUI();
             }
