@@ -91,12 +91,11 @@ namespace CardShopCoop.Net
         /// friend is not known locally or Steam is unavailable.</summary>
         string FriendNickname(ulong steamId);
 
-        /// <summary>Build the Steam P2P transport. MUST be called BEFORE Host()/Join():
-        /// the lobby callbacks inside the bridge write the lobby id (and, on the client,
-        /// the host connection) into the transport this returns. Reorder these two and
-        /// the callback fires against a null transport and the Steam path silently never
-        /// connects - on the Steam build, where nobody is looking for it.</summary>
-        ICoopTransport CreateTransport(bool isHost, INetMessage keepalive);
+        /// <summary>Build the unified KCP transport used for this Steam session. The
+        /// transport is created before Host/Join so Core can pump it immediately; the
+        /// bridge binds its Steam sockets bearer when the lobby lifecycle supplies the
+        /// host identity needed by that bearer.</summary>
+        ICoopTransport CreateTransport(bool isHost);
 
         void Host(bool isPublic, string lobbyName, bool hasPassword, int maxPlayers);
         long Join(ulong lobbyId);
@@ -137,8 +136,9 @@ namespace CardShopCoop.Net
         }
 
         /// <summary>Client: we entered a lobby and the transport is already wired to its
-        /// owner. The ROLE CHECK IS THE SUBSCRIBER'S JOB - see CoopCore.</summary>
-        Action OnConnectedToHost
+        /// owner. The ROLE CHECK IS THE SUBSCRIBER'S JOB - see CoopCore. The transport
+        /// argument identifies the session that produced this asynchronous callback.</summary>
+        Action<ICoopTransport> OnConnectedToHost
         {
             get; set;
         }
@@ -147,6 +147,15 @@ namespace CardShopCoop.Net
         /// transport identify the exact attempt so a late callback cannot tear down a
         /// newer session.</summary>
         Action<ulong, long, ICoopTransport, string> OnJoinFailed
+        {
+            get; set;
+        }
+
+        /// <summary>A current Steam session failed before it became usable (for example,
+        /// asynchronous lobby creation or host bearer startup). The transport argument
+        /// identifies the exact session and prevents a late Steam callback from failing a
+        /// newer one.</summary>
+        Action<ICoopTransport, string> OnSessionFailed
         {
             get; set;
         }
@@ -174,7 +183,10 @@ namespace CardShopCoop.Net
             get
             {
                 if (_state == 0)
+                {
                     _state = Detect() ? 1 : 2;
+                }
+
                 return _state == 1;
             }
         }
@@ -187,11 +199,15 @@ namespace CardShopCoop.Net
             try
             {
                 foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                {
                     if (string.Equals(a.GetName().Name, "com.rlabrecque.steamworks.net",
                                       StringComparison.OrdinalIgnoreCase))
+                    {
                         return true;
+                    }
+                }
             }
-            catch (System.Exception e) { Swallow.Log(e); }
+            catch (Exception e) { Swallow.Log(e); }
 
             // (b) Not loaded YET? Force a partial bind. DO NOT "SIMPLIFY" THIS AWAY: our
             //     Awake can easily run before the game first touches Steamworks, so (a)
@@ -201,9 +217,11 @@ namespace CardShopCoop.Net
             try
             {
                 if (Type.GetType("Steamworks.SteamAPI, com.rlabrecque.steamworks.net", false) != null)
+                {
                     return true;
+                }
             }
-            catch (System.Exception e) { Swallow.Log(e); }
+            catch (Exception e) { Swallow.Log(e); }
 
             return false;
         }
@@ -252,14 +270,16 @@ namespace CardShopCoop.Net
                 try
                 {
                     foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+                    {
                         if (string.Equals(a.GetName().Name, "Assembly-CSharp",
                                           StringComparison.OrdinalIgnoreCase))
                         {
                             _gameAsm = a;
                             break;
                         }
+                    }
                 }
-                catch (System.Exception e) { Swallow.Log(e); }
+                catch (Exception e) { Swallow.Log(e); }
             }
             return _gameAsm;
         }
@@ -298,7 +318,10 @@ namespace CardShopCoop.Net
                     }
                 }
                 if (_saveIndexField == null || _saveCycleField == null)
+                {
                     return false;
+                }
+
                 index = (int)_saveIndexField.GetValue(null);
                 cycle = (int)_saveCycleField.GetValue(null);
                 return true;
@@ -324,7 +347,10 @@ namespace CardShopCoop.Net
             get
             {
                 if (_gpState == 0)
+                {
                     _gpState = DetectGamecore() ? 1 : 2;
+                }
+
                 return _gpState == 1;
             }
         }
@@ -333,7 +359,10 @@ namespace CardShopCoop.Net
         {
             var asm = GameAssembly();
             if (asm == null)
+            {
                 return false;
+            }
+
             Type[] types;
             // a partially-loadable assembly still tells us what we need: walk .Types and
             // skip the nulls rather than giving up on the whole probe
@@ -342,19 +371,27 @@ namespace CardShopCoop.Net
                 types = asm.GetTypes();
             }
             catch (ReflectionTypeLoadException e) { types = e.Types; }
-            catch (System.Exception e) { Swallow.Log(e); return false; }
+            catch (Exception e) { Swallow.Log(e); return false; }
             if (types == null)
+            {
                 return false;
+            }
+
             foreach (var t in types)
             {
                 if (t == null)
+                {
                     continue;
+                }
+
                 try
                 {
                     if (t.Name.IndexOf("Gamecore", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
                         return true;
+                    }
                 }
-                catch (System.Exception e) { Swallow.Log(e); }
+                catch (Exception e) { Swallow.Log(e); }
             }
             return false;
         }
@@ -368,7 +405,7 @@ namespace CardShopCoop.Net
             get
             {
                 int i, c;
-                bool counter = TrySampleSaveCounter(out i, out c);
+                var counter = TrySampleSaveCounter(out i, out c);
                 return (GamePassBuild ? "Xbox containers (Game Pass)" : "local files")
                      + (counter
                         ? " [save-completion counter available]"
@@ -394,7 +431,10 @@ namespace CardShopCoop.Net
         public static ISteamBridge TryCreate()
         {
             if (!PlatformProbe.SteamworksPresent)
+            {
                 return null;
+            }
+
             try
             {
                 return Create();
@@ -424,3 +464,7 @@ namespace CardShopCoop.Net
         }
     }
 }
+
+
+
+

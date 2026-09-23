@@ -8,6 +8,7 @@ trim_trailing_whitespace = true
 
 [*.cs]
 csharp_new_line_before_open_brace = all
+csharp_prefer_braces = true
 csharp_indent_block_contents = true
 csharp_indent_case_contents = true
 csharp_indent_switch_labels = true
@@ -18,7 +19,17 @@ csharp_space_between_method_call_parameter_list_parentheses = false
 csharp_space_between_parentheses = false
 csharp_preserve_single_line_blocks = false
 csharp_preserve_single_line_statements = false
+csharp_style_var_for_built_in_types = true:error
+csharp_style_var_when_type_is_apparent = true:error
+csharp_style_var_elsewhere = true:error
 
 # Keep the existing codebase's explicit nullable/implicit-using choices intact.
-dotnet_diagnostic.IDE0005.severity = suggestion
+dotnet_diagnostic.IDE0005.severity = error
+dotnet_diagnostic.IDE0001.severity = error
+dotnet_diagnostic.IDE0011.severity = warning
+dotnet_diagnostic.IDE0017.severity = error
 dotnet_diagnostic.IDE0055.severity = warning
+dotnet_diagnostic.CS0067.severity = error
+dotnet_diagnostic.IDE0007.severity = error
+dotnet_diagnostic.IDE0008.severity = error
+dotnet_diagnostic.IDE0083.severity = error

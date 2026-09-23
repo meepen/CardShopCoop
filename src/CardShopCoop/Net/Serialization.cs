@@ -15,3 +15,5 @@ namespace CardShopCoop.Net
         public NetReader(Stream stream) : base(stream) { }
     }
 }
+
+

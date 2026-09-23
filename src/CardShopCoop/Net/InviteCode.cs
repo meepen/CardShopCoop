@@ -71,20 +71,32 @@ namespace CardShopCoop.Net
         {
             try
             {
-                if (!IPAddress.TryParse((ip ?? "").Trim(), out IPAddress addr))
+                if (!IPAddress.TryParse((ip ?? "").Trim(), out var addr))
+                {
                     return null;
+                }
+
                 if (addr.AddressFamily != AddressFamily.InterNetwork)
+                {
                     return null;
+                }
+
                 if (port <= 0 || port > 65535)
+                {
                     return null;
+                }
 
-                byte[] pw = Encoding.UTF8.GetBytes(password ?? "");
+                var pw = Encoding.UTF8.GetBytes(password ?? "");
                 if (pw.Length > MaxPasswordBytes)
+                {
                     return null;
+                }
 
-                byte[] quad = addr.GetAddressBytes();
+                var quad = addr.GetAddressBytes();
                 if (quad.Length != 4)
+                {
                     return null;
+                }
 
                 var payload = new byte[HeaderBytes + pw.Length];
                 payload[0] = Version;
@@ -100,7 +112,7 @@ namespace CardShopCoop.Net
                 // decodes anything at all.
                 return Group(ToBase32(payload) + CheckChar(payload));
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 Swallow.Log(e);
                 return null;
@@ -118,39 +130,52 @@ namespace CardShopCoop.Net
             try
             {
                 if (code == null || code.Length > MaxCodeLength)
+                {
                     return false;
+                }
 
                 // PASS 1 - normalize to bare alphabet characters. Separate from the decode
                 // now that the last character is not part of the bit stream: the check
                 // character has to be identified AFTER the dashes, spaces and confusables are
                 // gone, and "the last one" is only meaningful on the cleaned string.
                 var clean = new StringBuilder(code.Length);
-                foreach (char raw in code)
+                foreach (var raw in code)
                 {
-                    char c = char.ToUpperInvariant(raw);
+                    var c = char.ToUpperInvariant(raw);
                     // separators the player (or their chat client) may have added
                     if (c == '-' || c == '_' || c == ' ' || c == '\t' || c == '\r' || c == '\n')
+                    {
                         continue;
+                    }
                     // confusables: the three swaps Crockford's alphabet was chosen to allow
                     if (c == 'O')
+                    {
                         c = '0';
+                    }
                     else if (c == 'I' || c == 'L')
+                    {
                         c = '1';
+                    }
 
                     if (Alphabet.IndexOf(c) < 0)
+                    {
                         return false; // includes U, which Crockford has no value for
+                    }
+
                     clean.Append(c);
                 }
                 // shortest legal code: an 8-byte payload is 13 base32 characters, + 1 check
                 if (clean.Length < MinBase32Chars + 1)
+                {
                     return false;
+                }
 
-                char check = clean[clean.Length - 1];
+                var check = clean[clean.Length - 1];
 
                 // PASS 2 - base32 back to payload bytes, check character excluded
                 var bytes = new List<byte>(48);
                 int buffer = 0, bits = 0;
-                for (int i = 0; i < clean.Length - 1; i++)
+                for (var i = 0; i < clean.Length - 1; i++)
                 {
                     buffer = (buffer << 5) | Alphabet.IndexOf(clean[i]);
                     bits += 5;
@@ -159,36 +184,54 @@ namespace CardShopCoop.Net
                         bits -= 8;
                         bytes.Add((byte)((buffer >> bits) & 0xFF));
                         if (bytes.Count > HeaderBytes + MaxPasswordBytes)
+                        {
                             return false;
+                        }
                     }
                 }
                 // leftover bits are the encoder's zero padding (always < 8) and are dropped
 
-                byte[] payload = bytes.ToArray();
+                var payload = bytes.ToArray();
                 // BEFORE THE VERSION CHECK, on purpose: a corrupted code whose version byte
                 // still happens to read as 1 is exactly the case this catches, and a code that
                 // fails here should be reported as a typo rather than as a version mismatch.
                 if (CheckChar(payload) != check)
+                {
                     return false;
+                }
 
                 if (payload.Length < HeaderBytes)
+                {
                     return false;
-                if (payload[0] != Version)
-                    return false;
+                }
 
-                int p = (payload[5] << 8) | payload[6];
-                if (p <= 0 || p > 65535)
+                if (payload[0] != Version)
+                {
                     return false;
+                }
+
+                var p = (payload[5] << 8) | payload[6];
+                if (p <= 0 || p > 65535)
+                {
+                    return false;
+                }
 
                 int pwLen = payload[7];
                 if (pwLen > MaxPasswordBytes)
+                {
                     return false;
-                if (payload.Length - HeaderBytes < pwLen)
-                    return false;
+                }
 
-                string pw = "";
+                if (payload.Length - HeaderBytes < pwLen)
+                {
+                    return false;
+                }
+
+                var pw = "";
                 if (pwLen > 0)
+                {
                     pw = Encoding.UTF8.GetString(payload, HeaderBytes, pwLen);
+                }
 
                 ip = $"{payload[1]}.{payload[2]}.{payload[3]}.{payload[4]}";
                 port = p;
@@ -220,8 +263,8 @@ namespace CardShopCoop.Net
         {
             unchecked
             {
-                uint h = 2166136261u;              // FNV-1a 32-bit offset basis
-                foreach (byte b in payload)
+                var h = 2166136261u;              // FNV-1a 32-bit offset basis
+                foreach (var b in payload)
                 {
                     h ^= b;
                     h *= 16777619u;
@@ -242,7 +285,7 @@ namespace CardShopCoop.Net
         {
             var sb = new StringBuilder((data.Length * 8 + 4) / 5);
             int buffer = 0, bits = 0;
-            foreach (byte b in data)
+            foreach (var b in data)
             {
                 buffer = (buffer << 8) | b;
                 bits += 8;
@@ -253,20 +296,30 @@ namespace CardShopCoop.Net
                 }
             }
             if (bits > 0)
+            {
                 sb.Append(Alphabet[(buffer << (5 - bits)) & 31]); // zero-padded tail
+            }
+
             return sb.ToString();
         }
 
         private static string Group(string s)
         {
             var sb = new StringBuilder(s.Length + s.Length / GroupSize);
-            for (int i = 0; i < s.Length; i++)
+            for (var i = 0; i < s.Length; i++)
             {
                 if (i > 0 && (i % GroupSize) == 0)
+                {
                     sb.Append('-');
+                }
+
                 sb.Append(s[i]);
             }
             return sb.ToString();
         }
     }
 }
+
+
+
+

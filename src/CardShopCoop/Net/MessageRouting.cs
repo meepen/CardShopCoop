@@ -1,43 +1,49 @@
+using PeerConnection = CardShopCoop.Net.Connection.PeerConnection;
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Util;
+using System.Reflection;
+using CardShopCoop.Net.Protocol;
+using CardShopCoop.Net.Connection;
 
 namespace CardShopCoop.Net
 {
-    [Flags]
-    public enum MessagePolicy
-    {
-        Any = 0, HostOnly = 1, ClientOnly = 2, InGameOnly = 4, HostOnlyInGame = 5, ClientOnlyInGame = 6
-    }
-    public enum Delivery
-    {
-        Reliable, Transient
-    }
-
+    /// <summary>Marks a concrete INetMessage for assembly discovery.</summary>
     [AttributeUsage(AttributeTargets.Class, Inherited = false)]
     public sealed class NetworkMessageAttribute : Attribute
     {
-        public MsgType Type
+        public Reliability Reliability
         {
-            get; private set;
+            get;
+            set;
+        } = Reliability.Reliable;
+    }
+
+    /// <summary>Marks a method as the runtime handler for one registered message type.</summary>
+    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
+    public sealed class MessageHandlerAttribute : Attribute
+    {
+        public Type MessageType
+        {
+            get;
         }
-        public Delivery Delivery
+
+        public MessageHandlerAttribute(Type messageType)
         {
-            get; set;
-        }
-        public MessagePolicy Policy
-        {
-            get; set;
-        }
-        public NetworkMessageAttribute(MsgType type)
-        {
-            Type = type;
+            MessageType = messageType ?? throw new ArgumentNullException(nameof(messageType));
         }
     }
 
     public sealed class MessageContext
     {
-        public Connection Connection;
-        // Kept as a derived view while the game-facing handlers finish migrating.
+        public PeerConnection Connection;
+        public bool InGame;
+        public ICoopTransport Transport;
+
+        // Core supplies the bounded-dispatch work estimate. External callers that dispatch
+        // directly use the safe unit default.
+        internal int WorkCost = 1;
+
         public int ConnectionId
         {
             get
@@ -45,243 +51,272 @@ namespace CardShopCoop.Net
                 return Connection == null ? 0 : Connection.Id;
             }
         }
-        public CoopRole Role;
-        public bool InGame;
-        public ICoopTransport Transport;
+
+        public bool IsAuthenticated
+        {
+            get
+            {
+                return Connection != null
+                    && (Connection.State == ConnectionState.Transferring
+                        || Connection.State == ConnectionState.FullyJoined);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A reliable handler failed after the router requested peer recovery. The exception remains
+    /// visible to the bounded Core dispatch loop so it can stop consuming this peer's messages
+    /// for the current frame instead of treating the failed reliable message as handled.
+    /// </summary>
+    internal sealed class ReliableMessageHandlerException : Exception
+    {
+        internal ReliableMessageHandlerException(Type messageType, Exception innerException)
+            : base("Reliable handler failed for " + (messageType?.FullName ?? "<unknown>"),
+                innerException)
+        {
+            MessageType = messageType;
+        }
+
+        internal Type MessageType
+        {
+            get;
+        }
     }
 
     public sealed class MessageRouter
     {
-        private sealed class Route
+        private sealed class TargetRegistration
         {
-            public MsgType Type;
-            public MessagePolicy Policy;
-            public Action<MessageContext, INetMessage> Handler;
-            // Retry/heal metadata replaces the former per-MsgType switches in CoopCore.
-            // Only the types registered here are retried; a bounded failure calls
-            // Heal so the owning module re-baselines instead of replaying forever.
-            public bool Retryable;
-            public Action Heal;
+            public object Target;
+            public IProtocolRegistration Registration;
         }
-        private readonly Dictionary<Type, Route> _routes = new Dictionary<Type, Route>();
-        private readonly Dictionary<MsgType, Route> _byType = new Dictionary<MsgType, Route>();
 
-        public MessageRouter Register<T>(Action<MessageContext, T> handler,
-            MessagePolicy policy = MessagePolicy.Any, bool retryable = false, Action heal = null) where T : INetMessage
+        private readonly List<TargetRegistration> _targetRegistrations = new();
+        private readonly object _targetLock = new();
+
+        /// <summary>Contextual rejection seam for diagnostics, metrics, or disconnect policy.</summary>
+        public event Action<MessageRejection> Rejected;
+
+        public MessageRouter()
         {
-            if (handler == null)
-                throw new ArgumentNullException("handler");
-            var metadata = (NetworkMessageAttribute)Attribute.GetCustomAttribute(typeof(T), typeof(NetworkMessageAttribute));
-            if (metadata == null)
-                throw new InvalidOperationException(typeof(T).Name + " is missing [NetworkMessage]");
-            var route = new Route
+            MessageRegistry.EnsureInitialized();
+        }
+
+        public void RegisterAttributedHandlers(object target)
+        {
+            RegisterAttributedHandlers(target, false);
+        }
+
+        /// <summary>
+        /// Registers handlers owned by the core lifecycle. This is intentionally internal: an
+        /// extension can register handlers, but cannot obtain the pre-authentication privilege.
+        /// </summary>
+        internal void RegisterCoreAttributedHandlers(object target)
+        {
+            RegisterAttributedHandlers(target, true);
+        }
+
+        private void RegisterAttributedHandlers(object target, bool coreOwner)
+        {
+            if (target == null)
             {
-                Type = metadata.Type,
-                Policy = policy == MessagePolicy.Any ? metadata.Policy : policy,
-                Handler = (context, message) => handler(context, (T)message),
-                Retryable = retryable,
-                Heal = heal
-            };
-            _routes[typeof(T)] = route;
-            _byType[route.Type] = route;
-            return this;
+                throw new ArgumentNullException(nameof(target));
+            }
+
+            MessageRegistry.EnsureInitialized();
+            var methods = target.GetType().GetMethods(BindingFlags.Instance
+                | BindingFlags.Public | BindingFlags.NonPublic);
+            var pending = new List<ProtocolHandlerRegistration>();
+            var pendingTypes = new HashSet<Type>();
+            for (var i = 0; i < methods.Length; i++)
+            {
+                var method = methods[i];
+                var attribute = method.GetCustomAttribute<MessageHandlerAttribute>();
+                if (attribute == null)
+                {
+                    continue;
+                }
+
+                var parameters = method.GetParameters();
+                if (method.IsStatic || method.ReturnType != typeof(void) || parameters.Length != 2
+                    || parameters[0].ParameterType != typeof(MessageContext)
+                    || !typeof(INetMessage).IsAssignableFrom(parameters[1].ParameterType)
+                    || parameters[1].ParameterType != attribute.MessageType)
+                {
+                    throw new InvalidOperationException("Invalid network handler signature: "
+                        + method.DeclaringType?.FullName + "." + method.Name);
+                }
+
+                var messageType = parameters[1].ParameterType;
+                if (!pendingTypes.Add(messageType))
+                {
+                    throw new InvalidOperationException("Duplicate network handler for "
+                        + messageType.FullName + " in one target");
+                }
+                if (!ProtocolRegistry.Default.TryGetRegisteredDescriptor(messageType,
+                    out _))
+                {
+                    throw new InvalidOperationException("No registered network descriptor for "
+                        + messageType.FullName);
+                }
+
+                pending.Add(new ProtocolHandlerRegistration(messageType,
+                    (context, message) => method.Invoke(target, new object[] { context, message })));
+            }
+
+            if (pending.Count == 0)
+            {
+                return;
+            }
+
+            var owner = coreOwner
+                ? ProtocolRegistry.CoreOwner
+                : ProtocolRegistry.CreateOwner(
+                    "handlers:" + target.GetType().Assembly.GetName().Name);
+            lock (_targetLock)
+            {
+                var registration = ProtocolRegistry.Default.RegisterHandlers(pending, owner);
+                _targetRegistrations.Add(new TargetRegistration
+                {
+                    Target = target,
+                    Registration = registration,
+                });
+            }
+        }
+
+        public IProtocolRegistration RegisterHandler(Type messageType,
+            ProtocolMessageHandler handler, ProtocolRegistrationOwner owner = null)
+        {
+            owner ??= ProtocolRegistry.CreateOwner("router:explicit");
+            return ProtocolRegistry.Default.RegisterHandler(messageType, handler, owner);
+        }
+
+        public void UnregisterAttributedHandlers(object target)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            List<IProtocolRegistration> registrations = null;
+            lock (_targetLock)
+            {
+                for (var i = _targetRegistrations.Count - 1; i >= 0; i--)
+                {
+                    if (ReferenceEquals(_targetRegistrations[i].Target, target))
+                    {
+                        registrations ??= new List<IProtocolRegistration>();
+                        registrations.Add(_targetRegistrations[i].Registration);
+                        _targetRegistrations.RemoveAt(i);
+                    }
+                }
+            }
+
+            if (registrations == null)
+            {
+                return;
+            }
+            for (var i = 0; i < registrations.Count; i++)
+            {
+                registrations[i].Dispose();
+            }
         }
 
         public bool Dispatch(MessageContext context, INetMessage message)
         {
-            if (context == null || message == null)
-                return false;
-            Route route;
-            if (!_routes.TryGetValue(message.GetType(), out route))
-                return false;
-            // Disconnect is the terminal event itself. It must still reach the handler after
-            // transport records its reason, otherwise the state transition suppresses the very
-            // reason that Core/UI/modules are supposed to receive.
-            if (context.Connection != null && context.Connection.State == ConnectionState.Disconnected
-                && route.Type != MsgType.Disconnect)
-                return false;
-            if (context.Connection != null && context.Connection.IsDisconnectingOrDisconnected
-                && route.Type == MsgType.Disconnect)
-            {
-                route.Handler(context, message);
-                return true;
-            }
-            if (context.Connection != null
-                && (route.Type == MsgType.Ping || route.Type == MsgType.Pong)
-                && !IsKeepalivePhase(context.Connection.State))
-                return false;
-            // InGameOnly is a scene gate, not an authentication gate.  Before the
-            // handshake/world transfer completes, only the deliberately small control
-            // lane may reach a handler; every gameplay, economy and state route is
-            // rejected even when its metadata forgot InGameOnly.
-            if (context.Connection != null && context.Connection.State != ConnectionState.FullyJoined
-                && !IsPreJoinControl(message.Type)
-                && !IsClientBaselineFrame(route, context))
-                return false;
-            bool authenticatedFullyJoined = IsAuthenticatedFullyJoined(context, message.Type);
-            // The Any policy on FullyJoined is only a direction exception.  It must not
-            // admit the signal in Handshaking, after completion, or on a stale connection.
-            if (message.Type == MsgType.FullyJoined && !authenticatedFullyJoined)
-                return false;
-            if (!authenticatedFullyJoined && !Allowed(route.Policy, context))
-                return false;
-            route.Handler(context, message);
-            return true;
+            return Dispatch(context, message, false);
+        }
+
+        /// <summary>
+        /// Internal core lifecycle path for handshake/control dispatch before the generic
+        /// authenticated-session gate is established. External assemblies cannot call it.
+        /// </summary>
+        internal bool DispatchCore(MessageContext context, INetMessage message)
+        {
+            return Dispatch(context, message, true);
         }
 
         public bool IsRegistered(INetMessage message)
         {
-            return message != null && _routes.ContainsKey(message.GetType());
-        }
-
-        /// <summary>True only when this route is role-allowed but waiting for the game scene.</summary>
-        public bool IsTransientInGameGate(MessageContext context, INetMessage message)
-        {
-            if (context == null || message == null)
-                return false;
-            if (!_routes.TryGetValue(message.GetType(), out var route))
-                return false;
-            if (!RoleAllowed(route.Policy, context))
-                return false;
-            return (route.Policy & MessagePolicy.InGameOnly) != 0 && !context.InGame;
-        }
-
-        /// <summary>True when a failed dispatch of this type should be retried.</summary>
-        public bool IsRetryable(MsgType type)
-        {
-            return _byType.TryGetValue(type, out var route) && route.Retryable;
-        }
-
-        /// <summary>Ask the owning module to re-baseline after a dropped message.</summary>
-        public void Heal(MsgType type)
-        {
-            if (_byType.TryGetValue(type, out var route))
-                route.Heal?.Invoke();
-        }
-
-        private static bool Allowed(MessagePolicy policy, MessageContext context)
-        {
-            return RoleAllowed(policy, context)
-                && (context.Connection == null
-                    || (context.Connection.State == ConnectionState.FullyJoined
-                        || IsClientBaselinePolicy(policy, context)))
-                && ((policy & MessagePolicy.InGameOnly) == 0 || context.InGame);
-        }
-
-        private static bool RoleAllowed(MessagePolicy policy, MessageContext context)
-        {
-            if ((policy & MessagePolicy.HostOnly) != 0 && context.Role != CoopRole.Host)
-                return false;
-            if ((policy & MessagePolicy.ClientOnly) != 0 && context.Role != CoopRole.Client)
-                return false;
-            return true;
-        }
-
-        private static bool IsPreJoinControl(MsgType type)
-        {
-            switch (type)
+            if (message == null)
             {
-                case MsgType.Hello:
-                case MsgType.Welcome:
-                case MsgType.SaveChunk:
-                case MsgType.SaveDone:
-                case MsgType.BundleChunk:
-                case MsgType.BundleDone:
-                case MsgType.EnumSync:
-                case MsgType.FullyJoined:
-                case MsgType.FullyJoinedAck:
-                case MsgType.Disconnect:
-                case MsgType.Bye:
-                case MsgType.Ping:
-                case MsgType.Pong:
-                    return true;
-                default:
-                    return false;
+                return false;
+            }
+            return ProtocolRegistry.Default.CurrentSnapshot.TryGetHandler(message.GetType(),
+                out _);
+        }
+
+        private bool Dispatch(MessageContext context, INetMessage message, bool corePath)
+        {
+            if (context == null)
+            {
+                return Reject(null, null, "message context is null", context);
+            }
+            if (message == null)
+            {
+                return Reject(null, null, "message is null", context);
+            }
+
+            var snapshot = ProtocolRegistry.Default.CurrentSnapshot;
+            if (!snapshot.TryGet(message.GetType(), out var descriptor))
+            {
+                return Reject(message.GetType().FullName, message.GetType(),
+                    "no descriptor in the current protocol snapshot", context);
+            }
+            if (!snapshot.TryGetHandler(message.GetType(), out var handler))
+            {
+                return Reject(descriptor.WireName, descriptor.MessageType,
+                    "no runtime handler is bound", context);
+            }
+
+            var authorization = ProtocolAuthorization.Authorize(context,
+                corePath && handler.IsCoreOwner);
+            if (!authorization.Allowed)
+            {
+                return Reject(descriptor.WireName, descriptor.MessageType,
+                    authorization.Reason, context);
+            }
+
+            var timing = PerfProbe.StartHandlerMetric();
+            var completed = false;
+            try
+            {
+                handler.Invoke(context, message);
+                completed = true;
+                return true;
+            }
+            catch (Exception error)
+            {
+                var typeName = descriptor.WireName;
+                if (descriptor.Reliability == Reliability.Reliable)
+                {
+                    CoopPlugin.Log.LogError("reliable handler failed for " + typeName
+                        + " on connection " + context.ConnectionId
+                        + "; requesting session recovery: " + error);
+                    context.Transport?.GracefulDisconnect(context.Connection,
+                        new Connection.DisconnectInfo(
+                            "reliable message handler failed; session recovery required", false,
+                            "handler_failed", true, context.Connection.State));
+                    throw new ReliableMessageHandlerException(descriptor.MessageType, error);
+                }
+
+                CoopPlugin.Log.LogWarning("transient handler failed for " + typeName
+                    + " on connection " + context.ConnectionId + "; dropping message: " + error);
+                return false;
+            }
+            finally
+            {
+                PerfProbe.EndHandlerMetric(descriptor.MessageType, context.WorkCost,
+                    timing, !completed);
             }
         }
 
-        // The host deliberately sends the authoritative baseline before FullyJoinedAck.
-        // Those frames are reliable and ordered ahead of the ACK, but the connection must
-        // remain Transferring until the ACK is consumed.  Admit only host->client routes
-        // here; client gameplay traffic must not gain a pre-join escape hatch.
-        private static bool IsClientBaselineFrame(Route route, MessageContext context)
+        private bool Reject(string wireName, Type messageType, string reason, MessageContext context)
         {
-            return context.Role == CoopRole.Client
-                && context.Connection != null
-                && context.Connection.State == ConnectionState.Transferring
-                && (route.Policy & MessagePolicy.ClientOnly) != 0
-                && IsAuthoritativeBaseline(route.Type);
-        }
-
-        private static bool IsClientBaselinePolicy(MessagePolicy policy, MessageContext context)
-        {
-            return context.Role == CoopRole.Client
-                && context.Connection != null
-                && context.Connection.State == ConnectionState.Transferring
-                && (policy & MessagePolicy.ClientOnly) != 0;
-        }
-
-        // FullyJoined is the one control whose wire direction is opposite the generic
-        // role policy: a client sends it to a host.  Do not turn that exception into a
-        // general pre-join escape hatch.  The connection object is the transport's
-        // authenticated identity, must still be the exact active object, and must be
-        // immediately after the world transfer.
-        private static bool IsAuthenticatedFullyJoined(MessageContext context, MsgType type)
-        {
-            if (type != MsgType.FullyJoined || context.Role != CoopRole.Host
-                || context.Connection == null
-                || context.Connection.State != ConnectionState.Transferring
-                || context.Transport == null)
-                return false;
-            foreach (var active in context.Transport.Connections)
-                if (ReferenceEquals(active, context.Connection))
-                    return true;
+            var rejection = new MessageRejection(wireName, messageType, reason, context);
+            Rejected?.Invoke(rejection);
+            ProtocolRegistry.Default.RaiseRejection(rejection);
             return false;
-        }
-
-        private static bool IsAuthoritativeBaseline(MsgType type)
-        {
-            switch (type)
-            {
-                case MsgType.CoinSet:
-                case MsgType.DayTime:
-                case MsgType.ProgressSet:
-                case MsgType.ShelfDelta:
-                case MsgType.PriceList:
-                case MsgType.CardShelfDelta:
-                case MsgType.RegisterState:
-                case MsgType.RegisterCart:
-                case MsgType.ObjMoveDelta:
-                case MsgType.ShopName:
-                case MsgType.LightState:
-                case MsgType.PopState:
-                case MsgType.LicenseState:
-                case MsgType.StaffState:
-                case MsgType.ShopState:
-                case MsgType.SettingsState:
-                case MsgType.MarketState:
-                case MsgType.ReportState:
-                case MsgType.ContainerState:
-                case MsgType.TournamentState:
-                case MsgType.GradingState:
-                case MsgType.TradeState:
-                case MsgType.TableState:
-                case MsgType.PlayerModelState:
-                case MsgType.BoxSnapshot:
-                case MsgType.WarehouseState:
-                case MsgType.PlayTableMatchState:
-                case MsgType.Roster:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        private static bool IsKeepalivePhase(ConnectionState state)
-        {
-            return state == ConnectionState.Handshaking
-                || state == ConnectionState.Transferring
-                || state == ConnectionState.FullyJoined;
         }
     }
 }

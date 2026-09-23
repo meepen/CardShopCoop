@@ -1,11 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using BepInEx.Configuration;
 using CardShopCoop.Net;
+using CardShopCoop.Modules.Catalog;
+using CardShopCoop.Modules.Grading;
+using CardShopCoop.Modules.Hud;
+using CardShopCoop.Modules.Presence;
+using CardShopCoop.Runtime;
 // NO `using Steamworks;` HERE, AND NEVER AGAIN - see the same note in CoopCore.cs. OnGUI
 // is the worst possible place for a type-load fault (DrawNone runs every frame on the main
 // menu), so every lobby id in this file is a plain ulong and lobby rows are Net.LobbyRow.
@@ -20,15 +24,17 @@ namespace CardShopCoop.UI
         public bool Visible = true;
         public static bool TextFieldFocused;
 
-        private Rect _win = new Rect(24f, 96f, 400f, 10f);
+        private Rect _win = new(24f, 96f, 400f, 10f);
+        private int _fpsShown = -1;
+        private string _versionWithFps;
         private string _ipField;
         private string _nameField;
         private string _lanIps;
         private string _lanIpsOther;
-        private readonly CopyButton _ipCopy = new CopyButton();
+        private readonly CopyButton _ipCopy = new();
         private string _inviteField = "";
-        private readonly CopyButton _inviteCopy = new CopyButton();
-        private readonly CopyButton _passwordCopy = new CopyButton();
+        private readonly CopyButton _inviteCopy = new();
+        private readonly CopyButton _passwordCopy = new();
         private string _lanPwField = "";
         private bool _characterOpen = true;
         private enum CoopTab
@@ -45,27 +51,27 @@ namespace CardShopCoop.UI
         private Vector2 _hiddenScroll;
         private bool _characterSnapshotReady;
         private bool _characterFemale;
-        private readonly List<string> _presetNames = new List<string>();
+        private readonly List<string> _presetNames = new();
         private int _presetSelection;
-        private readonly List<int> _presetSelectionBuffer = new List<int>(1) { 0 };
+        private readonly List<int> _presetSelectionBuffer = new(1) { 0 };
         private int _characterSnapshotGeneration = -1;
         private CC.CharacterCustomization _characterCustomizer;
-        private readonly List<List<string>> _hairOptions = new List<List<string>>();
-        private readonly List<int> _hairSelections = new List<int>();
-        private readonly List<Color> _hairColors = new List<Color>();
-        private readonly List<List<string>> _apparelOptions = new List<List<string>>();
-        private readonly List<List<string>> _apparelNames = new List<List<string>>();
-        private readonly List<int> _apparelSelections = new List<int>();
-        private readonly List<int> _apparelMaterials = new List<int>();
-        private readonly List<Color> _apparelColors = new List<Color>();
+        private readonly List<List<string>> _hairOptions = new();
+        private readonly List<int> _hairSelections = new();
+        private readonly List<Color> _hairColors = new();
+        private readonly List<List<string>> _apparelOptions = new();
+        private readonly List<List<string>> _apparelNames = new();
+        private readonly List<int> _apparelSelections = new();
+        private readonly List<int> _apparelMaterials = new();
+        private readonly List<Color> _apparelColors = new();
         private int _colorEditorKind = -1;
         private int _colorEditorSlot = -1;
         private Texture2D _svPickerTexture;
         private Texture2D _huePickerTexture;
         private float _pickerTextureHue = -1f;
         private int _colorDragTarget;
-        private readonly List<string> _floatNames = new List<string>();
-        private readonly List<float> _floatValues = new List<float>();
+        private readonly List<string> _floatNames = new();
+        private readonly List<float> _floatValues = new();
 
         // LATCHED COPIES OF THE INVITE FIELDS, and the reason they exist is IMGUI's two-pass
         // model rather than anything about threads. GUILayout matches the Layout pass against
@@ -115,11 +121,20 @@ namespace CardShopCoop.UI
         private static int IpRank(string ip)
         {
             if (ip.StartsWith("192.168."))
+            {
                 return 0;             // classic home router
+            }
+
             if (ip.StartsWith("10."))
+            {
                 return 1;                   // some routers/VPNs
+            }
+
             if (ip.StartsWith("172."))
+            {
                 return 2;                  // usually WSL/Hyper-V/Docker
+            }
+
             return 3;
         }
 
@@ -127,9 +142,14 @@ namespace CardShopCoop.UI
         {
             CoopTheme.EnsureBuilt();
             if (_ipField == null)
+            {
                 _ipField = CoopPlugin.LastJoinIP.Value;
+            }
+
             if (_nameField == null)
+            {
                 _nameField = core.EffectivePlayerName;
+            }
 
             // ---- HUD overlays (outside the window) ----
             if (!Visible)
@@ -147,37 +167,37 @@ namespace CardShopCoop.UI
                         _errorText = $"<size=13><color=#ff5a4a>CO-OP: {core.ErrorLine}</color></size>";
                         _errorGc = new GUIContent(_errorText);
                     }
-                    Vector2 errSize = CoopTheme.PillSize(CoopTheme.HudPill, _errorGc, 660f);
+                    var errSize = CoopTheme.PillSize(CoopTheme.HudPill, _errorGc, 660f);
                     GUI.Label(new Rect(8f, Screen.height - errSize.y - 6f, errSize.x, errSize.y),
                         _errorGc, CoopTheme.HudPill);
                 }
             }
-            if (CoopCore.Role == CoopRole.Client && core.HostTimeLine.Length > 0)
+            if (CoopCore.Role == CoopRole.Client && HudApi.HostTimeText.Length > 0)
             {
-                if (core.HostTimeLine != _hostTimeSeen)
+                if (HudApi.HostTimeText != _hostTimeSeen)
                 {
-                    _hostTimeSeen = core.HostTimeLine;
-                    _hostTimeText = $"<color=#ffd54a>{core.HostTimeLine} - co-op</color>";
+                    _hostTimeSeen = HudApi.HostTimeText;
+                    _hostTimeText = $"<color=#ffd54a>{HudApi.HostTimeText} - co-op</color>";
                     _hostTimeGc = new GUIContent(_hostTimeText);
                 }
-                Vector2 sz = CoopTheme.PillSize(CoopTheme.HudPill, _hostTimeGc, 440f);
+                var sz = CoopTheme.PillSize(CoopTheme.HudPill, _hostTimeGc, 440f);
                 GUI.Label(new Rect((Screen.width - sz.x) / 2f, 4f, sz.x, sz.y), _hostTimeGc, CoopTheme.HudPill);
             }
-            if (core.RegisterLine.Length > 0)
+            if (HudApi.ToastText.Length > 0)
             {
-                if (core.RegisterLine != _registerSeen)
+                if (HudApi.ToastText != _registerSeen)
                 {
-                    _registerSeen = core.RegisterLine;
-                    _registerText = $"<size=18><color=#8ef58a>{core.RegisterLine}</color></size>";
+                    _registerSeen = HudApi.ToastText;
+                    _registerText = $"<size=18><color=#8ef58a>{HudApi.ToastText}</color></size>";
                     _registerGc = new GUIContent(_registerText);
                 }
-                Vector2 sz = CoopTheme.PillSize(CoopTheme.HudPillBig, _registerGc, 740f);
+                var sz = CoopTheme.PillSize(CoopTheme.HudPillBig, _registerGc, 740f);
                 GUI.Label(new Rect((Screen.width - sz.x) / 2f, Screen.height * 0.63f, sz.x, sz.y),
                     _registerGc, CoopTheme.HudPillBig);
             }
             if (!Visible)
             {
-                core.SetCharacterPreview(false);
+                PresenceApi.SetCharacterPreview(false);
                 return;
             }
 
@@ -201,8 +221,14 @@ namespace CardShopCoop.UI
         private void WindowFn(CoopCore core, ICoopTransport net)
         {
             CoopTheme.EnsureBuilt();
+            var fps = Mathf.RoundToInt((float)Util.FrameCounter.Fps);
+            if (_versionWithFps == null || fps != _fpsShown)
+            {
+                _fpsShown = fps;
+                _versionWithFps = "v" + CoopPlugin.Version + "   " + fps + " FPS";
+            }
             CoopTheme.DrawWindowChrome(new Rect(0f, 0f, _win.width, _win.height),
-                CoopPlugin.Name.ToUpperInvariant(), "v" + CoopPlugin.Version);
+                CoopPlugin.Name.ToUpperInvariant(), _versionWithFps);
             CoopTheme.DrawConnectionIndicator(new Rect(_win.width - 30f, 9f, 12f, 12f),
                 GetConnectionState(core, net));
 
@@ -210,12 +236,17 @@ namespace CardShopCoop.UI
             // available (disconnect); normalize before drawing so the highlight, the selected
             // content, and the scroll offset all agree.
             if (_tab == CoopTab.Character && CoopCore.Role == CoopRole.None)
+            {
                 _tab = CoopTab.Session;
+            }
+
             if (_tab == CoopTab.Hidden && !HiddenCategoryVisible())
+            {
                 _tab = CoopTab.Session;
+            }
 
             DrawTabs(core);
-            core.SetCharacterPreview(_tab == CoopTab.Character && CoopCore.Role != CoopRole.None);
+            PresenceApi.SetCharacterPreview(_tab == CoopTab.Character && CoopCore.Role != CoopRole.None);
 
             // The window height is set on GUILayout.Window itself, so nothing here measures the
             // header, tabs or footer. The content panel expands into whatever the window has
@@ -224,7 +255,7 @@ namespace CardShopCoop.UI
             // zero-padding keeps the overflow calculation exact, so the vertical bar only
             // appears when the content actually overflows.
             GUILayout.BeginVertical(CoopTheme.ContentPanel, GUILayout.ExpandHeight(true));
-            Vector2 scroll = _tab == CoopTab.Character ? _characterScroll
+            var scroll = _tab == CoopTab.Character ? _characterScroll
                 : _tab == CoopTab.Settings ? _settingsScroll
                 : _tab == CoopTab.Hidden ? _hiddenScroll : _sessionScroll;
             scroll = GUILayout.BeginScrollView(scroll, CoopTheme.ScrollView, GUILayout.ExpandHeight(true));
@@ -244,13 +275,22 @@ namespace CardShopCoop.UI
                 GUILayout.Space(4f);
             }
             if (_tab == CoopTab.Character && CoopCore.Role != CoopRole.None)
+            {
                 DrawCharacterSelector(core);
+            }
             else if (_tab == CoopTab.Settings)
+            {
                 DrawSettings(core);
+            }
             else if (_tab == CoopTab.Hidden)
+            {
                 DrawHidden(core);
+            }
             else
+            {
                 DrawSession(core, net);
+            }
+
             GUILayout.EndVertical();
             GUILayout.EndScrollView();
             // Remember the viewport the scroll view actually received so the next pass can size
@@ -258,18 +298,29 @@ namespace CardShopCoop.UI
             // Guarded so a bogus value can never inflate the content into a permanent scrollbar.
             if (Event.current.type == EventType.Repaint)
             {
-                float measured = GUILayoutUtility.GetLastRect().height;
+                var measured = GUILayoutUtility.GetLastRect().height;
                 if (measured > 0f && measured <= _win.height)
+                {
                     _viewportHeight = measured;
+                }
             }
             if (_tab == CoopTab.Character)
+            {
                 _characterScroll = scroll;
+            }
             else if (_tab == CoopTab.Settings)
+            {
                 _settingsScroll = scroll;
+            }
             else if (_tab == CoopTab.Hidden)
+            {
                 _hiddenScroll = scroll;
+            }
             else
+            {
                 _sessionScroll = scroll;
+            }
+
             GUILayout.EndVertical();
 
             FinishWindow();
@@ -300,7 +351,7 @@ namespace CardShopCoop.UI
             // own modded SOLO saves fail to load ("data lost") - the exact field report this
             // notice exists for. Show the warning + one-click restore whenever the marker says
             // the on-disk registry is the host's.
-            string lend = CoopCore.EnumLendState();
+            var lend = CatalogApi.EnumLendState();
             if (lend != null)
             {
                 GUILayout.BeginHorizontal();
@@ -315,7 +366,7 @@ namespace CardShopCoop.UI
                 if (CoopCore.Role == CoopRole.None
                     && GUILayout.Button("Restore MY card database (for solo saves - restart after)", CoopTheme.ButtonDanger))
                 {
-                    Util.ModParity.RestoreEnumBackup(out _enumRestoreMsg);
+                    CatalogApi.RestoreEnumBackup(out _enumRestoreMsg);
                 }
                 GUILayout.Space(4f);
             }
@@ -343,7 +394,7 @@ namespace CardShopCoop.UI
         /// toggle-key hint below the content panel, and keep the header draggable.</summary>
         private void FinishWindow()
         {
-            string focused = GUI.GetNameOfFocusedControl();
+            var focused = GUI.GetNameOfFocusedControl();
             TextFieldFocused = focused != null && focused.StartsWith("coop_");
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
@@ -357,7 +408,7 @@ namespace CardShopCoop.UI
         /// the configured key changes because OnGUI runs multiple times per frame.</summary>
         private string ToggleHintText()
         {
-            KeyCode key = CoopPlugin.UiToggleKey != null ? CoopPlugin.UiToggleKey.Value : KeyCode.None;
+            var key = CoopPlugin.UiToggleKey != null ? CoopPlugin.UiToggleKey.Value : KeyCode.None;
             if (_toggleHint == null || key != _toggleKeySeen)
             {
                 _toggleKeySeen = key;
@@ -375,8 +426,8 @@ namespace CardShopCoop.UI
         {
             // Never larger than the screen, and never a cap smaller than the floor we hand to
             // Clamp; on any real resolution the screen term comfortably dominates.
-            float max = Mathf.Max(1f, Mathf.Min(MaxWindowHeight, Screen.height - WindowScreenMargin));
-            float min = Mathf.Min(320f, max);
+            var max = Mathf.Max(1f, Mathf.Min(MaxWindowHeight, Screen.height - WindowScreenMargin));
+            var min = Mathf.Min(320f, max);
             return Mathf.Clamp(Screen.height * 0.72f, min, max);
         }
 
@@ -386,21 +437,32 @@ namespace CardShopCoop.UI
             GUI.enabled = _tab != CoopTab.Session;
             if (GUILayout.Button("SESSION", _tab == CoopTab.Session ? CoopTheme.TabSelected : CoopTheme.Tab,
                 GUILayout.Width(88f)))
+            {
                 _tab = CoopTab.Session;
+            }
+
             GUI.enabled = CoopCore.Role != CoopRole.None && _tab != CoopTab.Character;
             if (GUILayout.Button("CHARACTER", _tab == CoopTab.Character ? CoopTheme.TabSelected : CoopTheme.Tab,
                 GUILayout.Width(104f)))
+            {
                 _tab = CoopTab.Character;
+            }
+
             GUI.enabled = _tab != CoopTab.Settings;
             if (GUILayout.Button("SETTINGS", _tab == CoopTab.Settings ? CoopTheme.TabSelected : CoopTheme.Tab,
                 GUILayout.Width(96f)))
+            {
                 _tab = CoopTab.Settings;
+            }
+
             if (HiddenCategoryVisible())
             {
                 GUI.enabled = _tab != CoopTab.Hidden;
                 if (GUILayout.Button("HIDDEN", _tab == CoopTab.Hidden ? CoopTheme.TabSelected : CoopTheme.Tab,
                     GUILayout.Width(88f)))
+                {
                     _tab = CoopTab.Hidden;
+                }
             }
             GUI.enabled = true;
             GUILayout.FlexibleSpace();
@@ -414,10 +476,13 @@ namespace CardShopCoop.UI
         private void DrawSettings(CoopCore core)
         {
             GUILayout.Label("APPEARANCE", CoopTheme.SectionHeader);
-            bool allowNsfw = GUILayout.Toggle(CoopPlugin.AllowNsfw.Value,
+            var allowNsfw = GUILayout.Toggle(CoopPlugin.AllowNsfw.Value,
                 CoopPlugin.AllowNsfw.Value ? "NSFW allowed" : "NSFW hidden", CoopTheme.Toggle);
             if (allowNsfw != CoopPlugin.AllowNsfw.Value)
-                core.SetNsfwAllowed(allowNsfw);
+            {
+                PresenceApi.SetNsfwAllowed(allowNsfw);
+            }
+
             GUILayout.Space(8f);
 
             GUILayout.Label("JOINING", CoopTheme.SectionHeader);
@@ -426,13 +491,33 @@ namespace CardShopCoop.UI
             GUILayout.Space(8f);
 
             GUILayout.Label("LOGGING", CoopTheme.SectionHeader);
-            DrawConfigToggle(CoopPlugin.BoxSyncDebug, "Verbose box-sync logging (BoxSyncDebug)");
-            DrawConfigToggle(CoopPlugin.PerfDebug, "Per-frame stage timing (PerfDebug)");
+            DrawConfigToggle(CoopPlugin.PerfDebug, "Unity hitch profiling and stage timing (PerfDebug)");
             GUILayout.Space(8f);
 
             GUILayout.Label("LATENCY TESTING", CoopTheme.SectionHeader);
             DrawConfigIntSlider(CoopPlugin.ArtificialLagMs, 0, 2000, "Artificial lag");
             DrawConfigIntSlider(CoopPlugin.ArtificialJitterMs, 0, 1000, "Jitter");
+            GUILayout.Space(8f);
+
+            GUILayout.Label("MODULES (DIAGNOSTIC)", CoopTheme.SectionHeader);
+            GUILayout.Label("Uncheck a module to turn it off entirely - its patches, handlers and "
+                + "per-frame work stop. Use this to find which module costs frame rate. Applies "
+                + "after rejoining (persistent modules after a restart); leave the essentials on so "
+                + "you can still connect.", CoopTheme.LabelDimWrap);
+            foreach (var module in ModuleCatalog.Names())
+            {
+                var entry = ModuleCatalog.Entry(module);
+                if (entry == null)
+                {
+                    continue;
+                }
+
+                var enabled = GUILayout.Toggle(entry.Value, " " + module, CoopTheme.Toggle);
+                if (enabled != entry.Value)
+                {
+                    entry.Value = enabled; // ConfigEntry writes the file itself
+                }
+            }
             GUILayout.Space(8f);
 
             GUILayout.Label("Settings are saved to BepInEx/config/com.zwhit.cardshopcoop.cfg.", CoopTheme.LabelDim);
@@ -452,32 +537,45 @@ namespace CardShopCoop.UI
         private static void DrawConfigToggle(ConfigEntry<bool> entry, string label)
         {
             if (entry == null)
+            {
                 return;
-            bool value = GUILayout.Toggle(entry.Value, " " + label, CoopTheme.Toggle);
+            }
+
+            var value = GUILayout.Toggle(entry.Value, " " + label, CoopTheme.Toggle);
             if (value != entry.Value)
+            {
                 entry.Value = value; // ConfigEntry writes the file itself
+            }
         }
 
         private static void DrawConfigIntSlider(ConfigEntry<int> entry, int min, int max, string label)
         {
             if (entry == null)
+            {
                 return;
+            }
+
             GUILayout.BeginHorizontal();
             GUILayout.Label(label, CoopTheme.LabelDim, GUILayout.Width(130f));
-            int value = Mathf.RoundToInt(GUILayout.HorizontalSlider(entry.Value, min, max));
+            var value = Mathf.RoundToInt(GUILayout.HorizontalSlider(entry.Value, min, max));
             GUILayout.Label(value + " ms", CoopTheme.LabelDim, GUILayout.Width(56f));
             GUILayout.EndHorizontal();
             if (value != entry.Value)
+            {
                 entry.Value = value; // ConfigEntry writes the file itself
+            }
         }
 
         private static int GetConnectionState(CoopCore core, ICoopTransport net)
         {
             if (CoopCore.Role == CoopRole.Host)
+            {
                 return (net?.ConnectionCount ?? 0) > 0 ? 2 : 1;
+            }
+
             if (CoopCore.Role == CoopRole.Client)
             {
-                string status = core.StatusLine ?? "";
+                var status = core.StatusLine ?? "";
                 return status.IndexOf("Connecting", StringComparison.OrdinalIgnoreCase) >= 0
                     || status.IndexOf("loading", StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 2;
             }
@@ -487,23 +585,28 @@ namespace CardShopCoop.UI
         private void DrawCharacterSelector(CoopCore core)
         {
             if (Event.current.type == EventType.Layout
-                && (!_characterSnapshotReady || _characterSnapshotGeneration != core.PlayerModelGeneration))
+                && (!_characterSnapshotReady || _characterSnapshotGeneration != PresenceApi.PlayerModelGeneration))
             {
-                var model = core.GetLocalPlayerModel();
+                var model = PresenceApi.GetLocalPlayerModel();
                 _characterFemale = model.Female;
                 _presetNames.Clear();
-                _presetNames.AddRange(core.GetLocalPresetNames());
+                _presetNames.AddRange(PresenceApi.GetLocalPresetNames());
                 _presetSelection = _presetNames.FindIndex(x => x == (_characterFemale ? "Female" : "Male") + model.ModelIndex);
                 if (_presetSelection < 0)
+                {
                     _presetSelection = 0;
+                }
+
                 _presetSelectionBuffer[0] = _presetSelection;
-                _characterCustomizer = core.GetLocalCustomization();
+                _characterCustomizer = PresenceApi.GetLocalCustomization();
                 CacheWardrobeControls();
                 _characterSnapshotReady = true;
-                _characterSnapshotGeneration = core.PlayerModelGeneration;
+                _characterSnapshotGeneration = PresenceApi.PlayerModelGeneration;
             }
             if (!_characterSnapshotReady)
+            {
                 return;
+            }
 
             GUILayout.BeginVertical(CoopTheme.SectionBox);
             GUILayout.BeginHorizontal();
@@ -514,12 +617,18 @@ namespace CardShopCoop.UI
             if (_characterOpen)
             {
                 GUILayout.BeginHorizontal();
-                GUI.enabled = core.CanUndoPlayerModel;
+                GUI.enabled = PresenceApi.CanUndoPlayerModel;
                 if (GUILayout.Button("Undo", CoopTheme.ButtonSecondary, GUILayout.Width(58f)))
-                    core.UndoPlayerModel();
-                GUI.enabled = core.CanRedoPlayerModel;
+                {
+                    PresenceApi.UndoPlayerModel();
+                }
+
+                GUI.enabled = PresenceApi.CanRedoPlayerModel;
                 if (GUILayout.Button("Redo", CoopTheme.ButtonSecondary, GUILayout.Width(58f)))
-                    core.RedoPlayerModel();
+                {
+                    PresenceApi.RedoPlayerModel();
+                }
+
                 GUI.enabled = true;
                 GUILayout.FlexibleSpace();
                 GUILayout.EndHorizontal();
@@ -528,16 +637,18 @@ namespace CardShopCoop.UI
                 if (GUILayout.Button(_characterFemale ? "Female" : "Male", CoopTheme.ButtonSecondary))
                 {
                     _characterFemale = !_characterFemale;
-                    core.SetLocalPlayerModel(_characterFemale, 0);
+                    PresenceApi.SetLocalPlayerModel(_characterFemale, 0);
                 }
                 GUILayout.EndHorizontal();
                 if (_presetNames.Count > 0)
                 {
                     DrawCycleRow("Preset", _presetNames, _presetSelectionBuffer, 0,
-                        () => { _presetSelection = _presetSelectionBuffer[0]; core.ApplyLocalPreset(_presetNames[_presetSelection]); });
+                        () => { _presetSelection = _presetSelectionBuffer[0]; PresenceApi.ApplyLocalPreset(_presetNames[_presetSelection]); });
                 }
                 else
+                {
                     GUILayout.Label("No presets found for this gender.", CoopTheme.LabelDimWrap);
+                }
 
                 DrawWardrobeControls(core);
             }
@@ -558,26 +669,36 @@ namespace CardShopCoop.UI
             _floatNames.Clear();
             _floatValues.Clear();
             if (_characterCustomizer == null)
+            {
                 return;
+            }
+
             var data = _characterCustomizer.StoredCharacterData;
             if (data == null)
+            {
                 return;
+            }
 
-            for (int slot = 0; slot < _characterCustomizer.HairTables.Count; slot++)
+            for (var slot = 0; slot < _characterCustomizer.HairTables.Count; slot++)
             {
                 var options = new List<string> { "None" };
                 var table = _characterCustomizer.HairTables[slot];
                 if (table != null && table.Hairstyles != null)
+                {
                     foreach (var hair in table.Hairstyles)
+                    {
                         options.Add(hair.Name ?? "(unnamed)");
+                    }
+                }
+
                 _hairOptions.Add(options);
-                string current = slot < data.HairNames.Count ? data.HairNames[slot] : "";
-                int selected = options.FindIndex(x => x == current);
+                var current = slot < data.HairNames.Count ? data.HairNames[slot] : "";
+                var selected = options.FindIndex(x => x == current);
                 _hairSelections.Add(selected < 0 ? 0 : selected);
                 _hairColors.Add(ReadHairColor(data, slot));
             }
 
-            for (int slot = 0; slot < _characterCustomizer.ApparelTables.Count; slot++)
+            for (var slot = 0; slot < _characterCustomizer.ApparelTables.Count; slot++)
             {
                 var options = new List<string>();
                 var names = new List<string>();
@@ -590,72 +711,94 @@ namespace CardShopCoop.UI
                 }
                 var table = _characterCustomizer.ApparelTables[slot];
                 if (table != null && table.Items != null)
+                {
                     foreach (var item in table.Items)
                     {
                         options.Add(string.IsNullOrEmpty(item.DisplayName) ? (item.Name ?? "(unnamed)") : item.DisplayName);
                         names.Add(item.Name ?? "");
                     }
+                }
+
                 _apparelOptions.Add(options);
                 _apparelNames.Add(names);
-                string current = slot < data.ApparelNames.Count ? data.ApparelNames[slot] : "";
-                int selected = names.IndexOf(current);
+                var current = slot < data.ApparelNames.Count ? data.ApparelNames[slot] : "";
+                var selected = names.IndexOf(current);
                 _apparelSelections.Add(selected < 0 ? 0 : selected);
                 _apparelMaterials.Add(slot < data.ApparelMaterials.Count ? Mathf.Max(0, data.ApparelMaterials[slot]) : 0);
                 _apparelColors.Add(ReadApparelTint(data, slot));
             }
 
             if (data.FloatProperties != null)
+            {
                 foreach (var property in data.FloatProperties)
                 {
                     if (property == null || string.IsNullOrEmpty(property.propertyName))
+                    {
                         continue;
+                    }
+
                     _floatNames.Add(property.propertyName);
                     _floatValues.Add(property.floatValue);
                 }
+            }
         }
 
         private void DrawWardrobeControls(CoopCore core)
         {
             if (_characterCustomizer == null)
+            {
                 return;
+            }
+
             if (_hairOptions.Count > 0 || _apparelOptions.Count > 0)
+            {
                 GUILayout.Label("WARDROBE", CoopTheme.SectionHeader);
-            for (int slot = 0; slot < _hairOptions.Count; slot++)
+            }
+
+            for (var slot = 0; slot < _hairOptions.Count; slot++)
+            {
                 DrawCycleColorRow("Hair " + (slot + 1), _hairOptions[slot], _hairSelections, slot,
-                    _hairColors[slot], 0, slot, color => { _hairColors[slot] = color; core.SetLocalHairColor(slot, color); },
+                    _hairColors[slot], 0, slot, color => { _hairColors[slot] = color; PresenceApi.SetLocalHairColor(slot, color); },
                     () => ApplyHair(core, slot));
-            for (int slot = 0; slot < _apparelOptions.Count; slot++)
+            }
+
+            for (var slot = 0; slot < _apparelOptions.Count; slot++)
             {
                 // With NSFW off a slot with no real items offers nothing selectable.
                 if (_apparelOptions[slot].Count == 0)
+                {
                     continue;
-                string label = _characterCustomizer.ApparelTables[slot] != null
+                }
+
+                var label = _characterCustomizer.ApparelTables[slot] != null
                     && !string.IsNullOrEmpty(_characterCustomizer.ApparelTables[slot].Label)
                     ? _characterCustomizer.ApparelTables[slot].Label : "Apparel " + (slot + 1);
                 DrawCycleColorRow(label, _apparelOptions[slot], _apparelSelections, slot,
-                    _apparelColors[slot], 1, slot, color => { _apparelColors[slot] = color; core.SetLocalApparelTint(slot, color); },
+                    _apparelColors[slot], 1, slot, color => { _apparelColors[slot] = color; PresenceApi.SetLocalApparelTint(slot, color); },
                     () => ApplyApparel(core, slot));
-                string selectedApparel = _apparelNames[slot][_apparelSelections[slot]];
+                var selectedApparel = _apparelNames[slot][_apparelSelections[slot]];
                 if (!string.IsNullOrEmpty(selectedApparel))
                 {
                     var table = _characterCustomizer.ApparelTables[slot];
                     // When the Nude slot is offered it occupies index 0, so the item index
                     // is offset by one; with NSFW off the list starts at the first real item.
-                    int itemIndex = _apparelSelections[slot] - (CoopPlugin.AllowNsfw.Value ? 1 : 0);
-                    int materialCount = table != null && itemIndex >= 0 && itemIndex < table.Items.Count
+                    var itemIndex = _apparelSelections[slot] - (CoopPlugin.AllowNsfw.Value ? 1 : 0);
+                    var materialCount = table != null && itemIndex >= 0 && itemIndex < table.Items.Count
                         && table.Items[itemIndex].Materials != null ? table.Items[itemIndex].Materials.Count : 0;
                     if (materialCount > 1)
+                    {
                         DrawNumberRow("Material", materialCount, _apparelMaterials, slot,
                             () => ApplyApparel(core, slot));
+                    }
                 }
             }
-            for (int i = 0; i < _floatNames.Count; i++)
+            for (var i = 0; i < _floatNames.Count; i++)
             {
                 GUILayout.BeginHorizontal();
                 GUILayout.Label(_floatNames[i], CoopTheme.LabelDim, GUILayout.Width(130f));
-                float min = (_floatNames[i] == "Height" || _floatNames[i] == "Width") ? 0.5f : 0f;
-                float max = (_floatNames[i] == "Height" || _floatNames[i] == "Width") ? 1.5f : 1f;
-                float value = GUILayout.HorizontalSlider(_floatValues[i], min, max);
+                var min = (_floatNames[i] == "Height" || _floatNames[i] == "Width") ? 0.5f : 0f;
+                var max = (_floatNames[i] == "Height" || _floatNames[i] == "Width") ? 1.5f : 1f;
+                var value = GUILayout.HorizontalSlider(_floatValues[i], min, max);
                 GUILayout.Label(value.ToString("0.00"), CoopTheme.LabelDim, GUILayout.Width(36f));
                 GUILayout.EndHorizontal();
                 if (!Mathf.Approximately(value, _floatValues[i]))
@@ -663,7 +806,7 @@ namespace CardShopCoop.UI
                     _floatValues[i] = value;
                     var prop = new CC.CC_Property { propertyName = _floatNames[i], floatValue = value };
                     _characterCustomizer.setFloatProperty(prop, true);
-                    core.CommitLocalCustomization();
+                    PresenceApi.CommitLocalCustomization();
                 }
             }
         }
@@ -690,7 +833,7 @@ namespace CardShopCoop.UI
         private void DrawCycleColorRow(string label, List<string> options, List<int> selections, int index,
             Color color, int kind, int slot, Action<Color> applyColor, Action applySelection)
         {
-            bool expanded = _colorEditorKind == kind && _colorEditorSlot == slot;
+            var expanded = _colorEditorKind == kind && _colorEditorSlot == slot;
             GUILayout.BeginHorizontal();
             GUILayout.Label(label, CoopTheme.LabelDim, GUILayout.Width(86f));
             if (GUILayout.Button("<", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
@@ -704,21 +847,25 @@ namespace CardShopCoop.UI
                 selections[index] = (selections[index] + 1) % options.Count;
                 applySelection();
             }
-            Color previous = GUI.backgroundColor;
+            var previous = GUI.backgroundColor;
             GUI.backgroundColor = color;
             if (GUILayout.Button(" ", CoopTheme.ButtonSecondary, GUILayout.Width(24f)))
             {
                 _colorEditorKind = expanded ? -1 : kind;
                 _colorEditorSlot = expanded ? -1 : slot;
                 if (expanded)
+                {
                     _colorDragTarget = 0;
+                }
             }
             GUI.backgroundColor = previous;
             GUILayout.EndHorizontal();
             if (!expanded)
+            {
                 return;
+            }
 
-            Color.RGBToHSV(color, out float hue, out float saturation, out float value);
+            Color.RGBToHSV(color, out var hue, out var saturation, out var value);
             DrawColorPicker(ref hue, ref saturation, ref value, applyColor);
         }
 
@@ -726,12 +873,14 @@ namespace CardShopCoop.UI
         {
             EnsureColorPickerTextures();
             if (!Mathf.Approximately(_pickerTextureHue, hue))
+            {
                 RebuildSaturationValueTexture(hue);
+            }
 
             GUILayout.BeginHorizontal();
             GUILayout.Label("Color", CoopTheme.LabelDim, GUILayout.Width(86f));
-            Rect svRect = GUILayoutUtility.GetRect(150f, 92f, GUILayout.Width(150f), GUILayout.Height(92f));
-            Rect hueRect = GUILayoutUtility.GetRect(18f, 92f, GUILayout.Width(18f), GUILayout.Height(92f));
+            var svRect = GUILayoutUtility.GetRect(150f, 92f, GUILayout.Width(150f), GUILayout.Height(92f));
+            var hueRect = GUILayoutUtility.GetRect(18f, 92f, GUILayout.Width(18f), GUILayout.Height(92f));
             GUI.DrawTexture(svRect, _svPickerTexture, ScaleMode.StretchToFill, false);
             GUI.DrawTexture(hueRect, _huePickerTexture, ScaleMode.StretchToFill, false);
             DrawPickerMarker(new Rect(svRect.x + saturation * svRect.width - 4f,
@@ -740,13 +889,13 @@ namespace CardShopCoop.UI
                 hueRect.width + 4f, 4f), Color.black);
             GUILayout.EndHorizontal();
 
-            Event e = Event.current;
-            Vector2 mousePosition = GUIUtility.GUIToScreenPoint(e.mousePosition);
-            Vector2 svScreenPosition = GUIUtility.GUIToScreenPoint(svRect.position);
-            Vector2 hueScreenPosition = GUIUtility.GUIToScreenPoint(hueRect.position);
-            Rect svScreenRect = new Rect(svScreenPosition.x, svScreenPosition.y, svRect.width, svRect.height);
-            Rect hueScreenRect = new Rect(hueScreenPosition.x, hueScreenPosition.y, hueRect.width, hueRect.height);
-            bool changed = false;
+            var e = Event.current;
+            var mousePosition = GUIUtility.GUIToScreenPoint(e.mousePosition);
+            var svScreenPosition = GUIUtility.GUIToScreenPoint(svRect.position);
+            var hueScreenPosition = GUIUtility.GUIToScreenPoint(hueRect.position);
+            Rect svScreenRect = new(svScreenPosition.x, svScreenPosition.y, svRect.width, svRect.height);
+            Rect hueScreenRect = new(hueScreenPosition.x, hueScreenPosition.y, hueRect.width, hueRect.height);
+            var changed = false;
             if (e.type == EventType.MouseDown)
             {
                 if (svScreenRect.Contains(mousePosition))
@@ -773,29 +922,44 @@ namespace CardShopCoop.UI
                     value = Mathf.Clamp01(1f - (mousePosition.y - svScreenRect.y) / svScreenRect.height);
                 }
                 else
+                {
                     hue = Mathf.Clamp01(1f - (mousePosition.y - hueScreenRect.y) / hueScreenRect.height);
+                }
+
                 changed = true;
                 e.Use();
             }
             else if (e.type == EventType.MouseUp)
+            {
                 _colorDragTarget = 0;
+            }
+
             if (changed)
+            {
                 applyColor(Color.HSVToRGB(hue, saturation, value));
+            }
         }
 
         private void EnsureColorPickerTextures()
         {
             if (_svPickerTexture == null)
             {
-                _svPickerTexture = new Texture2D(96, 64, TextureFormat.RGBA32, false);
-                _svPickerTexture.wrapMode = TextureWrapMode.Clamp;
+                _svPickerTexture = new Texture2D(96, 64, TextureFormat.RGBA32, false)
+                {
+                    wrapMode = TextureWrapMode.Clamp
+                };
             }
             if (_huePickerTexture == null)
             {
-                _huePickerTexture = new Texture2D(1, 96, TextureFormat.RGBA32, false);
-                _huePickerTexture.wrapMode = TextureWrapMode.Clamp;
-                for (int y = 0; y < 96; y++)
+                _huePickerTexture = new Texture2D(1, 96, TextureFormat.RGBA32, false)
+                {
+                    wrapMode = TextureWrapMode.Clamp
+                };
+                for (var y = 0; y < 96; y++)
+                {
                     _huePickerTexture.SetPixel(0, y, Color.HSVToRGB(1f - y / 95f, 1f, 1f));
+                }
+
                 _huePickerTexture.Apply();
             }
         }
@@ -803,15 +967,20 @@ namespace CardShopCoop.UI
         private void RebuildSaturationValueTexture(float hue)
         {
             _pickerTextureHue = hue;
-            for (int y = 0; y < 64; y++)
-                for (int x = 0; x < 96; x++)
+            for (var y = 0; y < 64; y++)
+            {
+                for (var x = 0; x < 96; x++)
+                {
                     _svPickerTexture.SetPixel(x, y, Color.HSVToRGB(hue, x / 95f, y / 63f));
+                }
+            }
+
             _svPickerTexture.Apply();
         }
 
         private static void DrawPickerMarker(Rect rect, Color color)
         {
-            Color previous = GUI.color;
+            var previous = GUI.color;
             GUI.color = color;
             GUI.DrawTexture(rect, Texture2D.whiteTexture);
             GUI.color = previous;
@@ -823,7 +992,9 @@ namespace CardShopCoop.UI
             {
                 Color color;
                 if (ColorUtility.TryParseHtmlString("#" + data.HairColor[slot].stringValue, out color))
+                {
                     return color;
+                }
             }
             return Color.white;
         }
@@ -832,14 +1003,19 @@ namespace CardShopCoop.UI
         {
             if (data != null && data.ColorProperties != null)
             {
-                string key = "CardShopCoop.ApparelTint." + slot;
+                var key = "CardShopCoop.ApparelTint." + slot;
                 foreach (var property in data.ColorProperties)
                 {
                     if (property == null || property.propertyName != key)
+                    {
                         continue;
+                    }
+
                     Color color;
                     if (ColorUtility.TryParseHtmlString("#" + property.stringValue, out color))
+                    {
                         return color;
+                    }
                 }
             }
             return Color.white;
@@ -866,28 +1042,38 @@ namespace CardShopCoop.UI
         private void ApplyHair(CoopCore core, int slot)
         {
             if (_characterCustomizer == null)
+            {
                 return;
+            }
+
             if (_hairSelections[slot] == 0)
-                core.ClearLocalHair(slot);
+            {
+                PresenceApi.ClearLocalHair(slot);
+            }
             else
             {
                 _characterCustomizer.setHairByName(_hairOptions[slot][_hairSelections[slot]], slot);
-                core.CommitLocalCustomization();
+                PresenceApi.CommitLocalCustomization();
             }
         }
 
         private void ApplyApparel(CoopCore core, int slot)
         {
             if (_characterCustomizer == null)
+            {
                 return;
-            string name = _apparelNames[slot][_apparelSelections[slot]];
+            }
+
+            var name = _apparelNames[slot][_apparelSelections[slot]];
             if (string.IsNullOrEmpty(name))
-                core.ClearLocalApparel(slot);
+            {
+                PresenceApi.ClearLocalApparel(slot);
+            }
             else
             {
-                int material = Mathf.Max(0, _apparelMaterials[slot]);
+                var material = Mathf.Max(0, _apparelMaterials[slot]);
                 _characterCustomizer.setApparelByName(name, slot, material);
-                core.CommitLocalCustomization();
+                PresenceApi.CommitLocalCustomization();
             }
         }
 
@@ -895,7 +1081,7 @@ namespace CardShopCoop.UI
         /// (people paste that line into bug reports).</summary>
         private void DrawStatusRow(CoopCore core, ICoopTransport net)
         {
-            ClassifyStatus(core, net, out GUIStyle chip, out string chipText);
+            ClassifyStatus(core, net, out var chip, out var chipText);
             GUILayout.BeginHorizontal();
             if (chip != null)
             {
@@ -917,7 +1103,7 @@ namespace CardShopCoop.UI
         {
             chip = null;
             text = null;
-            string s = core.StatusLine ?? "";
+            var s = core.StatusLine ?? "";
             switch (CoopCore.Role)
             {
                 case CoopRole.Host:
@@ -976,12 +1162,14 @@ namespace CardShopCoop.UI
             else
             {
                 GUI.SetNextControlName("coop_name");
-                string newName = GUILayout.TextField(_nameField, 16, CoopTheme.TextField);
+                var newName = GUILayout.TextField(_nameField, 16, CoopTheme.TextField);
                 if (newName != _nameField)
                 {
                     _nameField = newName;
                     if (newName.Trim().Length > 0)
+                    {
                         CoopPlugin.PlayerName.Value = newName.Trim();
+                    }
                 }
             }
             GUILayout.EndHorizontal();
@@ -1027,7 +1215,7 @@ namespace CardShopCoop.UI
                 if (GUILayout.Button("Host via Steam", CoopTheme.ButtonPrimary))
                 {
                     if (int.TryParse(_hostPlayersField, NumberStyles.None, CultureInfo.InvariantCulture,
-                        out int maxPlayers)
+                        out var maxPlayers)
                         && maxPlayers >= SteamLobbyLimits.MinPlayers
                         && maxPlayers <= SteamLobbyLimits.MaxPlayers)
                     {
@@ -1041,12 +1229,16 @@ namespace CardShopCoop.UI
                     }
                 }
                 if (GUILayout.Button("Host via LAN", CoopTheme.ButtonSecondary, GUILayout.Width(110f)))
+                {
                     core.StartHosting();
+                }
             }
             else
             {
                 if (GUILayout.Button("Host via LAN", CoopTheme.ButtonPrimary))
+                {
                     core.StartHosting();
+                }
             }
             GUILayout.EndHorizontal();
             GUILayout.EndVertical();
@@ -1087,7 +1279,10 @@ namespace CardShopCoop.UI
                 GUI.SetNextControlName("coop_joinpw");
                 _joinPwField = GUILayout.TextField(_joinPwField, 20, CoopTheme.TextField);
                 if (GUILayout.Button("Retry", CoopTheme.ButtonPrimary, GUILayout.Width(64f)))
-                    core.JoinSteam(core.LastFailedLobby, _joinPwField);
+                {
+                    core.JoinSteamLobby(core.LastFailedLobby, _joinPwField);
+                }
+
                 GUILayout.EndHorizontal();
             }
 
@@ -1103,6 +1298,7 @@ namespace CardShopCoop.UI
             GUI.SetNextControlName("coop_lanpw");
             _lanPwField = GUILayout.TextField(_lanPwField, 20, CoopTheme.TextField, GUILayout.Width(84f));
             if (GUILayout.Button("Join LAN", CoopTheme.ButtonPrimary, GUILayout.Width(84f)))
+            {
                 // Trimmed and folded to upper case HERE, not in Join and not in the host's
                 // password gate. A LAN host's password can only ever be the generated one
                 // (there is no field anywhere that sets a custom one), and that is eight
@@ -1111,7 +1307,9 @@ namespace CardShopCoop.UI
                 // who typed what they heard in lower case an inexplicable "wrong password".
                 // The gate itself stays exactly comparing, because a STEAM lobby password is
                 // player-chosen and its case is the player's business.
-                core.Join(_ipField, CoopPlugin.Port.Value, _lanPwField.Trim().ToUpperInvariant());
+                core.JoinHostedGame(_ipField, CoopPlugin.Port.Value, _lanPwField.Trim().ToUpperInvariant());
+            }
+
             GUILayout.EndHorizontal();
 
             // The invite code is just the IP row with the address, the port and the password
@@ -1128,10 +1326,10 @@ namespace CardShopCoop.UI
             _inviteField = GUILayout.TextField(_inviteField, InviteCode.MaxCodeLength, CoopTheme.TextField);
             if (GUILayout.Button("Join by code", CoopTheme.ButtonPrimary, GUILayout.Width(100f)))
             {
-                if (InviteCode.TryParse(_inviteField, out string codeIp, out int codePort, out string codePw))
+                if (InviteCode.TryParse(_inviteField, out var codeIp, out var codePort, out var codePw))
                 {
                     _ipField = codeIp; // keep the plain IP row in step with what we just used
-                    core.Join(codeIp, codePort, codePw);
+                    core.JoinHostedGame(codeIp, codePort, codePw);
                 }
                 else
                 {
@@ -1154,8 +1352,11 @@ namespace CardShopCoop.UI
             {
                 GUILayout.Label("Hosting through Steam - no IPs needed.", CoopTheme.Label);
                 if (GUILayout.Button("Invite friend  (Steam overlay)", CoopTheme.ButtonPrimary))
+                {
                     core.OpenSteamInvite();
-                int scount = net?.ConnectionCount ?? 0;
+                }
+
+                var scount = net?.ConnectionCount ?? 0;
                 GUILayout.Label(scount == 0 ? "Waiting for your invite to be accepted..." : PlayersLine(core), CoopTheme.Label);
             }
             else
@@ -1175,13 +1376,19 @@ namespace CardShopCoop.UI
                 // by hand needs to read it.
                 _ipCopy.Draw("Copy IP address", IpClipboardText(), CoopTheme.ButtonSecondary);
                 DrawInvite(core);
-                int count = net?.ConnectionCount ?? 0;
+                var count = net?.ConnectionCount ?? 0;
                 GUILayout.Label(count == 0 ? "Waiting for a player..." : PlayersLine(core), CoopTheme.Label);
             }
             if (GUILayout.Button("Wave  (" + CoopPlugin.EmoteKey.Value + ")", CoopTheme.ButtonSecondary))
-                core.SendEmote();
+            {
+                PresenceApi.SendEmote();
+            }
+
             if (GUILayout.Button("Stop hosting", CoopTheme.ButtonDanger))
+            {
                 core.Disconnect();
+            }
+
             GUILayout.EndVertical();
         }
 
@@ -1209,14 +1416,16 @@ namespace CardShopCoop.UI
             }
 
             if (_invState == InviteState.Off)
+            {
                 return;
+            }
 
-            string code = _invCode;
+            var code = _invCode;
 
-            float copyButtonWidth = CopyButtonWidth();
+            var copyButtonWidth = CopyButtonWidth();
             // Both copy rows share this height (the button's box plus its margins) so the text
             // can be centred against the button instead of sitting at the top of the row.
-            float copyRowHeight = CoopTheme.ButtonSecondary.fixedHeight + CoopTheme.ButtonSecondary.margin.vertical;
+            var copyRowHeight = CoopTheme.ButtonSecondary.fixedHeight + CoopTheme.ButtonSecondary.margin.vertical;
             GUILayout.BeginHorizontal();
             GUILayout.Label(InviteStatusText(_invState), CoopTheme.LabelDimMiddle, GUILayout.Height(copyRowHeight));
             GUILayout.FlexibleSpace();
@@ -1246,7 +1455,7 @@ namespace CardShopCoop.UI
             // limit rather than an error, and it names the reason so the player can fix it.
             if (_invState == InviteState.LanOnly)
             {
-                string why = _invReason;
+                var why = _invReason;
                 GUILayout.Label("<size=11>LAN-only code - " + (why != null ? why : "couldn't reach the internet resolver")
                     + ". It carries your LAN address, so it still works for someone in this house.</size>",
                     CoopTheme.LabelWrap);
@@ -1256,8 +1465,11 @@ namespace CardShopCoop.UI
             // port being reachable (a second router, or the ISP's own NAT, still gets a vote).
             // Never promise more than that.
             if (_invPortState == 1)
+            {
                 GUILayout.Label("<size=10>port forward requested on your router automatically</size>", CoopTheme.LabelDim);
+            }
             else if (_invPortState == 2)
+            {
                 // Say what to DO about it, not just that it happened: forwarding the port is a
                 // router-admin job this mod cannot do, and the other player hosting instead is
                 // the answer for anyone who isn't going to go find their router password.
@@ -1265,6 +1477,7 @@ namespace CardShopCoop.UI
                 // and LabelDim doesn't wrap, so the tail was clipped off-screen - the half that
                 // carried the advice. LabelDimWrap is LabelDim + wordWrap.
                 GUILayout.Label($"<size=10>router declined - forward port {CoopPlugin.Port.Value} manually, or let the other player host</size>", CoopTheme.LabelDimWrap);
+            }
         }
 
         /// <summary>The plain-text connection block the Copy IP button puts on the clipboard:
@@ -1272,9 +1485,12 @@ namespace CardShopCoop.UI
         /// panel used to render, kept copyable so the address is never shown on screen.</summary>
         private string IpClipboardText()
         {
-            string text = $"{_lanIps}  (port {CoopPlugin.Port.Value})";
+            var text = $"{_lanIps}  (port {CoopPlugin.Port.Value})";
             if (!string.IsNullOrEmpty(_lanIpsOther))
+            {
                 text += $"\nOther addresses: {_lanIpsOther}";
+            }
+
             return text;
         }
 
@@ -1309,9 +1525,15 @@ namespace CardShopCoop.UI
             GUILayout.Label("IN SESSION", CoopTheme.SectionHeader);
             GUILayout.Label(PlayersLine(core), CoopTheme.Label);
             if (GUILayout.Button("Wave  (" + CoopPlugin.EmoteKey.Value + ")", CoopTheme.ButtonSecondary))
-                core.SendEmote();
+            {
+                PresenceApi.SendEmote();
+            }
+
             if (GUILayout.Button("Leave session", CoopTheme.ButtonDanger))
+            {
                 core.Disconnect();
+            }
+
             GUILayout.EndVertical();
         }
 
@@ -1323,17 +1545,19 @@ namespace CardShopCoop.UI
         /// LATCHED IN THE LAYOUT PASS for the reason spelled out at the top of this file - the
         /// offer list is rebuilt from the network pump, and a row count that differs between
         /// Layout and Repaint takes the entire window down with "Mismatched LayoutGroup".</summary>
-        private readonly List<CoopCore.GradedAdoptOffer> _adoptOffers = new List<CoopCore.GradedAdoptOffer>();
+        private readonly List<GradingOffer> _adoptOffers = new();
 
         private void DrawGradedAdopt(CoopCore core)
         {
             if (Event.current.type == EventType.Layout)
             {
                 _adoptOffers.Clear();
-                _adoptOffers.AddRange(core.GradedAdoptOffers);
+                _adoptOffers.AddRange(GradingUiApi.Offers);
             }
             if (_adoptOffers.Count == 0)
+            {
                 return;
+            }
 
             CoopTheme.Divider();
             GUILayout.BeginVertical(CoopTheme.SectionBox);
@@ -1346,11 +1570,13 @@ namespace CardShopCoop.UI
             // that duplicated a card this PC already held under Grading Overhaul's FAKE flag.
             GUILayout.Label("<size=11>Only missing graded cards will be added; existing certificates are skipped.</size>",
                 CoopTheme.LabelWrap);
-            for (int i = 0; i < _adoptOffers.Count; i++)
+            for (var i = 0; i < _adoptOffers.Count; i++)
             {
                 var o = _adoptOffers[i];
                 if (GUILayout.Button($"Adopt {o.Count} graded card(s) {o.Who} has that you don't", CoopTheme.ButtonSecondary))
-                    core.GradedAdopt(o.ConnId);
+                {
+                    GradingUiApi.Adopt(o.ConnectionId);
+                }
             }
             GUILayout.EndVertical();
         }
@@ -1371,7 +1597,10 @@ namespace CardShopCoop.UI
             GUILayout.Label("PUBLIC LOBBIES", CoopTheme.SectionHeader);
             GUILayout.FlexibleSpace();
             if (GUILayout.Button(core.Steam.ListRefreshing ? "..." : "Refresh", CoopTheme.ButtonPrimary, GUILayout.Width(72f)))
+            {
                 core.Steam.RefreshList();
+            }
+
             if (GUILayout.Button("Back", CoopTheme.ButtonSecondary, GUILayout.Width(54f)))
             {
                 _browserOpen = false;
@@ -1382,7 +1611,7 @@ namespace CardShopCoop.UI
             GUILayout.BeginHorizontal();
             GUILayout.Label("Search:", CoopTheme.Label, GUILayout.Width(52f));
             GUI.SetNextControlName("coop_search");
-            string s = GUILayout.TextField(_searchField, 24, CoopTheme.TextField);
+            var s = GUILayout.TextField(_searchField, 24, CoopTheme.TextField);
             if (s != _searchField)
             {
                 _searchField = s;
@@ -1395,25 +1624,29 @@ namespace CardShopCoop.UI
             // a build with no Steamworks assembly.
             var filtered = new List<LobbyRow>();
             foreach (var row in core.Steam.Lobbies)
+            {
                 if (_searchField.Length == 0
                     || (row.Name ?? "").IndexOf(_searchField, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
                     filtered.Add(row);
+                }
+            }
 
-            int pages = Mathf.Max(1, (filtered.Count + PageSize - 1) / PageSize);
+            var pages = Mathf.Max(1, (filtered.Count + PageSize - 1) / PageSize);
             _page = Mathf.Clamp(_page, 0, pages - 1);
 
             if (filtered.Count == 0)
             {
                 GUILayout.Label(core.Steam.ListRefreshing ? "Searching..." : "No lobbies found - hit Refresh, or host one!", CoopTheme.LabelDim);
             }
-            for (int i = _page * PageSize; i < filtered.Count && i < (_page + 1) * PageSize; i++)
+            for (var i = _page * PageSize; i < filtered.Count && i < (_page + 1) * PageSize; i++)
             {
                 var row = filtered[i];
-                bool verOk = row.Ver == CoopPlugin.Version;
+                var verOk = row.Ver == CoopPlugin.Version;
                 GUILayout.BeginHorizontal(((i & 1) == 0) ? CoopTheme.RowEven : CoopTheme.RowOdd);
                 GUILayout.Label((row.HasPw ? "[pw] " : "") + row.Name, CoopTheme.LabelBold, GUILayout.ExpandWidth(false));
                 GUILayout.FlexibleSpace();
-                string right = $"{row.Players}/{row.Max}" + (verOk ? "" : $"  <size=10>v{row.Ver}</size>");
+                var right = $"{row.Players}/{row.Max}" + (verOk ? "" : $"  <size=10>v{row.Ver}</size>");
                 GUILayout.Label(right, CoopTheme.LabelDim, GUILayout.ExpandWidth(false));
                 GUILayout.Space(6f);
                 GUI.enabled = verOk;
@@ -1426,7 +1659,7 @@ namespace CardShopCoop.UI
                     }
                     else
                     {
-                        core.JoinSteam(row.Id, "");
+                        core.JoinSteamLobby(row.Id, "");
                         _browserOpen = false;
                     }
                 }
@@ -1441,7 +1674,7 @@ namespace CardShopCoop.UI
                     _joinPwField = GUILayout.TextField(_joinPwField, 20, CoopTheme.TextField);
                     if (GUILayout.Button("Go", CoopTheme.ButtonPrimary, GUILayout.Width(44f)))
                     {
-                        core.JoinSteam(row.Id, _joinPwField);
+                        core.JoinSteamLobby(row.Id, _joinPwField);
                         _browserOpen = false;
                         _pwPromptLobby = 0;
                     }
@@ -1452,10 +1685,16 @@ namespace CardShopCoop.UI
             GUILayout.BeginHorizontal();
             GUI.enabled = _page > 0;
             if (GUILayout.Button("< Prev", CoopTheme.ButtonSecondary, GUILayout.Width(64f)))
+            {
                 _page--;
+            }
+
             GUI.enabled = _page < pages - 1;
             if (GUILayout.Button("Next >", CoopTheme.ButtonSecondary, GUILayout.Width(64f)))
+            {
                 _page++;
+            }
+
             GUI.enabled = true;
             GUILayout.FlexibleSpace();
             GUILayout.Label($"<size=11>page {_page + 1}/{pages} - {filtered.Count} lobbies</size>", CoopTheme.LabelDim);
@@ -1464,9 +1703,12 @@ namespace CardShopCoop.UI
 
         private static string PlayersLine(CoopCore core)
         {
-            if (core.PeerNames.Count == 0)
+            if (PresenceApi.PeerNames.Count == 0)
+            {
                 return "Linked.";
-            var names = new List<string>(core.PeerNames.Values);
+            }
+
+            var names = new List<string>(PresenceApi.PeerNames);
             return "Playing with: " + string.Join(", ", names);
         }
 
@@ -1478,24 +1720,43 @@ namespace CardShopCoop.UI
                 foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
                     if (ni.OperationalStatus != OperationalStatus.Up)
+                    {
                         continue;
+                    }
+
                     if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                    {
                         continue;
+                    }
+
                     foreach (var addr in ni.GetIPProperties().UnicastAddresses)
                     {
                         if (addr.Address.AddressFamily != AddressFamily.InterNetwork)
+                        {
                             continue;
-                        string s = addr.Address.ToString();
+                        }
+
+                        var s = addr.Address.ToString();
                         if (s.StartsWith("169.254"))
+                        {
                             continue; // link-local noise
+                        }
+
                         result.Add(s);
                     }
                 }
             }
-            catch (System.Exception e) { Swallow.Log(e); }
+            catch (Exception e) { Swallow.Log(e); }
             if (result.Count == 0)
+            {
                 result.Add("(no LAN address found)");
+            }
+
             return result;
         }
     }
 }
+
+
+
+

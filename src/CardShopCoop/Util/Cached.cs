@@ -1,5 +1,3 @@
-using UnityEngine;
-
 namespace CardShopCoop.Util
 {
     /// <summary>
@@ -25,7 +23,10 @@ namespace CardShopCoop.Util
         public T Get()
         {
             if (_value != null && !IsDestroyed(_value))
+            {
                 return _value;
+            }
+
             _value = GetRawValue();
             return _value;
         }
@@ -53,3 +54,5 @@ namespace CardShopCoop.Util
         }
     }
 }
+
+

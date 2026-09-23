@@ -76,7 +76,10 @@ namespace CardShopCoop.UI
         public static void EnsureBuilt()
         {
             if (_built)
+            {
                 return;
+            }
+
             _built = true;
 
             // ---- textures -----------------------------------------------------------
@@ -288,7 +291,10 @@ namespace CardShopCoop.UI
         public static void DrawWindowShadow(Rect win)
         {
             if (_shadowTex == null)
+            {
                 return;
+            }
+
             var r = new Rect(win.x + 3f, win.y + 4f, win.width, win.height);
             GUI.Box(r, GUIContent.none, HeaderShadow());
         }
@@ -315,11 +321,16 @@ namespace CardShopCoop.UI
             GUI.Box(new Rect(0f, 0f, r.width, stripH), GUIContent.none, HeaderStrip);
 
             if (_titleGc == null || _titleGc.text != title)
+            {
                 _titleGc = new GUIContent(title);
+            }
+
             GUI.Label(new Rect(13f, 5f, r.width - 26f, 20f), _titleGc, Header);
 
             if (_versionGc == null || _versionGc.text != version)
+            {
                 _versionGc = new GUIContent(version);
+            }
             // Keep the version immediately left of the connection indicator in the window
             // header instead of letting the indicator sit on top of the version text.
             GUI.Label(new Rect(13f, 6f, r.width - 52f, 18f), _versionGc, HeaderVersion);
@@ -331,7 +342,10 @@ namespace CardShopCoop.UI
             GUILayout.Space(3f);
             var r = GUILayoutUtility.GetRect(1f, 1f, GUILayout.ExpandWidth(true), GUILayout.Height(1f));
             if (Event.current.type == EventType.Repaint)
+            {
                 GUI.DrawTexture(r, _dividerTex);
+            }
+
             GUILayout.Space(3f);
         }
 
@@ -345,7 +359,7 @@ namespace CardShopCoop.UI
         /// wider than that.</summary>
         public static Vector2 PillSize(GUIStyle style, GUIContent content, float maxW)
         {
-            Vector2 s = style.CalcSize(content);
+            var s = style.CalcSize(content);
             if (s.x > maxW)
             {
                 s.x = maxW;
@@ -394,9 +408,11 @@ namespace CardShopCoop.UI
         /// 2 connected/hosting.</summary>
         public static void DrawConnectionIndicator(Rect rect, int state)
         {
-            Texture2D texture = state >= 2 ? _dotOkTex : state == 1 ? _dotWaitTex : _dotOffTex;
+            var texture = state >= 2 ? _dotOkTex : state == 1 ? _dotWaitTex : _dotOffTex;
             if (texture != null)
+            {
                 GUI.DrawTexture(rect, texture, ScaleMode.StretchToFill, true);
+            }
         }
 
         private static GUIStyle MakeTab(Texture2D bg, Texture2D hover, Color textColor)
@@ -493,19 +509,19 @@ namespace CardShopCoop.UI
         {
             var px = new Color[w * h];
             float bx = w * 0.5f, by = h * 0.5f;
-            for (int srow = 0; srow < h; srow++)   // srow 0 = top on screen
+            for (var srow = 0; srow < h; srow++)   // srow 0 = top on screen
             {
-                float py = (srow + 0.5f) - by;     // py > 0 => toward bottom
-                int arrayRow = h - 1 - srow;        // Texture2D row 0 is bottom
-                for (int col = 0; col < w; col++)
+                var py = (srow + 0.5f) - by;     // py > 0 => toward bottom
+                var arrayRow = h - 1 - srow;        // Texture2D row 0 is bottom
+                for (var col = 0; col < w; col++)
                 {
-                    float pxpos = (col + 0.5f) - bx;
-                    float d = SdRoundBox(pxpos, py, bx, by, rTL, rTR, rBR, rBL);
-                    float aOuter = Coverage(d);
-                    float aInner = bw > 0f ? Coverage(d + bw) : aOuter;
-                    float borderFrac = Mathf.Max(0f, aOuter - aInner);
-                    float fillFrac = aInner;
-                    float outA = fill.a * fillFrac + border.a * borderFrac;
+                    var pxpos = (col + 0.5f) - bx;
+                    var d = SdRoundBox(pxpos, py, bx, by, rTL, rTR, rBR, rBL);
+                    var aOuter = Coverage(d);
+                    var aInner = bw > 0f ? Coverage(d + bw) : aOuter;
+                    var borderFrac = Mathf.Max(0f, aOuter - aInner);
+                    var fillFrac = aInner;
+                    var outA = fill.a * fillFrac + border.a * borderFrac;
                     Color outC;
                     if (outA <= 0.0001f)
                     {
@@ -513,9 +529,9 @@ namespace CardShopCoop.UI
                     }
                     else
                     {
-                        float wr = fill.r * fill.a * fillFrac + border.r * border.a * borderFrac;
-                        float wg = fill.g * fill.a * fillFrac + border.g * border.a * borderFrac;
-                        float wb = fill.b * fill.a * fillFrac + border.b * border.a * borderFrac;
+                        var wr = fill.r * fill.a * fillFrac + border.r * border.a * borderFrac;
+                        var wg = fill.g * fill.a * fillFrac + border.g * border.a * borderFrac;
+                        var wb = fill.b * fill.a * fillFrac + border.b * border.a * borderFrac;
                         outC = new Color(wr / outA, wg / outA, wb / outA, outA);
                     }
                     px[arrayRow * w + col] = outC;
@@ -532,15 +548,15 @@ namespace CardShopCoop.UI
             var px = new Color[w * h];
             float cx = w * 0.5f, cy = h * 0.5f;
             float bx = cx - blur, by = cy - blur; // inset half-size leaves a blurred transparent margin
-            for (int srow = 0; srow < h; srow++)
+            for (var srow = 0; srow < h; srow++)
             {
-                float py = (srow + 0.5f) - cy;
-                int arrayRow = h - 1 - srow;
-                for (int col = 0; col < w; col++)
+                var py = (srow + 0.5f) - cy;
+                var arrayRow = h - 1 - srow;
+                for (var col = 0; col < w; col++)
                 {
-                    float pxpos = (col + 0.5f) - cx;
-                    float d = SdRoundBox(pxpos, py, bx, by, radius, radius, radius, radius);
-                    float a = maxAlpha * (1f - SmoothStep01(-blur, blur, d));
+                    var pxpos = (col + 0.5f) - cx;
+                    var d = SdRoundBox(pxpos, py, bx, by, radius, radius, radius, radius);
+                    var a = maxAlpha * (1f - SmoothStep01(-blur, blur, d));
                     px[arrayRow * w + col] = new Color(0f, 0f, 0f, a);
                 }
             }
@@ -571,14 +587,19 @@ namespace CardShopCoop.UI
         {
             float r;
             if (px > 0f)
+            {
                 r = (py > 0f) ? rBR : rTR;
+            }
             else
+            {
                 r = (py > 0f) ? rBL : rTL;
-            float qx = Mathf.Abs(px) - bx + r;
-            float qy = Mathf.Abs(py) - by + r;
+            }
+
+            var qx = Mathf.Abs(px) - bx + r;
+            var qy = Mathf.Abs(py) - by + r;
             float ox = Mathf.Max(qx, 0f), oy = Mathf.Max(qy, 0f);
-            float outside = Mathf.Sqrt(ox * ox + oy * oy);
-            float inside = Mathf.Min(Mathf.Max(qx, qy), 0f);
+            var outside = Mathf.Sqrt(ox * ox + oy * oy);
+            var inside = Mathf.Min(Mathf.Max(qx, qy), 0f);
             return outside + inside - r;
         }
 
@@ -590,16 +611,20 @@ namespace CardShopCoop.UI
 
         private static float SmoothStep01(float edge0, float edge1, float x)
         {
-            float t = Mathf.Clamp01((x - edge0) / (edge1 - edge0));
+            var t = Mathf.Clamp01((x - edge0) / (edge1 - edge0));
             return t * t * (3f - 2f * t);
         }
 
         // ---- color helpers --------------------------------------------------------------
         private static Color Rgb(int r, int g, int b, float a = 1f)
-            => new Color(r / 255f, g / 255f, b / 255f, a);
-        private static Color Mul(Color c, float m) => new Color(c.r * m, c.g * m, c.b * m, c.a);
-        private static Color WithA(Color c, float a) => new Color(c.r, c.g, c.b, a);
+            => new(r / 255f, g / 255f, b / 255f, a);
+        private static Color Mul(Color c, float m) => new(c.r * m, c.g * m, c.b * m, c.a);
+        private static Color WithA(Color c, float a) => new(c.r, c.g, c.b, a);
         private static Color Lerp(Color a, Color b, float t) => Color.Lerp(a, b, t);
-        private static Color Clear() => new Color(0f, 0f, 0f, 0f);
+        private static Color Clear() => new(0f, 0f, 0f, 0f);
     }
 }
+
+
+
+

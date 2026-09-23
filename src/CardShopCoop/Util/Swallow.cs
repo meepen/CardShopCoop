@@ -18,7 +18,7 @@ namespace CardShopCoop
         private const int CooldownMs = 2000;
 
         private static readonly ConcurrentDictionary<string, int> LastLogged
-            = new ConcurrentDictionary<string, int>();
+            = new();
 
         /// <summary>Logs a contained exception with caller context, rate-limited per call site.
         /// Safe to call from the net thread and before <see cref="CoopPlugin.Log"/> exists.</summary>
@@ -28,7 +28,9 @@ namespace CardShopCoop
             [CallerLineNumber] int line = 0)
         {
             if (e == null)
+            {
                 return;
+            }
 
             string filePart;
             try
@@ -39,11 +41,14 @@ namespace CardShopCoop
             {
                 filePart = "?";
             }
-            string site = filePart + "." + (member ?? "?") + ":" + line;
+            var site = filePart + "." + (member ?? "?") + ":" + line;
 
-            int now = Environment.TickCount;
-            if (LastLogged.TryGetValue(site, out int last) && unchecked(now - last) < CooldownMs)
+            var now = Environment.TickCount;
+            if (LastLogged.TryGetValue(site, out var last) && unchecked(now - last) < CooldownMs)
+            {
                 return;
+            }
+
             LastLogged[site] = now;
 
             // Log may be null very early in plugin startup; never let diagnostics throw.
@@ -57,3 +62,5 @@ namespace CardShopCoop
         }
     }
 }
+
+

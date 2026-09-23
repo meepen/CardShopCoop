@@ -4,6 +4,7 @@ using System.Globalization;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using UnityEngine;
+using CardShopCoop.Modules.Catalog;
 
 namespace CardShopCoop.Net
 {
@@ -24,17 +25,13 @@ namespace CardShopCoop.Net
                 MissingMemberHandling = MissingMemberHandling.Error,
                 MaxDepth = 128,
             };
-            settings.Converters.Add(new EnumWireConverter<EItemType>(Util.EnumKind.ItemType));
-            settings.Converters.Add(new EnumWireConverter<EObjectType>(Util.EnumKind.ObjectType));
-            settings.Converters.Add(new EnumWireConverter<EDecoObject>(Util.EnumKind.DecoObject));
-            settings.Converters.Add(new EnumWireConverter<ECardExpansionType>(Util.EnumKind.CardExpansion));
-            settings.Converters.Add(new EnumWireConverter<EMonsterType>(Util.EnumKind.MonsterType));
+            settings.Converters.Add(new EnumWireConverter<EItemType>(EnumKind.ItemType));
+            settings.Converters.Add(new EnumWireConverter<EObjectType>(EnumKind.ObjectType));
+            settings.Converters.Add(new EnumWireConverter<EDecoObject>(EnumKind.DecoObject));
+            settings.Converters.Add(new EnumWireConverter<ECardExpansionType>(EnumKind.CardExpansion));
+            settings.Converters.Add(new EnumWireConverter<EMonsterType>(EnumKind.MonsterType));
             settings.Converters.Add(new Vector3Converter());
             settings.Converters.Add(new QuaternionConverter());
-            settings.Converters.Add(new WorldEntryConverter());
-            settings.Converters.Add(new ObjMoveEntryConverter());
-            settings.Converters.Add(new PopulationStateConverter());
-            settings.Converters.Add(new PlayerStateConverter());
             return settings;
         }
     }
@@ -44,11 +41,13 @@ namespace CardShopCoop.Net
         protected override IList<JsonProperty> CreateProperties(Type type, MemberSerialization memberSerialization)
         {
             var properties = base.CreateProperties(type, MemberSerialization.OptOut);
-            for (int i = properties.Count - 1; i >= 0; i--)
+            for (var i = properties.Count - 1; i >= 0; i--)
             {
                 var p = properties[i];
-                if (p.PropertyName == "Type" || p.Ignored || (p.DeclaringType != null && p.DeclaringType.Namespace == "UnityEngine"))
+                if (p.Ignored || (p.DeclaringType != null && p.DeclaringType.Namespace == "UnityEngine"))
+                {
                     properties.RemoveAt(i);
+                }
             }
             return properties;
         }
@@ -56,8 +55,8 @@ namespace CardShopCoop.Net
 
     internal sealed class EnumWireConverter<T> : JsonConverter where T : struct
     {
-        private readonly Util.EnumKind _kind;
-        public EnumWireConverter(Util.EnumKind kind)
+        private readonly EnumKind _kind;
+        public EnumWireConverter(EnumKind kind)
         {
             _kind = kind;
         }
@@ -67,16 +66,24 @@ namespace CardShopCoop.Net
         }
         public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
         {
-            writer.WriteValue(Util.EnumMap.ToWireName(_kind, Convert.ToInt32(value, CultureInfo.InvariantCulture)));
+            writer.WriteValue(CatalogIdMap.ToWireName(_kind, Convert.ToInt32(value, CultureInfo.InvariantCulture)));
         }
         public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
         {
             if (reader.TokenType == JsonToken.Null)
+            {
                 throw new JsonSerializationException("Null enum " + objectType);
+            }
+
             if (reader.TokenType != JsonToken.String)
+            {
                 throw new JsonSerializationException("Numeric/non-string " + objectType.Name + " value " + Convert.ToString(reader.Value, CultureInfo.InvariantCulture) + " received: peer is sending pre-name wire");
+            }
+
+            var name = (string)reader.Value;
             int local;
-            Util.EnumMap.TryFromWireName(typeof(T), _kind, (string)reader.Value, out local);
+            CatalogIdMap.TryFromWireName(typeof(T), _kind, name, out local);
+
             return (T)Enum.ToObject(typeof(T), local);
         }
     }
@@ -105,15 +112,24 @@ namespace CardShopCoop.Net
         {
             var a = new List<object>();
             if (r.TokenType != JsonToken.StartArray)
+            {
                 throw new JsonSerializationException("Expected vector array");
+            }
+
             while (r.Read() && r.TokenType != JsonToken.EndArray)
             {
                 if (a.Count >= count)
+                {
                     throw new JsonSerializationException("Too many vector components");
+                }
+
                 a.Add(r.Value);
             }
             if (a.Count != count)
+            {
                 throw new JsonSerializationException("Wrong vector component count");
+            }
+
             return a;
         }
     }
@@ -138,16 +154,27 @@ namespace CardShopCoop.Net
         {
             var a = new List<object>();
             if (r.TokenType != JsonToken.StartArray)
+            {
                 throw new JsonSerializationException("Expected quaternion array");
+            }
+
             while (r.Read() && r.TokenType != JsonToken.EndArray)
             {
                 if (a.Count >= 4)
+                {
                     throw new JsonSerializationException("Too many quaternion components");
+                }
+
                 a.Add(r.Value);
             }
             if (a.Count != 4)
+            {
                 throw new JsonSerializationException("Wrong quaternion component count");
+            }
+
             return new Quaternion(Convert.ToSingle(a[0], CultureInfo.InvariantCulture), Convert.ToSingle(a[1], CultureInfo.InvariantCulture), Convert.ToSingle(a[2], CultureInfo.InvariantCulture), Convert.ToSingle(a[3], CultureInfo.InvariantCulture));
         }
     }
 }
+
+

@@ -1,7 +1,6 @@
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
-using HarmonyLib;
 using System;
 using System.Runtime.CompilerServices;
 using System.Reflection;
@@ -20,7 +19,7 @@ namespace CardShopCoop
     [BepInPlugin(Guid, Name, Version)]
     // SOFT dependency on Grading Overhaul: it changes NOTHING when GO is absent, and when GO is
     // present it guarantees GO is loaded before our Awake. That ordering is load-bearing now that
-    // Sync/GradingSync patches GO's OWN day-start prefix and resolves GO's submit validator at
+    // Sync/WorldGradingInteraction patches GO's OWN day-start prefix and resolves GO's submit validator at
     // patch time (see TryPatchGoDayStart) - both are one-shot reflective lookups, so a guest that
     // happened to sort ahead of GO in the chainloader would silently lose the guard that stops it
     // minting certificate numbers. Guid copied from GO's own BepInPlugin (decompiled-grading
@@ -47,8 +46,6 @@ namespace CardShopCoop
         public static ConfigEntry<bool> AutoPortForward;
         public static ConfigEntry<bool> AutoLanPassword;
         public static ConfigEntry<GradedAlertMode> GradedDriftAlert;
-        public static ConfigEntry<bool> BoxSyncDebug;
-        public static ConfigEntry<bool> PlayTableSpectatorProbe;
         public static ConfigEntry<bool> PerfDebug;
         public static ConfigEntry<int> ArtificialLagMs;
         public static ConfigEntry<int> ArtificialJitterMs;
@@ -58,6 +55,8 @@ namespace CardShopCoop
         private void Awake()
         {
             Log = Logger;
+            Runtime.SceneRef.Install();
+            Util.ScreenSingletonProbe.Install();
             try
             {
                 Assembly.Load("Newtonsoft.Json");
@@ -71,7 +70,7 @@ namespace CardShopCoop
             Logger.LogEvent += (_, e) => Util.FileLog.Write($"{e.Level,-7} {e.Data}");
 
             Port = Config.Bind("Network", "Port", 27886,
-                "TCP port used for hosting. Both PCs' firewalls must allow the game on this port.");
+                "UDP port used for LAN/KCP hosting. Both PCs' firewalls must allow the game on this port.");
             LastJoinIP = Config.Bind("Network", "LastJoinIP", "192.168.1.100",
                 "IP address of the host PC (remembered after a successful join).");
             PlayerName = Config.Bind("Player", "Name", System.Environment.UserName,
@@ -79,7 +78,10 @@ namespace CardShopCoop
             SendRateHz = Config.Bind("Network", "SendRateHz", 15f,
                 "How many position updates per second to send (8-20 is sensible).");
             if (Mathf.Approximately(SendRateHz.Value, 12f))
+            {
                 SendRateHz.Value = 15f; // migrate configs saved by earlier builds
+            }
+
             AvatarsEnabled = Config.Bind("Player", "AvatarsEnabled", true,
                 "Show the other player as a walking character in your shop.");
             AllowNsfw = Config.Bind("Player", "AllowNsfw", false,
@@ -87,7 +89,10 @@ namespace CardShopCoop
             UiToggleKey = Config.Bind("Keys", "UiToggleKey", KeyCode.F2,
                 "Toggles the co-op window. (F3 is reserved for future co-op options.)");
             if (UiToggleKey.Value == KeyCode.F11)
+            {
                 UiToggleKey.Value = KeyCode.F2; // migrate configs saved by early builds
+            }
+
             EmoteKey = Config.Bind("Keys", "EmoteKey", KeyCode.G,
                 "Sends a wave emote that pops above your avatar.");
             ClientWorldSlot = Config.Bind("Network", "ClientWorldSlot", 7,
@@ -104,12 +109,8 @@ namespace CardShopCoop
                 "Hosting via LAN generates a random session password. It is baked into the invite code (so a friend using the code notices nothing), shown in the host panel for a friend typing your IP by hand, and checked exactly like the Steam lobby password. Leave this on: the port your router opens for you is a door into your game, and this is the lock on it.");
             GradedDriftAlert = Config.Bind("Graded", "DriftAlert", GradedAlertMode.Always,
                 "How loudly to announce that your graded albums have drifted apart. THIS CONTROLS THE HOST'S SCREEN. While you are HOSTING it decides both your own on-screen line and the heads-up sent to the joiner. While you are JOINING it does nothing at all: the host's setting alone decides whether you get that heads-up, because the drift is only ever announced from the host's side. Always: announce every check that finds a difference. OncePerSession: say it once per player per session and then stay quiet - including for a later, bigger difference. Never: never put it on screen at all. The log records every check whichever you pick and on both PCs, so a support log stays complete whatever you choose; this only controls the screen, and it never changes what the co-op panel's adopt button offers.");
-            BoxSyncDebug = Config.Bind("Diagnostics", "BoxSyncDebug", false,
-                "Log detailed box-sync activity: each possession report a client sends, each update the host accepts or rejects, and each box the client adopts or spawns. Verbose - enable temporarily (then restart) to diagnose boxes that will not pick up, move, or hide in sync.");
-            PlayTableSpectatorProbe = Config.Bind("Diagnostics", "PlayTableSpectatorProbe", false,
-                "TESTING ONLY. Copy the visible cards from a local card-table match to a nearby table. No gameplay or network state is changed.");
             PerfDebug = Config.Bind("Diagnostics", "PerfDebug", false,
-                "Log any per-frame sync stage that takes longer than 5 ms (rate-limited to one line per stage per 2 s). Enable temporarily to find lag spikes; it does not change gameplay.");
+                "Enable Unity hitch profiling. Logs frames slower than 33 ms with available main-thread, GC, rendering, physics, and co-op stage timings; individual stages above 5 ms are also rate-limited. Enable temporarily to find lag spikes; it does not change gameplay.");
             ArtificialLagMs = Config.Bind("Diagnostics", "ArtificialLagMs", 0,
                 "TESTING ONLY. Adds this many milliseconds of latency to every network message you RECEIVE. Set the same value on both PCs for symmetric lag (each hop adds one delay, so a round trip is roughly twice the value). 0 disables it.");
             ArtificialJitterMs = Config.Bind("Diagnostics", "ArtificialJitterMs", 0,
@@ -118,6 +119,12 @@ namespace CardShopCoop
                 "TESTING ONLY. Allows the game's 1.00 cheat menu to open in solo mode or for the HOST. Clients are always blocked. Requires ShowHiddenCategory=true as an additional safety gate.");
             ShowHiddenCategory = Config.Bind("Hidden", "ShowHiddenCategory", false,
                 "TESTING ONLY. Shows the hidden category in the CardShopCoop window. The game cheat menu cannot open unless this and EnableGameCheatMenu are both enabled.");
+
+            // Bind one enable/disable checkbox per feature module and say exactly what will run.
+            // Kept beside the config binds so the [modules] line appears before anything it can
+            // disable.
+            Runtime.ModuleCatalog.Bind(Config);
+            Runtime.ModuleCatalog.LogConfiguration();
 
             // PLATFORM LINE FIRST, ABOVE EVERYTHING THAT CAN FAIL. This is the line a Game
             // Pass player (or a support thread) is told to look for, and it is most useful
@@ -134,9 +141,13 @@ namespace CardShopCoop
             // point that knows whether the bridge actually came up. Do not put it back here:
             // nothing at this point in startup is entitled to make it.
             if (!Net.PlatformProbe.SteamworksPresent)
+            {
                 Log.LogInfo("Steamworks assembly not detected - LAN and direct IP only (a HarmonyX ReflectionTypeLoadException warning naming Steamworks types may appear when any mod - including this one - enumerates loaded types; it is EXPECTED on this build and harmless)");
+            }
             else
+            {
                 Log.LogInfo("Steamworks assembly detected.");
+            }
 
             // SECOND LINE, ON PURPOSE. The line above answers "can Steam UI exist here"; this
             // one answers "where do this game's saves live", and 1.0.38 shipped a field report
@@ -168,7 +179,7 @@ namespace CardShopCoop
                 AttachCore(go);
                 coreLoaded = true;
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 // TypeLoadException lands here when a dependency of CoopCore is missing on
                 // this platform. Say so loudly - this is the line that explains an otherwise
@@ -179,19 +190,15 @@ namespace CardShopCoop
                 {
                     Destroy(go);
                 }
-                catch (System.Exception ex) { Swallow.Log(ex); }
-            }
-
-            if (coreLoaded)
-            {
-                var harmony = new Harmony(Guid);
-                Patches.GamePatches.ApplyAll(harmony);
+                catch (Exception ex) { Swallow.Log(ex); }
             }
 
             // Only claim the window works if the component that draws it actually loaded -
             // the LogError above is the whole story otherwise.
             if (coreLoaded)
+            {
                 Log.LogInfo($"{Name} {Version} loaded. Press {UiToggleKey.Value} in-game to open the co-op window.");
+            }
         }
 
         /// <summary>
@@ -215,3 +222,7 @@ namespace CardShopCoop
         }
     }
 }
+
+
+
+

@@ -31,7 +31,10 @@ namespace CardShopCoop.Util
             var velocity = typeof(Rigidbody).GetProperty("linearVelocity")
                            ?? typeof(Rigidbody).GetProperty("velocity");
             if (velocity == null)
+            {
                 throw new MissingMemberException(typeof(Rigidbody).FullName, "linearVelocity/velocity");
+            }
+
             _velocityGetter = (Func<Rigidbody, Vector3>)velocity.GetGetMethod()
                 .CreateDelegate(typeof(Func<Rigidbody, Vector3>));
             _velocitySetter = (Action<Rigidbody, Vector3>)velocity.GetSetMethod()
@@ -47,7 +50,9 @@ namespace CardShopCoop.Util
             {
                 _legacyWordWrapping = typeof(TMP_Text).GetProperty("enableWordWrapping");
                 if (_legacyWordWrapping == null)
+                {
                     throw new MissingMemberException(typeof(TMP_Text).FullName, "textWrappingMode/enableWordWrapping");
+                }
             }
         }
 
@@ -67,9 +72,15 @@ namespace CardShopCoop.Util
         internal static void SetWordWrapping(TMP_Text text, bool enabled)
         {
             if (_textWrapping != null)
+            {
                 _textWrapping.SetValue(text, enabled ? _wrapEnabled : _wrapDisabled);
+            }
             else
+            {
                 _legacyWordWrapping.SetValue(text, enabled);
+            }
         }
     }
 }
+
+

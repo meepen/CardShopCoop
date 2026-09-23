@@ -46,21 +46,21 @@ It's the folder that has **Card Shop Simulator.exe** in it.
 **Load into your shop first.** Not the main menu — all the way into the game.
 Then press **F2**.
 
-**Steam ↔ Steam (easiest)**
+**Steam ↔ Steam (easiest — KCP over Steam Networking Sockets)**
 
 Host clicks **Host via Steam** → **Invite friend**. Friend accepts. Done.
 
-**LAN / same house**
+**LAN / same house (UDP/KCP)**
 
 Host clicks **Host via LAN**. The panel shows a **session password** and a
 **Copy invite code** button. Friend pastes the code into **Join by code**.
 
 **Over the internet (no Steam — this is the Game Pass route)**
 
-The Game Pass version of the game has no Steam networking at all, so it's
+The Game Pass version of the game has no Steam Networking Sockets support at all, so it's
 IP-only.
 
-- **Option A:** host forwards TCP port **27886** on their router, then shares
+- **Option A:** host forwards UDP/KCP port **27886** on their router, then shares
   the invite code. The mod tries to do this automatically; the host panel tells
   you if your router refused.
 - **Option B (easier):** use a free virtual-LAN app — **Radmin VPN**

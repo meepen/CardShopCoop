@@ -1,35 +1,18 @@
-using CardShopCoop.Net;
-
 namespace CardShopCoop.Net.Messages
 {
-    // This is a client -> host signal, but it cannot use the generic HostOnly policy:
-    // the receiver's local role is Host while the sender is the authenticated guest.
-    // MessageRouter applies the connection/state/identity check for this control frame.
-    [NetworkMessage(MsgType.FullyJoined, Policy = MessagePolicy.Any)]
+    // This is a client -> host signal. The explicit descriptor direction is intentionally
+    // separate from the receiver's local role: the sender is the authenticated guest.
+    [NetworkMessage]
     public sealed class FullyJoinedMessage : INetMessage
     {
-        public MsgType Type
-        {
-            get
-            {
-                return MsgType.FullyJoined;
-            }
-        }
     }
 
-    [NetworkMessage(MsgType.FullyJoinedAck, Policy = MessagePolicy.ClientOnly)]
+    [NetworkMessage]
     public sealed class FullyJoinedAckMessage : INetMessage
     {
-        public MsgType Type
-        {
-            get
-            {
-                return MsgType.FullyJoinedAck;
-            }
-        }
     }
 
-    [NetworkMessage(MsgType.Disconnect, Policy = MessagePolicy.Any)]
+    [NetworkMessage]
     public sealed class DisconnectMessage : INetMessage
     {
         private const int MaxReasonLength = 256;
@@ -66,13 +49,6 @@ namespace CardShopCoop.Net.Messages
         public int Phase
         {
             get; set;
-        }
-        public MsgType Type
-        {
-            get
-            {
-                return MsgType.Disconnect;
-            }
         }
     }
 }

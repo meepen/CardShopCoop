@@ -12,7 +12,7 @@ namespace CardShopCoop.Util
     public static class FileLog
     {
         private static StreamWriter _writer;
-        private static readonly object Lock = new object();
+        private static readonly object Lock = new();
         private static int _lastFlushTick;
 
         public static string Path
@@ -24,7 +24,7 @@ namespace CardShopCoop.Util
         {
             try
             {
-                int pid = Process.GetCurrentProcess().Id;
+                var pid = Process.GetCurrentProcess().Id;
                 Path = System.IO.Path.Combine(gameRoot, "BepInEx", $"CardShopCoop_{pid}.log");
                 // no AutoFlush: an OS flush per line stalls the main thread under disk or
                 // antivirus pressure, so lines are batched and flushed at most once/second
@@ -42,21 +42,24 @@ namespace CardShopCoop.Util
         public static void Write(string line)
         {
             if (_writer == null)
+            {
                 return;
+            }
+
             lock (Lock)
             {
                 try
                 {
                     _writer.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {line}");
                     // unchecked int math survives TickCount wraparound (~25 days)
-                    int now = Environment.TickCount;
+                    var now = Environment.TickCount;
                     if (now - _lastFlushTick > 1000)
                     {
                         _writer.Flush();
                         _lastFlushTick = now;
                     }
                 }
-                catch (System.Exception e) { Swallow.Log(e); }
+                catch (Exception e) { Swallow.Log(e); }
             }
         }
 
@@ -68,8 +71,10 @@ namespace CardShopCoop.Util
                 {
                     _writer?.Flush();
                 }
-                catch (System.Exception e) { Swallow.Log(e); }
+                catch (Exception e) { Swallow.Log(e); }
             }
         }
     }
 }
+
+

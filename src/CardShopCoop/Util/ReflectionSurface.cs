@@ -8,38 +8,51 @@ namespace CardShopCoop.Util
     /// type initialization; optional members only produce a one-shot, greppable diagnostic.</summary>
     internal static class ReflectionSurface
     {
-        private static readonly HashSet<string> Reported = new HashSet<string>();
-        private static readonly object Gate = new object();
+        private static readonly HashSet<string> Reported = new();
+        private static readonly object Gate = new();
 
         internal static Type OptionalType(string name, string assembly)
         {
-            Type result = ModParity.ResolveType(name, assembly);
+            var result = ModParity.ResolveType(name, assembly);
             if (result == null)
+            {
                 Missing("type", null, name + ", " + assembly, false);
+            }
+
             return result;
         }
 
         private static void Missing(string kind, Type type, string name, bool required)
         {
-            string key = (required ? "required" : "optional") + ":" + kind + ":" +
+            var key = (required ? "required" : "optional") + ":" + kind + ":" +
                 (type == null ? "<null>" : type.FullName) + "." + name;
             bool report;
             lock (Gate)
+            {
                 report = Reported.Add(key);
-            if (!report)
-                return;
+            }
 
-            string message = "coop: reflection surface changed: " + kind + " " +
+            if (!report)
+            {
+                return;
+            }
+
+            var message = "coop: reflection surface changed: " + kind + " " +
                 (type == null ? "<null>" : type.FullName) + "." + name +
                 (required ? " (required)" : " (optional; feature disabled)");
             if (required)
             {
                 if (CoopPlugin.Log != null)
+                {
                     CoopPlugin.Log.LogError(message);
+                }
+
                 throw new MissingMemberException(message);
             }
             if (CoopPlugin.Log != null)
+            {
                 CoopPlugin.Log.LogWarning(message);
+            }
         }
 
         internal static FieldInfo RequiredField(Type type, string name)
@@ -47,7 +60,10 @@ namespace CardShopCoop.Util
             var result = type == null ? null : type.GetField(name,
                 BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (result == null)
+            {
                 Missing("field", type, name, true);
+            }
+
             return result;
         }
 
@@ -55,7 +71,10 @@ namespace CardShopCoop.Util
         {
             var result = ResolveMethod(type, name, args);
             if (result == null)
+            {
                 Missing("method", type, name, true);
+            }
+
             return result;
         }
 
@@ -64,7 +83,10 @@ namespace CardShopCoop.Util
             var result = type == null ? null : type.GetProperty(name,
                 BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (result == null)
+            {
                 Missing("property", type, name, false);
+            }
+
             return result;
         }
 
@@ -73,7 +95,10 @@ namespace CardShopCoop.Util
             var result = type == null ? null : type.GetField(name,
                 BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (result == null)
+            {
                 Missing("field", type, name, false);
+            }
+
             return result;
         }
 
@@ -81,14 +106,19 @@ namespace CardShopCoop.Util
         {
             var result = ResolveMethod(type, name, args);
             if (result == null)
+            {
                 Missing("method", type, name, false);
+            }
+
             return result;
         }
 
         private static MethodInfo ResolveMethod(Type type, string name, Type[] args)
         {
             if (type == null)
+            {
                 return null;
+            }
 
             const BindingFlags flags = BindingFlags.Static | BindingFlags.Instance |
                 BindingFlags.Public | BindingFlags.NonPublic;
@@ -102,12 +132,18 @@ namespace CardShopCoop.Util
             {
                 MethodInfo first = null;
                 MethodInfo parameterless = null;
-                foreach (MethodInfo candidate in type.GetMethods(flags))
+                foreach (var candidate in type.GetMethods(flags))
                 {
                     if (candidate.Name != name)
+                    {
                         continue;
+                    }
+
                     if (first == null)
+                    {
                         first = candidate;
+                    }
+
                     if (candidate.GetParameters().Length == 0)
                     {
                         parameterless = candidate;
@@ -121,3 +157,5 @@ namespace CardShopCoop.Util
         }
     }
 }
+
+

@@ -25,7 +25,7 @@ namespace CardShopCoop.UI
                 _revertAt = 0f;
             }
 
-            bool copied = Time.realtimeSinceStartup < _revertAt;
+            var copied = Time.realtimeSinceStartup < _revertAt;
             if (GUILayout.Button(copied ? "Copied!" : label, style, options))
             {
                 GUIUtility.systemCopyBuffer = value ?? string.Empty;
@@ -37,3 +37,5 @@ namespace CardShopCoop.UI
         }
     }
 }
+
+

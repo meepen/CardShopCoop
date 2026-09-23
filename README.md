@@ -3,8 +3,8 @@
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20shop-2ec484)](https://discord.gg/eNswvvTYbQ)
 
 **True co-op multiplayer for TCG Card Shop Simulator.** Run the shop together — shared
-money, XP, collection, and customers — over Steam (invites or a public lobby browser)
-or LAN. Built mod-first: it syncs by game IDs and plays nice with the PTCGO / Enhanced
+money, XP, collection, and customers — using KCP over Steam Networking Sockets (invites or a
+public lobby browser) or LAN over UDP/KCP. Built mod-first: it syncs by game IDs and plays nice with the PTCGO / Enhanced
 Prefab Loader content-mod stack, including automatic card-database alignment between
 players.
 
@@ -13,7 +13,7 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
 ## Features
 
 - **Steam lobbies**: friends-list invites, or a browsable/searchable public lobby list
-  with optional passwords. LAN/TCP fallback (port 27886). 2 players primary; extra
+  with optional passwords. LAN UDP/KCP fallback (port 27886). 2 players primary; extra
   joiners supported via host relay.
 - **One shop, one truth** (host-authoritative): money, XP, level, fame, the card
   collection (including graded cards), item and card prices, shelf stock, card display
@@ -47,7 +47,7 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
    (including content data packs) — the join handshake tells you exactly what differs
    if not.
 4. In game, press **F2** for the co-op window. Host: load your save, click Host.
-   Friend: Join via Steam invite, the lobby browser, or LAN IP.
+   Friend: Join via Steam invite, the lobby browser, or a LAN IP (UDP/KCP).
 
 ## Repo layout
 
@@ -70,13 +70,20 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
   suppresses its own customers/workers/day-end via Harmony and mirrors state. Client
   actions forward as ops the host executes through vanilla code paths, then authoritative
   state echoes back (hash-gated snapshot-diff engines with staggered timers).
-- **Two network lanes**: reliable ordered frames for state, unreliable no-delay for
-  15 Hz positions and 8 Hz NPC batches (chunked under Steam's 1200-byte datagram limit).
+- **Two network lanes**: reliable ordered KCP frames for state, unreliable no-delay for
+  15 Hz positions and 8 Hz NPC batches (sized below the shared 1200-byte datagram limit).
   Remote motion renders ~150 ms behind on a snapshot ring buffer.
+- **Extensible protocol catalog**: message DTOs are registered by `Type.FullName`. Peers must
+  match the same frozen, ordinally ordered catalog during the named handshake; subsequent frames
+  use its zero-based 16-bit IDs on both UDP and Steam.
+- **Transport trust**: Steam sessions use Steam's authenticated connection identity. Direct
+  UDP/KCP sessions are not encrypted and do not provide cryptographic host identity, so use them
+  only on a trusted LAN or through a trusted VPN; the optional room password is admission control,
+  not transport encryption.
 - **Identity over indexes**: anything that crosses the wire is keyed by item identity
   (type + size + name), never by list position — content mods can order their
   registries differently per machine.
-- Game gotchas that cost us dearly (see `Patches/GamePatches.cs` and git history):
+- Game gotchas that cost us dearly (see the feature modules and git history):
   dead statics (`CGameManager.Player`), auto-creating `CSingleton<T>.Instance`,
   `SpawnItem` being a save-loader not an adder, price tags living in separate canvas
   groups, and raw-`itemType`-indexed tables ~200k entries long under content mods.

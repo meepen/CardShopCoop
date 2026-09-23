@@ -293,7 +293,7 @@ Ordered by severity; all changes are in `src/CardShopCoop`.
    `StoredBoxRecord`-shaped entry in the container/world message or a `BoxWire` "record" form —
    so `m_StoredBoxRecordList` syncs, and include record-only stock in `LiveBoxes()`/snapshot
    enumeration (today it reads only `RestockManager.GetItemPackagingBoxList()`).
-4. Re-check test `tests/ShelfBoxPull` and the existing `ItemBoxFamily` store/move/Unhook paths
+4. Re-check the existing `ItemBoxFamily` store/move/Unhook paths
    against the new record lifecycle.
 
 ### P0-2 — Sync the 8th (Ascension) market table
