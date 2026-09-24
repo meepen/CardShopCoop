@@ -151,6 +151,11 @@ namespace CardShopCoop.Modules.World
         internal static bool IsKnownPackagingBox(InteractablePackagingBox box)
             => _instance?._boxNetworkInteraction?.IsKnownBox(box) == true;
 
+        /// <summary>Client: a worker is carrying this world box. Retire the real object from its
+        /// warehouse slot; the Npc worker prop draws the carried box.</summary>
+        internal static void ApplyWorkerHeldBox(long boxNetworkId)
+            => _instance?._warehouseShelfInteraction?.ApplyWorkerHeldBox(boxNetworkId);
+
         internal static void ResetCardState()
         {
             _instance?._cardInteraction?.Reset();

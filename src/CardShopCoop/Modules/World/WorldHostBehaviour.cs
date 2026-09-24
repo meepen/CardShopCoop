@@ -108,6 +108,20 @@ namespace CardShopCoop.Modules.World
 
         internal static void ResetCardState() => _instance?._cardInteraction?.Reset();
 
+        /// <summary>Resolves the stable world box id for a worker's carried box, if the host box
+        /// network has one. Used by the Npc worker sync so clients can retire the real object.</summary>
+        internal static bool TryGetHeldBoxId(InteractablePackagingBox box, out long boxNetworkId)
+        {
+            boxNetworkId = 0;
+            return box != null && _instance?._boxNetworkInteraction != null
+                && _instance._boxNetworkInteraction.TryGetId(box, out boxNetworkId);
+        }
+
+        /// <summary>Authoritative open/closed flag of a carried box, read directly from the field
+        /// so the whole open-close animation window reports the true state.</summary>
+        internal static bool IsHeldBoxOpen(InteractablePackagingBox box)
+            => box is InteractablePackagingBox_Item item && BoxNetworkInteraction.IsBoxOpen(item);
+
         /// <summary>Apply one validated client intent on the host. Successful operations publish
         /// their authoritative state or the small gameplay handoff they require.</summary>
         internal bool ExecuteWorldCommand(MessageContext context, WorldMessage command,

@@ -335,6 +335,40 @@ namespace CardShopCoop.Modules.World
             _boxes.ClientForgetStored(message.BoxNetworkId);
         }
 
+        private static readonly Vector3 ParkedWorkerBoxPosition = new Vector3(10000f, 10000f, 10000f);
+
+        /// <summary>Client: a worker is carrying world box <paramref name="boxNetworkId"/>. Detach
+        /// it from any warehouse compartment and park the real object out of view; the Npc worker
+        /// prop draws the carried box. The id binding is kept so a later store reuses this same
+        /// object, and the host's warehouse removal delta still fixes the compartment listing.</summary>
+        internal void ApplyWorkerHeldBox(long boxNetworkId)
+        {
+            if (_host || boxNetworkId <= 0 || !Available())
+            {
+                return;
+            }
+
+            if (!_boxes.TryGetBox(boxNetworkId, out var box)
+                || box is not InteractablePackagingBox_Item item)
+            {
+                return;
+            }
+
+            var compartment = item.GetBoxStoredCompartment();
+            if (compartment != null)
+            {
+                var boxes = compartment.GetInteractablePackagingBoxList();
+                if (boxes != null && boxes.Contains(item))
+                {
+                    compartment.RemoveBox(item);
+                }
+            }
+
+            _boxes.ClientForgetStored(boxNetworkId);
+            item.SetPhysicsEnabled(false);
+            item.transform.position = ParkedWorkerBoxPosition;
+        }
+
         private void ClientUndoTakePrediction(WarehouseDeltaMessage delta)
         {
             // The optimistic take may still be lerping the box into the hand, and the game's
@@ -413,10 +447,40 @@ namespace CardShopCoop.Modules.World
                 BroadcastWarehouseDelta(compartment, true, added);
         }
 
-        internal void OnBoxRemoved(ShelfCompartment compartment)
+        internal void OnBoxRemoved(ShelfCompartment compartment, InteractablePackagingBox_Item box)
         {
-            if (!_hostApplyingCommand)
-                BroadcastLiveRemoval(compartment);
+            if (_hostApplyingCommand || !_host || IsApplyingRemote || !Available()
+                || !IsWarehouse(compartment) || box == null)
+            {
+                return;
+            }
+
+            // Broadcast exactly the box that left the compartment. The previous diff-based lookup
+            // could report a stale, already-removed id (for example after a suppressed player
+            // take), and the client then removed the wrong object from its shelf.
+            if (!_boxes.TryGetId(box, out var id) || id <= 0)
+            {
+                return;
+            }
+
+            WarehouseBoxState state;
+            if (!_knownBoxes.TryGetValue(id, out state) || state == null)
+            {
+                state = new WarehouseBoxState
+                {
+                    BoxNetworkId = id,
+                    ItemType = box.m_ItemCompartment == null
+                        ? EItemType.None : box.m_ItemCompartment.GetItemType(),
+                    Amount = box.m_ItemCompartment == null ? 0 : box.m_ItemCompartment.GetItemCount(),
+                    IsBig = box.m_IsBigBox,
+                };
+            }
+
+            _knownBoxes.Remove(id);
+            _knownBoxLocations.Remove(id);
+            CoopPlugin.Log.LogInfo("[warehouse] remove id=" + id + " shelf="
+                + compartment.GetWarehouseIndex() + ":" + compartment.GetIndex());
+            BroadcastWarehouseDelta(compartment, false, state);
         }
 
         internal bool PrepareHostStore(InteractablePackagingBox_Item box, bool isPlayer,
@@ -773,37 +837,6 @@ namespace CardShopCoop.Modules.World
             };
             RememberWarehouseBox(compartment, state);
             return true;
-        }
-
-        private void BroadcastLiveRemoval(ShelfCompartment compartment)
-        {
-            if (!_host || IsApplyingRemote || !Available() || !IsWarehouse(compartment))
-                return;
-
-            var key = CompartmentKey(compartment);
-            var present = new HashSet<long>();
-            var boxes = compartment.GetInteractablePackagingBoxList();
-            for (var i = 0; boxes != null && i < boxes.Count; i++)
-            {
-                if (boxes[i] != null && _boxes.TryGetId(boxes[i], out var id))
-                    present.Add(id);
-            }
-
-            var removed = new List<long>();
-            foreach (var pair in _knownBoxLocations)
-            {
-                if (pair.Value == key && !present.Contains(pair.Key))
-                    removed.Add(pair.Key);
-            }
-
-            for (var i = 0; i < removed.Count; i++)
-            {
-                var id = removed[i];
-                if (_knownBoxes.TryGetValue(id, out var state))
-                    BroadcastWarehouseDelta(compartment, false, state);
-                _knownBoxes.Remove(id);
-                _knownBoxLocations.Remove(id);
-            }
         }
 
         private WarehouseCompartmentState BuildState(ShelfCompartment compartment)

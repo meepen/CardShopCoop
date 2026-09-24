@@ -5,6 +5,7 @@ using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Modules.Register;
+using CardShopCoop.Modules.World;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
@@ -278,6 +279,9 @@ namespace CardShopCoop.Modules.Npc
             p.PrevRenderedPos = message.Position;
             p.HoldBig = false;
             p.HoldItemType = 0;
+            p.HoldBoxNetworkId = 0;
+            p.HoldBoxOpened = false;
+            p.AppliedHeldBoxNetworkId = 0;
             p.GrabSequence = UnsetActionSequence;
             if (p.Go != null)
             {
@@ -761,8 +765,11 @@ namespace CardShopCoop.Modules.Npc
         }
 
         /// <summary>Show a stripped cosmetic box on a worker puppet. The synchronized
-        /// gameplay object is intentionally never attached to the puppet.</summary>
-        public static void SetWorkerBoxVisual(int index, bool visible, bool isBig, int itemType)
+        /// gameplay object is intentionally never attached to the puppet; instead the real world
+        /// box the worker took is parked (see <see cref="WorldClientBehaviour.ApplyWorkerHeldBox"/>)
+        /// and this prop carries the visual, including its open/closed state.</summary>
+        public static void SetWorkerBoxVisual(int index, bool visible, bool isBig, int itemType,
+            long boxNetworkId, bool opened)
         {
             if (_active == null)
             {
@@ -780,51 +787,115 @@ namespace CardShopCoop.Modules.Npc
                 _active.ReleaseWorkerBoxProp(p);
                 return;
             }
+
             if (p.BoxProp != null && p.BoxPropBig == isBig && p.BoxPropType == itemType)
             {
                 p.BoxProp.SetActive(true);
-                return;
             }
-            _active.ReleaseWorkerBoxProp(p);
-            var rm = SceneRef<RestockManager>.Get();
-            var prefab = isBig ? rm.m_PackageBoxPrefab : rm.m_PackageBoxSmallPrefab;
-
-            var holder = new GameObject("CoopWorkerBoxProp_tmp");
-            holder.SetActive(false);
-            var clone = Instantiate(prefab.gameObject, holder.transform);
-            foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
+            else
             {
-                if (mb != null)
+                _active.ReleaseWorkerBoxProp(p);
+                var rm = SceneRef<RestockManager>.Get();
+                var prefab = isBig ? rm.m_PackageBoxPrefab : rm.m_PackageBoxSmallPrefab;
+
+                var holder = new GameObject("CoopWorkerBoxProp_tmp");
+                holder.SetActive(false);
+                var clone = Instantiate(prefab.gameObject, holder.transform);
+
+                // Capture the open/closed visual groups from the box component before every
+                // MonoBehaviour is stripped; the child GameObjects survive that removal.
+                var sourceBox = clone.GetComponent<InteractablePackagingBox_Item>();
+                if (sourceBox != null)
                 {
-                    DestroyImmediate(mb);
+                    p.BoxPropStaticMesh = sourceBox.m_StaticMeshGrp;
+                    p.BoxPropRigMesh = sourceBox.m_RigMeshGrp;
+                    p.BoxPropOpen = sourceBox.m_OpenBox;
+                    p.BoxPropClosed = sourceBox.m_ClosedBox;
+                    p.BoxPropOutlineOpen = sourceBox.m_OutlineOpenBox;
+                    p.BoxPropOutlineClosed = sourceBox.m_OutlineClosedBox;
+                }
+                else
+                {
+                    p.BoxPropStaticMesh = null;
+                    p.BoxPropRigMesh = null;
+                    p.BoxPropOpen = null;
+                    p.BoxPropClosed = null;
+                    p.BoxPropOutlineOpen = null;
+                    p.BoxPropOutlineClosed = null;
+                }
+
+                foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
+                {
+                    if (mb != null)
+                    {
+                        DestroyImmediate(mb);
+                    }
+                }
+
+                foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
+                {
+                    if (rb != null)
+                    {
+                        DestroyImmediate(rb);
+                    }
+                }
+
+                foreach (var col in clone.GetComponentsInChildren<Collider>(true))
+                {
+                    if (col != null)
+                    {
+                        DestroyImmediate(col);
+                    }
+                }
+
+                clone.transform.SetParent(p.HoldBox, false);
+                clone.transform.localPosition = Vector3.zero;
+                clone.transform.localRotation = Quaternion.identity;
+                clone.name = "CoopWorkerBoxProp";
+                clone.SetActive(true);
+                Destroy(holder);
+                p.BoxProp = clone;
+                p.BoxPropBig = isBig;
+                p.BoxPropType = itemType;
+            }
+
+            ApplyWorkerBoxOpenState(p, opened);
+
+            // The real world box the worker took must leave its shelf slot; this prop represents
+            // the carried box. Only touch the World module when the held box id changes.
+            if (boxNetworkId > 0)
+            {
+                if (boxNetworkId != p.AppliedHeldBoxNetworkId)
+                {
+                    p.AppliedHeldBoxNetworkId = boxNetworkId;
+                    WorldClientBehaviour.ApplyWorkerHeldBox(boxNetworkId);
                 }
             }
-
-            foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
+            else
             {
-                if (rb != null)
-                {
-                    DestroyImmediate(rb);
-                }
+                p.AppliedHeldBoxNetworkId = 0;
             }
+        }
 
-            foreach (var col in clone.GetComponentsInChildren<Collider>(true))
+        private static void ApplyWorkerBoxOpenState(Puppet p, bool opened)
+        {
+            // Mirror InteractablePackagingBox_Item.ResetToggleOpenClose exactly. The stripped clone
+            // never runs Awake, so the static/rig groups must be forced to the steady state or the
+            // open/closed children are toggled on a group that is not visible.
+            SetActive(p.BoxPropStaticMesh, true);
+            SetActive(p.BoxPropRigMesh, false);
+            SetActive(p.BoxPropOpen, opened);
+            SetActive(p.BoxPropClosed, !opened);
+            SetActive(p.BoxPropOutlineOpen, opened);
+            SetActive(p.BoxPropOutlineClosed, !opened);
+        }
+
+        private static void SetActive(GameObject target, bool active)
+        {
+            if (target != null && target.activeSelf != active)
             {
-                if (col != null)
-                {
-                    DestroyImmediate(col);
-                }
+                target.SetActive(active);
             }
-
-            clone.transform.SetParent(p.HoldBox, false);
-            clone.transform.localPosition = Vector3.zero;
-            clone.transform.localRotation = Quaternion.identity;
-            clone.name = "CoopWorkerBoxProp";
-            clone.SetActive(true);
-            Destroy(holder);
-            p.BoxProp = clone;
-            p.BoxPropBig = isBig;
-            p.BoxPropType = itemType;
         }
 
         /// <summary>Copies authoritative staff settings onto the inert worker component
@@ -959,6 +1030,15 @@ namespace CardShopCoop.Modules.Npc
             public GameObject BoxProp;
             public bool BoxPropBig;
             public int BoxPropType;
+            public GameObject BoxPropStaticMesh;
+            public GameObject BoxPropRigMesh;
+            public GameObject BoxPropOpen;
+            public GameObject BoxPropClosed;
+            public GameObject BoxPropOutlineOpen;
+            public GameObject BoxPropOutlineClosed;
+            public long HoldBoxNetworkId;
+            public bool HoldBoxOpened;
+            public long AppliedHeldBoxNetworkId;
             public bool HoldBig;
             public int HoldItemType;
             public int PendingIdentity;
@@ -979,6 +1059,14 @@ namespace CardShopCoop.Modules.Npc
             p.BoxProp = null;
             p.BoxPropBig = false;
             p.BoxPropType = 0;
+            p.BoxPropStaticMesh = null;
+            p.BoxPropRigMesh = null;
+            p.BoxPropOpen = null;
+            p.BoxPropClosed = null;
+            p.BoxPropOutlineOpen = null;
+            p.BoxPropOutlineClosed = null;
+            // Force the next hold of this (or any) box to notify the World module again.
+            p.AppliedHeldBoxNetworkId = 0;
             if (ReferenceEquals(prop, null) || prop == null)
             {
                 return;
@@ -1451,6 +1539,8 @@ namespace CardShopCoop.Modules.Npc
                     ActionKind = message.ActionKind,
                     HoldBig = message.HoldBig,
                     HoldItemType = message.HoldItemType,
+                    HoldBoxNetworkId = message.HoldBoxNetworkId,
+                    HoldBoxOpened = message.HoldBoxOpened,
                 }
             });
             _pendingStates.Remove(key);
@@ -1661,6 +1751,8 @@ namespace CardShopCoop.Modules.Npc
                 {
                     p.HoldBig = ent.HoldBig;
                     p.HoldItemType = ent.HoldItemType;
+                    p.HoldBoxNetworkId = ent.HoldBoxNetworkId;
+                    p.HoldBoxOpened = ent.HoldBoxOpened;
                 }
 
                 if (hasName)
@@ -1894,7 +1986,8 @@ namespace CardShopCoop.Modules.Npc
                 {
                     if ((p.Flags & NpcFlags.IsHoldingBox) != 0)
                     {
-                        SetWorkerBoxVisual((int)(kv.Key & 0xffff), true, p.HoldBig, p.HoldItemType);
+                        SetWorkerBoxVisual((int)(kv.Key & 0xffff), true, p.HoldBig, p.HoldItemType,
+                            p.HoldBoxNetworkId, p.HoldBoxOpened);
                     }
                     else
                     {

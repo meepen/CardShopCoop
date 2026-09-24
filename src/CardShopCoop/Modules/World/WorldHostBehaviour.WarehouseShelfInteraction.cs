@@ -102,9 +102,10 @@ namespace CardShopCoop.Modules.World
             Warehouse?.OnBoxAdded(compartment);
         }
 
-        private void NotifyWarehouseBoxRemoved(ShelfCompartment compartment)
+        private void NotifyWarehouseBoxRemoved(ShelfCompartment compartment,
+            InteractablePackagingBox_Item box)
         {
-            Warehouse?.OnBoxRemoved(compartment);
+            Warehouse?.OnBoxRemoved(compartment, box);
         }
 
         [HarmonyPatch(typeof(InteractablePackagingBox_Item), "DispenseItem")]
@@ -163,9 +164,9 @@ namespace CardShopCoop.Modules.World
         private static class BoxRemovedPatch
         {
             [HarmonyPostfix]
-            private static void Postfix(ShelfCompartment __instance)
+            private static void Postfix(ShelfCompartment __instance, InteractablePackagingBox_Item __0)
             {
-                _instance?.NotifyWarehouseBoxRemoved(__instance);
+                _instance?.NotifyWarehouseBoxRemoved(__instance, __0);
             }
         }
 

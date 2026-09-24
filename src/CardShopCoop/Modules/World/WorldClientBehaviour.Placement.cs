@@ -205,6 +205,7 @@ namespace CardShopCoop.Modules.World
             for (var i = 0; list != null && i < list.Count; i++)
             {
                 if (list[i] is InteractableObject obj
+                    && !PlacementIdentity.IsIdentified(obj)
                     && PlacementInterop.TypeIdOf(obj) == entry.Type)
                 {
                     return true;

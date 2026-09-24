@@ -897,25 +897,41 @@ namespace CardShopCoop.Modules.World
         private InteractablePackagingBox_Shelf MaterializeFurniture(BoxNetworkState state,
             string furnitureEntityId)
         {
-            if (!PlacementApi.TryResolveBoxableFurnitureEntityId(furnitureEntityId,
+            if (PlacementApi.TryResolveBoxableFurnitureEntityId(furnitureEntityId,
                 WorldMessageMetadata.FurnitureIdentityScope,
                 state.FurnitureObjectType, out var existing, false))
-                throw new InvalidOperationException("Authoritative furniture identity could not be resolved: "
-                    + furnitureEntityId);
-
-            // The client suppresses the local hold-box input, so the exact placement object is
-            // still present when the authoritative descriptor arrives. Box it in-place instead
-            // of choosing another object with the same type or a nearby position.
-            var package = existing.GetPackagingBoxShelf();
-            if (package == null)
             {
-                CoopPlugin.Log.LogInfo("[box-furniture] applying authoritative box-up to exact "
-                    + state.FurnitureObjectType + " placement for box id=" + state.BoxNetworkId + ".");
-                existing.BoxUpObject(false);
-                package = existing.GetPackagingBoxShelf();
+                // The client suppresses the local hold-box input, so the exact placement object is
+                // still present when the authoritative descriptor arrives. Box it in-place instead
+                // of choosing another object with the same type or a nearby position.
+                var package = existing.GetPackagingBoxShelf();
+                if (package == null)
+                {
+                    CoopPlugin.Log.LogInfo("[box-furniture] applying authoritative box-up to exact "
+                        + state.FurnitureObjectType + " placement for box id=" + state.BoxNetworkId
+                        + ".");
+                    existing.BoxUpObject(false);
+                    package = existing.GetPackagingBoxShelf();
+                }
+
+                return package;
             }
 
-            return package;
+            // The host spawned this furniture and named its placement identity, but this peer
+            // never saw a placement delta for it. The box descriptor is self-sufficient: create
+            // the exact object through the game's factory and bind the identity it names, rather
+            // than adopting a same-type local object.
+            if (!PlacementApi.TryCreateBoxableFurnitureForIdentity(furnitureEntityId,
+                WorldMessageMetadata.FurnitureIdentityScope, state.FurnitureObjectType,
+                state.Position, state.Rotation, out var created))
+            {
+                throw new InvalidOperationException("Authoritative furniture identity could not be resolved or created: "
+                    + furnitureEntityId);
+            }
+
+            CoopPlugin.Log.LogInfo("[box-furniture] created host-spawned furniture for box id="
+                + state.BoxNetworkId + " entity=" + furnitureEntityId + ".");
+            return created.GetPackagingBoxShelf();
         }
 
         private InteractablePackagingBox FindAdoptable(BoxNetworkState state, string furnitureEntityId)

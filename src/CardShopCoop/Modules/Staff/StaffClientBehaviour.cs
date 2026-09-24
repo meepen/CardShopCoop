@@ -99,6 +99,10 @@ namespace CardShopCoop.Modules.Staff
                 if (_deferredDeltas.TryGetValue(key, out var previous))
                     PredictionApi.ConfirmSuperseded(previous.PredictionId);
                 _deferredDeltas[key] = message;
+                CoopPlugin.Log.LogInfo("[staff] deferred " + message.Kind + " index=" + message.Index
+                    + " generation=" + message.Generation + " known="
+                    + (_workerGenerations.TryGetValue(message.Index, out var known)
+                        ? known.ToString() : "none"));
             }
         }
 
@@ -156,7 +160,10 @@ namespace CardShopCoop.Modules.Staff
                 return false;
             }
 
-            if (!IsWorkerGenerationReady(message))
+            // Interaction deltas only carry module lease/busy/mode state (plus optional stop/open
+            // calls when the puppet exists), so they are safe before the worker puppet is ready.
+            // Deferring them can strand the client's lease and block reopening the worker menu.
+            if (message.Kind != StaffDeltaKind.Interaction && !IsWorkerGenerationReady(message))
             {
                 return false;
             }
@@ -174,7 +181,7 @@ namespace CardShopCoop.Modules.Staff
                 return false;
             }
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            Action apply = () =>
             {
                 _applyingRemote = true;
                 try
@@ -185,7 +192,22 @@ namespace CardShopCoop.Modules.Staff
                 {
                     _applyingRemote = false;
                 }
-            });
+            };
+
+            // Fired and Interaction deltas confirm the client's own optimistic action. The local
+            // apply already closed/opened the interaction exactly as the host did, so undoing it
+            // first (what ApplyAuthoritative does) would reopen the worker menu before re-closing,
+            // or re-close before reopening. Every other kind can contradict the prediction, so
+            // they stay authoritative.
+            if (message.Kind == StaffDeltaKind.Fired || message.Kind == StaffDeltaKind.Interaction)
+            {
+                PredictionApi.ApplyConfirmed(message.PredictionId, apply);
+            }
+            else
+            {
+                PredictionApi.ApplyAuthoritative(message.PredictionId, apply);
+            }
+
             return true;
         }
 
@@ -246,7 +268,15 @@ namespace CardShopCoop.Modules.Staff
 
         private void ApplyEntry(int index, StaffModuleEntry entry)
         {
-            _workerGenerations[index] = entry.Generation;
+            // Prediction snapshots (CaptureEntry/CaptureWorkerEntry) leave Generation at its
+            // default 0 because they describe only worker data. Never overwrite the tracked
+            // generation with that default: doing so makes every later Task/Options/Bonus/
+            // Experience delta for the worker fail the generation check and defer forever.
+            if (entry.Generation != 0)
+            {
+                _workerGenerations[index] = entry.Generation;
+            }
+
             EnsureHiredSlot(index);
             CPlayerData.SetIsWorkerHired(index, entry.Hired);
             if (entry.HasData)
@@ -338,6 +368,7 @@ namespace CardShopCoop.Modules.Staff
             worker.m_BonusBoostedCount = message.BonusCount;
             worker.m_IsBonusBoosted = message.BonusBoosted;
             RefreshWorker(worker);
+            RefreshInteractScreen(_interactScreenCache.Get(), message.Index);
         }
 
         private void ApplyExperience(StaffModuleDeltaMessage message)
@@ -403,6 +434,17 @@ namespace CardShopCoop.Modules.Staff
             }
         }
 
+        /// <summary>Drops the client's optimistic interaction with a worker. The host ends the
+        /// interaction as part of Task/Options/Pack/Fire, and the running game method already
+        /// stopped the local interaction UI, so the module's lease/busy flags must follow. This
+        /// must not depend on the later <see cref="StaffDeltaKind.Interaction"/> delta, which can
+        /// be deferred.</summary>
+        private void ReleaseLocalInteraction(int index)
+        {
+            _workerLease.Remove(index);
+            _workerBusy[index] = false;
+        }
+
         private void WithPrediction(Action action)
         {
             _applyingPrediction++;
@@ -420,7 +462,12 @@ namespace CardShopCoop.Modules.Staff
             Func<StaffClientBehaviour, bool> allowOriginal = null)
         {
             var active = _active;
-            if (active == null || active._shutdown || _applyingRemote)
+            // While a prediction is applying (or undoing) we are already running the game's own
+            // method on purpose, so every prefix must let it through. Without this check the UI
+            // patches below re-enter their own interceptor from inside the prediction apply, which
+            // sends an unbounded stream of intents and disconnects the client.
+            if (active == null || active._shutdown || _applyingRemote
+                || active._applyingPrediction != 0)
             {
                 return true;
             }
@@ -517,7 +564,7 @@ namespace CardShopCoop.Modules.Staff
         }
 
         private bool PredictWorker(string scope, StaffModuleIntentMessage message, Worker worker,
-            StaffModuleEntry before, Action apply)
+            StaffModuleEntry before, Action apply, Action undo = null)
         {
             PredictionApi.Predict(scope,
                 id =>
@@ -526,7 +573,7 @@ namespace CardShopCoop.Modules.Staff
                     Send(message);
                 },
                 apply,
-                () => Restore(before, worker));
+                undo ?? (() => Restore(before, worker)));
             return false;
         }
 
@@ -596,6 +643,7 @@ namespace CardShopCoop.Modules.Staff
                 {
                     worker.GiveSalaryBonus();
                     RefreshWorker(worker);
+                    RefreshInteractScreen(screen, worker.m_WorkerIndex);
                 });
         }
 
@@ -607,20 +655,34 @@ namespace CardShopCoop.Modules.Staff
                 return false;
             }
 
+            var index = worker.m_WorkerIndex;
             var before = CaptureBefore(worker);
-            return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex,
+            return PredictWorker(PredictionScope + ":" + index,
                 new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.Fire,
-                    Index = worker.m_WorkerIndex,
+                    Index = index,
                 },
                 worker,
                 before,
                 () =>
                 {
+                    // The host ends the interaction as part of firing (HostFire ->
+                    // HostEndInteraction), so the client ends it locally too but must not emit a
+                    // second EndInteraction intent: OnPressStopInteract is run through
+                    // WithPrediction so WorkerStopPatch lets the game method run directly instead
+                    // of predicting a competing interaction the host would reject.
                     worker.FireWorker();
-                    worker.OnPressStopInteract();
+                    ReleaseLocalInteraction(index);
+                    WithPrediction(worker.OnPressStopInteract);
                     screen.CloseScreen();
+                },
+                () =>
+                {
+                    Restore(before, worker);
+                    _workerLease.Add(index);
+                    _workerBusy[index] = true;
+                    WithRemote(worker.OnMousePress);
                 });
         }
 
@@ -643,7 +705,11 @@ namespace CardShopCoop.Modules.Staff
             var before = CaptureBefore(worker);
             var message = BuildTaskIntent(worker, isPrimary, workerTask);
             return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex, message, worker, before,
-                () => WithPrediction(() => screen.SetTaskAsPrimaryOrSecondary(isPrimary)));
+                () =>
+                {
+                    WithPrediction(() => screen.SetTaskAsPrimaryOrSecondary(isPrimary));
+                    ReleaseLocalInteraction(worker.m_WorkerIndex);
+                });
         }
 
         private StaffModuleIntentMessage BuildTaskIntent(Worker worker, bool isPrimary, EWorkerTask task)
@@ -689,7 +755,11 @@ namespace CardShopCoop.Modules.Staff
                 CardPriceMult = data.setCardPriceMultiplier,
             };
             return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex, message, worker, before,
-                () => WithPrediction(() => screen.OnPressRestockShelfWithNoLabel(noLabel)));
+                () =>
+                {
+                    WithPrediction(() => screen.OnPressRestockShelfWithNoLabel(noLabel));
+                    ReleaseLocalInteraction(worker.m_WorkerIndex);
+                });
         }
 
         private bool InterceptPriceOptions(WorkerOptionSetPriceUIScreen screen)
@@ -725,7 +795,11 @@ namespace CardShopCoop.Modules.Staff
                 CardPriceMult = isPrice ? data.setCardPriceMultiplier : multiplier,
             };
             return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex, message, worker, before,
-                () => WithPrediction(screen.OnPressConfirm));
+                () =>
+                {
+                    WithPrediction(screen.OnPressConfirm);
+                    ReleaseLocalInteraction(worker.m_WorkerIndex);
+                });
         }
 
         private bool InterceptPackOptions(WorkerSetPackOpenerTypeOptionScreen screen)
@@ -762,7 +836,11 @@ namespace CardShopCoop.Modules.Staff
                 PackChanges = changes,
             };
             return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex, message, worker, before,
-                () => WithPrediction(screen.OnPressConfirm));
+                () =>
+                {
+                    WithPrediction(screen.OnPressConfirm);
+                    ReleaseLocalInteraction(worker.m_WorkerIndex);
+                });
         }
 
         private bool HandleWorkerMousePress(Worker worker)
@@ -776,6 +854,9 @@ namespace CardShopCoop.Modules.Staff
             if (_workerLease.Contains(index)
                 || _workerBusy.TryGetValue(index, out var occupied) && occupied)
             {
+                CoopPlugin.Log.LogInfo("[staff] open blocked index=" + index
+                    + " lease=" + _workerLease.Contains(index)
+                    + " busy=" + (_workerBusy.TryGetValue(index, out var busy) && busy));
                 return false;
             }
 
@@ -993,7 +1074,7 @@ namespace CardShopCoop.Modules.Staff
             [HarmonyPrefix]
             private static bool Prefix(Worker __instance)
                 => RouteInteraction(active => active.HandleWorkerMousePress(__instance),
-                    active => active._applyingPrediction != 0 || __instance == null);
+                    _ => __instance == null);
         }
 
         [HarmonyPatch(typeof(Worker), nameof(Worker.OnPressStopInteract))]
@@ -1002,7 +1083,7 @@ namespace CardShopCoop.Modules.Staff
             [HarmonyPrefix]
             private static bool Prefix(Worker __instance)
                 => RouteInteraction(active => active.HandleWorkerStopInteract(__instance),
-                    active => active._applyingPrediction != 0 || __instance == null);
+                    _ => __instance == null);
         }
     }
 }

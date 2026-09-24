@@ -45,6 +45,15 @@ namespace CardShopCoop.Modules.World
             => PlacementIdentity.TryResolveBoxableFurnitureEntityId(entityId, worldEpoch,
                 expectedType, out result, requireUnboxed);
 
+        /// <summary>Creates the exact boxed furniture a host entity id names, through the game's
+        /// factory, and binds that identity to it. Used when an authoritative box descriptor
+        /// arrives for a host-spawned object this peer never saw a placement delta for.</summary>
+        public static bool TryCreateBoxableFurnitureForIdentity(string entityId, long worldEpoch,
+            EObjectType expectedType, Vector3 position, Quaternion rotation,
+            out InteractableObject created)
+            => PlacementIdentity.TryCreateBoxableFurnitureForIdentity(entityId, worldEpoch,
+                expectedType, position, rotation, out created);
+
         public static bool IsPlacementIdentityReady
             => WorldClientBehaviour.IsPlacementIdentityReady;
 
@@ -303,40 +312,28 @@ namespace CardShopCoop.Modules.World
                 || CardShopCoop.Modules.World.WorldHostBehaviour.IsKnownPackagingBox(box);
         }
 
-        internal static InteractableObject FindBoxedObjectAtPose(int kind, int objectType,
-            Vector3 boxPosition)
-        {
-            var list = GetList(FindShelfManager(), kind);
-            InteractableObject result = null;
-            var best = float.MaxValue;
-            for (var i = 0; list != null && i < list.Count; i++)
-            {
-                if (list[i] is not InteractableObject obj || !IsBoxed(obj)
-                    || (int)obj.m_ObjectType != objectType || obj.GetPackagingBoxShelf() == null)
-                {
-                    continue;
-                }
-
-                var distance = (obj.GetPackagingBoxShelf().transform.position - boxPosition).sqrMagnitude;
-                if (distance < best)
-                {
-                    best = distance;
-                    result = obj;
-                }
-            }
-
-            return result;
-        }
-
-        /// <summary>Recreates a boxed placement object through the game's own package factory and
-        /// returns the object it created. The factory registers the object with its kind's list;
-        /// the new object is located by the boxed pose it was spawned at.</summary>
-        internal static InteractableObject SpawnBoxedObject(int kind, int objectType, Vector3 position,
+        /// <summary>Recreates a boxed placement object through the game's factory and returns
+        /// exactly the object it created. The factory self-registers the object with its kind's
+        /// list; locating it afterwards by pose could pick a different same-type object, so the
+        /// instance is returned directly instead.</summary>
+        internal static InteractableObject SpawnBoxedObject(int objectType, Vector3 position,
             Quaternion rotation)
         {
-            ShelfManager.SpawnInteractableObjectInPackageBox((EObjectType)objectType, position,
-                rotation);
-            return FindBoxedObjectAtPose(kind, objectType, position);
+            var obj = ShelfManager.SpawnInteractableObject((EObjectType)objectType);
+            if (obj == null)
+            {
+                return null;
+            }
+
+            obj.Init();
+            obj.BoxUpObject(false);
+            var package = obj.GetPackagingBoxShelf();
+            if (package != null)
+            {
+                package.transform.SetPositionAndRotation(position, rotation);
+            }
+
+            return obj;
         }
 
         /// <summary>Recreates a placed (unboxed) placement object through the game's factory. The
@@ -408,6 +405,13 @@ namespace CardShopCoop.Modules.World
             return false;
         }
 
+        /// <summary>True when this object already owns a placement identity. Identity is
+        /// exclusive: an incoming delta may only adopt an object that has none. Binding a new
+        /// key onto an already-identified object silently steals it from its own entity, which
+        /// is how a purchased furniture box adopted a same-type piece that was already placed.</summary>
+        internal static bool IsIdentified(InteractableObject obj)
+            => obj != null && ByObject.TryGetValue(obj, out var id) && id != Invalid;
+
         internal static ushort AssignHost(InteractableObject obj)
         {
             if (obj == null)
@@ -444,11 +448,16 @@ namespace CardShopCoop.Modules.World
 
             if (ByObject.TryGetValue(obj, out var old) && old != id)
             {
+                CoopPlugin.Log.LogWarning("[placement] identity moved " + old + "->" + id + " on "
+                    + obj.name + "; a placement object must keep one identity for its lifetime.");
                 ById.Remove(old);
             }
 
             if (ById.TryGetValue(id, out var previous) && !ReferenceEquals(previous, obj))
             {
+                CoopPlugin.Log.LogWarning("[placement] identity " + id + " moved off "
+                    + (previous == null ? "<null>" : previous.name) + " onto " + obj.name
+                    + "; two objects must not share one identity.");
                 ByObject.Remove(previous);
             }
 
@@ -541,6 +550,44 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
+            return true;
+        }
+
+        /// <summary>Creates the exact boxed furniture the entity id names, through the game's
+        /// factory, and binds the identity to it. The identity must be unbound; the caller reaches
+        /// here only after a resolve attempt failed.</summary>
+        internal static bool TryCreateBoxableFurnitureForIdentity(string entityId, long worldEpoch,
+            EObjectType expectedType, Vector3 position, Quaternion rotation,
+            out InteractableObject created)
+        {
+            created = null;
+            if (expectedType == EObjectType.None
+                || !TryParseFurnitureEntityId(entityId, worldEpoch, out var key))
+            {
+                return false;
+            }
+
+            var kind = key >> 24;
+            var id = ObjectIdFromObjectKey(key);
+            if (kind < 0 || kind >= PlacementApi.KindCount || kind == PlacementApi.DecorationKind
+                || id == Invalid)
+            {
+                return false;
+            }
+
+            if (TryResolve(PlacementInterop.FindShelfManager(), kind, id, out created))
+            {
+                // Raced with another apply; the authoritative object already exists.
+                return created.m_ObjectType == expectedType;
+            }
+
+            created = PlacementInterop.SpawnBoxedObject((int)expectedType, position, rotation);
+            if (created == null)
+            {
+                return false;
+            }
+
+            Bind(created, id);
             return true;
         }
 
@@ -725,7 +772,7 @@ namespace CardShopCoop.Modules.World
 
                 if (obj == null && entry.IsBoxed)
                 {
-                    obj = PlacementInterop.SpawnBoxedObject(kind, entry.ObjType, entry.BoxedPos,
+                    obj = PlacementInterop.SpawnBoxedObject(entry.ObjType, entry.BoxedPos,
                         entry.BoxedRot);
                 }
 
@@ -1009,12 +1056,20 @@ namespace CardShopCoop.Modules.World
                         return false;
                     }
 
-                    obj = PlacementInterop.SpawnBoxedObject(kind, entry.Type, entry.BoxedPos,
+                    obj = PlacementInterop.SpawnBoxedObject(entry.Type, entry.BoxedPos,
                         entry.BoxedRot);
                     if (obj == null)
                     {
                         return false;
                     }
+
+                    CoopPlugin.Log.LogInfo("[placement] materialized host-spawned boxed entity key="
+                        + objectKey + " type=" + entry.Type + ".");
+                }
+                else
+                {
+                    CoopPlugin.Log.LogInfo("[placement] adopted unbound local entity key="
+                        + objectKey + " object=" + obj.name + ".");
                 }
 
                 PlacementIdentity.Bind(obj, PlacementIdentity.ObjectIdFromObjectKey(objectKey));
@@ -1031,6 +1086,7 @@ namespace CardShopCoop.Modules.World
             for (var i = 0; list != null && i < list.Count; i++)
             {
                 if (list[i] is not InteractableObject candidate
+                    || PlacementIdentity.IsIdentified(candidate)
                     || (entry.Type != PlacementInterop.NoType
                         && PlacementInterop.TypeIdOf(candidate) != entry.Type))
                 {
