@@ -45,6 +45,10 @@ namespace CardShopCoop.Modules.SessionInput
 
         private static readonly FieldInfo CameraLerpField =
             AccessTools.Field(typeof(InteractionPlayerController), "m_IsLerpingCameraRot");
+        private static readonly FieldInfo PhoneModeField =
+            AccessTools.Field(typeof(InteractionPlayerController), "m_IsPhoneScreenMode");
+        private static readonly FieldInfo DecoModeField =
+            AccessTools.Field(typeof(InteractionPlayerController), "m_IsDecoScreenMode");
 
         private static bool _ownsWalkerStop;
         private static CMF.AdvancedWalkerController _latchedWalker;
@@ -98,6 +102,26 @@ namespace CardShopCoop.Modules.SessionInput
             _ownsWalkerStop = false;
             _latchedWalker = null;
             _walkerFieldWarningLogged = false;
+        }
+
+        /// <summary>Diagnostic: logs the vanilla pause gate when the pause key is pressed, so a
+        /// report of "Escape does nothing" names the exact flag that is blocking it.</summary>
+        internal static void LogPauseGate(InteractionPlayerController controller)
+        {
+            if (controller == null)
+            {
+                CoopPlugin.Log.LogInfo("[pause] pause key pressed with no InteractionPlayerController.");
+                return;
+            }
+
+            var inUi = UiModeField != null && UiModeField.GetValue(controller) is bool u && u;
+            var phone = PhoneModeField != null && PhoneModeField.GetValue(controller) is bool p && p;
+            var deco = DecoModeField != null && DecoModeField.GetValue(controller) is bool d && d;
+            var pause = SceneRef<PauseScreen>.Get();
+            var pauseOpen = pause != null && pause.m_ScreenGrp != null && pause.m_ScreenGrp.activeSelf;
+            CoopPlugin.Log.LogInfo("[pause] pause key pressed: inUI=" + inUi + " phone=" + phone
+                + " deco=" + deco + " pauseOpen=" + pauseOpen + " windowBlocks=" + WindowBlocksInput
+                + " cheatFreeze=" + CheatMenuFreezeActive() + " role=" + CoopCore.Role + ".");
         }
 
         internal static bool PauseMenuOpen()

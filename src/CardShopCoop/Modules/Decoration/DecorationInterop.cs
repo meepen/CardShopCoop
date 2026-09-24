@@ -71,6 +71,8 @@ namespace CardShopCoop.Modules.Decoration
             typeof(InteractableObject), "Update");
         private static readonly MethodInfo MiPlaceMovedObject = ReflectionSurface.RequiredMethod(
             typeof(InteractableObject), "PlaceMovedObject");
+        private static readonly MethodInfo MiOnPlacedMovedObject = ReflectionSurface.RequiredMethod(
+            typeof(InteractableObject), "OnPlacedMovedObject");
         private static readonly MethodInfo MiOnDestroyed = ReflectionSurface.RequiredMethod(
             typeof(InteractableObject), "OnDestroyed");
         private static readonly MethodInfo MiBoxUpObject = ReflectionSurface.RequiredMethod(
@@ -169,7 +171,11 @@ namespace CardShopCoop.Modules.Decoration
                     continue;
                 }
 
-                if (!HostIds.TryGetValue(obj, out var id))
+                // Reuse the object's stable id whenever it already has one. On a guest that id
+                // comes from ClientObjects (assigned by the host); assigning a fresh synthetic id
+                // here re-keyed every mapped object and made later host deltas miss, which
+                // duplicated pieces whenever the host moved them.
+                if (!TryGetHoldId(obj, out var id))
                 {
                     id = _nextHostId++;
                     HostIds.Add(obj, id);
@@ -190,7 +196,8 @@ namespace CardShopCoop.Modules.Decoration
             return result;
         }
 
-        internal static void ApplySnapshot(DecorationStateMessage message)
+        internal static void ApplySnapshot(DecorationStateMessage message,
+            bool removeUnlisted = true)
         {
             ApplyList(FiWallUnlocks, message.WallUnlocks);
             ApplyList(FiFloorUnlocks, message.FloorUnlocks);
@@ -203,7 +210,7 @@ namespace CardShopCoop.Modules.Decoration
             SetInt(FiCeiling, message.Ceiling);
             SetInt(FiCeilingB, message.CeilingB);
             ApplyMaterials(message);
-            Reconcile(message.Placed);
+            Reconcile(message.Placed, removeUnlisted);
             RefreshUi();
         }
 
@@ -267,6 +274,22 @@ namespace CardShopCoop.Modules.Decoration
                 throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown decoration type.");
             }
             MiAddInventory.Invoke(null, new object[] { decoType, amount });
+        }
+
+        /// <summary>Sets the local count to the host-authoritative value. Buy, place and box-up
+        /// deltas all carry the resulting count, so the local list converges without polling.</summary>
+        internal static void ApplyInventoryCount(int type, int count)
+        {
+            if (count < 0 || !TryEnum(type, out _))
+            {
+                return;
+            }
+
+            var current = InventoryCount(type);
+            if (current != count)
+            {
+                MiAddInventory.Invoke(null, new object[] { (EDecoObject)type, count - current });
+            }
         }
 
         internal static bool TryBuyCategory(int category, int index, float price)
@@ -341,7 +364,10 @@ namespace CardShopCoop.Modules.Decoration
 
             InteractableObject spawned = null;
             var isExisting = existingId > 0;
-            if (isExisting && !TryFindHostObject(existingId, out spawned))
+            // Host ids live in HostIds on the authority and in ClientObjects on a guest, so an
+            // existing object must be resolved through both maps. Using only HostIds silently
+            // failed on clients and spawned a duplicate for every move the host published.
+            if (isExisting && !TryResolveHoldId(existingId, out spawned))
             {
                 return false;
             }
@@ -445,7 +471,8 @@ namespace CardShopCoop.Modules.Decoration
 
         internal static bool TryRemove(long id)
         {
-            if (id <= 0 || !TryFindHostObject(id, out var obj))
+            // Same dual-map resolution as placement: guests own their objects in ClientObjects.
+            if (id <= 0 || !TryResolveHoldId(id, out var obj))
             {
                 return false;
             }
@@ -567,7 +594,8 @@ namespace CardShopCoop.Modules.Decoration
             return obj != null || (id > 0 && TryFindHostObject(id, out obj));
         }
 
-        internal static void ApplyDelta(DecorationDeltaMessage message)
+        internal static void ApplyDelta(DecorationDeltaMessage message,
+            InteractableObject predictedPreview = null)
         {
             switch (message.Action)
             {
@@ -591,29 +619,78 @@ namespace CardShopCoop.Modules.Decoration
                 case DecorationActions.Place:
                     if (message.Pose != null)
                     {
-                        if (!TryPlace(message.Pose, message.Pose.Id, out var placed))
-                            TryPlace(message.Pose, 0, out placed);
+                        var placed = ResolvePlacement(message.Pose, predictedPreview);
                         if (placed != null)
                             ClientObjects[message.Pose.Id] = placed;
                     }
+                    ApplyInventoryCount(message.DecorationType, message.InventoryCount);
                     break;
                 case DecorationActions.Remove:
                     TryRemove(message.ObjectId);
+                    ApplyInventoryCount(message.DecorationType, message.InventoryCount);
                     break;
             }
 
             RefreshUi();
         }
 
-        internal static void RemoveLocalPreview(InteractableObject obj)
+        /// <summary>Binds an authoritative placement to a local object. A placement the guest
+        /// predicted adopts that preview instead of spawning a second piece; every other case
+        /// (join baseline, host action, late join) resolves or creates the object the usual way.</summary>
+        private static InteractableObject ResolvePlacement(DecorationPose pose,
+            InteractableObject predictedPreview)
         {
-            if (obj == null)
+            if (TryResolveHoldId(pose.Id, out var mapped))
             {
-                return;
+                DiscardPreview(predictedPreview);
+                // Never re-run StartMoveObject here: if the guest is already moving this piece
+                // (its own pickup, or a remote hold render) the call captures the temporary
+                // Ignore Raycast layer as m_OriginalLayer, and placement then restores that, so
+                // the piece becomes invisible to the interaction raycast. Apply the
+                // host-authoritative pose and finalize only if it is still mid-move.
+                FinalizePlacement(mapped, pose);
+                CoopPlugin.Log.LogInfo("[decoration] place id=" + pose.Id + " type="
+                    + pose.DecorationType + " applied-existing.");
+                return mapped;
             }
 
-            SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
-            MiOnDestroyed.Invoke(obj, null);
+            if (predictedPreview != null)
+            {
+                if (IsAdoptable(predictedPreview, pose))
+                {
+                    FinalizePlacement(predictedPreview, pose);
+                    CoopPlugin.Log.LogInfo("[decoration] place id=" + pose.Id + " type="
+                        + pose.DecorationType + " adopted preview.");
+                    return predictedPreview;
+                }
+
+                // The host's authoritative piece differs from the preview (wrong type or
+                // orientation). Retire the preview so it cannot linger, then create the real one.
+                CoopPlugin.Log.LogWarning("[decoration] place id=" + pose.Id
+                    + " preview incompatible; discarding and spawning.");
+                DiscardPreview(predictedPreview);
+            }
+
+            var spawned = TryPlace(pose, 0, out var created);
+            CoopPlugin.Log.LogInfo("[decoration] place id=" + pose.Id + " type="
+                + pose.DecorationType + " spawned ok=" + spawned + ".");
+            return spawned ? created : null;
+        }
+
+        private static bool IsAdoptable(InteractableObject obj, DecorationPose pose)
+            => obj != null
+                && Convert.ToInt32(FiObjectType.GetValue(obj)) == pose.DecorationType
+                && GetVertical(obj) == pose.Vertical;
+
+        /// <summary>Retires a predicted placement preview that never became authoritative
+        /// (a rejected or superseded intent). Settles the move lifecycle, then removes it.</summary>
+        internal static void DiscardPreview(InteractableObject obj)
+        {
+            if (obj == null)
+                return;
+            CoopPlugin.Log.LogInfo("[decoration] retiring predicted preview without confirmation.");
+            FinalizeMovedObject(obj);
+            RemoveLocalPlacedObject(obj);
         }
 
         internal static void RemoveLocalPlacedObject(InteractableObject obj)
@@ -642,6 +719,41 @@ namespace CardShopCoop.Modules.Decoration
             RebindWallBlocker(obj, pose.WarehouseWallSnap, pose.Wall);
         }
 
+        /// <summary>Applies an authoritative pose to a local decoration and, when it is still
+        /// mid-move, runs the game's own <c>OnPlacedMovedObject</c> to settle the move-preview
+        /// overlay, colliders and layer. It never calls <c>StartMoveObject</c>; doing so on an
+        /// object that is already moving would capture the temporary Ignore Raycast layer as its
+        /// original layer and leave the piece unpickable.</summary>
+        internal static void FinalizePlacement(InteractableObject obj, DecorationPose pose)
+        {
+            if (obj == null || pose == null)
+                return;
+            var moving = obj.GetIsMovingObject();
+            obj.transform.SetPositionAndRotation(pose.Position, pose.Rotation);
+            if (moving)
+            {
+                MiOnPlacedMovedObject.Invoke(obj, null);
+            }
+            RebindWallBlocker(obj, pose.WarehouseWallSnap, pose.Wall);
+        }
+
+        /// <summary>Runs the game's placement finalisation on an object being boxed while it is
+        /// still mid move. Vanilla <c>BoxUpObject</c> does this before removing the piece; skipping
+        /// it left the player controller and the move-preview overlay stuck in placement mode.</summary>
+        internal static void FinalizeMovedObject(InteractableObject obj)
+        {
+            if (obj == null || !obj.GetIsMovingObject())
+                return;
+            try
+            {
+                MiOnPlacedMovedObject.Invoke(obj, null);
+            }
+            catch (Exception exception)
+            {
+                CoopPlugin.Log.LogWarning("Decoration move finalisation failed: " + exception.Message);
+            }
+        }
+
         internal static List<InteractableObject> GetLiveDecorations()
         {
             var list = MiGetList.Invoke(null, null) as IList;
@@ -661,7 +773,7 @@ namespace CardShopCoop.Modules.Decoration
             return result;
         }
 
-        private static void Reconcile(IList<DecorationPose> poses)
+        private static void Reconcile(IList<DecorationPose> poses, bool removeUnlisted)
         {
             var used = new HashSet<InteractableObject>(new ReferenceComparer());
             var next = new Dictionary<long, InteractableObject>();
@@ -691,12 +803,28 @@ namespace CardShopCoop.Modules.Decoration
                 ApplyPose(obj, pose);
             }
 
-            for (var i = 0; i < live.Count; i++)
+            if (removeUnlisted)
             {
-                var obj = live[i];
-                if (obj != null && !used.Contains(obj) && !obj.GetIsMovingObject())
+                for (var i = 0; i < live.Count; i++)
                 {
-                    RemoveLocalPlacedObject(obj);
+                    var obj = live[i];
+                    if (obj != null && !used.Contains(obj) && !obj.GetIsMovingObject())
+                    {
+                        RemoveLocalPlacedObject(obj);
+                    }
+                }
+            }
+            else
+            {
+                // A local rollback snapshot can be older than a piece the host has since confirmed,
+                // so it must not drop host-owned mappings it does not mention. Authoritative state
+                // (removeUnlisted) still prunes everything absent from the host's snapshot.
+                foreach (var pair in ClientObjects)
+                {
+                    if (pair.Value != null && !next.ContainsKey(pair.Key))
+                    {
+                        next[pair.Key] = pair.Value;
+                    }
                 }
             }
 

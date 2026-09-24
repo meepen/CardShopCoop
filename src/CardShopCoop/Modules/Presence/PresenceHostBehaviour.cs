@@ -18,6 +18,7 @@ namespace CardShopCoop.Modules.Presence
         private readonly HashSet<int> _joined = new();
         private readonly Dictionary<int, PresenceModelEntry> _models = new();
         private readonly Dictionary<int, PresenceStateMessage> _latestStates = new();
+        private readonly Dictionary<int, PresenceHoldMessage> _latestHolds = new();
         private CoopRuntimeContext _context;
         private PresenceService _service;
         private float _stateTimer;
@@ -109,6 +110,7 @@ namespace CardShopCoop.Modules.Presence
             _joined.Remove(connection.Id);
             _models.Remove(connection.Id);
             _latestStates.Remove(connection.Id);
+            _latestHolds.Remove(connection.Id);
             _context?.PeerPresence.Clear(connection.Id);
             _service?.Remove(connection.Id);
             BroadcastRosterDelta(new PresenceRosterDeltaMessage
@@ -132,8 +134,7 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            _context.PeerPresence.RecordAuthenticatedState(context.Connection, message.Position,
-                message.Hold, message.HoldTypes);
+            _context.PeerPresence.RecordAuthenticatedPosition(context.Connection, message.Position);
             _service.ApplyState(context.Connection.Id, message);
             _latestStates[context.Connection.Id] = CloneState(message);
 
@@ -141,6 +142,33 @@ namespace CardShopCoop.Modules.Presence
             {
                 SenderId = context.Connection.Id,
                 State = CloneState(message),
+            };
+            foreach (var connectionId in ConnectionIds())
+            {
+                if (connectionId != context.Connection.Id && _joined.Contains(connectionId))
+                {
+                    _context.Send(connectionId, relay);
+                }
+            }
+        }
+
+        [MessageHandler(typeof(PresenceHoldMessage))]
+        private void HandleHold(MessageContext context, PresenceHoldMessage message)
+        {
+            if (!IsAuthenticatedSender(context) || message == null)
+            {
+                return;
+            }
+
+            _context.PeerPresence.RecordAuthenticatedHold(context.Connection, message.Hold,
+                message.HoldTypes);
+            _service.ApplyHold(context.Connection.Id, message);
+            _latestHolds[context.Connection.Id] = CloneHold(message);
+
+            var relay = new PresenceRelayHoldMessage
+            {
+                SenderId = context.Connection.Id,
+                Hold = CloneHold(message),
             };
             foreach (var connectionId in ConnectionIds())
             {
@@ -270,6 +298,25 @@ namespace CardShopCoop.Modules.Presence
                     State = CloneState(pair.Value),
                 });
             }
+
+            if (_latestHolds.TryGetValue(0, out var hostHold))
+            {
+                _context.Send(connectionId, CloneHold(hostHold));
+            }
+
+            foreach (var pair in _latestHolds)
+            {
+                if (pair.Key == 0 || pair.Key == connectionId || !_joined.Contains(pair.Key))
+                {
+                    continue;
+                }
+
+                _context.Send(connectionId, new PresenceRelayHoldMessage
+                {
+                    SenderId = pair.Key,
+                    Hold = CloneHold(pair.Value),
+                });
+            }
         }
 
         private void PublishLocalState(float deltaTime)
@@ -284,6 +331,20 @@ namespace CardShopCoop.Modules.Presence
             _stateTimer = 0f;
             _latestStates[0] = CloneState(state);
             _context.Broadcast(state);
+            PublishLocalHold();
+        }
+
+        /// <summary>Broadcasts the host's hold appearance only when it changes, on the reliable
+        /// lane. The 15 Hz transform broadcast stays fixed-size.</summary>
+        private void PublishLocalHold()
+        {
+            if (!_service.TryConsumeLocalHoldChange(out var hold))
+            {
+                return;
+            }
+
+            _latestHolds[0] = CloneHold(hold);
+            _context.Broadcast(hold);
         }
 
         private void OnLocalModelChanged(PresenceModelEntry model)
@@ -442,9 +503,18 @@ namespace CardShopCoop.Modules.Presence
                     CameraPosition = state.CameraPosition,
                     CameraRotation = state.CameraRotation,
                     Speed = state.Speed,
-                    Hold = state.Hold,
-                    HoldTypes = state.HoldTypes == null ? null : new List<int>(state.HoldTypes),
-                    HoldCards = state.HoldCards == null ? null : new List<CardData>(state.HoldCards),
+                };
+        }
+
+        private static PresenceHoldMessage CloneHold(PresenceHoldMessage hold)
+        {
+            return hold == null
+                ? null
+                : new PresenceHoldMessage
+                {
+                    Hold = hold.Hold,
+                    HoldTypes = hold.HoldTypes == null ? null : new List<int>(hold.HoldTypes),
+                    HoldCards = hold.HoldCards == null ? null : new List<CardData>(hold.HoldCards),
                 };
         }
 

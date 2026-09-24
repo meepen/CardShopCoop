@@ -103,6 +103,7 @@ namespace CardShopCoop.Modules.Presence
 
             _joined = true;
             _modelPending = true;
+            _service.InvalidateLocalHold();
             SendLocalModel();
         }
 
@@ -200,6 +201,28 @@ namespace CardShopCoop.Modules.Presence
             }
 
             _service.ApplyState(1000 + message.SenderId, message.State);
+        }
+
+        [MessageHandler(typeof(PresenceHoldMessage))]
+        private void HandleHostHold(MessageContext context, PresenceHoldMessage message)
+        {
+            if (message == null)
+            {
+                return;
+            }
+
+            _service.ApplyHold(1, message);
+        }
+
+        [MessageHandler(typeof(PresenceRelayHoldMessage))]
+        private void HandleRelayHold(MessageContext context, PresenceRelayHoldMessage message)
+        {
+            if (message?.Hold == null)
+            {
+                return;
+            }
+
+            _service.ApplyHold(1000 + message.SenderId, message.Hold);
         }
 
         [MessageHandler(typeof(PresenceModelStateMessage))]
@@ -441,6 +464,23 @@ namespace CardShopCoop.Modules.Presence
 
             _stateTimer = 0f;
             _context.Send(1, state);
+            PublishLocalHold();
+        }
+
+        /// <summary>Sends the hold appearance only when it changes, on the reliable lane. It must
+        /// not ride the 15 Hz transform stream: the verbose CardData list does not fit the
+        /// unreliable MTU once a hand fills up.</summary>
+        private void PublishLocalHold()
+        {
+            if (!CanSendIntent())
+            {
+                return;
+            }
+
+            if (_service.TryConsumeLocalHoldChange(out var hold))
+            {
+                _context.Send(1, hold);
+            }
         }
 
         private bool CanSendIntent()

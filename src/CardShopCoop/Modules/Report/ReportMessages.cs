@@ -90,4 +90,21 @@ namespace CardShopCoop.Modules.Report
         public EItemType ItemType;
         public string CustomerName;
     }
+
+    /// <summary>Guest intent: this player pressed Next Day and is ready for the day to roll over.
+    /// The host advances only once every connected player has readied.</summary>
+    [NetworkMessage]
+    public sealed class ReportNextDayReadyMessage : INetMessage
+    {
+    }
+
+    /// <summary>Host view of the end-of-day ready gate: the names of the players who have not
+    /// pressed Next Day yet. <see cref="Active"/> is false while no gate is running (nobody has
+    /// pressed, or the day already advanced), which tells guests to clear their waiting notice.</summary>
+    [NetworkMessage]
+    public sealed class ReportNextDayWaitMessage : INetMessage
+    {
+        public bool Active;
+        public List<string> Pending = new();
+    }
 }

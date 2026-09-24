@@ -108,6 +108,11 @@ namespace CardShopCoop.Modules.Pricing
                 || !PricingInterop.ValidCard(message.Card)
                 || !PricingInterop.ValidPrice(message.Price) || message.EncodedGrade < 0)
             {
+                CoopPlugin.Log.LogWarning("[pricing] rejected card intent: card="
+                    + (message?.Card == null ? "null" : Describe(message.Card))
+                    + " valid=" + (message?.Card != null && PricingInterop.ValidCard(message.Card))
+                    + " price=" + (message?.Price ?? -1f) + " grade=" + (message?.EncodedGrade ?? -1)
+                    + ".");
                 Reject(context, message?.PredictionId ?? Guid.Empty);
                 return;
             }
@@ -116,6 +121,9 @@ namespace CardShopCoop.Modules.Pricing
             if (key == null || !WorldCardInteraction.TryGetDisplayedCard(message.Card,
                 message.EncodedGrade, out var displayed))
             {
+                CoopPlugin.Log.LogWarning("[pricing] rejected card intent: not displayed card="
+                    + Describe(message.Card) + " key=" + (key ?? "null") + " grade="
+                    + message.EncodedGrade + ".");
                 Reject(context, message.PredictionId);
                 return;
             }
@@ -124,6 +132,12 @@ namespace CardShopCoop.Modules.Pricing
             if (canonical == null || GradingApi.Encoded(canonical) != message.EncodedGrade
                 || !TrySetCard(canonical, message.Price, out var actual))
             {
+                CoopPlugin.Log.LogWarning("[pricing] rejected card intent: set failed card="
+                    + Describe(message.Card) + " requestedGrade=" + message.EncodedGrade
+                    + " canonicalGrade=" + (canonical == null ? -1
+                        : GradingApi.Encoded(canonical)) + " requestedPrice=" + message.Price
+                    + " actualPrice=" + (canonical == null ? -1f : PricingInterop.ReadCard(canonical))
+                    + ".");
                 Reject(context, message.PredictionId);
                 return;
             }
@@ -132,6 +146,15 @@ namespace CardShopCoop.Modules.Pricing
             _cards[key] = new OwnedCardState { Card = canonical, Price = actual };
             BroadcastCardDelta(message.PredictionId, canonical, actual, false);
         }
+
+        private static string Describe(CardData card)
+            => card == null ? "null"
+                : (int)card.expansionType + "/" + (int)card.monsterType + "/"
+                + (int)card.borderType + "/foil=" + (card.isFoil ? 1 : 0)
+                + "/destiny=" + (card.isDestiny ? 1 : 0)
+                + "/champ=" + (card.isChampionCard ? 1 : 0)
+                + "/grade=" + card.cardGrade + "/saveIndex="
+                + (PricingInterop.SafeSaveIndex(card));
 
         internal static bool Submit(SetItemPriceScreen screen)
         {

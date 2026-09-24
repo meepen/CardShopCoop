@@ -72,3 +72,7 @@ The repo bundles a helper to get a game version from a game path:
 python scripts\game-version.py            # game + Unity version, and the suggested dir name
 python scripts\game-version.py --quiet     # just the version, for scripts/CI
 ```
+
+## Code standards
+1. No polling or timers. Prefer event driven always.
+2. Harmony is proven and not the issue.

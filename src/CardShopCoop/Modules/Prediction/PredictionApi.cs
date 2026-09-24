@@ -96,6 +96,21 @@ namespace CardShopCoop.Modules.Prediction
             Reconcile(prediction, apply);
         }
 
+        /// <summary>Client side: applies a result that <b>confirms</b> the predicted action, retiring
+        /// the prediction without undoing or replaying it. The optimistic apply already equals the
+        /// accepted state, so running its inverse first (what <see cref="ApplyAuthoritative"/> does)
+        /// would visibly roll the action back and re-perform it. Use
+        /// <see cref="ApplyAuthoritative"/> when the incoming state can contradict the prediction,
+        /// and <see cref="Rollback(Guid)"/> when the host rejected it.</summary>
+        public static void ApplyConfirmed(Guid predictionId, Action apply)
+        {
+            if (apply == null)
+                throw new ArgumentNullException(nameof(apply));
+
+            ConfirmSuperseded(predictionId);
+            apply();
+        }
+
         public static void ConfirmSuperseded(Guid predictionId)
         {
             if (predictionId == Guid.Empty || !ById.TryGetValue(predictionId, out var prediction))

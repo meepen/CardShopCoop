@@ -352,6 +352,7 @@ namespace CardShopCoop.Modules.World
 
         private readonly Action<INetMessage> _broadcast;
         private readonly Action<int, INetMessage> _send;
+        private readonly Func<bool> _inGame;
         private readonly bool _host;
         private bool _applying;
         private int _playerMutationDepth;
@@ -366,7 +367,7 @@ namespace CardShopCoop.Modules.World
             public Vector3 ShelfPosition;
         }
 
-        internal ShelfInteraction(Action<INetMessage> broadcast)
+        internal ShelfInteraction(Action<INetMessage> broadcast, Func<bool> inGame)
         {
             if (broadcast == null)
             {
@@ -375,6 +376,7 @@ namespace CardShopCoop.Modules.World
 
             _host = true;
             _broadcast = broadcast;
+            _inGame = inGame;
         }
 
         internal ShelfInteraction(Action<int, INetMessage> send)
@@ -409,8 +411,15 @@ namespace CardShopCoop.Modules.World
         internal LocalMutation CaptureLocalMutation(ShelfCompartment compartment, bool isAdd,
             EItemType requestedType, Item item)
         {
-            if (_applying || _playerMutationDepth == 0 || !IsPlayerShelf(compartment)
-                || (_host ? _broadcast == null : _send == null))
+            // The host mirrors every in-game player-shelf mutation it performs, not only the ones
+            // inside a local-player scope: NPC customers (and workers) take/return items outside
+            // that scope, so gating on the player scope silently dropped their shelf updates. The
+            // client still only forwards its own player mutations. _applying keeps a mirrored
+            // apply (and the load-time shelf population) from being echoed back.
+            if (_applying || !IsPlayerShelf(compartment)
+                || (_host
+                    ? _broadcast == null || _inGame == null || !_inGame()
+                    : _send == null || _playerMutationDepth == 0))
             {
                 return default;
             }

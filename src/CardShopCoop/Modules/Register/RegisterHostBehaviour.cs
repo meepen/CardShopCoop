@@ -145,6 +145,12 @@ namespace CardShopCoop.Modules.Register
 
                 if (station.Owner != connection.Id || !Apply(counter, message))
                 {
+                    if (station.Owner != connection.Id)
+                    {
+                        LogIntentReject("station owner " + station.Owner + " != sender "
+                            + connection.Id, message);
+                    }
+
                     Reject(connection.Id, message.PredictionId);
                     return;
                 }
@@ -178,6 +184,7 @@ namespace CardShopCoop.Modules.Register
                 case RegisterIntentKind.ScanItem:
                     if (counter.m_CashierCounterState != ECashierCounterState.ScanningItem)
                     {
+                        LogIntentReject("counter state " + counter.m_CashierCounterState, message);
                         return false;
                     }
 
@@ -186,6 +193,12 @@ namespace CardShopCoop.Modules.Register
                         || items[message.Slot].m_InteractableScanItem == null
                         || !items[message.Slot].m_InteractableScanItem.IsNotScanned())
                     {
+                        LogIntentReject("slot=" + message.Slot + " bagItems="
+                            + (items?.Count ?? -1) + " alreadyScanned="
+                            + (items != null && message.Slot >= 0 && message.Slot < items.Count
+                                && items[message.Slot]?.m_InteractableScanItem != null
+                                && !items[message.Slot].m_InteractableScanItem.IsNotScanned()),
+                            message);
                         return false;
                     }
 
@@ -195,6 +208,7 @@ namespace CardShopCoop.Modules.Register
                 case RegisterIntentKind.ScanCard:
                     if (counter.m_CashierCounterState != ECashierCounterState.ScanningItem)
                     {
+                        LogIntentReject("counter state " + counter.m_CashierCounterState, message);
                         return false;
                     }
 
@@ -202,6 +216,12 @@ namespace CardShopCoop.Modules.Register
                     if (message.Slot < 0 || message.Slot >= cards.Count || cards[message.Slot] == null
                         || !cards[message.Slot].IsNotScanned())
                     {
+                        LogIntentReject("slot=" + message.Slot + " bagCards="
+                            + (cards?.Count ?? -1) + " alreadyScanned="
+                            + (cards != null && message.Slot >= 0 && message.Slot < cards.Count
+                                && cards[message.Slot] != null
+                                && !cards[message.Slot].IsNotScanned()),
+                            message);
                         return false;
                     }
 
@@ -562,6 +582,18 @@ namespace CardShopCoop.Modules.Register
             delta.Slot = change.m_Index;
             delta.IsCoin = change.m_IsCoin;
             delta.Value = change.m_ValueDouble;
+            // The client gates Scan and Change on the station's customer identity (see
+            // RequiresCustomer); without the index/generation here every change delta was
+            // deferred and never applied, so money added or removed at the counter never
+            // reached the other player.
+            var customer = counter.m_CurrentCustomer;
+            delta.HasCustomer = customer != null;
+            if (customer != null)
+            {
+                delta.CustomerIndex = RegisterInterop.CustomerIndex(customer);
+                delta.CustomerGeneration = (int)Observe(index, counter).CustomerGeneration;
+            }
+
             // ChangeCount and the phase fields are absolute results. The client must not
             // replay the click direction after deferred compaction.
             delta.ChangeCount = RegisterInterop.GivenAmount(change);
@@ -628,6 +660,10 @@ namespace CardShopCoop.Modules.Register
                 _context.Broadcast(delta);
             }
         }
+
+        private static void LogIntentReject(string reason, RegisterIntentMessage message)
+            => CoopPlugin.Log.LogWarning("[register] rejected " + message?.Kind + " counter="
+                + (message?.Counter ?? 255) + " slot=" + (message?.Slot ?? -1) + ": " + reason);
 
         private void Reject(int connectionId, Guid predictionId)
         {

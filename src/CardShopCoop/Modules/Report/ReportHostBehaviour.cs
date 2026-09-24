@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Hud;
+using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -25,6 +27,12 @@ namespace CardShopCoop.Modules.Report
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
+        private readonly HashSet<int> _nextDayParticipants = new();
+        private readonly HashSet<int> _nextDayReadyPeers = new();
+        private bool _nextDayHostReady;
+        private bool _nextDayGateActive;
+        private bool _advancingNextDay;
+        private bool _nextDayAdvancing;
 
         private void OnEnable()
         {
@@ -34,14 +42,19 @@ namespace CardShopCoop.Modules.Report
             }
 
             _context = RuntimeContext;
+            var handlersRegistered = false;
             try
             {
+                _context.Messages.RegisterAttributedHandlers(this);
+                handlersRegistered = true;
                 _active = this;
                 _harmony = new Harmony("com.zwhit.cardshopcoop.report.host");
                 Patch(typeof(ReportOpenPatch));
                 Patch(typeof(ReviewAddPatch));
                 Patch(typeof(ReportMutationPatch));
                 Patch(typeof(NextDayCoroutinePatch));
+                Patch(typeof(NextDayGatePatch));
+                Patch(typeof(ShowGoNextDayPatch));
                 Patch(typeof(TournamentEntryMutationPatch));
             }
             catch (Exception error)
@@ -49,6 +62,11 @@ namespace CardShopCoop.Modules.Report
                 CoopPlugin.Log.LogError("Report host initialization failed: " + error);
                 _harmony?.UnpatchSelf();
                 _harmony = null;
+                if (handlersRegistered)
+                {
+                    _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
@@ -67,13 +85,202 @@ namespace CardShopCoop.Modules.Report
         [OnFullyJoined]
         private void SendJoinBaseline(PeerConnection connection)
         {
-            if (_shutdown || connection == null || !IsJoinPhase(connection.State)
-                || !_context.InGame())
+            if (_shutdown || connection == null || !IsJoinPhase(connection.State))
+            {
+                return;
+            }
+
+            _nextDayParticipants.Add(connection.Id);
+            if (_nextDayGateActive)
+            {
+                // A late joiner becomes a required reader mid-gate; make sure everyone sees them
+                // in the pending list instead of the day silently stalling.
+                BroadcastNextDayWait();
+            }
+
+            if (!_context.InGame())
             {
                 return;
             }
 
             _context.Send(connection.Id, BuildFullState());
+        }
+
+        [OnClientDisconnected]
+        private void ForgetConnection(PeerConnection connection, DisconnectInfo info)
+        {
+            if (_shutdown || connection == null)
+            {
+                return;
+            }
+
+            var wasParticipant = _nextDayParticipants.Remove(connection.Id);
+            _nextDayReadyPeers.Remove(connection.Id);
+            if (!wasParticipant || !_nextDayGateActive)
+            {
+                return;
+            }
+
+            if (AllNextDayReady())
+            {
+                AdvanceNextDay();
+            }
+            else
+            {
+                BroadcastNextDayWait();
+            }
+        }
+
+        /// <summary>A guest is ready for the day to roll. The host records it and advances only
+        /// once every connected player has readied.</summary>
+        [MessageHandler(typeof(ReportNextDayReadyMessage))]
+        private void HandleNextDayReady(MessageContext context, ReportNextDayReadyMessage message)
+        {
+            if (_shutdown || _nextDayAdvancing || !_context.InGame() || context?.Connection == null)
+            {
+                return;
+            }
+
+            var id = context.Connection.Id;
+            if (!_nextDayParticipants.Contains(id) || !_nextDayReadyPeers.Add(id))
+            {
+                return;
+            }
+
+            _nextDayGateActive = true;
+            if (AllNextDayReady())
+            {
+                AdvanceNextDay();
+            }
+            else
+            {
+                BroadcastNextDayWait();
+            }
+        }
+
+        /// <summary>Host-side gate for its own Next Day press: record the host's readiness and only
+        /// let the vanilla advance run once every player has readied.</summary>
+        private bool HostPressNextDay()
+        {
+            if (_shutdown || _context == null || !_context.InGame())
+            {
+                return true;
+            }
+
+            if (_nextDayAdvancing)
+            {
+                return false;
+            }
+
+            _nextDayHostReady = true;
+            _nextDayGateActive = true;
+            if (AllNextDayReady())
+            {
+                AdvanceNextDay();
+                return false;
+            }
+
+            BroadcastNextDayWait();
+            return false;
+        }
+
+        private bool AllNextDayReady()
+        {
+            if (!_nextDayHostReady)
+            {
+                return false;
+            }
+
+            foreach (var id in _nextDayParticipants)
+            {
+                if (!_nextDayReadyPeers.Contains(id))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void AdvanceNextDay()
+        {
+            ResetNextDayGate();
+            var screen = SceneRef<EndOfDayReportScreen>.Get();
+            if (screen == null)
+            {
+                BroadcastNextDayWait();
+                return;
+            }
+
+            // Hold the gate shut until the roll-over coroutine finishes so a re-press during the
+            // loading screen cannot re-arm it and leave a stale waiting notice on the new day.
+            _nextDayAdvancing = true;
+            _advancingNextDay = true;
+            try
+            {
+                // The host's vanilla roll-over closes the recap (which PublishClose already
+                // broadcasts), advances the day and charges the event fee. The guest mirrors that
+                // by playing the same loading overlay when the close arrives; nothing extra to send.
+                screen.OnPressGoNextDay();
+            }
+            finally
+            {
+                _advancingNextDay = false;
+            }
+
+            BroadcastNextDayWait();
+        }
+
+        internal void OnNextDayCoroutineCompleted()
+        {
+            _nextDayAdvancing = false;
+        }
+
+        private void ResetNextDayGate()
+        {
+            _nextDayHostReady = false;
+            _nextDayGateActive = false;
+            _nextDayReadyPeers.Clear();
+        }
+
+        private void BroadcastNextDayWait()
+        {
+            if (_shutdown || _context == null || !_context.InGame())
+            {
+                return;
+            }
+
+            var pending = BuildPendingNextDayNames();
+            var showHostWait = _nextDayHostReady && pending.Count > 0;
+            HudApi.SetNextDayWait(showHostWait,
+                showHostWait ? "Waiting for: " + string.Join(", ", pending) : "");
+            _context.Broadcast(new ReportNextDayWaitMessage
+            {
+                Active = _nextDayGateActive,
+                Pending = pending,
+            });
+        }
+
+        private List<string> BuildPendingNextDayNames()
+        {
+            var pending = new List<string>();
+            if (!_nextDayHostReady)
+            {
+                pending.Add(PresenceApi.LocalPlayerName);
+            }
+
+            foreach (var id in _nextDayParticipants)
+            {
+                if (_nextDayReadyPeers.Contains(id))
+                {
+                    continue;
+                }
+
+                var name = _context.PeerName?.Invoke(id);
+                pending.Add(string.IsNullOrWhiteSpace(name) ? "Player " + id : name);
+            }
+
+            return pending;
         }
 
         private static bool IsJoinPhase(ConnectionState state)
@@ -299,6 +506,7 @@ namespace CardShopCoop.Modules.Report
             }
 
             _shutdown = true;
+            _context?.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
@@ -306,6 +514,13 @@ namespace CardShopCoop.Modules.Report
                 _active = null;
             }
 
+            _nextDayParticipants.Clear();
+            _nextDayReadyPeers.Clear();
+            _nextDayHostReady = false;
+            _nextDayGateActive = false;
+            _advancingNextDay = false;
+            _nextDayAdvancing = false;
+            HudApi.SetNextDayWait(false, "");
             _context = null;
         }
 
@@ -394,6 +609,41 @@ namespace CardShopCoop.Modules.Report
         }
 
         /// <summary>
+        /// Gates the host's own Next Day press on every player being ready. While players are
+        /// still pending the vanilla advance is suppressed and the wait state is broadcast;
+        /// <see cref="AdvanceNextDay"/> re-enters the vanilla method with the gate bypassed.
+        /// </summary>
+        [HarmonyPatch(typeof(EndOfDayReportScreen), "OnPressGoNextDay")]
+        private static class NextDayGatePatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix()
+            {
+                var host = _active;
+                if (host == null || host._shutdown || host._advancingNextDay)
+                {
+                    return true;
+                }
+
+                return host.HostPressNextDay();
+            }
+        }
+
+        /// <summary>
+        /// With the recap already open, the Enter/GoNextDay key belongs to the recap's own Next Day
+        /// action. The vanilla <c>ShowGoNextDayScreen</c> would call <c>OpenScreen</c>, which closes
+        /// an already-open recap, so suppress it while the recap is up. With the recap closed this
+        /// still runs vanilla, which is the first Enter that opens the menu.
+        /// </summary>
+        [HarmonyPatch(typeof(InteractionPlayerController), "ShowGoNextDayScreen")]
+        private static class ShowGoNextDayPatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix()
+                => _active == null || _active._shutdown || !EndOfDayReportScreen.IsActive();
+        }
+
+        /// <summary>
         /// DelayGoNextDay is an iterator. A normal postfix runs when the iterator is created,
         /// before the wait and before the host event fee is applied. Observe the completed step
         /// and relay the money section only after the coroutine actually changed it.
@@ -417,6 +667,7 @@ namespace CardShopCoop.Modules.Report
                     var beforeSupplyCost = CPlayerData.m_GameReportDataCollect.supplyCost;
                     if (!inner.MoveNext())
                     {
+                        _active?.OnNextDayCoroutineCompleted();
                         yield break;
                     }
 

@@ -26,7 +26,10 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(BoxDestroyedMessage))]
         private void HandleBoxDestroyed(MessageContext context, BoxDestroyedMessage message)
         {
-            WorldPrediction.ApplyAuthoritative(message,
+            // A destroy echo names exactly the box the guest asked to destroy (a rejected request
+            // comes back as a prediction rollback), so it confirms the prediction; reconciling
+            // would first respawn the optimistic descriptor for no reason.
+            WorldPrediction.ApplyConfirmed(message,
                 () => _boxNetworkInteraction.ClientApplyDestroyed(message));
         }
 

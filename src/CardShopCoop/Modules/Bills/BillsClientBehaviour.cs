@@ -82,7 +82,9 @@ namespace CardShopCoop.Modules.Bills
             if (_shutdown)
                 return;
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () => ApplyDelta(message));
+            // Host pays the exact bill the guest asked to pay and reads back the zeroed values
+            // (a rejected payment rolls the prediction back), so this confirms the prediction.
+            PredictionApi.ApplyConfirmed(message.PredictionId, () => ApplyDelta(message));
         }
 
         [MessageHandler(typeof(BillPopupMessage))]

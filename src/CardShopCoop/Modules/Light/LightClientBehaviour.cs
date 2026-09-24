@@ -83,7 +83,9 @@ namespace CardShopCoop.Modules.Light
                 return;
 
             var pending = _pendingState;
-            PredictionApi.ApplyAuthoritative(pending.PredictionId,
+            // The host applies the guest's absolute requested bool and echoes it, so this delta
+            // confirms the toggle; reconciling would flip the switch back first.
+            PredictionApi.ApplyConfirmed(pending.PredictionId,
                 () => LightSwitchState.Apply(pending.IsActive));
             _pendingState = null;
         }

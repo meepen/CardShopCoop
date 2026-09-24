@@ -867,9 +867,8 @@ namespace CardShopCoop.Modules.Presence
             return found;
         }
 
-        public void UpdateState(int connId, Vector3 pos, float yaw, byte holdState,
-            Vector3 cameraPosition = default(Vector3), Quaternion cameraRotation = default(Quaternion),
-            List<int> holdTypes = null, List<CardData> holdCards = null)
+        public void UpdateState(int connId, Vector3 pos, float yaw,
+            Vector3 cameraPosition = default(Vector3), Quaternion cameraRotation = default(Quaternion))
         {
             if (!_avatars.TryGetValue(connId, out var av))
             {
@@ -905,32 +904,6 @@ namespace CardShopCoop.Modules.Presence
             av.CameraPosition = cameraPosition;
             av.CameraRotation = cameraRotation == default(Quaternion) ? Quaternion.identity : cameraRotation;
             av.HasCamera = cameraRotation != default(Quaternion);
-            av.HoldState = holdState;
-            // THE HOLD PAYLOAD IS ALREADY IN LOCAL IDS: PresenceStateJsonConverter built it
-            // with CatalogIdMap, which is the one and only translation boundary for
-            // these values. Do NOT translate again here - a second FromWire on an
-            // already-local id is how a modded product turns into the wrong prop (or into
-            // None). This loop is a plain copy into the avatar's OWN list (not aliased: the
-            // host relays the sender's list on to the other clients verbatim).
-            // An item from a content pack this PC does not have already arrived as
-            // EItemType.None, and the hold-prop loop tests for that sentinel BY VALUE: note
-            // that GetItemMeshData(None) hands back a BLANK but non-null ItemMeshData, so a
-            // "meshData == null" check alone would NOT skip it. Skipped explicitly, the avatar
-            // carries one item fewer and nothing is destroyed.
-            av.HoldTypes.Clear();
-            if (holdTypes != null)
-            {
-                // hold state 1 packs [isBigBox flag, product EItemType]: slot 0 is a BOOL,
-                // not an id, and must never be translated. ReadHoldPayload already honours
-                // that (the flag is 0/1, far below CatalogIdMap's modded floor, so its
-                // Msg.ReadItemType pass is the identity function) - and nothing here
-                // translates at all, so the copy is uniform.
-                for (var i = 0; i < holdTypes.Count; i++)
-                {
-                    av.HoldTypes.Add(holdTypes[i]);
-                }
-            }
-            av.HoldCards = holdCards == null ? null : new List<CardData>(holdCards);
             av.HasState = true;
 
             av.SnapHead = (av.SnapHead + 1) % SnapBufferSize;
@@ -940,7 +913,49 @@ namespace CardShopCoop.Modules.Presence
                 av.SnapCount++;
             }
 
-            // Hold signatures are built here, at packet rate (<=15 Hz): strings are fine at
+            if (!av.EverPositioned && av.Go != null)
+            {
+                av.Go.transform.position = pos;
+                av.EverPositioned = true;
+            }
+        }
+
+        /// <summary>Applies the discrete hold appearance. It arrives on the reliable lane only
+        /// when it changes, so this also rebuilds the cached hold signatures that Tick compares.
+        /// THE HOLD PAYLOAD IS ALREADY IN LOCAL IDS: PresenceHoldJsonConverter built it with
+        /// CatalogIdMap, which is the one and only translation boundary for these values. Do NOT
+        /// translate again here - a second FromWire on an already-local id is how a modded product
+        /// turns into the wrong prop (or into None). This is a plain copy into the avatar's OWN
+        /// list, not aliased: the host relays the sender's list on to the other clients verbatim.
+        /// An item from a content pack this PC does not have already arrived as EItemType.None,
+        /// and the hold-prop loop tests for that sentinel BY VALUE: note that GetItemMeshData(None)
+        /// hands back a BLANK but non-null ItemMeshData, so a "meshData == null" check alone would
+        /// NOT skip it. Skipped explicitly, the avatar carries one item fewer and nothing is
+        /// destroyed.</summary>
+        public void UpdateHold(int connId, byte holdState, List<int> holdTypes, List<CardData> holdCards)
+        {
+            if (!_avatars.TryGetValue(connId, out var av))
+            {
+                av = new RemoteAvatar();
+                _avatars[connId] = av;
+            }
+            av.HoldState = holdState;
+            av.HoldTypes.Clear();
+            if (holdTypes != null)
+            {
+                // hold state 1 packs [isBigBox flag, product EItemType]: slot 0 is a BOOL,
+                // not an id, and must never be translated. PresenceHoldMessage already honours
+                // that (the flag is 0/1, far below CatalogIdMap's modded floor, so its
+                // Msg.ReadItemType pass is the identity function) - and nothing here
+                // translates at all, so the copy is uniform.
+                for (var i = 0; i < holdTypes.Count; i++)
+                {
+                    av.HoldTypes.Add(holdTypes[i]);
+                }
+            }
+            av.HoldCards = holdCards == null ? null : new List<CardData>(holdCards);
+
+            // Hold signatures are built here, at appearance-change rate: strings are fine at
             // this cadence, and Tick then only compares cached strings so rendering never
             // allocates while something is carried (steady per-frame garbage was a GC-stutter
             // source on the joiner).
@@ -964,12 +979,6 @@ namespace CardShopCoop.Modules.Presence
 
             av.PendingItemSig = holdState == 2 && av.HoldTypes.Count > 0
                 ? string.Join(",", av.HoldTypes) : "";
-
-            if (!av.EverPositioned && av.Go != null)
-            {
-                av.Go.transform.position = pos;
-                av.EverPositioned = true;
-            }
         }
 
         public bool TryGetPlacementCamera(int connId, out Vector3 position, out Quaternion rotation)

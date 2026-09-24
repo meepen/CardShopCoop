@@ -1,4 +1,3 @@
-using System;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -21,7 +20,6 @@ namespace CardShopCoop.Modules.GameTime
         private Harmony _harmony;
         private DayTimeMessage _pendingMessage;
         private bool _shutdown;
-        private bool _worldReady;
 
         private void OnEnable()
         {
@@ -32,7 +30,6 @@ namespace CardShopCoop.Modules.GameTime
 
             _context = RuntimeContext;
             _active = this;
-            _worldReady = GameTimeInterop.IsSceneReady(GameTimeInterop.FindSceneManager());
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
             _harmony = new Harmony("com.zwhit.cardshopcoop.game-time.client");
@@ -54,12 +51,8 @@ namespace CardShopCoop.Modules.GameTime
             TryApplyPending();
         }
 
-        private void Apply(DayTimeMessage message)
+        private static void Apply(LightManager manager, DayTimeMessage message)
         {
-            var manager = GameTimeInterop.FindSceneManager();
-            if (!GameTimeInterop.IsSceneReady(manager))
-                throw new InvalidOperationException("Game-time scene became unavailable while applying host state.");
-
             var morningReset = message.Hour == 8 && message.Minute == 0 && !message.HasDayEnded
                 && !message.ShopOnceOpen;
             CPlayerData.m_CurrentDay = message.Day;
@@ -83,33 +76,36 @@ namespace CardShopCoop.Modules.GameTime
 
         private void TryApplyPending()
         {
-            if (_shutdown || !_worldReady || !_context.InGame() || _pendingMessage == null)
+            if (_shutdown || _pendingMessage == null || _context == null || !_context.InGame())
             {
                 return;
             }
 
+            // The clock surface belongs to the scene's LightManager, and it is not usable until the
+            // game has finished restoring it (m_FinishLoading, set by LightManager.Init). The join
+            // baseline or a correction can land during the world load, so the latest message is
+            // retained here and applied by the LightManager init hook below once the clock is live.
+            // Treating this ordinary lifecycle gap as fatal used to disconnect the guest mid-join.
+            var manager = GameTimeInterop.FindSceneManager();
+            if (!GameTimeInterop.IsSceneReady(manager))
+            {
+                CoopPlugin.Log.LogDebug("game-time baseline held until the world clock is ready.");
+                return;
+            }
+
             var pending = _pendingMessage;
-            Apply(pending);
+            Apply(manager, pending);
             _pendingMessage = null;
         }
 
         private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _)
-        {
-            _worldReady = true;
-            TryApplyPending();
-        }
+            => TryApplyPending();
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
-        {
-            _worldReady = GameTimeInterop.IsSceneReady(GameTimeInterop.FindSceneManager());
-            TryApplyPending();
-        }
+            => TryApplyPending();
 
         private void OnLightManagerReady()
-        {
-            _worldReady = true;
-            TryApplyPending();
-        }
+            => TryApplyPending();
 
         [OnClientDisconnected]
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
@@ -141,7 +137,6 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             _pendingMessage = null;
-            _worldReady = false;
             _context = null;
         }
 

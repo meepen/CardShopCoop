@@ -92,16 +92,39 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
-            change.ResetAmountGiven();
-            for (var i = 0; i < amount; i++)
+            amount = Math.Max(0, amount);
+            var current = GivenAmount(change);
+            if (current == amount)
             {
-                change.OnMouseButtonUp();
+                // The optimistic prediction (or an earlier delta) already produced this absolute
+                // count. ResetAmountGiven only clears m_GivenAmount and the stack visuals - it does
+                // NOT undo OnGiveChange, so replaying OnMouseButtonUp here called OnGiveChange a
+                // second time and double-counted the counter's change value and coin/bill counters.
+                return;
+            }
+
+            // Apply the difference with the game's own methods so m_GivenAmount, the stack
+            // visuals, OnGiveChange and the coin/bill added counters all move together and the
+            // net result equals the authoritative absolute count.
+            if (current < amount)
+            {
+                for (var i = current; i < amount; i++)
+                {
+                    change.OnMouseButtonUp();
+                }
+            }
+            else
+            {
+                for (var i = amount; i < current; i++)
+                {
+                    change.OnRightMouseButtonUp();
+                }
             }
 
             // The loop only materializes the game's stack visuals when the counter is currently
             // accepting change. The field write makes the resulting denomination count exact
             // even when this absolute delta arrives after the phase has already advanced.
-            Write(change, "m_GivenAmount", Math.Max(0, amount));
+            Write(change, "m_GivenAmount", amount);
         }
 
         internal static int CustomerIndex(Customer customer)
@@ -218,6 +241,35 @@ namespace CardShopCoop.Modules.Register
             customer.m_CustomerCash.gameObject.SetActive(false);
         }
 
+        /// <summary>Returns the credit card machine to its resting spot and hides the hand-held
+        /// card model. Mirrors the card half of vanilla <c>OnPressSpaceBar</c>, which only runs
+        /// when the local player is standing at the counter. The client needs it too when a
+        /// prediction is rolled back so a later re-entry into giving change cannot capture the
+        /// already-moved machine as its "original" position.</summary>
+        internal static void RestoreCreditCardMachine(InteractableCashierCounter counter)
+        {
+            if (counter == null)
+            {
+                return;
+            }
+
+            var machine = counter.m_CreditCardMachineModel;
+            if (machine != null)
+            {
+                if (Read(counter, "m_CreditCardMachineOriginalPos") is Vector3 position)
+                {
+                    machine.position = position;
+                }
+
+                if (Read(counter, "m_CreditCardMachineOriginalRot") is Quaternion rotation)
+                {
+                    machine.rotation = rotation;
+                }
+            }
+
+            counter.m_CreditCardModel?.SetActive(false);
+        }
+
         internal static void ResetCheckoutVisuals(InteractableCashierCounter counter)
         {
             if (counter == null)
@@ -233,6 +285,11 @@ namespace CardShopCoop.Modules.Register
 
             CashScreen(counter)?.ResetCounter();
             CreditScreen(counter)?.ResetCounter();
+            if (counter.m_CreditCardModel != null && counter.m_CreditCardModel.activeSelf)
+            {
+                RestoreCreditCardMachine(counter);
+            }
+
             Write(counter, "m_IsUsingCard", false);
             Write(counter, "m_IsStartGivingChange", false);
             Write(counter, "m_IsChangeReady", false);

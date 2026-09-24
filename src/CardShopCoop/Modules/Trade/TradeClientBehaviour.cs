@@ -167,6 +167,16 @@ namespace CardShopCoop.Modules.Trade
         {
             if (!_context.InGame() || !IsTradeSceneReady())
             {
+                if (_pendingBaseline != null || _pendingDeltas.Count > 0)
+                {
+                    CoopPlugin.Log.LogInfo("[trade] offers waiting: inGame=" + _context.InGame()
+                        + " manager=" + (TradeInterop.Manager != null)
+                        + " customers=" + (TradeInterop.Customers != null)
+                        + " screen=" + (TradeInterop.Screen != null)
+                        + " pending=" + _pendingDeltas.Count + " baseline="
+                        + (_pendingBaseline != null) + ".");
+                }
+
                 return;
             }
 
@@ -348,12 +358,25 @@ namespace CardShopCoop.Modules.Trade
             var customers = TradeInterop.Customers;
             if (customers == null || offer.State.CustomerIndex >= customers.Count)
             {
+                CoopPlugin.Log.LogWarning("[trade] carrier slot missing for offer id="
+                    + offer.State.Counter + " index=" + offer.State.CustomerIndex + " count="
+                    + (customers == null ? -1 : customers.Count) + ".");
                 return;
             }
 
             var carrier = customers[offer.State.CustomerIndex];
-            if (carrier == null || NpcClientBehaviour.IsExistingCustomer(carrier))
+            if (carrier == null)
             {
+                CoopPlugin.Log.LogWarning("[trade] carrier is null for offer id="
+                    + offer.State.Counter + " index=" + offer.State.CustomerIndex + ".");
+                return;
+            }
+
+            if (NpcClientBehaviour.IsExistingCustomer(carrier))
+            {
+                CoopPlugin.Log.LogWarning("[trade] carrier index=" + offer.State.CustomerIndex
+                    + " offer id=" + offer.State.Counter
+                    + " is already an existing customer; not preparing a trade carrier for it.");
                 return;
             }
 
@@ -380,6 +403,11 @@ namespace CardShopCoop.Modules.Trade
             offer.MaskedRenderers = renderers;
             offer.RendererStates = states;
             UpdateCarrierVisibility(offer);
+            CoopPlugin.Log.LogInfo("[trade] prepared carrier id=" + offer.State.Counter + " index="
+                + offer.State.CustomerIndex + " name=" + carrier.name + " active="
+                + carrier.gameObject.activeSelf + " collider="
+                + (carrier.m_InteractCollider != null && carrier.m_InteractCollider.activeSelf)
+                + ".");
         }
 
         private static void RestoreRenderers(Renderer[] renderers, bool[] states)
@@ -783,18 +811,41 @@ namespace CardShopCoop.Modules.Trade
         [HarmonyPatch(typeof(Customer), "OnMousePress")]
         private static class CustomerPressPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(Customer __instance)
+            // Runs AFTER vanilla OnMousePress opens the trade screen. BeginSession snapshots the
+            // open/closed state for the prediction's undo; starting it in a prefix recorded the
+            // screen as closed (vanilla opens it a moment later), so when the host confirmed the
+            // session the reconcile "restored" that captured state and closed the screen the
+            // guest had just opened.
+            [HarmonyPostfix]
+            private static void Postfix(Customer __instance)
             {
                 var client = _active;
-                if (client == null || !client.IsCarrier(__instance, out var offer)
-                    || offer.State == null || client._pendingCounter >= 0)
+                if (client == null)
                 {
-                    return true;
+                    return;
                 }
 
+                if (!client.IsCarrier(__instance, out var offer))
+                {
+                    if (client._carrierKeysByCustomer.Count > 0)
+                    {
+                        CoopPlugin.Log.LogInfo("[trade] click on customer "
+                            + (__instance == null ? "<null>" : __instance.name)
+                            + " that is not a trade carrier (carriers="
+                            + client._carrierKeysByCustomer.Count + ").");
+                    }
+
+                    return;
+                }
+
+                if (offer.State == null || client._pendingCounter >= 0)
+                {
+                    return;
+                }
+
+                CoopPlugin.Log.LogInfo("[trade] carrier clicked id=" + offer.State.Counter
+                    + "; starting session.");
                 client.BeginSession(offer);
-                return true;
             }
         }
 
@@ -871,7 +922,14 @@ namespace CardShopCoop.Modules.Trade
                     return true;
                 }
 
-                if (!client._awaitingPrediction && client._claimAccepted && !client._terminalSent)
+                // A session the host never accepted (an open that was rejected) has nothing to
+                // resolve; let vanilla close the screen instead of silently swallowing the click.
+                if (!client._claimAccepted)
+                {
+                    return true;
+                }
+
+                if (!client._awaitingPrediction && !client._terminalSent)
                 {
                     client._awaitingPrediction = client.PredictIntent(TradeIntentOperation.Decline, 0f);
                 }

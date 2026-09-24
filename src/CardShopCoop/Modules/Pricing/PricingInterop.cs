@@ -97,6 +97,23 @@ namespace CardShopCoop.Modules.Pricing
             => !float.IsNaN(price) && !float.IsInfinity(price) && price >= 0f
                 && price <= 1000000000f;
 
+        internal static int SafeSaveIndex(CardData card)
+        {
+            if (card == null)
+            {
+                return -1;
+            }
+
+            try
+            {
+                return CPlayerData.GetCardSaveIndex(card);
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
         internal static string CardKey(CardData card, int encodedGrade = int.MinValue)
         {
             if (card == null)

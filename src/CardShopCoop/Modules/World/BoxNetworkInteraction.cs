@@ -559,13 +559,13 @@ namespace CardShopCoop.Modules.World
 
         internal void ClientApplyDestroyed(BoxDestroyedMessage message)
         {
-            _pendingFurniture.Remove(message.BoxNetworkId);
+            var wasPending = _pendingFurniture.Remove(message.BoxNetworkId);
             _furnitureEntityIds.Remove(message.BoxNetworkId);
             var wasStored = _storedBoxes.Remove(message.BoxNetworkId);
             if (!TryGetBox(message.BoxNetworkId, out var box))
             {
                 // The live package may already be gone because the player unboxed it locally and
-                // the host is only now confirming the destruction. Drop the stale binding instead
+                // the host is only now confirming the destruction. Drop any stale binding instead
                 // of treating our own already-applied destroy as a protocol error.
                 if (_boxesById.TryGetValue(message.BoxNetworkId, out var stale))
                 {
@@ -573,9 +573,18 @@ namespace CardShopCoop.Modules.World
                     return;
                 }
 
-                if (!wasStored)
-                    throw new InvalidOperationException("Authoritative box destruction references unknown box "
-                        + message.BoxNetworkId + ".");
+                // Destruction is idempotent. A furniture delivery box can be torn down locally
+                // (unboxing) while the host's BoxCreated is still deferred or the local object was
+                // only ever an unbound candidate, so the authoritative destroy can legitimately
+                // name an id this peer never bound. Recognizing it as already applied is the
+                // correct client behavior; throwing here used to tear the session down.
+                if (message.BoxNetworkId > 0)
+                {
+                    CoopPlugin.Log.LogInfo("[box-id] authoritative destroy for already-gone box id="
+                        + message.BoxNetworkId + " pending=" + wasPending + " stored=" + wasStored
+                        + ".");
+                }
+
                 return;
             }
 
@@ -896,7 +905,12 @@ namespace CardShopCoop.Modules.World
                 case BoxNetworkKind.Card:
                     return FindCard(state);
                 case BoxNetworkKind.Furniture:
-                    return ResolveFurniturePackage(furnitureEntityId, state.FurnitureObjectType);
+                    // Prefer the exact placement identity. If it cannot be resolved yet (a
+                    // play-table/other furniture box whose entity id has not been bound, or a
+                    // locally spawned delivery box the host is only now announcing), adopt this
+                    // peer's matching unbound candidate instead of materializing a duplicate.
+                    return ResolveFurniturePackage(furnitureEntityId, state.FurnitureObjectType)
+                        ?? FindUnboundFurnitureCandidate(state.FurnitureObjectType, state.Position);
                 default:
                     return null;
             }
@@ -952,6 +966,35 @@ namespace CardShopCoop.Modules.World
             }
 
             return closest;
+        }
+
+        /// <summary>Finds this peer's not-yet-authoritative furniture package of the expected type,
+        /// nearest the authoritative pose. Used when the placement identity is not resolvable, so a
+        /// runtime-purchased furniture box (play tables included) can still adopt its local wrapper
+        /// instead of failing the authoritative creation.</summary>
+        private InteractablePackagingBox FindUnboundFurnitureCandidate(EObjectType furnitureObjectType,
+            Vector3 position)
+        {
+            InteractablePackagingBox_Shelf best = null;
+            var bestDistance = float.MaxValue;
+            foreach (var candidate in _unboundCandidates)
+            {
+                if (candidate is not InteractablePackagingBox_Shelf shelf
+                    || !TryGetBoxedFurniture(shelf, out var furniture)
+                    || furniture.m_ObjectType != furnitureObjectType)
+                {
+                    continue;
+                }
+
+                var distance = (shelf.transform.position - position).sqrMagnitude;
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    best = shelf;
+                }
+            }
+
+            return best;
         }
 
         private InteractablePackagingBox_Shelf ResolveFurniturePackage(string furnitureEntityId,
@@ -1125,7 +1168,7 @@ namespace CardShopCoop.Modules.World
                 + " type=" + itemType + " count=" + itemCount + ".");
         }
 
-        private static BoxCardState ToState(CardData card)
+        internal static BoxCardState ToState(CardData card)
         {
             return new BoxCardState
             {
@@ -1141,7 +1184,7 @@ namespace CardShopCoop.Modules.World
             };
         }
 
-        private static CardData FromState(BoxCardState state)
+        internal static CardData FromState(BoxCardState state)
         {
             var border = (ECardBorderType)Enum.Parse(typeof(ECardBorderType), state.BorderType);
 

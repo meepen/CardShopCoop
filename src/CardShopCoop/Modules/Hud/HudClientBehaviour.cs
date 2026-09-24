@@ -24,6 +24,14 @@ namespace CardShopCoop.Modules.Hud
         private int _applyingSnapshot;
         private GameUIScreen _gameUi;
 
+        // Last authoritative values pushed by the host, kept separate from the optimistic
+        // predictions so a guest can recover the size of each confirmed change and play the
+        // game's own top-right money/experience popup.
+        private float _authoritativeCoinDisplay;
+        private int _authoritativeExperience;
+        private int _authoritativeLevel;
+        private bool _hasAuthoritativeTrack;
+
         private void OnEnable()
         {
             if (_shutdown || _context != null || _harmony != null)
@@ -98,6 +106,7 @@ namespace CardShopCoop.Modules.Hud
         {
             _highestNotifiedLevel = -1;
             _hasAuthoritativeLevel = false;
+            _hasAuthoritativeTrack = false;
             _gameUi = null;
         }
 
@@ -127,6 +136,7 @@ namespace CardShopCoop.Modules.Hud
         {
             if (state == null)
                 return;
+            Track(state);
             _pending = Clone(state);
             ApplyPendingIfReady();
         }
@@ -137,8 +147,19 @@ namespace CardShopCoop.Modules.Hud
             if (message == null)
                 return;
 
+            var confirmedOwnContribution = PredictionApi.IsPending(message.PredictionId);
+            var hadTrack = _hasAuthoritativeTrack;
+            var delta = message.CoinDisplay - _authoritativeCoinDisplay;
+            _authoritativeCoinDisplay = message.CoinDisplay;
+            _hasAuthoritativeTrack = true;
+
             PredictionApi.ApplyAuthoritative(message.PredictionId,
                 () => ApplyWallet(message.Coins, message.CoinDisplay));
+
+            // The optimistic apply already popped the local player's own change, so only remote
+            // changes (and host-driven changes with no local prediction) need a popup here.
+            if (!confirmedOwnContribution && hadTrack)
+                ShowWalletPopup(delta);
         }
 
         [MessageHandler(typeof(HudProgressDeltaMessage))]
@@ -147,8 +168,21 @@ namespace CardShopCoop.Modules.Hud
             if (message == null)
                 return;
 
+            var confirmedOwnContribution = PredictionApi.IsPending(message.PredictionId);
+            var hadTrack = _hasAuthoritativeTrack;
+            var gained = hadTrack
+                ? GainedExperience(_authoritativeLevel, _authoritativeExperience,
+                    message.Level, message.Experience)
+                : 0;
+            _authoritativeExperience = message.Experience;
+            _authoritativeLevel = message.Level;
+            _hasAuthoritativeTrack = true;
+
             PredictionApi.ApplyAuthoritative(message.PredictionId,
                 () => ApplyProgress(message.Experience, message.Level));
+
+            if (!confirmedOwnContribution && gained > 0)
+                ShowExperiencePopup(gained);
         }
 
         [MessageHandler(typeof(HudFameDeltaMessage))]
@@ -221,6 +255,70 @@ namespace CardShopCoop.Modules.Hud
             }
 
             ApplyValues(state.Coins, state.CoinDisplay, state.Experience, state.Level, state.Fame);
+
+            // Immediate feedback for the local player's own predicted change. Reconciliation
+            // re-applies newer predictions after an undo, so skip the popup while reconciling to
+            // avoid replaying changes that already appeared.
+            if (!PredictionApi.IsReconciling)
+                ShowContributionPopup(kind, value);
+        }
+
+        private void ShowContributionPopup(HudContributionKind kind, float value)
+        {
+            switch (kind)
+            {
+                case HudContributionKind.AddCoin:
+                    ShowWalletPopup(value);
+                    break;
+                case HudContributionKind.ReduceCoin:
+                    ShowWalletPopup(-value);
+                    break;
+                case HudContributionKind.AddShopExperience:
+                    ShowExperiencePopup(Mathf.RoundToInt(value));
+                    break;
+            }
+        }
+
+        private void ShowWalletPopup(float delta)
+        {
+            if (delta == 0f || !IsGameUiReady())
+                return;
+            HudPopupBridge.ShowWallet(_gameUi, delta);
+        }
+
+        private void ShowExperiencePopup(int gained)
+        {
+            if (gained <= 0 || !IsGameUiReady())
+                return;
+            HudPopupBridge.ShowExperience(_gameUi, gained);
+        }
+
+        private void Track(HudAuthoritativeState state)
+        {
+            _authoritativeCoinDisplay = state.CoinDisplay;
+            _authoritativeExperience = state.Experience;
+            _authoritativeLevel = state.Level;
+            _hasAuthoritativeTrack = true;
+        }
+
+        /// <summary>Experience gained between two authoritative shop states, expressed as raw XP so
+        /// the popup keeps showing the true gain even when the change crossed a level boundary.</summary>
+        private static int GainedExperience(int oldLevel, int oldExperience, int newLevel,
+            int newExperience)
+        {
+            if (newLevel < oldLevel)
+                return 0;
+
+            return (int)(CumulativeExperience(newLevel, newExperience)
+                - CumulativeExperience(oldLevel, oldExperience));
+        }
+
+        private static long CumulativeExperience(int level, int experience)
+        {
+            var total = (long)experience;
+            for (var i = 0; i < level; i++)
+                total += CPlayerData.GetExpRequiredToLevelUpAtLevel(i);
+            return total;
         }
 
         private void ApplyValues(double coins, float coinDisplay, int experience, int level, int fame)
@@ -330,6 +428,10 @@ namespace CardShopCoop.Modules.Hud
             _applyingSnapshot = 0;
             _highestNotifiedLevel = -1;
             _hasAuthoritativeLevel = false;
+            _authoritativeCoinDisplay = 0f;
+            _authoritativeExperience = 0;
+            _authoritativeLevel = 0;
+            _hasAuthoritativeTrack = false;
             _gameUi = null;
             HudPresentationState.Clear();
             SceneManager.sceneLoaded -= OnSceneLoaded;

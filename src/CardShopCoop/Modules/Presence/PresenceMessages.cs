@@ -84,7 +84,9 @@ namespace CardShopCoop.Modules.Presence
         public PresenceModelEntry Entry;
     }
 
-    /// <summary>Latest local transform and held-object state. Its JSON converter is attached to
+    /// <summary>Latest local transform sample. This is the 15 Hz unreliable stream, so it carries
+    /// only fixed-size data; the discrete hold appearance (item types / card faces) travels in
+    /// <see cref="PresenceHoldMessage"/> on the reliable lane. Its JSON converter is attached to
     /// the module DTO rather than the shared wire settings, so this feature can be cut over
     /// without teaching the legacy namespace about a second state type.</summary>
     [NetworkMessage(Reliability = Reliability.Transient)]
@@ -96,9 +98,6 @@ namespace CardShopCoop.Modules.Presence
         public Vector3 CameraPosition;
         public Quaternion CameraRotation;
         public float Speed;
-        public byte Hold;
-        public List<int> HoldTypes;
-        public List<CardData> HoldCards;
     }
 
     /// <summary>Host relay of a state sample. SenderId is written by the host from its
@@ -108,6 +107,27 @@ namespace CardShopCoop.Modules.Presence
     {
         public int SenderId;
         public PresenceStateMessage State = new();
+    }
+
+    /// <summary>Discrete hold appearance: the hold pose byte plus the carried item types or card
+    /// faces. This is sent reliably and only when it changes; the verbose CardData list does not
+    /// fit the unreliable MTU once a hand fills up, so it must never ride the 15 Hz stream.</summary>
+    [NetworkMessage]
+    [JsonConverter(typeof(PresenceHoldJsonConverter))]
+    public sealed class PresenceHoldMessage : INetMessage
+    {
+        public byte Hold;
+        public List<int> HoldTypes;
+        public List<CardData> HoldCards;
+    }
+
+    /// <summary>Host relay of a peer's hold appearance. SenderId is written by the host from its
+    /// authenticated ingress connection and is never accepted from the original client.</summary>
+    [NetworkMessage]
+    public sealed class PresenceRelayHoldMessage : INetMessage
+    {
+        public int SenderId;
+        public PresenceHoldMessage Hold = new();
     }
 
     [NetworkMessage]
@@ -157,21 +177,6 @@ namespace CardShopCoop.Modules.Presence
             serializer.Serialize(writer, message.CameraRotation);
             writer.WritePropertyName("Speed");
             writer.WriteValue(message.Speed);
-            writer.WritePropertyName("Hold");
-            writer.WriteValue(message.Hold);
-            writer.WritePropertyName("HoldTypes");
-            writer.WriteStartArray();
-            if (message.HoldTypes != null)
-            {
-                foreach (var id in message.HoldTypes)
-                {
-                    writer.WriteValue(CatalogIdMap.ToWireName(EnumKind.ItemType, id));
-                }
-            }
-
-            writer.WriteEndArray();
-            writer.WritePropertyName("HoldCards");
-            serializer.Serialize(writer, message.HoldCards);
             writer.WriteEndObject();
         }
 
@@ -214,6 +219,73 @@ namespace CardShopCoop.Modules.Presence
                     case "Speed":
                         message.Speed = serializer.Deserialize<float>(reader);
                         break;
+                    default:
+                        reader.Skip();
+                        break;
+                }
+            }
+
+            return message;
+        }
+
+    }
+
+    /// <summary>Serializes the discrete hold appearance. HoldTypes uses the shared item wire names
+    /// and HoldCards goes through the shared enum converters, so a peer on another game build or
+    /// with a different modded-card set still resolves the same identities.</summary>
+    internal sealed class PresenceHoldJsonConverter : JsonConverter
+    {
+        public override bool CanConvert(Type objectType)
+        {
+            return objectType == typeof(PresenceHoldMessage);
+        }
+
+        public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+        {
+            var message = (PresenceHoldMessage)value;
+            writer.WriteStartObject();
+            writer.WritePropertyName("Hold");
+            writer.WriteValue(message.Hold);
+            writer.WritePropertyName("HoldTypes");
+            writer.WriteStartArray();
+            if (message.HoldTypes != null)
+            {
+                foreach (var id in message.HoldTypes)
+                {
+                    writer.WriteValue(CatalogIdMap.ToWireName(EnumKind.ItemType, id));
+                }
+            }
+
+            writer.WriteEndArray();
+            writer.WritePropertyName("HoldCards");
+            serializer.Serialize(writer, message.HoldCards);
+            writer.WriteEndObject();
+        }
+
+        public override object ReadJson(JsonReader reader, Type objectType, object existingValue,
+            JsonSerializer serializer)
+        {
+            if (reader.TokenType != JsonToken.StartObject)
+            {
+                throw new JsonSerializationException("PresenceHold must be an object");
+            }
+
+            var message = new PresenceHoldMessage();
+            while (reader.Read() && reader.TokenType != JsonToken.EndObject)
+            {
+                if (reader.TokenType != JsonToken.PropertyName)
+                {
+                    throw new JsonSerializationException("Invalid PresenceHold property");
+                }
+
+                var name = (string)reader.Value;
+                if (!reader.Read())
+                {
+                    throw new JsonSerializationException("Unexpected end of PresenceHold");
+                }
+
+                switch (name)
+                {
                     case "Hold":
                         message.Hold = serializer.Deserialize<byte>(reader);
                         break;
@@ -232,7 +304,7 @@ namespace CardShopCoop.Modules.Presence
             return message;
         }
 
-        private static void ReadHoldTypes(JsonReader reader, PresenceStateMessage message)
+        private static void ReadHoldTypes(JsonReader reader, PresenceHoldMessage message)
         {
             if (reader.TokenType == JsonToken.Null)
             {
@@ -254,7 +326,7 @@ namespace CardShopCoop.Modules.Presence
         }
 
         private static void ReadHoldCards(JsonReader reader, JsonSerializer serializer,
-            PresenceStateMessage message)
+            PresenceHoldMessage message)
         {
             if (reader.TokenType == JsonToken.Null)
             {

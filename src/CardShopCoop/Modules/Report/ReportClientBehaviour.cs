@@ -1,7 +1,9 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Register;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
@@ -9,6 +11,8 @@ using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using CardShopCoop.Util;
 using HarmonyLib;
+using I2.Loc;
+using TMPro;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -31,6 +35,12 @@ namespace CardShopCoop.Modules.Report
             ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsPhoneScreenMode");
         private static readonly FieldInfo FiCashMode =
             ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsCashCounterMode");
+        private static readonly FieldInfo FiLoadingGrp =
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_LoadingScreenGrp");
+        private static readonly FieldInfo FiLoadingCurrentDay =
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_LoadingCurrentDayText");
+        private static readonly FieldInfo FiLoadingNextDay =
+            ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_LoadingNextDayText");
 
         private const int CounterSlice = 0;
         private const int MoneySlice = 1;
@@ -47,6 +57,9 @@ namespace CardShopCoop.Modules.Report
         private bool _haveOpenReport;
         private bool _pendingOpen;
         private bool _shutdown;
+        private bool _nextDayLocalReady;
+        private ReportNextDayWaitMessage _nextDayWait;
+        private Coroutine _rolloverCoroutine;
 
         private void OnEnable()
         {
@@ -65,6 +78,7 @@ namespace CardShopCoop.Modules.Report
                 _harmony = new Harmony("com.zwhit.cardshopcoop.report.client");
                 Patch(typeof(NextButtonPatch));
                 Patch(typeof(NextDayPatch));
+                Patch(typeof(ShowGoNextDayPatch));
                 Patch(typeof(ReportClosePatch));
                 PatchScreenReadiness();
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
@@ -183,6 +197,7 @@ namespace CardShopCoop.Modules.Report
             _reviewSeq = -1;
             _haveOpenReport = false;
             _pendingOpen = false;
+            ClearNextDayWait();
         }
 
         private void ApplyState(ReportStateMessage message)
@@ -209,6 +224,11 @@ namespace CardShopCoop.Modules.Report
             if (message.CloseScreen)
             {
                 CloseClientReport();
+                // The host closes the recap as the first step of the vanilla day roll-over (it has
+                // just accepted every player's Next Day). Play the same "Loading Day X" overlay the
+                // host's OnPressGoNextDay shows, so the guest sees the roll-over too. The day
+                // advance and the host event fee stay host-owned; the guest only mirrors the overlay.
+                PlayNextDayRollover();
                 return;
             }
 
@@ -370,6 +390,7 @@ namespace CardShopCoop.Modules.Report
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
+            StopNextDayRollover();
             _screen = null;
             _ipc = null;
             TryApplyPendingState();
@@ -422,14 +443,14 @@ namespace CardShopCoop.Modules.Report
                 return true;
             }
 
-            var lerping = (bool)FiIsLerping.GetValue(screen);
-
-            if (lerping)
+            // While the recap still counts its totals up, the button skips the animation. It only
+            // becomes the ready action once the numbers have settled.
+            if ((bool)FiIsLerping.GetValue(screen))
             {
                 return true;
             }
 
-            CloseClientReport();
+            _active.ReadyForNextDay();
             return false;
         }
 
@@ -440,8 +461,126 @@ namespace CardShopCoop.Modules.Report
                 return true;
             }
 
-            CloseClientReport();
+            _active.ReadyForNextDay();
             return false;
+        }
+
+        /// <summary>Tells the host this guest is ready for the next day. The recap stays open (with
+        /// the wait notice) until every player has readied and the host rolls the day over.</summary>
+        private void ReadyForNextDay()
+        {
+            if (_context == null || !_context.InGame())
+            {
+                return;
+            }
+
+            if (!_nextDayLocalReady)
+            {
+                _nextDayLocalReady = true;
+                _context.Send(1, new ReportNextDayReadyMessage());
+            }
+
+            ApplyNextDayWaitUi();
+        }
+
+        [MessageHandler(typeof(ReportNextDayWaitMessage))]
+        private void HandleNextDayWait(MessageContext context, ReportNextDayWaitMessage message)
+        {
+            if (_shutdown)
+            {
+                return;
+            }
+
+            if (message == null || !message.Active)
+            {
+                ClearNextDayWait();
+                return;
+            }
+
+            _nextDayWait = message;
+            ApplyNextDayWaitUi();
+        }
+
+        private void ApplyNextDayWaitUi()
+        {
+            var wait = _nextDayWait;
+            if (wait == null || !wait.Active || !_nextDayLocalReady
+                || wait.Pending == null || wait.Pending.Count == 0)
+            {
+                HudApi.SetNextDayWait(false, "");
+                return;
+            }
+
+            HudApi.SetNextDayWait(true, "Waiting for: " + string.Join(", ", wait.Pending));
+        }
+
+        private void ClearNextDayWait()
+        {
+            _nextDayLocalReady = false;
+            _nextDayWait = null;
+            HudApi.SetNextDayWait(false, "");
+        }
+
+        /// <summary>Mirrors vanilla <c>DelayGoNextDay</c>'s presentation on the guest: show the
+        /// "Loading Day X → X+1" overlay for the same window. The host's <c>CloseScreen</c> already
+        /// closed the recap and (on the host only) advanced the day and charged the event fee.</summary>
+        private void PlayNextDayRollover()
+        {
+            if (_shutdown || _rolloverCoroutine != null)
+            {
+                return;
+            }
+
+            var screen = _screen != null ? _screen : SceneRef<EndOfDayReportScreen>.Get();
+            if (screen == null)
+            {
+                return;
+            }
+
+            _screen = screen;
+            _rolloverCoroutine = StartCoroutine(NextDayRollover(screen));
+        }
+
+        private IEnumerator NextDayRollover(EndOfDayReportScreen screen)
+        {
+            var loading = FiLoadingGrp.GetValue(screen) as GameObject;
+            if (FiLoadingCurrentDay.GetValue(screen) is TextMeshProUGUI current)
+            {
+                current.text = LocalizationManager.GetTranslation("Day XXX")
+                    .Replace("XXX", (CPlayerData.m_CurrentDay + 1).ToString());
+            }
+
+            if (FiLoadingNextDay.GetValue(screen) is TextMeshProUGUI next)
+            {
+                next.text = LocalizationManager.GetTranslation("Day XXX")
+                    .Replace("XXX", (CPlayerData.m_CurrentDay + 2).ToString());
+            }
+
+            if (loading != null)
+            {
+                loading.SetActive(true);
+            }
+
+            // Match DelayGoNextDay's own timings: the recap closed at the top, then the loading
+            // overlay stays up while the host advances the day before it is hidden.
+            yield return new WaitForSeconds(0.5f);
+            yield return new WaitForSeconds(2.5f);
+
+            if (loading != null)
+            {
+                loading.SetActive(false);
+            }
+
+            _rolloverCoroutine = null;
+        }
+
+        private void StopNextDayRollover()
+        {
+            if (_rolloverCoroutine != null)
+            {
+                StopCoroutine(_rolloverCoroutine);
+                _rolloverCoroutine = null;
+            }
         }
 
         internal void Shutdown()
@@ -452,6 +591,7 @@ namespace CardShopCoop.Modules.Report
             }
 
             _shutdown = true;
+            StopNextDayRollover();
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
@@ -469,6 +609,7 @@ namespace CardShopCoop.Modules.Report
             _reviewSeq = -1;
             _haveOpenReport = false;
             _pendingOpen = false;
+            ClearNextDayWait();
             _context = null;
         }
 
@@ -486,6 +627,18 @@ namespace CardShopCoop.Modules.Report
         {
             [HarmonyPrefix]
             private static bool Prefix() => NextDay();
+        }
+
+        /// <summary>With the recap already open, the Enter/GoNextDay key belongs to the recap's own
+        /// Next Day action. The vanilla <c>ShowGoNextDayScreen</c> would call <c>OpenScreen</c>,
+        /// which closes an already-open recap, so suppress it while the recap is up. With the recap
+        /// closed this still runs vanilla, which is the first Enter that opens the menu.</summary>
+        [HarmonyPatch(typeof(InteractionPlayerController), "ShowGoNextDayScreen")]
+        private static class ShowGoNextDayPatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix()
+                => _active == null || _active._shutdown || !EndOfDayReportScreen.IsActive();
         }
 
         [HarmonyPatch(typeof(EndOfDayReportScreen), "CloseScreen")]

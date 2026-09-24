@@ -46,6 +46,7 @@ namespace CardShopCoop.Modules.World
             InstallPlayerShelfInteractionPatches();
             InstallWarehouseShelfInteractionPatches();
             InstallCardInteractionPatches();
+            InstallCardDisplayPatches();
             InstallPlacement();
             InstallPlacementHold();
         }
@@ -58,6 +59,7 @@ namespace CardShopCoop.Modules.World
             _shutdown = true;
             ShutdownPlacementHold();
             ShutdownPlacement();
+            ShutdownCardDisplay();
             ResetPlayerBoxInteractionState();
             ResetPlayerShelfInteractionState();
             _boxNetworkInteraction?.Dispose();
@@ -135,6 +137,7 @@ namespace CardShopCoop.Modules.World
             _instance._shelfInteraction?.Reset();
             _instance._warehouseShelfInteraction?.Reset();
             _instance._boxNetworkInteraction?.ClientBeginBaseline();
+            _instance.ResetCardDisplayState();
         }
 
         internal static void CompleteWorldBaseline(long baselineId)

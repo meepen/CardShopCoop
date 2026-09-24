@@ -160,7 +160,11 @@ namespace CardShopCoop.Modules.World
             if (_playerBoxInteraction == null)
                 return false;
 
-            WorldPrediction.ApplyAuthoritative(message,
+            // Pickup/placement/throw are only ever echoed back after the host applied the guest's
+            // own intent (a rejection comes as a prediction rollback), so this confirms the
+            // prediction. Applying it authoritatively would first undo the hold/move/throw and
+            // replay it: the box re-lerps into the hand, or the throw is re-applied.
+            WorldPrediction.ApplyConfirmed(message,
                 () => _playerBoxInteraction.ApplyIncoming(message));
             return true;
         }
@@ -172,6 +176,15 @@ namespace CardShopCoop.Modules.World
             private static bool Prefix(InteractablePackagingBox __instance, bool isPlayer,
                 out PlayerBoxInteraction.LocalAction __state)
             {
+                __state = default;
+                if (__instance != null && __instance.GetIsMovingObject())
+                {
+                    // Never take a box back into hand while it is in the game's placement preview:
+                    // hold mode layered on top of move-box mode is what let the throw corrupt it.
+                    CoopPlugin.Log.LogInfo("[box-id] ignoring hold on a box that is being placed.");
+                    return false;
+                }
+
                 __state = _instance == null
                     ? default
                     : _instance.CapturePlayerBoxAction(__instance, isPlayer, false);
@@ -193,6 +206,16 @@ namespace CardShopCoop.Modules.World
             private static bool Prefix(InteractablePackagingBox __instance, bool isPlayer,
                 out PlayerBoxInteraction.LocalAction __state)
             {
+                __state = default;
+                if (isPlayer && __instance != null && __instance.GetIsMovingObject())
+                {
+                    // F while the box is in the placement preview: the box is being aimed, not
+                    // held. A throw would enable physics under the running move lerp and strand
+                    // it, so ignore the input and let placement finish.
+                    CoopPlugin.Log.LogInfo("[box-id] ignoring throw on a box that is being placed.");
+                    return false;
+                }
+
                 __state = _instance == null
                     ? default
                     : _instance.CapturePlayerBoxAction(__instance, isPlayer, true);

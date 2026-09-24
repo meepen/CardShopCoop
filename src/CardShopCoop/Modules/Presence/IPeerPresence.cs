@@ -44,7 +44,8 @@ namespace CardShopCoop.Modules.Presence
     public interface IPeerPresence
     {
         bool TryGet(int connectionId, out PeerPresence presence);
-        void RecordAuthenticatedState(PeerConnection connection, Vector3 position, byte hold, IReadOnlyList<int> holdTypes);
+        void RecordAuthenticatedPosition(PeerConnection connection, Vector3 position);
+        void RecordAuthenticatedHold(PeerConnection connection, byte hold, IReadOnlyList<int> holdTypes);
         void Clear(int connectionId);
         void ClearAll();
     }
@@ -82,14 +83,41 @@ namespace CardShopCoop.Modules.Presence
                 return true;
             }
         }
-        public void RecordAuthenticatedState(PeerConnection connection, Vector3 position, byte hold, IReadOnlyList<int> holdTypes)
+        public void RecordAuthenticatedPosition(PeerConnection connection, Vector3 position)
         {
             if (connection == null || connection.State != ConnectionState.FullyJoined || !Finite(position))
+                return;
+            lock (_gate)
+            {
+                if (_entries.TryGetValue(connection.Id, out var entry))
+                {
+                    entry.Position = position;
+                    entry.Receipt = Stopwatch.GetTimestamp();
+                    return;
+                }
+
+                _entries[connection.Id] = new Entry { Position = position, Receipt = Stopwatch.GetTimestamp() };
+            }
+        }
+
+        /// <summary>Records the advertised hold slot and its type IDs. The hold payload rides its
+        /// own reliable message, so this preserves the last position and refreshes the receipt.</summary>
+        public void RecordAuthenticatedHold(PeerConnection connection, byte hold, IReadOnlyList<int> holdTypes)
+        {
+            if (connection == null || connection.State != ConnectionState.FullyJoined)
                 return;
             var copy = CopyHoldTypes(holdTypes);
             lock (_gate)
             {
-                _entries[connection.Id] = new Entry { Position = position, Hold = hold, HoldTypes = copy, Receipt = Stopwatch.GetTimestamp() };
+                if (_entries.TryGetValue(connection.Id, out var entry))
+                {
+                    entry.Hold = hold;
+                    entry.HoldTypes = copy;
+                    entry.Receipt = Stopwatch.GetTimestamp();
+                    return;
+                }
+
+                _entries[connection.Id] = new Entry { Hold = hold, HoldTypes = copy, Receipt = Stopwatch.GetTimestamp() };
             }
         }
         public void Clear(int connectionId)

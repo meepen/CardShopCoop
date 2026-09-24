@@ -13,6 +13,7 @@ namespace CardShopCoop.Modules.World
         internal const string WarehouseScope = "world.warehouse";
         internal const string ContainersScope = "world.containers";
         internal const string BoxStateScope = "world.boxstate";
+        internal const string CardDisplayScope = "world.carddisplay";
 
         internal static Guid Predict(string scope, WorldMessage intent, Action apply, Action undo,
             bool applyLocally = true)
@@ -22,5 +23,10 @@ namespace CardShopCoop.Modules.World
 
         internal static void ApplyAuthoritative(WorldMessage message, Action apply)
             => PredictionApi.ApplyAuthoritative(message?.PredictionId ?? Guid.Empty, apply);
+
+        /// <summary>Applies a world result that confirms the predicted action, retiring the
+        /// prediction without rolling it back first. See <see cref="PredictionApi.ApplyConfirmed"/>.</summary>
+        internal static void ApplyConfirmed(WorldMessage message, Action apply)
+            => PredictionApi.ApplyConfirmed(message?.PredictionId ?? Guid.Empty, apply);
     }
 }

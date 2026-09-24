@@ -90,9 +90,8 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
 
             var state = _pendingState;
-            if (!TutorialInterop.IsSceneReady(TutorialInterop.FindManager()))
+            if (!TryApply(state))
                 return;
-            Apply(state);
             CoopPlugin.Log.LogDebug("tutorial baseline applied: index=" + state.TutorialIndex
                 + " values=" + (state.Values == null ? 0 : state.Values.Count));
             _pendingState = null;
@@ -117,7 +116,7 @@ namespace CardShopCoop.Modules.Tutorial
                     Increment = increment,
                 }),
                 () => ApplyLocalAction(condition, increment),
-                () => Apply(previous));
+                () => TryApply(previous));
             return false;
         }
 
@@ -150,11 +149,14 @@ namespace CardShopCoop.Modules.Tutorial
             }
         }
 
-        private static void Apply(TutorialStateMessage message)
+        /// <summary>Applies an authoritative tutorial state. Returns false while the scene's
+        /// tutorial surface is not ready; the caller retains the state and retries from its
+        /// lifecycle hooks instead of failing the reliable message (which would drop the guest).</summary>
+        private static bool TryApply(TutorialStateMessage message)
         {
             var manager = TutorialInterop.FindManager();
             if (!TutorialInterop.IsSceneReady(manager) || CPlayerData.m_TutorialDataList == null)
-                throw new InvalidOperationException("Tutorial scene became unavailable while applying host state.");
+                return false;
             _applyingRemote = true;
             try
             {
@@ -164,19 +166,28 @@ namespace CardShopCoop.Modules.Tutorial
             {
                 _applyingRemote = false;
             }
+
+            return true;
         }
 
-        private static void ApplyDelta(TutorialDeltaMessage message)
+        private void ApplyDelta(TutorialDeltaMessage message)
         {
             if (message.Values != null)
             {
-                Apply(new TutorialStateMessage
+                // A full-state delta is a snapshot. Retain it exactly like the baseline so a
+                // scene that is momentarily not ready cannot silently drop the host's state.
+                _pendingState = new TutorialStateMessage
                 {
                     TutorialIndex = message.TutorialIndex,
                     Values = message.Values,
-                });
+                };
+                TryApplyPending();
                 return;
             }
+
+            if (!TutorialInterop.IsSceneReady(TutorialInterop.FindManager())
+                || CPlayerData.m_TutorialDataList == null)
+                return;
 
             var current = TutorialInterop.ValueFor((ETutorialTaskCondition)message.Condition);
             ApplyLocalAction((ETutorialTaskCondition)message.Condition, message.Value - current);
@@ -222,6 +233,17 @@ namespace CardShopCoop.Modules.Tutorial
                 for (var valueIndex = 0; valueIndex < incomingValues.Count; valueIndex++)
                     group.AddTaskValue(incomingValues[valueIndex].value,
                         incomingValues[valueIndex].tutorialTaskCondition);
+
+                // The game's completion flag is sticky, and a task's stored value can drop below
+                // its max when a displayed card is removed. Rebuilding the flag from the value
+                // alone would therefore reopen a task the host has already moved past (the guest
+                // would show "9/10" forever while the host rejects every further placement).
+                // Honour the authoritative index: every group before it is complete. The group on
+                // the index keeps its value-derived flag so a genuinely finished last task still
+                // ends the tutorial.
+                if (TutorialInterop.FiSubgroupFinished != null
+                    && groupIndex < message.TutorialIndex - 1)
+                    TutorialInterop.FiSubgroupFinished.SetValue(group, true);
             }
 
             if (message.TutorialIndex == 0)
@@ -294,6 +316,18 @@ namespace CardShopCoop.Modules.Tutorial
             {
                 if (_applyingRemote || _active == null || !_active._joined)
                     return true;
+
+                // The host only accepts progress, so a guest's local decrement (the game calls
+                // AddTaskValue(PutCardOnShelf, -1) when a displayed card is taken back off a
+                // shelf) must not be applied here. Applying it would desync the guest from the
+                // host and could reopen a task the host has already completed.
+                if (valueAdd <= 0f)
+                {
+                    CoopPlugin.Log.LogDebug("tutorial decrement ignored on client: condition="
+                        + tutorialTaskCondition + " value=" + valueAdd + ".");
+                    return false;
+                }
+
                 PredictAction(tutorialTaskCondition, valueAdd);
                 return false;
             }

@@ -24,6 +24,7 @@ namespace CardShopCoop.Modules.World
         CardDeltaBatch = 13,
         GradedRemove = 14,
         BoxState = 15,
+        CardDisplay = 16,
     }
 
     /// <summary>Common identity carried by world messages. Stable entity IDs make validation
@@ -177,6 +178,10 @@ namespace CardShopCoop.Modules.World
                 return "box:" + boxStateResult.BoxNetworkId;
             if (message is PlayerBoxInteractionMessage player)
                 return "box:" + player.BoxNetworkId;
+            if (message is CardDisplayRequestMessage cardDisplay)
+                return CardDisplayEntityId(cardDisplay.ShelfKey, cardDisplay.Compartment);
+            if (message is CardDisplayMessage cardDisplayState)
+                return CardDisplayEntityId(cardDisplayState.ShelfKey, cardDisplayState.Compartment);
             if (message is ContainerOpMessage container)
                 return ContainerEntityId(container.Kind, container.Index);
             if (message is WarehouseStoreMessage store)
@@ -198,6 +203,9 @@ namespace CardShopCoop.Modules.World
                 return "market";
             return message.GetType().FullName ?? message.GetType().Name;
         }
+
+        internal static string CardDisplayEntityId(int shelfKey, int compartment)
+            => "card-display:" + shelfKey + ":" + compartment;
 
         internal static string ContainerEntityId(int kind, int index)
             => "container:" + kind + ":" + index;
@@ -240,6 +248,8 @@ namespace CardShopCoop.Modules.World
                 return WorldOperationKind.WarehouseStore;
             if (message is WarehouseTakeMessage)
                 return WorldOperationKind.WarehouseTake;
+            if (message is CardDisplayRequestMessage)
+                return WorldOperationKind.CardDisplay;
             if (message is ContainerOpMessage)
                 return WorldOperationKind.Container;
             if (message is CardDeltaBatchRequestMessage)

@@ -12,10 +12,14 @@ namespace CardShopCoop.Modules.Hud
         private static string _toastText = "";
         private static float _toastRemaining;
         private static string _hostTimeText = "";
+        private static bool _nextDayWaitActive;
+        private static string _nextDayWaitText = "";
 
         public static string ToastText => _toastText;
         public static float ToastRemaining => _toastRemaining;
         public static string HostTimeText => _hostTimeText;
+        public static bool NextDayWaitActive => _nextDayWaitActive;
+        public static string NextDayWaitText => _nextDayWaitText;
 
         public static bool HasToast => !string.IsNullOrEmpty(_toastText) && _toastRemaining > 0f;
 
@@ -47,6 +51,14 @@ namespace CardShopCoop.Modules.Hud
             _hostTimeText = text ?? "";
         }
 
+        /// <summary>Persistent "waiting for other players" line, shown while the end-of-day
+        /// ready gate is waiting on players who have not pressed Next Day.</summary>
+        internal static void SetNextDayWait(bool active, string text)
+        {
+            _nextDayWaitActive = active && !string.IsNullOrEmpty(text);
+            _nextDayWaitText = _nextDayWaitActive ? text : "";
+        }
+
         internal static void Tick(float deltaTime)
         {
             if (_toastRemaining <= 0f)
@@ -66,6 +78,8 @@ namespace CardShopCoop.Modules.Hud
             _toastText = "";
             _toastRemaining = 0f;
             _hostTimeText = "";
+            _nextDayWaitActive = false;
+            _nextDayWaitText = "";
         }
     }
 }

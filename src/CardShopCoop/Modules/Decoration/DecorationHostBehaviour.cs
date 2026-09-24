@@ -109,6 +109,8 @@ namespace CardShopCoop.Modules.Decoration
             }
             else if (message.PredictionId != Guid.Empty)
             {
+                CoopPlugin.Log.LogInfo("[decoration] intent rejected action=" + message.Action
+                    + " type=" + message.DecorationType + " prediction=" + message.PredictionId + ".");
                 PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
             }
         }
@@ -240,6 +242,10 @@ namespace CardShopCoop.Modules.Decoration
             {
                 delta.InventoryCount = DecorationInterop.InventoryCount(intent.DecorationType);
             }
+            else if (intent.Action == DecorationActions.Remove)
+            {
+                delta.InventoryCount = DecorationInterop.InventoryCount(intent.DecorationType);
+            }
             else if (intent.Action == DecorationActions.Place)
             {
                 var state = DecorationInterop.Snapshot();
@@ -366,6 +372,9 @@ namespace CardShopCoop.Modules.Decoration
                     Action = DecorationActions.Place,
                     DecorationType = (int)__instance.m_DecoObjectType,
                     Position = __instance.transform.position,
+                    // A moved piece already owns a host id; pass it so the delta cannot bind to a
+                    // different but nearby decoration of the same type.
+                    ObjectId = DecorationInterop.HostIdFor(__instance),
                 }));
             }
         }
@@ -373,12 +382,22 @@ namespace CardShopCoop.Modules.Decoration
         [HarmonyPatch(typeof(InteractableObject), "BoxUpObject")]
         private static class RemovePatch
         {
+            private struct State
+            {
+                public long Id;
+                public int Type;
+            }
+
             [HarmonyPrefix]
-            private static void Prefix(InteractableObject __instance, out long __state)
-                => __state = DecorationInterop.HostIdFor(__instance);
+            private static void Prefix(InteractableObject __instance, out State __state)
+                => __state = new State
+                {
+                    Id = DecorationInterop.HostIdFor(__instance),
+                    Type = (int)__instance.m_DecoObjectType,
+                };
 
             [HarmonyPostfix]
-            private static void Postfix(InteractableObject __instance, long __state)
+            private static void Postfix(InteractableObject __instance, State __state)
             {
                 if (_active == null || _active._applyingIntent || __instance == null
                     || __instance.m_DecoObjectType == EDecoObject.None)
@@ -386,7 +405,9 @@ namespace CardShopCoop.Modules.Decoration
                 _active.BroadcastDelta(new DecorationDeltaMessage
                 {
                     Action = DecorationActions.Remove,
-                    ObjectId = __state,
+                    ObjectId = __state.Id,
+                    DecorationType = __state.Type,
+                    InventoryCount = DecorationInterop.InventoryCount(__state.Type),
                     PredictionId = Guid.Empty,
                 });
             }

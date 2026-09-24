@@ -964,7 +964,9 @@ namespace CardShopCoop.Modules.PlayTable
 
                 if (!PlayTablePlacementInterop.TryGetTableKey(__instance, out var key))
                 {
-                    return false;
+                    // Unidentified table: defer to vanilla rather than blocking a state change we
+                    // cannot route. Blocking here is what hung the loader's box-up (see BoxPatch).
+                    return true;
                 }
 
                 if (client.HasActiveMatch(key) || client.HasLocalLaunch(key)
@@ -996,14 +998,18 @@ namespace CardShopCoop.Modules.PlayTable
                     return true;
                 }
 
-                if (!PlayTablePlacementInterop.TryGetTableKey(__instance, out var key))
-                {
-                    return false;
-                }
-
                 if (!holdBox)
                 {
-                    return !client.HasActiveMatch(key) && !client.HasLocalLaunch(key);
+                    // The vanilla loader boxes up a saved table here (and this is the "box in
+                    // place" path) before placement identities are registered, then dereferences
+                    // the packaging box BoxUpObject creates. Never suppress it: a blocked box-up
+                    // leaves GetPackagingBoxShelf() null and the load coroutine null-references.
+                    return true;
+                }
+
+                if (!PlayTablePlacementInterop.TryGetTableKey(__instance, out var key))
+                {
+                    return true;
                 }
 
                 if (client.HasActiveMatch(key) || client.HasLocalLaunch(key))

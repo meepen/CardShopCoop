@@ -39,7 +39,7 @@ namespace CardShopCoop.Modules.World
             _context.Messages.RegisterAttributedHandlers(this);
             _boxNetworkInteraction = new BoxNetworkInteraction(true, BroadcastWorld, SendWorldTo);
             _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction, BroadcastWorld);
-            _shelfInteraction = new ShelfInteraction(BroadcastWorld);
+            _shelfInteraction = new ShelfInteraction(BroadcastWorld, () => _context.InGame());
             _warehouseShelfInteraction = new WarehouseShelfInteraction(true, BroadcastWorld,
                 SendWorldTo, _boxNetworkInteraction);
             _cardInteraction = new WorldCardInteraction(_context, true, _boxNetworkInteraction);
@@ -56,6 +56,7 @@ namespace CardShopCoop.Modules.World
             InstallPlayerShelfInteractionPatches();
             InstallWarehouseShelfInteractionPatches();
             InstallCardInteractionPatches();
+            InstallCardDisplayPatches();
             InstallPlacement();
             InstallPlacementHold();
         }
@@ -171,6 +172,7 @@ namespace CardShopCoop.Modules.World
             SendWorldTo(connectionId, new BoxBaselineCompleteMessage());
             _cardInteraction?.AppendBaselineMessages(message => SendWorldTo(connectionId,
                 message));
+            AppendCardDisplayBaseline(message => SendWorldTo(connectionId, message));
             SendWorldTo(connectionId, new WorldBaselineCompleteMessage
             {
                 BaselineId = baselineId,

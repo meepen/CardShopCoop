@@ -10,6 +10,8 @@ namespace CardShopCoop.Modules.Hud
         public static float ToastRemaining => HudPresentationState.ToastRemaining;
         public static bool HasToast => HudPresentationState.HasToast;
         public static string HostTimeText => HudPresentationState.HostTimeText;
+        public static bool NextDayWaitActive => HudPresentationState.NextDayWaitActive;
+        public static string NextDayWaitText => HudPresentationState.NextDayWaitText;
 
         internal static void SetToast(string text, float seconds = 8f)
         {
@@ -29,6 +31,11 @@ namespace CardShopCoop.Modules.Hud
         internal static void SetHostTime(string text)
         {
             HudPresentationState.SetHostTime(text);
+        }
+
+        internal static void SetNextDayWait(bool active, string text)
+        {
+            HudPresentationState.SetNextDayWait(active, text);
         }
 
         internal static void Clear()

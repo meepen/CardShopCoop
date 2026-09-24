@@ -92,7 +92,9 @@ namespace CardShopCoop.Modules.Purchasing
             }
 
             _pendingRequests.Remove(outcome.PredictionId);
-            PredictionApi.ApplyAuthoritative(outcome.PredictionId, () =>
+            // Reached only for an accepted purchase (failures come back as a rollback), so this
+            // confirms the prediction; reconciling would reopen the cart/confirmation first.
+            PredictionApi.ApplyConfirmed(outcome.PredictionId, () =>
                 ApplyAccepted(pending));
             if (pending.Surface == PendingSurface.ProductLicense)
                 CatalogApi.ApplyClientProductEntitlementSideEffects(pending.LocalIndex);

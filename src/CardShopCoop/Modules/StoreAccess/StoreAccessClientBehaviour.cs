@@ -79,9 +79,14 @@ namespace CardShopCoop.Modules.StoreAccess
         private void HandleDelta(MessageContext context, StoreAccessDeltaMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () => ApplyDelta(message));
+            // The local click already ran the vanilla sign path (toggle + animation), so the echo
+            // of our own prediction must retire without undoing it - undoing would snap the sign
+            // back and then re-animate it. ApplyDelta skips whatever already matches.
+            PredictionApi.ApplyConfirmed(message.PredictionId, () => ApplyDelta(message));
         }
 
         private void TryApplyPending()
@@ -112,38 +117,52 @@ namespace CardShopCoop.Modules.StoreAccess
 
         private static void ApplyDelta(StoreAccessDeltaMessage message)
         {
+            // Skip a sign whose authoritative state the local game already reached. The player's
+            // own click applied it through the vanilla path (which is still animating), so
+            // re-animating or refreshing here would fight that animation.
+            var shopChanged = message.HasShopOpen && CPlayerData.m_IsShopOpen != message.IsShopOpen;
+            var warehouseChanged = message.HasWarehouseDoorClosed
+                && CPlayerData.m_IsWarehouseDoorClosed != message.IsWarehouseDoorClosed;
+
             if (message.HasShopOpen)
                 CPlayerData.m_IsShopOpen = message.IsShopOpen;
             if (message.HasWarehouseDoorClosed)
                 CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
 
-            var openSign = StoreAccessInterop.FindOpenSign();
-            if (!message.Animate || !StoreAccessInterop.PlayOpenAnimation(openSign))
-                StoreAccessInterop.RefreshOpenMesh(openSign);
-            var warehouseSign = StoreAccessInterop.FindWarehouseSign();
-            if (!message.Animate || !StoreAccessInterop.PlayWarehouseAnimation(warehouseSign))
-                StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
+            if (shopChanged)
+            {
+                var openSign = StoreAccessInterop.FindOpenSign();
+                if (!message.Animate || !StoreAccessInterop.PlayOpenAnimation(openSign))
+                    StoreAccessInterop.RefreshOpenMesh(openSign);
+            }
+
+            if (warehouseChanged)
+            {
+                var warehouseSign = StoreAccessInterop.FindWarehouseSign();
+                if (!message.Animate || !StoreAccessInterop.PlayWarehouseAnimation(warehouseSign))
+                    StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
+            }
         }
 
-        private static bool PredictToggle(byte which)
+        /// <summary>The vanilla sign click already toggled the state and started its animation;
+        /// forward the intent so the host applies and echoes it. The prediction carries no local
+        /// apply (vanilla did it) and only restores the pre-click state on a rollback.</summary>
+        private void ForwardToggle(byte which, bool before, bool after)
         {
-            var client = _active;
-            if (client == null || client._shutdown || !client._joined || client._context == null
-                || !client._context.InGame())
-                return true;
-            var oldShop = CPlayerData.m_IsShopOpen;
-            var oldWarehouse = CPlayerData.m_IsWarehouseDoorClosed;
+            if (_shutdown || !_joined || _context == null || !_context.InGame() || after == before)
+                return;
+
+            var previousShop = which == 0 ? before : CPlayerData.m_IsShopOpen;
+            var previousWarehouse = which == 1 ? before : CPlayerData.m_IsWarehouseDoorClosed;
             PredictionApi.Predict(
                 "store-access",
-                predictionId => client._context.Send(1, new StoreAccessToggleMessage
+                predictionId => _context.Send(1, new StoreAccessToggleMessage
                 {
                     PredictionId = predictionId,
                     Which = which,
                 }),
-                () => ApplyLocal(which == 0 ? !oldShop : oldShop,
-                    which == 1 ? !oldWarehouse : oldWarehouse),
-                () => ApplyLocal(oldShop, oldWarehouse));
-            return false;
+                () => { },
+                () => ApplyLocal(previousShop, previousWarehouse));
         }
 
         private static void ApplyLocal(bool shopOpen, bool warehouseClosed)
@@ -205,30 +224,27 @@ namespace CardShopCoop.Modules.StoreAccess
         [HarmonyPatch(typeof(InteractableOpenCloseSign), "OnMouseButtonUp")]
         private static class OpenSignPatch
         {
+            // Let vanilla run so the sign plays its own animation; forward the result afterwards.
             [HarmonyPrefix]
-            private static bool Prefix()
-            {
-                if (!IsClientReady())
-                    return true;
-                return PredictToggle(0);
-            }
+            private static void Prefix(out bool __state)
+                => __state = CPlayerData.m_IsShopOpen;
+
+            [HarmonyPostfix]
+            private static void Postfix(bool __state)
+                => _active?.ForwardToggle(0, __state, CPlayerData.m_IsShopOpen);
         }
 
         [HarmonyPatch(typeof(InteractableWarehouseAllowEnterSign), "OnMouseButtonUp")]
         private static class WarehouseSignPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix()
-            {
-                if (!IsClientReady())
-                    return true;
-                return PredictToggle(1);
-            }
-        }
+            private static void Prefix(out bool __state)
+                => __state = CPlayerData.m_IsWarehouseDoorClosed;
 
-        private static bool IsClientReady()
-            => _active != null && !_active._shutdown && _active._joined
-                && _active._context != null && _active._context.InGame();
+            [HarmonyPostfix]
+            private static void Postfix(bool __state)
+                => _active?.ForwardToggle(1, __state, CPlayerData.m_IsWarehouseDoorClosed);
+        }
 
         [HarmonyPatch(typeof(InteractableOpenCloseSign), "OnEnable")]
         private static class OpenSignReadyPatch

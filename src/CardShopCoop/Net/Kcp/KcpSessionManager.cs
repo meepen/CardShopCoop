@@ -1317,6 +1317,18 @@ namespace CardShopCoop.Net.Kcp
                     return;
                 }
 
+                // A complete frame may only follow a finished reassembly. If one lands on the
+                // wire while a fragmented frame is still being rebuilt, the sender interleaved
+                // frames and the frame-id sequence is no longer trustworthy. This is checked at
+                // the receive point: complete frames buffered before message-id activation are
+                // replayed later (DrainPendingCompactLocked) and must not be judged by the
+                // reassembly state at replay time.
+                if (state.Reassembly != null && state.ReassemblyOffset != 0)
+                {
+                    DisconnectForProtocol(state, "partial reliable frame delivery");
+                    return;
+                }
+
                 DeliverFrame(state, data.Array, data.Offset + EnvelopeSize,
                     reliable.PayloadLength, true);
                 state.NextInboundFrameId = NextFrameId(reliable.FrameId);
@@ -1457,7 +1469,6 @@ namespace CardShopCoop.Net.Kcp
                 BeforeActivation = !state.MessageIdsActivated,
                 Snapshot = _messageSnapshot,
                 FrameLimit = frameLimit - Msg.FrameHeaderSize,
-                PartialReassembly = reliable && state.Reassembly != null && state.ReassemblyOffset != 0,
                 EncodedBytes = count,
             });
             EnsureDecodeWorker();
@@ -1615,7 +1626,6 @@ namespace CardShopCoop.Net.Kcp
                 State = work.State,
                 Reliable = work.Reliable,
                 BeforeActivation = work.BeforeActivation,
-                PartialReassembly = work.PartialReassembly,
                 Snapshot = work.Snapshot,
                 EncodedBytes = work.EncodedBytes,
             };
@@ -1679,12 +1689,6 @@ namespace CardShopCoop.Net.Kcp
                         : descriptor.Reliability != Reliability.Transient))
                 {
                     DisconnectForProtocol(state, "application delivery does not match descriptor");
-                    continue;
-                }
-
-                if (result.PartialReassembly)
-                {
-                    DisconnectForProtocol(state, "partial reliable frame delivery");
                     continue;
                 }
 
@@ -2558,7 +2562,6 @@ namespace CardShopCoop.Net.Kcp
             internal bool BeforeActivation;
             internal ProtocolSnapshot Snapshot;
             internal int FrameLimit;
-            internal bool PartialReassembly;
             internal int EncodedBytes;
         }
 
@@ -2569,7 +2572,6 @@ namespace CardShopCoop.Net.Kcp
             internal InMsg Message;
             internal bool Reliable;
             internal bool BeforeActivation;
-            internal bool PartialReassembly;
             internal ProtocolSnapshot Snapshot;
             internal bool Ok;
             internal int EncodedBytes;

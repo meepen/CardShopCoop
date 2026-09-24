@@ -328,6 +328,35 @@ namespace CardShopCoop.Modules.World
             return result;
         }
 
+        /// <summary>Recreates a boxed placement object through the game's own package factory and
+        /// returns the object it created. The factory registers the object with its kind's list;
+        /// the new object is located by the boxed pose it was spawned at.</summary>
+        internal static InteractableObject SpawnBoxedObject(int kind, int objectType, Vector3 position,
+            Quaternion rotation)
+        {
+            ShelfManager.SpawnInteractableObjectInPackageBox((EObjectType)objectType, position,
+                rotation);
+            return FindBoxedObjectAtPose(kind, objectType, position);
+        }
+
+        /// <summary>Recreates a placed (unboxed) placement object through the game's factory. The
+        /// factory returns and self-registers the new object, unlike the package-box path.</summary>
+        internal static InteractableObject SpawnPlacedObject(int objectType, Vector3 position,
+            Quaternion rotation)
+        {
+            var obj = ShelfManager.SpawnInteractableObject((EObjectType)objectType);
+            if (obj == null)
+            {
+                return null;
+            }
+
+            // Match the package-box factory: run the object's own init so it is registered with
+            // every list the game expects, then settle its pose.
+            obj.Init();
+            obj.transform.SetPositionAndRotation(position, rotation);
+            return obj;
+        }
+
         internal static int FindKind(InteractableObject obj)
         {
             var manager = FindShelfManager();
@@ -471,7 +500,7 @@ namespace CardShopCoop.Modules.World
             long worldEpoch, out string entityId, bool host)
         {
             entityId = null;
-            if (obj == null || worldEpoch <= 0 || obj is InteractablePlayTable)
+            if (obj == null || worldEpoch <= 0)
             {
                 return false;
             }
@@ -505,7 +534,7 @@ namespace CardShopCoop.Modules.World
             }
 
             if (!TryResolve(PlacementInterop.FindShelfManager(), kind, ObjectIdFromObjectKey(key),
-                out result) || result is InteractablePlayTable || result.m_ObjectType != expectedType
+                out result) || result.m_ObjectType != expectedType
                 || (requireUnboxed && (result.GetIsBoxedUp() || result.GetIsMovingObject())))
             {
                 result = null;
@@ -673,18 +702,49 @@ namespace CardShopCoop.Modules.World
                     continue;
                 }
 
-                var obj = FindCandidate(current, used, entry, i);
+                var obj = FindCandidate(current, used, entry, i, false);
+                if (obj == null && kind == PlacementApi.PlayTableKind)
+                {
+                    // The play-table list can legitimately lack a host table: one may postdate the
+                    // transferred save, or a cross-build loader may skip it. A play table carries
+                    // no stored contents, so recreate it from the authoritative baseline instead of
+                    // leaving the peer without a table it can see.
+                    obj = FindCandidate(current, used, entry, i, true);
+                    if (obj == null && !entry.IsBoxed && entry.ObjType != PlacementInterop.NoType)
+                    {
+                        obj = PlacementInterop.SpawnPlacedObject(entry.ObjType, entry.Pos,
+                            entry.Rot);
+                        if (obj != null)
+                        {
+                            CoopPlugin.Log.LogInfo("[placement] baseline materialized missing play-table id="
+                                + entry.Id + " type=" + entry.ObjType + " boxed=" + entry.IsBoxed
+                                + ".");
+                        }
+                    }
+                }
+
                 if (obj == null && entry.IsBoxed)
                 {
-                    ShelfManager.SpawnInteractableObjectInPackageBox((EObjectType)entry.ObjType,
-                        entry.BoxedPos, entry.BoxedRot);
-                    obj = PlacementInterop.FindBoxedObjectAtPose(kind, entry.ObjType,
-                        entry.BoxedPos);
+                    obj = PlacementInterop.SpawnBoxedObject(kind, entry.ObjType, entry.BoxedPos,
+                        entry.BoxedRot);
                 }
 
                 if (obj == null)
                 {
+                    if (kind == PlacementApi.PlayTableKind)
+                    {
+                        CoopPlugin.Log.LogWarning("[placement] baseline could not resolve play-table id="
+                            + entry.Id + " type=" + entry.ObjType + " boxed=" + entry.IsBoxed
+                            + " (no local table and none could be spawned).");
+                    }
+
                     continue;
+                }
+
+                if (kind == PlacementApi.PlayTableKind)
+                {
+                    CoopPlugin.Log.LogInfo("[placement] baseline bound play-table id=" + entry.Id
+                        + " to " + obj.name + " boxed=" + entry.IsBoxed + ".");
                 }
 
                 used.Add(obj);
@@ -713,7 +773,8 @@ namespace CardShopCoop.Modules.World
         }
 
         private static InteractableObject FindCandidate(List<InteractableObject> current,
-            HashSet<InteractableObject> used, PlacementPopulationEntry entry, int preferredIndex)
+            HashSet<InteractableObject> used, PlacementPopulationEntry entry, int preferredIndex,
+            bool ignoreBoxed)
         {
             if (preferredIndex < current.Count && !used.Contains(current[preferredIndex])
                 && (int)current[preferredIndex].m_ObjectType == entry.ObjType)
@@ -728,7 +789,7 @@ namespace CardShopCoop.Modules.World
                 var candidate = current[i];
                 if (used.Contains(candidate) || candidate == null
                     || (int)candidate.m_ObjectType != entry.ObjType
-                    || PlacementInterop.IsBoxed(candidate) != entry.IsBoxed)
+                    || (!ignoreBoxed && PlacementInterop.IsBoxed(candidate) != entry.IsBoxed))
                 {
                     continue;
                 }
@@ -939,7 +1000,21 @@ namespace CardShopCoop.Modules.World
                 obj = FindCandidate(kind, entry);
                 if (obj == null)
                 {
-                    return false;
+                    // A host can spawn a boxed placement object that no peer predicted (a
+                    // furniture purchase, whose pose only the host chooses). Nothing local can
+                    // adopt it, so recreate it through the game's factory before binding the
+                    // host's identity. The box channel then adopts this exact package.
+                    if (!entry.IsBoxed || entry.Type == PlacementInterop.NoType)
+                    {
+                        return false;
+                    }
+
+                    obj = PlacementInterop.SpawnBoxedObject(kind, entry.Type, entry.BoxedPos,
+                        entry.BoxedRot);
+                    if (obj == null)
+                    {
+                        return false;
+                    }
                 }
 
                 PlacementIdentity.Bind(obj, PlacementIdentity.ObjectIdFromObjectKey(objectKey));

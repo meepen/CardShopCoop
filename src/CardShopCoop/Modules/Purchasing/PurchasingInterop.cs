@@ -106,9 +106,16 @@ namespace CardShopCoop.Modules.Purchasing
             if (cart == null || purchased == null)
                 throw new InvalidOperationException("Purchasing restock cart is not available.");
 
+            // The checkout's optimistic apply already removed the purchased lines, and an accepted
+            // outcome replays this same apply (PredictionApi.ApplyConfirmed) rather than undoing it
+            // first. An absent line therefore means "already removed," not a missing cart entry.
             foreach (var purchase in purchased)
             {
-                var current = cart[purchase.Key];
+                if (!cart.TryGetValue(purchase.Key, out var current))
+                {
+                    continue;
+                }
+
                 current -= purchase.Value;
                 if (current > 0)
                 {

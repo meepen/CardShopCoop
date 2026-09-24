@@ -67,8 +67,21 @@ namespace CardShopCoop.Modules.World
             }
             else
             {
+                // A later delta for the same entity can now be applied immediately (for example a
+                // boxed update arriving after its unboxed add was deferred); the older deferred
+                // delta is obsolete and would otherwise be replayed onto the freshly built object.
+                DiscardSupersededDelta(message.Entity.Key);
                 CoopPlugin.Log.LogInfo("[placement] applied delta op=" + message.Operation + " key="
                     + message.Entity.Key + ".");
+            }
+        }
+
+        private void DiscardSupersededDelta(int key)
+        {
+            if (_pendingDeltas.TryGetValue(key, out var previous))
+            {
+                PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                _pendingDeltas.Remove(key);
             }
         }
 
@@ -139,7 +152,8 @@ namespace CardShopCoop.Modules.World
 
             if (message.Operation != PlacementDeltaMessage.Remove
                 && PlacementMoveState.ResolveObjectByKey(message.Entity.Key) == null
-                && !CanFindCandidate(message.Entity))
+                && !CanFindCandidate(message.Entity)
+                && !CanMaterialize(message.Entity))
             {
                 return false;
             }
@@ -147,7 +161,10 @@ namespace CardShopCoop.Modules.World
             _applyingState++;
             try
             {
-                PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+                // The host applies the exact Move entry the guest sent and stamps the prediction
+                // id (a stale intent is rejected via a prediction rollback), so this delta confirms
+                // the move. Reconciling would snap the piece back to its pre-move pose first.
+                PredictionApi.ApplyConfirmed(message.PredictionId, () =>
                 {
                     if (!PlacementEntityState.Apply(message))
                     {
@@ -173,6 +190,13 @@ namespace CardShopCoop.Modules.World
                 PredictionApi.ConfirmSuperseded(previous.PredictionId);
             _pendingDeltas[key] = message;
         }
+
+        /// <summary>True when a delta names a boxed object that can be recreated through the game's
+        /// package factory. This is how a peer adopts a host-spawned object it never predicted,
+        /// such as a purchased furniture package whose pose only the host chooses.</summary>
+        private static bool CanMaterialize(PlacementMoveEntry entry)
+            => entry != null && entry.IsBoxed && entry.Type != PlacementInterop.NoType
+                && (entry.Key >> 24) != PlacementApi.DecorationKind;
 
         private static bool CanFindCandidate(PlacementMoveEntry entry)
         {
@@ -377,8 +401,17 @@ namespace CardShopCoop.Modules.World
 
         public static void ShelfInitPostfix()
         {
-            _instance?.ApplyLatestBaseline();
-            _instance?.ApplyPendingDeltas();
+            // A placement apply can recreate an object through the game's package factory, which
+            // invokes this postfix from inside the new object's own Awake, before its fields are
+            // initialized. Re-entering the baseline/pending application there would pose (and
+            // re-box) a half-built object, so let the in-flight apply finish first.
+            if (_instance == null || _instance._applyingState != 0)
+            {
+                return;
+            }
+
+            _instance.ApplyLatestBaseline();
+            _instance.ApplyPendingDeltas();
         }
 
         public static void InteractableObjectDestroyedPostfix(InteractableObject __instance)

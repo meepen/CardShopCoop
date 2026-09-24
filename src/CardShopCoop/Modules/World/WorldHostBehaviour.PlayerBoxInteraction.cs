@@ -134,6 +134,15 @@ namespace CardShopCoop.Modules.World
             private static bool Prefix(InteractablePackagingBox __instance, bool isPlayer,
                 out PlayerBoxInteraction.LocalAction __state)
             {
+                __state = default;
+                if (__instance != null && __instance.GetIsMovingObject())
+                {
+                    // Never take a box back into hand while it is in the game's placement preview:
+                    // hold mode layered on top of move-box mode is what let the throw corrupt it.
+                    CoopPlugin.Log.LogInfo("[box-id] ignoring hold on a box that is being placed.");
+                    return false;
+                }
+
                 __state = _instance == null ? default
                     : _instance.CapturePlayerBoxAction(__instance, isPlayer, false);
                 return true;
@@ -154,6 +163,16 @@ namespace CardShopCoop.Modules.World
             private static bool Prefix(InteractablePackagingBox __instance, bool isPlayer,
                 out PlayerBoxInteraction.LocalAction __state)
             {
+                __state = default;
+                if (isPlayer && __instance != null && __instance.GetIsMovingObject())
+                {
+                    // F while the box is in the placement preview: the box is being aimed, not
+                    // held. A throw would enable physics under the running move lerp and strand
+                    // it, so ignore the input and let placement finish.
+                    CoopPlugin.Log.LogInfo("[box-id] ignoring throw on a box that is being placed.");
+                    return false;
+                }
+
                 __state = _instance == null ? default
                     : _instance.CapturePlayerBoxAction(__instance, isPlayer, true);
                 return true;
@@ -357,6 +376,16 @@ namespace CardShopCoop.Modules.World
         private void ApplyPredictedLocal(InteractablePackagingBox box,
             PlayerBoxInteractionMessage message)
         {
+            if (IsBeingPlaced(box))
+            {
+                // The local player has the box in the game's placement preview. Replaying a
+                // predicted pickup/drop/throw on top of the running move state machine is what
+                // strands the box (physics on under the move lerp, Ignore Raycast layer kept).
+                CoopPlugin.Log.LogInfo("[box-id] skipping predicted box action while the box is being placed id="
+                    + (message == null ? 0 : message.BoxNetworkId) + ".");
+                return;
+            }
+
             _applyingPrediction = true;
             try
             {
@@ -381,6 +410,15 @@ namespace CardShopCoop.Modules.World
         private void RestorePredictedLocal(InteractablePackagingBox box, Transform parent,
             Vector3 position, Quaternion rotation, Vector3 velocity, Vector3 angularVelocity)
         {
+            if (IsBeingPlaced(box))
+            {
+                // Undoing a superseded box action would drop the box out of the game's placement
+                // preview, so leave the move (and its transform) alone. The move is the newer,
+                // locally-owned intent and it will send its own authoritative result.
+                CoopPlugin.Log.LogInfo("[box-id] skipping prediction restore while the box is being placed.");
+                return;
+            }
+
             _applyingPrediction = true;
             try
             {
@@ -522,6 +560,16 @@ namespace CardShopCoop.Modules.World
                 throw new InvalidOperationException("Authoritative player-box action references unknown box "
                     + message.BoxNetworkId + ".");
 
+            if (IsBeingPlaced(box))
+            {
+                // This peer already owns the box in the game's placement preview. A networked
+                // hold, drop, or throw on top of that fight the move state machine and strand the
+                // box, and the move will publish its own authoritative result when it finishes.
+                CoopPlugin.Log.LogInfo("[box-id] ignoring authoritative box action while the box is being placed id="
+                    + message.BoxNetworkId + " (" + message.GetType().Name + ").");
+                return false;
+            }
+
             if (message is PlayerBoxPickupMessage pickup)
             {
                 if (!_host && (_localHeldBoxNetworkId == pickup.BoxNetworkId
@@ -650,6 +698,16 @@ namespace CardShopCoop.Modules.World
             }
 
         }
+
+        /// <summary>True while this peer has the box in the game's own placement preview
+        /// (move-box mode, <c>m_IsMovingObject</c>). The move state machine owns the box then:
+        /// the object is on the Ignore Raycast layer with its colliders off and its rigidbody
+        /// kinematic, and <c>Update</c> lerps its transform toward the aim target. Applying a
+        /// networked hold/drop/throw on top of that re-enables physics and re-parents the box
+        /// while the move lerp keeps running, so it jitters in place and can no longer be picked
+        /// up. A no-op until the move itself finishes.</summary>
+        private static bool IsBeingPlaced(InteractablePackagingBox box)
+            => box != null && box.GetIsMovingObject();
 
         private static void AlignBodyToVisual(InteractablePackagingBox box)
         {

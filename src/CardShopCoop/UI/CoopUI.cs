@@ -114,6 +114,7 @@ namespace CardShopCoop.UI
         private string _enumRestoreMsg; // outcome line under the enum-lend notice
         private string _hostTimeSeen, _hostTimeText; private GUIContent _hostTimeGc;
         private string _registerSeen, _registerText; private GUIContent _registerGc;
+        private string _nextDayWaitSeen, _nextDayWaitText; private GUIContent _nextDayWaitGc;
         private KeyCode _toggleKeySeen = KeyCode.None;
         private string _toggleHint;
 
@@ -194,6 +195,18 @@ namespace CardShopCoop.UI
                 var sz = CoopTheme.PillSize(CoopTheme.HudPillBig, _registerGc, 740f);
                 GUI.Label(new Rect((Screen.width - sz.x) / 2f, Screen.height * 0.63f, sz.x, sz.y),
                     _registerGc, CoopTheme.HudPillBig);
+            }
+            if (HudApi.NextDayWaitActive && HudApi.NextDayWaitText.Length > 0)
+            {
+                if (HudApi.NextDayWaitText != _nextDayWaitSeen)
+                {
+                    _nextDayWaitSeen = HudApi.NextDayWaitText;
+                    _nextDayWaitText = $"<size=18><color=#ffd54a>{HudApi.NextDayWaitText}</color></size>";
+                    _nextDayWaitGc = new GUIContent(_nextDayWaitText);
+                }
+                var sz = CoopTheme.PillSize(CoopTheme.HudPillBig, _nextDayWaitGc, 740f);
+                GUI.Label(new Rect((Screen.width - sz.x) / 2f, Screen.height * 0.70f, sz.x, sz.y),
+                    _nextDayWaitGc, CoopTheme.HudPillBig);
             }
             if (!Visible)
             {

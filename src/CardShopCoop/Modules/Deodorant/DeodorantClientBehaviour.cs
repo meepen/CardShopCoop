@@ -119,7 +119,9 @@ namespace CardShopCoop.Modules.Deodorant
             if (message == null)
                 return;
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            // The one predicted value (spray content) is echoed verbatim and the customer state is
+            // host-computed, so this confirms the spray rather than correcting it.
+            PredictionApi.ApplyConfirmed(message.PredictionId,
                 () => ApplyEvent(message));
         }
 

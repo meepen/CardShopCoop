@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
@@ -18,6 +19,7 @@ namespace CardShopCoop.Modules.Decoration
         private Harmony _harmony;
         private DecorationStateMessage _pendingState;
         private InteractableObject _pendingPlacement;
+        private readonly Dictionary<Guid, InteractableObject> _placementPreviews = new();
         private bool _shutdown;
         private int _applyingState;
         private bool _joined;
@@ -37,6 +39,7 @@ namespace CardShopCoop.Modules.Decoration
                 _context.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
+                PredictionApi.PredictionRetired += OnPredictionRetired;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycle = true;
@@ -61,6 +64,7 @@ namespace CardShopCoop.Modules.Decoration
                 }
                 if (registered)
                     _context.Messages.UnregisterAttributedHandlers(this);
+                PredictionApi.PredictionRetired -= OnPredictionRetired;
                 if (ReferenceEquals(_active, this))
                     _active = null;
                 ResetSessionState();
@@ -85,17 +89,38 @@ namespace CardShopCoop.Modules.Decoration
         {
             if (_shutdown)
                 return;
+            // Take the predicted preview out of the map before the authoritative apply runs. On
+            // success the apply adopts it; on rollback the prediction is retired without this
+            // delta and the retire handler discards it. Either way the preview is claimed once.
+            InteractableObject preview = null;
+            if (message.Action == DecorationActions.Place
+                && _placementPreviews.TryGetValue(message.PredictionId, out var tracked))
+            {
+                preview = tracked;
+                _placementPreviews.Remove(message.PredictionId);
+            }
+
             PredictionApi.ApplyAuthoritative(message.PredictionId,
-                () => ApplyDelta(message));
+                () => ApplyDelta(message, preview));
         }
 
-        private static void ApplyDelta(DecorationDeltaMessage message)
+        private void OnPredictionRetired(Guid predictionId)
+        {
+            if (!_placementPreviews.TryGetValue(predictionId, out var preview))
+                return;
+
+            _placementPreviews.Remove(predictionId);
+            DecorationInterop.DiscardPreview(preview);
+        }
+
+        private static void ApplyDelta(DecorationDeltaMessage message,
+            InteractableObject preview = null)
         {
             if (_active != null)
                 _active._applyingState++;
             try
             {
-                DecorationInterop.ApplyDelta(message);
+                DecorationInterop.ApplyDelta(message, preview);
             }
             finally
             {
@@ -130,7 +155,8 @@ namespace CardShopCoop.Modules.Decoration
             _context.Send(1, message);
         }
 
-        private static bool Predict(DecorationIntentMessage message, Action apply, Action undo)
+        private static bool Predict(DecorationIntentMessage message, Action apply, Action undo,
+            InteractableObject preview = null)
         {
             var client = _active;
             if (client == null || client._shutdown || !client._joined || client._context == null
@@ -140,6 +166,8 @@ namespace CardShopCoop.Modules.Decoration
                 predictionId =>
                 {
                     message.PredictionId = predictionId;
+                    if (preview != null)
+                        client._placementPreviews[predictionId] = preview;
                     client._context.Send(1, message);
                 }, apply, undo);
             return false;
@@ -202,7 +230,9 @@ namespace CardShopCoop.Modules.Decoration
                 _active._applyingState++;
             try
             {
-                DecorationInterop.ApplySnapshot(SnapshotMessage(before));
+                // A rollback restores owned state, but must not delete pieces the host already
+                // confirmed from a snapshot taken before they existed.
+                DecorationInterop.ApplySnapshot(SnapshotMessage(before), removeUnlisted: false);
             }
             finally
             {
@@ -231,6 +261,7 @@ namespace CardShopCoop.Modules.Decoration
             _joined = false;
             _pendingState = null;
             _pendingPlacement = null;
+            _placementPreviews.Clear();
             _applyingState = 0;
         }
 
@@ -254,6 +285,7 @@ namespace CardShopCoop.Modules.Decoration
                 return;
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
+            PredictionApi.PredictionRetired -= OnPredictionRetired;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
@@ -372,11 +404,14 @@ namespace CardShopCoop.Modules.Decoration
                     ObjectId = objectId,
                 };
                 var before = DecorationInterop.Snapshot();
+                // Leave the preview mid-move: it keeps its colliders off and its layer ignored
+                // while the host decides. On confirmation the delta adopts it, so no second piece
+                // is ever spawned; on rejection the retire handler discards it.
                 var predicted = Predict(message, () =>
                 {
                     DecorationInterop.ApplyPredictedPose(__instance, pose);
                     SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
-                }, () => UndoState(before));
+                }, () => UndoState(before), objectId > 0 ? null : __instance);
                 if (predicted)
                     return true;
                 SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
@@ -394,35 +429,30 @@ namespace CardShopCoop.Modules.Decoration
                 if (!IsClientReady() || _active._applyingState != 0 || __instance == null
                     || __instance.m_DecoObjectType == EDecoObject.None)
                     return true;
-                if (__instance.GetIsMovingObject())
-                {
-                    var movingId = DecorationInterop.ClientIdFor(__instance);
-                    if (movingId <= 0)
-                        return true;
-                    var message = new DecorationIntentMessage
-                    {
-                        Action = DecorationActions.Remove,
-                        ObjectId = movingId,
-                    };
-                    var before = DecorationInterop.Snapshot();
-                    var predicted = Predict(message,
-                        () => DecorationInterop.RemoveLocalPlacedObject(__instance),
-                        () => UndoState(before));
-                    if (predicted)
-                        return true;
-                    SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
-                    _active._pendingPlacement = null;
-                    return false;
-                }
-                var remove = new DecorationIntentMessage
+                var objectId = DecorationInterop.ClientIdFor(__instance);
+                if (objectId <= 0)
+                    return true;
+                var decorationType = (int)__instance.m_DecoObjectType;
+                var message = new DecorationIntentMessage
                 {
                     Action = DecorationActions.Remove,
-                    ObjectId = DecorationInterop.ClientIdFor(__instance),
+                    DecorationType = decorationType,
+                    ObjectId = objectId,
                 };
-                var prior = DecorationInterop.Snapshot();
-                return Predict(remove,
-                    () => DecorationInterop.RemoveLocalPlacedObject(__instance),
-                    () => UndoState(prior));
+                var before = DecorationInterop.Snapshot();
+                var predicted = Predict(message, () =>
+                {
+                    // Mirror vanilla BoxUpObject: settle the move lifecycle before destroying the
+                    // piece, otherwise the controller and the placement overlay stay active. The
+                    // authoritative delta carries the resulting inventory count.
+                    DecorationInterop.FinalizeMovedObject(__instance);
+                    DecorationInterop.RemoveLocalPlacedObject(__instance);
+                }, () => UndoState(before));
+                if (predicted)
+                    return true;
+                SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
+                _active._pendingPlacement = null;
+                return false;
             }
         }
 

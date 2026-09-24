@@ -1,5 +1,6 @@
 using System;
 using HarmonyLib;
+using UnityEngine;
 
 namespace CardShopCoop.Modules.SessionInput
 {
@@ -25,6 +26,18 @@ namespace CardShopCoop.Modules.SessionInput
                 postfix: new HarmonyMethod(typeof(SessionInputPatches), nameof(PauseOpenPostfix)));
             TryPatch(harmony, typeof(PauseScreen), "CloseScreen",
                 postfix: new HarmonyMethod(typeof(SessionInputPatches), nameof(PauseClosePostfix)));
+
+            // Diagnostic only: when the pause key is pressed, report which gate flag is set.
+            TryPatch(harmony, typeof(InteractionPlayerController), "Update",
+                prefix: new HarmonyMethod(typeof(SessionInputPatches), nameof(PauseProbePrefix)));
+        }
+
+        internal static void PauseProbePrefix(InteractionPlayerController __instance)
+        {
+            if (Input.GetKeyDown(KeyCode.Escape))
+            {
+                SessionInputRuntime.LogPauseGate(__instance);
+            }
         }
 
         internal static bool CameraInputPrefix(ref float __result)

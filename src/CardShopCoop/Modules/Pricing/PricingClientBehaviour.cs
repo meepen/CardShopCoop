@@ -228,22 +228,38 @@ namespace CardShopCoop.Modules.Pricing
             if (screen == null || !PricingInterop.TryReadConfirmPrice(screen, out var price))
                 return true;
             if (!PricingInterop.ValidPrice(price))
+            {
+                CoopPlugin.Log.LogWarning("[pricing] confirm ignored: invalid price " + price + ".");
                 return false;
+            }
 
             var item = screen.GetCurrentSettingPriceItemType();
             var card = screen.GetCurrentSettingPriceCardData();
             if (card != null)
             {
                 if (!PricingInterop.ValidCard(card))
+                {
+                    CoopPlugin.Log.LogWarning("[pricing] confirm ignored: invalid card saveIndex="
+                        + PricingInterop.SafeSaveIndex(card) + " expansion="
+                        + (int)card.expansionType + " monster=" + (int)card.monsterType
+                        + " grade=" + card.cardGrade + ".");
                     return false;
+                }
 
                 var grade = GradingApi.Encoded(card);
+                CoopPlugin.Log.LogInfo("[pricing] forwarding card price saveIndex="
+                    + PricingInterop.SafeSaveIndex(card) + " grade=" + grade + " price=" + price
+                    + ".");
                 PredictCard(PricingInterop.CopyCard(card, grade), price, grade);
             }
             else
             {
                 if (!PricingInterop.IsItemTypeValid(item))
+                {
+                    CoopPlugin.Log.LogWarning("[pricing] confirm ignored: no card and invalid item "
+                        + item + ".");
                     return false;
+                }
 
                 PredictItem(item, price);
             }

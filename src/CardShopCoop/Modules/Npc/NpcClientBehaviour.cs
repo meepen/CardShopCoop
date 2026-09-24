@@ -195,9 +195,13 @@ namespace CardShopCoop.Modules.Npc
 
         private void ApplyIdentity(NpcIdentityDeltaMessage message)
         {
+            // Customers name themselves "Female<model>" / "Male<model>"; workers rely on the
+            // explicit flag. Accept either source so a missing/incorrect flag cannot spawn a
+            // female NPC from the male prefab.
+            var female = message.Female || HasFemaleNamePrefix(message.CharName);
             if (message.Kind == KindCustomer)
             {
-                EnsureCustomerCapacity(message.Index, message.Female);
+                EnsureCustomerCapacity(message.Index, female);
             }
 
             var key = (message.Kind << 16) | message.Index;
@@ -213,7 +217,7 @@ namespace CardShopCoop.Modules.Npc
             // here re-instantiated and fully re-dressed the character on every customer spawn
             // (~7 ms each) even though nothing visible changed.
             var reusedIncarnation = puppet.HasIdentity && puppet.Identity != message.Identity
-                && SameDressedLook(puppet, message);
+                && SameDressedLook(puppet, message.Kind, female, message.CharName);
 
             if (puppet.HasIdentity && puppet.Identity != message.Identity && !reusedIncarnation)
             {
@@ -236,20 +240,26 @@ namespace CardShopCoop.Modules.Npc
                 ResetPuppetForIncarnation(puppet, message);
             }
 
-            SetPendingIdentity(puppet, message.Identity, message.Female);
-            Redress(puppet, message.CharName, message.Position, message.Female,
+            SetPendingIdentity(puppet, message.Identity, female);
+            Redress(puppet, message.CharName, message.Position, female,
                 message.Kind, message.Index);
         }
+
+        /// <summary>Customers encode their gender in the model name ("Female3"/"Male7"); the
+        /// workforce does not, so it relies on the explicit flag.</summary>
+        private static bool HasFemaleNamePrefix(string charName)
+            => !string.IsNullOrEmpty(charName)
+                && charName.StartsWith("Female", StringComparison.Ordinal);
 
         /// <summary>A puppet already wearing exactly the look an identity packet describes.
         /// Appearance is a pure function of gender and character name (the game resolves the
         /// preset by name), so equal values mean no re-dress is needed even when the wire
         /// identity advanced for a new visit by the same pooled NPC.</summary>
-        private static bool SameDressedLook(Puppet puppet, NpcIdentityDeltaMessage message)
+        private static bool SameDressedLook(Puppet puppet, byte kind, bool female, string charName)
         {
             return puppet.Go != null && puppet.Custom != null
-                && puppet.Kind == message.Kind && puppet.Female == message.Female
-                && puppet.CharName == message.CharName;
+                && puppet.Kind == kind && puppet.Female == female
+                && puppet.CharName == charName;
         }
 
         /// <summary>Reuse a clone for a new incarnation of the same-looking pooled NPC: reset
@@ -1145,6 +1155,14 @@ namespace CardShopCoop.Modules.Npc
             spawner.ShowPricePopup(message.Amount, message.OffsetUp, anchor);
         }
 
+        /// <summary>The GameObject instance id of a customer root. Native activation
+        /// suppression is keyed on the root <see cref="GameObject"/>, so carriers must be
+        /// whitelisted with the same id. <c>Customer.GetInstanceID()</c> would return the
+        /// component's own id and never match the root the guard sees.</summary>
+        private static int CustomerRootId(Customer customer)
+            => !ReferenceEquals(customer, null) && customer != null && customer.gameObject != null
+                ? customer.gameObject.GetInstanceID() : 0;
+
         public static void DetachExistingCustomer(int index, Customer customer)
         {
             if (_active == null)
@@ -1158,8 +1176,7 @@ namespace CardShopCoop.Modules.Npc
             // teardown can never hide or de-suppress a newer customer that took the same slot.
             var ownsMirror = _active._existing.TryGetValue(index, out var existing)
                 && (customer == null || ReferenceEquals(existing.Customer, customer));
-            var customerRootId = !ReferenceEquals(customer, null) && customer != null
-                ? customer.GetInstanceID() : 0;
+            var customerRootId = CustomerRootId(customer);
             if (ownsMirror && existing.RootInstanceId != 0)
             {
                 _active._allowedNativeRoots.Remove(existing.RootInstanceId);
@@ -1191,7 +1208,7 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            _active._allowedNativeRoots.Add(customer.GetInstanceID());
+            _active._allowedNativeRoots.Add(CustomerRootId(customer));
             _active.TrackNativeRoot(customer.gameObject);
 
             if (!_active._existing.TryGetValue(index, out var existing) || existing.Generation != generation)
@@ -1205,7 +1222,7 @@ namespace CardShopCoop.Modules.Npc
                 existing = new ExistingCustomer
                 {
                     Customer = customer,
-                    RootInstanceId = customer.GetInstanceID(),
+                    RootInstanceId = CustomerRootId(customer),
                     Generation = generation,
                     PrevRenderedPos = customer.transform.position,
                     RenderYaw = customer.transform.eulerAngles.y,
@@ -1223,7 +1240,7 @@ namespace CardShopCoop.Modules.Npc
                 }
 
                 existing.Customer = customer;
-                existing.RootInstanceId = customer.GetInstanceID();
+                existing.RootInstanceId = CustomerRootId(customer);
                 existing.KeepPuppetVisible = keepPuppetVisible;
             }
             var key = (KindCustomer << 16) | index;
@@ -1312,11 +1329,25 @@ namespace CardShopCoop.Modules.Npc
         {
             var manager = NpcInterop.CustomerManager;
             var customers = manager?.GetCustomerList();
+            var grew = false;
             while (customers.Count <= index)
             {
                 var customer = manager.GetNewCustomerPrefab(female);
                 _active.TrackNativeRoot(customer.gameObject);
                 customer.gameObject.SetActive(false);
+                grew = true;
+            }
+
+            if (grew)
+            {
+                // Runtime pool growth must announce itself exactly like the batch overload.
+                // Client modules hold state that could not be applied until this slot existed
+                // (trade/register carriers, deodorant state) and apply it from these events; a
+                // silently grown slot left that state stranded. A customer's identity can reach
+                // the host's incremental scan after its counter trade offer, so this is the only
+                // signal the guest gets that the slot its offer refers to now exists.
+                CustomerPoolChanged?.Invoke();
+                CustomerCapacityChanged?.Invoke(index);
             }
         }
 
@@ -1474,9 +1505,14 @@ namespace CardShopCoop.Modules.Npc
                 var kind = ent.Kind;
                 var index = ent.Index;
                 var identity = ent.Identity;
-                var female = ent.Female;
                 var hasName = ent.HasName;
                 var charName = ent.CharName;
+                // State-only entries carry no gender at all, so `ent.Female` defaults to false.
+                // Treating that as authoritative and comparing it against the puppet's real
+                // gender destroyed every female puppet on each state update (its Female flag
+                // never matched the default). Only a name-bearing baseline/identity entry can
+                // assert gender, and customers encode it in the name as well.
+                var female = ent.Female || (hasName && HasFemaleNamePrefix(charName));
                 var pos = ent.Position;
                 var yaw = ent.Yaw;
                 var speed = ent.Speed;
@@ -1530,7 +1566,8 @@ namespace CardShopCoop.Modules.Npc
                             existing.PuppetReadyNotified = false;
                         }
                         if (visual != null && visual.HasIdentity
-                            && (visual.Identity != identity || visual.Female != female))
+                            && (visual.Identity != identity
+                                || (hasName && visual.Female != female)))
                         {
                             // This list slot was reused by a newer pooled customer: drop the
                             // stale body so it is rebuilt for this identity, exactly as the
@@ -1602,7 +1639,7 @@ namespace CardShopCoop.Modules.Npc
                 }
 
                 var identityChanged = p.HasIdentity
-                    && (p.Identity != identity || p.Female != female);
+                    && (p.Identity != identity || (hasName && p.Female != female));
                 if (identityChanged)
                 {
                     ClearPendingIdentity(p);

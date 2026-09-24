@@ -35,6 +35,9 @@ namespace CardShopCoop.Modules.Presence
         private readonly CoopRuntimeContext _context;
         private readonly List<int> _holdTypes = new();
         private readonly List<CardData> _holdCards = new();
+        private readonly List<int> _lastHoldTypes = new();
+        private readonly List<CardData> _lastHoldCards = new();
+        private int _lastHoldKind = -1;
         private readonly List<PresenceModelEntry> _undo = new();
         private readonly List<PresenceModelEntry> _redo = new();
         private readonly PresenceAvatarRenderer _renderer = new();
@@ -113,7 +116,6 @@ namespace CardShopCoop.Modules.Presence
             var yaw = camera != null ? camera.eulerAngles.y : _playerTransform.eulerAngles.y;
             var cameraPosition = camera != null ? camera.position : position;
             var cameraRotation = camera != null ? camera.rotation : Quaternion.Euler(0f, yaw, 0f);
-            var hold = ComputeHoldState();
             var now = Time.unscaledTime;
             var speed = 0f;
             if (_hasLastStatePosition)
@@ -134,11 +136,106 @@ namespace CardShopCoop.Modules.Presence
                 CameraPosition = cameraPosition,
                 CameraRotation = cameraRotation,
                 Speed = speed,
-                Hold = hold,
-                HoldTypes = hold == 3 ? null : new List<int>(_holdTypes),
-                HoldCards = hold == 3 ? new List<CardData>(_holdCards) : null,
             };
             return IsFinite(state);
+        }
+
+        /// <summary>Forces the next <see cref="TryConsumeLocalHoldChange"/> to report a change, so
+        /// a freshly joined peer receives the current hold appearance as part of its baseline.</summary>
+        internal void InvalidateLocalHold()
+        {
+            _lastHoldKind = -1;
+        }
+
+        /// <summary>Returns the local hold appearance only when it differs from the last one
+        /// reported. The caller sends it on the reliable lane; it never rides the 15 Hz transform
+        /// stream because the verbose CardData list cannot be trusted to fit the unreliable MTU.</summary>
+        internal bool TryConsumeLocalHoldChange(out PresenceHoldMessage hold)
+        {
+            hold = null;
+            var kind = ComputeHoldState();
+            if (!LocalHoldChanged(kind))
+            {
+                return false;
+            }
+
+            RememberLocalHold(kind);
+            hold = new PresenceHoldMessage
+            {
+                Hold = kind,
+                HoldTypes = kind == 3 ? null : new List<int>(_holdTypes),
+                HoldCards = kind == 3 ? new List<CardData>(_holdCards) : null,
+            };
+            return true;
+        }
+
+        private bool LocalHoldChanged(byte kind)
+        {
+            if (kind != _lastHoldKind)
+            {
+                return true;
+            }
+
+            if (kind == 3)
+            {
+                if (_holdCards.Count != _lastHoldCards.Count)
+                {
+                    return true;
+                }
+
+                for (var i = 0; i < _holdCards.Count; i++)
+                {
+                    if (!SameCard(_holdCards[i], _lastHoldCards[i]))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (_holdTypes.Count != _lastHoldTypes.Count)
+            {
+                return true;
+            }
+
+            for (var i = 0; i < _holdTypes.Count; i++)
+            {
+                if (_holdTypes[i] != _lastHoldTypes[i])
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void RememberLocalHold(byte kind)
+        {
+            _lastHoldKind = kind;
+            _lastHoldTypes.Clear();
+            _lastHoldTypes.AddRange(_holdTypes);
+            _lastHoldCards.Clear();
+            for (var i = 0; i < _holdCards.Count; i++)
+            {
+                var copy = new CardData();
+                copy.CopyData(_holdCards[i]);
+                _lastHoldCards.Add(copy);
+            }
+        }
+
+        private static bool SameCard(CardData a, CardData b)
+        {
+            return a != null && b != null
+                && a.expansionType == b.expansionType
+                && a.monsterType == b.monsterType
+                && a.borderType == b.borderType
+                && a.isFoil == b.isFoil
+                && a.isDestiny == b.isDestiny
+                && a.isChampionCard == b.isChampionCard
+                && a.isNew == b.isNew
+                && a.cardGrade == b.cardGrade
+                && a.gradedCardIndex == b.gradedCardIndex;
         }
 
         internal bool TryGetLocalPosition(out Vector3 position)
@@ -198,8 +295,13 @@ namespace CardShopCoop.Modules.Presence
 
         internal void ApplyState(int avatarId, PresenceStateMessage state)
         {
-            _renderer.UpdateState(avatarId, state.Position, state.Yaw, state.Hold,
-                state.CameraPosition, state.CameraRotation, state.HoldTypes, state.HoldCards);
+            _renderer.UpdateState(avatarId, state.Position, state.Yaw,
+                state.CameraPosition, state.CameraRotation);
+        }
+
+        internal void ApplyHold(int avatarId, PresenceHoldMessage hold)
+        {
+            _renderer.UpdateHold(avatarId, hold.Hold, hold.HoldTypes, hold.HoldCards);
         }
 
         /// <summary>Chest-bone anchor of the avatar holding a box, so the world module can ride the

@@ -1,6 +1,5 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -72,39 +71,39 @@ namespace CardShopCoop.Modules.Expansion
         [MessageHandler(typeof(ExpansionPurchaseMessage))]
         private void HandlePurchase(MessageContext context, ExpansionPurchaseMessage message)
         {
+            // Every joined client, including the first connection (which the host numbers 1),
+            // is allowed to ask the host to buy an expansion. The host is the only writer.
             if (_shutdown || message == null || context?.Connection == null
-                || context.Connection.Id == 1 || !IsJoinPhase(context.Connection.State))
+                || !_context.InGame() || !IsJoinPhase(context.Connection.State))
             {
                 return;
             }
 
+            if (message.Kind > 2)
+            {
+                CoopPlugin.Log.LogWarning("Expansion purchase rejected peer="
+                    + context.Connection.Id + " kind=" + message.Kind
+                    + " reason=unsupported purchase kind");
+                return;
+            }
+
             var accepted = false;
-            var reason = "purchase was rejected";
             try
             {
-                if (message.Kind > 2)
-                {
-                    reason = "unsupported purchase kind";
-                }
-                else
-                {
-                    accepted = HostPurchase(message.Kind, context.Connection.Id, out reason);
-                }
+                accepted = HostPurchase(message.Kind, context.Connection.Id, out _);
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Expansion purchase failed for peer "
                     + context.Connection.Id + ": " + exception);
-                reason = "host expansion action failed";
             }
 
             if (!accepted)
             {
-                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
                 return;
             }
 
-            BroadcastDelta(message.Kind, message.PredictionId);
+            BroadcastDelta(message.Kind);
         }
 
         internal void Shutdown()
@@ -251,7 +250,7 @@ namespace CardShopCoop.Modules.Expansion
                 + CPlayerData.m_CoinAmountDouble);
         }
 
-        private void BroadcastDelta(byte kind, Guid predictionId)
+        private void BroadcastDelta(byte kind)
         {
             if (_shutdown || _context == null || !_context.InGame())
             {
@@ -260,7 +259,6 @@ namespace CardShopCoop.Modules.Expansion
 
             var message = new ExpansionDeltaMessage
             {
-                PredictionId = predictionId,
                 Area = kind,
             };
             switch (kind)
@@ -302,7 +300,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(2, Guid.Empty);
+                    _active.BroadcastDelta(2);
                 }
             }
         }
@@ -315,7 +313,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(0, Guid.Empty);
+                    _active.BroadcastDelta(0);
                 }
             }
         }
@@ -328,7 +326,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(1, Guid.Empty);
+                    _active.BroadcastDelta(1);
                 }
             }
         }

@@ -1,6 +1,5 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -9,7 +8,9 @@ using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Expansion
 {
-    /// <summary>Guest expansion intent capture and authoritative state application.</summary>
+    /// <summary>Guest expansion intent capture and authoritative state application. A guest forwards
+    /// one purchase intent and then waits for the host's authoritative state; it never mutates its
+    /// own expansion.</summary>
     [ClientBehaviour]
     public sealed class ExpansionClientBehaviour : CoopBehaviour
     {
@@ -23,7 +24,6 @@ namespace CardShopCoop.Modules.Expansion
         private ExpansionDeltaMessage _pendingWarehouseDelta;
         private ExpansionDeltaMessage _pendingWarehouseUnlockDelta;
         private bool _baselineNeedsManagerInitialization;
-        private const string PredictionScope = "expansion";
 
         private void OnEnable()
         {
@@ -204,19 +204,14 @@ namespace CardShopCoop.Modules.Expansion
             }
 
             var delta = pending;
-            PredictionApi.ApplyAuthoritative(delta.PredictionId, () =>
-            {
-                ExpansionInterop.ApplyDelta(manager, delta);
-                ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());
-            });
             pending = null;
+            ExpansionInterop.ApplyDelta(manager, delta);
+            ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());
         }
 
         private static void ReplacePending(ref ExpansionDeltaMessage pending,
             ExpansionDeltaMessage replacement)
         {
-            if (pending != null)
-                PredictionApi.ConfirmSuperseded(pending.PredictionId);
             pending = replacement;
         }
 
@@ -236,40 +231,17 @@ namespace CardShopCoop.Modules.Expansion
                 return true;
             }
 
-            var manager = ExpansionInterop.FindUnlockManager();
-            if (manager == null)
+            if (ExpansionInterop.FindUnlockManager() == null)
             {
-                return true;
+                CoopPlugin.Log.LogWarning(
+                    "Expansion purchase ignored: the unlock manager is unavailable.");
+                return false;
             }
 
-            var oldCount = kind == 0 ? CPlayerData.m_UnlockRoomCount
-                : CPlayerData.m_UnlockWarehouseRoomCount;
-            var oldUnlocked = CPlayerData.m_IsWarehouseRoomUnlocked;
-            var predictedCount = oldCount + 1;
-            var predictedUnlocked = true;
-            PredictionApi.Predict(
-                PredictionScope,
-                predictionId => client._context.Send(1, new ExpansionPurchaseMessage
-                {
-                    PredictionId = predictionId,
-                    Kind = kind,
-                }),
-                () => ApplyPredicted(manager, kind, predictedCount, predictedUnlocked),
-                () => ApplyPredicted(manager, kind, oldCount, oldUnlocked));
+            client._context.Send(1, new ExpansionPurchaseMessage { Kind = kind });
+            // The host owns the mutation and will broadcast the resulting state. Never run the
+            // vanilla local purchase on a guest.
             return false;
-        }
-
-        private static void ApplyPredicted(UnlockRoomManager manager, byte kind, int count,
-            bool unlocked)
-        {
-            var delta = new ExpansionDeltaMessage
-            {
-                Area = kind,
-                Count = count,
-                Unlocked = unlocked,
-            };
-            ExpansionInterop.ApplyDelta(manager, delta);
-            ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());
         }
 
         [HarmonyPatch(typeof(ExpansionShopUIScreen), "EvaluateCartCheckout")]

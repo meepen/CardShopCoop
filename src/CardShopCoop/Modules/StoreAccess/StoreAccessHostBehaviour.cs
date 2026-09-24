@@ -98,16 +98,23 @@ namespace CardShopCoop.Modules.StoreAccess
                         Rollback(context, message);
                     else
                     {
+                        var before = CPlayerData.m_IsShopOpen;
                         _applyingIntent = true;
                         try
                         {
+                            // Run the vanilla click so the host sign animates exactly like a local
+                            // click. It is a no-op while the previous swap is still playing or the
+                            // tutorial gate blocks, in which case there is nothing to confirm.
                             sign.OnMouseButtonUp();
-                            accepted = true;
                         }
                         finally
                         {
                             _applyingIntent = false;
                         }
+
+                        accepted = CPlayerData.m_IsShopOpen != before;
+                        if (!accepted)
+                            Rollback(context, message);
                     }
                 }
                 else
@@ -117,16 +124,20 @@ namespace CardShopCoop.Modules.StoreAccess
                         Rollback(context, message);
                     else
                     {
+                        var before = CPlayerData.m_IsWarehouseDoorClosed;
                         _applyingIntent = true;
                         try
                         {
                             sign.OnMouseButtonUp();
-                            accepted = true;
                         }
                         finally
                         {
                             _applyingIntent = false;
                         }
+
+                        accepted = CPlayerData.m_IsWarehouseDoorClosed != before;
+                        if (!accepted)
+                            Rollback(context, message);
                     }
                 }
             }

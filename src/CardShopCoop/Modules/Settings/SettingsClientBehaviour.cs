@@ -50,6 +50,8 @@ namespace CardShopCoop.Modules.Settings
                 Patch(typeof(CashierCheckoutPatch));
                 Patch(typeof(CashierTradePatch));
                 Patch(typeof(TableNumberPatch));
+                Patch(typeof(CashierInitPatch));
+                Patch(typeof(TableInitPatch));
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
                 SceneManager.sceneLoaded += OnSceneLoaded;
             }
@@ -107,10 +109,49 @@ namespace CardShopCoop.Modules.Settings
                 for (var i = 0; i < states.Count; i++)
                 {
                     var state = states[i].Value;
+                    if (!CanApply(state))
+                    {
+                        // The referenced scene object (a just-purchased play table or cashier) has
+                        // not been materialized here yet. Keep the latest authoritative value
+                        // pending and apply it from that object's init hook; indexing a shorter
+                        // list here used to throw straight into session recovery.
+                        continue;
+                    }
+
                     _pendingStates.Remove(states[i].Key);
                     PredictionApi.ApplyAuthoritative(state.PredictionId, () => ApplyState(state));
                 }
             }
+        }
+
+        /// <summary>True when a partial mutation's keyed element exists locally. Tombstones and
+        /// list-shaped payloads never need the element (they only trim the local tail), and a
+        /// full state is applied with per-element skips.</summary>
+        private static bool CanApply(SettingsStateMessage message)
+        {
+            if (message == null || message.Full || message.ItemIndex < 0 || message.Tombstone)
+            {
+                return true;
+            }
+
+            return message.Index switch
+            {
+                6 => CashierExists(message.ItemIndex),
+                7 => TableExists(message.ItemIndex),
+                _ => true,
+            };
+        }
+
+        private static bool CashierExists(int index)
+        {
+            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
+            return counters != null && index >= 0 && index < counters.Count && counters[index] != null;
+        }
+
+        private static bool TableExists(int index)
+        {
+            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
+            return tables != null && index >= 0 && index < tables.Count && tables[index] != null;
         }
 
         [MessageHandler(typeof(SettingsStateMessage))]
@@ -144,15 +185,14 @@ namespace CardShopCoop.Modules.Settings
             ClearPendingStates();
         }
 
-        private void ApplyState(SettingsStateMessage message)
+        private bool ApplyState(SettingsStateMessage message)
         {
             _applyingRemote = true;
             try
             {
                 if (!message.Full)
                 {
-                    ApplyPartial(message);
-                    return;
+                    return ApplyPartial(message);
                 }
 
                 CPlayerData.m_GameEventFormat = (EGameEventFormat)message.GameEventFormat;
@@ -163,6 +203,7 @@ namespace CardShopCoop.Modules.Settings
                 ApplyFees(message.GameEventPrices, message.GameEventPrices.Count);
                 ApplyCashiers(message.CashierFlags, message.CashierFlags.Count);
                 ApplyTables(message.TableNumbers, message.TableNumbers.Count);
+                return true;
             }
             finally
             {
@@ -171,7 +212,10 @@ namespace CardShopCoop.Modules.Settings
 
         }
 
-        private static void ApplyPartial(SettingsStateMessage message)
+        /// <summary>Applies one partial mutation. Returns false when the keyed element is not
+        /// materialized locally yet so the caller can retry from the object's init hook instead
+        /// of applying against a shorter list.</summary>
+        private static bool ApplyPartial(SettingsStateMessage message)
         {
             if (message.Index == 4)
             {
@@ -186,8 +230,11 @@ namespace CardShopCoop.Modules.Settings
                 ResizeFees(count);
                 if (message.ItemIndex >= 0)
                 {
-                    if (!message.Tombstone)
+                    if (!message.Tombstone && message.ItemIndex < CPlayerData.m_SetGameEventPriceList.Count
+                        && message.GameEventPrices.Count > 0)
+                    {
                         CPlayerData.m_SetGameEventPriceList[message.ItemIndex] = message.GameEventPrices[0];
+                    }
                 }
                 else
                 {
@@ -200,8 +247,11 @@ namespace CardShopCoop.Modules.Settings
                 ApplyCashierTail(count);
                 if (message.ItemIndex >= 0)
                 {
-                    if (!message.Tombstone)
-                        ApplyCashier(message.ItemIndex, message.CashierFlags[0]);
+                    if (!message.Tombstone && message.CashierFlags.Count > 0
+                        && !ApplyCashier(message.ItemIndex, message.CashierFlags[0]))
+                    {
+                        return false;
+                    }
                 }
                 else
                 {
@@ -214,8 +264,11 @@ namespace CardShopCoop.Modules.Settings
                 ApplyTableTail(count);
                 if (message.ItemIndex >= 0)
                 {
-                    if (!message.Tombstone)
-                        ApplyTable(message.ItemIndex, message.TableNumbers[0]);
+                    if (!message.Tombstone && message.TableNumbers.Count > 0
+                        && !ApplyTable(message.ItemIndex, message.TableNumbers[0]))
+                    {
+                        return false;
+                    }
                 }
                 else
                 {
@@ -227,6 +280,8 @@ namespace CardShopCoop.Modules.Settings
                 throw new ArgumentOutOfRangeException(nameof(message.Index), message.Index,
                     "Unknown authoritative settings discriminator.");
             }
+
+            return true;
         }
 
         private static string StateKey(SettingsStateMessage message)
@@ -242,19 +297,32 @@ namespace CardShopCoop.Modules.Settings
             _pendingFullState = null;
         }
 
-        private static void ApplyCashier(int index, byte flags)
+        private static bool ApplyCashier(int index, byte flags)
         {
-            var counter = SettingsInterop.FindShelfManager().m_CashierCounterList[index];
+            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
+            if (counters == null || index < 0 || index >= counters.Count || counters[index] == null)
+            {
+                return false;
+            }
+
+            var counter = counters[index];
             var checkout = (flags & 1) != 0;
             var trade = (flags & 2) != 0;
             counter.SetCanCheckout(checkout);
             counter.SetCanTradeCard(trade);
+            return true;
         }
 
-        private static void ApplyTable(int index, byte number)
+        private static bool ApplyTable(int index, byte number)
         {
-            SettingsInterop.FindShelfManager().m_PlayTableList[index]
-                .SetTournamentPlayTableNumber(number);
+            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
+            if (tables == null || index < 0 || index >= tables.Count || tables[index] == null)
+            {
+                return false;
+            }
+
+            tables[index].SetTournamentPlayTableNumber(number);
+            return true;
         }
 
         private static void ResizeFees(int count)
@@ -275,7 +343,7 @@ namespace CardShopCoop.Modules.Settings
         {
             var fees = CPlayerData.m_SetGameEventPriceList;
             ResizeFees(count);
-            for (var i = 0; i < values.Count; i++)
+            for (var i = 0; i < values.Count && i < fees.Count; i++)
             {
                 fees[i] = values[i];
             }
@@ -290,11 +358,19 @@ namespace CardShopCoop.Modules.Settings
 
         private static void ApplyCashierTail(int count)
         {
-            var counters = SettingsInterop.FindShelfManager().m_CashierCounterList;
-            for (var i = count; i < counters.Count; i++)
+            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
+            if (counters == null)
             {
-                counters[i].SetCanCheckout(true);
-                counters[i].SetCanTradeCard(true);
+                return;
+            }
+
+            for (var i = count < 0 ? 0 : count; i < counters.Count; i++)
+            {
+                if (counters[i] != null)
+                {
+                    counters[i].SetCanCheckout(true);
+                    counters[i].SetCanTradeCard(true);
+                }
             }
         }
 
@@ -307,10 +383,18 @@ namespace CardShopCoop.Modules.Settings
 
         private static void ApplyTableTail(int count)
         {
-            var tables = SettingsInterop.FindShelfManager().m_PlayTableList;
-            for (var i = count; i < tables.Count; i++)
+            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
+            if (tables == null)
             {
-                tables[i].SetTournamentPlayTableNumber(0);
+                return;
+            }
+
+            for (var i = count < 0 ? 0 : count; i < tables.Count; i++)
+            {
+                if (tables[i] != null)
+                {
+                    tables[i].SetTournamentPlayTableNumber(0);
+                }
             }
         }
 
@@ -539,6 +623,23 @@ namespace CardShopCoop.Modules.Settings
             [HarmonyPostfix]
             private static void Postfix(InteractableCashierCounter __instance, byte __state)
                 => SendCashierIntent(__instance, __state);
+        }
+
+        [HarmonyPatch(typeof(InteractablePlayTable), "Awake")]
+        private static class TableInitPatch
+        {
+            // A play table bought at runtime is materialized after the settings mutation that
+            // carries its number. Awake resets the number to 0 (after ShelfManager.InitPlayTable
+            // registers it), so retry the deferred state once Awake has finished.
+            [HarmonyPostfix]
+            private static void Postfix() => _active?.TryApplyPendingState();
+        }
+
+        [HarmonyPatch(typeof(InteractableCashierCounter), "Awake")]
+        private static class CashierInitPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix() => _active?.TryApplyPendingState();
         }
 
         [HarmonyPatch(typeof(InteractablePlayTable), "SetTournamentPlayTableNumber")]

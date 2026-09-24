@@ -50,14 +50,19 @@ namespace CardShopCoop.Modules.World
         private void HandleContainerPackClaim(MessageContext context,
             ContainerPackClaimMessage message)
         {
-            WorldPrediction.ApplyAuthoritative(message,
+            // Host-only answer to an accepted claim intent; the client's optimistic apply only set
+            // CollectClaimed, and the authoritative apply re-establishes it with the host output.
+            WorldPrediction.ApplyConfirmed(message,
                 () => _cardInteraction.Containers.ClientApplyPackClaim(message));
         }
 
         [MessageHandler(typeof(ContainerDeltaMessage))]
         private void HandleContainerDelta(MessageContext context, ContainerDeltaMessage message)
         {
-            WorldPrediction.ApplyAuthoritative(message,
+            // Accepted container ops are echoed as the host's full record state for that
+            // compartment (rejections roll the prediction back), so the receiver's apply is a
+            // state-set, not a second mutation.
+            WorldPrediction.ApplyConfirmed(message,
                 () => _cardInteraction.Containers.ClientApplyDelta(message));
         }
 

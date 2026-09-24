@@ -229,7 +229,7 @@ namespace CardShopCoop.Modules.Register
 
             if (message.Kind == RegisterDeltaKind.CounterLifecycle && !message.Exists)
             {
-                PredictionApi.ApplyAuthoritative(message.PredictionId,
+                PredictionApi.ApplyConfirmed(message.PredictionId,
                     () => ApplyCounterLifecycle(message));
                 return true;
             }
@@ -256,7 +256,11 @@ namespace CardShopCoop.Modules.Register
                 return false;
             }
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            // A delta only follows a host-applied intent (rejections arrive as a prediction
+            // rollback), so it confirms the guest's optimistic claim/release/scan. Undoing that
+            // optimism first would replay it - e.g. releasing the register would re-man the
+            // counter and yank the player back before the ownership delta clears it.
+            PredictionApi.ApplyConfirmed(message.PredictionId, () =>
             {
                 _applyingRemote++;
                 try
@@ -788,6 +792,17 @@ namespace CardShopCoop.Modules.Register
 
                 customer.m_Anim.SetBool("HandingOverCash", undo.HandingOverCash);
                 counter.UpdateCashierCounterState(undo.State);
+                // Rolling back the moment the customer handed over a card restores the counter
+                // to a pre-giving-change phase, but vanilla only restores the credit card
+                // machine inside OnPressSpaceBar (which ran before the rollback). If the machine
+                // is left out at the player, the authoritative phase's re-entry into giving
+                // change captures that moved spot as the machine's "original" and the phone is
+                // stuck at the number pad forever. Put it back before the re-apply runs.
+                if (undo.UsingCard && undo.State != ECashierCounterState.GivingChange)
+                {
+                    RegisterInterop.RestoreCreditCardMachine(counter);
+                }
+
                 RestoreChangeCounts(counter, undo.ChangeCounts);
                 RebuildCashScreen(counter, customer);
                 RegisterInterop.CashScreen(counter)?.UpdateMoneyChangeAmount(undo.ChangeReady,
@@ -944,6 +959,8 @@ namespace CardShopCoop.Modules.Register
         private void PredictScan(InteractableCashierCounter counter, int index, int slot, bool card)
         {
             var customer = counter.m_CurrentCustomer;
+            CoopPlugin.Log.LogInfo("[register] predicting " + (card ? "card" : "item")
+                + " scan counter=" + index + " slot=" + slot + ".");
             var undo = CaptureUndo(counter, customer);
             PredictionApi.Predict(PredictionScope + ":" + index,
                 id => Send(new RegisterIntentMessage
@@ -1262,15 +1279,20 @@ namespace CardShopCoop.Modules.Register
 
                 if (!client._claims.Contains(index))
                 {
+                    CoopPlugin.Log.LogWarning("[register] item scan blocked: counter=" + index
+                        + " is owned by another peer.");
                     return false;
                 }
 
                 var slot = client.ItemSlot(__instance, index);
-                if (slot >= 0)
+                if (slot < 0)
                 {
-                    client.PredictScan(counter, index, slot, false);
+                    CoopPlugin.Log.LogWarning("[register] item scan blocked: the item is not in "
+                        + "counter " + index + "'s bag.");
+                    return false;
                 }
 
+                client.PredictScan(counter, index, slot, false);
                 return false;
             }
         }
@@ -1296,15 +1318,20 @@ namespace CardShopCoop.Modules.Register
 
                 if (!client._claims.Contains(index))
                 {
+                    CoopPlugin.Log.LogWarning("[register] card scan blocked: counter=" + index
+                        + " is owned by another peer.");
                     return false;
                 }
 
                 var slot = client.CardSlot(__instance, index);
-                if (slot >= 0)
+                if (slot < 0)
                 {
-                    client.PredictScan(counter, index, slot, true);
+                    CoopPlugin.Log.LogWarning("[register] card scan blocked: the card is not in "
+                        + "counter " + index + "'s bag.");
+                    return false;
                 }
 
+                client.PredictScan(counter, index, slot, true);
                 return false;
             }
         }
@@ -1422,9 +1449,16 @@ namespace CardShopCoop.Modules.Register
         [HarmonyPatch(typeof(Customer), "EvaluateFinishScanItem")]
         private static class ScanCompletionPatch
         {
+            // EvaluateFinishScanItem rolls the cash-vs-card choice and the amount with the
+            // local RNG, then flips the counter into TakingCash. On a client that prediction
+            // would disagree with the host's independent roll, so the guest could see cash,
+            // click it, and then watch it turn into a card while the host rejected the
+            // mismatched payment. The host publishes the authoritative type/amount via the
+            // phase delta and ApplyPhase performs the same transition, so the client never
+            // needs to (and must not) run it.
             [HarmonyPrefix]
             private static bool Prefix()
-                => _active == null || _active._applyingRemote == 0;
+                => _active == null;
         }
 
         private int ItemSlot(InteractableScanItem item, int counterIndex)
