@@ -253,6 +253,15 @@ namespace CardShopCoop.Modules.Staff
                 return;
             }
 
+            // FireWorker disables the worker collider, and the game only re-enables it inside
+            // ActivateWorker. The client puppet never runs that path, so a re-hired worker would
+            // stay unclickable unless the hired state restores the interaction surface here.
+            worker.m_IsActive = entry.Hired;
+            if (worker.m_WorkerCollider != null)
+            {
+                worker.m_WorkerCollider.gameObject.SetActive(entry.Hired);
+            }
+
             worker.m_PrimaryTask = (EWorkerTask)entry.PrimaryTask;
             worker.m_SecondaryTask = (EWorkerTask)entry.SecondaryTask;
             worker.m_WorkerTask = (EWorkerTask)entry.WorkerTask;
