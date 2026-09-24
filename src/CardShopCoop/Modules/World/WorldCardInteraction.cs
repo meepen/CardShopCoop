@@ -274,6 +274,86 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        private List<CardDeltaEntry> _clientCardBatch;
+
+        /// <summary>True while a bulk card action (bundle cards, donation quick-fill) is
+        /// collecting its deltas into one transaction.</summary>
+        internal bool HasClientCardBatch => _clientCardBatch != null;
+
+        /// <summary>Client: start collecting card deltas into one atomic batch. While open, the
+        /// forwarding patch appends to the batch instead of sending a message per mutation, so a
+        /// bulk action (up to a hundred reductions) becomes one intent and one reconcile instead
+        /// of a per-delta prediction fan-out.</summary>
+        internal void BeginClientCardBatch()
+        {
+            if (_host)
+            {
+                return;
+            }
+
+            if (_clientCardBatch != null)
+            {
+                CoopPlugin.Log.LogWarning("world cards: a client card batch was already open; "
+                    + "restarting it.");
+            }
+
+            _clientCardBatch = new List<CardDeltaEntry>();
+        }
+
+        internal void AddClientCardBatch(CardData card, int amount, bool isAdd)
+        {
+            if (_clientCardBatch == null || card == null || amount <= 0)
+            {
+                return;
+            }
+
+            var snapshot = SnapshotCard(card);
+            if (GradingApi.Present)
+            {
+                snapshot.cardGrade = GradingApi.Encoded(card);
+            }
+
+            _clientCardBatch.Add(new CardDeltaEntry
+            {
+                IsAdd = isAdd,
+                Amount = amount,
+                Card = snapshot,
+            });
+        }
+
+        internal void CommitClientCardBatch()
+        {
+            var entries = _clientCardBatch;
+            _clientCardBatch = null;
+            if (entries == null || entries.Count == 0)
+            {
+                return;
+            }
+
+            var message = new CardDeltaBatchRequestMessage { Deltas = entries };
+            WorldPrediction.Predict(WorldPrediction.CardsScope, message,
+                () => ApplyPredictedCardBatch(entries, false),
+                () => ApplyPredictedCardBatch(entries, true));
+        }
+
+        private static void ApplyPredictedCardBatch(List<CardDeltaEntry> entries, bool reverse)
+        {
+            if (reverse)
+            {
+                for (var i = entries.Count - 1; i >= 0; i--)
+                {
+                    ApplyPredictedCardDelta(entries[i].Card, entries[i].Amount, !entries[i].IsAdd);
+                }
+
+                return;
+            }
+
+            for (var i = 0; i < entries.Count; i++)
+            {
+                ApplyPredictedCardDelta(entries[i].Card, entries[i].Amount, entries[i].IsAdd);
+            }
+        }
+
         internal void SendCardDeltaTo(int connectionId, CardData card, int amount, bool isAdd)
         {
             if (!_host || ConnectionCount == 0 || card == null || amount <= 0)
@@ -503,6 +583,7 @@ namespace CardShopCoop.Modules.World
             _deltaLogBuf.Clear();
             _binderRefreshPending = false;
             ApplyingRemoteCards = false;
+            _clientCardBatch = null;
             WorldContainerInteraction.ApplyingRemote = false;
             ClearCardSetCache();
             GradingApi.Reset();

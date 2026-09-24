@@ -49,6 +49,7 @@ namespace CardShopCoop.Modules.World
             InstallCardDisplayPatches();
             InstallPlacement();
             InstallPlacementHold();
+            InstallWorkbench();
         }
 
         internal void Shutdown()
@@ -60,6 +61,7 @@ namespace CardShopCoop.Modules.World
             ShutdownPlacementHold();
             ShutdownPlacement();
             ShutdownCardDisplay();
+            ShutdownWorkbench();
             ResetPlayerBoxInteractionState();
             ResetPlayerShelfInteractionState();
             _boxNetworkInteraction?.Dispose();
@@ -136,6 +138,7 @@ namespace CardShopCoop.Modules.World
             _instance._playerBoxInteraction?.Reset();
             _instance._shelfInteraction?.Reset();
             _instance._warehouseShelfInteraction?.Reset();
+            _instance._workbenchInteraction?.Reset();
             _instance._boxNetworkInteraction?.ClientBeginBaseline();
             _instance.ResetCardDisplayState();
         }

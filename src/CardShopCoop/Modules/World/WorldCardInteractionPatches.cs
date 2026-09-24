@@ -102,11 +102,19 @@ namespace CardShopCoop.Modules.World
                 bool isDestiny, int reduceAmount, out bool __state)
             {
                 __state = false;
-                if (Current?.IsClient == true && !WorldCardInteraction.ApplyingRemoteCards
+                var current = Current;
+                if (current?.HasClientCardBatch == true)
+                {
+                    current.AddClientCardBatch(
+                        CPlayerData.GetCardData(index, expansionType, isDestiny), reduceAmount, false);
+                    return false;
+                }
+
+                if (current?.IsClient == true && !WorldCardInteraction.ApplyingRemoteCards
                     && !SaveTransferApi.PreloadHold)
                 {
                     var card = CPlayerData.GetCardData(index, expansionType, isDestiny);
-                    __state = Current.PredictClientCardDelta(card, reduceAmount, false);
+                    __state = current.PredictClientCardDelta(card, reduceAmount, false);
                     return !__state;
                 }
                 return true;

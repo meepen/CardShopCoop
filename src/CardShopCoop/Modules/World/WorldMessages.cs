@@ -25,6 +25,7 @@ namespace CardShopCoop.Modules.World
         GradedRemove = 14,
         BoxState = 15,
         CardDisplay = 16,
+        Workbench = 17,
     }
 
     /// <summary>Common identity carried by world messages. Stable entity IDs make validation
@@ -203,6 +204,12 @@ namespace CardShopCoop.Modules.World
                     + ":" + furniture.Position.z.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
             if (message is ContainerStateMessage state)
                 return "container-state";
+            if (message is WorkbenchStateMessage workbench)
+                return WorkbenchEntityId(workbench.Index);
+            if (message is WorkbenchBundleMessage bundle)
+                return WorkbenchEntityId(bundle.Index);
+            if (message is WorkbenchGrantMessage grant)
+                return grant.StableEntityId ?? "workbench-grant";
             if (message is WarehouseStateMessage)
                 return "warehouse-state";
             if (message is MarketStateMessage)
@@ -215,6 +222,9 @@ namespace CardShopCoop.Modules.World
 
         internal static string ContainerEntityId(int kind, int index)
             => "container:" + kind + ":" + index;
+
+        internal static string WorkbenchEntityId(int index)
+            => "workbench:" + index;
 
         internal static string WarehouseEntityId(int shelfIndex, int compartmentIndex)
             => "warehouse:" + shelfIndex + ":" + compartmentIndex;
@@ -264,6 +274,8 @@ namespace CardShopCoop.Modules.World
                 return WorldOperationKind.CardDelta;
             if (message is GradedRemoveRequestMessage)
                 return WorldOperationKind.GradedRemove;
+            if (message is WorkbenchStateRequestMessage || message is WorkbenchBundleMessage)
+                return WorldOperationKind.Workbench;
             return WorldOperationKind.Unknown;
         }
     }
