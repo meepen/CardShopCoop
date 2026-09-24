@@ -24,6 +24,22 @@ namespace CardShopCoop.Modules.World
         internal static void ApplyAuthoritative(WorldMessage message, Action apply)
             => PredictionApi.ApplyAuthoritative(message?.PredictionId ?? Guid.Empty, apply);
 
+        /// <summary>Applies an authoritative result that either confirms the local prediction or is
+        /// a remote action. A result carrying a still-pending local prediction id confirms the
+        /// optimistic state that already equals it, so the prediction is retired without running
+        /// its inverse or replaying the apply; anything else is applied directly.</summary>
+        internal static void ApplyConfirmedOrRemote(WorldMessage message, Action apply)
+        {
+            var predictionId = message?.PredictionId ?? Guid.Empty;
+            if (predictionId != Guid.Empty && PredictionApi.IsPending(predictionId))
+            {
+                PredictionApi.ConfirmSuperseded(predictionId);
+                return;
+            }
+
+            apply();
+        }
+
         /// <summary>Applies a world result that confirms the predicted action, retiring the
         /// prediction without rolling it back first. See <see cref="PredictionApi.ApplyConfirmed"/>.</summary>
         internal static void ApplyConfirmed(WorldMessage message, Action apply)

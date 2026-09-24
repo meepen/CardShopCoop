@@ -323,6 +323,23 @@ namespace CardShopCoop.Modules.Register
                         ? (uint)generation : NextCustomerGeneration(station.CustomerGeneration);
                 }
             }
+            else if (customer != null)
+            {
+                // A pooled customer object can be reused for the next customer at this counter, so
+                // the reference is unchanged even though it is a new incarnation. The Npc module
+                // bumps its generation on the inactive->active transition; re-sync it here so this
+                // counter gets a new generation and the client rebuilds its carrier. Without this
+                // the guest kept the previous customer's (now stale) bag and its scans were
+                // rejected against the host's live, different bag.
+                var generation = NpcHostBehaviour.GetCustomerGeneration(customer);
+                if (generation > 0 && (uint)generation != station.CustomerGeneration)
+                {
+                    CoopPlugin.Log.LogDebug("[register] counter " + index + " customer generation "
+                        + station.CustomerGeneration + " -> " + generation
+                        + " (pooled customer reused).");
+                    station.CustomerGeneration = (uint)generation;
+                }
+            }
 
             if (station.Owner == -1 && !counter.IsMannedByPlayer())
             {

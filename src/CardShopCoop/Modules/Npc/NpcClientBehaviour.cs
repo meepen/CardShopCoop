@@ -541,6 +541,7 @@ namespace CardShopCoop.Modules.Npc
         private static readonly int HashIsSitting = Animator.StringToHash("IsSitting");
         private static readonly int HashIsPlaying = Animator.StringToHash("IsPlaying");
         private static readonly int HashIsHoldingBox = Animator.StringToHash("IsHoldingBox");
+        private static readonly int HashIsBeingSprayed = Animator.StringToHash("IsBeingSprayed");
         private static readonly System.Reflection.MethodInfo MiEvaluateWorkerAttribute =
             AccessTools.Method(typeof(Worker), "EvaluateWorkerAttribute");
         private static readonly System.Reflection.MethodInfo MiEvaluateSkillLevel =
@@ -551,7 +552,7 @@ namespace CardShopCoop.Modules.Npc
             AccessTools.Field(typeof(CC.CharacterCustomization), "ApparelObjects");
 
         [Flags]
-        private enum NpcFlags : byte
+        private enum NpcFlags : ushort
         {
             None = 0,
             HoldingBag = 1,
@@ -562,6 +563,8 @@ namespace CardShopCoop.Modules.Npc
             Smelly = 32,
             Exclaim = 64,   // the red "!" trade-prompt mesh is showing
             Female = 128,   // puppet should spawn from the female prefab (workers esp.)
+            Sprayed = 256,  // the customer's "IsBeingSprayed" animator reaction is playing
+            Cleaned = 512,  // the customer's clean puff FX is showing
         }
 
 
@@ -936,6 +939,7 @@ namespace CardShopCoop.Modules.Npc
             public GameObject CardFan;
             public GameObject CardSingle;
             public GameObject Smelly;
+            public GameObject Clean;     // the clean puff FX after a spray
             public GameObject Exclaim;   // the red "!" trade prompt mesh
             public bool Female;          // which prefab this puppet was spawned from
             public byte Kind;
@@ -1731,6 +1735,7 @@ namespace CardShopCoop.Modules.Npc
             customer.m_Anim.SetBool(HashIsSitting, (flags & NpcFlags.IsSitting) != 0);
             customer.m_Anim.SetBool(HashIsPlaying, (flags & NpcFlags.IsPlaying) != 0);
             customer.m_Anim.SetBool(HashIsHoldingBox, (flags & NpcFlags.IsHoldingBox) != 0);
+            customer.m_Anim.SetBool(HashIsBeingSprayed, (flags & NpcFlags.Sprayed) != 0);
             customer.m_ShoppingBagTransform?.gameObject.SetActive((flags & NpcFlags.HoldingBag) != 0);
 
             customer.m_CustomerCash?.gameObject.SetActive((flags & NpcFlags.HandingOverCash) != 0);
@@ -1740,6 +1745,8 @@ namespace CardShopCoop.Modules.Npc
             customer.m_GameCardSingle?.SetActive((flags & NpcFlags.IsPlaying) != 0);
 
             customer.m_SmellyFX?.SetActive((flags & NpcFlags.Smelly) != 0);
+
+            customer.m_CleanFX?.SetActive((flags & NpcFlags.Cleaned) != 0);
 
             customer.m_ExclaimationMesh?.SetActive((flags & NpcFlags.Exclaim) != 0);
         }
@@ -1872,12 +1879,14 @@ namespace CardShopCoop.Modules.Npc
                         p.Anim.SetBool(HashIsSitting, (p.Flags & NpcFlags.IsSitting) != 0);
                         p.Anim.SetBool(HashIsPlaying, (p.Flags & NpcFlags.IsPlaying) != 0);
                         p.Anim.SetBool(HashIsHoldingBox, (p.Flags & NpcFlags.IsHoldingBox) != 0);
+                        p.Anim.SetBool(HashIsBeingSprayed, (p.Flags & NpcFlags.Sprayed) != 0);
                     }
                     Toggle(p.Bag, (p.Flags & NpcFlags.HoldingBag) != 0);
                     Toggle(p.Cash, (p.Flags & NpcFlags.HandingOverCash) != 0);
                     Toggle(p.CardFan, (p.Flags & NpcFlags.IsPlaying) != 0);
                     Toggle(p.CardSingle, (p.Flags & NpcFlags.IsPlaying) != 0);
                     Toggle(p.Smelly, (p.Flags & NpcFlags.Smelly) != 0);
+                    Toggle(p.Clean, (p.Flags & NpcFlags.Cleaned) != 0);
                     Toggle(p.Exclaim, (p.Flags & NpcFlags.Exclaim) != 0);
                     p.AppliedFlags = (int)p.Flags;
                 }
@@ -2181,6 +2190,7 @@ namespace CardShopCoop.Modules.Npc
                 p.CardFan = cust.m_GameCardFanOut;
                 p.CardSingle = cust.m_GameCardSingle;
                 p.Smelly = cust.m_SmellyFX; // plain child FX object, survives the strip
+                p.Clean = cust.m_CleanFX; // clean puff FX shown after a spray
                 p.Exclaim = cust.m_ExclaimationMesh; // the "!" trade prompt, driven by flags below
                 Toggle(p.Bag, false);
                 Toggle(p.Cash, false);

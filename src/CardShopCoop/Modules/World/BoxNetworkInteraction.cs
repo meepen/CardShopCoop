@@ -298,6 +298,18 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>Clears a stored-box descriptor without touching the live object or its binding.
+        /// Used when a rejected prediction returns a still-live box to the player's hand.</summary>
+        internal void ClientForgetStored(long id)
+        {
+            if (_host || id <= 0)
+            {
+                return;
+            }
+
+            _storedBoxes.Remove(id);
+        }
+
         internal void BindStoredLiveBox(long id, InteractablePackagingBox_Item box,
             WarehouseBoxState state)
         {
@@ -314,6 +326,9 @@ namespace CardShopCoop.Modules.World
                 DestroyWithoutNotification(previous);
             }
 
+            // A stored box is not simulated: the game leaves it frozen from the held state, but a
+            // box materialized for the network arrives with physics on and would sag or fall.
+            box.SetPhysicsEnabled(false);
             _storedBoxes[id] = descriptor;
             Bind(id, box);
         }
@@ -519,7 +534,14 @@ namespace CardShopCoop.Modules.World
 
             if (TryGetBox(state.BoxNetworkId, out var existing))
             {
-                ApplyPose(existing, state.Position, state.Rotation);
+                // A held box's pose belongs to its hand/remote anchor, not to the host's spawn
+                // pose. Applying it here yanked a just-taken box out of the hand (a take
+                // announces the replacement box's spawn pose before the take itself).
+                if (!IsBeingHeld(existing))
+                {
+                    ApplyPose(existing, state.Position, state.Rotation);
+                }
+
                 _storedBoxes.Remove(state.BoxNetworkId);
                 _unboundCandidates.Remove(existing);
                 if (state.Kind == BoxNetworkKind.Furniture)

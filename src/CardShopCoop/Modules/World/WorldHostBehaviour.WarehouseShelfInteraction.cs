@@ -41,8 +41,16 @@ namespace CardShopCoop.Modules.World
             {
                 if (Warehouse == null)
                     return false;
-                return Warehouse.HostApplyStore(message, context.ConnectionId,
-                    response => SendWorldTo(context.ConnectionId, response));
+                if (!Warehouse.HostApplyStore(message, context.ConnectionId,
+                    response => SendWorldTo(context.ConnectionId, response)))
+                {
+                    return false;
+                }
+
+                // The box is on the shelf now, not carried: drop the mirrored hand hold so a
+                // later take re-attaches it to the avatar's carry anchor.
+                _playerBoxInteraction?.ReleaseRemoteHoldForBox(message.BoxNetworkId);
+                return true;
             });
         }
 

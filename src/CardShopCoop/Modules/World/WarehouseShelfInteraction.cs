@@ -158,17 +158,60 @@ namespace CardShopCoop.Modules.World
             };
             WorldPrediction.Predict(WorldPrediction.WarehouseScope, intent,
                 () => ClientApplyDelta(delta),
-                () => ClientApplyDelta(new WarehouseDeltaMessage
-                {
-                    IsStore = false,
-                    ShelfIndex = shelfIndex,
-                    CompartmentIndex = compartmentIndex,
-                    BoxNetworkId = boxNetworkId,
-                    ItemType = intent.ItemType,
-                    Amount = intent.Amount,
-                    IsBig = intent.IsBig,
-                }));
+                () => ClientUndoStore(delta));
             return false;
+        }
+
+        /// <summary>Reverts a rejected store prediction locally: the optimistic store moved the
+        /// player's own live box into the compartment, so the inverse removes that same box and
+        /// returns it to the player's hand. It must not run the warehouse take path, which
+        /// materializes a duplicate and emits a player-box pickup the host never asked for.
+        /// The prediction rollback runs inside the prediction reconcile, so the game's own hold
+        /// cannot be mistaken for a fresh local pickup.</summary>
+        private void ClientUndoStore(WarehouseDeltaMessage delta)
+        {
+            var compartment = ResolveCompartment(delta.ShelfIndex, delta.CompartmentIndex);
+            if (compartment == null)
+            {
+                return;
+            }
+
+            if (_usesRecords)
+            {
+                var count = RecordCount(compartment);
+                if (count == 0 || GetRecordId(compartment, count - 1, null) != delta.BoxNetworkId)
+                {
+                    return;
+                }
+
+                var args = new object[] { null };
+                if (!(bool)_recordPop.Invoke(compartment, args))
+                {
+                    return;
+                }
+
+                RemoveLastRecordId(compartment);
+            }
+            else if (_boxes.TryGetBox(delta.BoxNetworkId, out var stored)
+                && stored is InteractablePackagingBox_Item item)
+            {
+                var boxes = compartment.GetInteractablePackagingBoxList();
+                if (boxes != null && boxes.Contains(item))
+                {
+                    compartment.RemoveBox(item);
+                }
+            }
+
+            _boxes.ClientForgetStored(delta.BoxNetworkId);
+            if (!_boxes.ClientEnsureWarehouseTake(delta.BoxNetworkId, delta.ItemType, delta.Amount,
+                delta.IsBig, out var held))
+            {
+                throw new InvalidOperationException("Warehouse store rollback could not restore box ID "
+                    + delta.BoxNetworkId + ".");
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            held.StartHoldBox(true, controller.m_HoldItemPos);
         }
 
         internal bool TryForwardClientTake(InteractableStorageCompartment storage)
@@ -216,11 +259,92 @@ namespace CardShopCoop.Modules.World
             delta.ItemType = state.ItemType;
             delta.Amount = state.Amount;
             delta.IsBig = state.IsBig;
-            ClientApplyDelta(delta);
+            ClientTakeIntoHand(delta, compartment);
+        }
+
+        /// <summary>Moves a taken box from the shelf into the local player's hand. The live box
+        /// that was stored is the box being taken, so it is moved directly; only the record
+        /// backend needs a fresh live representation.</summary>
+        private void ClientTakeIntoHand(WarehouseDeltaMessage delta, ShelfCompartment compartment)
+        {
+            if (compartment == null)
+                throw new InvalidOperationException("Warehouse take references an unknown compartment.");
+
+            if (_usesRecords)
+            {
+                PopClientWarehouseRecord(compartment, delta.BoxNetworkId);
+            }
+            else if (_boxes.TryGetBox(delta.BoxNetworkId, out var stored)
+                && stored is InteractablePackagingBox_Item live)
+            {
+                var boxes = compartment.GetInteractablePackagingBoxList();
+                if (boxes != null && boxes.Contains(live))
+                {
+                    compartment.RemoveBox(live);
+                }
+
+                _boxes.ClientForgetStored(delta.BoxNetworkId);
+            }
+
+            if (!_boxes.ClientEnsureWarehouseTake(delta.BoxNetworkId, delta.ItemType, delta.Amount,
+                delta.IsBig, out var box))
+            {
+                throw new InvalidOperationException("Warehouse take could not materialize box ID "
+                    + delta.BoxNetworkId + ".");
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            box.StartHoldBox(true, controller.m_HoldItemPos);
+        }
+
+        /// <summary>Applies another player's take on this peer: the box leaves our shelf, but only
+        /// the taker ends up holding it. Their pickup broadcast attaches the live box to their
+        /// avatar, so we must not start a local hold here.</summary>
+        private void ClientApplyRemoteTake(WarehouseDeltaMessage message)
+        {
+            var compartment = ResolveCompartment(message.ShelfIndex, message.CompartmentIndex);
+            if (compartment == null)
+            {
+                throw new InvalidOperationException("Warehouse take delta references an unknown compartment.");
+            }
+
+            if (_usesRecords)
+            {
+                PopClientWarehouseRecord(compartment, message.BoxNetworkId);
+                if (!_boxes.ClientEnsureWarehouseTake(message.BoxNetworkId, message.ItemType,
+                        message.Amount, message.IsBig, out _))
+                {
+                    throw new InvalidOperationException("Warehouse take could not materialize box ID "
+                        + message.BoxNetworkId + ".");
+                }
+
+                _boxes.ClientForgetStored(message.BoxNetworkId);
+                return;
+            }
+
+            if (_boxes.TryGetBox(message.BoxNetworkId, out var stored)
+                && stored is InteractablePackagingBox_Item live)
+            {
+                var boxes = compartment.GetInteractablePackagingBoxList();
+                if (boxes != null && boxes.Contains(live))
+                {
+                    compartment.RemoveBox(live);
+                }
+            }
+
+            _boxes.ClientForgetStored(message.BoxNetworkId);
         }
 
         private void ClientUndoTakePrediction(WarehouseDeltaMessage delta)
         {
+            // The optimistic take may still be lerping the box into the hand, and the game's
+            // store path refuses a box that is lerping (CanPickup). Stop that lerp so the same
+            // box can go straight back onto the shelf.
+            if (!_usesRecords && _boxes.TryGetBox(delta.BoxNetworkId, out var box))
+            {
+                box.StopLerpToTransform();
+            }
+
             ClientApplyDelta(new WarehouseDeltaMessage
             {
                 IsStore = true,
@@ -280,7 +404,12 @@ namespace CardShopCoop.Modules.World
 
         internal void OnBoxAdded(ShelfCompartment compartment)
         {
-            if (!_hostApplyingCommand && TryGetLastLiveBoxState(compartment, out var added))
+            // Always record the box so a later removal (for example the host taking it off the
+            // shelf) is detectable and broadcast. Only a command being applied suppresses the
+            // store broadcast, because HostApplyStore already sends that delta.
+            if (!TryGetLastLiveBoxState(compartment, out var added))
+                return;
+            if (!_hostApplyingCommand)
                 BroadcastWarehouseDelta(compartment, true, added);
         }
 
@@ -376,6 +505,13 @@ namespace CardShopCoop.Modules.World
                 {
                     _hostApplyingCommand = false;
                 }
+            }
+            else
+            {
+                CoopPlugin.Log.LogWarning("Warehouse store rejected: shelf [" + message.ShelfIndex
+                    + "," + message.CompartmentIndex + "] will not take box "
+                    + message.BoxNetworkId + " (" + message.ItemType + " x" + message.Amount
+                    + ", big=" + message.IsBig + ").");
             }
 
             if (!accepted)
@@ -502,15 +638,11 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var compartment = ResolveCompartment(message.ShelfIndex, message.CompartmentIndex);
-            RemoveClientWarehouseTop(compartment, message.BoxNetworkId);
-            if (!_boxes.ClientEnsureWarehouseTake(message.BoxNetworkId, message.ItemType,
-                    message.Amount, message.IsBig, out var box))
-                throw new InvalidOperationException("Warehouse take could not materialize box ID "
-                    + message.BoxNetworkId + ".");
-
-            var controllerForTake = SceneRef<InteractionPlayerController>.Get();
-            box.StartHoldBox(true, controllerForTake.m_HoldItemPos);
+            // A take that did not confirm our own prediction belongs to another player. The
+            // origin already moved the box into its own hand optimistically, so here we only
+            // make our shelf match; taking it into our own hand would publish a pickup request
+            // from every observer and misattribute the holder.
+            ClientApplyRemoteTake(message);
         }
 
         private void ClientApplyStoreDelta(WarehouseDeltaMessage message)
@@ -550,7 +682,10 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private void RemoveClientWarehouseTop(ShelfCompartment compartment, long boxNetworkId)
+        /// <summary>Pops the record a client take targets. Only the record backend keeps its boxes
+        /// as records; the live backend moves the stored box itself (see
+        /// <see cref="ClientTakeIntoHand"/> and <see cref="ClientApplyRemoteTake"/>).</summary>
+        private void PopClientWarehouseRecord(ShelfCompartment compartment, long boxNetworkId)
         {
             if (compartment == null)
                 throw new InvalidOperationException("Warehouse take delta references an unknown compartment.");
@@ -558,23 +693,13 @@ namespace CardShopCoop.Modules.World
             IsApplyingRemote = true;
             try
             {
-                if (_usesRecords)
-                {
-                    var count = RecordCount(compartment);
-                    if (count == 0 || GetRecordId(compartment, count - 1, null) != boxNetworkId)
-                        return;
-                    var args = new object[] { null };
-                    if (!(bool)_recordPop.Invoke(compartment, args))
-                        throw new InvalidOperationException("Warehouse record take could not be applied.");
-                    RemoveLastRecordId(compartment);
+                var count = RecordCount(compartment);
+                if (count == 0 || GetRecordId(compartment, count - 1, null) != boxNetworkId)
                     return;
-                }
-
-                var box = compartment.GetLastInteractablePackagingBox();
-                if (box == null || !_boxes.TryGetId(box, out var id) || id != boxNetworkId)
-                    return;
-                compartment.RemoveBox(box);
-                _boxes.DetachForWarehouseTake(boxNetworkId);
+                var args = new object[] { null };
+                if (!(bool)_recordPop.Invoke(compartment, args))
+                    throw new InvalidOperationException("Warehouse record take could not be applied.");
+                RemoveLastRecordId(compartment);
             }
             finally
             {
@@ -801,6 +926,7 @@ namespace CardShopCoop.Modules.World
             if (stored == null)
                 throw new InvalidOperationException("Could not materialize an authoritative warehouse box.");
 
+            stored.SetPhysicsEnabled(false);
             stored.DispenseItem(false, compartment);
             if (!stored.m_IsStored)
             {
@@ -819,6 +945,7 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
+            box.SetPhysicsEnabled(false);
             box.DispenseItem(false, compartment);
             return box.m_IsStored;
         }

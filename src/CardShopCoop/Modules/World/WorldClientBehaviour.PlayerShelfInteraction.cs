@@ -16,6 +16,7 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(TakeItemFromShelfScopePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(BoxAddToShelfScopePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(BoxRemoveFromShelfScopePatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(RemoveLabelPatch)).Patch();
         }
 
         [MessageHandler(typeof(ShelfItemAddMessage))]
@@ -71,7 +72,8 @@ namespace CardShopCoop.Modules.World
         /// fires neither AddItem nor RemoveItem, so it needs its own publish or the other players
         /// keep showing the label. Only the removal (type -> None) is shared: an empty compartment
         /// briefly takes the incoming type before the first item lands, and that is not a label.</summary>
-        private void PublishLabelChange(ShelfCompartment compartment, EItemType previousType)
+        private void PublishLabelChange(ShelfCompartment compartment, EItemType previousType,
+            bool allowWarehouse = false)
         {
             if (_shelfInteraction == null || compartment == null || !_context.InGame()
                 || compartment.GetItemCount() > 0
@@ -84,7 +86,7 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogInfo("[shelf] label removed on " + compartment.name + " ("
                 + previousType + ").");
             _shelfInteraction.PublishRemove(compartment,
-                _shelfInteraction.CaptureLabelChange(compartment));
+                _shelfInteraction.CaptureLabelChange(compartment, allowWarehouse));
         }
 
         private bool ApplyShelfAction(ShelfInteractionMessage message)
@@ -258,6 +260,27 @@ namespace CardShopCoop.Modules.World
             [HarmonyPostfix]
             private static void Postfix(ShelfCompartment __instance, EItemType __state)
                 => _instance?.PublishLabelChange(__instance, __state);
+        }
+
+        /// <summary>Warehouse labels are removed from the price tag the same way player-shelf
+        /// labels are, but the warehouse compartment is outside the player-shelf inventory
+        /// protocol so the compartment-type hook above ignores it. Publish only that explicit
+        /// removal; box-driven type changes stay on the warehouse box protocol.</summary>
+        [HarmonyPatch(typeof(ShelfCompartment), "RemoveLabel")]
+        private static class RemoveLabelPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(ShelfCompartment __instance, out EItemType __state)
+                => __state = __instance == null ? EItemType.None : __instance.GetItemType();
+
+            [HarmonyPostfix]
+            private static void Postfix(ShelfCompartment __instance, EItemType __state)
+            {
+                if (__instance != null && __instance.GetWarehouseShelf() != null)
+                {
+                    _instance?.PublishLabelChange(__instance, __state, allowWarehouse: true);
+                }
+            }
         }
     }
 }

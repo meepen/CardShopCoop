@@ -110,7 +110,7 @@ namespace CardShopCoop
             GradedDriftAlert = Config.Bind("Graded", "DriftAlert", GradedAlertMode.Always,
                 "How loudly to announce that your graded albums have drifted apart. THIS CONTROLS THE HOST'S SCREEN. While you are HOSTING it decides both your own on-screen line and the heads-up sent to the joiner. While you are JOINING it does nothing at all: the host's setting alone decides whether you get that heads-up, because the drift is only ever announced from the host's side. Always: announce every check that finds a difference. OncePerSession: say it once per player per session and then stay quiet - including for a later, bigger difference. Never: never put it on screen at all. The log records every check whichever you pick and on both PCs, so a support log stays complete whatever you choose; this only controls the screen, and it never changes what the co-op panel's adopt button offers.");
             PerfDebug = Config.Bind("Diagnostics", "PerfDebug", false,
-                "Enable Unity hitch profiling. Logs frames slower than 33 ms with available main-thread, GC, rendering, physics, and co-op stage timings; individual stages above 5 ms are also rate-limited. Enable temporarily to find lag spikes; it does not change gameplay.");
+                "Enable Unity hitch profiling. Logs frames slower than 33 ms with available main-thread, GC, rendering, physics, and co-op stage timings; individual stages above 5 ms are also rate-limited. Also logs a [perf-update] breakdown of every mod Update/LateUpdate and Harmony patch body each window. Enable temporarily to find lag spikes; it does not change gameplay.");
             ArtificialLagMs = Config.Bind("Diagnostics", "ArtificialLagMs", 0,
                 "TESTING ONLY. Adds this many milliseconds of latency to every network message you RECEIVE. Set the same value on both PCs for symmetric lag (each hop adds one delay, so a round trip is roughly twice the value). 0 disables it.");
             ArtificialJitterMs = Config.Bind("Diagnostics", "ArtificialJitterMs", 0,
@@ -125,6 +125,10 @@ namespace CardShopCoop
             // disable.
             Runtime.ModuleCatalog.Bind(Config);
             Runtime.ModuleCatalog.LogConfiguration();
+            // Install the generic mod Update profiler up front when PerfDebug is already on,
+            // so the wrappers exist before the first Update; PerfProbe re-installs lazily if the
+            // setting is turned on later.
+            Util.UpdateProfiler.Install();
 
             // PLATFORM LINE FIRST, ABOVE EVERYTHING THAT CAN FAIL. This is the line a Game
             // Pass player (or a support thread) is told to look for, and it is most useful

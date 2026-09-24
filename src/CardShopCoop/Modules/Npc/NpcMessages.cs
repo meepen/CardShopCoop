@@ -26,7 +26,7 @@ namespace CardShopCoop.Modules.Npc
         public Vector3 Position;
         public float Yaw;
         public float Speed;
-        public byte Flags;
+        public ushort Flags;
         public int ActionSequence;
         public byte ActionKind;
         public bool HoldBig;
@@ -66,7 +66,7 @@ namespace CardShopCoop.Modules.Npc
         public float OffsetUp;
     }
 
-    /// <summary>One NPC in the join baseline. Flags is the raw wire byte (the game's NpcFlags
+    /// <summary>One NPC in the join baseline. Flags is the raw wire ushort (the game's NpcFlags
     /// is a private nested enum in NpcClientBehaviour).</summary>
     public sealed class NpcEntry
     {
@@ -79,7 +79,7 @@ namespace CardShopCoop.Modules.Npc
         public Vector3 Position;
         public float Yaw;
         public float Speed;
-        public byte Flags;
+        public ushort Flags;
         public int ActionSequence;
         public byte ActionKind;
         public bool HoldBig;

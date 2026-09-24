@@ -37,7 +37,11 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(WarehouseDeltaMessage))]
         private void HandleWarehouseDelta(MessageContext context, WarehouseDeltaMessage message)
         {
-            WorldPrediction.ApplyAuthoritative(message,
+            // An accepted host delta carries the prediction id it confirmed. The optimistic
+            // store/take already equals that result, so retire the prediction instead of running
+            // its inverse and replaying it (which for a store meant a take that reparented the
+            // host's stored box and left the guest without it). Dealt remote actions apply direct.
+            WorldPrediction.ApplyConfirmedOrRemote(message,
                 () => Warehouse.ClientApplyDelta(message));
         }
 

@@ -53,6 +53,7 @@ namespace CardShopCoop.Modules.Register
         private bool _joined;
         private int _applyingRemote;
         private int _applyingPrediction;
+        private bool _applyingBaseline;
         private RegisterBaselineMessage _pendingBaseline;
         private readonly Dictionary<int, int> _owners = new();
         private readonly Dictionary<int, uint> _counterGenerations = new();
@@ -156,12 +157,24 @@ namespace CardShopCoop.Modules.Register
 
         private void TryApplyPending()
         {
+            if (_applyingBaseline)
+            {
+                // ApplyBaseline can synchronously raise the Npc customer
+                // PoolChanged/ExistingCustomerChanged events (Attach/DetachExistingCustomer) and
+                // this module subscribes to them. Re-entering here re-applied the still-pending
+                // baseline and could recurse without bound.
+                CoopPlugin.Log.LogDebug("[register] re-entrant baseline apply suppressed");
+                return;
+            }
+
             if (_pendingBaseline == null || !_context.InGame() || !IsSceneReady())
             {
                 return;
             }
 
             var baseline = _pendingBaseline;
+            _pendingBaseline = null;
+            _applyingBaseline = true;
             _applyingRemote++;
             try
             {
@@ -175,9 +188,8 @@ namespace CardShopCoop.Modules.Register
             finally
             {
                 _applyingRemote--;
+                _applyingBaseline = false;
             }
-
-            _pendingBaseline = null;
         }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
@@ -260,12 +272,13 @@ namespace CardShopCoop.Modules.Register
             // rollback), so it confirms the guest's optimistic claim/release/scan. Undoing that
             // optimism first would replay it - e.g. releasing the register would re-man the
             // counter and yank the player back before the ownership delta clears it.
+            var confirmedOwnPrediction = PredictionApi.IsPending(message.PredictionId);
             PredictionApi.ApplyConfirmed(message.PredictionId, () =>
             {
                 _applyingRemote++;
                 try
                 {
-                    ApplyDeltaCore(message);
+                    ApplyDeltaCore(message, confirmedOwnPrediction);
                 }
                 finally
                 {
@@ -328,7 +341,7 @@ namespace CardShopCoop.Modules.Register
             ApplyChangeStack(counter, baseline.State, baseline.UsingCard, baseline.ChangeItems);
         }
 
-        private void ApplyDeltaCore(RegisterDeltaMessage message)
+        private void ApplyDeltaCore(RegisterDeltaMessage message, bool confirmedOwnPrediction)
         {
             var index = (int)message.Counter;
             switch (message.Kind)
@@ -350,7 +363,7 @@ namespace CardShopCoop.Modules.Register
                     ApplyPhaseDelta(message);
                     break;
                 case RegisterDeltaKind.Change:
-                    ApplyChange(message);
+                    ApplyChange(message, confirmedOwnPrediction);
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(message.Kind), message.Kind,
@@ -450,8 +463,19 @@ namespace CardShopCoop.Modules.Register
                 message.ChangeStarted, message.TooMuchChange);
         }
 
-        private void ApplyChange(RegisterDeltaMessage message)
+        private void ApplyChange(RegisterDeltaMessage message, bool confirmedOwnPrediction)
         {
+            if (confirmedOwnPrediction)
+            {
+                // This delta confirms a change the guest already applied optimistically. The
+                // guest's counter may have newer clicks stacked on top, so re-applying the host's
+                // absolute ChangeCount here would walk the stack back down (SetGivenAmount calls
+                // OnRightMouseButtonUp) and the next delta would give the cash back out - the
+                // register cash visibly replaying. The optimistic state is already correct; only
+                // a change the guest did not predict may need applying.
+                return;
+            }
+
             var change = RegisterInterop.FindChange(RegisterInterop.Counter(message.Counter), message.Slot,
                 message.IsCoin, message.Value);
             RegisterInterop.SetGivenAmount(change, message.ChangeCount);
@@ -489,6 +513,19 @@ namespace CardShopCoop.Modules.Register
             }
 
             RegisterInterop.PrepareCarrier(carrier, counter);
+            // A pooled customer can be reused while it still carries a previous customer's bag.
+            // The Lines here are the full authoritative bag for this customer, so clear the
+            // carrier first; otherwise the guest accumulates phantom items and its bag indices
+            // no longer match the host's, so every scan the guest sends is rejected.
+            var staleItems = carrier.GetItemInBagList()?.Count ?? 0;
+            var staleCards = carrier.GetCardInBagList()?.Count ?? 0;
+            if (staleItems > 0 || staleCards > 0)
+            {
+                CoopPlugin.Log.LogDebug("[register] cleared stale carrier bag counter=" + index
+                    + " items=" + staleItems + " cards=" + staleCards + ".");
+            }
+
+            RegisterInterop.ReleaseContents(carrier);
             if (carrier.m_CharacterCustom != null)
             {
                 carrier.m_CharacterCustom.CharacterName = characterName;
@@ -1417,6 +1454,20 @@ namespace CardShopCoop.Modules.Register
             if (!client._claims.Contains(index))
             {
                 return false;
+            }
+
+            // Match the game's own guards so a predicted click is always one the optimistic apply
+            // will really perform. Otherwise a confirming delta could be skipped locally while the
+            // host applied it, leaving the guest short.
+            if (counter == null || !counter.IsGivingChange())
+            {
+                return true;
+            }
+
+            var given = RegisterInterop.GivenAmount(change);
+            if (takeBack ? given <= 0 : given >= 100)
+            {
+                return true;
             }
 
             client.PredictChange(change, takeBack, index);

@@ -56,6 +56,8 @@ namespace CardShopCoop.Modules.Trade
             _harmony = new Harmony("com.zwhit.cardshopcoop.trade.host");
             _harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerStatePatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(CustomerActionPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(CustomerPathEndPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerStopPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(ThinkPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerManagerStartPatch)).Patch();
@@ -66,6 +68,7 @@ namespace CardShopCoop.Modules.Trade
             RegisterAllCustomers(TradeInterop.Customers);
             SignalCustomerManagerReady();
             SignalTradeScreenReady();
+            CoopPlugin.Log.LogInfo("[trade] host module enabled.");
         }
 
         private void Update()
@@ -468,7 +471,7 @@ namespace CardShopCoop.Modules.Trade
             if (customerIndex < 0 || customerIndex > ushort.MaxValue || counter < 0
                 || counter >= 250 || generation <= 0)
             {
-                CoopPlugin.Log.LogWarning("Trade host: waiting customer has no stable trade identity");
+                CoopPlugin.Log.LogDebug("Trade host: waiting customer has no stable trade identity");
                 return;
             }
 
@@ -500,6 +503,8 @@ namespace CardShopCoop.Modules.Trade
         {
             if (HostIsBusy() || TradeInterop.Screen == null)
             {
+                CoopPlugin.Log.LogDebug("[trade] host offer index=" + customerIndex
+                    + " deferred: busy=" + HostIsBusy() + " screen=" + (TradeInterop.Screen != null) + ".");
                 return;
             }
 
@@ -516,6 +521,9 @@ namespace CardShopCoop.Modules.Trade
 
             if (data.m_CardData_L == null || (data.m_IsTrading && data.m_CardData_R == null))
             {
+                CoopPlugin.Log.LogDebug("[trade] host offer index=" + customerIndex
+                    + " has no tradeable card: L=" + (data.m_CardData_L != null)
+                    + " R=" + (data.m_CardData_R != null) + " trading=" + data.m_IsTrading + ".");
                 return;
             }
 
@@ -657,6 +665,10 @@ namespace CardShopCoop.Modules.Trade
             {
                 return;
             }
+
+            CoopPlugin.Log.LogInfo("[trade] host sending offer counter=" + offer.Counter + " index="
+                + offer.CustomerIndex + " gen=" + offer.CustomerGeneration + " removed=" + removed
+                + " peers=" + _joinedConnections.Count + ".");
 
             var state = removed ? null : ToState(offer);
             foreach (var pair in _joinedConnections)
@@ -837,8 +849,32 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
+        // Customer.SetState is a one-line private setter, so Mono can inline it at the call sites
+        // that assign the trade states (both of them live in the two methods below), bypassing this
+        // postfix. It is kept for builds/methods that are not inlined; the two event hooks below are
+        // the reliable, event-driven triggers.
         [HarmonyPatch(typeof(Customer), "SetState")]
         private static class CustomerStatePatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(Customer __instance)
+                => _active?.ReconcileCustomer(__instance);
+        }
+
+        // Sets ECustomerState.WantToTradeCard (the customer spots a free trade counter and starts
+        // walking to it).
+        [HarmonyPatch(typeof(Customer), "DetermineShopAction")]
+        private static class CustomerActionPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(Customer __instance)
+                => _active?.ReconcileCustomer(__instance);
+        }
+
+        // Sets ECustomerState.WaitingToTradeCard once the customer reaches the trade stand. This is
+        // the transition that actually makes the trade available.
+        [HarmonyPatch(typeof(Customer), "OnReachedPathEnd")]
+        private static class CustomerPathEndPatch
         {
             [HarmonyPostfix]
             private static void Postfix(Customer __instance)

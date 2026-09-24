@@ -189,7 +189,7 @@ namespace CardShopCoop.Modules.World
             if (message is WarehouseTakeMessage take)
                 return WarehouseEntityId(take.ShelfIndex, take.CompartmentIndex);
             if (message is ShelfInteractionMessage shelf)
-                return "shelf:" + (shelf.HierarchyPath ?? shelf.ShelfName ?? "unknown");
+                return "shelf:" + shelf.ShelfKey + ":" + shelf.Compartment;
             if (message is FurnitureBoxUpRequestMessage furniture)
                 return "furniture:" + furniture.ObjectType + ":"
                     + furniture.Position.x.ToString("R", System.Globalization.CultureInfo.InvariantCulture)

@@ -458,6 +458,16 @@ namespace CardShopCoop.Modules.Hud
                     return true;
                 }
 
+                // Economy events emitted while a prediction is being applied belong to an action
+                // the host applies authoritatively too (a guest checkout's AddCoin/AddShopExp, a
+                // worker/register action, etc.). Mirroring them here as well would credit the
+                // host twice and pop the HUD popup twice, so drop them and let the host's
+                // authoritative wallet/exp delta drive the guest.
+                if (PredictionApi.IsApplying || PredictionApi.IsReconciling)
+                {
+                    return false;
+                }
+
                 if (evt is CEventPlayer_AddCoin add)
                     return !active.Forward(HudContributionKind.AddCoin, add.m_CoinValue);
                 if (evt is CEventPlayer_ReduceCoin reduce)

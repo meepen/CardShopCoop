@@ -20,6 +20,7 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(TakeItemFromShelfScopePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(BoxAddToShelfScopePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(BoxRemoveFromShelfScopePatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(RemoveLabelPatch)).Patch();
         }
 
         [MessageHandler(typeof(ShelfItemAddRequestMessage))]
@@ -38,10 +39,8 @@ namespace CardShopCoop.Modules.World
                 BroadcastWorld(new ShelfItemAddMessage
                 {
                     PredictionId = message.PredictionId,
-                    OperationId = message.OperationId,
-                    ShelfName = message.ShelfName,
-                    HierarchyPath = message.HierarchyPath,
-                    ShelfPosition = message.ShelfPosition,
+                    ShelfKey = message.ShelfKey,
+                    Compartment = message.Compartment,
                     ItemType = message.ItemType,
                     ItemCount = message.ItemCount,
                 });
@@ -65,10 +64,8 @@ namespace CardShopCoop.Modules.World
                 BroadcastWorld(new ShelfItemRemoveMessage
                 {
                     PredictionId = message.PredictionId,
-                    OperationId = message.OperationId,
-                    ShelfName = message.ShelfName,
-                    HierarchyPath = message.HierarchyPath,
-                    ShelfPosition = message.ShelfPosition,
+                    ShelfKey = message.ShelfKey,
+                    Compartment = message.Compartment,
                     ItemType = message.ItemType,
                     ItemCount = message.ItemCount,
                 });
@@ -104,7 +101,8 @@ namespace CardShopCoop.Modules.World
         /// fires neither AddItem nor RemoveItem, so it needs its own publish or the other players
         /// keep showing the label. Only the removal (type -> None) is shared: an empty compartment
         /// briefly takes the incoming type before the first item lands, and that is not a label.</summary>
-        private void PublishLabelChange(ShelfCompartment compartment, EItemType previousType)
+        private void PublishLabelChange(ShelfCompartment compartment, EItemType previousType,
+            bool allowWarehouse = false)
         {
             if (_shelfInteraction == null || compartment == null || !_context.InGame()
                 || compartment.GetItemCount() > 0
@@ -117,7 +115,7 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogInfo("[shelf] label removed on " + compartment.name + " ("
                 + previousType + ").");
             _shelfInteraction.PublishRemove(compartment,
-                _shelfInteraction.CaptureLabelChange(compartment));
+                _shelfInteraction.CaptureLabelChange(compartment, allowWarehouse));
         }
 
         private bool ApplyShelfAction(ShelfInteractionMessage message)
@@ -290,6 +288,27 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(ShelfCompartment __instance, EItemType __state)
                 => _instance?.PublishLabelChange(__instance, __state);
         }
+
+        /// <summary>Warehouse labels are removed from the price tag the same way player-shelf
+        /// labels are, but the warehouse compartment is outside the player-shelf inventory
+        /// protocol so the compartment-type hook above ignores it. Publish only that explicit
+        /// removal; box-driven type changes stay on the warehouse box protocol.</summary>
+        [HarmonyPatch(typeof(ShelfCompartment), "RemoveLabel")]
+        private static class RemoveLabelPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(ShelfCompartment __instance, out EItemType __state)
+                => __state = __instance == null ? EItemType.None : __instance.GetItemType();
+
+            [HarmonyPostfix]
+            private static void Postfix(ShelfCompartment __instance, EItemType __state)
+            {
+                if (__instance != null && __instance.GetWarehouseShelf() != null)
+                {
+                    _instance?.PublishLabelChange(__instance, __state, allowWarehouse: true);
+                }
+            }
+        }
     }
 
     [NetworkMessage]
@@ -312,13 +331,13 @@ namespace CardShopCoop.Modules.World
     {
     }
 
-    /// <summary>Wire state for one player-induced shelf stock mutation.</summary>
+    /// <summary>Wire state for one player-induced shelf stock mutation. The shelf is addressed by
+    /// its host-assigned placement identity (the same furniture key card displays and placement
+    /// moves already use) plus the compartment index, never by scene name or hierarchy path.</summary>
     public abstract class ShelfInteractionMessage : WorldMessage
     {
-        public string OperationId;
-        public string ShelfName;
-        public string HierarchyPath;
-        public Vector3 ShelfPosition;
+        public int ShelfKey;
+        public int Compartment;
         public int ItemType;
         public int ItemCount;
     }
@@ -331,15 +350,16 @@ namespace CardShopCoop.Modules.World
     /// </summary>
     internal sealed class ShelfInteraction
     {
-        private const int MaxStringLength = 256;
         private const int MaxItemCount = 4096;
-        private const float MaxCoordinate = 1000f;
-        private const float MaxResolveDistance = 2f;
+        private const int MaxCompartments = 256;
 
         private readonly Dictionary<string, ShelfInteractionMessage> _pendingClientStates = new();
 
         private static readonly FieldInfo StoredItemsField =
             AccessTools.Field(typeof(ShelfCompartment), "m_StoredItemList");
+
+        private static readonly FieldInfo CompartmentListField =
+            AccessTools.Field(typeof(InteractableObject), "m_ItemCompartmentList");
 
         private static readonly FieldInfo PosListField =
             AccessTools.Field(typeof(ShelfCompartment), "m_PosList");
@@ -362,9 +382,8 @@ namespace CardShopCoop.Modules.World
             public bool Send;
             public bool SuppressVanilla;
             public ShelfInteractionMessage Command;
-            public string ShelfName;
-            public string HierarchyPath;
-            public Vector3 ShelfPosition;
+            public int ShelfKey;
+            public int Compartment;
         }
 
         internal ShelfInteraction(Action<INetMessage> broadcast, Func<bool> inGame)
@@ -424,6 +443,13 @@ namespace CardShopCoop.Modules.World
                 return default;
             }
 
+            if (!TryMakeKey(compartment, out var shelfKey, out var compartmentIndex))
+            {
+                CoopPlugin.Log.LogWarning("[shelf] no furniture id for " + compartment.name
+                    + "; " + (isAdd ? "placement" : "removal") + " not synced.");
+                return default;
+            }
+
             var beforeType = compartment.GetItemType();
             var beforeCount = compartment.GetItemCount();
             var targetType = isAdd && requestedType != EItemType.None
@@ -431,9 +457,8 @@ namespace CardShopCoop.Modules.World
             var targetCount = isAdd ? beforeCount + 1 : Math.Max(0, beforeCount - 1);
             var message = isAdd ? new ShelfItemAddRequestMessage() as ShelfInteractionMessage
                 : new ShelfItemRemoveRequestMessage();
-            message.ShelfName = compartment.name;
-            message.HierarchyPath = GetHierarchyPath(compartment.transform);
-            message.ShelfPosition = compartment.transform.position;
+            message.ShelfKey = shelfKey;
+            message.Compartment = compartmentIndex;
             message.ItemType = (int)targetType;
             message.ItemCount = targetCount;
 
@@ -463,9 +488,8 @@ namespace CardShopCoop.Modules.World
                 Send = true,
                 SuppressVanilla = suppressVanilla,
                 Command = _host ? null : message,
-                ShelfName = compartment.name,
-                HierarchyPath = GetHierarchyPath(compartment.transform),
-                ShelfPosition = compartment.transform.position,
+                ShelfKey = shelfKey,
+                Compartment = compartmentIndex,
             };
         }
 
@@ -545,14 +569,24 @@ namespace CardShopCoop.Modules.World
             Publish(compartment, mutation, false);
         }
 
-        /// <summary>An explicit label removal on an empty player shelf. Unlike an item move this
-        /// has no count change and no prediction; the compartment's resulting (type, count) is
-        /// published as a plain remove, which clears the label on the far side.</summary>
-        internal LocalMutation CaptureLabelChange(ShelfCompartment compartment)
+        /// <summary>An explicit label removal on an empty shelf. Unlike an item move this has no
+        /// count change and no prediction; the compartment's resulting (type, count) is published
+        /// as a plain remove, which clears the label on the far side. Warehouse compartments share
+        /// the label concept with player shelves, so the caller opts them in.</summary>
+        internal LocalMutation CaptureLabelChange(ShelfCompartment compartment,
+            bool allowWarehouse = false)
         {
-            if (_applying || !IsPlayerShelf(compartment)
+            if (_applying
+                || !(allowWarehouse ? IsSyncableShelf(compartment) : IsPlayerShelf(compartment))
                 || (_host ? _broadcast == null : _send == null))
             {
+                return default;
+            }
+
+            if (!TryMakeKey(compartment, out var shelfKey, out var compartmentIndex))
+            {
+                CoopPlugin.Log.LogWarning("[shelf] no furniture id for " + compartment.name
+                    + "; label removal not synced.");
                 return default;
             }
 
@@ -561,9 +595,8 @@ namespace CardShopCoop.Modules.World
                 Send = true,
                 SuppressVanilla = false,
                 Command = null,
-                ShelfName = compartment.name,
-                HierarchyPath = GetHierarchyPath(compartment.transform),
-                ShelfPosition = compartment.transform.position,
+                ShelfKey = shelfKey,
+                Compartment = compartmentIndex,
             };
         }
 
@@ -574,7 +607,7 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            var compartment = FindMatchingShelf(message);
+            var compartment = ResolveCompartment(message.ShelfKey, message.Compartment);
             if (compartment == null)
             {
                 if (!_host)
@@ -689,9 +722,8 @@ namespace CardShopCoop.Modules.World
             {
                 message = _host ? new ShelfItemRemoveMessage() : new ShelfItemRemoveRequestMessage();
             }
-            message.ShelfName = mutation.ShelfName;
-            message.HierarchyPath = mutation.HierarchyPath;
-            message.ShelfPosition = mutation.ShelfPosition;
+            message.ShelfKey = mutation.ShelfKey;
+            message.Compartment = mutation.Compartment;
             message.ItemType = (int)compartment.GetItemType();
             message.ItemCount = compartment.GetItemCount();
 
@@ -705,46 +737,78 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private bool IsPlayerShelf(ShelfCompartment compartment)
+        private static bool IsSyncableShelf(ShelfCompartment compartment)
         {
-            return compartment != null && compartment.GetWarehouseShelf() == null
-                // Include inactive parents: a closed box deactivates its item compartment, and
-                // without this the box would be mistaken for a player shelf.
+            // Include inactive parents: a closed box deactivates its item compartment, and
+            // without this the box would be mistaken for a player shelf.
+            return compartment != null
                 && compartment.GetComponentInParent<InteractablePackagingBox>(true) == null;
         }
+
+        private static bool IsPlayerShelf(ShelfCompartment compartment)
+            => IsSyncableShelf(compartment) && compartment.GetWarehouseShelf() == null;
 
         private static string ShelfKey(ShelfInteractionMessage message)
             => WorldMessageMetadata.StableEntityId(message);
 
-        private ShelfCompartment FindMatchingShelf(ShelfInteractionMessage message)
+        /// <summary>Builds the host-assigned furniture identity for a compartment's owning shelf
+        /// plus the compartment's index in that shelf's compartment list. Fails for a compartment
+        /// that is not owned by a placed shelf (for example one inside a packaging box) or whose
+        /// shelf has no host identity yet.</summary>
+        private static bool TryMakeKey(ShelfCompartment compartment, out int shelfKey,
+            out int compartmentIndex)
         {
-            ShelfCompartment closest = null;
-            var closestDistance = float.MaxValue;
-            var matchingPath = false;
-#pragma warning disable CS0618 // The non-obsolete replacement does not exist on the legacy Unity build.
-            var compartments = UnityEngine.Object.FindObjectsOfType<ShelfCompartment>();
-#pragma warning restore CS0618
-            for (var i = 0; i < compartments.Length; i++)
+            shelfKey = 0;
+            compartmentIndex = -1;
+            if (compartment == null)
             {
-                var candidate = compartments[i];
-                if (!IsPlayerShelf(candidate) || candidate.name != message.ShelfName)
-                {
-                    continue;
-                }
-
-                var distance = (candidate.transform.position - message.ShelfPosition).sqrMagnitude;
-                var pathMatches = GetHierarchyPath(candidate.transform) == message.HierarchyPath;
-                if (closest == null || (pathMatches && !matchingPath)
-                    || (pathMatches == matchingPath && distance < closestDistance))
-                {
-                    closest = candidate;
-                    closestDistance = distance;
-                    matchingPath = pathMatches;
-                }
+                return false;
             }
 
-            return _host && closestDistance > MaxResolveDistance * MaxResolveDistance
-                ? null : closest;
+            // A warehouse compartment shares its GameObject with its InteractableStorageCompartment,
+            // which is an InteractableObject but not a placement object, so walk up until we reach
+            // the shelf whose compartment list actually owns this compartment.
+            for (var node = compartment.transform; node != null;)
+            {
+                var owner = node.GetComponentInParent<InteractableObject>(true);
+                if (owner == null)
+                {
+                    return false;
+                }
+
+                if (CompartmentListField?.GetValue(owner) is List<ShelfCompartment> compartments)
+                {
+                    var index = compartments.IndexOf(compartment);
+                    if (index >= 0 && index < MaxCompartments)
+                    {
+                        var kind = PlacementInterop.FindKind(owner);
+                        if (kind >= 0 && PlacementApi.TryMakeObjectKey(kind, owner, out shelfKey))
+                        {
+                            compartmentIndex = index;
+                            return true;
+                        }
+                    }
+                }
+
+                node = owner.transform.parent;
+            }
+
+            return false;
+        }
+
+        /// <summary>Resolves the shelf the host assigned an identity to, then picks the addressed
+        /// compartment. Exact, unlike the name/path/position search it replaces.</summary>
+        private static ShelfCompartment ResolveCompartment(int shelfKey, int compartmentIndex)
+        {
+            if (compartmentIndex < 0 || compartmentIndex >= MaxCompartments
+                || PlacementApi.ResolveObjectByKey(shelfKey) is not InteractableObject owner
+                || CompartmentListField?.GetValue(owner) is not List<ShelfCompartment> compartments
+                || compartmentIndex >= compartments.Count)
+            {
+                return null;
+            }
+
+            return compartments[compartmentIndex];
         }
 
         /// <summary>Merges an authoritative compartment state onto the live shelf by applying only
@@ -886,11 +950,17 @@ namespace CardShopCoop.Modules.World
 
         private bool Validate(ShelfInteractionMessage message)
         {
-            return message != null && IsShortString(message.ShelfName)
-                && IsShortString(message.HierarchyPath)
-                && IsSanePosition(message.ShelfPosition) && message.ItemCount >= 0
-                && message.ItemCount <= MaxItemCount && CanResolveItemType(message.ItemType,
-                    message.ItemCount);
+            if (message == null || message.Compartment < 0 || message.Compartment >= MaxCompartments
+                || message.ItemCount < 0 || message.ItemCount > MaxItemCount)
+            {
+                return false;
+            }
+
+            var kind = message.ShelfKey >> 24;
+            return kind >= 0 && kind < PlacementApi.KindCount
+                && PlacementApi.ObjectIdFromObjectKey(message.ShelfKey)
+                    != PlacementIdentity.Invalid
+                && CanResolveItemType(message.ItemType, message.ItemCount);
         }
 
         private bool CanResolveItemType(int itemType, int itemCount)
@@ -910,35 +980,6 @@ namespace CardShopCoop.Modules.World
             {
                 return false;
             }
-        }
-
-        private bool IsShortString(string value)
-        {
-            return value != null && value.Length > 0 && value.Length <= MaxStringLength;
-        }
-
-        private bool IsSanePosition(Vector3 position)
-        {
-            return IsFinite(position.x) && IsFinite(position.y) && IsFinite(position.z)
-                && Mathf.Abs(position.x) <= MaxCoordinate && Mathf.Abs(position.y) <= MaxCoordinate
-                && Mathf.Abs(position.z) <= MaxCoordinate;
-        }
-
-        private bool IsFinite(float value)
-        {
-            return !float.IsNaN(value) && !float.IsInfinity(value);
-        }
-
-        private string GetHierarchyPath(Transform transform)
-        {
-            var entries = new List<string>();
-            for (var current = transform; current != null; current = current.parent)
-            {
-                entries.Add(current.name + "[" + current.GetSiblingIndex() + "]");
-            }
-
-            entries.Reverse();
-            return string.Join("/", entries);
         }
 
     }

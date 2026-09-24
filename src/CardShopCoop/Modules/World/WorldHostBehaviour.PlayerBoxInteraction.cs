@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
@@ -333,8 +334,10 @@ namespace CardShopCoop.Modules.World
         internal LocalAction CaptureLocalAction(InteractablePackagingBox box, bool isPlayer,
             bool alignBody)
         {
-            if (_applyingPrediction)
+            if (_applyingPrediction || PredictionApi.IsReconciling)
             {
+                // A reconcile drives holds from network state (a prediction rollback or a
+                // superseded replay), never from a fresh local pickup request.
                 return default;
             }
 
@@ -447,6 +450,8 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            // Taking the box locally supersedes any remote hold this peer was mirroring for it.
+            ReleaseRemoteHold(action.BoxNetworkId);
             _localHeldBoxNetworkId = action.BoxNetworkId;
             var pickup = _host
                 ? (PlayerBoxPickupMessage)new PlayerBoxPickupMessage()
@@ -572,8 +577,7 @@ namespace CardShopCoop.Modules.World
 
             if (message is PlayerBoxPickupMessage pickup)
             {
-                if (!_host && (_localHeldBoxNetworkId == pickup.BoxNetworkId
-                    || pickup.HolderConnectionId == CoopCore.LocalConnectionId))
+                if (!_host && pickup.HolderConnectionId == CoopCore.LocalConnectionId)
                 {
                     // The host named us the holder: either the echo of our own pickup, or a
                     // server-driven hold such as the furniture box-up we requested. Take the box
@@ -585,6 +589,18 @@ namespace CardShopCoop.Modules.World
                 }
                 else
                 {
+                    // Someone else is now the holder. If we still think we hold this box (the
+                    // host took it out of our hands), release it first; otherwise the controller
+                    // keeps hold mode and the box is misattributed to us.
+                    if (_localHeldBoxNetworkId == pickup.BoxNetworkId)
+                    {
+                        CoopPlugin.Log.LogInfo("[box-id] releasing local hold id="
+                            + pickup.BoxNetworkId + " to holder conn=" + pickup.HolderConnectionId + ".");
+                        _localHeldBoxNetworkId = 0;
+                        box.DropBox(false);
+                        SceneRef<InteractionPlayerController>.Get()?.OnExitHoldBoxMode();
+                    }
+
                     ApplyPickup(box, pickup.BoxNetworkId, pickup.HeldPosition, pickup.HeldRotation,
                         pickup.HolderConnectionId);
                 }
@@ -610,33 +626,35 @@ namespace CardShopCoop.Modules.World
             Vector3 heldPosition, Quaternion heldRotation, int holderConnectionId)
         {
             var anchor = GetRemoteHoldAnchor(boxNetworkId, heldPosition, heldRotation);
-            var attached = false;
-            if (_remoteHeldBoxIds.Add(boxNetworkId))
+
+            // Re-resolve the holder's carry anchor on every pickup. The id can remain in
+            // _remoteHeldBoxIds from an earlier hold (a warehouse store does not release it), so
+            // attaching only on the first add left a re-picked box riding a stale standalone
+            // anchor at the old streamed hand pose instead of the avatar's hands.
+            var carried = PresenceApi.TryGetRemoteCarryAnchor(holderConnectionId, out var carry)
+                && carry != null;
+            if (carried)
             {
-                CoopPlugin.Log.LogInfo("[box-id] applying remote hold id=" + boxNetworkId
-                    + " at " + heldPosition + ".");
-
-                // Ride the holder's animated avatar when this peer has it, so the real box moves
-                // smoothly and shows its own contents/open state. Otherwise it follows the
-                // streamed hand anchor.
-                if (PresenceApi.TryGetRemoteCarryAnchor(holderConnectionId, out var carry)
-                    && carry != null)
-                {
-                    anchor.SetParent(carry, false);
-                    anchor.localPosition = Vector3.zero;
-                    anchor.localRotation = RemoteHoldLocalRotation;
-                    attached = true;
-                }
-
-                box.StartHoldBox(false, anchor);
-                box.StopLerpToTransform();
+                anchor.SetParent(carry, false);
+                anchor.localPosition = Vector3.zero;
+                anchor.localRotation = RemoteHoldLocalRotation;
             }
 
+            var first = _remoteHeldBoxIds.Add(boxNetworkId);
+            box.StartHoldBox(false, anchor);
+            box.StopLerpToTransform();
             box.transform.SetParent(anchor, false);
             // The position offset is applied in the anchor's rotated frame (the box's own frame),
             // so it stays a left shift after the yaw/pitch above.
-            box.transform.localPosition = attached ? RemoteHoldLocalOffset : Vector3.zero;
+            box.transform.localPosition = carried ? RemoteHoldLocalOffset : Vector3.zero;
             box.transform.localRotation = Quaternion.identity;
+
+            if (first)
+            {
+                CoopPlugin.Log.LogInfo("[box-id] applying remote hold id=" + boxNetworkId
+                    + " at " + heldPosition + " carried=" + carried + " boxWorld="
+                    + box.transform.position + ".");
+            }
         }
 
         private void ApplyPlacement(InteractablePackagingBox box,
@@ -683,6 +701,14 @@ namespace CardShopCoop.Modules.World
 
             anchor.SetPositionAndRotation(position, rotation);
             return anchor;
+        }
+
+        /// <summary>Drops the mirrored hold for a box that is no longer carried (for example after
+        /// it is stored on a shelf), so a later pickup starts from a clean anchor instead of
+        /// reusing the stale one.</summary>
+        internal void ReleaseRemoteHoldForBox(long boxNetworkId)
+        {
+            ReleaseRemoteHold(boxNetworkId);
         }
 
         private void ReleaseRemoteHold(long boxNetworkId)

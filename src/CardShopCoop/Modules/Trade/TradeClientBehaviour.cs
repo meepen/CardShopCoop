@@ -44,6 +44,7 @@ namespace CardShopCoop.Modules.Trade
         private Harmony _harmony;
         private TradeOfferBaselineMessage _pendingBaseline;
         private readonly Dictionary<byte, TradeOfferDeltaMessage> _pendingDeltas = new();
+        private bool _applyingPending;
         private int _pendingCounter = -1;
         private bool _claimAccepted;
         private bool _awaitingPrediction;
@@ -154,6 +155,8 @@ namespace CardShopCoop.Modules.Trade
         [MessageHandler(typeof(TradeOfferDeltaMessage))]
         private void HandleDelta(MessageContext context, TradeOfferDeltaMessage message)
         {
+            CoopPlugin.Log.LogInfo("[trade] client offer delta counter=" + message.Counter
+                + " removed=" + message.Removed + " ready=" + IsTradeSceneReady() + ".");
             if (!_context.InGame() || !IsTradeSceneReady())
             {
                 DeferDelta(message);
@@ -165,6 +168,16 @@ namespace CardShopCoop.Modules.Trade
 
         private void ApplyPendingMessages()
         {
+            if (_applyingPending)
+            {
+                // Applying the baseline can synchronously raise the Npc customer
+                // PoolChanged/ExistingCustomerChanged events (PrepareCarrier ->
+                // AttachExistingCustomer) and this module subscribes to both. Re-entering here
+                // re-applied the still-pending baseline and recursed without bound.
+                CoopPlugin.Log.LogDebug("[trade] re-entrant offer apply suppressed");
+                return;
+            }
+
             if (!_context.InGame() || !IsTradeSceneReady())
             {
                 if (_pendingBaseline != null || _pendingDeltas.Count > 0)
@@ -180,22 +193,33 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            if (_pendingBaseline != null)
+            _applyingPending = true;
+            try
             {
-                ApplyBaseline(_pendingBaseline);
-                _pendingBaseline = null;
-            }
+                if (_pendingBaseline != null)
+                {
+                    // Clear before applying so a synchronous re-entry can never observe a
+                    // still-pending baseline.
+                    var baseline = _pendingBaseline;
+                    _pendingBaseline = null;
+                    ApplyBaseline(baseline);
+                }
 
-            if (_pendingDeltas.Count == 0)
-            {
-                return;
-            }
+                if (_pendingDeltas.Count == 0)
+                {
+                    return;
+                }
 
-            var deltas = new List<TradeOfferDeltaMessage>(_pendingDeltas.Values);
-            _pendingDeltas.Clear();
-            for (var i = 0; i < deltas.Count; i++)
+                var deltas = new List<TradeOfferDeltaMessage>(_pendingDeltas.Values);
+                _pendingDeltas.Clear();
+                for (var i = 0; i < deltas.Count; i++)
+                {
+                    ApplyOfferDelta(deltas[i]);
+                }
+            }
+            finally
             {
-                ApplyOfferDelta(deltas[i]);
+                _applyingPending = false;
             }
         }
 
@@ -249,6 +273,8 @@ namespace CardShopCoop.Modules.Trade
 
         private void ApplyOfferState(TradeOfferState snapshot)
         {
+            CoopPlugin.Log.LogInfo("[trade] client apply offer counter=" + snapshot.Counter
+                + " index=" + snapshot.CustomerIndex + " gen=" + snapshot.CustomerGeneration + ".");
             if (!_offers.TryGetValue(snapshot.Counter, out var offer))
             {
                 offer = new LocalOffer();

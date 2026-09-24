@@ -18,11 +18,18 @@ namespace CardShopCoop.Modules.Prediction
         private static readonly Dictionary<string, List<Prediction>> ByScope = new(StringComparer.Ordinal);
         private static bool _active;
         private static bool _reconciling;
+        private static int _applying;
 
         /// <summary>Raised when a prediction leaves the tracker without a retry or result queue.</summary>
         public static event Action<Guid> PredictionRetired;
 
         public static bool IsReconciling => _reconciling;
+
+        /// <summary>True while a prediction's optimistic local apply (or its re-apply during a
+        /// reconcile) is running. Modules whose game method emits economy events use this to avoid
+        /// also mirroring them: the host applies the same action authoritatively and would credit
+        /// it twice.</summary>
+        public static bool IsApplying => _applying > 0;
 
         internal static void Start()
         {
@@ -79,7 +86,17 @@ namespace CardShopCoop.Modules.Prediction
             }
 
             if (applyLocally)
-                apply();
+            {
+                _applying++;
+                try
+                {
+                    apply();
+                }
+                finally
+                {
+                    _applying--;
+                }
+            }
             return prediction.Id;
         }
 
@@ -208,6 +225,7 @@ namespace CardShopCoop.Modules.Prediction
             ById.Clear();
             ByScope.Clear();
             _reconciling = false;
+            _applying = 0;
         }
     }
 }

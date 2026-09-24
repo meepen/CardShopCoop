@@ -234,6 +234,7 @@ namespace CardShopCoop.Util
             _averageFrames = 0;
             _averageWindowStart = 0d;
             StopRecorders();
+            UpdateProfiler.Reset();
         }
 
         /// <summary>Allocation-free timing token for legacy call sites.</summary>
@@ -520,6 +521,7 @@ namespace CardShopCoop.Util
             CoopPlugin.Log.LogInfo("[perf-avg] fps=" + (frames / seconds).ToString("F1")
                 + " frame=" + (seconds * 1000d / frames).ToString("F2") + "ms"
                 + " stages=[" + string.Join(",", stages) + "]");
+            UpdateProfiler.Flush(seconds);
 
             AverageStageTicks.Clear();
             _averageFrames = 0;
@@ -540,6 +542,7 @@ namespace CardShopCoop.Util
             TryAddRecorder("draw-calls", ProfilerCategory.Render, "Draw Calls Count");
             TryAddRecorder("batches", ProfilerCategory.Render, "Batches Count");
             TryAddRecorder("physics", ProfilerCategory.Physics, "Physics.Processing", nanoseconds: true);
+            UpdateProfiler.Install();
 
             var available = Recorders.Count == 0 ? "none"
                 : string.Join(",", Recorders.Select(metric => metric.Name));
@@ -717,6 +720,7 @@ namespace CardShopCoop.Util
             }
             Recorders.Clear();
             _recordersStarted = false;
+            UpdateProfiler.Uninstall();
         }
     }
 }

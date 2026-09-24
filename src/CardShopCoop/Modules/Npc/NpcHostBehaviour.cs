@@ -297,11 +297,12 @@ namespace CardShopCoop.Modules.Npc
         private static readonly int HashIsSitting = Animator.StringToHash("IsSitting");
         private static readonly int HashIsPlaying = Animator.StringToHash("IsPlaying");
         private static readonly int HashIsHoldingBox = Animator.StringToHash("IsHoldingBox");
+        private static readonly int HashIsBeingSprayed = Animator.StringToHash("IsBeingSprayed");
         private static readonly FieldInfo FiCurrentHoldItemBox =
             AccessTools.Field(typeof(Worker), "m_CurrentHoldItemBox");
 
         [Flags]
-        private enum NpcFlags : byte
+        private enum NpcFlags : ushort
         {
             None = 0,
             HoldingBag = 1,
@@ -312,6 +313,8 @@ namespace CardShopCoop.Modules.Npc
             Smelly = 32,
             Exclaim = 64,   // the red "!" trade-prompt mesh is showing
             Female = 128,   // puppet should spawn from the female prefab (workers esp.)
+            Sprayed = 256,  // the customer's "IsBeingSprayed" animator reaction is playing
+            Cleaned = 512,  // the customer's clean puff FX is showing
         }
 
         // ---------------- host: collect & serialize ----------------
@@ -638,6 +641,7 @@ namespace CardShopCoop.Modules.Npc
             }
 
             var flags = CollectFlags(customer.m_Anim);
+            flags = AddCustomerReactionFlags(customer, flags);
             var grabSequence = GetGrabSequence(index, customer.m_CurrentState);
             var actionKind = customer.m_CurrentState == ECustomerState.TournamentTakePrize
                 ? (byte)2 : (byte)1;
@@ -734,7 +738,7 @@ namespace CardShopCoop.Modules.Npc
                 Position = transform.position,
                 Yaw = transform.eulerAngles.y,
                 Speed = speed,
-                Flags = (byte)flags,
+                Flags = (ushort)flags,
                 ActionSequence = actionSequence,
                 ActionKind = actionKind,
                 HoldBig = holdBig,
@@ -751,6 +755,7 @@ namespace CardShopCoop.Modules.Npc
             }
 
             var flags = CollectFlags(customer.m_Anim);
+            flags = AddCustomerReactionFlags(customer, flags);
             if (customer.IsSmelly())
             {
                 flags |= NpcFlags.Smelly;
@@ -809,7 +814,7 @@ namespace CardShopCoop.Modules.Npc
                 Position = transform.position,
                 Yaw = transform.eulerAngles.y,
                 Speed = speed,
-                Flags = (byte)flags,
+                Flags = (ushort)flags,
                 ActionSequence = actionSequence,
                 ActionKind = actionKind,
                 HoldBig = holdBig,
@@ -953,6 +958,23 @@ namespace CardShopCoop.Modules.Npc
             if (anim.GetBool(HashIsHoldingBox))
             {
                 flags |= NpcFlags.IsHoldingBox;
+            }
+            return flags;
+        }
+
+        /// <summary>Customer-only visual state the spray path writes onto the live animator and FX.
+        /// The client suppresses both <c>Customer.Update</c> (which resets the spray reaction) and
+        /// <c>Customer.DeodorantSprayCheck</c>, so these native fields are the only source of the
+        /// reaction and have to ride the state sync instead of being re-simulated on the client.</summary>
+        private static NpcFlags AddCustomerReactionFlags(Customer customer, NpcFlags flags)
+        {
+            if (customer.m_Anim != null && customer.m_Anim.GetBool(HashIsBeingSprayed))
+            {
+                flags |= NpcFlags.Sprayed;
+            }
+            if (customer.m_CleanFX != null && customer.m_CleanFX.activeSelf)
+            {
+                flags |= NpcFlags.Cleaned;
             }
             return flags;
         }
