@@ -356,6 +356,7 @@ namespace CardShopCoop.Modules.Npc
             public int CustomerGrabSequence;
             public int WorkerActionSequence;
             public byte WorkerActionKind;
+            public long LastHeldBoxId;
             public string IdentityName;
             public bool IdentityFemale;
             public int IdentityGeneration;
@@ -674,6 +675,7 @@ namespace CardShopCoop.Modules.Npc
             state.Active = active;
             if (!active)
             {
+                ReleaseTrackedWorkerBox(state);
                 return wasActive ? NewInactiveDelta(KindWorker, index, state.Generation, hostTime) : null;
             }
 
@@ -702,6 +704,18 @@ namespace CardShopCoop.Modules.Npc
                 WorldHostBehaviour.TryGetHeldBoxId(holdBox, out holdBoxNetworkId);
                 holdBoxOpened = WorldHostBehaviour.IsHeldBoxOpen(holdBox);
             }
+
+            // A released box must be re-announced with its dropped pose, or the guest leaves its
+            // local copy parked off-map (the vanished-on-drop bug). The refresh is broadcast here,
+            // before the state delta that tells the guest to release the prop, so the ordered link
+            // applies the pose first and the release only re-enables its physics.
+            if (state.LastHeldBoxId > 0 && state.LastHeldBoxId != holdBoxNetworkId)
+            {
+                WorldHostBehaviour.NotifyWorkerReleasedBox(state.LastHeldBoxId);
+            }
+
+            state.LastHeldBoxId = holdBoxNetworkId;
+
             if (holdBox != null)
             {
                 flags |= NpcFlags.IsHoldingBox;
@@ -725,6 +739,19 @@ namespace CardShopCoop.Modules.Npc
 
         private static bool IsWorkerActive(Worker worker)
             => worker != null && worker.m_IsActive && worker.gameObject.activeSelf;
+
+        /// <summary>Host: a tracked worker stopped holding its box. Re-announce the box so guests
+        /// restore its dropped pose instead of leaving their parked copy invisible.</summary>
+        private static void ReleaseTrackedWorkerBox(NpcData state)
+        {
+            if (state == null || state.LastHeldBoxId <= 0)
+            {
+                return;
+            }
+
+            WorldHostBehaviour.NotifyWorkerReleasedBox(state.LastHeldBoxId);
+            state.LastHeldBoxId = 0;
+        }
 
         private static NpcStateDeltaMessage NewInactiveDelta(byte kind, int index, int identity,
             float hostTime)

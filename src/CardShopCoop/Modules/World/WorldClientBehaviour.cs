@@ -156,6 +156,10 @@ namespace CardShopCoop.Modules.World
         internal static void ApplyWorkerHeldBox(long boxNetworkId)
             => _instance?._warehouseShelfInteraction?.ApplyWorkerHeldBox(boxNetworkId);
 
+        /// <summary>Client: the worker put this box down; restore the real object to a live state.</summary>
+        internal static void RestoreWorkerDroppedBox(long boxNetworkId)
+            => _instance?._warehouseShelfInteraction?.RestoreWorkerDroppedBox(boxNetworkId);
+
         internal static void ResetCardState()
         {
             _instance?._cardInteraction?.Reset();

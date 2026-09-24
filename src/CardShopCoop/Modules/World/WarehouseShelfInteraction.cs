@@ -365,8 +365,32 @@ namespace CardShopCoop.Modules.World
             }
 
             _boxes.ClientForgetStored(boxNetworkId);
+            // The worker now carries it, exactly as if StartHoldBox had run on the host: the box
+            // is no longer stored. Leaving this true kept OnFinishLerp arranging a compartment it
+            // had left and made the drop-restore skip the box.
+            item.m_IsStored = false;
             item.SetPhysicsEnabled(false);
             item.transform.position = ParkedWorkerBoxPosition;
+        }
+
+        /// <summary>Client: the worker put this box down. Its authoritative pose has already been
+        /// re-announced and applied by the box channel; make it a live physics object again so it
+        /// rests where it was dropped instead of staying parked off-map.</summary>
+        internal void RestoreWorkerDroppedBox(long boxNetworkId)
+        {
+            if (_host || boxNetworkId <= 0 || !Available())
+            {
+                return;
+            }
+
+            if (!_boxes.TryGetBox(boxNetworkId, out var box)
+                || box is not InteractablePackagingBox_Item item
+                || item.m_IsStored)
+            {
+                return;
+            }
+
+            item.SetPhysicsEnabled(true);
         }
 
         private void ClientUndoTakePrediction(WarehouseDeltaMessage delta)
@@ -557,7 +581,11 @@ namespace CardShopCoop.Modules.World
                     }
                     else
                     {
-                        accepted = StoreLiveBox(compartment, box);
+                        // Idempotent: a box already listed in the compartment must not be added
+                        // again, which would inflate the slot count with a duplicate entry.
+                        var stored = compartment.GetInteractablePackagingBoxList();
+                        accepted = (stored != null && stored.Contains(box))
+                            || StoreLiveBox(compartment, box);
                     }
                 }
                 catch (Exception e)
@@ -729,7 +757,13 @@ namespace CardShopCoop.Modules.World
                 else if (_boxes.TryGetBox(message.BoxNetworkId, out var box)
                     && box is InteractablePackagingBox_Item item)
                 {
-                    item.DispenseItem(false, compartment);
+                    // Idempotent: only dispense into the compartment if it is not already there.
+                    var stored = compartment.GetInteractablePackagingBoxList();
+                    if (stored == null || !stored.Contains(item))
+                    {
+                        item.DispenseItem(false, compartment);
+                    }
+
                     _boxes.BindStoredLiveBox(message.BoxNetworkId, item,
                         new WarehouseBoxState
                         {
@@ -936,7 +970,13 @@ namespace CardShopCoop.Modules.World
                         _boxes.ClientForgetPhysical(previousId, copy[i]);
                     }
 
-                    compartment.RemoveBox(copy[i]);
+                    // ClientForgetPhysical destroys through the box engine, which detaches a
+                    // stored box; only remove here if the compartment still lists it.
+                    if (existing.Contains(copy[i]))
+                    {
+                        compartment.RemoveBox(copy[i]);
+                    }
+
                     if (copy[i] != null)
                     {
                         UnityEngine.Object.Destroy(copy[i].gameObject);

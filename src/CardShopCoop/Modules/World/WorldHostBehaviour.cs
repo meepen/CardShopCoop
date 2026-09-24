@@ -122,6 +122,26 @@ namespace CardShopCoop.Modules.World
         internal static bool IsHeldBoxOpen(InteractablePackagingBox box)
             => box is InteractablePackagingBox_Item item && BoxNetworkInteraction.IsBoxOpen(item);
 
+        /// <summary>Host: a worker stopped carrying this box. Re-announce its authoritative pose so
+        /// guests lift their parked copy back into the world (unless it has since been stored or
+        /// destroyed, which its own channel already handled).</summary>
+        internal static void NotifyWorkerReleasedBox(long boxNetworkId)
+            => _instance?._boxNetworkInteraction?.HostRefreshReleasedWorkerBox(boxNetworkId);
+
+        /// <summary>Snapshot every packaging box's slot the moment the world is serialized for a
+        /// transfer. The guest reproduces the same order from the transferred save, so box ids are
+        /// assigned by slot rather than matched by content or pose.</summary>
+        internal static void CaptureTransferBoxSlots()
+        {
+            if (_instance?._boxNetworkInteraction == null)
+            {
+                CoopPlugin.Log.LogWarning("Box slot map could not be captured: the world host is not active.");
+                return;
+            }
+
+            _instance._boxNetworkInteraction.CaptureTransferSlots();
+        }
+
         /// <summary>Apply one validated client intent on the host. Successful operations publish
         /// their authoritative state or the small gameplay handoff they require.</summary>
         internal bool ExecuteWorldCommand(MessageContext context, WorldMessage command,

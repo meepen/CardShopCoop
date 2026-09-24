@@ -1515,7 +1515,9 @@ namespace CardShopCoop.Modules.World
 
             while (stored.Count < targetCount)
             {
-                var itemType = (EItemType)storedTypes[stored.Count];
+                var itemType = stored.Count < storedTypes.Count
+                    ? (EItemType)storedTypes[stored.Count]
+                    : EItemType.None;
                 var item = SpawnItem(itemType, opener.m_PosInside);
                 stored.Add(item);
             }
@@ -2214,6 +2216,11 @@ namespace CardShopCoop.Modules.World
                 () =>
                 {
                     mirror.StoredCount++;
+                    // SyncLocalPackItems reads StoredTypes[stored.Count] while it grows the local
+                    // list to StoredCount, so the optimistic increment must carry its item type or
+                    // it throws IndexOutOfRange, aborting the caller before the source box gives
+                    // the pack up.
+                    mirror.StoredTypes.Add((int)itemType);
                     if (!mirror.Processing && mirror.StoredCount >= __instance.m_MaxPackCount)
                     {
                         mirror.Processing = true;
@@ -2226,6 +2233,11 @@ namespace CardShopCoop.Modules.World
                 () =>
                 {
                     mirror.StoredCount = priorStored;
+                    if (mirror.StoredTypes.Count > priorStored)
+                    {
+                        mirror.StoredTypes.RemoveRange(priorStored,
+                            mirror.StoredTypes.Count - priorStored);
+                    }
                     mirror.Processing = priorProcessing;
                     mirror.CurrentState = priorState;
                     mirror.PackStartTimestamp = priorStart;

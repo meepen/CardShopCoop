@@ -8,6 +8,7 @@ namespace CardShopCoop.Modules.Shop
         internal static void Reset()
         {
             _canonicalName = null;
+            ShopInterop.Reset();
         }
 
         internal static bool TryNormalize(string proposed, out string canonical)
@@ -52,7 +53,10 @@ namespace CardShopCoop.Modules.Shop
         {
             _canonicalName = name;
             CPlayerData.PlayerName = name;
-            var renamers = ShopInterop.FindRenamers();
+            // The renamer controller is inactive during normal play, but its text fields point at
+            // the visible shop sign (and the rename inputs). Repaint through the scene instance so
+            // a remote rename lands on the sign without waiting for the billboard to be opened.
+            var renamers = ShopInterop.FindSignRenamers();
             var appliedUi = false;
             for (var i = 0; i < renamers.Length; i++)
             {

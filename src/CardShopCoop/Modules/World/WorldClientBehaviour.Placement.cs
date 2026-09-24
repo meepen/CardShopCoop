@@ -308,6 +308,7 @@ namespace CardShopCoop.Modules.World
             _movingObject = null;
             _movingBefore = null;
             PlacementIdentity.Reset();
+            _boxNetworkInteraction?.ClientInvalidateSceneSlots();
         }
 
         private void InstallPlacementPatches()

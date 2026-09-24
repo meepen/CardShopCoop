@@ -3,6 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Threading;
+using CardShopCoop.Modules.World;
 using CardShopCoop.Runtime;
 using UnityEngine;
 
@@ -86,6 +87,10 @@ namespace CardShopCoop.Modules.SaveTransfer
             {
                 manager.m_CurrentSaveLoadSlotSelectedIndex = previousSlot;
             }
+
+            // The world snapshot has now been serialized in live-list order. Capture the matching
+            // box slots immediately so the box baseline can name each scene box deterministically.
+            WorldHostBehaviour.CaptureTransferBoxSlots();
 
             if (IsFresh(path, timestamp))
             {

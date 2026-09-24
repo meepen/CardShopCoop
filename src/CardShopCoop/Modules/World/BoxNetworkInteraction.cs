@@ -36,6 +36,13 @@ namespace CardShopCoop.Modules.World
         // Package-box factories run locally on clients as part of vanilla furniture/item
         // flows. Keep those objects alive until the host's descriptor gives us their identity.
         private readonly HashSet<InteractablePackagingBox> _unboundCandidates = new();
+        // Host: each scene box's index in the world snapshot's serialization order. Stamped on
+        // the box baseline so the guest can bind by slot instead of matching content/pose.
+        private readonly Dictionary<InteractablePackagingBox, int> _snapshotSlots = new();
+        // Guest: the boxes recovered from the transferred save, indexed exactly as the host's
+        // snapshot slots. Captured at baseline start, before any runtime box is materialized.
+        private readonly Dictionary<byte, List<InteractablePackagingBox>> _sceneSlots = new();
+        private bool _sceneSlotsCaptured;
         private Transform _cardSpawnAnchor;
         private long _nextId = 1;
         private int _materializing;
@@ -89,6 +96,9 @@ namespace CardShopCoop.Modules.World
             _furnitureEntityIds.Clear();
             _pendingFurniture.Clear();
             _unboundCandidates.Clear();
+            _snapshotSlots.Clear();
+            _sceneSlots.Clear();
+            _sceneSlotsCaptured = false;
             _nextId = 1;
             _materializing = 0;
             _applyingRemote = 0;
@@ -124,6 +134,72 @@ namespace CardShopCoop.Modules.World
             _furnitureEntityIds.Clear();
             _pendingFurniture.Clear();
             _unboundCandidates.Clear();
+            CaptureSceneSlots();
+        }
+
+        /// <summary>Guest: forget the scene-box slots on a scene reload so pre-baseline box
+        /// traffic is not bound against a stale list.</summary>
+        internal void ClientInvalidateSceneSlots()
+        {
+            if (_host)
+            {
+                return;
+            }
+
+            _sceneSlots.Clear();
+            _sceneSlotsCaptured = false;
+        }
+
+        /// <summary>Guest: snapshot the boxes recovered from the transferred save, in the exact
+        /// order the host serialized them. The box baseline's slots index into these lists.</summary>
+        private void CaptureSceneSlots()
+        {
+            _sceneSlots.Clear();
+            _sceneSlots[(byte)BoxNetworkKind.Item] =
+                SnapshotBoxes(RestockManager.GetItemPackagingBoxList());
+            _sceneSlots[(byte)BoxNetworkKind.Card] =
+                SnapshotBoxes(RestockManager.GetCardPackagingBoxList());
+            _sceneSlotsCaptured = true;
+        }
+
+        private static List<InteractablePackagingBox> SnapshotBoxes<T>(IList<T> boxes)
+            where T : InteractablePackagingBox
+        {
+            var list = new List<InteractablePackagingBox>();
+            for (var i = 0; boxes != null && i < boxes.Count; i++)
+            {
+                list.Add(boxes[i]);
+            }
+
+            return list;
+        }
+
+        /// <summary>Host: record every packaging box's slot in the world snapshot's serialization
+        /// order. The guest reproduces the same order from the transferred save. Called right after
+        /// the world snapshot is written, so runtime boxes present at snapshot time are covered and
+        /// boxes created later are not.</summary>
+        internal void CaptureTransferSlots()
+        {
+            if (!_host)
+            {
+                return;
+            }
+
+            _snapshotSlots.Clear();
+            CaptureTransferKindSlots(RestockManager.GetItemPackagingBoxList());
+            CaptureTransferKindSlots(RestockManager.GetCardPackagingBoxList());
+        }
+
+        private void CaptureTransferKindSlots<T>(IList<T> boxes)
+            where T : InteractablePackagingBox
+        {
+            for (var i = 0; boxes != null && i < boxes.Count; i++)
+            {
+                if (boxes[i] != null)
+                {
+                    _snapshotSlots[boxes[i]] = i;
+                }
+            }
         }
 
         internal void RegisterHostSceneBoxes()
@@ -206,6 +282,23 @@ namespace CardShopCoop.Modules.World
         internal void HostRefresh(long id)
         {
             if (!_host || id <= 0 || !TryGetBox(id, out var box))
+            {
+                return;
+            }
+
+            _broadcast(CreateMessage(id, box));
+        }
+
+        /// <summary>Host: re-announce a box a worker just put down. Stored boxes keep their
+        /// compartment slot (the warehouse channel owns them), so only a free box is refreshed.</summary>
+        internal void HostRefreshReleasedWorkerBox(long id)
+        {
+            if (!_host || id <= 0 || !TryGetBox(id, out var box))
+            {
+                return;
+            }
+
+            if (box is InteractablePackagingBox_Item item && item.m_IsStored)
             {
                 return;
             }
@@ -533,6 +626,8 @@ namespace CardShopCoop.Modules.World
                 HostPredictionId = predictionId;
                 try
                 {
+                    // A stored box destroyed in place would leave a ghost in its compartment.
+                    DetachStoredBox(box);
                     box.OnDestroyed();
                 }
                 finally
@@ -557,6 +652,13 @@ namespace CardShopCoop.Modules.World
 
         internal void ClientApplyCreated(BoxCreatedMessage message)
         {
+            if (!_host && !_sceneSlotsCaptured)
+            {
+                // Pre-baseline traffic. The ordered baseline that follows resends every box, so
+                // drop this rather than binding it against a list we have not captured yet.
+                return;
+            }
+
             var state = message.Box;
             if (state.Kind == BoxNetworkKind.Furniture
                 && !PlacementApi.IsPlacementIdentityReady)
@@ -587,12 +689,18 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var box = FindAdoptable(state, message.StableEntityId) ?? Materialize(state,
-                message.StableEntityId);
+            // A snapshot slot names a box this peer recovered from the transferred save; its id
+            // is assigned by that slot. A negative slot is a box created after the snapshot: this
+            // peer has no local counterpart, so the host's creation event is the association and
+            // the box is created here bound to the host id. No content or pose matching, ever.
+            var box = message.SnapshotSlot >= 0
+                ? ResolveSceneSlot(state.Kind, message.SnapshotSlot)
+                : Materialize(state, message.StableEntityId);
             if (box == null)
             {
                 throw new InvalidOperationException("Could not materialize authoritative box id="
-                    + state.BoxNetworkId + " kind=" + state.Kind + ".");
+                    + state.BoxNetworkId + " kind=" + state.Kind + " slot="
+                    + message.SnapshotSlot + ".");
             }
 
             _storedBoxes.Remove(state.BoxNetworkId);
@@ -604,12 +712,26 @@ namespace CardShopCoop.Modules.World
             }
 
             CoopPlugin.Log.LogInfo("[box-id] adopted candidate id=" + state.BoxNetworkId
-                + " kind=" + state.Kind + " object=" + box.name + ".");
+                + " kind=" + state.Kind + " slot=" + message.SnapshotSlot + " object=" + box.name
+                + ".");
             ApplyPose(box, state.Position, state.Rotation);
             if (box is InteractablePackagingBox_Item itemBox)
             {
                 ApplyItemState(itemBox, state);
             }
+        }
+
+        /// <summary>Guest: the box the host's snapshot slot names, captured at baseline start.</summary>
+        private InteractablePackagingBox ResolveSceneSlot(BoxNetworkKind kind, int slot)
+        {
+            if (!_sceneSlots.TryGetValue((byte)kind, out var boxes) || slot < 0
+                || slot >= boxes.Count)
+            {
+                return null;
+            }
+
+            var box = boxes[slot];
+            return box == null ? null : box;
         }
 
         internal void ClientApplyDestroyed(BoxDestroyedMessage message)
@@ -694,6 +816,11 @@ namespace CardShopCoop.Modules.World
         private BoxCreatedMessage CreateMessage(long id, InteractablePackagingBox box)
         {
             var message = new BoxCreatedMessage { Box = Describe(id, box) };
+            if (_host && _snapshotSlots.TryGetValue(box, out var slot))
+            {
+                message.SnapshotSlot = slot;
+            }
+
             if (box is not InteractablePackagingBox_Shelf shelf)
             {
                 return message;
@@ -967,107 +1094,6 @@ namespace CardShopCoop.Modules.World
             return created.GetPackagingBoxShelf();
         }
 
-        private InteractablePackagingBox FindAdoptable(BoxNetworkState state, string furnitureEntityId)
-        {
-            switch (state.Kind)
-            {
-                case BoxNetworkKind.Item:
-                    return FindItem(state);
-                case BoxNetworkKind.Card:
-                    return FindCard(state);
-                case BoxNetworkKind.Furniture:
-                    // Prefer the exact placement identity. If it cannot be resolved yet (a
-                    // play-table/other furniture box whose entity id has not been bound, or a
-                    // locally spawned delivery box the host is only now announcing), adopt this
-                    // peer's matching unbound candidate instead of materializing a duplicate.
-                    return ResolveFurniturePackage(furnitureEntityId, state.FurnitureObjectType)
-                        ?? FindUnboundFurnitureCandidate(state.FurnitureObjectType, state.Position);
-                default:
-                    return null;
-            }
-        }
-
-        private InteractablePackagingBox_Item FindItem(BoxNetworkState state)
-        {
-            var boxes = RestockManager.GetItemPackagingBoxList();
-            InteractablePackagingBox_Item closest = null;
-            var closestDistance = float.MaxValue;
-            for (var i = 0; boxes != null && i < boxes.Count; i++)
-            {
-                var candidate = boxes[i];
-                if (candidate == null || _idsByBox.ContainsKey(candidate)
-                    || candidate.m_IsBigBox != state.IsBig || candidate.m_ItemCompartment == null
-                    || candidate.m_ItemCompartment.GetItemType() != state.ItemType
-                    || candidate.m_ItemCompartment.GetItemCount() != state.ItemCount)
-                {
-                    continue;
-                }
-
-                var distance = (candidate.transform.position - state.Position).sqrMagnitude;
-                if (distance < closestDistance)
-                {
-                    closest = candidate;
-                    closestDistance = distance;
-                }
-            }
-
-            return closest;
-        }
-
-        private InteractablePackagingBox_Card FindCard(BoxNetworkState state)
-        {
-            var boxes = RestockManager.GetCardPackagingBoxList();
-            InteractablePackagingBox_Card closest = null;
-            var closestDistance = float.MaxValue;
-            for (var i = 0; boxes != null && i < boxes.Count; i++)
-            {
-                var candidate = boxes[i];
-                if (candidate == null || _idsByBox.ContainsKey(candidate)
-                    || candidate.GetCardDataList()?.Count != state.Cards.Count)
-                {
-                    continue;
-                }
-
-                var distance = (candidate.transform.position - state.Position).sqrMagnitude;
-                if (distance < closestDistance)
-                {
-                    closest = candidate;
-                    closestDistance = distance;
-                }
-            }
-
-            return closest;
-        }
-
-        /// <summary>Finds this peer's not-yet-authoritative furniture package of the expected type,
-        /// nearest the authoritative pose. Used when the placement identity is not resolvable, so a
-        /// runtime-purchased furniture box (play tables included) can still adopt its local wrapper
-        /// instead of failing the authoritative creation.</summary>
-        private InteractablePackagingBox FindUnboundFurnitureCandidate(EObjectType furnitureObjectType,
-            Vector3 position)
-        {
-            InteractablePackagingBox_Shelf best = null;
-            var bestDistance = float.MaxValue;
-            foreach (var candidate in _unboundCandidates)
-            {
-                if (candidate is not InteractablePackagingBox_Shelf shelf
-                    || !TryGetBoxedFurniture(shelf, out var furniture)
-                    || furniture.m_ObjectType != furnitureObjectType)
-                {
-                    continue;
-                }
-
-                var distance = (shelf.transform.position - position).sqrMagnitude;
-                if (distance < bestDistance)
-                {
-                    bestDistance = distance;
-                    best = shelf;
-                }
-            }
-
-            return best;
-        }
-
         private InteractablePackagingBox_Shelf ResolveFurniturePackage(string furnitureEntityId,
             EObjectType furnitureObjectType)
         {
@@ -1106,11 +1132,41 @@ namespace CardShopCoop.Modules.World
                     shelf.EmptyBoxShelf();
                 }
 
+                // A stored item box must leave its warehouse compartment explicitly: the game's
+                // OnDestroyed does not, and a destroyed entry left in the list still occupies the
+                // slot, so the shelf shows a box that is not there and refuses new boxes.
+                DetachStoredBox(box);
+
                 box.OnDestroyed();
             }
             finally
             {
                 _applyingRemote--;
+            }
+        }
+
+        /// <summary>Removes a stored item box from its warehouse compartment, if it is in one.
+        /// Idempotent: a box already detached (or not stored) is left alone.</summary>
+        private static void DetachStoredBox(InteractablePackagingBox box)
+        {
+            if (box is not InteractablePackagingBox_Item item)
+            {
+                return;
+            }
+
+            var compartment = item.GetBoxStoredCompartment();
+            if (compartment == null)
+            {
+                return;
+            }
+
+            var stored = compartment.GetInteractablePackagingBoxList();
+            if (stored != null && stored.Contains(item))
+            {
+                CoopPlugin.Log.LogInfo("[warehouse] detaching destroyed stored box " + item.name
+                    + " from shelf=" + compartment.GetWarehouseIndex() + " comp="
+                    + compartment.GetIndex() + "; the slot would otherwise stay blocked.");
+                compartment.RemoveBox(item);
             }
         }
 

@@ -24,6 +24,8 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(ItemBoxOpenStatePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(ItemBoxContentsPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(ItemBoxRemoveFromShelfPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PackOpenerDispenseFromBoxPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(CleanserDispenseFromBoxPatch)).Patch();
         }
 
         internal static bool ForwardFurnitureBoxUp(InteractableObject obj, bool holdBox)
@@ -315,6 +317,44 @@ namespace CardShopCoop.Modules.World
                     _instance?.PublishItemBoxState(__instance, true);
                 }
             }
+        }
+
+        /// <summary>A guest feeding the machine straight from an open delivery box moves the item
+        /// out with <c>itemBox.m_ItemCompartment.RemoveItem</c>, a path that never fires
+        /// <see cref="ItemBoxContentsPatch"/>. Publish the source box after the move so the host
+        /// removes the same item instead of keeping a duplicate in its box.</summary>
+        private static void PublishDispensedSourceBox(InteractablePackagingBox_Item itemBox,
+            int priorCount)
+        {
+            if (itemBox?.m_ItemCompartment != null
+                && itemBox.m_ItemCompartment.GetItemCount() != priorCount)
+            {
+                _instance?.PublishItemBoxState(itemBox, true);
+            }
+        }
+
+        [HarmonyPatch(typeof(InteractableAutoPackOpener), "DispenseItemFromBox")]
+        private static class PackOpenerDispenseFromBoxPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractablePackagingBox_Item itemBox, out int __state)
+                => __state = itemBox?.m_ItemCompartment?.GetItemCount() ?? 0;
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractablePackagingBox_Item itemBox, int __state)
+                => PublishDispensedSourceBox(itemBox, __state);
+        }
+
+        [HarmonyPatch(typeof(InteractableAutoCleanser), "DispenseItemFromBox")]
+        private static class CleanserDispenseFromBoxPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractablePackagingBox_Item itemBox, out int __state)
+                => __state = itemBox?.m_ItemCompartment?.GetItemCount() ?? 0;
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractablePackagingBox_Item itemBox, int __state)
+                => PublishDispensedSourceBox(itemBox, __state);
         }
     }
 }

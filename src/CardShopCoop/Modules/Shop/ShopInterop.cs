@@ -3,12 +3,20 @@ using System.Reflection;
 using CardShopCoop.Runtime;
 using CardShopCoop.Util;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Shop
 {
     /// <summary>Scene lookup boundary for both the Unity 2021 and Unity 6 runtimes.</summary>
     internal static class ShopInterop
     {
+        // The renamer deactivates its own GameObject after the shop is named (and on load once
+        // the tutorial is done), so it is invisible to an active-only scene search. The sign
+        // repaint therefore needs its own lookup that can see the inactive object; the naming
+        // side-effect path keeps the active-only lookup so its tutorial/entitlement timing is
+        // unchanged.
+        private static ShopRenamer _signRenamer;
+
         private static readonly FieldInfo FiIsTutorial = ReflectionSurface.RequiredField(
             typeof(ShopRenamer), "m_IsTutorial");
         private static readonly FieldInfo FiTutorialIndex = ReflectionSurface.RequiredField(
@@ -21,10 +29,68 @@ namespace CardShopCoop.Modules.Shop
         private static ConstructorInfo _grantBonusConstructor;
         private static bool _grantBonusResolved;
 
+        static ShopInterop()
+        {
+            SceneRef.Register(
+                () => _signRenamer = null,
+                scene => InvalidateForScene(scene),
+                scene => InvalidateForScene(scene));
+        }
+
+        /// <summary>Drop the cached sign renamer. Called when the session ends or its scene goes
+        /// away; a destroyed Unity object also compares equal to null, so a missed reset cannot
+        /// pin a stale reference.</summary>
+        internal static void Reset()
+        {
+            _signRenamer = null;
+        }
+
+        private static void InvalidateForScene(Scene scene)
+        {
+            if (_signRenamer == null || !_signRenamer.gameObject.scene.IsValid()
+                || _signRenamer.gameObject.scene.handle == scene.handle)
+            {
+                _signRenamer = null;
+            }
+        }
+
+        /// <summary>Active-only lookup used by the naming side-effect replay.</summary>
         internal static ShopRenamer[] FindRenamers()
         {
             var renamer = SceneRef<ShopRenamer>.Get();
             return renamer == null ? new ShopRenamer[0] : new[] { renamer };
+        }
+
+        /// <summary>Repaint lookup for the shop sign. The renamer controller is routinely
+        /// inactive while its sign stays visible, so this search includes inactive objects.</summary>
+        internal static ShopRenamer[] FindSignRenamers()
+        {
+            if (_signRenamer == null)
+            {
+                _signRenamer = FindSceneObject<ShopRenamer>();
+                if (_signRenamer == null)
+                {
+                    CoopPlugin.Log.LogDebug("Shop renamer is not present in the scene.");
+                }
+            }
+
+            return _signRenamer == null ? new ShopRenamer[0] : new[] { _signRenamer };
+        }
+
+        /// <summary>Find a scene component even while its GameObject is inactive. Prefab assets
+        /// returned by the resource search are rejected by the valid-scene check.</summary>
+        private static T FindSceneObject<T>() where T : Component
+        {
+            var all = Resources.FindObjectsOfTypeAll<T>();
+            for (var i = 0; i < all.Length; i++)
+            {
+                if (all[i] != null && all[i].gameObject.scene.IsValid())
+                {
+                    return all[i];
+                }
+            }
+
+            return null;
         }
 
         internal static ShopRenamer FindRenamer()

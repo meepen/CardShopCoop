@@ -1991,7 +1991,12 @@ namespace CardShopCoop.Modules.Npc
                     }
                     else
                     {
+                        var releasedBoxId = p.AppliedHeldBoxNetworkId;
                         ReleaseWorkerBoxProp(p);
+                        if (releasedBoxId > 0)
+                        {
+                            WorldClientBehaviour.RestoreWorkerDroppedBox(releasedBoxId);
+                        }
                     }
                 }
             }

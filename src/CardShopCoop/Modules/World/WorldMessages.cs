@@ -95,6 +95,12 @@ namespace CardShopCoop.Modules.World
     public sealed class BoxCreatedMessage : WorldMessage
     {
         public BoxNetworkState Box;
+
+        /// <summary>Index of this box in the world snapshot's serialization order for its kind,
+        /// or -1 for a box created after the snapshot. The guest reproduces the same index from
+        /// the transferred save, so a scene box is adopted by slot instead of by content/pose.
+        /// </summary>
+        public int SnapshotSlot = -1;
     }
 
     /// <summary>Client -> host: request retirement of a locally consumed box.</summary>
