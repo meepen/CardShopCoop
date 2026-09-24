@@ -1718,22 +1718,23 @@ namespace CardShopCoop.Modules.World
                     Op = OpEmptyBoxTake,
                     Kind = (byte)KindEmptyBoxStorage,
                     Index = (byte)idx,
+                    // Only the host creates the physical box. Flagging the take as a player action
+                    // makes the host's accepted delta arrive as TakeIntoHand, so the guest holds
+                    // the authoritative box instead of a locally predicted duplicate.
+                    IsPlayer = true,
                 };
-                InteractablePackagingBox_Item predictedBox = null;
+                // Predict only the storage count. The host's box is materialized by the box
+                // engine from its BoxCreated/ContainerDelta and put into the hand by TakeIntoHand,
+                // so the guest never spawns a second box it would then have to reconcile away.
                 WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
                     () =>
                     {
                         var count = storage.GetBoxStoredCount();
                         FiEmptyStoredCount.SetValue(storage, count - 1);
                         MiEmptyEvaluateStack.Invoke(storage, null);
-                        predictedBox = RestockManager.SpawnPackageBoxItem(EItemType.None, 0, true);
-                        var controller = SceneRef<InteractionPlayerController>.Get();
-                        predictedBox.StartHoldBox(true, controller.m_HoldItemPos);
                     },
                     () =>
                     {
-                        if (predictedBox != null)
-                            predictedBox.OnDestroyed();
                         var count = storage.GetBoxStoredCount();
                         FiEmptyStoredCount.SetValue(storage, count + 1);
                         MiEmptyEvaluateStack.Invoke(storage, null);
@@ -1762,12 +1763,14 @@ namespace CardShopCoop.Modules.World
                     () =>
                     {
                         ApplyingRemote = true;
+                        _boxes?.BeginContainerConsume();
                         try
                         {
                             storage.StoreBox(box, false);
                         }
                         finally
                         {
+                            _boxes?.EndContainerConsume();
                             ApplyingRemote = false;
                         }
                     },

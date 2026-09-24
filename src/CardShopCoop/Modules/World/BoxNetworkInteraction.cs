@@ -40,6 +40,11 @@ namespace CardShopCoop.Modules.World
         private long _nextId = 1;
         private int _materializing;
         private int _applyingRemote;
+        // Set while a container operation consumes a box through the game's own store path (for
+        // example InteractableEmptyBoxStorage.StoreBox). The container op already carries the box
+        // ID and owns the authoritative result, so the box engine must not also emit a competing
+        // BoxDestroyRequest for the box the store destroyed.
+        private int _suppressDestroyForward;
         internal Guid HostPredictionId;
         private static readonly System.Reflection.FieldInfo OutOfBoundsTimer =
             AccessTools.Field(typeof(RestockManager), "m_OutofBoundCheckTimer");
@@ -87,6 +92,7 @@ namespace CardShopCoop.Modules.World
             _nextId = 1;
             _materializing = 0;
             _applyingRemote = 0;
+            _suppressDestroyForward = 0;
             HostPredictionId = Guid.Empty;
             if (_cardSpawnAnchor != null)
             {
@@ -446,6 +452,22 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogInfo("[box-id] destroyed id=" + id + ".");
         }
 
+        /// <summary>Suppresses generic box-destroy forwarding while a container operation consumes
+        /// a box through the game's own store path. The caller must pair this with
+        /// <see cref="EndContainerConsume"/> in a finally.</summary>
+        internal void BeginContainerConsume()
+        {
+            _suppressDestroyForward++;
+        }
+
+        internal void EndContainerConsume()
+        {
+            if (_suppressDestroyForward > 0)
+            {
+                _suppressDestroyForward--;
+            }
+        }
+
         internal bool ClientNotifyDestroyed(InteractablePackagingBox box)
         {
             if (_host || _applyingRemote > 0 || box == null
@@ -457,6 +479,17 @@ namespace CardShopCoop.Modules.World
 
             if (id <= 0)
             {
+                return true;
+            }
+
+            if (_suppressDestroyForward > 0)
+            {
+                // The box is being consumed by a container operation that already carries its ID
+                // and owns the authoritative result (the host will run the same store and echo a
+                // BoxDestroyed). Drop the local binding and let vanilla finish the destroy; sending
+                // a competing BoxDestroyRequest would be rejected as an unknown box and its
+                // rollback would resurrect this box on the client only.
+                Unbind(id, box);
                 return true;
             }
 
