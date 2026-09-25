@@ -34,9 +34,9 @@ namespace CardShopCoop.Modules.SaveTransfer
             => SaveTransferHostBehaviour.TryAuthorizeAndSend(target, sendHandshakeOffer,
                 afterOfferQueued);
 
-        public static bool TryBeginClientTransfer(int hostSlot, int saveLength, int bundleLength,
-            bool sidecarsComplete = true, string sidecarWarning = null)
-            => SaveTransferClientBehaviour.TryBeginClientTransfer(hostSlot, saveLength, bundleLength,
+        public static bool TryBeginClientTransfer(int saveLength, int bundleLength,
+            bool sidecarsComplete, string sidecarWarning)
+            => SaveTransferClientBehaviour.TryBeginClientTransfer(saveLength, bundleLength,
                 sidecarsComplete, sidecarWarning);
 
         internal static bool TryConsumeHostTransferAcknowledgement(PeerConnection connection)
@@ -46,8 +46,6 @@ namespace CardShopCoop.Modules.SaveTransfer
             => SaveTransferClientBehaviour.TryConsumeFullyJoinedAcknowledgement(connection);
 
         public static byte[] BuildHostPayload() => SaveTransferStorage.BuildHostPayload();
-        public static byte[] BuildSidecarBundle(int hostSlot)
-            => SaveTransferSidecars.BuildBundle(hostSlot);
         public static void ForceLoadSlot(int slot) => SaveTransferStorage.ForceLoadSlot(slot);
     }
 }

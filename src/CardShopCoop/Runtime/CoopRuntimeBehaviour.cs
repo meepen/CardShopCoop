@@ -123,7 +123,7 @@ namespace CardShopCoop.Runtime
 
         // Feature callbacks (including external mods') are isolated from the session control flow:
         // one failing handler is logged, never allowed to unwind CoopCore.Update or Shutdown.
-        private static void Guard(string label, System.Action action)
+        private static void Guard(string label, Action action)
         {
             try
             {

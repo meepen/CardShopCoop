@@ -230,6 +230,7 @@ namespace CardShopCoop.Modules.Pricing
             if (!PricingInterop.ValidPrice(price))
             {
                 CoopPlugin.Log.LogWarning("[pricing] confirm ignored: invalid price " + price + ".");
+                screen.CloseScreen();
                 return false;
             }
 
@@ -239,11 +240,14 @@ namespace CardShopCoop.Modules.Pricing
             {
                 if (!PricingInterop.ValidCard(card))
                 {
-                    CoopPlugin.Log.LogWarning("[pricing] confirm ignored: invalid card saveIndex="
-                        + PricingInterop.SafeSaveIndex(card) + " expansion="
+                    // A card this build's pricing store cannot name (typically a modded
+                    // expansion). Defer to the game's own confirm so it is applied locally rather
+                    // than leaving the player stuck in the menu with no price set.
+                    CoopPlugin.Log.LogWarning("[pricing] confirm: card is outside the local pricing "
+                        + "store (saveIndex=" + PricingInterop.SafeSaveIndex(card) + " expansion="
                         + (int)card.expansionType + " monster=" + (int)card.monsterType
-                        + " grade=" + card.cardGrade + ".");
-                    return false;
+                        + " grade=" + card.cardGrade + "); deferring to the game's own confirm.");
+                    return true;
                 }
 
                 var grade = GradingApi.Encoded(card);
@@ -256,9 +260,9 @@ namespace CardShopCoop.Modules.Pricing
             {
                 if (!PricingInterop.IsItemTypeValid(item))
                 {
-                    CoopPlugin.Log.LogWarning("[pricing] confirm ignored: no card and invalid item "
-                        + item + ".");
-                    return false;
+                    CoopPlugin.Log.LogWarning("[pricing] confirm: item " + item
+                        + " is outside the local pricing store; deferring to the game's own confirm.");
+                    return true;
                 }
 
                 PredictItem(item, price);
@@ -386,14 +390,18 @@ namespace CardShopCoop.Modules.Pricing
 
         internal static void CaptureItemSetter(EItemType type, float requestedPrice)
         {
-            if (_active == null || _active._applying || _active._suppressCapture)
+            // Guard the store read: a direct setter can fire for a modded slot the pricing model
+            // cannot name (the confirm was deferred to vanilla), and ReadItem would throw.
+            if (_active == null || _active._applying || _active._suppressCapture
+                || !PricingInterop.IsItemTypeValid(type))
                 return;
             EmitItem(type, PricingInterop.ReadItem(type));
         }
 
         internal static void CaptureCardSetter(CardData card, float requestedPrice)
         {
-            if (_active == null || _active._applying || _active._suppressCapture || card == null)
+            if (_active == null || _active._applying || _active._suppressCapture || card == null
+                || !PricingInterop.ValidCard(card))
                 return;
             var grade = GradingApi.Encoded(card);
             GradingApi.Remember(card);

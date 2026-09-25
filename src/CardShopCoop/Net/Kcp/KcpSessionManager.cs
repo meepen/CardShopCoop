@@ -73,6 +73,12 @@ namespace CardShopCoop.Net.Kcp
         private bool _disposed;
         private bool _resourcesDisposed;
         private int _nextHostConnectionId = 1;
+        // When a disconnect carries a reason, hold the KCP close until the terminal frame is
+        // acknowledged (or this grace elapses) so the peer receives the reason before the goodbye.
+        private const int TerminalFrameAckGraceMs = 1000;
+        // The peer's terminal reason frame is decoded on the async worker, which can lag the KCP
+        // close. Hold a reasonless disconnect this long so the decoded frame can claim it.
+        private const int DisconnectDecodeGraceMs = 250;
         private int _reassemblyBytes;
         private int _incomingBytes;
         private int _pendingActivationFrames;
@@ -407,6 +413,35 @@ namespace CardShopCoop.Net.Kcp
 
                         if (state.DisconnectRequested && !state.Terminal)
                             DisconnectOnPump(state);
+
+                        if (state.PendingTerminalDisconnect && !state.Terminal)
+                        {
+                            var acked = state.Session.PendingReliableSegments == 0;
+                            if (acked || unchecked(now - state.TerminalDisconnectDeadline) >= 0)
+                            {
+                                LogInfo("coop: completing held disconnect for peer "
+                                    + state.Connection.Id + " (acked=" + acked + ").");
+                                FinishDisconnectOnPump(state);
+                            }
+                        }
+
+                        if (state.PendingDisconnectCompletion && !state.Terminal
+                            && unchecked(now - state.DisconnectCompletionDeadline) >= 0)
+                        {
+                            // The peer's terminal DisconnectMessage is decoded on the async worker
+                            // and can land after the last drain of this pass, especially when the
+                            // frame pump is slow (loading screens). Harvest it before giving up on
+                            // a reason so the terminal event carries the peer's own explanation
+                            // instead of the generic fallback.
+                            DrainDecodeResults();
+                            if (!state.Terminal)
+                            {
+                                LogInfo("coop: completing deferred disconnect for peer "
+                                    + state.Connection.Id + " with fallback reason '"
+                                    + (state.DisconnectInfo?.Reason ?? "<null>") + "'.");
+                                CompleteDisconnect(state, state.DisconnectInfo);
+                            }
+                        }
 
                     }
                 }
@@ -1763,7 +1798,19 @@ namespace CardShopCoop.Net.Kcp
                 info = new DisconnectInfo(reason,
                     remote, remote ? "remote_closed" : "kcp_closed", remote,
                     state.Connection.State);
+
+                // No application reason yet: the peer's terminal DisconnectMessage may still be on
+                // the async decode path. Hold completion briefly so that decoded frame can claim
+                // the reason, instead of publishing the generic close.
+                state.DisconnectInfo = info;
+                state.PendingDisconnectCompletion = true;
+                state.DisconnectCompletionDeadline = unchecked(MonotonicNow() + DisconnectDecodeGraceMs);
+                LogInfo("coop: session disconnected for peer " + state.Connection.Id
+                    + "; holding completion " + DisconnectDecodeGraceMs
+                    + "ms for a terminal reason frame.");
+                return;
             }
+
             CompleteDisconnect(state, info);
         }
 
@@ -1784,6 +1831,8 @@ namespace CardShopCoop.Net.Kcp
                 return;
             state.DisconnectInfo ??= new DisconnectInfo(reason, false, "protocol_error", false,
                 state.Connection.State);
+            LogWarning("coop: protocol disconnect for peer " + state.Connection.Id + ": " + reason
+                + ".");
             state.DisconnectRequested = true;
             DisconnectOnPump(state);
         }
@@ -1798,17 +1847,37 @@ namespace CardShopCoop.Net.Kcp
             state.DisconnectInfo = info;
             state.Connection.BeginDisconnect(info);
 
-            // Tell the peer why this connection is ending, then tear down. The frame is flushed
-            // in this tick: kcp2k's disconnect does not flush queued reliable data, and the
-            // receiver defers a peer's disconnect control until its buffered reliable input was
-            // delivered. Delivery stays best effort: a dead or unauthenticated peer just misses
-            // the detail.
-            TrySendTerminalFrame(state, info);
+            // Tell the peer why this connection is ending. The frame is flushed in this tick, but
+            // KCP's own disconnect sends unreliable goodbye headers that can reach the peer BEFORE
+            // the reliable terminal frame is decoded, which made the peer publish a generic
+            // "remote disconnected" instead of the real reason. When the terminal frame is sent,
+            // hold the KCP close until it is acknowledged (bounded by a short grace) so the peer
+            // always sees the reason first.
+            if (TrySendTerminalFrame(state, info))
+            {
+                state.PendingTerminalDisconnect = true;
+                state.TerminalDisconnectDeadline = unchecked(MonotonicNow() + TerminalFrameAckGraceMs);
+                LogInfo("coop: holding disconnect for peer " + state.Connection.Id
+                    + " until the terminal reason frame is acknowledged.");
+                return;
+            }
 
+            FinishDisconnectOnPump(state);
+        }
+
+        /// <summary>Completes a disconnect whose terminal reason frame was already sent (or could
+        /// not be sent). Safe to call from the pump only.</summary>
+        private void FinishDisconnectOnPump(SessionState state)
+        {
+            var info = state.DisconnectInfo ?? new DisconnectInfo("connection closed");
             if (!state.Session.IsDisconnected)
+            {
                 state.Session.Disconnect();
+            }
             else
+            {
                 CompleteDisconnect(state, info);
+            }
         }
 
         /// <summary>
@@ -1902,9 +1971,13 @@ namespace CardShopCoop.Net.Kcp
                 ? (ConnectionState)message.Phase : ConnectionState.Disconnecting;
             var info = new DisconnectInfo(message.Reason, true, message.Code, message.Retryable,
                 phase);
+            LogInfo("coop: remote terminal reason for peer " + state.Connection.Id + ": "
+                + info.Code + " / " + info.Reason);
             if (!state.Connection.RecordRemoteDisconnect(info))
             {
                 // A local goodbye or an earlier remote reason already owns this terminal claim.
+                LogInfo("coop: ignoring remote terminal reason for peer " + state.Connection.Id
+                    + " (already claimed: " + (state.Connection.DisconnectReason?.Code ?? "?") + ").");
                 return;
             }
 
@@ -2430,6 +2503,11 @@ namespace CardShopCoop.Net.Kcp
             CoopPlugin.Log?.LogWarning(message);
         }
 
+        private static void LogInfo(string message)
+        {
+            CoopPlugin.Log?.LogInfo(message);
+        }
+
         private static void LogError(string message)
         {
             CoopPlugin.Log?.LogError(message);
@@ -2476,6 +2554,10 @@ namespace CardShopCoop.Net.Kcp
             internal bool DisconnectRequested;
             internal bool DisconnectRequestQueued;
             internal DisconnectInfo DisconnectInfo;
+            internal bool PendingTerminalDisconnect;
+            internal uint TerminalDisconnectDeadline;
+            internal bool PendingDisconnectCompletion;
+            internal uint DisconnectCompletionDeadline;
             internal bool HasError;
             internal string LastErrorDetail;
             internal uint LastReceiveTime;

@@ -145,7 +145,7 @@ namespace CardShopCoop.Runtime
             CoopPlugin.Log?.LogInfo("[api] integrating external co-op mod '" + ownerId
                 + "' (assembly " + assemblyName + ")");
 
-            CardShopCoop.Net.Protocol.IProtocolRegistration registration = null;
+            IProtocolRegistration registration = null;
             try
             {
                 if (HasNetworkMessages(assembly))

@@ -252,7 +252,7 @@ namespace CardShopCoop.Modules.Presence
             {
                 foreach (var id in message.HoldTypes)
                 {
-                    writer.WriteValue(CatalogIdMap.ToWireName(EnumKind.ItemType, id));
+                    writer.WriteValue(CatalogIdMap.ToHostValue(EnumKind.ItemType, id));
                 }
             }
 
@@ -319,9 +319,9 @@ namespace CardShopCoop.Modules.Presence
             message.HoldTypes = new List<int>();
             while (reader.Read() && reader.TokenType != JsonToken.EndArray)
             {
-                int local;
-                CatalogIdMap.TryReadWireName(EnumKind.ItemType, new JValue(reader.Value), out local);
-                message.HoldTypes.Add(local);
+                var hostValue = Convert.ToInt32(reader.Value,
+                    System.Globalization.CultureInfo.InvariantCulture);
+                message.HoldTypes.Add(CatalogIdMap.FromHostValue(EnumKind.ItemType, hostValue));
             }
         }
 

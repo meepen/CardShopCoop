@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -156,7 +157,12 @@ namespace CardShopCoop.Modules.Settings
         private static bool IsValidExpansion(ECardExpansionType expansion)
         {
             var value = (int)expansion;
-            return value >= (int)ECardExpansionType.None && value < (int)ECardExpansionType.MAX;
+            // The loaded enum is the membership truth (EPL mints its expansions into it at
+            // prepatch), so this accepts vanilla and modded expansions alike. Exclude the MAX
+            // sentinel, which is a real member but not a usable expansion.
+            return value >= (int)ECardExpansionType.None
+                && value != (int)ECardExpansionType.MAX
+                && CatalogApi.IsDefinedEnumValue(EnumKind.CardExpansion, value);
         }
 
         private static bool IsFinite(float value)

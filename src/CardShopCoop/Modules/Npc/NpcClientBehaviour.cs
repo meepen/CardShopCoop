@@ -278,7 +278,7 @@ namespace CardShopCoop.Modules.Npc
             p.RenderYaw = 0f;
             p.PrevRenderedPos = message.Position;
             p.HoldBig = false;
-            p.HoldItemType = 0;
+            p.HoldItemType = EItemType.None;
             p.HoldBoxNetworkId = 0;
             p.HoldBoxOpened = false;
             p.AppliedHeldBoxNetworkId = 0;
@@ -546,9 +546,9 @@ namespace CardShopCoop.Modules.Npc
         private static readonly int HashIsPlaying = Animator.StringToHash("IsPlaying");
         private static readonly int HashIsHoldingBox = Animator.StringToHash("IsHoldingBox");
         private static readonly int HashIsBeingSprayed = Animator.StringToHash("IsBeingSprayed");
-        private static readonly System.Reflection.MethodInfo MiEvaluateWorkerAttribute =
+        private static readonly MethodInfo MiEvaluateWorkerAttribute =
             AccessTools.Method(typeof(Worker), "EvaluateWorkerAttribute");
-        private static readonly System.Reflection.MethodInfo MiEvaluateSkillLevel =
+        private static readonly MethodInfo MiEvaluateSkillLevel =
             AccessTools.Method(typeof(Worker), "EvaluateSkillLevel");
         private static readonly FieldInfo FiCustomizationHairObjects =
             AccessTools.Field(typeof(CC.CharacterCustomization), "HairObjects");
@@ -768,7 +768,7 @@ namespace CardShopCoop.Modules.Npc
         /// gameplay object is intentionally never attached to the puppet; instead the real world
         /// box the worker took is parked (see <see cref="WorldClientBehaviour.ApplyWorkerHeldBox"/>)
         /// and this prop carries the visual, including its open/closed state.</summary>
-        public static void SetWorkerBoxVisual(int index, bool visible, bool isBig, int itemType,
+        public static void SetWorkerBoxVisual(int index, bool visible, bool isBig, EItemType itemType,
             long boxNetworkId, bool opened)
         {
             if (_active == null)
@@ -1029,7 +1029,7 @@ namespace CardShopCoop.Modules.Npc
             public Transform HoldBox;
             public GameObject BoxProp;
             public bool BoxPropBig;
-            public int BoxPropType;
+            public EItemType BoxPropType;
             public GameObject BoxPropStaticMesh;
             public GameObject BoxPropRigMesh;
             public GameObject BoxPropOpen;
@@ -1040,7 +1040,7 @@ namespace CardShopCoop.Modules.Npc
             public bool HoldBoxOpened;
             public long AppliedHeldBoxNetworkId;
             public bool HoldBig;
-            public int HoldItemType;
+            public EItemType HoldItemType;
             public int PendingIdentity;
             public bool PendingFemale;
             // Last ActionSequence applied to this puppet's animator. int.MinValue means the
@@ -1058,7 +1058,7 @@ namespace CardShopCoop.Modules.Npc
             var prop = p.BoxProp;
             p.BoxProp = null;
             p.BoxPropBig = false;
-            p.BoxPropType = 0;
+            p.BoxPropType = EItemType.None;
             p.BoxPropStaticMesh = null;
             p.BoxPropRigMesh = null;
             p.BoxPropOpen = null;

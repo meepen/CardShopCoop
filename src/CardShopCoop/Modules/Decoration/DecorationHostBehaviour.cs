@@ -351,8 +351,8 @@ namespace CardShopCoop.Modules.Decoration
                 _active.BroadcastDelta(new DecorationDeltaMessage
                 {
                     Action = DecorationActions.BuyItemDecoration,
-                    DecorationType = (int)itemType,
-                    InventoryCount = DecorationInterop.InventoryCount((int)itemType),
+                    DecorationType = itemType,
+                    InventoryCount = DecorationInterop.InventoryCount(itemType),
                     PredictionId = Guid.Empty,
                 });
             }
@@ -370,7 +370,7 @@ namespace CardShopCoop.Modules.Decoration
                 _active.BroadcastDelta(BuildDelta(new DecorationIntentMessage
                 {
                     Action = DecorationActions.Place,
-                    DecorationType = (int)__instance.m_DecoObjectType,
+                    DecorationType = __instance.m_DecoObjectType,
                     Position = __instance.transform.position,
                     // A moved piece already owns a host id; pass it so the delta cannot bind to a
                     // different but nearby decoration of the same type.
@@ -385,7 +385,7 @@ namespace CardShopCoop.Modules.Decoration
             private struct State
             {
                 public long Id;
-                public int Type;
+                public EDecoObject Type;
             }
 
             [HarmonyPrefix]
@@ -393,7 +393,7 @@ namespace CardShopCoop.Modules.Decoration
                 => __state = new State
                 {
                     Id = DecorationInterop.HostIdFor(__instance),
-                    Type = (int)__instance.m_DecoObjectType,
+                    Type = __instance.m_DecoObjectType,
                 };
 
             [HarmonyPostfix]

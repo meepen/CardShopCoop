@@ -64,7 +64,7 @@ namespace CardShopCoop.Modules.Pricing
         }
 
         [OnFullyJoined]
-        private void SendJoinState(Net.Connection.PeerConnection peer)
+        private void SendJoinState(PeerConnection peer)
         {
             if (peer == null)
                 return;
@@ -183,24 +183,46 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (screen == null || !PricingInterop.TryReadConfirmPrice(screen, out var price))
                 return true;
+
             if (!PricingInterop.ValidPrice(price))
+            {
+                CoopPlugin.Log.LogWarning("[pricing] host confirm rejected: invalid price " + price + ".");
+                screen.CloseScreen();
                 return false;
+            }
 
             var item = screen.GetCurrentSettingPriceItemType();
             var card = screen.GetCurrentSettingPriceCardData();
             if (card != null)
             {
                 if (!PricingInterop.ValidCard(card))
-                    return false;
+                {
+                    // A card this build's pricing store cannot name (typically a modded
+                    // expansion). Do not hijack the confirm: let the game's own OnPressConfirm
+                    // apply it locally, exactly as it would without this mod, instead of leaving
+                    // the player stuck in the menu with no price set.
+                    CoopPlugin.Log.LogWarning("[pricing] host confirm: card is outside the local "
+                        + "pricing store (" + Describe(card)
+                        + "); deferring to the game's own confirm.");
+                    return true;
+                }
 
                 var grade = GradingApi.Encoded(card);
+                CoopPlugin.Log.LogInfo("[pricing] host confirm card saveIndex="
+                    + PricingInterop.SafeSaveIndex(card) + " grade=" + grade + " price=" + price + ".");
                 AuthorizeFromLocal(PricingInterop.CopyCard(card, grade), price, grade);
             }
             else
             {
                 if (!PricingInterop.IsItemTypeValid(item))
-                    return false;
+                {
+                    // Same fallback for an item slot our wire/store model cannot name.
+                    CoopPlugin.Log.LogWarning("[pricing] host confirm: item " + item
+                        + " is outside the local pricing store; deferring to the game's own confirm.");
+                    return true;
+                }
 
+                CoopPlugin.Log.LogInfo("[pricing] host confirm item=" + item + " price=" + price + ".");
                 AuthorizeFromLocal(item, price);
             }
 
@@ -299,9 +321,14 @@ namespace CardShopCoop.Modules.Pricing
         private PricingStateMessage BuildState()
         {
             var state = new PricingStateMessage();
-            for (var i = 0; i < PricingInterop.ItemCount; i++)
+            // Enumerate the enum, not the raw price-list slots: EPL's minted members live outside
+            // the raw list's vanilla indices and are served through its intercepted virtual list,
+            // so a numeric 0..Count-1 loop would silently omit every modded pack from the baseline
+            // (and on a plain vanilla machine this is simply every member).
+            var itemTypes = (EItemType[])Enum.GetValues(typeof(EItemType));
+            for (var i = 0; i < itemTypes.Length; i++)
             {
-                var type = (EItemType)i;
+                var type = itemTypes[i];
                 if (!PricingInterop.IsItemTypeValid(type))
                     continue;
                 state.ItemTypes.Add(type);

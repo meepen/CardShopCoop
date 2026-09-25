@@ -274,11 +274,6 @@ namespace CardShopCoop
                 ErrorLine = "Steam isn't running.";
                 return;
             }
-            if (CatalogApi.RestartRequiredForJoin)
-            {
-                ErrorLine = "the host's card database was installed on this PC - RESTART the game before joining";
-                return;
-            }
 
             BeginSession(CoopRole.Client, true);
             IsSteamSession = true;
@@ -395,11 +390,6 @@ namespace CardShopCoop
             if (ip.Length == 0)
             {
                 ErrorLine = "Enter the host's IP address.";
-                return;
-            }
-            if (CatalogApi.RestartRequiredForJoin)
-            {
-                ErrorLine = "the host's card database was installed on this PC - RESTART the game before joining";
                 return;
             }
 
@@ -601,7 +591,7 @@ namespace CardShopCoop
                 CardsHash = catalog.CardsHash,
                 PluginList = Util.ModParity.PluginList(),
                 CardsList = catalog.CardsList,
-                EnumBlob = catalog.EnumBlob,
+                EnumIdentity = catalog.EnumIdentity,
                 GameVersion = Application.version ?? "",
                 UnityVersion = Application.unityVersion ?? "",
                 MessageCatalog = messageCatalog,
@@ -892,18 +882,16 @@ namespace CardShopCoop
                 return;
             }
 
-            var peerCatalog = CatalogHandshake.ReadBlob(hello.EnumBlob);
-            if (!peerCatalog.IsValid)
+            if (!CatalogHandshake.IsIdentityUsable(hello.EnumIdentity))
             {
-                var reason = peerCatalog.FailureReason ?? "the catalog gzip payload is malformed";
                 CoopPlugin.Log.LogWarning("catalog handshake rejected connection " + connection.Id
-                    + ": invalid client EnumBlob: " + reason);
-                RejectConn(connection, "invalid custom-card catalog from client: " + reason);
+                    + ": invalid or empty client enum identity.");
+                RejectConn(connection, "invalid custom-content catalog from client");
                 return;
             }
 
             var enumValidation = CatalogHandshake.ValidateEnums(name, hello.EnumHash,
-                peerCatalog.Lines);
+                hello.EnumIdentity);
             if (!enumValidation.HashesAreConsistent)
             {
                 var reason = enumValidation.HashFailureReason
@@ -915,23 +903,11 @@ namespace CardShopCoop
             }
             if (enumValidation.Conflicts.Count > 0)
             {
-                if (!enumValidation.RegistryFileMatchesRuntime)
-                {
-                    RejectConn(connection, CatalogHandshake.DescribeRuntimeConflict(enumValidation.Conflicts));
-                    return;
-                }
-
-                var offer = CatalogHandshake.PrepareEnumSync();
-                if (offer.ShouldSend)
-                {
-                    if (Net is not ICoopHandshakeTransport handshake)
-                    {
-                        throw new InvalidOperationException(
-                            "could not send enum synchronization: no live handshake transport");
-                    }
-                    handshake.SendHandshake(connection, new EnumSyncMessage { Data = offer.Payload });
-                }
-                RejectConn(connection, CatalogHandshake.DescribeEnumConflict(enumValidation.Conflicts, offer));
+                CoopPlugin.Log.LogWarning("catalog handshake rejected connection " + connection.Id
+                    + ": custom-content name set differs (" + enumValidation.Conflicts.Count
+                    + " entries).");
+                RejectConn(connection,
+                    CatalogHandshake.DescribeEnumKeysMismatch(enumValidation.Conflicts));
                 return;
             }
             if (!CatalogHandshake.TryValidateCards(hello.CardsHash, hello.CardsList, out var cardReason))
@@ -972,12 +948,11 @@ namespace CardShopCoop
                     HostName = EffectivePlayerName,
                     SteamId = _steam == null ? 0 : _steam.LocalSteamId,
                     SaveLength = offer.SaveLength,
-                    HostSlot = offer.HostSlot,
                     BundleLength = offer.BundleLength,
                     SidecarsComplete = offer.SidecarsComplete,
                     SidecarWarning = offer.SidecarWarning,
                     SelfId = connection.Id,
-                    HostEnumBlob = blobs.EnumBlob,
+                    HostEnumIdentity = blobs.EnumIdentity,
                     HostCardsBlob = blobs.CardsBlob,
                     MessageCatalog = new List<string>(messageCatalog),
                     MessageReliability = (byte[])messageReliability.Clone(),
@@ -1028,20 +1003,21 @@ namespace CardShopCoop
             }
             Net.ActivateMessageIds(connection);
 
-            var enumBlob = CatalogHandshake.ReadBlob(welcome.HostEnumBlob);
+            var hostIdentityValid = CatalogHandshake.IsIdentityUsable(welcome.HostEnumIdentity);
             var cardBlob = CatalogHandshake.ReadBlob(welcome.HostCardsBlob);
-            if (!enumBlob.IsValid || !cardBlob.IsValid)
+            if (!hostIdentityValid || !cardBlob.IsValid)
             {
-                var invalid = !enumBlob.IsValid ? "host EnumBlob: " + enumBlob.FailureReason
-                    : "host CardsBlob: " + cardBlob.FailureReason;
+                var invalid = hostIdentityValid
+                    ? "host CardsBlob: " + cardBlob.FailureReason
+                    : "host enum identity is invalid or empty";
                 CoopPlugin.Log.LogError("catalog handshake received an invalid host blob: " + invalid);
                 Shutdown("host sent an invalid custom-card catalog");
                 return;
             }
-            CatalogIdMap.Build(enumBlob.Lines, cardBlob.Lines);
+            CatalogIdMap.Build(welcome.HostEnumIdentity);
             _localConnectionId = welcome.SelfId;
             PresenceApi.SetPeerName(1, ResolvePeerName(welcome.SteamId, welcome.HostName));
-            if (!SaveTransferApi.TryBeginClientTransfer(welcome.HostSlot, welcome.SaveLength,
+            if (!SaveTransferApi.TryBeginClientTransfer(welcome.SaveLength,
                 welcome.BundleLength, welcome.SidecarsComplete, welcome.SidecarWarning))
             {
                 Shutdown("invalid world transfer authorization");
@@ -1053,45 +1029,6 @@ namespace CardShopCoop
                 return;
             }
             SetStatus("Downloading " + (PresenceApi.PeerName(1) ?? "host") + "'s shop...");
-        }
-
-        [MessageHandler(typeof(EnumSyncMessage))]
-        private void HandleEnumSync(MessageContext context, EnumSyncMessage message)
-        {
-            var connection = context?.Connection;
-            if (Role != CoopRole.Client || message == null
-                || !ExpectControlState(connection, "EnumSync", ConnectionState.Handshaking,
-                    ConnectionState.Transferring))
-            {
-                return;
-            }
-
-            if (!CoopPlugin.AutoSyncCardDatabase.Value)
-            {
-                SetStatus("card databases differ - auto-sync is disabled; copy enum_values.json yourself");
-                return;
-            }
-
-            if (!CatalogHandshake.TryGunzipCapped(message.Data, out var bytes,
-                out var failureReason))
-            {
-                var status = "enum sync rejected: " + failureReason;
-                CoopPlugin.Log.LogError(status);
-                ErrorLine = status;
-                Shutdown(status);
-                return;
-            }
-
-            if (!CatalogParity.TryParseEnumRegistry(bytes, out _, out failureReason))
-            {
-                var status = "enum sync rejected: " + failureReason;
-                CoopPlugin.Log.LogError(status);
-                ErrorLine = status;
-                Shutdown(status);
-                return;
-            }
-
-            SetStatus(CatalogHandshake.ApplyEnumSync(bytes));
         }
 
         [MessageHandler(typeof(ByeMessage))]

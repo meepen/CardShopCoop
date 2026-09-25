@@ -945,9 +945,9 @@ namespace CardShopCoop.Modules.Presence
             {
                 // hold state 1 packs [isBigBox flag, product EItemType]: slot 0 is a BOOL,
                 // not an id, and must never be translated. PresenceHoldMessage already honours
-                // that (the flag is 0/1, far below CatalogIdMap's modded floor, so its
-                // Msg.ReadItemType pass is the identity function) - and nothing here
-                // translates at all, so the copy is uniform.
+                // that (the flag is 0/1, which is not a meaningful item member, so its
+                // Msg.ReadItemType pass leaves it unchanged) - and nothing here translates at all,
+                // so the copy is uniform.
                 for (var i = 0; i < holdTypes.Count; i++)
                 {
                     av.HoldTypes.Add(holdTypes[i]);

@@ -30,7 +30,7 @@ namespace CardShopCoop.Modules.Npc
         public int ActionSequence;
         public byte ActionKind;
         public bool HoldBig;
-        public int HoldItemType;
+        public EItemType HoldItemType;
         /// <summary>Stable world box network id the worker is carrying, or 0. Lets the client
         /// remove the real warehouse box object the worker took and drive the held box prop.</summary>
         public long HoldBoxNetworkId;
@@ -88,7 +88,7 @@ namespace CardShopCoop.Modules.Npc
         public int ActionSequence;
         public byte ActionKind;
         public bool HoldBig;
-        public int HoldItemType;
+        public EItemType HoldItemType;
         /// <summary>Stable world box network id the worker is carrying, or 0. Lets the client
         /// remove the real warehouse box object the worker took and drive the held box prop.</summary>
         public long HoldBoxNetworkId;

@@ -278,7 +278,7 @@ namespace CardShopCoop.Net
                         + " on connection " + context.ConnectionId
                         + "; requesting session recovery: " + error);
                     context.Transport?.GracefulDisconnect(context.Connection,
-                        new Connection.DisconnectInfo(
+                        new DisconnectInfo(
                             "reliable message handler failed; session recovery required", false,
                             "handler_failed", true, context.Connection.State));
                     throw new ReliableMessageHandlerException(descriptor.MessageType, error);

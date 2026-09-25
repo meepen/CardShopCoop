@@ -58,7 +58,7 @@ namespace CardShopCoop.Modules.SessionInput
         {
             if (_active != null && !ReferenceEquals(_active, behaviour))
             {
-                throw new System.InvalidOperationException("SessionInput is already active for another session.");
+                throw new InvalidOperationException("SessionInput is already active for another session.");
             }
 
             ReleaseWindowModal();
@@ -267,7 +267,7 @@ namespace CardShopCoop.Modules.SessionInput
                     && _pauseScreen.m_ScreenGrp.activeSelf;
                 SetOwner(ModalOwner.Pause, _pauseMenuOpen);
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 Swallow.Log(e);
                 _pauseMenuOpen = false;
@@ -371,7 +371,7 @@ namespace CardShopCoop.Modules.SessionInput
                 // without making PauseScreen or CheatManager release state they do not own.
                 controller.ShowCursor();
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 Swallow.Log(e);
             }
@@ -476,7 +476,7 @@ namespace CardShopCoop.Modules.SessionInput
                 _ownsWalkerStop = true;
                 _latchedWalker = walker;
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 Swallow.Log(e);
             }
@@ -508,7 +508,7 @@ namespace CardShopCoop.Modules.SessionInput
                 _ownsWalkerStop = false;
                 _latchedWalker = null;
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 Swallow.Log(e);
             }
@@ -540,7 +540,7 @@ namespace CardShopCoop.Modules.SessionInput
                     walker.SetStopMovement(false);
                 }
             }
-            catch (System.Exception e)
+            catch (Exception e)
             {
                 Swallow.Log(e);
             }

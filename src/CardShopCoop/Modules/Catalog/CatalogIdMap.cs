@@ -1,14 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
+using CardShopCoop.Net.Messages;
 
 namespace CardShopCoop.Modules.Catalog
 {
-    /// <summary>The enum kinds whose values cross the wire by name. Four are enums
-    /// EnhancedPrefabLoader mints into (see CatalogParity's ModdedEnumTypeNames); MonsterType
-    /// is not EPL's at all - custom monsters come from CreateCards/CardForge .ini files and use
-    /// the exact CardForge name-and-id list validated during the handshake.</summary>
+    /// <summary>The enum kinds whose numeric values are translated between peers. Six are enums
+    /// EnhancedPrefabLoader mints ids into (see CatalogParity's ModdedEnumTypes); MonsterType is
+    /// CardForge's, whose name-and-id list the handshake requires to match exactly, so its values
+    /// are identical on both peers and its missing table resolves to the identity.</summary>
     public enum EnumKind
     {
         ItemType = 0,      // EItemType
@@ -16,62 +15,80 @@ namespace CardShopCoop.Modules.Catalog
         DecoObject = 2,    // EDecoObject
         CardExpansion = 3, // ECardExpansionType
         MonsterType = 4,   // EMonsterType (CreateCards/CardForge, NOT EPL)
+        Rarity = 5,        // ERarity
+        CollectionPack = 6, // ECollectionPackType
     }
 
     /// <summary>
-    /// NAME-BASED wire identity for the enum kinds used by the co-op protocol. Vanilla and
-    /// custom enum values use their CLR enum member names. CardForge MonsterType values are not
-    /// enum members, so they use their canonical CardForge names. The handshake requires the
-    /// complete CardForge name-and-id list to match before this map is built.
+    /// Value translation for the enum kinds used by the co-op protocol. Every enum on the wire and
+    /// in a transferred save travels in the HOST's numeric space: the host is the identity
+    /// translation, and the client builds <see cref="EnumValueMap"/> from the host's typed enum
+    /// identity carried by the handshake, paired member-by-member by NAME. Ids are never compared
+    /// for equality and no registry file is read.
     /// </summary>
     internal static class CatalogIdMap
     {
-        private static readonly HashSet<string> _loggedNameMisses = new(StringComparer.Ordinal);
-        private static readonly Dictionary<Type, NameTable> _nameTables = new();
-        private static readonly object _nameTableLock = new();
-        private static CardNameTable _cardNameTable;
-        private static int _nameWrites;
-        private static bool _nameSummaryLogged;
+        private static readonly object _mapLock = new();
+        private static EnumValueMap _enumMap;
 
-        private sealed class NameTable
+        /// <summary>
+        /// The per-kind value bijection between the host's numeric enum ids and this process's.
+        /// Built on the CLIENT from the host's typed enum identity (the handshake value tables)
+        /// paired to this process's members by NAME, ordinally first-name-wins so aliases pick the
+        /// same canonical value on both peers. The HOST has no map: an absent map is the identity,
+        /// so the host writes and reads its own raw values with zero translation. A value with no
+        /// counterpart at all (a sentinel such as None, or an unknown id) is absent from the map
+        /// and therefore passes through unchanged.
+        /// </summary>
+        private sealed class EnumValueMap
         {
-            public readonly Dictionary<int, string> ValueToName;
-            public readonly Dictionary<string, int> NameToValue;
-            public NameTable(Type type)
+            private readonly Dictionary<EnumKind, Dictionary<int, int>> _hostToLocal = new();
+            private readonly Dictionary<EnumKind, Dictionary<int, int>> _localToHost = new();
+
+            public void Add(EnumKind kind, int hostValue, int localValue)
             {
-                ValueToName = new Dictionary<int, string>();
-                NameToValue = new Dictionary<string, int>(StringComparer.Ordinal);
-                foreach (var value in Enum.GetValues(type))
+                if (!_hostToLocal.TryGetValue(kind, out var forward))
                 {
-                    var id = Convert.ToInt32(value);
-                    var name = Enum.GetName(type, value);
-                    if (name != null)
-                    {
-                        ValueToName[id] = name;
-                        NameToValue[name] = id;
-                    }
+                    _hostToLocal[kind] = forward = new Dictionary<int, int>();
+                }
+
+                if (!forward.ContainsKey(hostValue))
+                {
+                    forward[hostValue] = localValue;
+                }
+
+                if (!_localToHost.TryGetValue(kind, out var reverse))
+                {
+                    _localToHost[kind] = reverse = new Dictionary<int, int>();
+                }
+
+                if (!reverse.ContainsKey(localValue))
+                {
+                    reverse[localValue] = hostValue;
                 }
             }
-        }
 
-        /// <summary>Canonical CardForge names for the MonsterType name wire. The table is built
-        /// from this process's CardForge list; exact name-and-id parity was already required by
-        /// the handshake, so both directions use the same numeric identity on both peers.</summary>
-        private sealed class CardNameTable
-        {
-            public readonly Dictionary<int, string> LocalIdToName;
-            public readonly Dictionary<string, int> NameToLocalId;
-
-            public CardNameTable(Dictionary<int, string> localIdToName,
-                Dictionary<string, int> nameToLocalId)
+            public bool TryHostToLocal(EnumKind kind, int hostValue, out int localValue)
             {
-                LocalIdToName = localIdToName;
-                NameToLocalId = nameToLocalId;
+                localValue = hostValue;
+                return _hostToLocal.TryGetValue(kind, out var forward)
+                    && forward.TryGetValue(hostValue, out localValue);
             }
+
+            public bool TryLocalToHost(EnumKind kind, int localValue, out int hostValue)
+            {
+                hostValue = localValue;
+                return _localToHost.TryGetValue(kind, out var reverse)
+                    && reverse.TryGetValue(localValue, out hostValue);
+            }
+
+            public bool HasKind(EnumKind kind) => _hostToLocal.ContainsKey(kind);
+
+            public int Kinds => _hostToLocal.Count;
         }
 
-        /// <summary>The last "id translation ready" summary actually logged at Info, so an
-        /// identical one is demoted to Debug instead of repeating.
+        /// <summary>The last "value map ready" summary actually logged at Info, so an identical
+        /// one is demoted instead of repeating.
         ///
         /// DO NOT reset this in <see cref="Clear"/>. Clear runs on EVERY teardown and on BOTH
         /// host-start paths, i.e. at least once between any two Builds - clearing it would make
@@ -110,7 +127,54 @@ namespace CardShopCoop.Modules.Catalog
             }
         }
 
-        // ------------------------------------------------------------------ name-wire API
+        // ------------------------------------------------------------------ value-map API
+
+        /// <summary>Translate THIS process's runtime value into the host's numeric space, which is
+        /// the one space every enum on the wire and in a transferred save uses. An absent map (the
+        /// host's own process) or an unmapped value is the identity.</summary>
+        internal static int ToHostValue(EnumKind kind, int localValue)
+        {
+            var map = _enumMap;
+            if (map != null && map.TryLocalToHost(kind, localValue, out var hostValue))
+            {
+                return hostValue;
+            }
+
+            return localValue;
+        }
+
+        /// <summary>Translate a HOST numeric value into THIS process's runtime value using the
+        /// handshake map. Unmapped values (sentinels, unknown ids) pass through unchanged.</summary>
+        internal static int FromHostValue(EnumKind kind, int hostValue)
+        {
+            var map = _enumMap;
+            if (map != null && map.TryHostToLocal(kind, hostValue, out var localValue))
+            {
+                return localValue;
+            }
+
+            return hostValue;
+        }
+
+        internal static bool HasEnumMap => _enumMap != null;
+
+        /// <summary>Like <see cref="FromHostValue"/> but reports whether the value actually had a
+        /// counterpart. A kind with no table at all (this process is the host, or the kind never
+        /// carried a host table such as MonsterType) is treated as the identity and reports true;
+        /// only a kind that HAS a table but lacks this specific value reports false (unresolved).</summary>
+        internal static bool TryFromHostValue(EnumKind kind, int hostValue, out int localValue)
+        {
+            var map = _enumMap;
+            if (map == null || !map.HasKind(kind))
+            {
+                localValue = hostValue;
+                return true;
+            }
+
+            return map.TryHostToLocal(kind, hostValue, out localValue);
+        }
+
+        // ------------------------------------------------------------------ type identity
 
         internal static Type WireType(EnumKind kind)
         {
@@ -126,137 +190,59 @@ namespace CardShopCoop.Modules.Catalog
                     return typeof(ECardExpansionType);
                 case EnumKind.MonsterType:
                     return typeof(EMonsterType);
+                case EnumKind.Rarity:
+                    return typeof(ERarity);
+                case EnumKind.CollectionPack:
+                    return typeof(ECollectionPackType);
                 default:
                     throw new ArgumentOutOfRangeException("kind", kind, "Unknown enum kind");
             }
         }
 
-        internal static string ToWireName(EnumKind kind, int value)
+        /// <summary>True when <paramref name="value"/> is a DEFINED member of the runtime enum for
+        /// this kind. EPL injects its minted members into the loaded enum at prepatch, so on an EPL
+        /// machine this validates vanilla and modded values alike - unlike a numeric range check,
+        /// a value merely inside the modded band but absent from the enum returns false.</summary>
+        internal static bool IsDefined(EnumKind kind, int value)
         {
-            return ToWireName(WireType(kind), kind, value);
-        }
-
-        internal static string ToWireName(Type type, EnumKind kind, int value)
-        {
-            var table = Names(type);
-            string name;
-            if (kind == EnumKind.MonsterType
-                && CardNames().LocalIdToName.TryGetValue(value, out name))
+            try
             {
-                // CardForge owns this numeric identity even when the CLR enum has a member at
-                // the same value. Sending the card name preserves that distinction on decode.
+                return Enum.IsDefined(WireType(kind), value);
             }
-            else if (!table.ValueToName.TryGetValue(value, out name))
+            catch (Exception)
             {
-                throw new JsonSerializationException("Undefined " + type.Name + " value " + value + " cannot be sent on the wire");
-            }
-
-            lock (_nameTableLock)
-            {
-                _nameWrites++;
-                if (!_nameSummaryLogged)
-                {
-                    _nameSummaryLogged = true;
-                    Log("name wire active (values sent by name: " + _nameWrites + ")");
-                }
-            }
-            return name;
-        }
-
-        internal static bool TryFromWireName(EnumKind kind, string name, out int value)
-        {
-            return TryFromWireName(WireType(kind), kind, name, out value);
-        }
-
-        internal static bool TryFromWireName(Type type, EnumKind kind, string name, out int value)
-        {
-            if (name == null)
-            {
-                throw new JsonSerializationException("Null " + type.Name + " enum name");
-            }
-
-            if (kind == EnumKind.MonsterType
-                && CardNames().NameToLocalId.TryGetValue(name, out value))
-            {
-                return true;
-            }
-
-            var table = Names(type);
-            if (table.NameToValue.TryGetValue(name, out value))
-            {
-                return true;
-            }
-
-            value = Sentinel(kind);
-            LogNameMissOnce(kind, name);
-            return false;
-        }
-
-        internal static bool TryReadWireName(EnumKind kind, JToken token, out int value)
-        {
-            var type = WireType(kind);
-            if (token == null || token.Type == JTokenType.Null)
-            {
-                throw new JsonSerializationException("Null " + type.Name + " enum");
-            }
-
-            if (token.Type != JTokenType.String)
-            {
-                throw new JsonSerializationException("Numeric/non-string " + type.Name + " value " + token.ToString(Formatting.None) + " received: peer is sending pre-name wire");
-            }
-
-            return TryFromWireName(type, kind, token.Value<string>(), out value);
-        }
-
-        private static NameTable Names(Type type)
-        {
-            lock (_nameTableLock)
-            {
-                NameTable table;
-                if (!_nameTables.TryGetValue(type, out table))
-                {
-                    table = new NameTable(type);
-                    _nameTables.Add(type, table);
-                }
-                return table;
+                return false;
             }
         }
 
-        /// <summary>Drop the negotiated card-name table. Called from CoopCore.Shutdown so the
-        /// next session starts with the host's local canonical card list until a client Build
-        /// establishes a new negotiated table.</summary>
+        /// <summary>Drop the negotiated value map. Called from CoopCore.Shutdown so the next
+        /// session starts with the identity (host-style) translation until a client Build
+        /// establishes a new map.</summary>
         public static void Clear()
         {
-            lock (_nameTableLock)
+            lock (_mapLock)
             {
-                _cardNameTable = null;
-            }
-            lock (_loggedNameMisses)
-            {
-                _loggedNameMisses.Clear();
+                _enumMap = null;
             }
         }
 
         // ------------------------------------------------------------------ construction
 
-        /// <summary>CLIENT ONLY: establish the CardForge name table from this process's local
-        /// list. The handshake has already rejected any differing CardForge name or id list, so
-        /// no one-sided or intersection mapping is possible here. The enum-lines parameter is
-        /// retained for the existing Welcome call shape; enum member names need no table.</summary>
-        public static void Build(List<string> hostEnumLines, List<string> hostCardLines)
+        /// <summary>CLIENT ONLY: establish the enum value map from the host's typed identity. The
+        /// handshake has already rejected any differing enum key set, so no one-sided or
+        /// intersection mapping is possible here.</summary>
+        public static void Build(List<EnumKindIdentityDto> hostEnumIdentity)
         {
             Clear();
             _buildCount++; // every Build is a join; Clear() must not reset this (see the field)
             try
             {
-                var ourCards = ParseCardLines(SafeLines(CatalogParity.CardsList));
-                var cardNames = BuildCardNameTable(ourCards);
-                lock (_nameTableLock)
+                var enumMap = BuildEnumMap(hostEnumIdentity);
+                lock (_mapLock)
                 {
-                    _cardNameTable = cardNames;
+                    _enumMap = enumMap;
                 }
-                var line = "name wire ready (CardForge MonsterType speaks canonical names): "
-                    + cardNames.LocalIdToName.Count + " CardForge names";
+                var line = "value map ready (" + enumMap.Kinds + " enum kinds)";
                 if (!string.Equals(line, _lastSummary, StringComparison.Ordinal))
                 {
                     _lastSummary = line;
@@ -264,117 +250,94 @@ namespace CardShopCoop.Modules.Catalog
                 }
                 else
                 {
-                    Log("name wire ready (unchanged, join #" + _buildCount + ")");
+                    Log("value map ready (unchanged, join #" + _buildCount + ")");
                 }
             }
             catch (Exception e)
             {
-                // Name translation must never be the thing that breaks a join. Clear the
-                // negotiated table so the process returns to its host-style local canonical
-                // source rather than retaining a partial table.
+                // Translation must never be the thing that breaks a join. Clear the negotiated
+                // map so the process returns to its local canonical source rather than retaining
+                // a partial map.
                 Clear();
-                LogWarn("name wire could not be built (" + e.Message + ") - running with local card names");
+                LogWarn("value map could not be built (" + e.Message + ") - running with local ids");
             }
         }
 
-        /// <summary>Build the name-wire pair from the local CardForge list. Numeric ids are
-        /// deliberately not sent; the exact CardForge name-and-id handshake guarantees that the
-        /// same canonical name resolves to the same numeric value on both peers.</summary>
-        private static CardNameTable BuildCardNameTable(Dictionary<string, int> cards)
+        /// <summary>Pair the host's typed enum members with this process's by NAME, producing the
+        /// value bijection. Members are ordinal-sorted by the identity builder and first-name-wins,
+        /// so aliases canonicalize identically on both peers.</summary>
+        private static EnumValueMap BuildEnumMap(List<EnumKindIdentityDto> hostIdentity)
         {
-            var localIdToName = new Dictionary<int, string>();
-            var nameToLocalId = new Dictionary<string, int>(StringComparer.Ordinal);
-            if (cards == null)
-            {
-                return new CardNameTable(localIdToName, nameToLocalId);
-            }
-
-            foreach (var kv in cards)
-            {
-                localIdToName[kv.Value] = kv.Key;
-                nameToLocalId[kv.Key] = kv.Value;
-            }
-
-            return new CardNameTable(localIdToName, nameToLocalId);
-        }
-
-        /// <summary>Before a client receives Welcome, use this process's CardForge list. After
-        /// Build, the exact-parity session table replaces this identity table.</summary>
-        private static CardNameTable CardNames()
-        {
-            lock (_nameTableLock)
-            {
-                if (_cardNameTable == null)
-                {
-                    var localCards = ParseCardLines(SafeLines(CatalogParity.CardsList));
-                    _cardNameTable = BuildCardNameTable(localCards);
-                }
-
-                return _cardNameTable;
-            }
-        }
-
-        // ------------------------------------------------------------------ internals
-
-        private static void LogNameMissOnce(EnumKind kind, string name)
-        {
-            var key = ((int)kind) + ":" + name;
-            bool first;
-            lock (_loggedNameMisses)
-            {
-                first = _loggedNameMisses.Add(key);
-            }
-            if (first)
-            {
-                Log("unknown " + kind + " wire name " + name
-                    + " - using None; further occurrences of this name are silent");
-            }
-        }
-
-        /// <summary>"MonsterName=id" lines (CatalogParity.CardsList) -&gt; name-&gt;id. No floor filter:
-        /// CardForge ids can occupy the same numeric band as vanilla MonsterType values.</summary>
-        private static Dictionary<string, int> ParseCardLines(List<string> lines)
-        {
-            var map = new Dictionary<string, int>(StringComparer.Ordinal);
-            if (lines == null)
+            var map = new EnumValueMap();
+            if (hostIdentity == null || hostIdentity.Count == 0)
             {
                 return map;
             }
 
-            foreach (var raw in lines)
+            var localByKind = new Dictionary<int, Dictionary<string, int>>();
+            foreach (var kind in CatalogParity.EnumIdentity())
             {
-                if (string.IsNullOrEmpty(raw))
+                if (kind == null || kind.Members == null)
                 {
                     continue;
                 }
 
-                var line = raw.Trim();
-                var eq = line.LastIndexOf('=');
-                if (eq <= 0 || eq == line.Length - 1)
+                var byName = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var member in kind.Members)
                 {
-                    continue;
+                    if (member != null && member.Name != null
+                        && member.Value >= int.MinValue && member.Value <= int.MaxValue)
+                    {
+                        byName[member.Name] = (int)member.Value;
+                    }
                 }
 
-                int id;
-                if (!int.TryParse(line.Substring(eq + 1).Trim(), out id))
-                {
-                    continue;
-                }
-
-                map[line.Substring(0, eq).Trim()] = id;
+                localByKind[kind.Kind] = byName;
             }
+
+            foreach (var hostKind in hostIdentity)
+            {
+                if (hostKind == null || hostKind.Members == null
+                    || !localByKind.TryGetValue(hostKind.Kind, out var locals))
+                {
+                    continue;
+                }
+
+                var kind = (EnumKind)hostKind.Kind;
+                var mapped = 0;
+                var changed = 0;
+                foreach (var member in hostKind.Members)
+                {
+                    if (member == null || member.Name == null
+                        || member.Value < int.MinValue || member.Value > int.MaxValue
+                        || !locals.TryGetValue(member.Name, out var localValue))
+                    {
+                        continue;
+                    }
+
+                    map.Add(kind, (int)member.Value, localValue);
+                    mapped++;
+                    if ((int)member.Value != localValue)
+                    {
+                        changed++;
+                    }
+
+                    if (member.Name == "BaseSetBoosterPacks"
+                        || member.Name == "ykOPDenDenMushi_Mugiwaras"
+                        || member.Name == "BaseSet")
+                    {
+                        Log("sample " + kind + " " + member.Name + " host=" + member.Value
+                            + " local=" + localValue);
+                    }
+                }
+
+                Log("map " + kind + " mapped=" + mapped + " changed=" + changed);
+            }
+
             return map;
         }
 
-        /// <summary>Our own registry reads must never throw into a session handshake.</summary>
-        private static List<string> SafeLines(Func<List<string>> f)
-        {
-            try
-            {
-                return f() ?? new List<string>();
-            }
-            catch (Exception e) { Swallow.Log(e); return new List<string>(); }
-        }
+        // ------------------------------------------------------------------ internals
 
         private static void Log(string s)
         {
@@ -395,6 +358,3 @@ namespace CardShopCoop.Modules.Catalog
         }
     }
 }
-
-
-

@@ -184,7 +184,7 @@ namespace CardShopCoop.Modules.Decoration
                 result.Placed.Add(new DecorationPose
                 {
                     Id = id,
-                    DecorationType = Convert.ToInt32(FiObjectType.GetValue(obj)),
+                    DecorationType = (EDecoObject)FiObjectType.GetValue(obj),
                     Position = obj.transform.position,
                     Rotation = obj.transform.rotation,
                     Vertical = GetVertical(obj),
@@ -234,53 +234,51 @@ namespace CardShopCoop.Modules.Decoration
             return price >= 0f && !float.IsNaN(price) && !float.IsInfinity(price);
         }
 
-        internal static bool TryGetItemPrice(int type, out float price)
+        internal static bool TryGetItemPrice(EDecoObject type, out float price)
         {
             price = 0f;
-            if (!TryEnum(type, out _))
-            {
-                return false;
-            }
+            var index = (int)type;
             var list = ItemData();
-            if (list == null || type < 0 || type >= list.Count || list[type] == null)
+            if (!IsValidDeco(type) || list == null || index < 0 || index >= list.Count
+                || list[index] == null)
             {
                 return false;
             }
 
-            price = Convert.ToSingle(FiItemPrice.GetValue(list[type]));
+            price = Convert.ToSingle(FiItemPrice.GetValue(list[index]));
             return price >= 0f && !float.IsNaN(price) && !float.IsInfinity(price);
         }
 
-        internal static bool HasInventory(int type)
+        internal static bool HasInventory(EDecoObject type)
         {
-            if (!TryEnum(type, out var decoType))
+            if (!IsValidDeco(type))
             {
                 return false;
             }
-            return Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { decoType })) > 0;
+            return Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { type })) > 0;
         }
 
-        internal static int InventoryCount(int type)
+        internal static int InventoryCount(EDecoObject type)
         {
-            if (!TryEnum(type, out var decoType))
+            if (!IsValidDeco(type))
                 return 0;
-            return Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { decoType }));
+            return Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { type }));
         }
 
-        internal static void AdjustInventory(int type, int amount)
+        internal static void AdjustInventory(EDecoObject type, int amount)
         {
-            if (!TryEnum(type, out var decoType))
+            if (!IsValidDeco(type))
             {
                 throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown decoration type.");
             }
-            MiAddInventory.Invoke(null, new object[] { decoType, amount });
+            MiAddInventory.Invoke(null, new object[] { type, amount });
         }
 
         /// <summary>Sets the local count to the host-authoritative value. Buy, place and box-up
         /// deltas all carry the resulting count, so the local list converges without polling.</summary>
-        internal static void ApplyInventoryCount(int type, int count)
+        internal static void ApplyInventoryCount(EDecoObject type, int count)
         {
-            if (count < 0 || !TryEnum(type, out _))
+            if (count < 0 || !IsValidDeco(type))
             {
                 return;
             }
@@ -288,7 +286,7 @@ namespace CardShopCoop.Modules.Decoration
             var current = InventoryCount(type);
             if (current != count)
             {
-                MiAddInventory.Invoke(null, new object[] { (EDecoObject)type, count - current });
+                MiAddInventory.Invoke(null, new object[] { type, count - current });
             }
         }
 
@@ -313,17 +311,17 @@ namespace CardShopCoop.Modules.Decoration
             return IsUnlocked(category, index);
         }
 
-        internal static bool TryBuyItem(int type, float price)
+        internal static bool TryBuyItem(EDecoObject type, float price)
         {
             var screen = FindFirst(typeof(ShopBuyDecoUIScreen));
-            if (screen == null || !TryEnum(type, out var decoType))
+            if (screen == null || !IsValidDeco(type))
             {
                 return false;
             }
 
-            var before = Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { decoType }));
-            MiBuyItem.Invoke(screen, new object[] { decoType, price });
-            var after = Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { decoType }));
+            var before = Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { type }));
+            MiBuyItem.Invoke(screen, new object[] { type, price });
+            var after = Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { type }));
             return after > before;
         }
 
@@ -355,7 +353,7 @@ namespace CardShopCoop.Modules.Decoration
             out InteractableObject placed)
         {
             placed = null;
-            if (pose == null || !TryEnum(pose.DecorationType, out var decoType)
+            if (pose == null || !IsValidDeco(pose.DecorationType)
                 || !ValidPose(pose.Position, pose.Rotation)
                 || !ValidWallIndex(pose.WarehouseWallSnap, pose.Wall))
             {
@@ -373,9 +371,9 @@ namespace CardShopCoop.Modules.Decoration
             }
             if (!isExisting)
             {
-                spawned = MiSpawn.Invoke(null, new object[] { decoType }) as InteractableObject;
+                spawned = MiSpawn.Invoke(null, new object[] { pose.DecorationType }) as InteractableObject;
             }
-            if (spawned == null || Convert.ToInt32(FiObjectType.GetValue(spawned)) != pose.DecorationType
+            if (spawned == null || (EDecoObject)FiObjectType.GetValue(spawned) != pose.DecorationType
                 || GetVertical(spawned) != pose.Vertical)
             {
                 return false;
@@ -540,7 +538,7 @@ namespace CardShopCoop.Modules.Decoration
         {
             return new DecorationPose
             {
-                DecorationType = Convert.ToInt32(FiObjectType.GetValue(obj)),
+                DecorationType = (EDecoObject)FiObjectType.GetValue(obj),
                 Position = obj.transform.position,
                 Rotation = obj.transform.rotation,
                 Vertical = GetVertical(obj),
@@ -608,11 +606,11 @@ namespace CardShopCoop.Modules.Decoration
                         unlocks[message.Index] = true;
                     break;
                 case DecorationActions.BuyItemDecoration:
-                    if (TryEnum(message.DecorationType, out var item))
+                    if (IsValidDeco(message.DecorationType))
                     {
                         var current = InventoryCount(message.DecorationType);
                         if (current != message.InventoryCount)
-                            MiAddInventory.Invoke(null, new object[] { item,
+                            MiAddInventory.Invoke(null, new object[] { message.DecorationType,
                                 message.InventoryCount - current });
                     }
                     break;
@@ -679,7 +677,7 @@ namespace CardShopCoop.Modules.Decoration
 
         private static bool IsAdoptable(InteractableObject obj, DecorationPose pose)
             => obj != null
-                && Convert.ToInt32(FiObjectType.GetValue(obj)) == pose.DecorationType
+                && (EDecoObject)FiObjectType.GetValue(obj) == pose.DecorationType
                 && GetVertical(obj) == pose.Vertical;
 
         /// <summary>Retires a predicted placement preview that never became authoritative
@@ -844,7 +842,7 @@ namespace CardShopCoop.Modules.Decoration
             {
                 var obj = live[i];
                 if (obj == null || used.Contains(obj) || obj.GetIsMovingObject()
-                    || Convert.ToInt32(FiObjectType.GetValue(obj)) != pose.DecorationType)
+                    || (EDecoObject)FiObjectType.GetValue(obj) != pose.DecorationType)
                 {
                     continue;
                 }
@@ -999,16 +997,11 @@ namespace CardShopCoop.Modules.Decoration
 
         private static void SetInt(FieldInfo field, int value) => field.SetValue(null, value);
 
-        private static bool TryEnum(int type, out EDecoObject result)
-        {
-            result = EDecoObject.None;
-            if (type <= 0 || !Enum.IsDefined(typeof(EDecoObject), type))
-            {
-                return false;
-            }
-            result = (EDecoObject)type;
-            return true;
-        }
+        /// <summary>True when a decoration type is a real, placeable member. None (0) and any
+        /// undefined value are rejected. The host and the game both speak <see cref="EDecoObject"/>,
+        /// so callers pass the enum directly rather than a raw int.</summary>
+        private static bool IsValidDeco(EDecoObject type)
+            => type != EDecoObject.None && Enum.IsDefined(typeof(EDecoObject), type);
 
         private static bool GetVertical(InteractableObject obj)
             => Convert.ToBoolean(FiVertical.GetValue(obj));

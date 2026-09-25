@@ -30,6 +30,12 @@ namespace CardShopCoop.Net
             settings.Converters.Add(new EnumWireConverter<EDecoObject>(EnumKind.DecoObject));
             settings.Converters.Add(new EnumWireConverter<ECardExpansionType>(EnumKind.CardExpansion));
             settings.Converters.Add(new EnumWireConverter<EMonsterType>(EnumKind.MonsterType));
+            settings.Converters.Add(new EnumWireConverter<ERarity>(EnumKind.Rarity));
+            settings.Converters.Add(new EnumWireConverter<ECollectionPackType>(EnumKind.CollectionPack));
+            // Every enum that is NOT a gated registry enum travels as its member-name string, so a
+            // non-renumbered enum can never be silently misread. Registered after the gated
+            // converters, which therefore win for their own types.
+            settings.Converters.Add(new Newtonsoft.Json.Converters.StringEnumConverter());
             settings.Converters.Add(new Vector3Converter());
             settings.Converters.Add(new QuaternionConverter());
             return settings;
@@ -66,8 +72,12 @@ namespace CardShopCoop.Net
         }
         public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
         {
-            writer.WriteValue(CatalogIdMap.ToWireName(_kind, Convert.ToInt32(value, CultureInfo.InvariantCulture)));
+            // The wire carries the HOST's numeric space, the single space every enum uses. The
+            // host is the identity translation; the client maps its value into the host's.
+            writer.WriteValue(CatalogIdMap.ToHostValue(_kind,
+                Convert.ToInt32(value, CultureInfo.InvariantCulture)));
         }
+
         public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
         {
             if (reader.TokenType == JsonToken.Null)
@@ -75,14 +85,15 @@ namespace CardShopCoop.Net
                 throw new JsonSerializationException("Null enum " + objectType);
             }
 
-            if (reader.TokenType != JsonToken.String)
+            if (reader.TokenType != JsonToken.Integer && reader.TokenType != JsonToken.Float)
             {
-                throw new JsonSerializationException("Numeric/non-string " + objectType.Name + " value " + Convert.ToString(reader.Value, CultureInfo.InvariantCulture) + " received: peer is sending pre-name wire");
+                throw new JsonSerializationException("Non-numeric " + objectType.Name + " value "
+                    + Convert.ToString(reader.Value, CultureInfo.InvariantCulture)
+                    + " received: gated enums travel as the host's numeric value");
             }
 
-            var name = (string)reader.Value;
-            int local;
-            CatalogIdMap.TryFromWireName(typeof(T), _kind, name, out local);
+            var hostValue = Convert.ToInt32(reader.Value, CultureInfo.InvariantCulture);
+            var local = CatalogIdMap.FromHostValue(_kind, hostValue);
 
             return (T)Enum.ToObject(typeof(T), local);
         }

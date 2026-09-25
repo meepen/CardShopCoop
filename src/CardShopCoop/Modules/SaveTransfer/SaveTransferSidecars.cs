@@ -8,160 +8,73 @@ using UnityEngine;
 
 namespace CardShopCoop.Modules.SaveTransfer
 {
-    public sealed class SidecarBundle
+    /// <summary>One mod-owned file written during a host save, ready to ship.</summary>
+    internal sealed class SaveTransferFile
     {
-        public byte[] Payload
-        {
-            get;
-        }
-        public bool Complete
-        {
-            get;
-        }
-        public string Warning
-        {
-            get;
-        }
-        public int FileCount
-        {
-            get;
-        }
-        public long RawBytes
-        {
-            get;
-        }
+        internal readonly string RelativePath;
+        internal readonly byte[] Data;
 
-        internal SidecarBundle(byte[] payload, bool complete, string warning, int fileCount,
-            long rawBytes)
+        internal SaveTransferFile(string relativePath, byte[] data)
         {
-            Payload = payload ?? throw new ArgumentNullException(nameof(payload));
-            Complete = complete;
-            Warning = warning;
-            FileCount = fileCount;
-            RawBytes = rawBytes;
+            RelativePath = relativePath;
+            Data = data;
         }
     }
 
+    /// <summary>The files a host save wrote, plus whether the set had to be trimmed.</summary>
+    internal sealed class SaveTransferFileSet
+    {
+        internal List<SaveTransferFile> Files = new();
+        internal bool Complete = true;
+        internal string Warning;
+        internal long RawBytes;
+    }
+
     /// <summary>
-    /// Transfers mod-owned per-save files alongside the game's base save. Every received path is
-    /// canonicalized under persistentDataPath before it is read or written; host data is never
-    /// allowed to escape that root.
+    /// Ships the mod-owned files a host save actually wrote. Rather than scanning by a hardcoded
+    /// filename pattern (which misses a mod that names its file differently), we bracket the
+    /// synchronous save with a timestamp and collect every mod-data file whose last-write time
+    /// falls inside that window. Files are addressed by their path relative to
+    /// persistentDataPath; the host snapshot slot token in a filename is rewritten to the guest's
+    /// reserved slot on apply. enum_values.json is never sent (it is written at prepatch, not on
+    /// save, and is deliberately out of scope).
     /// </summary>
-    public static class SaveTransferSidecars
+    internal static class SaveTransferSidecars
     {
         internal const int MaxFiles = 4096;
         internal const int MaxFileBytes = 16 * 1024 * 1024;
         internal const int MaxAggregateRawBytes = SaveTransferStorage.MaxSidecarRawBytes;
         private const int MaxWarningLength = 512;
         private const int MaxWarningDetails = 8;
+        // Filesystems with coarse timestamps (FAT ~2s) need slack; NTFS is far finer.
+        private const int FreshnessSlackSeconds = 2;
 
-        public static byte[] BuildBundle(int hostSlot)
+        /// <summary>Enumerates every file written at or after <paramref name="sinceUtc"/> under the
+        /// mod-data directories (every direct subdirectory of <paramref name="root"/> except
+        /// Screenshots/Unity, recursively). Callers bracket the synchronous game save with the
+        /// timestamp. Reads the file bytes here, so invoke off the main thread.</summary>
+        internal static SaveTransferFileSet CollectWrittenFiles(string root, DateTime sinceUtc)
         {
-            return BuildBundleWithMetadata(hostSlot, Application.persistentDataPath).Payload;
-        }
-
-        /// <summary>
-        /// Builds the sidecar snapshot without touching Unity APIs. The caller captures the root
-        /// on Unity's thread and invokes this method only after the synchronous game save has
-        /// completed. This keeps directory enumeration, file reads, and bundle construction off
-        /// the main thread.
-        /// </summary>
-        internal static SidecarBundle BuildBundleWithMetadata(int hostSlot, string root)
-        {
-            ValidateSlot(hostSlot);
             if (string.IsNullOrEmpty(root))
-            {
                 throw new ArgumentException("A sidecar root is required.", nameof(root));
-            }
 
+            var result = new SaveTransferFileSet();
+            var warningDetails = new List<string>();
             var rootPath = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar);
-            var candidates = FindCandidates(hostSlot, rootPath, out var complete,
-                out var warningDetails);
-            var entries = new List<SidecarEntry>();
-            long rawBytes = 0;
+            var threshold = sinceUtc.AddSeconds(-FreshnessSlackSeconds);
 
-            for (var i = 0; i < candidates.Count; i++)
+            string[] directories;
+            try
             {
-                var file = candidates[i];
-                var relative = GetRelativePath(rootPath, file);
-                FileInfo info;
-                try
-                {
-                    info = new FileInfo(file);
-                    var length = info.Length;
-                    if (length > MaxFileBytes)
-                    {
-                        SkipFile(relative, "is " + length + " bytes; the per-file limit is "
-                            + MaxFileBytes + " bytes", warningDetails);
-                        complete = false;
-                        continue;
-                    }
-                    if (length < 0 || rawBytes + length > MaxAggregateRawBytes)
-                    {
-                        SkipFile(relative, "would exceed the aggregate raw sidecar limit of "
-                            + MaxAggregateRawBytes + " bytes", warningDetails);
-                        complete = false;
-                        continue;
-                    }
-
-                    var data = ReadStableFile(file, (int)length);
-                    if (data == null)
-                    {
-                        SkipFile(relative, "changed while it was being read", warningDetails);
-                        complete = false;
-                        continue;
-                    }
-
-                    entries.Add(new SidecarEntry(relative, data));
-                    rawBytes += data.Length;
-                }
-                catch (Exception error)
-                {
-                    SkipFile(relative, "could not be read: " + error.Message, warningDetails);
-                    complete = false;
-                }
+                directories = Directory.GetDirectories(rootPath);
+            }
+            catch (Exception error)
+            {
+                throw new InvalidDataException("mod-data directories could not be enumerated: "
+                    + error.Message);
             }
 
-            while (true)
-            {
-                var payload = SerializeEntries(entries);
-                if (payload.Length <= SaveTransferStorage.MaxTransferBytes)
-                {
-                    var warning = BuildWarning(warningDetails);
-                    if (!complete)
-                    {
-                        CoopPlugin.Log?.LogWarning("Sidecar session is incomplete: " + warning);
-                    }
-                    CoopPlugin.Log?.LogInfo("Sidecar bundle: " + entries.Count + " mod files, "
-                        + rawBytes / 1024 + " KB raw, " + payload.Length / 1024 + " KB encoded"
-                        + (complete ? "" : " (partial)"));
-                    return new SidecarBundle(payload, complete, warning, entries.Count, rawBytes);
-                }
-
-                if (entries.Count == 0)
-                {
-                    throw new InvalidDataException("Sidecar bundle metadata exceeds its transfer limit.");
-                }
-
-                var removed = entries[entries.Count - 1];
-                entries.RemoveAt(entries.Count - 1);
-                rawBytes -= removed.Data.Length;
-                SkipFile(removed.RelativePath, "would exceed the encoded sidecar bundle limit",
-                    warningDetails);
-                complete = false;
-            }
-        }
-
-        private static List<string> FindCandidates(int hostSlot, string root, out bool complete,
-            out List<string> warningDetails)
-        {
-            complete = true;
-            warningDetails = new List<string>();
-            var files = new List<string>();
-            var slotPattern = new Regex("(_|Release)" + Regex.Escape(hostSlot.ToString())
-                + "(_|\\.|$)", RegexOptions.CultureInvariant);
-            var directories = Directory.GetDirectories(root);
             for (var i = 0; i < directories.Length; i++)
             {
                 var directory = directories[i];
@@ -179,9 +92,9 @@ namespace CardShopCoop.Modules.SaveTransfer
                 }
                 catch (Exception error)
                 {
-                    AddWarning("directory '" + GetRelativePath(root, directory)
+                    AddWarning("directory '" + GetRelativePath(rootPath, directory)
                         + "' could not be enumerated: " + error.Message, warningDetails);
-                    complete = false;
+                    result.Complete = false;
                     continue;
                 }
 
@@ -189,25 +102,114 @@ namespace CardShopCoop.Modules.SaveTransfer
                 {
                     var file = directoryFiles[j];
                     var fileName = Path.GetFileName(file);
-                    if (!slotPattern.IsMatch(fileName)
-                        && !string.Equals(fileName, "enum_values.json",
-                            StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(fileName, "enum_values.json", StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
                     }
-                    if (files.Count >= MaxFiles)
+                    if (!IsFresh(file, threshold))
                     {
-                        AddWarning("more than " + MaxFiles + " sidecar files were found; the rest"
-                            + " were not considered", warningDetails);
-                        complete = false;
-                        return files;
+                        continue;
                     }
-                    files.Add(file);
+                    if (result.Files.Count >= MaxFiles)
+                    {
+                        AddWarning("more than " + MaxFiles + " files were written; the rest were not"
+                            + " considered", warningDetails);
+                        result.Complete = false;
+                        break;
+                    }
+
+                    var relative = GetRelativePath(rootPath, file);
+                    try
+                    {
+                        var length = new FileInfo(file).Length;
+                        if (length > MaxFileBytes)
+                        {
+                            SkipFile(relative, "is " + length + " bytes; the per-file limit is "
+                                + MaxFileBytes + " bytes", warningDetails);
+                            result.Complete = false;
+                            continue;
+                        }
+                        if (length < 0 || result.RawBytes + length > MaxAggregateRawBytes)
+                        {
+                            SkipFile(relative, "would exceed the aggregate raw limit of "
+                                + MaxAggregateRawBytes + " bytes", warningDetails);
+                            result.Complete = false;
+                            continue;
+                        }
+
+                        var data = ReadStableFile(file, (int)length);
+                        if (data == null)
+                        {
+                            SkipFile(relative, "changed while it was being read", warningDetails);
+                            result.Complete = false;
+                            continue;
+                        }
+
+                        result.Files.Add(new SaveTransferFile(relative, data));
+                        result.RawBytes += data.Length;
+                    }
+                    catch (Exception error)
+                    {
+                        SkipFile(relative, "could not be read: " + error.Message, warningDetails);
+                        result.Complete = false;
+                    }
                 }
             }
 
-            files.Sort(StringComparer.Ordinal);
-            return files;
+            result.Files.Sort((a, b) => string.CompareOrdinal(a.RelativePath, b.RelativePath));
+            result.Warning = BuildWarning(warningDetails);
+            CoopPlugin.Log?.LogInfo("Sidecar gather: " + result.Files.Count + " files written by the save, "
+                + result.RawBytes / 1024 + " KB raw"
+                + (result.Complete ? "" : " (partial)"));
+            return result;
+        }
+
+        /// <summary>Serializes the gathered files, dropping entries from the end until the encoded
+        /// bundle fits the wire cap.</summary>
+        internal static byte[] BuildBundle(SaveTransferFileSet set)
+        {
+            if (set == null)
+            {
+                throw new ArgumentNullException(nameof(set));
+            }
+
+            while (true)
+            {
+                var payload = SerializeEntries(set.Files);
+                if (payload.Length <= SaveTransferStorage.MaxTransferBytes)
+                {
+                    return payload;
+                }
+
+                if (set.Files.Count == 0)
+                {
+                    throw new InvalidDataException("Sidecar bundle metadata exceeds its transfer limit.");
+                }
+
+                var removed = set.Files[set.Files.Count - 1];
+                set.Files.RemoveAt(set.Files.Count - 1);
+                set.RawBytes -= removed.Data.Length;
+                set.Complete = false;
+                set.Warning = BoundWarning("file '" + removed.RelativePath
+                    + "' would exceed the encoded sidecar bundle limit" + (set.Warning == null
+                        ? "" : "; " + set.Warning));
+                CoopPlugin.Log?.LogWarning("Sidecar skipped file '" + removed.RelativePath
+                    + "' (encoded bundle limit)");
+            }
+        }
+
+        private static bool IsFresh(string path, DateTime thresholdUtc)
+        {
+            try
+            {
+                return File.GetLastWriteTimeUtc(path) >= thresholdUtc;
+            }
+            catch (Exception error)
+            {
+                CoopPlugin.Log?.LogWarning("Sidecar timestamp read failed for " + path + ": "
+                    + error.Message);
+                return false;
+            }
         }
 
         private static byte[] ReadStableFile(string path, int expectedLength)
@@ -224,6 +226,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                     {
                         return null;
                     }
+
                     offset += read;
                 }
 
@@ -235,7 +238,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             return data;
         }
 
-        private static byte[] SerializeEntries(List<SidecarEntry> entries)
+        private static byte[] SerializeEntries(List<SaveTransferFile> entries)
         {
             using (var stream = new MemoryStream())
             using (var writer = new NetWriter(stream))
@@ -290,21 +293,18 @@ namespace CardShopCoop.Modules.SaveTransfer
                 return null;
             }
 
-            var warning = string.Join("; ", warningDetails);
-            return warning.Length <= MaxWarningLength
-                ? warning : warning.Substring(0, MaxWarningLength - 3) + "...";
+            return BoundWarning(string.Join("; ", warningDetails));
         }
 
-        private sealed class SidecarEntry
+        private static string BoundWarning(string warning)
         {
-            internal readonly string RelativePath;
-            internal readonly byte[] Data;
-
-            internal SidecarEntry(string relativePath, byte[] data)
+            if (string.IsNullOrWhiteSpace(warning))
             {
-                RelativePath = relativePath;
-                Data = data;
+                return null;
             }
+            warning = warning.Trim();
+            return warning.Length <= MaxWarningLength
+                ? warning : warning.Substring(0, MaxWarningLength - 3) + "...";
         }
 
         public static void ApplyBundleAsync(byte[] bundle, int hostSlot, int clientSlot,
@@ -317,7 +317,8 @@ namespace CardShopCoop.Modules.SaveTransfer
         internal static void ApplyBundleAsync(byte[] bundle, int hostSlot, int clientSlot,
             int sessionGeneration, string root, Action completed, Action<Exception> failed)
         {
-            if (bundle == null || bundle.Length < 4 || bundle.Length > SaveTransferStorage.MaxTransferBytes)
+            if (bundle == null || bundle.Length < 4
+                || bundle.Length > SaveTransferStorage.MaxTransferBytes)
             {
                 throw new InvalidDataException("Sidecar bundle is empty or exceeds its limit.");
             }
@@ -369,16 +370,12 @@ namespace CardShopCoop.Modules.SaveTransfer
             thread.Start();
         }
 
-        public static void ApplyBundle(byte[] bundle, int hostSlot, int clientSlot)
-        {
-            ApplyBundle(bundle, hostSlot, clientSlot, Application.persistentDataPath);
-        }
-
         private static void ApplyBundle(byte[] bundle, int hostSlot, int clientSlot, string root)
         {
             ValidateSlot(hostSlot);
             ValidateSlot(clientSlot);
-            if (bundle == null || bundle.Length < 4 || bundle.Length > SaveTransferStorage.MaxTransferBytes)
+            if (bundle == null || bundle.Length < 4
+                || bundle.Length > SaveTransferStorage.MaxTransferBytes)
             {
                 throw new InvalidDataException("Sidecar bundle is empty or exceeds its limit.");
             }
@@ -428,22 +425,6 @@ namespace CardShopCoop.Modules.SaveTransfer
 
                     var directory = Path.GetDirectoryName(relative) ?? "";
                     var name = Path.GetFileName(relative);
-                    if (string.Equals(name, "enum_values.json", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (!File.Exists(originalPath))
-                        {
-                            Directory.CreateDirectory(Path.GetDirectoryName(originalPath));
-                            AtomicWrite(originalPath, data);
-                            applied++;
-                        }
-                        else if (!BytesEqual(File.ReadAllBytes(originalPath), data))
-                        {
-                            skipped++;
-                            CoopPlugin.Log.LogWarning("enum_values.json differs from the host's; modded item IDs may not line up.");
-                        }
-                        continue;
-                    }
-
                     var rewrittenName = renamePattern.Replace(name, clientSlot.ToString());
                     var rewrittenRelative = string.IsNullOrEmpty(directory)
                         ? rewrittenName : Path.Combine(directory, rewrittenName);
@@ -469,9 +450,10 @@ namespace CardShopCoop.Modules.SaveTransfer
 
         private static void ValidateSlot(int slot)
         {
-            if (slot < 0 || slot > 99)
+            if (slot == -1)
             {
-                throw new ArgumentOutOfRangeException(nameof(slot));
+                throw new ArgumentOutOfRangeException(nameof(slot),
+                    "Save slot -1 is the game's \"no save\" sentinel and cannot be used.");
             }
         }
 
@@ -498,8 +480,9 @@ namespace CardShopCoop.Modules.SaveTransfer
             {
                 rootPath += Path.DirectorySeparatorChar;
             }
-            full = Path.GetFullPath(Path.Combine(rootPath, relative.Replace('/', Path.DirectorySeparatorChar)
-                .Replace('\\', Path.DirectorySeparatorChar)));
+            full = Path.GetFullPath(Path.Combine(rootPath,
+                relative.Replace('/', Path.DirectorySeparatorChar)
+                    .Replace('\\', Path.DirectorySeparatorChar)));
             return full.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase)
                 && full.Length > rootPath.Length;
         }
@@ -507,22 +490,6 @@ namespace CardShopCoop.Modules.SaveTransfer
         private static void RejectUnsafe(string relative)
         {
             CoopPlugin.Log.LogWarning("sidecar: rejecting unsafe path '" + relative + "'");
-        }
-
-        private static bool BytesEqual(byte[] first, byte[] second)
-        {
-            if (first == null || second == null || first.Length != second.Length)
-            {
-                return false;
-            }
-            for (var i = 0; i < first.Length; i++)
-            {
-                if (first[i] != second[i])
-                {
-                    return false;
-                }
-            }
-            return true;
         }
 
         private static void AtomicWrite(string path, byte[] data)

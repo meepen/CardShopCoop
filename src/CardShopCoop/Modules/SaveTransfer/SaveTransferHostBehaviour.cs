@@ -13,10 +13,6 @@ namespace CardShopCoop.Modules.SaveTransfer
     /// <summary>Handshake metadata produced by the transfer owner for Core to authorize/send.</summary>
     public sealed class SaveTransferOffer
     {
-        public int HostSlot
-        {
-            get; internal set;
-        }
         public int SaveLength
         {
             get; internal set;
@@ -39,6 +35,14 @@ namespace CardShopCoop.Modules.SaveTransfer
             get; set;
         }
         internal byte[] BundlePayload
+        {
+            get; set;
+        }
+        internal string SidecarRoot
+        {
+            get; set;
+        }
+        internal DateTime SaveStartedUtc
         {
             get; set;
         }
@@ -153,22 +157,17 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
 
             SaveTransferOffer offer;
-            var sidecarRoot = (string)null;
             try
             {
                 // Unity/game reads and the synchronous save must happen before the worker. Core
                 // calls this API from its main-thread dispatch path.
-                var save = SaveTransferStorage.BuildHostPayload();
-                // Capture the Unity-owned path here. Enumeration and all sidecar file reads are
-                // deliberately deferred to the worker after SaveGameData has completed.
-                sidecarRoot = Application.persistentDataPath;
-
+                var save = SaveTransferStorage.BuildHostPayload(out var saveStartedUtc);
+                // Capture the Unity-owned path here; enumeration and file reads happen on the worker.
                 offer = new SaveTransferOffer
                 {
-                    HostSlot = SaveTransferStorage.HostSnapshotSlot,
                     SavePayload = save,
-                    BundlePayload = new byte[0],
-                    SidecarsComplete = false,
+                    SidecarRoot = Application.persistentDataPath,
+                    SaveStartedUtc = saveStartedUtc,
                 };
             }
             catch (Exception error)
@@ -198,47 +197,57 @@ namespace CardShopCoop.Modules.SaveTransfer
                         return;
                     }
 
-                    try
-                    {
-                        var sidecars = SaveTransferSidecars.BuildBundleWithMetadata(
-                            SaveTransferStorage.HostSnapshotSlot, sidecarRoot);
-                        offer.BundlePayload = sidecars.Payload;
-                        offer.SidecarsComplete = sidecars.Complete;
-                        offer.SidecarWarning = sidecars.Warning;
-                    }
-                    catch (Exception error)
-                    {
-                        offer.BundlePayload = new byte[0];
-                        offer.SidecarsComplete = false;
-                        offer.SidecarWarning = BoundWarning("sidecar bundle could not be read: "
-                            + error.Message);
-                        CoopPlugin.Log.LogWarning("Sidecar bundle failed (sending base save only): "
-                            + error);
-                    }
-
                     if (owner._shutdown || owner.IsAborted(target.Id)
                         || !SaveTransferRuntime.IsSessionGeneration(generation))
                     {
                         return;
                     }
 
+                    SaveTransferFileSet gathered;
+                    try
+                    {
+                        gathered = SaveTransferSidecars.CollectWrittenFiles(offer.SidecarRoot,
+                            offer.SaveStartedUtc);
+                    }
+                    catch (Exception error)
+                    {
+                        gathered = null;
+                        CoopPlugin.Log.LogWarning("Sidecar gather failed (sending base save only): "
+                            + error);
+                    }
+
                     var savePayload = Msg.Gzip(offer.SavePayload);
-                    var bundlePayload = offer.BundlePayload.Length == 0
-                        ? new byte[0] : Msg.Gzip(offer.BundlePayload);
                     if (savePayload.Length <= 0 || savePayload.Length > SaveTransferStorage.MaxTransferBytes)
                     {
                         throw new InvalidDataException("Compressed world transfer exceeds its safety limit.");
                     }
-                    if (bundlePayload.Length > SaveTransferStorage.MaxTransferBytes)
+
+                    var bundlePayload = new byte[0];
+                    if (gathered != null)
                     {
-                        offer.BundlePayload = new byte[0];
-                        offer.SidecarsComplete = false;
-                        offer.SidecarWarning = BoundWarning(
-                            "sidecar bundle exceeded the compressed transfer limit and was omitted");
-                        bundlePayload = new byte[0];
-                        CoopPlugin.Log.LogWarning("Sidecar bundle exceeded the compressed transfer limit; "
-                            + "sending the base save with sidecars marked incomplete");
+                        var rawBundle = SaveTransferSidecars.BuildBundle(gathered);
+                        offer.SidecarsComplete = gathered.Complete;
+                        offer.SidecarWarning = gathered.Warning;
+                        if (rawBundle.Length > 0)
+                        {
+                            bundlePayload = Msg.Gzip(rawBundle);
+                            if (bundlePayload.Length > SaveTransferStorage.MaxTransferBytes)
+                            {
+                                bundlePayload = new byte[0];
+                                offer.SidecarsComplete = false;
+                                offer.SidecarWarning = BoundWarning("mod-data bundle exceeded the"
+                                    + " compressed transfer limit and was omitted");
+                                CoopPlugin.Log.LogWarning("Sidecar bundle exceeded the compressed transfer"
+                                    + " limit; sending the base save with mod data marked incomplete");
+                            }
+                        }
                     }
+                    else
+                    {
+                        offer.SidecarsComplete = false;
+                        offer.SidecarWarning = BoundWarning("mod-data gather failed");
+                    }
+
                     offer.SaveLength = savePayload.Length;
                     offer.BundleLength = bundlePayload.Length;
 
@@ -305,7 +314,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 }
 
                 CoopPlugin.Log.LogInfo("coop: transfer sent to connection " + target.Id + " (save "
-                    + savePayload.Length / 1024 + " KB, bundle " + bundlePayload.Length / 1024
+                    + savePayload.Length / 1024 + " KB, mod data " + bundlePayload.Length / 1024
                     + " KB)");
             }
             catch (Exception error)
@@ -340,7 +349,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             lock (owner._sendingLock)
             {
                 // The main-thread send action removes _sending only after every transfer frame,
-                // including BundleDone, has been admitted. This closes the window where an early
+                // including SaveDone, has been admitted. This closes the window where an early
                 // lifecycle acknowledgement could advance the host before the transfer was queued.
                 var accepted = !owner._sending.Contains(connection.Id)
                     && !owner._aborted.Contains(connection.Id)

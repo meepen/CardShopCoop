@@ -359,7 +359,7 @@ namespace CardShopCoop.Modules.Decoration
                 var message = new DecorationIntentMessage
                 {
                     Action = DecorationActions.BuyItemDecoration,
-                    DecorationType = (int)itemType,
+                    DecorationType = itemType,
                 };
                 var before = DecorationInterop.Snapshot();
                 return Predict(message, () => PredictState(message, before),
@@ -432,7 +432,7 @@ namespace CardShopCoop.Modules.Decoration
                 var objectId = DecorationInterop.ClientIdFor(__instance);
                 if (objectId <= 0)
                     return true;
-                var decorationType = (int)__instance.m_DecoObjectType;
+                var decorationType = __instance.m_DecoObjectType;
                 var message = new DecorationIntentMessage
                 {
                     Action = DecorationActions.Remove,

@@ -34,7 +34,7 @@ namespace CardShopCoop.Modules.World
                         writer.WritePropertyName("Id");
                         writer.WriteValue(entry.Id);
                         writer.WritePropertyName("ObjType");
-                        writer.WriteValue(PlacementWire.EnumName(kind, entry.ObjType));
+                        writer.WriteValue(PlacementWire.EnumValue(kind, entry.ObjType));
                         writer.WritePropertyName("Pos");
                         serializer.Serialize(writer, entry.Pos);
                         writer.WritePropertyName("Rot");
@@ -80,8 +80,9 @@ namespace CardShopCoop.Modules.World
                     continue;
                 }
 
-                var resolved = CatalogIdMap.TryReadWireName(PlacementWire.EnumKindFor(kind),
-                    item["ObjType"], out var objectType);
+                var hostObjectType = item["ObjType"]?.Value<int>() ?? 0;
+                var resolved = CatalogIdMap.TryFromHostValue(PlacementWire.EnumKindFor(kind),
+                    hostObjectType, out var objectType);
                 result.Add(new PlacementPopulationEntry
                 {
                     Id = (ushort)item["Id"].Value<int>(),
@@ -111,7 +112,7 @@ namespace CardShopCoop.Modules.World
             writer.WritePropertyName("Key");
             writer.WriteValue(entry.Key);
             writer.WritePropertyName("Type");
-            writer.WriteValue(PlacementWire.EnumName(entry.Key >> 24, entry.Type));
+            writer.WriteValue(PlacementWire.EnumValue(entry.Key >> 24, entry.Type));
             writer.WritePropertyName("Pos");
             serializer.Serialize(writer, entry.Pos);
             writer.WritePropertyName("Rot");
@@ -130,7 +131,8 @@ namespace CardShopCoop.Modules.World
         {
             var item = JObject.Load(reader);
             var key = item["Key"].Value<int>();
-            CatalogIdMap.TryReadWireName(PlacementWire.EnumKindFor(key >> 24), item["Type"],
+            var hostType = item["Type"]?.Value<int>() ?? 0;
+            CatalogIdMap.TryFromHostValue(PlacementWire.EnumKindFor(key >> 24), hostType,
                 out var wireObjectType);
             return new PlacementMoveEntry
             {
@@ -150,8 +152,8 @@ namespace CardShopCoop.Modules.World
         internal static EnumKind EnumKindFor(int kind)
             => kind == PlacementApi.DecorationKind ? EnumKind.DecoObject : EnumKind.ObjectType;
 
-        internal static string EnumName(int kind, int value)
-            => CatalogIdMap.ToWireName(EnumKindFor(kind), value);
+        internal static int EnumValue(int kind, int value)
+            => CatalogIdMap.ToHostValue(EnumKindFor(kind), value);
 
         internal static Vector3 ReadVector(JObject value, string name, JsonSerializer serializer)
             => value[name] == null ? default : value[name].ToObject<Vector3>(serializer);

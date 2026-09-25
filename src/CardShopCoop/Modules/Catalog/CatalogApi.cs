@@ -21,11 +21,14 @@ namespace CardShopCoop.Modules.Catalog
 
         private static bool _enumLendWarned;
 
-        public static bool RestartRequiredForJoin => CatalogParity.RestartRequiredForJoin;
-        public static bool RestartRequiredForSolo => CatalogParity.RestartRequiredForSolo;
-
         internal static bool IsWireableItemType(EItemType itemType, string context = null)
             => CatalogInterop.IsWireableItemType(itemType, context);
+
+        /// <summary>True for a DEFINED member of the runtime enum for this kind. Because EPL mints
+        /// its members into the enum at prepatch, the loaded enum is the membership truth for both
+        /// vanilla and modded values; a value that is not an actual member returns false.</summary>
+        internal static bool IsDefinedEnumValue(EnumKind kind, int value)
+            => CatalogIdMap.IsDefined(kind, value);
 
         /// <summary>Returns the player-facing borrowed-registry notice, or null when no host
         /// registry is currently installed. The first observed notice is logged once.</summary>

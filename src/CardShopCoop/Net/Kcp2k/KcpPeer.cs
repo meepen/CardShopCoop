@@ -28,8 +28,10 @@ namespace kcp2k
         protected KcpState state = KcpState.Connected;
 
         // If we don't receive anything these many milliseconds
-        // then consider us disconnected
-        public const int DEFAULT_TIMEOUT = 10000;
+        // then consider us disconnected. Raised well above kcp2k's 10s default so a client that
+        // is synchronously loading the transferred world (main-thread stall) is not declared dead
+        // mid-load; the connection is still torn down promptly on a real close or error.
+        public const int DEFAULT_TIMEOUT = 100000;
         public int timeout;
         uint lastReceiveTime;
         uint currentTime;

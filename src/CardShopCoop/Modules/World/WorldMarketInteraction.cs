@@ -62,6 +62,8 @@ namespace CardShopCoop.Modules.World
         // Cached EPL modded-id list (walking the EPL item dictionary + Convert.ToInt32 per key
         // was happening on every snapshot build). The registry is fixed for a session.
         private static List<int> s_eplModdedCache;
+        private static HashSet<int> s_eplModdedSet;
+        private static int s_vanillaItemTypeCount = -1;
 
         // Host: modded-expansion card-market changes (deltas), captured by the
         // AddCardPricePercentChange / SetCardGeneratedMarketPrice postfixes. EPL prefixes
@@ -85,7 +87,7 @@ namespace CardShopCoop.Modules.World
         {
             _pendingState = null;
             s_dirty = false;
-            s_eplModdedCache = null;
+            InvalidateContentCache();
             s_modCardPending.Clear();
             ApplyingRemote = false;
         }
@@ -95,6 +97,8 @@ namespace CardShopCoop.Modules.World
         internal static void InvalidateContentCache()
         {
             s_eplModdedCache = null;
+            s_eplModdedSet = null;
+            s_vanillaItemTypeCount = -1;
         }
 
         internal void Tick()
@@ -407,9 +411,8 @@ namespace CardShopCoop.Modules.World
             {
                 if (list[i] != 0f)
                 {
-                    // the index IS an EItemType; below the modded floor WriteItemType (invoked
-                    // by the DTO Serialize) is the identity, so this whole vanilla half is
-                    // byte-for-byte what it always was
+                    // the index IS a vanilla EItemType; the DTO serializes it by name like every
+                    // other enum, so this whole vanilla half is exactly what it always was
                     out_list.Add(new MarketPercentEntry
                     {
                         ItemType = (EItemType)i,
@@ -439,7 +442,7 @@ namespace CardShopCoop.Modules.World
             {
                 if (list[i] != 0f)
                 {
-                    out_list.Add(new MarketSparseEntry { ItemType = (EItemType)i, Value = list[i] }); // identity below the modded floor
+                    out_list.Add(new MarketSparseEntry { ItemType = (EItemType)i, Value = list[i] }); // vanilla identity
                 }
             }
 
@@ -608,10 +611,10 @@ namespace CardShopCoop.Modules.World
         // returns the RAW values - GetItemMarketPrice/GetItemCost bake the percent in,
         // GetAverageItemCost rounds and substitutes cost when out of range); average
         // cost writes ride CPlayerData.SetAverageItemCost, a clean setter whose woven
-        // body IS the SetItem path. Wire indexes stay raw EItemType ints: EPL keeps
-        // modded ids >= 200000, which resolve identically on every machine, unlike
-        // its alternate [129, 129+modCount) index space, which is ordered by the
-        // LOCALLY installed mod set and would cross-assign prices between machines.
+        // body IS the SetItem path. Wire indexes stay raw EItemType ints: EPL's modded ids
+        // resolve identically on every machine, unlike its alternate [129, 129+modCount)
+        // index space, which is ordered by the LOCALLY installed mod set and would
+        // cross-assign prices between machines.
         private static bool s_eplProbed;
         private static object s_eplSaveMgr;    // EplServices.SaveDataManager (created once, never reassigned)
         private static MethodInfo s_eplTryGet; // TryGetSaveData<EItemType, ItemSaveData>(key, out data)
@@ -681,22 +684,37 @@ namespace CardShopCoop.Modules.World
 
         private static int VanillaItemTypeCount()
         {
-            var max = -1;
-            var values = Enum.GetValues(typeof(EItemType));
-            for (var i = 0; i < values.Length; i++)
+            if (s_vanillaItemTypeCount >= 0)
             {
-                var value = Convert.ToInt32(values.GetValue(i));
-                if (value >= 0 && value < 200000 && value > max)
+                return s_vanillaItemTypeCount;
+            }
+
+            // Vanilla ids are the defined members EPL did NOT mint. This uses EPL's own registered
+            // item set instead of a numeric "modded floor" range check.
+            var modded = EplModdedSet();
+            var max = -1;
+            foreach (EItemType value in Enum.GetValues(typeof(EItemType)))
+            {
+                var id = (int)value;
+                if (id >= 0 && !modded.Contains(id) && id > max)
                 {
-                    max = value;
+                    max = id;
                 }
             }
-            return max + 1;
+
+            s_vanillaItemTypeCount = max + 1;
+            return s_vanillaItemTypeCount;
         }
 
-        /// <summary>Raw itemType ints of EPL's modded items (ItemLibrary.ItemData keys);
-        /// empty without the bridge. Ids outside [200000, 500000] are unshippable: below
-        /// lands in EPL's machine-local index space, above fails the receive cap.</summary>
+        private static HashSet<int> EplModdedSet()
+        {
+            EplModdedItemTypes(); // populates s_eplModdedCache
+            return s_eplModdedSet ??= new HashSet<int>(s_eplModdedCache);
+        }
+
+        /// <summary>The raw itemType ids of EPL's modded items (ItemLibrary.ItemData keys); empty
+        /// without the bridge. These are real EItemType members EPL registered, so there is no
+        /// numeric range filter - the keys themselves are the authority.</summary>
         private static List<int> EplModdedItemTypes()
         {
             // The EPL registry is fixed after content registration. Populate once and only
@@ -718,11 +736,7 @@ namespace CardShopCoop.Modules.World
                     {
                         foreach (var key in dict.Keys)
                         {
-                            var v = Convert.ToInt32(key);
-                            if (v >= 200000 && v <= 500000)
-                            {
-                                result.Add(v);
-                            }
+                            result.Add(Convert.ToInt32(key));
                         }
                     }
                 }

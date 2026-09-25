@@ -45,7 +45,7 @@ namespace CardShopCoop.Modules.Decoration
         public byte Action;
         public int Category;
         public int Index;
-        public int DecorationType;
+        public EDecoObject DecorationType;
         public bool LotB;
         public Vector3 Position;
         public Quaternion Rotation;
@@ -65,7 +65,7 @@ namespace CardShopCoop.Modules.Decoration
         public byte Action;
         public int Category;
         public int Index;
-        public int DecorationType;
+        public EDecoObject DecorationType;
         public bool LotB;
         public int InventoryCount;
         public long ObjectId;
@@ -75,7 +75,7 @@ namespace CardShopCoop.Modules.Decoration
     public sealed class DecorationPose
     {
         public long Id;
-        public int DecorationType;
+        public EDecoObject DecorationType;
         public Vector3 Position;
         public Quaternion Rotation;
         public bool Vertical;

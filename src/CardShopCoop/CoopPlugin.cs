@@ -40,7 +40,6 @@ namespace CardShopCoop
         public static ConfigEntry<KeyCode> UiToggleKey;
         public static ConfigEntry<KeyCode> EmoteKey;
         public static ConfigEntry<int> ClientWorldSlot;
-        public static ConfigEntry<bool> AutoSyncCardDatabase;
         public static ConfigEntry<float> ServeReach;
         public static ConfigEntry<bool> AllowCrossBuildJoin;
         public static ConfigEntry<bool> AutoPortForward;
@@ -99,10 +98,8 @@ namespace CardShopCoop
 
             EmoteKey = Config.Bind("Keys", "EmoteKey", KeyCode.G,
                 "Sends a wave emote that pops above your avatar.");
-            ClientWorldSlot = Config.Bind("Network", "ClientWorldSlot", 7,
-                "Save slot the co-op world uses when JOINING someone (your own slots 0-3 are never touched). On a PC dedicated to co-op you can set 0 for maximum mod-data fidelity.");
-            AutoSyncCardDatabase = Config.Bind("Network", "AutoSyncCardDatabase", true,
-                "When your modded-card ID registry (EPL enum_values.json) differs from the host's, automatically install the host's copy (yours is backed up beside it) so you only need to restart and rejoin. Set false to handle the file yourself.");
+            ClientWorldSlot = Config.Bind("Network", "ClientWorldSlot", -100,
+                "Save slot the co-op world uses when JOINING someone. The default -100 is a reserved negative slot the save UI never shows, so your own local saves (0-3) are never touched. Only change this if you need the borrowed world to live at a specific slot.");
             ServeReach = Config.Bind("Player", "ServeReach", 1.6f,
                 "How close (meters, to the counter's center) a JOINER must stand to answer a counter trade customer. The counter itself is ~1m wide, so values below ~1.2 make it unreachable.");
             AllowCrossBuildJoin = Config.Bind("Network", "AllowCrossBuildJoin", false,

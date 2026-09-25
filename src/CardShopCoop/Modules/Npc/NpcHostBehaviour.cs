@@ -658,7 +658,7 @@ namespace CardShopCoop.Modules.Npc
 
             return NewStateDelta(KindCustomer, index, state.Generation, hostTime,
                 customer.transform, customer.m_CurrentMoveSpeed, flags, grabSequence, actionKind,
-                false, 0, 0L, false);
+                false, (EItemType)0, 0L, false);
         }
 
         private NpcStateDeltaMessage CollectWorkerState(Worker worker, int index, float hostTime)
@@ -696,7 +696,7 @@ namespace CardShopCoop.Modules.Npc
             var holdBox = FiCurrentHoldItemBox == null
                 ? null : FiCurrentHoldItemBox.GetValue(worker) as InteractablePackagingBox_Item;
             var holdBig = holdBox != null && holdBox.m_IsBigBox;
-            var holdItemType = holdBox == null ? 0 : (int)holdBox.GetItemType();
+            var holdItemType = holdBox == null ? (EItemType)0 : holdBox.GetItemType();
             var holdBoxNetworkId = 0L;
             var holdBoxOpened = false;
             if (holdBox != null)
@@ -766,7 +766,7 @@ namespace CardShopCoop.Modules.Npc
 
         private static NpcStateDeltaMessage NewStateDelta(byte kind, int index, int identity,
             float hostTime, Transform transform, float speed, NpcFlags flags, int actionSequence,
-            byte actionKind, bool holdBig, int holdItemType, long holdBoxNetworkId, bool holdBoxOpened)
+            byte actionKind, bool holdBig, EItemType holdItemType, long holdBoxNetworkId, bool holdBoxOpened)
             => new NpcStateDeltaMessage
             {
                 HostTime = hostTime,
@@ -810,7 +810,7 @@ namespace CardShopCoop.Modules.Npc
                 customer.m_IsFemale, customer.transform, customer.m_CurrentMoveSpeed, flags,
                 GetGrabSequence(index, customer.m_CurrentState),
                 customer.m_CurrentState == ECustomerState.TournamentTakePrize ? (byte)2 : (byte)1,
-                false, 0, 0L, false);
+                false, (EItemType)0, 0L, false);
         }
 
         private NpcEntry BuildWorkerEntry(Worker worker, int index, float hostTime)
@@ -846,12 +846,12 @@ namespace CardShopCoop.Modules.Npc
             return NewEntry(KindWorker, index, state.Generation, cc.CharacterName,
                 worker.m_IsFemale, worker.transform, moveSpeed, flags, state.WorkerActionSequence,
                 state.WorkerActionKind, holdBox != null && holdBox.m_IsBigBox,
-                holdBox == null ? 0 : (int)holdBox.GetItemType(), holdBoxNetworkId, holdBoxOpened);
+                holdBox == null ? (EItemType)0 : holdBox.GetItemType(), holdBoxNetworkId, holdBoxOpened);
         }
 
         private static NpcEntry NewEntry(byte kind, int index, int identity, string name,
             bool female, Transform transform, float speed, NpcFlags flags, int actionSequence,
-            byte actionKind, bool holdBig, int holdItemType, long holdBoxNetworkId, bool holdBoxOpened)
+            byte actionKind, bool holdBig, EItemType holdItemType, long holdBoxNetworkId, bool holdBoxOpened)
             => new NpcEntry
             {
                 Kind = kind,

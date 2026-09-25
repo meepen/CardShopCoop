@@ -13,10 +13,13 @@ namespace CardShopCoop.Modules.Pricing
 
         internal const float PriceEpsilon = 0.0075f;
 
+        /// <summary>A named EItemType member with a live price table. The id is deliberately NOT
+        /// bounded by the vanilla list length: EPL's CollectionWeaver serves its minted members
+        /// through that list, and <see cref="CatalogApi.IsWireableItemType"/> already rejects the
+        /// unnamed raw slots in the price list's tail.</summary>
         internal static bool IsItemTypeValid(EItemType type)
             => CatalogApi.IsWireableItemType(type, "pricing item")
-                && CPlayerData.m_SetItemPriceList != null
-                && (int)type >= 0 && (int)type < CPlayerData.m_SetItemPriceList.Count;
+                && CPlayerData.m_SetItemPriceList != null;
 
         internal static bool TryReadConfirmPrice(SetItemPriceScreen screen, out float price)
         {

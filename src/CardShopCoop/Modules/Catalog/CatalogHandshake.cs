@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Messages;
 
 namespace CardShopCoop.Modules.Catalog
 {
@@ -12,7 +13,7 @@ namespace CardShopCoop.Modules.Catalog
         internal string EnumHash;
         internal string CardsHash;
         internal List<string> CardsList;
-        internal byte[] EnumBlob;
+        internal List<EnumKindIdentityDto> EnumIdentity;
     }
 
     /// <summary>A bounded, decoded registry/card blob. Invalid input retains an empty line list
@@ -35,7 +36,7 @@ namespace CardShopCoop.Modules.Catalog
     /// before Core starts its worker transfer.</summary>
     internal sealed class CatalogWelcomeBlobs
     {
-        internal byte[] EnumBlob;
+        internal List<EnumKindIdentityDto> EnumIdentity;
         internal byte[] CardsBlob;
     }
 
@@ -43,18 +44,8 @@ namespace CardShopCoop.Modules.Catalog
     internal sealed class CatalogEnumValidation
     {
         internal List<string> Conflicts;
-        internal bool RegistryFileMatchesRuntime;
         internal bool HashesAreConsistent;
         internal string HashFailureReason;
-    }
-
-    /// <summary>A registry payload prepared for a rejected peer.</summary>
-    internal sealed class CatalogEnumSyncOffer
-    {
-        internal byte[] Payload;
-        internal string FailureReason;
-
-        internal bool ShouldSend => Payload != null && Payload.Length > 0;
     }
 
     /// <summary>
@@ -64,77 +55,46 @@ namespace CardShopCoop.Modules.Catalog
     internal static class CatalogHandshake
     {
         /// <summary>The decompressed text ceiling for Hello and Welcome catalog blobs.</summary>
-        internal const int EnumBlobCap = 256 * 1024;
+        internal const int CatalogBlobCap = 256 * 1024;
 
         internal static CatalogHelloData BuildHelloData()
         {
-            var enumLines = CanonicalLines(SafeLines(CatalogParity.EnumLines));
+            var identity = SafeIdentity();
             var cards = CatalogParity.CardsList();
             return new CatalogHelloData
             {
-                EnumHash = CatalogParity.EnumHashForLines(enumLines),
+                EnumHash = CatalogParity.EnumHashForIdentity(identity),
                 CardsHash = CatalogParity.CardsHashForLines(cards),
                 CardsList = cards,
-                EnumBlob = GzipLines(enumLines),
+                EnumIdentity = identity,
             };
         }
 
         internal static CatalogWelcomeBlobs BuildWelcomeBlobs()
         {
-            var enumLines = CanonicalLines(SafeLines(CatalogParity.EnumLines));
+            var identity = SafeIdentity();
             var cards = CatalogParity.CardsList();
             return new CatalogWelcomeBlobs
             {
-                EnumBlob = GzipLines(enumLines),
+                EnumIdentity = identity,
                 CardsBlob = GzipLines(cards),
             };
         }
 
-        /// <summary>Read and gzip the registry file for one handshake response.</summary>
-        internal static bool TryBuildEnumSyncPayload(out byte[] payload, out string failureReason)
+        /// <summary>The typed enum identity, never throwing into the handshake. An empty identity
+        /// is legitimate (no enum types resolved) and is treated as such by the host.</summary>
+        private static List<EnumKindIdentityDto> SafeIdentity()
         {
-            payload = null;
-            failureReason = null;
-            var path = CatalogParity.EnumFilePath();
             try
             {
-                if (!File.Exists(path))
-                {
-                    failureReason = "the host has no card-database file on disk to send";
-                    return false;
-                }
-
-                var length = new FileInfo(path).Length;
-                if (length > EnumBlobCap)
-                {
-                    failureReason = "the host card-database file exceeds the " + EnumBlobCap
-                        + "-byte resource cap";
-                    CoopPlugin.Log.LogWarning("enum sync send: " + failureReason);
-                    return false;
-                }
-
-                var bytes = File.ReadAllBytes(path);
-                if (!CatalogParity.TryParseEnumRegistry(bytes, out _, out var registryFailure))
-                {
-                    failureReason = "the host card-database file is not a valid EPL registry: "
-                        + registryFailure;
-                    CoopPlugin.Log.LogWarning("enum sync send: " + failureReason);
-                    return false;
-                }
-
-                payload = Msg.Gzip(bytes);
-                return true;
+                return CatalogParity.EnumIdentity() ?? new List<EnumKindIdentityDto>();
             }
             catch (Exception error)
             {
-                failureReason = error.Message;
-                CoopPlugin.Log.LogWarning("enum sync send: " + error.Message);
-                return false;
+                CoopPlugin.Log.LogWarning("catalog enum identity: " + error.Message);
+                return new List<EnumKindIdentityDto>();
             }
         }
-
-        internal static string ApplyEnumSync(byte[] hostBytes)
-            => CatalogParity.InstallEnumFile(hostBytes);
 
         /// <summary>Decode either the enum or custom-card blob. A valid gzip containing no text is
         /// legitimate empty content; missing, malformed, or over-cap input is explicitly invalid
@@ -174,29 +134,23 @@ namespace CardShopCoop.Modules.Catalog
         }
 
         internal static CatalogEnumValidation ValidateEnums(string peerName, string peerHash,
-            List<string> peerLines)
+            List<EnumKindIdentityDto> peerIdentity)
         {
-            var canonicalPeerLines = CanonicalLines(peerLines);
-            var localLines = CanonicalLines(SafeLines(CatalogParity.EnumLines));
-            var expectedPeerHash = CatalogParity.EnumHashForLines(canonicalPeerLines);
-            var expectedLocalHash = CatalogParity.EnumHashForLines(localLines);
-            // The peer hash authenticates the peer's decoded input and the local hash checks the
-            // host snapshot. Do not require the two full sets to be equal: CatalogIdMap supports
-            // one-sided content packs, while EnumConflicts below rejects shared names with
-            // incompatible IDs.
+            var localIdentity = SafeIdentity();
+            var expectedPeerHash = CatalogParity.EnumHashForIdentity(peerIdentity);
+            var expectedLocalHash = CatalogParity.EnumHashForIdentity(localIdentity);
+            // The peer hash authenticates the peer's identity and the local hash checks the host
+            // snapshot. We do not require the two full sets to be equal: EnumKeyConflicts below
+            // compares the NAME sets only, since ids can differ between two installs and are
+            // translated by the value map on the wire and in the save.
             var hashesAreConsistent = string.Equals(peerHash, expectedPeerHash,
                 StringComparison.Ordinal);
             string hashFailureReason = null;
             if (!hashesAreConsistent)
             {
-                hashFailureReason = "client EnumHash does not match its decoded EnumBlob"
+                hashFailureReason = "client EnumHash does not match its decoded enum identity"
                     + " (reported " + (peerHash ?? "<missing>") + ", decoded "
                     + expectedPeerHash + ")";
-            }
-            else if (!AreEnumLinesWellFormed(canonicalPeerLines))
-            {
-                hashesAreConsistent = false;
-                hashFailureReason = "client EnumBlob contains a malformed enum identity line";
             }
             else if (!string.Equals(CatalogParity.EnumHash(), expectedLocalHash,
                 StringComparison.Ordinal))
@@ -206,75 +160,148 @@ namespace CardShopCoop.Modules.Catalog
                     + " (expected " + expectedLocalHash + ", reported " + CatalogParity.EnumHash() + ")";
             }
 
-            if (localLines.Count == 0)
+            if (MemberCount(localIdentity) == 0)
             {
-                CoopPlugin.Log.LogWarning("enum check: the host has NO modded enum ids to compare against, so "
-                    + (peerName ?? "") + " was not ID-checked at all (expected on a vanilla host; on a modded one see the 'enum identity source' line at startup)");
+                CoopPlugin.Log.LogWarning("enum check: the host resolved NO enum identity members, so "
+                    + (peerName ?? "") + " was not key-checked at all (the six enum types did not "
+                    + "resolve this session; see the 'enum identity source' line at startup)");
             }
 
             return new CatalogEnumValidation
             {
-                Conflicts = EnumConflicts(canonicalPeerLines, localLines),
-                RegistryFileMatchesRuntime = CatalogParity.RegistryFileMatchesRuntime(),
+                Conflicts = EnumKeyConflicts(peerIdentity, localIdentity),
                 HashesAreConsistent = hashesAreConsistent,
                 HashFailureReason = hashFailureReason,
             };
         }
 
-        internal static string DescribeRuntimeConflict(List<string> conflicts)
-            => "your custom-card database conflicts with the host's, and the host's card-database FILE was changed this session so it no longer matches what the host is running - the HOST has to RESTART the game before it can be auto-synced to you (conflicting: "
-                + DescribeConflicts(conflicts ?? new List<string>()) + ")";
-
-        /// <summary>Find only same-name/different-id conflicts. One-sided content remains legal;
-        /// an empty side therefore has no conflicts.</summary>
-        internal static List<string> EnumConflicts(List<string> theirs, List<string> ours)
+        /// <summary>True when the identity has the shape the handshake expects: no duplicate
+        /// kinds, every member named, no duplicate names within a kind. An EMPTY identity is
+        /// allowed - the key-set comparison decides whether it is a mismatch, exactly as the
+        /// previous line-based handshake did; only a null/malformed shape is rejected here.</summary>
+        internal static bool IsIdentityUsable(List<EnumKindIdentityDto> identity)
         {
-            var found = new List<string>();
-            if (theirs == null || theirs.Count == 0 || ours == null || ours.Count == 0)
+            if (identity == null)
             {
-                return found;
+                return false;
             }
 
-            var theirMap = EnumMap(theirs);
-            var ourMap = EnumMap(ours);
-            foreach (var kv in theirMap)
+            if (identity.Count == 0)
             {
-                if (ourMap.TryGetValue(kv.Key, out var ourId) && ourId != kv.Value)
+                return true;
+            }
+
+            var kinds = new HashSet<int>();
+            foreach (var kind in identity)
+            {
+                if (kind == null || kind.Members == null || !kinds.Add(kind.Kind))
                 {
-                    found.Add($"{kv.Key} -> yours {kv.Value}, host {ourId}");
+                    return false;
+                }
+
+                var names = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var member in kind.Members)
+                {
+                    if (member == null || string.IsNullOrEmpty(member.Name)
+                        || !names.Add(member.Name))
+                    {
+                        return false;
+                    }
                 }
             }
+
+            return true;
+        }
+
+        private static int MemberCount(List<EnumKindIdentityDto> identity)
+        {
+            var count = 0;
+            if (identity == null)
+            {
+                return 0;
+            }
+
+            foreach (var kind in identity)
+            {
+                count += kind == null || kind.Members == null ? 0 : kind.Members.Count;
+            }
+
+            return count;
+        }
+
+        /// <summary>The peer's custom-content name set differs from ours. Ids are irrelevant - only
+        /// which names exist matters, because the wire translates by name.</summary>
+        internal static string DescribeEnumKeysMismatch(List<string> conflicts)
+            => "your custom content does not match the host's - both players need the same custom "
+                + "card/item packs installed (identical names; the numeric ids underneath may "
+                + "differ). Differences: "
+                + DescribeConflicts(conflicts ?? new List<string>());
+
+        /// <summary>Find catalog KEY differences only: a member name present on one peer and not
+        /// the other. The numeric ids are deliberately ignored - EPL mints them in bundle load
+        /// order, so the same name can carry different ids on two peers; the wire and the save
+        /// translate enum identity by name (<see cref="CatalogIdMap"/>), so differing ids are not
+        /// a conflict.</summary>
+        internal static List<string> EnumKeyConflicts(List<EnumKindIdentityDto> theirs,
+            List<EnumKindIdentityDto> ours)
+        {
+            var found = new List<string>();
+            var theirKeys = EnumKeySet(theirs);
+            var ourKeys = EnumKeySet(ours);
+            foreach (var key in theirKeys)
+            {
+                if (!ourKeys.Contains(key))
+                {
+                    found.Add("client-only " + key);
+                }
+            }
+
+            foreach (var key in ourKeys)
+            {
+                if (!theirKeys.Contains(key))
+                {
+                    found.Add("host-only " + key);
+                }
+            }
+
             found.Sort(StringComparer.Ordinal);
             return found;
         }
 
-        internal static CatalogEnumSyncOffer PrepareEnumSync()
+        /// <summary>The "EnumType:MemberName" keys of one identity, for key-set comparison. The
+        /// member's numeric id is intentionally not part of the key.</summary>
+        private static HashSet<string> EnumKeySet(List<EnumKindIdentityDto> identity)
         {
-            var offer = new CatalogEnumSyncOffer();
-
-            if (!TryBuildEnumSyncPayload(out var payload, out var failureReason))
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            if (identity == null)
             {
-                offer.FailureReason = failureReason;
-                return offer;
+                return keys;
             }
 
-            offer.Payload = payload;
-            return offer;
-        }
-
-        internal static string DescribeEnumConflict(List<string> conflicts, CatalogEnumSyncOffer offer)
-        {
-            var why = DescribeConflicts(conflicts ?? new List<string>());
-            if (offer != null && offer.ShouldSend)
+            foreach (var kind in identity)
             {
-                return "your custom-card database conflicts with the host's - the host's copy has just been sent to you, and (unless you switched auto-sync off) saved on your PC with your old file backed up first. Now QUIT THE GAME TO DESKTOP, start it again, then join: the ids are only read while the game is booting, so nothing changes until you do (conflicting: "
-                    + why + ")";
+                if (kind == null || kind.Members == null)
+                {
+                    continue;
+                }
+
+                string typeName;
+                try
+                {
+                    typeName = CatalogIdMap.WireType((EnumKind)kind.Kind).Name;
+                }
+                catch { continue; }
+
+                foreach (var member in kind.Members)
+                {
+                    if (member != null && member.Name != null)
+                    {
+                        keys.Add(typeName + ":" + member.Name);
+                    }
+                }
             }
 
-            return "your custom-card database conflicts with the host's, and the host could not send its card database"
-                + (offer != null && offer.FailureReason != null ? " (" + offer.FailureReason + ")" : "")
-                + " - ask the host to check that AppData\\LocalLow\\OPNeonGames\\Card Shop Simulator\\PrefabLoader\\enum_values.json exists and is readable, or copy it across by hand (conflicting: "
-                + why + ")";
+            return keys;
         }
 
         internal static bool TryValidateCards(string peerHash, List<string> peerCards,
@@ -381,9 +408,9 @@ namespace CardShopCoop.Modules.Catalog
                     int count;
                     while ((count = gzip.Read(buffer, 0, buffer.Length)) > 0)
                     {
-                        if (destination.Length + count > EnumBlobCap)
+                        if (destination.Length + count > CatalogBlobCap)
                         {
-                            failureReason = "catalog gzip expands beyond the " + EnumBlobCap
+                            failureReason = "catalog gzip expands beyond the " + CatalogBlobCap
                                 + "-byte resource cap";
                             CoopPlugin.Log.LogWarning("catalog blob rejected: " + failureReason
                                 + " (" + data.Length + " compressed bytes)");
@@ -411,11 +438,11 @@ namespace CardShopCoop.Modules.Catalog
             {
                 var values = (lines ?? new List<string>()).ToArray();
                 var raw = Encoding.UTF8.GetBytes(string.Join("\n", values));
-                if (raw.Length > EnumBlobCap)
+                if (raw.Length > CatalogBlobCap)
                 {
-                    CoopPlugin.Log.LogWarning("registry blob is OVER THE WIRE CAP: " + values.Length + " ids, "
-                        + raw.Length + " bytes uncompressed vs a " + EnumBlobCap
-                        + "-byte cap - the other PC will IGNORE it and modded ids will not be translated this session (ids must already match)");
+                    CoopPlugin.Log.LogWarning("enum identity blob is OVER THE WIRE CAP: " + values.Length + " lines, "
+                        + raw.Length + " bytes uncompressed vs a " + CatalogBlobCap
+                        + "-byte cap - the receiving PC cannot decode it and the join will be refused");
                 }
 
                 return Msg.Gzip(raw);
@@ -445,57 +472,6 @@ namespace CardShopCoop.Modules.Catalog
             }
 
             result.Sort(StringComparer.Ordinal);
-            return result;
-        }
-
-        private static bool AreEnumLinesWellFormed(List<string> lines)
-        {
-            foreach (var line in lines)
-            {
-                var colon = line.IndexOf(':');
-                var equals = line.LastIndexOf('=');
-                if (colon <= 0 || equals <= colon + 1 || equals == line.Length - 1
-                    || !long.TryParse(line.Substring(equals + 1), out _))
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private static List<string> SafeLines(Func<List<string>> factory)
-        {
-            try
-            {
-                return factory() ?? new List<string>();
-            }
-            catch (Exception error)
-            {
-                CoopPlugin.Log.LogWarning("catalog parity lines: " + error.Message);
-                return new List<string>();
-            }
-        }
-
-        private static Dictionary<string, string> EnumMap(List<string> lines)
-        {
-            var result = new Dictionary<string, string>();
-            foreach (var line in lines)
-            {
-                if (string.IsNullOrEmpty(line))
-                {
-                    continue;
-                }
-
-                var equals = line.LastIndexOf('=');
-                if (equals <= 0 || equals == line.Length - 1)
-                {
-                    continue;
-                }
-
-                result[line.Substring(0, equals)] = line.Substring(equals + 1);
-            }
-
             return result;
         }
 

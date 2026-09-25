@@ -53,11 +53,11 @@ namespace CardShopCoop.Modules.World
         // BoxDestroyRequest for the box the store destroyed.
         private int _suppressDestroyForward;
         internal Guid HostPredictionId;
-        private static readonly System.Reflection.FieldInfo OutOfBoundsTimer =
+        private static readonly FieldInfo OutOfBoundsTimer =
             AccessTools.Field(typeof(RestockManager), "m_OutofBoundCheckTimer");
-        private static readonly System.Reflection.FieldInfo BoxedFurniture =
+        private static readonly FieldInfo BoxedFurniture =
             AccessTools.Field(typeof(InteractablePackagingBox_Shelf), "m_BoxedObject");
-        private static readonly System.Reflection.FieldInfo BeingHoldField =
+        private static readonly FieldInfo BeingHoldField =
             AccessTools.Field(typeof(InteractableObject), "m_IsBeingHold");
 
         internal BoxNetworkInteraction(bool host, Action<INetMessage> broadcast,

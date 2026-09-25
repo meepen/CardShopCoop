@@ -23,7 +23,6 @@ namespace CardShopCoop.Modules.SaveTransfer
         private byte[] _pendingSave;
         private int _saveExpected;
         private int _bundleExpected;
-        private int _hostSlot;
         private int _sessionGeneration;
         private bool _sidecarsComplete;
         private string _sidecarWarning;
@@ -55,14 +54,13 @@ namespace CardShopCoop.Modules.SaveTransfer
         }
 
         /// <summary>Core calls this after it validates the host Welcome metadata.</summary>
-        public static bool TryBeginClientTransfer(int hostSlot, int saveLength, int bundleLength,
-            bool sidecarsComplete = true, string sidecarWarning = null)
+        public static bool TryBeginClientTransfer(int saveLength, int bundleLength,
+            bool sidecarsComplete, string sidecarWarning)
         {
             var owner = _active;
             if (owner == null || owner._shutdown || saveLength <= 0
                 || saveLength > SaveTransferStorage.MaxTransferBytes
-                || bundleLength < 0 || bundleLength > SaveTransferStorage.MaxTransferBytes
-                || hostSlot < 0 || hostSlot > 99)
+                || bundleLength < 0 || bundleLength > SaveTransferStorage.MaxTransferBytes)
             {
                 return false;
             }
@@ -74,7 +72,6 @@ namespace CardShopCoop.Modules.SaveTransfer
 
             owner._saveExpected = saveLength;
             owner._bundleExpected = bundleLength;
-            owner._hostSlot = hostSlot;
             owner._sidecarsComplete = sidecarsComplete;
             owner._sidecarWarning = BoundWarning(sidecarWarning);
             owner._sessionGeneration = SaveTransferRuntime.SessionGeneration;
@@ -98,7 +95,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             if (!sidecarsComplete)
             {
                 status += " Some mod data was omitted.";
-                CoopPlugin.Log.LogWarning("coop: host sidecar transfer is partial"
+                CoopPlugin.Log.LogWarning("coop: host mod-data transfer is partial"
                     + (string.IsNullOrEmpty(owner._sidecarWarning) ? "" : ": "
                         + owner._sidecarWarning));
             }
@@ -262,7 +259,7 @@ namespace CardShopCoop.Modules.SaveTransfer
 
             if (!_sidecarsComplete)
             {
-                CoopPlugin.Log.LogWarning("coop: applying a partial sidecar bundle"
+                CoopPlugin.Log.LogWarning("coop: applying a partial mod-data bundle"
                     + (string.IsNullOrEmpty(_sidecarWarning) ? "" : ": " + _sidecarWarning));
             }
 
@@ -288,10 +285,9 @@ namespace CardShopCoop.Modules.SaveTransfer
 
             try
             {
-                var sidecarRoot = Application.persistentDataPath;
-                SaveTransferSidecars.ApplyBundleAsync(bundle, _hostSlot, SaveTransferStorage.CoopSlot,
-                    generation, sidecarRoot, () => ApplySave(save, generation), error => RejectTransfer(
-                        "could not apply mod data: " + error.Message));
+                SaveTransferSidecars.ApplyBundleAsync(bundle, SaveTransferStorage.HostSnapshotSlot,
+                    SaveTransferStorage.CoopSlot, generation, () => ApplySave(save, generation),
+                    error => RejectTransfer("could not apply mod data: " + error.Message));
             }
             catch (Exception error)
             {

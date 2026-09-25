@@ -3,6 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Threading;
+using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Runtime;
 using UnityEngine;
@@ -18,6 +19,13 @@ namespace CardShopCoop.Modules.SaveTransfer
     public static class SaveTransferStorage
     {
         public const int HostSnapshotSlot = 6;
+
+        /// <summary>The reserved slot the borrowed co-op world lives in on a guest. It is a
+        /// negative value so it can never collide with a real save (0..99) or with the game's
+        /// "-1 = no save" sentinel: CSaveLoad.Load(-100) reads savedGames_Release-100.json and EPL
+        /// reads PrefabLoader/EnhancedPrefabLoader_-100, neither of which the save UI ever shows,
+        /// so a guest's own local saves are never touched.</summary>
+        public const int ReservedCoopSlot = -100;
         public const int MaxTransferBytes = 32 * 1024 * 1024;
         public const int MaxSidecarRawBytes = MaxTransferBytes;
         public const int MaxExpandedBytes = 64 * 1024 * 1024;
@@ -29,8 +37,10 @@ namespace CardShopCoop.Modules.SaveTransfer
         {
             get
             {
-                var configured = CoopPlugin.ClientWorldSlot == null ? 7 : CoopPlugin.ClientWorldSlot.Value;
-                return configured >= 0 && configured <= 99 ? configured : 7;
+                var configured = CoopPlugin.ClientWorldSlot?.Value ?? ReservedCoopSlot;
+                // -1 is the game's "no save" sentinel; never use it. Anything else is safe because
+                // the slot is only ever used to build the save filename.
+                return configured == -1 ? ReservedCoopSlot : configured;
             }
         }
 
@@ -42,9 +52,10 @@ namespace CardShopCoop.Modules.SaveTransfer
 
         private static void ValidateSlot(int slot)
         {
-            if (slot < 0 || slot > 99)
+            if (slot == -1)
             {
-                throw new ArgumentOutOfRangeException(nameof(slot), "Save slot must be between 0 and 99.");
+                throw new ArgumentOutOfRangeException(nameof(slot),
+                    "Save slot -1 is the game's \"no save\" sentinel and cannot be used.");
             }
         }
 
@@ -54,6 +65,14 @@ namespace CardShopCoop.Modules.SaveTransfer
         /// file proves completion, or the game's save counter proves the in-memory backend ran.
         /// </summary>
         public static byte[] BuildHostPayload()
+            => BuildHostPayload(out _);
+
+        /// <summary>
+        /// Force-saves the live host world into the throwaway slot and returns exactly the bytes
+        /// that the client will load. <paramref name="saveStartedUtc"/> is the instant the save
+        /// began; every mod-data file written at or after it is the sidecar set to ship.
+        /// </summary>
+        public static byte[] BuildHostPayload(out DateTime saveStartedUtc)
         {
             ValidateSlot(HostSnapshotSlot);
             var manager = SceneRef<CGameManager>.Get();
@@ -68,6 +87,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 "savedGames_Release" + HostSnapshotSlot + ".gd"));
 
             var timestamp = DateTime.UtcNow;
+            saveStartedUtc = timestamp;
             var counterBeforeKnown = Net.PlatformProbe.TrySampleSaveCounter(out var indexBefore,
                 out var cycleBefore);
             var previousSlot = manager.m_CurrentSaveLoadSlotSelectedIndex;
@@ -385,22 +405,14 @@ namespace CardShopCoop.Modules.SaveTransfer
                 throw new InvalidOperationException("The game manager is not available for world load.");
             }
 
+            // The bytes are already on disk at the reserved slot. The ONLY way the world loads is
+            // the game's own CSaveLoad.Load(slot) (reached via ForceLoadSlot), so EPL's per-slot
+            // load prefix and the native restore both run exactly as they do for a local save.
             manager.m_ForceNoCloudSaveLoad = true;
-            var field = typeof(CSaveLoad).GetField("m_SavedGame",
-                BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-            var json = new UTF8Encoding(false).GetString(saveBytes)
-                .TrimStart('\uFEFF', ' ', '\r', '\n', '\t');
-            if (field != null)
-            {
-                var world = JsonUtility.FromJson(json, field.FieldType);
-                if (world == null)
-                {
-                    throw new InvalidDataException("The game rejected the received world JSON.");
-                }
-                field.SetValue(null, world);
-            }
-
             CoopPlugin.Log.LogInfo("Coop save received (" + saveBytes.Length / 1024 + " KB), loading world...");
+            // One-shot: the native load that follows is the host's save, whose gated enum ids are
+            // in the host's space; translate them before the game propagates them.
+            SaveEnumRemap.Arm();
             ForceLoadSlot(CoopSlot);
         }
 

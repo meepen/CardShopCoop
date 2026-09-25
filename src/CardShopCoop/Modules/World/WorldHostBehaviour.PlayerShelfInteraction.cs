@@ -338,7 +338,7 @@ namespace CardShopCoop.Modules.World
     {
         public int ShelfKey;
         public int Compartment;
-        public int ItemType;
+        public EItemType ItemType;
         public int ItemCount;
     }
 
@@ -459,7 +459,7 @@ namespace CardShopCoop.Modules.World
                 : new ShelfItemRemoveRequestMessage();
             message.ShelfKey = shelfKey;
             message.Compartment = compartmentIndex;
-            message.ItemType = (int)targetType;
+            message.ItemType = targetType;
             message.ItemCount = targetCount;
 
             // An add lets the game's own AddItem move the real item, so a rejected add can hand
@@ -644,7 +644,7 @@ namespace CardShopCoop.Modules.World
             var type = compartment.GetItemType();
             if (message is ShelfItemAddRequestMessage)
             {
-                var requestedType = (EItemType)message.ItemType;
+                var requestedType = message.ItemType;
                 if (count > 0 && type != requestedType)
                 {
                     return false;
@@ -661,7 +661,7 @@ namespace CardShopCoop.Modules.World
                     return false;
                 }
 
-                message.ItemType = (int)requestedType;
+                message.ItemType = requestedType;
                 message.ItemCount = count + 1;
                 return true;
             }
@@ -677,12 +677,12 @@ namespace CardShopCoop.Modules.World
                         return false;
                     }
 
-                    message.ItemType = (int)EItemType.None;
+                    message.ItemType = EItemType.None;
                     message.ItemCount = 0;
                     return true;
                 }
 
-                message.ItemType = (int)type;
+                message.ItemType = type;
                 message.ItemCount = count - 1;
                 return true;
             }
@@ -724,7 +724,7 @@ namespace CardShopCoop.Modules.World
             }
             message.ShelfKey = mutation.ShelfKey;
             message.Compartment = mutation.Compartment;
-            message.ItemType = (int)compartment.GetItemType();
+            message.ItemType = compartment.GetItemType();
             message.ItemCount = compartment.GetItemCount();
 
             if (_host)
@@ -815,9 +815,8 @@ namespace CardShopCoop.Modules.World
         /// the difference. Rapid deltas then add/remove single items instead of rebuilding the
         /// whole compartment, which previously flickered and could desync the stored-item list
         /// from the price-tag count.</summary>
-        private void ApplyState(ShelfCompartment compartment, int itemType, int itemCount)
+        private void ApplyState(ShelfCompartment compartment, EItemType type, int itemCount)
         {
-            var type = (EItemType)itemType;
             if (itemCount <= 0 || type == EItemType.None)
             {
                 Clear(compartment);
@@ -963,16 +962,16 @@ namespace CardShopCoop.Modules.World
                 && CanResolveItemType(message.ItemType, message.ItemCount);
         }
 
-        private bool CanResolveItemType(int itemType, int itemCount)
+        private bool CanResolveItemType(EItemType itemType, int itemCount)
         {
-            if (itemType == (int)EItemType.None)
+            if (itemType == EItemType.None)
             {
                 return itemCount == 0;
             }
 
             try
             {
-                var data = InventoryBase.GetItemData((EItemType)itemType);
+                var data = InventoryBase.GetItemData(itemType);
                 var dimension = data != null ? data.itemDimension : Vector3.zero;
                 return dimension.x > 0f && dimension.y > 0f && dimension.z > 0f;
             }
