@@ -39,6 +39,17 @@ Build the plugin with:
 dotnet build src\CardShopCoop\CardShopCoop.csproj -c Release -p:Deploy=true
 ```
 
+Or open `CardShopCoop.sln` and build the **Deploy** configuration, which builds every plugin project
+and copies them into the game install resolved from `GamePath`:
+
+```powershell
+dotnet build CardShopCoop.sln -c Deploy
+```
+
+`-p:Deploy=true` still works for a single project, and `-p:DeploySample=true` additionally deploys
+the sample mod. The Deploy configuration only changes where output goes; it is otherwise a normal
+build.
+
 Before submitting changes, check formatting from the repository root:
 
 ```powershell

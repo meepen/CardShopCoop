@@ -1,0 +1,94 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>CardShopCoop.CustomTv</AssemblyName>
+    <AssemblyTitle>CardShopCoop.CustomTv</AssemblyTitle>
+    <RootNamespace>CardShopCoop.CustomTv</RootNamespace>
+    <Company>DeliriumPulse</Company>
+    <Product>CardShopCoop Custom TV</Product>
+    <Description>RTCGO Custom TV co-op sync for CardShopCoop. Optional separate download.</Description>
+    <Authors>DeliriumPulse</Authors>
+    <Version>$(CardShopCoopVersion)</Version>
+    <LangVersion>9</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <ManagedPath>$(GamePath)/Card Shop Simulator_Data/Managed</ManagedPath>
+    <BepInExPath>$(GamePath)/BepInEx/core</BepInExPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Copy-local is off: the API assembly ships with CardShopCoop core, so we never ship a
+         second copy that could load as a distinct identity. -->
+    <ProjectReference Include="..\CardShopCoop.Api\CardShopCoop.Api.csproj">
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExPath)\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExPath)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedPath)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedPath)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedPath)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(ManagedPath)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="$(IntermediateOutputPath)CustomTvVersion.g.cs" />
+  </ItemGroup>
+
+  <Target Name="GenerateCustomTvVersion" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <CustomTvGeneratedSource>// &lt;auto-generated /&gt;&#xA;namespace CardShopCoop.CustomTv&#xA;{&#xA;    public partial class TvPlugin&#xA;    {&#xA;        public const string Version = &quot;$(CardShopCoopVersion)&quot;%3B&#xA;    }&#xA;}</CustomTvGeneratedSource>
+    </PropertyGroup>
+    <WriteLinesToFile
+      File="$(IntermediateOutputPath)CustomTvVersion.g.cs"
+      Overwrite="true"
+      Lines="$(CustomTvGeneratedSource)" />
+  </Target>
+
+  <Target Name="DeployTv" AfterTargets="Build" Condition="'$(Deploy)' == 'true'">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GamePath)/BepInEx/plugins" />
+  </Target>
+
+  <Target Name="Package" AfterTargets="Build" Condition="'$(Package)' == 'true'">
+    <!-- The external-mod interop bundle. It currently holds just Custom TV; future interop mods
+         are added as additional <FolderName>/<Dll> entries in PackageDirectory. -->
+    <PropertyGroup>
+      <PackageDirectory>$(IntermediateOutputPath)package</PackageDirectory>
+      <PackageZip>$(OutputPath)CardShopCoop.ExternalModInterop.zip</PackageZip>
+    </PropertyGroup>
+    <RemoveDir Directories="$(PackageDirectory)" />
+    <MakeDir Directories="$(PackageDirectory)/$(AssemblyName)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageDirectory)/$(AssemblyName)" />
+    <ZipDirectory SourceDirectory="$(PackageDirectory)" DestinationFile="$(PackageZip)" Overwrite="true" />
+  </Target>
+
+</Project>

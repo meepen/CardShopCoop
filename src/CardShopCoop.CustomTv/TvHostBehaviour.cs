@@ -1,9 +1,8 @@
 using System;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -23,7 +22,7 @@ namespace CardShopCoop.Modules.Tv
         private const byte Open = 7;
 
         private static TvHostBehaviour _active;
-        private CoopRuntimeContext _context;
+        private ICoopContext _context;
         private Harmony _harmony;
         private bool _shutdown;
         private float _lastSeekInputTime;
@@ -53,7 +52,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _context = RuntimeContext;
+            _context = Context;
             var registered = false;
             try
             {
@@ -68,7 +67,7 @@ namespace CardShopCoop.Modules.Tv
             }
             catch (Exception exception)
             {
-                CoopPlugin.Log.LogError("TV host initialization failed: " + exception);
+                CoopLog.Error("TV host initialization failed: " + exception);
                 _harmony?.UnpatchSelf();
                 _harmony = null;
                 if (registered)
@@ -112,7 +111,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvOpMessage))]
-        private void HandleOperation(MessageContext context, TvOpMessage message)
+        private void HandleOperation(CoopMessageContext context, TvOpMessage message)
         {
             if (_shutdown || message == null || !IsJoinedClient(context) || !TvInterop.Present
                 || message.Op < Next || message.Op > Open)
@@ -125,7 +124,7 @@ namespace CardShopCoop.Modules.Tv
             {
                 if (!TryBeginPendingMediaOperation(message.Op, message.PredictionId))
                 {
-                    PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                    CoopPredict.Rollback(_context, context.Connection.Id, message.PredictionId);
                     return;
                 }
             }
@@ -135,7 +134,7 @@ namespace CardShopCoop.Modules.Tv
             var applied = TvInterop.ApplyOperation(message.Op, message.Url, message.Title, message.Value);
             if (!applied)
             {
-                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                CoopPredict.Rollback(_context, context.Connection.Id, message.PredictionId);
                 if (mediaOperation)
                 {
                     ClearPendingMediaOperation(pendingOperation, pendingPredictionId);
@@ -195,7 +194,7 @@ namespace CardShopCoop.Modules.Tv
             ClearPendingMediaOperation();
         }
 
-        private static bool IsJoinedClient(MessageContext context)
+        private static bool IsJoinedClient(CoopMessageContext context)
         {
             return context?.Connection != null && context.Connection.Id != 1
                 && (context.Connection.State == ConnectionState.Transferring
@@ -293,7 +292,7 @@ namespace CardShopCoop.Modules.Tv
 
         private void PublishMediaDelta(byte operation, Guid predictionId, bool force)
         {
-            if (_shutdown || _context == null || !_context.InGame() || !TvInterop.Present)
+            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
             {
                 return;
             }
@@ -334,7 +333,7 @@ namespace CardShopCoop.Modules.Tv
 
         private void PublishScalarDelta(byte operation, Guid predictionId)
         {
-            if (_shutdown || _context == null || !_context.InGame() || !TvInterop.Present)
+            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
             {
                 return;
             }
@@ -377,7 +376,7 @@ namespace CardShopCoop.Modules.Tv
 
         private void PublishBarrierDelta(Guid predictionId)
         {
-            if (_shutdown || _context == null || !_context.InGame() || !TvInterop.Present)
+            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
             {
                 return;
             }
@@ -488,7 +487,7 @@ namespace CardShopCoop.Modules.Tv
                 var original = AccessTools.Method(TvInterop.OptionalControllerType, method);
                 if (original == null)
                 {
-                    CoopPlugin.Log.LogWarning("TV host patch target missing: " + method);
+                    CoopLog.Warn("TV host patch target missing: " + method);
                     return;
                 }
 
@@ -496,7 +495,7 @@ namespace CardShopCoop.Modules.Tv
             }
             catch (Exception exception)
             {
-                CoopPlugin.Log.LogWarning("TV host patch failed " + method + ": " + exception.Message);
+                CoopLog.Warn("TV host patch failed " + method + ": " + exception.Message);
             }
         }
 
@@ -629,7 +628,7 @@ namespace CardShopCoop.Modules.Tv
 
             var pendingOperation = _pendingMediaOperation;
             var pendingPredictionId = _pendingMediaPredictionId;
-            CoopPlugin.Log.LogError("Host TV VideoPlayer failed: " + (message ?? "unknown error"));
+            CoopLog.Error("Host TV VideoPlayer failed: " + (message ?? "unknown error"));
             TvInterop.AbortSharedPlayback();
             AbortBarrier("host TV playback failed");
             _lastSource = null;
@@ -644,7 +643,7 @@ namespace CardShopCoop.Modules.Tv
             _lastPlaylistIndex = 0;
             _lastPosition = 0.0;
             _hasHostState = _lastPowered;
-            if (_context != null && _context.InGame() && TvInterop.Present)
+            if (_context != null && _context.InGame && TvInterop.Present)
             {
                 _context.Broadcast(new TvPlaybackErrorDeltaMessage
                 {
@@ -667,7 +666,7 @@ namespace CardShopCoop.Modules.Tv
             _barrier = false;
             _resumePulse = true;
             TvInterop.ResumePlayback();
-            CoopPlugin.Log.LogWarning("TV load barrier aborted: " + reason);
+            CoopLog.Warn("TV load barrier aborted: " + reason);
         }
     }
 }

@@ -8,12 +8,6 @@ using CardShopCoop.Util;
 
 namespace CardShopCoop.Net
 {
-    /// <summary>Typed representation of one protocol message. Payload serialization is
-    /// centralized in <see cref="WireCodec"/>; message DTOs contain data only.</summary>
-    public interface INetMessage
-    {
-    }
-
     public static class NetMessageCodec
     {
         public static byte[] Encode(INetMessage message)

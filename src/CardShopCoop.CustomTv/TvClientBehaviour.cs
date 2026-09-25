@@ -1,9 +1,8 @@
 using System;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -24,7 +23,7 @@ namespace CardShopCoop.Modules.Tv
         private const string PredictionScope = "tv";
 
         private static TvClientBehaviour _active;
-        private CoopRuntimeContext _context;
+        private ICoopContext _context;
         private Harmony _harmony;
         private TvBaselineMessage _latestBaseline;
         private TvMediaDeltaMessage _pendingMedia;
@@ -46,7 +45,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _context = RuntimeContext;
+            _context = Context;
             var registered = false;
             try
             {
@@ -62,7 +61,7 @@ namespace CardShopCoop.Modules.Tv
             }
             catch (Exception exception)
             {
-                CoopPlugin.Log.LogError("TV client initialization failed: " + exception);
+                CoopLog.Error("TV client initialization failed: " + exception);
                 _harmony?.UnpatchSelf();
                 _harmony = null;
                 if (registered)
@@ -89,7 +88,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvBaselineMessage))]
-        private void HandleBaseline(MessageContext context, TvBaselineMessage message)
+        private void HandleBaseline(CoopMessageContext context, TvBaselineMessage message)
         {
             if (_shutdown || !TvInterop.Present)
             {
@@ -106,7 +105,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvMediaDeltaMessage))]
-        private void HandleMediaDelta(MessageContext context, TvMediaDeltaMessage message)
+        private void HandleMediaDelta(CoopMessageContext context, TvMediaDeltaMessage message)
         {
             if (_shutdown || !TvInterop.Present)
             {
@@ -116,14 +115,14 @@ namespace CardShopCoop.Modules.Tv
             if (message.Generation < _clientGeneration
                 || _pendingMedia != null && _pendingMedia.Generation > message.Generation)
             {
-                PredictionApi.ConfirmSuperseded(message.PredictionId);
+                CoopPredict.ConfirmSuperseded(message.PredictionId);
                 return;
             }
 
             _pendingMedia = message;
             if (_pendingError != null && _pendingError.Generation < message.Generation)
             {
-                PredictionApi.ConfirmSuperseded(_pendingError.PredictionId);
+                CoopPredict.ConfirmSuperseded(_pendingError.PredictionId);
                 _pendingError = null;
             }
             ReconcileWithoutController(message.PredictionId);
@@ -131,7 +130,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvPauseDeltaMessage))]
-        private void HandlePauseDelta(MessageContext context, TvPauseDeltaMessage message)
+        private void HandlePauseDelta(CoopMessageContext context, TvPauseDeltaMessage message)
         {
             if (_shutdown || !TvInterop.Present)
             {
@@ -144,7 +143,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvPowerDeltaMessage))]
-        private void HandlePowerDelta(MessageContext context, TvPowerDeltaMessage message)
+        private void HandlePowerDelta(CoopMessageContext context, TvPowerDeltaMessage message)
         {
             if (_shutdown || !TvInterop.Present)
             {
@@ -157,7 +156,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvShuffleDeltaMessage))]
-        private void HandleShuffleDelta(MessageContext context, TvShuffleDeltaMessage message)
+        private void HandleShuffleDelta(CoopMessageContext context, TvShuffleDeltaMessage message)
         {
             if (_shutdown || !TvInterop.Present)
             {
@@ -170,7 +169,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvSeekDeltaMessage))]
-        private void HandleSeekDelta(MessageContext context, TvSeekDeltaMessage message)
+        private void HandleSeekDelta(CoopMessageContext context, TvSeekDeltaMessage message)
         {
             if (_shutdown || !TvInterop.Present)
             {
@@ -183,7 +182,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvBarrierDeltaMessage))]
-        private void HandleBarrierDelta(MessageContext context, TvBarrierDeltaMessage message)
+        private void HandleBarrierDelta(CoopMessageContext context, TvBarrierDeltaMessage message)
         {
             if (_shutdown || !TvInterop.Present)
             {
@@ -196,7 +195,7 @@ namespace CardShopCoop.Modules.Tv
         }
 
         [MessageHandler(typeof(TvPlaybackErrorDeltaMessage))]
-        private void HandlePlaybackError(MessageContext context, TvPlaybackErrorDeltaMessage message)
+        private void HandlePlaybackError(CoopMessageContext context, TvPlaybackErrorDeltaMessage message)
         {
             if (_shutdown || !TvInterop.Present)
             {
@@ -206,7 +205,7 @@ namespace CardShopCoop.Modules.Tv
             if (message.Generation < _clientGeneration
                 || _pendingMedia != null && _pendingMedia.Generation > message.Generation)
             {
-                PredictionApi.ConfirmSuperseded(message.PredictionId);
+                CoopPredict.ConfirmSuperseded(message.PredictionId);
                 return;
             }
 
@@ -285,13 +284,13 @@ namespace CardShopCoop.Modules.Tv
         {
             if (!TvInterop.ControllerReady)
             {
-                PredictionApi.ApplyAuthoritative(predictionId, () => { });
+                CoopPredict.ApplyAuthoritative(predictionId, () => { });
             }
         }
 
         private void ApplyLatestState()
         {
-            if (_shutdown || !_joined || _context == null || !_context.InGame()
+            if (_shutdown || !_joined || _context == null || !_context.InGame
                 || !TvInterop.Present || TvInterop.ApplyingRemote || !TvInterop.ControllerReady)
             {
                 return;
@@ -312,13 +311,13 @@ namespace CardShopCoop.Modules.Tv
 
             if (_pendingMedia != null && _pendingMedia.Generation < _clientGeneration)
             {
-                PredictionApi.ConfirmSuperseded(_pendingMedia.PredictionId);
+                CoopPredict.ConfirmSuperseded(_pendingMedia.PredictionId);
                 _pendingMedia = null;
             }
 
             if (_pendingError != null && _pendingError.Generation < _clientGeneration)
             {
-                PredictionApi.ConfirmSuperseded(_pendingError.PredictionId);
+                CoopPredict.ConfirmSuperseded(_pendingError.PredictionId);
                 _pendingError = null;
             }
 
@@ -356,7 +355,7 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var message = _pendingMedia;
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            CoopPredict.ApplyAuthoritative(message.PredictionId, () =>
             {
                 _clientGeneration = message.Generation;
                 _clientBarrier = message.Barrier;
@@ -376,7 +375,7 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var message = _pendingPause;
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            CoopPredict.ApplyAuthoritative(message.PredictionId,
                 () => TvInterop.ApplyPaused(message.Paused));
             _pendingPause = null;
         }
@@ -389,7 +388,7 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var message = _pendingPower;
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            CoopPredict.ApplyAuthoritative(message.PredictionId,
                 () => TvInterop.ApplyPowered(message.PoweredOff));
             _pendingPower = null;
         }
@@ -402,7 +401,7 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var message = _pendingShuffle;
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            CoopPredict.ApplyAuthoritative(message.PredictionId,
                 () => TvInterop.ApplyShuffle(message.Shuffle));
             _pendingShuffle = null;
         }
@@ -415,7 +414,7 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var message = _pendingSeek;
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            CoopPredict.ApplyAuthoritative(message.PredictionId,
                 () => TvInterop.ApplySeek(message.Position));
             _pendingSeek = null;
         }
@@ -428,7 +427,7 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var message = _pendingBarrier;
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            CoopPredict.ApplyAuthoritative(message.PredictionId, () =>
             {
                 _clientBarrier = message.Barrier;
                 TvInterop.ApplyBarrier(message.Barrier, message.Resume);
@@ -446,12 +445,12 @@ namespace CardShopCoop.Modules.Tv
             var message = _pendingError;
             if (message.Generation < _clientGeneration)
             {
-                PredictionApi.ConfirmSuperseded(message.PredictionId);
+                CoopPredict.ConfirmSuperseded(message.PredictionId);
                 _pendingError = null;
                 return;
             }
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            CoopPredict.ApplyAuthoritative(message.PredictionId, () =>
             {
                 _clientGeneration = Math.Max(_clientGeneration, message.Generation);
                 _clientBarrier = false;
@@ -505,7 +504,7 @@ namespace CardShopCoop.Modules.Tv
                 var original = AccessTools.Method(TvInterop.OptionalControllerType, method);
                 if (original == null)
                 {
-                    CoopPlugin.Log.LogWarning("TV client patch target missing: " + method);
+                    CoopLog.Warn("TV client patch target missing: " + method);
                     return;
                 }
 
@@ -513,7 +512,7 @@ namespace CardShopCoop.Modules.Tv
             }
             catch (Exception exception)
             {
-                CoopPlugin.Log.LogWarning("TV client patch failed " + method + ": " + exception.Message);
+                CoopLog.Warn("TV client patch failed " + method + ": " + exception.Message);
             }
         }
 
@@ -582,7 +581,7 @@ namespace CardShopCoop.Modules.Tv
         private static bool CanPredict()
         {
             return _active != null && !_active._shutdown && _active._joined
-                && _active._context != null && _active._context.InGame() && TvInterop.Present;
+                && _active._context != null && _active._context.InGame && TvInterop.Present;
         }
 
         private static void SendIntent(Guid predictionId, byte op, string url = null,
@@ -601,7 +600,7 @@ namespace CardShopCoop.Modules.Tv
         private static void PredictMedia(byte op, string url = null, string title = null)
         {
             var prior = TvInterop.CapturePlaybackState();
-            PredictionApi.Predict(
+            CoopPredict.Predict(
                 PredictionScope,
                 predictionId => SendIntent(predictionId, op, url, title),
                 () => TvInterop.ApplyOperation(op, url, title, 0),
@@ -641,7 +640,7 @@ namespace CardShopCoop.Modules.Tv
         {
             var prior = TvInterop.Paused;
             var predicted = !prior;
-            PredictionApi.Predict(PredictionScope,
+            CoopPredict.Predict(PredictionScope,
                 predictionId => SendIntent(predictionId, Pause),
                 () => TvInterop.ApplyPaused(predicted),
                 () => TvInterop.ApplyPaused(prior));
@@ -651,7 +650,7 @@ namespace CardShopCoop.Modules.Tv
         {
             var prior = TvInterop.PoweredOff;
             var predicted = !prior;
-            PredictionApi.Predict(PredictionScope,
+            CoopPredict.Predict(PredictionScope,
                 predictionId => SendIntent(predictionId, Power),
                 () => TvInterop.ApplyPowered(predicted),
                 () => TvInterop.ApplyPowered(prior));
@@ -661,7 +660,7 @@ namespace CardShopCoop.Modules.Tv
         {
             var prior = TvInterop.Shuffle;
             var predicted = !prior;
-            PredictionApi.Predict(PredictionScope,
+            CoopPredict.Predict(PredictionScope,
                 predictionId => SendIntent(predictionId, Shuffle),
                 () => TvInterop.ApplyShuffle(predicted),
                 () => TvInterop.ApplyShuffle(prior));
@@ -671,7 +670,7 @@ namespace CardShopCoop.Modules.Tv
         {
             var prior = TvInterop.Position;
             var predicted = Math.Max(0.0, Math.Min(TvInterop.MaxPositionSeconds, prior + amount));
-            PredictionApi.Predict(PredictionScope,
+            CoopPredict.Predict(PredictionScope,
                 predictionId => SendIntent(predictionId, Seek, value: amount),
                 () => TvInterop.ApplySeek(predicted),
                 () => TvInterop.ApplySeek(prior));

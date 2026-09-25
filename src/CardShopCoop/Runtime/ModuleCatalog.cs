@@ -30,20 +30,29 @@ namespace CardShopCoop.Runtime
         private static readonly object Gate = new();
         private static Dictionary<string, ConfigEntry<bool>> _entries;
         private static List<string> _known;
+        private static ConfigFile _config;
 
-        /// <summary>The module a behaviour type belongs to, or "Core" for anything outside
-        /// <c>CardShopCoop.Modules.*</c>.</summary>
+        /// <summary>The module a behaviour type belongs to. A type from an external mod belongs to
+        /// that mod's assembly (one enable/disable checkbox per integrating mod, regardless of the
+        /// namespace it happens to use); built-in modules are namespaces under
+        /// <c>CardShopCoop.Modules</c>.</summary>
         internal static string ModuleOf(Type type)
         {
-            var ns = type?.Namespace;
-            if (string.IsNullOrEmpty(ns) || !ns.StartsWith(ModulesRoot, StringComparison.Ordinal))
+            var assembly = type?.Assembly;
+            if (assembly != null && assembly != typeof(ModuleCatalog).Assembly)
             {
-                return CoreModule;
+                return assembly.GetName().Name;
             }
 
-            var rest = ns.Substring(ModulesRoot.Length);
-            var dot = rest.IndexOf('.');
-            return dot < 0 ? rest : rest.Substring(0, dot);
+            var ns = type?.Namespace;
+            if (!string.IsNullOrEmpty(ns) && ns.StartsWith(ModulesRoot, StringComparison.Ordinal))
+            {
+                var rest = ns.Substring(ModulesRoot.Length);
+                var dot = rest.IndexOf('.');
+                return dot < 0 ? rest : rest.Substring(0, dot);
+            }
+
+            return CoreModule;
         }
 
         /// <summary>Bind one enable/disable checkbox per module. Call this once from plugin
@@ -62,6 +71,7 @@ namespace CardShopCoop.Runtime
                     return;
                 }
 
+                _config = config;
                 var entries = new Dictionary<string, ConfigEntry<bool>>(StringComparer.OrdinalIgnoreCase);
                 foreach (var module in Names())
                 {
@@ -81,6 +91,33 @@ namespace CardShopCoop.Runtime
             lock (Gate)
             {
                 return _known ??= Discover();
+            }
+        }
+
+        /// <summary>Adds a late-discovered external mod's enable/disable checkbox. Called when an
+        /// integrating mod's assembly is registered, after plugin startup.</summary>
+        internal static void BindExternal(string module)
+        {
+            if (string.IsNullOrEmpty(module) || string.Equals(module, CoreModule,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            lock (Gate)
+            {
+                if (_config == null || _entries == null || _entries.ContainsKey(module))
+                {
+                    return;
+                }
+
+                _entries[module] = _config.Bind(Section, module, true,
+                    "Enable the external co-op mod '" + module + "'. Applies after rejoining.");
+                if (_known != null && !_known.Contains(module))
+                {
+                    _known.Add(module);
+                    _known.Sort(StringComparer.OrdinalIgnoreCase);
+                }
             }
         }
 

@@ -12,10 +12,12 @@ namespace CardShopCoop.Net.Connection
         Disconnected
     }
 
+    /// <summary>Why a peer connection ended. Peer-supplied fields are bounded on the wire.</summary>
     public sealed class DisconnectInfo
     {
         public const int MaxCodeLength = 32;
         public const int MaxDetailLength = 256;
+
         public string Code
         {
             get;
@@ -37,11 +39,9 @@ namespace CardShopCoop.Net.Connection
             get;
         }
 
-        public DisconnectInfo(string reason, bool remote = false, string code = "closed", bool retryable = false,
-            ConnectionState phase = ConnectionState.Disconnecting)
+        public DisconnectInfo(string reason, bool remote = false, string code = "closed",
+            bool retryable = false, ConnectionState phase = ConnectionState.Disconnecting)
         {
-            // Phase is peer supplied on the wire.  Keep the useful bounded code/detail even
-            // when an old or malicious peer sends a value added by a newer build.
             if (!Enum.IsDefined(typeof(ConnectionState), phase))
             {
                 phase = ConnectionState.Disconnecting;
@@ -53,6 +53,7 @@ namespace CardShopCoop.Net.Connection
             Retryable = retryable;
             Phase = phase;
         }
+
         private static string Bound(string value, int max, string fallback)
         {
             if (string.IsNullOrWhiteSpace(value))
@@ -71,15 +72,18 @@ namespace CardShopCoop.Net.Connection
         private readonly object _stateLock = new();
         private ConnectionState _state;
         private DisconnectInfo _disconnectInfo;
+
         internal PeerConnection(int id)
         {
             Id = id;
             _state = ConnectionState.Handshaking;
         }
+
         public int Id
         {
             get;
         }
+
         public ConnectionState State
         {
             get
@@ -90,6 +94,7 @@ namespace CardShopCoop.Net.Connection
                 }
             }
         }
+
         internal bool TryTransition(ConnectionState next)
         {
             lock (_stateLock)
@@ -117,7 +122,7 @@ namespace CardShopCoop.Net.Connection
                 return true;
             }
         }
-        /// <summary>Atomically claims terminal transition and its first reason.</summary>
+
         internal bool BeginDisconnect(DisconnectInfo info)
         {
             if (info == null)
@@ -137,7 +142,7 @@ namespace CardShopCoop.Net.Connection
                 return true;
             }
         }
-        /// <summary>Records a peer-supplied terminal reason before EOF cleanup wins the race.</summary>
+
         internal bool RecordRemoteDisconnect(DisconnectInfo info)
         {
             if (info == null || !info.Remote)
@@ -162,6 +167,7 @@ namespace CardShopCoop.Net.Connection
                 return true;
             }
         }
+
         internal bool IsDisconnectingOrDisconnected
         {
             get
@@ -172,6 +178,7 @@ namespace CardShopCoop.Net.Connection
                 }
             }
         }
+
         internal DisconnectInfo DisconnectReason
         {
             get
@@ -182,6 +189,7 @@ namespace CardShopCoop.Net.Connection
                 }
             }
         }
+
         internal bool TryMarkDisconnected()
         {
             lock (_stateLock)
@@ -200,6 +208,7 @@ namespace CardShopCoop.Net.Connection
                 return true;
             }
         }
+
         public override string ToString() => "PeerConnection(" + Id + ")";
     }
 
@@ -209,6 +218,7 @@ namespace CardShopCoop.Net.Connection
         {
             get;
         }
+
         public DisconnectInfo Disconnect
         {
             get;
@@ -221,6 +231,3 @@ namespace CardShopCoop.Net.Connection
         }
     }
 }
-
-
-

@@ -29,4 +29,8 @@ jobs:
 
       # Formatting does not require the proprietary game assemblies.
       - name: Verify formatting
-        run: dotnet format src/CardShopCoop/CardShopCoop.csproj whitespace --verify-no-changes --no-restore
+        run: |
+          dotnet format src/CardShopCoop/CardShopCoop.csproj whitespace --verify-no-changes --no-restore
+          dotnet format src/CardShopCoop.Api/CardShopCoop.Api.csproj whitespace --verify-no-changes
+          dotnet format src/CardShopCoop.CustomTv/CardShopCoop.CustomTv.csproj whitespace --verify-no-changes
+          dotnet format samples/CardShopCoop.SampleMod/CardShopCoop.SampleMod.csproj whitespace --verify-no-changes

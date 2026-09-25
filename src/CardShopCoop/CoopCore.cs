@@ -93,6 +93,7 @@ namespace CardShopCoop
         private readonly MessageRouter _messageRouter = new();
         private readonly MainThreadDispatcher _dispatcher = new();
         private bool _shutdownCompleted;
+        private bool _externalModsDiscovered;
         private bool _sessionInGame;
         private bool _worldReady;
         private int _localConnectionId = -1;
@@ -124,6 +125,10 @@ namespace CardShopCoop
         }
 
         internal static int LocalConnectionId => Instance == null ? -1 : Instance._localConnectionId;
+
+        /// <summary>The live session context, or null when no session is active. Read by the
+        /// public <see cref="Api.CoopApi"/> binding.</summary>
+        internal CoopRuntimeContext LiveContext => _liveRuntimeContext;
 
         internal static bool IsSessionGeneration(int generation)
         {
@@ -557,8 +562,20 @@ namespace CardShopCoop
 
             var runtime = _runtime;
             _runtime = null;
-            runtime.Shutdown();
-            Destroy(runtime);
+            try
+            {
+                runtime.Shutdown();
+            }
+            catch (Exception error)
+            {
+                // Never let a feature teardown skip the destroyed-component cleanup or unwind
+                // the caller's shutdown sequence.
+                CoopPlugin.Log?.LogError("Co-op runtime shutdown failed: " + error);
+            }
+            finally
+            {
+                Destroy(runtime);
+            }
         }
 
         private void AbortSessionStart(string reason)
@@ -1235,6 +1252,14 @@ namespace CardShopCoop
         private void Update()
         {
             Util.FrameCounter.Tick();
+            // First frame: every BepInEx plugin (including dependents that load after us) now has
+            // an instance, so the dependency-driven external integration scan is complete.
+            if (!_externalModsDiscovered)
+            {
+                _externalModsDiscovered = true;
+                ExternalCoopMods.Instance.EnsureDiscovered();
+                _persistentRuntime?.IncludeExternalPersistentBehaviours();
+            }
             Util.PerfProbe.BeginFrame();
             Util.PerfProbe.FlushThreadMetrics();
             using (Util.PerfProbe.Sample("core.dispatcher"))
@@ -1873,7 +1898,15 @@ namespace CardShopCoop
             CEventManager.RemoveListener<CEventPlayer_OnOpenCardPack>(OnLocalPackOpened);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             Shutdown("plugin unloaded");
-            _persistentRuntime?.Shutdown();
+            try
+            {
+                _persistentRuntime?.Shutdown();
+            }
+            catch (Exception error)
+            {
+                // An external persistent handler must never skip the remainder of teardown.
+                CoopPlugin.Log?.LogError("Co-op persistent runtime shutdown failed: " + error);
+            }
             if (_persistentRuntime != null)
             {
                 Destroy(_persistentRuntime);

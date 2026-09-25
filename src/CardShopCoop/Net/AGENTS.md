@@ -5,6 +5,11 @@ without modifying CardShopCoop or being added to a central allowlist.
 
 ## Registration and discovery
 
+The wire contract types (`INetMessage`, `[NetworkMessage]`, `[MessageHandler]`, `Reliability`) and
+the behaviour/session contract live in the `CardShopCoop.Api` assembly; core references it. External
+mods reference the same assembly and are discovered from the BepInEx dependency graph (a mod that
+soft-depends on `com.zwhit.cardshopcoop` is integrated automatically). There is no central allowlist.
+
 - Provide supported public APIs for external assemblies to register DTOs, handlers, route
   policies, and transport/QoS metadata. Registration must return an explicit lifetime handle and
   support clean, idempotent unregistration.

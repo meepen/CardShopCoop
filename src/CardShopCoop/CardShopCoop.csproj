@@ -26,6 +26,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\CardShopCoop.Api\CardShopCoop.Api.csproj">
+      <Private>true</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="BepInEx">
       <HintPath>$(BepInExPath)\BepInEx.dll</HintPath>
       <Private>false</Private>
@@ -104,7 +110,7 @@
   </Target>
 
   <Target Name="DeployToPlugins" AfterTargets="Build" Condition="'$(Deploy)' == 'true'">
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GamePath)/BepInEx/plugins/CardShopCoop" />
+    <Copy SourceFiles="$(TargetPath);$(TargetDir)CardShopCoop.Api.dll" DestinationFolder="$(GamePath)/BepInEx/plugins/CardShopCoop" />
   </Target>
 
   <Target Name="Package" AfterTargets="Build" Condition="'$(Package)' == 'true'">
@@ -114,7 +120,7 @@
     </PropertyGroup>
     <RemoveDir Directories="$(PackageDirectory)" />
     <MakeDir Directories="$(PackageDirectory)/$(AssemblyName)" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageDirectory)/$(AssemblyName)" />
+    <Copy SourceFiles="$(TargetPath);$(TargetDir)CardShopCoop.Api.dll" DestinationFolder="$(PackageDirectory)/$(AssemblyName)" />
     <ZipDirectory SourceDirectory="$(PackageDirectory)" DestinationFile="$(PackageZip)" Overwrite="true" />
   </Target>
 

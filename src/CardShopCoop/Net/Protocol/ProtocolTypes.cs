@@ -6,16 +6,6 @@ using CardShopCoop.Net;
 namespace CardShopCoop.Net.Protocol
 {
     /// <summary>
-    /// Selects the transport lane for a message. Reliable is the safe default; transient
-    /// messages are explicitly opt-in and are never promoted to the reliable lane.
-    /// </summary>
-    public enum Reliability
-    {
-        Reliable,
-        Transient,
-    }
-
-    /// <summary>
     /// The immutable catalog entry for one message type. Wire identity is always and only
     /// <see cref="Type.FullName"/>; transport reliability is the sole message policy.
     /// </summary>

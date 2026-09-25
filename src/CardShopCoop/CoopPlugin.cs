@@ -55,6 +55,10 @@ namespace CardShopCoop
         private void Awake()
         {
             Log = Logger;
+            // Install the public integration contract before anything else can read it. External
+            // mods may touch CoopApi from their own Awake, which runs after ours.
+            Api.CoopApi.Binding = Runtime.ExternalCoopMods.Instance;
+            Api.CoopApi.Log = Logger;
             Runtime.SceneRef.Install();
             Util.ScreenSingletonProbe.Install();
             try

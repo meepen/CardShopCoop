@@ -2,11 +2,18 @@ using System;
 
 namespace CardShopCoop.Attributes
 {
+    /// <summary>
+    /// Marks a behaviour that exists on the HOST for the lifetime of a co-op session. Discovered
+    /// from the CardShopCoop assembly and from any external mod that soft-depends on it.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Class, Inherited = false)]
     public sealed class ServerBehaviourAttribute : Attribute
     {
     }
 
+    /// <summary>
+    /// Marks a behaviour that exists on a JOINER for the lifetime of a co-op session.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Class, Inherited = false)]
     public sealed class ClientBehaviourAttribute : Attribute
     {

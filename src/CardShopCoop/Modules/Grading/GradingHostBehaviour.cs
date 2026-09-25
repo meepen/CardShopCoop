@@ -341,13 +341,15 @@ namespace CardShopCoop.Modules.Grading
 
             snapshot = new GoJobSnapshot
             {
+
                 ServiceLevel = set.m_ServiceLevel,
                 Cards = CloneCards(set.m_CardDataList),
                 CompanyId = companyId,
                 UseCheats = useCheats,
                 JobId = jobId,
+                RegisterAttempted = true
+
             };
-            snapshot.RegisterAttempted = true;
             if (!GradingInterop.RegisterJobCompany(set, companyId, useCheats))
                 return false;
 

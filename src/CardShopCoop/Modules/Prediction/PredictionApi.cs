@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Runtime;
 
 namespace CardShopCoop.Modules.Prediction
@@ -24,6 +25,9 @@ namespace CardShopCoop.Modules.Prediction
         public static event Action<Guid> PredictionRetired;
 
         public static bool IsReconciling => _reconciling;
+
+        /// <summary>True while a client prediction session is active (a client is in a session).</summary>
+        public static bool IsActive => _active;
 
         /// <summary>True while a prediction's optimistic local apply (or its re-apply during a
         /// reconcile) is running. Modules whose game method emits economy events use this to avoid
@@ -144,7 +148,7 @@ namespace CardShopCoop.Modules.Prediction
         /// <summary>Host side: rejects one client prediction. The client undoes the optimistic
         /// action recorded with the matching <see cref="Predict"/> call. This is the single
         /// generic rejection path shared by every predictive feature.</summary>
-        public static void Reject(CoopRuntimeContext context, int connectionId, Guid predictionId)
+        public static void Reject(ICoopContext context, int connectionId, Guid predictionId)
         {
             if (predictionId == Guid.Empty)
                 return;
@@ -153,7 +157,7 @@ namespace CardShopCoop.Modules.Prediction
             context.Send(connectionId, new PredictionRollbackMessage { PredictionId = predictionId });
         }
 
-        public static void Rollback(CoopRuntimeContext context, int connectionId, Guid predictionId)
+        public static void Rollback(ICoopContext context, int connectionId, Guid predictionId)
         {
             if (predictionId == Guid.Empty)
                 return;

@@ -35,8 +35,10 @@ namespace CardShopCoop.Modules.World
             _shelfInteraction = new ShelfInteraction(SendWorldCommand);
             _warehouseShelfInteraction = new WarehouseShelfInteraction(false, _ => { },
                 SendWorldCommand, _boxNetworkInteraction);
-            _cardInteraction = new WorldCardInteraction(_context, false, _boxNetworkInteraction);
-            _cardInteraction.SendOverride = SendWorldCommand;
+            _cardInteraction = new WorldCardInteraction(_context, false, _boxNetworkInteraction)
+            {
+                SendOverride = SendWorldCommand
+            };
             _cardInteraction.Containers.SendOp = message => SendWorldCommand(1, message);
             _cardInteraction.Containers.InGameProvider = _context.InGame;
             _cardInteraction.Containers.ReloadingProvider = _context.PreloadHold;

@@ -255,9 +255,9 @@ namespace CardShopCoop.Modules.Pricing
             _cards[key] = new OwnedCardState
             {
                 Card = canonical,
-                Price = PricingInterop.ReadCard(canonical),
+                Price = ResolveCardPrice(canonical, requestedPrice),
             };
-            BroadcastCardDelta(Guid.Empty, canonical, PricingInterop.ReadCard(canonical), false);
+            BroadcastCardDelta(Guid.Empty, canonical, _cards[key].Price, false);
         }
 
         private void ObserveInventoryMutation(CardData card)
@@ -281,12 +281,13 @@ namespace CardShopCoop.Modules.Pricing
             }
             else
             {
+                var price = EffectiveCardPrice(key, canonical);
                 _cards[key] = new OwnedCardState
                 {
                     Card = canonical,
-                    Price = PricingInterop.ReadCard(canonical),
+                    Price = price,
                 };
-                BroadcastCardDelta(Guid.Empty, canonical, PricingInterop.ReadCard(canonical), false);
+                BroadcastCardDelta(Guid.Empty, canonical, price, false);
             }
         }
 
@@ -423,8 +424,28 @@ namespace CardShopCoop.Modules.Pricing
             _cards[key] = new OwnedCardState
             {
                 Card = canonical,
-                Price = PricingInterop.ReadCard(canonical),
+                Price = EffectiveCardPrice(key, canonical),
             };
+        }
+
+        /// <summary>Returns the price to cache for an owned card. The game's price store returns 0
+        /// for an expansion it cannot hold (a modded card this machine ignores), so an already
+        /// cached authoritative price is kept instead of being clobbered by that read-back.</summary>
+        private float EffectiveCardPrice(string key, CardData card)
+        {
+            var stored = PricingInterop.ReadCard(card);
+            if (stored <= 0f && _cards.TryGetValue(key, out var existing) && existing.Price > 0f)
+                return existing.Price;
+            return stored;
+        }
+
+        /// <summary>Returns the price a setter actually asked for when the store cannot hold it.
+        /// Vanilla round-trips within <see cref="PricingInterop.PriceEpsilon"/>; a wider gap means
+        /// the expansion's price store ignored the write, so report the requested value.</summary>
+        private static float ResolveCardPrice(CardData card, float requested)
+        {
+            var stored = PricingInterop.ReadCard(card);
+            return Math.Abs(stored - requested) <= PricingInterop.PriceEpsilon ? stored : requested;
         }
 
         private bool TrySetItem(EItemType type, float price, out float actual)

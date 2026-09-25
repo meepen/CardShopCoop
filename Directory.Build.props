@@ -2,7 +2,10 @@
   <PropertyGroup>
     <!-- Single source of truth for the plugin's public/release version. -->
     <CardShopCoopVersion>2.0.0</CardShopCoopVersion>
-    <Deploy>false</Deploy>
+    <!-- "Deploy" is a solution configuration meaning "build and copy into the game". A
+         command-line -p:Deploy=true still works and wins over this default. -->
+    <Deploy Condition="'$(Configuration)' == 'Deploy'">true</Deploy>
+    <Deploy Condition="'$(Deploy)' == ''">false</Deploy>
     <GamePath Condition="'$(GamePath)' == '' and '$(CARDSHOP_GAMEPATH)' != ''">$(CARDSHOP_GAMEPATH)</GamePath>
     <GamePath Condition="'$(GamePath)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">D:\SteamLibrary\steamapps\common\TCG Card Shop Simulator</GamePath>
     <GamePath Condition="'$(GamePath)' == ''">/srv/cardshop/game</GamePath>

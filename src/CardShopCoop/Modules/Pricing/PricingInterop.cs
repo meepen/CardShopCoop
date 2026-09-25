@@ -46,6 +46,13 @@ namespace CardShopCoop.Modules.Pricing
             return Math.Abs(actual - price) <= PriceEpsilon;
         }
 
+        /// <summary>Writes a card price and reports the value to publish. The game's price store
+        /// only holds the seven vanilla expansions: <see cref="CPlayerData.SetCardPrice"/> is a
+        /// hard-coded if-chain that silently writes nothing for any other expansion, yet still
+        /// fires <c>CEventPlayer_CardPriceChanged</c> (the event that repaints every visible price
+        /// tag). A store that cannot hold the value is not an invalid intent, so this accepts the
+        /// requested price instead of reporting the read-back: rejecting here rolled the setter
+        /// back and left them looking at the old price while every other peer showed the new one.</summary>
         internal static bool SetCard(CardData card, float price, out float actual)
         {
             actual = 0f;
@@ -54,7 +61,15 @@ namespace CardShopCoop.Modules.Pricing
 
             CPlayerData.SetCardPrice(card, price);
             actual = ReadCard(card);
-            return Math.Abs(actual - price) <= PriceEpsilon;
+            if (Math.Abs(actual - price) <= PriceEpsilon)
+                return true;
+
+            CoopPlugin.Log.LogWarning("[pricing] card price store did not hold " + price
+                + " for expansion=" + (int)card.expansionType + " monster=" + (int)card.monsterType
+                + " grade=" + card.cardGrade + " (read back " + actual
+                + "); publishing the requested price so peers stay in step.");
+            actual = price;
+            return true;
         }
 
         internal static float ReadCard(CardData card)

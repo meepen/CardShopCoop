@@ -3,10 +3,11 @@ using System.Collections.Generic;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Modules.Presence;
+using CardShopCoop.Api;
 
 namespace CardShopCoop.Runtime
 {
-    public sealed class CoopRuntimeContext
+    public sealed class CoopRuntimeContext : ICoopContext
     {
         public MessageRouter Messages
         {
@@ -68,5 +69,20 @@ namespace CardShopCoop.Runtime
             Disconnect = disconnect;
             PeerPresence = new PeerPresenceProvider(TimeSpan.FromSeconds(10));
         }
+
+        // ICoopContext is the public view of this live session. Explicit implementations keep the
+        // built-in rich members (Func/Action fields, MessageRouter) untouched for internal modules.
+        bool ICoopContext.IsHost => CoopCore.Role == CoopRole.Host;
+        bool ICoopContext.IsClient => CoopCore.Role == CoopRole.Client;
+        bool ICoopContext.InSession => CoopCore.Role != CoopRole.None;
+        bool ICoopContext.InGame => InGame != null && InGame();
+        int ICoopContext.LocalConnectionId => CoopCore.LocalConnectionId;
+        IReadOnlyList<int> ICoopContext.ConnectionIds => ConnectionIds == null
+            ? Array.Empty<int>() : ConnectionIds();
+        string ICoopContext.PeerName(int connectionId)
+            => PeerName == null ? null : PeerName(connectionId);
+        ICoopMessageRegistry ICoopContext.Messages => Messages;
+        void ICoopContext.Send(int connectionId, INetMessage message) => Send(connectionId, message);
+        void ICoopContext.Broadcast(INetMessage message) => Broadcast(message);
     }
 }

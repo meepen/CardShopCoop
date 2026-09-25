@@ -9,10 +9,13 @@ needed; not every feature needs every file.
 
 - Mark network DTOs with `[NetworkMessage]` and behaviour classes with `[ServerBehaviour]` or
   `[ClientBehaviour]`; use `[OnFullyJoined]` for late-join initialization where appropriate.
+  These attributes and the message contract come from the `CardShopCoop.Api` assembly.
 - Behaviours are discovered automatically by `CoopBehaviourRegistry`; do not add manual catalog
   registration. Keep handler registration, Harmony patches, subscriptions, and network resources
   owned by the module, and make unpatch/shutdown idempotent.
-- Keep feature DTOs, hooks, and state inside the module. Put only generic infrastructure outside
+- Built-in modules are keyed by their `CardShopCoop.Modules.*` namespace for the enable/disable
+  checkbox; an external mod is keyed by its assembly name (`ModuleCatalog.BindExternal`). Keep
+  feature DTOs, hooks, and state inside the module. Put only generic infrastructure outside
   it, and expose narrow, intentional cross-module APIs rather than reaching into another module's
   internals.
 

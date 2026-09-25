@@ -5,35 +5,10 @@ using CardShopCoop.Util;
 using System.Reflection;
 using CardShopCoop.Net.Protocol;
 using CardShopCoop.Net.Connection;
+using CardShopCoop.Api;
 
 namespace CardShopCoop.Net
 {
-    /// <summary>Marks a concrete INetMessage for assembly discovery.</summary>
-    [AttributeUsage(AttributeTargets.Class, Inherited = false)]
-    public sealed class NetworkMessageAttribute : Attribute
-    {
-        public Reliability Reliability
-        {
-            get;
-            set;
-        } = Reliability.Reliable;
-    }
-
-    /// <summary>Marks a method as the runtime handler for one registered message type.</summary>
-    [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
-    public sealed class MessageHandlerAttribute : Attribute
-    {
-        public Type MessageType
-        {
-            get;
-        }
-
-        public MessageHandlerAttribute(Type messageType)
-        {
-            MessageType = messageType ?? throw new ArgumentNullException(nameof(messageType));
-        }
-    }
-
     public sealed class MessageContext
     {
         public PeerConnection Connection;
@@ -83,7 +58,7 @@ namespace CardShopCoop.Net
         }
     }
 
-    public sealed class MessageRouter
+    public sealed class MessageRouter : ICoopMessageRegistry
     {
         private sealed class TargetRegistration
         {
@@ -138,8 +113,10 @@ namespace CardShopCoop.Net
                 }
 
                 var parameters = method.GetParameters();
+                var isExternal = parameters.Length > 0
+                    && parameters[0].ParameterType == typeof(CoopMessageContext);
                 if (method.IsStatic || method.ReturnType != typeof(void) || parameters.Length != 2
-                    || parameters[0].ParameterType != typeof(MessageContext)
+                    || (parameters[0].ParameterType != typeof(MessageContext) && !isExternal)
                     || !typeof(INetMessage).IsAssignableFrom(parameters[1].ParameterType)
                     || parameters[1].ParameterType != attribute.MessageType)
                 {
@@ -161,7 +138,11 @@ namespace CardShopCoop.Net
                 }
 
                 pending.Add(new ProtocolHandlerRegistration(messageType,
-                    (context, message) => method.Invoke(target, new object[] { context, message })));
+                    isExternal
+                        ? (context, message) => method.Invoke(target,
+                            new object[] { ToPublicContext(context), message })
+                        : (context, message) => method.Invoke(target,
+                            new object[] { context, message })));
             }
 
             if (pending.Count == 0)
@@ -221,6 +202,9 @@ namespace CardShopCoop.Net
                 registrations[i].Dispose();
             }
         }
+
+        private static CoopMessageContext ToPublicContext(MessageContext context)
+            => new CoopMessageContext(context.Connection, context.InGame);
 
         public bool Dispatch(MessageContext context, INetMessage message)
         {

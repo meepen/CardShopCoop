@@ -47,14 +47,34 @@ jobs:
       - name: Restore
         run: dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode --configfile NuGet.Config
 
+      - name: Build and package API
+        run: dotnet build src/CardShopCoop.Api/CardShopCoop.Api.csproj -c Release -p:Package=true --no-restore
+
       - name: Build and package
         run: dotnet build src/CardShopCoop/CardShopCoop.csproj -c Release -p:Deploy=false -p:Package=true --no-restore
+
+      - name: Build and package external mod interop
+        run: dotnet build src/CardShopCoop.CustomTv/CardShopCoop.CustomTv.csproj -c Release -p:Deploy=false -p:Package=true
+
+      - name: Upload API artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-package
+          path: src/CardShopCoop.Api/bin/Release/CardShopCoop.Api-${{ steps.version.outputs.version }}.zip
+          if-no-files-found: error
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:
           name: plugin-package
           path: src/CardShopCoop/bin/Release/CardShopCoop-${{ steps.version.outputs.version }}.zip
+          if-no-files-found: error
+
+      - name: Upload external mod interop artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: external-mod-interop
+          path: src/CardShopCoop.CustomTv/bin/Release/CardShopCoop.ExternalModInterop.zip
           if-no-files-found: error
 
   release:
@@ -69,6 +89,18 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: plugin-package
+          path: dist
+
+      - name: Download API artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: api-package
+          path: dist
+
+      - name: Download external mod interop artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: external-mod-interop
           path: dist
 
       - name: Create stable GitHub release

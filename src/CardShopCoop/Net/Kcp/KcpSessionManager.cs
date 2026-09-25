@@ -1203,9 +1203,11 @@ namespace CardShopCoop.Net.Kcp
             }
 
             var cookie = _isHost ? NewCookie() : 0u;
-            var state = new SessionState(peer, AllocateConnectionId());
-            state.LastReceiveTime = _lastClock;
-            state.HandshakeStarted = _lastClock;
+            var state = new SessionState(peer, AllocateConnectionId())
+            {
+                LastReceiveTime = _lastClock,
+                HandshakeStarted = _lastClock
+            };
             state.Session = new KcpSession(_config, _isHost, cookie,
                 datagram => RawSend(state, datagram),
                 (message, channel) => OnSessionData(state, message, channel),

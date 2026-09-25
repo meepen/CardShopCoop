@@ -1,7 +1,7 @@
 using System;
 using System.Collections;
 using System.Reflection;
-using CardShopCoop.Util;
+using CardShopCoop.Api;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.Tv
@@ -23,7 +23,7 @@ namespace CardShopCoop.Modules.Tv
         internal const double MaxPositionSeconds = 86400.0;
         internal const double MaxSeekDeltaSeconds = 300.0;
         private static readonly Type ControllerType =
-            ReflectionSurface.OptionalType("Scripts.VideoPlayerController", AssemblyName);
+            CoopReflection.OptionalType("Scripts.VideoPlayerController", AssemblyName);
         private const BindingFlags Flags = BindingFlags.Static | BindingFlags.Instance
             | BindingFlags.Public | BindingFlags.NonPublic;
 
@@ -118,15 +118,15 @@ namespace CardShopCoop.Modules.Tv
                 if (present && !_logged)
                 {
                     _logged = true;
-                    CoopPlugin.Log?.LogInfo("RTCGO Custom TV detected - shared playback is available");
+                    CoopLog.Info("RTCGO Custom TV detected - shared playback is available");
                 }
                 return present;
             }
         }
 
-        private static FieldInfo Field(string name) => ReflectionSurface.OptionalField(ControllerType, name);
+        private static FieldInfo Field(string name) => CoopReflection.OptionalField(ControllerType, name);
         private static MethodInfo Method(string name, params Type[] arguments)
-            => ReflectionSurface.OptionalMethod(ControllerType, name, arguments);
+            => CoopReflection.OptionalMethod(ControllerType, name, arguments);
 
         private static FeatureAvailability ValidateSurface()
         {
@@ -185,9 +185,9 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var videoPlayerType = VideoPlayerField.FieldType;
-            if (ReflectionSurface.OptionalProperty(videoPlayerType, "isPrepared") == null
-                || ReflectionSurface.OptionalProperty(videoPlayerType, "time") == null
-                || ReflectionSurface.OptionalProperty(videoPlayerType, "length") == null)
+            if (CoopReflection.OptionalProperty(videoPlayerType, "isPrepared") == null
+                || CoopReflection.OptionalProperty(videoPlayerType, "time") == null
+                || CoopReflection.OptionalProperty(videoPlayerType, "length") == null)
             {
                 return FeatureAvailability.Drifted;
             }
@@ -205,11 +205,11 @@ namespace CardShopCoop.Modules.Tv
             _availabilityLogged = true;
             if (AvailabilityState == FeatureAvailability.Drifted)
             {
-                CoopPlugin.Log?.LogError("TV integration disabled: " + UnavailableReason);
+                CoopLog.Error("TV integration disabled: " + UnavailableReason);
             }
             else if (AvailabilityState == FeatureAvailability.Absent)
             {
-                CoopPlugin.Log?.LogInfo("RTCGO Custom TV is not installed - shared TV disabled");
+                CoopLog.Info("RTCGO Custom TV is not installed - shared TV disabled");
             }
         }
 
@@ -227,7 +227,7 @@ namespace CardShopCoop.Modules.Tv
             }
             catch (Exception exception)
             {
-                Swallow.Log(exception);
+                CoopLog.Swallow(exception);
                 return fallback;
             }
         }
@@ -250,7 +250,7 @@ namespace CardShopCoop.Modules.Tv
             }
             catch (Exception exception)
             {
-                Swallow.Log(exception);
+                CoopLog.Swallow(exception);
                 return null;
             }
         }
@@ -390,7 +390,7 @@ namespace CardShopCoop.Modules.Tv
             {
                 _videoErrorDelegate = null;
                 _attachedVideoPlayer = null;
-                CoopPlugin.Log.LogError("TV VideoPlayer error lifecycle hook failed: " + exception);
+                CoopLog.Error("TV VideoPlayer error lifecycle hook failed: " + exception);
                 return false;
             }
         }
@@ -458,7 +458,7 @@ namespace CardShopCoop.Modules.Tv
                     _launchedSource = sourceUrl;
                     _launchedPlaylistIndex = playlistIndex;
                     _streamLaunchPending = true;
-                    CoopPlugin.Log.LogInfo("TV client injecting shared stream: " + sourceUrl);
+                    CoopLog.Info("TV client injecting shared stream: " + sourceUrl);
                     SetField(PendingUrlField, sourceUrl, master);
                     QualityChoice.Invoke(master, new object[] { false });
                     _streamLaunchPending = false;
@@ -991,7 +991,7 @@ namespace CardShopCoop.Modules.Tv
             }
             catch (Exception exception)
             {
-                CoopPlugin.Log.LogWarning("TV quality selection failed: " + exception);
+                CoopLog.Warn("TV quality selection failed: " + exception);
                 return false;
             }
         }
@@ -1073,7 +1073,7 @@ namespace CardShopCoop.Modules.Tv
             }
             catch (Exception exception)
             {
-                Swallow.Log(exception);
+                CoopLog.Swallow(exception);
                 return fallback;
             }
         }
@@ -1082,14 +1082,14 @@ namespace CardShopCoop.Modules.Tv
         {
             try
             {
-                var property = ReflectionSurface.OptionalProperty(target.GetType(), name);
+                var property = CoopReflection.OptionalProperty(target.GetType(), name);
                 var value = property?.GetValue(target, null);
                 var result = value == null ? fallback : Convert.ToDouble(value);
                 return IsValidPosition(result) ? Math.Min(result, MaxPositionSeconds) : fallback;
             }
             catch (Exception exception)
             {
-                Swallow.Log(exception);
+                CoopLog.Swallow(exception);
                 return fallback;
             }
         }
@@ -1098,13 +1098,13 @@ namespace CardShopCoop.Modules.Tv
         {
             try
             {
-                var property = ReflectionSurface.OptionalProperty(target.GetType(), name);
+                var property = CoopReflection.OptionalProperty(target.GetType(), name);
                 var value = property?.GetValue(target, null);
                 return value == null ? fallback : (T)Convert.ChangeType(value, typeof(T));
             }
             catch (Exception exception)
             {
-                Swallow.Log(exception);
+                CoopLog.Swallow(exception);
                 return fallback;
             }
         }

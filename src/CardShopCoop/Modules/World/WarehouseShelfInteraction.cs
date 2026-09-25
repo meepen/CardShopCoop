@@ -41,6 +41,7 @@ namespace CardShopCoop.Modules.World
         private readonly Dictionary<long, WarehouseBoxState> _knownBoxes = new();
         private readonly Dictionary<long, long> _knownBoxLocations = new();
         private WarehouseStateMessage _pendingClientState;
+        private readonly List<WarehouseDeltaMessage> _pendingClientDeltas = new();
         private bool _hostApplyingCommand;
 
         internal bool IsApplyingRemote
@@ -88,6 +89,7 @@ namespace CardShopCoop.Modules.World
             _pendingRecordStores.Clear();
             _pendingRecordTakes.Clear();
             _pendingClientState = null;
+            _pendingClientDeltas.Clear();
             _hostApplyingCommand = false;
             _knownBoxes.Clear();
             _knownBoxLocations.Clear();
@@ -95,12 +97,27 @@ namespace CardShopCoop.Modules.World
 
         internal void FlushClientState()
         {
-            if (_pendingClientState == null)
-                return;
+            if (_pendingClientState != null)
+            {
+                var pending = _pendingClientState;
+                _pendingClientState = null;
+                ClientApplyState(pending);
+            }
 
-            var pending = _pendingClientState;
-            _pendingClientState = null;
-            ClientApplyState(pending);
+            if (_pendingClientDeltas.Count == 0)
+            {
+                return;
+            }
+
+            // A delta can arrive before the world streams the compartment it names. Keep it (in
+            // order) and replay once the scene is ready, instead of throwing and forcing the host
+            // to drop the guest from the session.
+            var deltas = new List<WarehouseDeltaMessage>(_pendingClientDeltas);
+            _pendingClientDeltas.Clear();
+            for (var i = 0; i < deltas.Count; i++)
+            {
+                ClientApplyDelta(deltas[i]);
+            }
         }
 
         /// <summary>Builds one frozen warehouse snapshot for a resumable host baseline.</summary>
@@ -117,8 +134,25 @@ namespace CardShopCoop.Modules.World
         internal bool TryForwardClientStore(InteractablePackagingBox_Item box, bool isPlayer,
             ShelfCompartment compartment)
         {
-            if (_host || IsApplyingRemote || !isPlayer || !IsWarehouse(compartment))
+            if (_host || IsApplyingRemote || !isPlayer)
             {
+                return true;
+            }
+
+            if (!IsWarehouse(compartment))
+            {
+                // A box compartment the warehouse protocol does not own (for example a custom
+                // shelf without a WarehouseShelf). There is no wire model for it, so vanilla runs
+                // locally. Warn when that local store would actually happen so it is diagnosable
+                // rather than a silent, unsynced mutation.
+                if (box?.m_ItemCompartment != null && WouldVanillaStore(compartment,
+                        box.m_ItemCompartment.GetItemType(), box.m_ItemCompartment.GetItemCount(),
+                        box.m_IsBigBox))
+                {
+                    CoopPlugin.Log.LogWarning("[warehouse] storing box " + box.name
+                        + " on a non-warehouse compartment; this store cannot be synced.");
+                }
+
                 return true;
             }
 
@@ -129,9 +163,22 @@ namespace CardShopCoop.Modules.World
             }
 
             var amount = box.m_ItemCompartment.GetItemCount();
-            if (!CanStore(compartment, box.m_ItemCompartment.GetItemType(), amount, box.m_IsBigBox))
+            var itemType = box.m_ItemCompartment.GetItemType();
+            if (!WouldVanillaStore(compartment, itemType, amount, box.m_IsBigBox))
             {
+                // Vanilla will refuse this and show its own player-facing popup; let it run.
                 return true;
+            }
+
+            if (amount > MaxWarehouseAmount)
+            {
+                // Vanilla would store it locally, but the host rejects anything above the
+                // warehouse amount limit (Validate/IsValidBox). Suppressing the local store keeps
+                // the client from diverging from authority; the box stays in the player's hand.
+                CoopPlugin.Log.LogWarning("[warehouse] refusing to store box " + box.name + " ("
+                    + itemType + " x" + amount + ", big=" + box.m_IsBigBox
+                    + "): amount exceeds the " + MaxWarehouseAmount + " limit the host enforces.");
+                return false;
             }
 
             if (!_boxes.TryGetId(box, out var boxNetworkId))
@@ -230,6 +277,10 @@ namespace CardShopCoop.Modules.World
 
             if (!TryGetTopBoxNetworkId(compartment, out var boxNetworkId))
             {
+                // The top box has no authoritative id on this peer. Suppress the vanilla take so
+                // we do not remove a box the host will not mirror, and leave it for diagnosis.
+                CoopPlugin.Log.LogWarning("[warehouse] take could not resolve the top box on shelf ["
+                    + shelfIndex + "," + compartmentIndex + "]; leaving the box in place.");
                 return false;
             }
 
@@ -300,14 +351,9 @@ namespace CardShopCoop.Modules.World
         /// <summary>Applies another player's take on this peer: the box leaves our shelf, but only
         /// the taker ends up holding it. Their pickup broadcast attaches the live box to their
         /// avatar, so we must not start a local hold here.</summary>
-        private void ClientApplyRemoteTake(WarehouseDeltaMessage message)
+        private void ClientApplyRemoteTake(WarehouseDeltaMessage message,
+            ShelfCompartment compartment)
         {
-            var compartment = ResolveCompartment(message.ShelfIndex, message.CompartmentIndex);
-            if (compartment == null)
-            {
-                throw new InvalidOperationException("Warehouse take delta references an unknown compartment.");
-            }
-
             if (_usesRecords)
             {
                 PopClientWarehouseRecord(compartment, message.BoxNetworkId);
@@ -722,11 +768,29 @@ namespace CardShopCoop.Modules.World
 
         internal void ClientApplyDelta(WarehouseDeltaMessage message)
         {
+            if (message == null)
+            {
+                return;
+            }
+
+            var compartment = ResolveCompartment(message.ShelfIndex, message.CompartmentIndex);
+            if (compartment == null)
+            {
+                // The world has not streamed this compartment yet. Defer and replay on the world
+                // ready hook; throwing here would disconnect the guest through the reliable
+                // handler failure path on a transient timing mismatch.
+                CoopPlugin.Log.LogWarning("[warehouse] deferring delta for unresolved compartment ["
+                    + message.ShelfIndex + "," + message.CompartmentIndex + "] box="
+                    + message.BoxNetworkId + " isStore=" + message.IsStore + ".");
+                _pendingClientDeltas.Add(message);
+                return;
+            }
+
             if (message.IsStore)
             {
                 var controller = SceneRef<InteractionPlayerController>.Get();
                 controller?.OnExitHoldBoxMode();
-                ClientApplyStoreDelta(message);
+                ClientApplyStoreDelta(message, compartment);
                 return;
             }
 
@@ -734,15 +798,12 @@ namespace CardShopCoop.Modules.World
             // origin already moved the box into its own hand optimistically, so here we only
             // make our shelf match; taking it into our own hand would publish a pickup request
             // from every observer and misattribute the holder.
-            ClientApplyRemoteTake(message);
+            ClientApplyRemoteTake(message, compartment);
         }
 
-        private void ClientApplyStoreDelta(WarehouseDeltaMessage message)
+        private void ClientApplyStoreDelta(WarehouseDeltaMessage message,
+            ShelfCompartment compartment)
         {
-            var compartment = ResolveCompartment(message.ShelfIndex, message.CompartmentIndex);
-            if (compartment == null)
-                throw new InvalidOperationException("Warehouse store delta references an unknown compartment.");
-
             var descriptor = BoxNetworkInteraction.ItemDescriptor(message.BoxNetworkId,
                 message.ItemType, message.Amount, message.IsBig, Vector3.zero, Quaternion.identity);
             IsApplyingRemote = true;
@@ -786,7 +847,7 @@ namespace CardShopCoop.Modules.World
         private void PopClientWarehouseRecord(ShelfCompartment compartment, long boxNetworkId)
         {
             if (compartment == null)
-                throw new InvalidOperationException("Warehouse take delta references an unknown compartment.");
+                return;
 
             IsApplyingRemote = true;
             try
@@ -1388,12 +1449,23 @@ namespace CardShopCoop.Modules.World
             return compartment != null && compartment.GetWarehouseShelf() != null;
         }
 
+        /// <summary>The same admission checks the game's own <c>DispenseItem</c> makes before it
+        /// stores a box, without any warehouse/authority condition. This lets the client tell
+        /// "vanilla will refuse and show its own popup" apart from "vanilla would store it, but the
+        /// host would reject it".</summary>
+        private static bool WouldVanillaStore(ShelfCompartment compartment, EItemType itemType,
+            int amount, bool isBig)
+        {
+            return itemType != EItemType.None && amount > 0 && compartment != null
+                && compartment.m_CanPutBox && compartment.CheckBoxType(isBig) == isBig
+                && compartment.HasEnoughSlot() && compartment.CheckBoxItemType(itemType);
+        }
+
         private static bool CanStore(ShelfCompartment compartment, EItemType itemType, int amount,
             bool isBig)
         {
-            return itemType != EItemType.None && amount > 0 && IsWarehouse(compartment)
-                && compartment.m_CanPutBox && compartment.CheckBoxType(isBig) == isBig
-                && compartment.HasEnoughSlot() && compartment.CheckBoxItemType(itemType);
+            return WouldVanillaStore(compartment, itemType, amount, isBig) && IsWarehouse(compartment)
+                && amount <= MaxWarehouseAmount;
         }
 
         private static bool IsValidBox(WarehouseBoxState state)

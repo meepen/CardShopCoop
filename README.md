@@ -51,9 +51,15 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
 
 ## Repo layout
 
-- `src/CardShopCoop/` — plugin source. Build: `dotnet build -c Release`
-  (deployment is opt-in; use `-p:Deploy=true` only when you want the DLL copied into the
-  game's plugins directory).
+- `CardShopCoop.sln` — all plugin projects. Build the **Deploy** configuration to build and copy
+  everything into the game in one step (`dotnet build CardShopCoop.sln -c Deploy`).
+- `src/CardShopCoop/` — the core plugin (session, transport, modules, UI). Build:
+  `dotnet build -c Release` (deployment is opt-in; use `-p:Deploy=true` only when you want the DLL
+  copied into the game's plugins directory).
+- `src/CardShopCoop.Api/` — the public integration contract other mods reference (ships with core).
+- `src/CardShopCoop.CustomTv/` — optional RTCGO Custom TV sync, built on the public API.
+- `samples/CardShopCoop.SampleMod/` — a minimal example integration.
+- `docs/third-party-integration.md` — how another mod integrates.
   The game install path (`GamePath`) is resolved by `Directory.Build.props`:
   point it at your install by copying `Directory.Build.user.props.example` to
   `Directory.Build.user.props` (git-ignored), or set the `CARDSHOP_GAMEPATH`
@@ -83,6 +89,13 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
 - **Identity over indexes**: anything that crosses the wire is keyed by item identity
   (type + size + name), never by list position — content mods can order their
   registries differently per machine.
+- **For other mods**: a separate `CardShopCoop.Api.dll` exposes a small, optional-dependency-safe
+  contract. Add a soft `[BepInDependency]`, reference the API with copy-local off, mark your DTOs
+  and behaviours with attributes, and CardShopCoop discovers you automatically. See
+  `docs/third-party-integration.md` and `samples/CardShopCoop.SampleMod`.
+- **Custom TV** co-op sync ships in the optional `CardShopCoop.ExternalModInterop.zip` bundle
+  (currently containing the `CardShopCoop.CustomTv` plugin); install it alongside CardShopCoop
+  (both players) to share TV playback.
 - Game gotchas that cost us dearly (see the feature modules and git history):
   dead statics (`CGameManager.Player`), auto-creating `CSingleton<T>.Instance`,
   `SpawnItem` being a save-loader not an adder, price tags living in separate canvas
