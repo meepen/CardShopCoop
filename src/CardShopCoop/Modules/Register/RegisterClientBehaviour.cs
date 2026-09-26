@@ -150,6 +150,9 @@ namespace CardShopCoop.Modules.Register
             {
                 if (ApplyDelta(pair.Value))
                 {
+                    CoopPlugin.Log.LogInfo("[register] applied deferred delta kind="
+                        + pair.Value.Kind + " counter=" + pair.Value.Counter + " pred="
+                        + pair.Value.PredictionId);
                     _deferredDeltas.Remove(pair.Key);
                 }
             }
@@ -225,6 +228,10 @@ namespace CardShopCoop.Modules.Register
         {
             if (!ApplyDelta(message))
             {
+                CoopPlugin.Log.LogInfo("[register] deferring delta kind=" + message.Kind
+                    + " counter=" + message.Counter + " counterGen=" + message.CounterGeneration
+                    + " customer=" + message.CustomerIndex + " customerGen="
+                    + message.CustomerGeneration + " pred=" + message.PredictionId);
                 var key = DeltaKey(message);
                 if (_deferredDeltas.TryGetValue(key, out var previous))
                     PredictionApi.ConfirmSuperseded(previous.PredictionId);
@@ -674,6 +681,9 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
+            var diagnosticBefore = RegisterInterop.Total(counter);
+            var diagnosticBeforeCustomer = customer == null ? 0d
+                : Convert.ToDouble(RegisterInterop.Read(customer, "m_TotalScannedItemCost") ?? 0f);
             var wantedState = (ECashierCounterState)state;
             if (customer != null && wantedState == ECashierCounterState.GivingChange
                 && counter.m_CashierCounterState != ECashierCounterState.GivingChange)
@@ -704,6 +714,17 @@ namespace CardShopCoop.Modules.Register
 
             counter.UpdateCashierCounterState(wantedState);
             RegisterInterop.CashScreen(counter)?.UpdateMoneyChangeAmount(changeReady, paid, total, change);
+            if (Math.Abs(total - diagnosticBefore) > 0.005
+                || Math.Abs(customerTotal - diagnosticBeforeCustomer) > 0.005)
+            {
+                CoopPlugin.Log.LogInfo("[register] phase counter=" + RegisterInterop.Index(counter)
+                    + " state=" + wantedState + " card=" + usingCard
+                    + " total=" + diagnosticBefore.ToString("F3") + "->" + total.ToString("F3")
+                    + " customer=" + diagnosticBeforeCustomer.ToString("F3")
+                    + "->" + customerTotal.ToString("F3")
+                    + " paid=" + paid.ToString("F3") + " change=" + change.ToString("F3")
+                    + " ready=" + changeReady + " started=" + changeStarted);
+            }
         }
 
         private static void ApplyChangeStack(InteractableCashierCounter counter, byte state, bool usingCard,
@@ -1059,6 +1080,9 @@ namespace CardShopCoop.Modules.Register
             InteractableCustomerCash cash)
         {
             var undo = CaptureUndo(counter, counter.m_CurrentCustomer);
+            CoopPlugin.Log.LogInfo("[register] take payment sent card=" + cash.m_IsCard
+                + " counterTotal=" + RegisterInterop.Total(counter).ToString("F3")
+                + " state=" + counter.m_CashierCounterState);
             PredictionApi.Predict(PredictionScope + ":" + index,
                 id => Send(new RegisterIntentMessage
                 {
@@ -1074,6 +1098,11 @@ namespace CardShopCoop.Modules.Register
         private void PredictCardPayment(InteractableCashierCounter counter, int index, double value)
         {
             var undo = CaptureUndo(counter, counter.m_CurrentCustomer);
+            CoopPlugin.Log.LogInfo("[register] card payment sent value=" + value.ToString("F3")
+                + " counterTotal=" + RegisterInterop.Total(counter).ToString("F3")
+                + " customerTotal=" + Convert.ToDouble(RegisterInterop.Read(
+                    counter.m_CurrentCustomer, "m_TotalScannedItemCost") ?? 0f).ToString("F3")
+                + " state=" + counter.m_CashierCounterState);
             PredictionApi.Predict(PredictionScope + ":" + index,
                 id => Send(new RegisterIntentMessage
                 {
@@ -1088,6 +1117,11 @@ namespace CardShopCoop.Modules.Register
 
         private void PredictChange(InteractableCounterMoneyChange change, bool takeBack, int index)
         {
+            CoopPlugin.Log.LogInfo("[register] change sent slot=" + change.m_Index
+                + " coin=" + change.m_IsCoin + " takeBack=" + takeBack
+                + " value=" + change.m_ValueDouble.ToString("F3")
+                + " given=" + RegisterInterop.GivenAmount(change)
+                + " counterTotal=" + RegisterInterop.Total(change.m_CashierCounter).ToString("F3"));
             PredictionApi.Predict(PredictionScope + ":" + index,
                 id => Send(new RegisterIntentMessage
                 {

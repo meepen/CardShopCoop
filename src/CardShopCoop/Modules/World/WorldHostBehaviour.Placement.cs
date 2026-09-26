@@ -47,6 +47,25 @@ namespace CardShopCoop.Modules.World
             SendBaseline(connection.Id);
         }
 
+        /// <summary>Answers a fully-connected guest's request for one more baseline. This is
+        /// deliberately per-connection: only the requester is re-sent, never the other players.
+        /// A fresh baseline is built from the host's current live lists, so objects the guest's
+        /// scene finished spawning after the join baseline are bound and posed on this pass.</summary>
+        [MessageHandler(typeof(PlacementBaselineRequestMessage))]
+        private void HandlePlacementBaselineRequest(MessageContext context,
+            PlacementBaselineRequestMessage message)
+        {
+            if (_shutdown || context?.Connection == null
+                || !IsJoinPhase(context.Connection.State))
+            {
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[placement] re-sending baseline to connection "
+                + context.ConnectionId + " on request.");
+            SendBaseline(context.Connection.Id);
+        }
+
         [OnClientDisconnected]
         private void ForgetPlacementConnection(PeerConnection connection, DisconnectInfo _)
         {

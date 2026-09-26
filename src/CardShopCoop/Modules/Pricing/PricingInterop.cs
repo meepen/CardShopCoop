@@ -10,6 +10,7 @@ namespace CardShopCoop.Modules.Pricing
     {
         private static readonly FieldInfo PriceField = typeof(SetItemPriceScreen).GetField(
             "m_PriceSet", BindingFlags.Instance | BindingFlags.NonPublic);
+        private static bool _readCardOutOfRangeLogged;
 
         internal const float PriceEpsilon = 0.0075f;
 
@@ -79,7 +80,29 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (card == null)
                 throw new ArgumentNullException(nameof(card));
-            return CPlayerData.GetCardPrice(card);
+
+            try
+            {
+                return CPlayerData.GetCardPrice(card);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // The game's card price store is indexed by GetCardSaveIndex, which modded
+                // content can push past the list (an EPL-expanded shown-monster list, or a
+                // grade beyond the vanilla float list). The store simply cannot hold a price
+                // for this card, so report "unset" instead of letting one such card abort the
+                // whole pricing baseline at join. Callers treat 0 as no known price, and
+                // EffectiveCardPrice keeps any cached authoritative value.
+                if (!_readCardOutOfRangeLogged)
+                {
+                    _readCardOutOfRangeLogged = true;
+                    CoopPlugin.Log.LogWarning("[pricing] card price store is out of range for expansion="
+                        + (int)card.expansionType + " monster=" + (int)card.monsterType
+                        + " grade=" + card.cardGrade + "; treating its price as unset.");
+                }
+
+                return 0f;
+            }
         }
 
         internal static CardData CopyCard(CardData card, int encodedGrade)

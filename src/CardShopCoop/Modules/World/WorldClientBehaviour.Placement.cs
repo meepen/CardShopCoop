@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Connection;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -49,6 +50,21 @@ namespace CardShopCoop.Modules.World
         {
             _latestBaseline = message;
             ApplyLatestBaseline();
+        }
+
+        /// <summary>Sent once this peer is fully connected. The join baseline can arrive while
+        /// the guest's scene is still settling (objects finishing their load-time spawn or their
+        /// recovery from the transferred save), so ask the host for one fresh pass now that the
+        /// scene is up. The host answers this connection only.</summary>
+        private void RequestPlacementBaseline(PeerConnection connection)
+        {
+            if (connection == null)
+            {
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[placement] fully connected; requesting a fresh baseline.");
+            _context.Send(connection.Id, new PlacementBaselineRequestMessage());
         }
 
         [MessageHandler(typeof(PlacementDeltaMessage))]
@@ -102,11 +118,20 @@ namespace CardShopCoop.Modules.World
 
                 for (var i = 0; i < _latestBaseline.Moves.Count; i++)
                 {
-                    if (!PlacementMoveState.Apply(_latestBaseline.Moves[i], false))
+                    var move = _latestBaseline.Moves[i];
+                    if (PlacementMoveState.Apply(move, false))
                     {
-                        throw new InvalidOperationException(
-                            "placement baseline pose could not be applied");
+                        continue;
                     }
+
+                    // A move is a binding hint, not identity: this peer's object lists can
+                    // legitimately be shorter than the host's (a transferred save or a
+                    // cross-build list difference), so a move naming an object this peer does
+                    // not have must not tear the session down. A later population refresh or
+                    // delta republishes the pose if the object ever exists here.
+                    CoopPlugin.Log.LogWarning("[placement] baseline move key="
+                        + (move == null ? -1 : move.Key) + " type="
+                        + (move == null ? -1 : move.Type) + " did not resolve; skipping.");
                 }
 
                 _identityReady = true;

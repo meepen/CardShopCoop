@@ -106,6 +106,7 @@ namespace CardShopCoop.Modules.World
             {
                 _cardInteraction?.FlushWorldReady();
                 _warehouseShelfInteraction?.FlushClientState();
+                RequestPlacementBaseline(connection);
             }
         }
 

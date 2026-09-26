@@ -233,6 +233,10 @@ namespace CardShopCoop.Modules.Register
                         || customer.m_CustomerCash == null
                         || customer.m_CustomerCash.m_IsCard != message.IsCard)
                     {
+                        LogIntentReject("take payment state=" + counter.m_CashierCounterState
+                            + " intentCard=" + message.IsCard + " cash="
+                            + (customer.m_CustomerCash == null
+                                ? "null" : customer.m_CustomerCash.m_IsCard.ToString()), message);
                         return false;
                     }
 
@@ -244,6 +248,10 @@ namespace CardShopCoop.Modules.Register
                         || !RegisterInterop.IsUsingCard(counter) || !RegisterInterop.IsFinite(message.Value)
                         || Math.Abs(message.Value - RegisterInterop.Total(counter)) > 0.011d)
                     {
+                        LogIntentReject("card payment state=" + counter.m_CashierCounterState
+                            + " usingCard=" + RegisterInterop.IsUsingCard(counter)
+                            + " value=" + message.Value.ToString("F3")
+                            + " hostTotal=" + RegisterInterop.Total(counter).ToString("F3"), message);
                         return false;
                     }
 
@@ -254,6 +262,9 @@ namespace CardShopCoop.Modules.Register
                     if (counter.m_CashierCounterState != ECashierCounterState.GivingChange
                         || RegisterInterop.IsUsingCard(counter) || !RegisterInterop.IsFinite(message.Value))
                     {
+                        LogIntentReject("change state=" + counter.m_CashierCounterState
+                            + " usingCard=" + RegisterInterop.IsUsingCard(counter)
+                            + " value=" + message.Value.ToString("F3"), message);
                         return false;
                     }
 
@@ -261,6 +272,8 @@ namespace CardShopCoop.Modules.Register
                         message.Value);
                     if (change == null)
                     {
+                        LogIntentReject("change slot=" + message.Slot + " coin=" + message.IsCoin
+                            + " value=" + message.Value.ToString("F3") + " not found", message);
                         return false;
                     }
 
@@ -279,6 +292,8 @@ namespace CardShopCoop.Modules.Register
                     if (counter.m_CashierCounterState != ECashierCounterState.GivingChange
                         || !RegisterInterop.IsChangeReady(counter))
                     {
+                        LogIntentReject("complete state=" + counter.m_CashierCounterState
+                            + " changeReady=" + RegisterInterop.IsChangeReady(counter), message);
                         return false;
                     }
 

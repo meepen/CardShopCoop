@@ -44,6 +44,15 @@ namespace CardShopCoop.Modules.World
         public PlacementMoveEntry Move;
     }
 
+    /// <summary>Guest -> host: sent once this peer is fully connected, asking for one more
+    /// placement baseline. The join baseline can race the guest's scene as objects finish their
+    /// load-time spawn/recovery from the transferred save, so the fresh pass rebinds anything
+    /// that missed. The host answers the requesting connection only.</summary>
+    [NetworkMessage]
+    public sealed class PlacementBaselineRequestMessage : INetMessage
+    {
+    }
+
     /// <summary>Population grouped by the stable placement kind ordinal.</summary>
     [JsonConverter(typeof(PlacementPopulationMessageConverter))]
     public sealed class PlacementPopulationMessage
