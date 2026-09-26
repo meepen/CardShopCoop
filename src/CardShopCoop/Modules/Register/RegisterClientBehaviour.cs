@@ -868,7 +868,12 @@ namespace CardShopCoop.Modules.Register
                     + counter.m_CustomerPlaceItemPos.forward * (-0.025f * (itemSlot++ % 8));
                 item.gameObject.SetActive(true);
                 item.m_Collider.enabled = true;
-                item.m_Rigidbody.isKinematic = false;
+                var rigidbody = RegisterInterop.EnsureItemRigidbody(item);
+                if (rigidbody != null)
+                {
+                    rigidbody.isKinematic = false;
+                }
+
                 item.m_InteractableScanItem.enabled = true;
                 item.m_InteractableScanItem.RegisterScanItem(customer, counter.m_ScannedItemLerpPos);
             }
@@ -888,7 +893,12 @@ namespace CardShopCoop.Modules.Register
                     + counter.m_CustomerPlaceItemPos.forward * (-0.035f * (cardSlot++ % 8));
                 card.gameObject.SetActive(true);
                 card.m_Collider.enabled = true;
-                card.m_Rigidbody.isKinematic = false;
+                var rigidbody = RegisterInterop.EnsureCardRigidbody(card);
+                if (rigidbody != null)
+                {
+                    rigidbody.isKinematic = false;
+                }
+
                 card.RegisterScanCard(customer, counter.m_ScannedItemLerpPos);
             }
         }

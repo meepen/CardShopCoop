@@ -35,6 +35,7 @@ namespace CardShopCoop.Modules.World
         private readonly Action<INetMessage> _broadcast;
         private readonly Action<int, INetMessage> _send;
         private readonly BoxNetworkInteraction _boxes;
+        private readonly PlayerBoxInteraction _playerBox;
         private readonly Dictionary<long, List<long>> _recordIds = new();
         private readonly Dictionary<long, Queue<PendingRecordStore>> _pendingRecordStores = new();
         private readonly Queue<long> _pendingRecordTakes = new();
@@ -58,13 +59,37 @@ namespace CardShopCoop.Modules.World
         }
 
         internal WarehouseShelfInteraction(bool host, Action<INetMessage> broadcast,
-            Action<int, INetMessage> send, BoxNetworkInteraction boxes)
+            Action<int, INetMessage> send, BoxNetworkInteraction boxes,
+            PlayerBoxInteraction playerBox = null)
         {
             _host = host;
             _broadcast = broadcast ?? throw new ArgumentNullException(nameof(broadcast));
             _send = send ?? throw new ArgumentNullException(nameof(send));
             _boxes = boxes ?? throw new ArgumentNullException(nameof(boxes));
+            _playerBox = playerBox;
             Probe();
+        }
+
+        /// <summary>Moves a taken warehouse box into the local player's hand through the shared
+        /// single-hand path, so a take can never stack a second box on top of one already held.</summary>
+        private void TakeIntoLocalHand(InteractablePackagingBox box)
+        {
+            if (box == null)
+            {
+                return;
+            }
+
+            if (_playerBox != null)
+            {
+                _playerBox.TakeIntoLocalHand(box);
+                return;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            if (controller != null)
+            {
+                box.StartHoldBox(true, controller.m_HoldItemPos);
+            }
         }
 
         internal static bool Available()
@@ -257,8 +282,7 @@ namespace CardShopCoop.Modules.World
                     + delta.BoxNetworkId + ".");
             }
 
-            var controller = SceneRef<InteractionPlayerController>.Get();
-            held.StartHoldBox(true, controller.m_HoldItemPos);
+            TakeIntoLocalHand(held);
         }
 
         internal bool TryForwardClientTake(InteractableStorageCompartment storage)
@@ -344,8 +368,7 @@ namespace CardShopCoop.Modules.World
                     + delta.BoxNetworkId + ".");
             }
 
-            var controller = SceneRef<InteractionPlayerController>.Get();
-            box.StartHoldBox(true, controller.m_HoldItemPos);
+            TakeIntoLocalHand(box);
         }
 
         /// <summary>Applies another player's take on this peer: the box leaves our shelf, but only

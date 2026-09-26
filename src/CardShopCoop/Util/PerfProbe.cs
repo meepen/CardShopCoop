@@ -147,6 +147,29 @@ namespace CardShopCoop.Util
             }
         }
 
+        /// <summary>Unity-free timing scope for dedicated worker threads. Unlike <see cref="Scope"/>,
+        /// this never touches the Unity profiler or <c>UnityEngine.Time</c>; it only feeds the
+        /// lock-free <see cref="ThreadMetrics"/> aggregates flushed by <see cref="FlushThreadMetrics"/>.</summary>
+        public readonly struct ThreadScope : IDisposable
+        {
+            private readonly string _stage;
+            private readonly long _start;
+
+            internal ThreadScope(string stage)
+            {
+                _stage = stage;
+                _start = StartThreadMetric();
+            }
+
+            public void Dispose()
+            {
+                if (_start != 0L)
+                {
+                    EndThreadMetric(_stage, _start);
+                }
+            }
+        }
+
         public static bool Enabled
         {
             get
@@ -204,6 +227,18 @@ namespace CardShopCoop.Util
                 throw new ArgumentException("A performance stage name is required.", nameof(stage));
             }
             return new Scope(stage);
+        }
+
+        /// <summary>Thread-safe counterpart of <see cref="Sample"/> for non-Unity threads. Does not
+        /// emit a Unity profiler sample and does not read <c>UnityEngine.Time</c>; the token is
+        /// accumulated into <see cref="ThreadMetrics"/> and reported on the main thread.</summary>
+        public static ThreadScope ThreadSample(string stage)
+        {
+            if (string.IsNullOrEmpty(stage))
+            {
+                throw new ArgumentException("A performance stage name is required.", nameof(stage));
+            }
+            return new ThreadScope(stage);
         }
 
         /// <summary>Run an action and expose/log its stage while diagnostics are enabled.</summary>

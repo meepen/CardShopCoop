@@ -41,8 +41,9 @@ namespace CardShopCoop.Modules.World
             _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction, BroadcastWorld);
             _shelfInteraction = new ShelfInteraction(BroadcastWorld, () => _context.InGame());
             _warehouseShelfInteraction = new WarehouseShelfInteraction(true, BroadcastWorld,
-                SendWorldTo, _boxNetworkInteraction);
-            _cardInteraction = new WorldCardInteraction(_context, true, _boxNetworkInteraction)
+                SendWorldTo, _boxNetworkInteraction, _playerBoxInteraction);
+            _cardInteraction = new WorldCardInteraction(_context, true, _boxNetworkInteraction,
+                _playerBoxInteraction)
             {
                 BroadcastOverride = BroadcastWorld,
                 RelayOverride = RelayWorldExcept,

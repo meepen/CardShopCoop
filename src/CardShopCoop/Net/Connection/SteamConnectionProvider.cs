@@ -47,7 +47,7 @@ namespace CardShopCoop.Net.Connection
         public void Host(int port, bool isPublic = false, string lobbyName = "", string password = "", int maxPlayers = 0)
         {
             EnsureUnused();
-            Transport = _steam.CreateTransport(true);
+            Transport = NetworkPump.Wrap(LagTransport.Wrap(_steam.CreateTransport(true)));
             Transport.PeerConnected += OnPeerConnected;
             // Publish first so Core can register the role's module handlers before Start freezes
             // the process-wide protocol snapshot for this session (the LAN provider uses the
@@ -65,7 +65,7 @@ namespace CardShopCoop.Net.Connection
                 throw new ArgumentException("Steam lobby id must be numeric.", nameof(address));
             }
 
-            Transport = _steam.CreateTransport(false);
+            Transport = NetworkPump.Wrap(LagTransport.Wrap(_steam.CreateTransport(false)));
             Transport.PeerConnected += OnPeerConnected;
             TransportChanged?.Invoke();
             StartKcpTransport(Transport);
@@ -104,14 +104,14 @@ namespace CardShopCoop.Net.Connection
 
         private static void StartKcpTransport(ICoopTransport transport)
         {
-            if (transport is KcpSessionManager manager)
+            if (transport is ICoopStartable startable)
             {
-                manager.Start();
+                startable.Start();
                 return;
             }
 
             throw new InvalidOperationException(
-                "Steam bridge returned a transport that is not a KCP session manager.");
+                "Steam bridge returned a transport that cannot be started.");
         }
     }
 }

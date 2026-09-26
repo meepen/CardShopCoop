@@ -15,6 +15,8 @@ namespace CardShopCoop.Modules.Register
     {
         private static MethodInfo _getOrCreateCardRigidbody;
         private static bool _cardRigidbodyMethodResolved;
+        private static MethodInfo _getOrCreateItemRigidbody;
+        private static bool _itemRigidbodyMethodResolved;
 
         internal static IList<InteractableCashierCounter> Counters
             => SceneRef<ShelfManager>.Get()?.m_CashierCounterList;
@@ -335,9 +337,10 @@ namespace CardShopCoop.Modules.Register
             item.m_InteractableScanItem.StopLerpToTransform();
             item.gameObject.SetActive(true);
             item.m_Collider.enabled = true;
-            if (item.m_Rigidbody != null)
+            var rigidbody = EnsureItemRigidbody(item);
+            if (rigidbody != null)
             {
-                item.m_Rigidbody.isKinematic = false;
+                rigidbody.isKinematic = false;
             }
 
             item.m_InteractableScanItem.enabled = true;
@@ -357,9 +360,10 @@ namespace CardShopCoop.Modules.Register
             card.StopLerpToTransform();
             card.gameObject.SetActive(true);
             card.m_Collider.enabled = true;
-            if (card.m_Rigidbody != null)
+            var rigidbody = EnsureCardRigidbody(card);
+            if (rigidbody != null)
             {
-                card.m_Rigidbody.isKinematic = false;
+                rigidbody.isKinematic = false;
             }
 
             card.RegisterScanCard(customer, counter != null ? counter.m_ScannedItemLerpPos : null);
@@ -384,13 +388,24 @@ namespace CardShopCoop.Modules.Register
             item.transform.position += counter.m_CustomerPlaceItemPos.right * (0.1f * Mathf.Clamp(slot / 8, 0, 1));
             item.transform.position += Vector3.up * (0.2f * Mathf.Clamp(slot / 16, 0, 2));
             item.transform.rotation = counter.m_CustomerPlaceItemPos.rotation;
+            // Vanilla drops every item with a random tilt (Customer.WaypointEndUpdate's
+            // counter-placement block), using the integer Random.Range overload. Without it the
+            // item lands perfectly axis-aligned, so it settles flat instead of rocking/settling
+            // the way a dropped item should.
+            item.transform.Rotate(new Vector3(UnityEngine.Random.Range(-30, -5),
+                UnityEngine.Random.Range(-5, 5), UnityEngine.Random.Range(-5, 5)));
             item.m_Mesh.enabled = true;
             item.gameObject.SetActive(true);
             item.m_Collider.enabled = true;
-            if (item.m_Rigidbody != null)
+            // The 1.00 beta creates the item Rigidbody lazily via GetOrCreateRigidbody, so a
+            // plain m_Rigidbody null check silently skipped physics on that build. Use the same
+            // accessor the card path established.
+            var rigidbody = EnsureItemRigidbody(item);
+            if (rigidbody != null)
             {
-                item.m_Rigidbody.isKinematic = false;
+                rigidbody.isKinematic = false;
             }
+
             item.m_InteractableScanItem.enabled = true;
             item.m_InteractableScanItem.RegisterScanItem(customer, counter.m_ScannedItemLerpPos);
             customer.m_ItemInBagList.Add(item);
@@ -433,10 +448,16 @@ namespace CardShopCoop.Modules.Register
 
             card.transform.parent = counter.transform;
             card.transform.position = counter.m_CustomerPlaceItemPos.position;
+            card.transform.localScale = Vector3.one;
             card.transform.position += counter.m_CustomerPlaceItemPos.forward * (-0.035f * (slot % 8));
             card.transform.position += counter.m_CustomerPlaceItemPos.right * (0.1f * Mathf.Clamp(slot / 8, 0, 1));
             card.transform.position += Vector3.up * (0.3f * Mathf.Clamp(slot / 16, 0, 2));
             card.transform.rotation = counter.m_CustomerPlaceItemPos.rotation;
+            // Cards use the same random drop tilt as items, offset by 180 degrees on X so the
+            // face-down card tip is the leading edge, exactly as vanilla places them (integer
+            // Random.Range overload: Customer.WaypointEndUpdate).
+            card.transform.Rotate(new Vector3(UnityEngine.Random.Range(-30, -5) + 180,
+                UnityEngine.Random.Range(-5, 5), UnityEngine.Random.Range(-5, 5)));
             card.m_Card3dUI.gameObject.SetActive(true);
             card.gameObject.SetActive(true);
             card.m_Collider.enabled = true;
@@ -446,7 +467,7 @@ namespace CardShopCoop.Modules.Register
             return card;
         }
 
-        private static Rigidbody EnsureCardRigidbody(InteractableCard3d card)
+        internal static Rigidbody EnsureCardRigidbody(InteractableCard3d card)
         {
             if (card == null)
             {
@@ -468,6 +489,35 @@ namespace CardShopCoop.Modules.Register
             var rigidbody = _getOrCreateCardRigidbody?.Invoke(card, null) as Rigidbody
                 ?? card.GetComponent<Rigidbody>();
             card.m_Rigidbody = rigidbody;
+            return rigidbody;
+        }
+
+        /// <summary>The item counterpart of <see cref="EnsureCardRigidbody"/>. The 1.00 beta
+        /// creates an item's Rigidbody lazily via <c>Item.GetOrCreateRigidbody</c>; builds without
+        /// that member already carry it on the prefab. Resolving both keeps the counter placement
+        /// physically identical on every supported build.</summary>
+        internal static Rigidbody EnsureItemRigidbody(Item item)
+        {
+            if (item == null)
+            {
+                return null;
+            }
+
+            if (item.m_Rigidbody != null)
+            {
+                return item.m_Rigidbody;
+            }
+
+            if (!_itemRigidbodyMethodResolved)
+            {
+                _getOrCreateItemRigidbody = ReflectionSurface.OptionalMethod(
+                    typeof(Item), "GetOrCreateRigidbody");
+                _itemRigidbodyMethodResolved = true;
+            }
+
+            var rigidbody = _getOrCreateItemRigidbody?.Invoke(item, null) as Rigidbody
+                ?? item.GetComponent<Rigidbody>();
+            item.m_Rigidbody = rigidbody;
             return rigidbody;
         }
     }

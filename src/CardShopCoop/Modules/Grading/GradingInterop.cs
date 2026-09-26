@@ -99,13 +99,29 @@ namespace CardShopCoop.Modules.Grading
             : ResolveExactMethod(TSubmitValidatorPatch, "Prefix",
                 typeof(GradedCardSubmitSelectScreen));
 
+        // Grading Overhaul 3.4.x returns void from the external-remember and day-start hooks
+        // where earlier versions returned bool. Both contracts are accepted so one DLL spans
+        // the versions; the presence/parameter checks stay exact.
+        private static readonly Type[] BoolOrVoidReturn = { typeof(bool), typeof(void) };
+
         private static bool _logged;
         private static bool _compatibilityLogged;
+        private static bool _rollbackUnavailableLogged;
+        // Compatibility is a process-static reflection result whose only mutable input is the
+        // day-start surface, so it is computed once and invalidated when that surface changes.
+        // Present/GoCompatible/Encoded/Actual are consulted per card on hot paths, and recomputing
+        // this would allocate and reflect on every call.
+        private static bool _compatibilityResolved;
+        private static string _compatibilityFailure;
         private static bool _dayStartSurfaceChecked;
         private static bool _dayStartSurfaceReady;
         private static int _maxSubmitSlots;
         private static readonly HashSet<long> RefusalWarnings = new();
 
+        /// <summary>True when Grading Overhaul is installed AND its API matches what this build
+        /// supports. An installed-but-incompatible GO must NOT half-activate the integration (that
+        /// yields GO's 52 slots, raw grades, and a guaranteed service rejection). It instead runs
+        /// the vanilla fallback: 8 slots, raw 1-10 grades, and no GO calls.</summary>
         internal static bool Present
         {
             get
@@ -119,9 +135,15 @@ namespace CardShopCoop.Modules.Grading
                         CoopPlugin.Log.LogInfo("Grading Overhaul detected - the grading module will preserve encoded certificates");
                         LogCompanies();
                     }
+                    else
+                    {
+                        CoopPlugin.Log.LogWarning("Grading Overhaul is present but not compatible with "
+                            + "this CardShopCoop build - running the vanilla grading fallback "
+                            + "(8 slots, raw grades, no Grading Overhaul integration)");
+                    }
                 }
 
-                return GoDetected;
+                return GoDetected && compatible;
             }
         }
 
@@ -136,7 +158,7 @@ namespace CardShopCoop.Modules.Grading
             }
         }
 
-        private static bool GoDetected
+        internal static bool GoDetected
             => TRegistry != null || THelper != null || TCompany != null || TJobRegistry != null
                 || TPreRoll != null || TTheme != null || TCodec != null || TConfig != null
                 || TSlotExpansion != null || TSaveManager != null || TDayStartPatch != null
@@ -144,15 +166,29 @@ namespace CardShopCoop.Modules.Grading
 
         private static string CompatibilityFailure()
         {
+            if (_compatibilityResolved)
+            {
+                return _compatibilityFailure;
+            }
+
+            // Publish the result before flipping the resolved flag, so a reader that observes
+            // resolved=true always observes the computed failure rather than a stale null.
+            _compatibilityFailure = ComputeCompatibilityFailure();
+            _compatibilityResolved = true;
+            return _compatibilityFailure;
+        }
+
+        private static string ComputeCompatibilityFailure()
+        {
             if (!GoDetected)
                 return null;
 
             var failures = new List<string>();
-            if (!IsExactMethod(MiRemember, TRegistry, true, typeof(bool), typeof(CardData),
+            if (!IsFlexibleMethod(MiRemember, TRegistry, true, BoolOrVoidReturn, typeof(CardData),
                 typeof(int)))
             {
                 failures.Add("RememberForExternalMod must be declared by EncodedGradeRegistry, "
-                    + "static, (CardData, int), and return bool");
+                    + "static, (CardData, int), and return bool or void");
             }
             if (TCompany == null || !TCompany.IsEnum)
                 failures.Add("GradingCompany must be an enum");
@@ -175,10 +211,11 @@ namespace CardShopCoop.Modules.Grading
             {
                 failures.Add("IsCertBoundToCard must have the exact company/certificate/card signature");
             }
-            if (!IsExactMethod(MiDayStart, TDayStartPatch, true, typeof(bool)))
+            if (!IsFlexibleMethod(MiDayStart, TDayStartPatch, true, BoolOrVoidReturn))
             {
                 failures.Add("day-start Prefix must be declared by "
-                    + "CompanyStamp_RestockManager_OnDayStartedPatch, static, (), and return bool");
+                    + "CompanyStamp_RestockManager_OnDayStartedPatch, static, (), and return "
+                    + "bool or void");
             }
             else if (_dayStartSurfaceChecked && !_dayStartSurfaceReady)
             {
@@ -203,14 +240,20 @@ namespace CardShopCoop.Modules.Grading
                 failures.Add("PreRollOnSubmit apply method has an unexpected declaring type, "
                     + "static/instance mode, parameter list, or return type");
             }
-            if (!IsExactMethod(MiRollbackJobCompany, TJobRegistry, true, typeof(bool),
-                typeof(GradeCardSubmitSet), TCompany, typeof(bool), typeof(int)))
+            // Grading Overhaul 3.4.x removed the post-submit rollback hooks. They are a
+            // compensation path for a local exception AFTER the GO job was enrolled, not part of
+            // the happy path, so their absence must not disable grading; it only means a failed
+            // local commit cannot un-enroll the GO job. Warn once and continue.
+            if (MiRollbackJobCompany != null
+                && !IsExactMethod(MiRollbackJobCompany, TJobRegistry, true, typeof(bool),
+                    typeof(GradeCardSubmitSet), TCompany, typeof(bool), typeof(int)))
             {
                 failures.Add("OnJobCancelled rollback method has an unexpected declaring type, "
                     + "static/instance mode, parameter list, or return type");
             }
-            if (!IsExactMethod(MiRollbackPreRoll, TPreRoll, true, typeof(bool),
-                typeof(GradeCardSubmitSet), TCompany, typeof(bool), typeof(int)))
+            if (MiRollbackPreRoll != null
+                && !IsExactMethod(MiRollbackPreRoll, TPreRoll, true, typeof(bool),
+                    typeof(GradeCardSubmitSet), TCompany, typeof(bool), typeof(int)))
             {
                 failures.Add("RollbackOnSubmit rollback method has an unexpected declaring type, "
                     + "static/instance mode, parameter list, or return type");
@@ -223,6 +266,12 @@ namespace CardShopCoop.Modules.Grading
                 TCompany?.MakeByRefType(), typeof(int).MakeByRefType()))
             {
                 failures.Add("ServiceLevelCodec.TryDecode has an unexpected exact signature");
+            }
+
+            if (failures.Count == 0
+                && (MiRollbackJobCompany == null || MiRollbackPreRoll == null))
+            {
+                LogRollbackUnavailable();
             }
 
             return failures.Count == 0 ? null : string.Join("; ", failures);
@@ -269,6 +318,61 @@ namespace CardShopCoop.Modules.Grading
             return true;
         }
 
+        /// <summary>Like <see cref="IsExactMethod"/> but tolerant of the hook's RETURN type within
+        /// <paramref name="allowedReturnTypes"/>. Grading Overhaul 3.4.x changed the external
+        /// remember and day-start prefixes from bool to void, so requiring a single return type
+        /// disabled co-op grading on every 3.4.x install.</summary>
+        private static bool IsFlexibleMethod(MethodInfo method, Type declaringType, bool isStatic,
+            Type[] allowedReturnTypes, params Type[] parameterTypes)
+        {
+            if (method == null || method.DeclaringType != declaringType
+                || method.IsStatic != isStatic)
+            {
+                return false;
+            }
+
+            var returnAllowed = false;
+            for (var i = 0; i < allowedReturnTypes.Length; i++)
+            {
+                if (method.ReturnType == allowedReturnTypes[i])
+                {
+                    returnAllowed = true;
+                    break;
+                }
+            }
+            if (!returnAllowed)
+                return false;
+
+            var parameters = method.GetParameters();
+            if (parameters.Length != parameterTypes.Length)
+                return false;
+
+            for (var i = 0; i < parameters.Length; i++)
+            {
+                if (parameters[i].ParameterType != parameterTypes[i])
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static void LogRollbackUnavailable()
+        {
+            if (_rollbackUnavailableLogged || CoopPlugin.Log == null)
+                return;
+
+            _rollbackUnavailableLogged = true;
+            CoopPlugin.Log.LogWarning("Grading Overhaul has no post-submit rollback hooks "
+                + "(OnJobCancelled/RollbackOnSubmit) on this build; a local commit failure after "
+                + "job enrollment cannot be compensated. Grading stays enabled.");
+        }
+
+        private static void InvalidateCompatibility()
+        {
+            _compatibilityResolved = false;
+            _compatibilityFailure = null;
+        }
+
         internal static int CurrentCompanyId
         {
             get
@@ -309,7 +413,7 @@ namespace CardShopCoop.Modules.Grading
         internal static MethodInfo GoDayStartMethod => MiDayStart;
 
         internal static bool GoDayStartMethodMatches
-            => IsExactMethod(MiDayStart, TDayStartPatch, true, typeof(bool));
+            => IsFlexibleMethod(MiDayStart, TDayStartPatch, true, BoolOrVoidReturn);
 
         internal static MethodInfo GoSubmitValidatorMethod => MiSubmitValidator;
 
@@ -317,6 +421,9 @@ namespace CardShopCoop.Modules.Grading
         {
             _dayStartSurfaceChecked = true;
             _dayStartSurfaceReady = ready;
+            // The day-start surface is the only input to the cached compatibility result that can
+            // change after the first query, so force the next query to recompute it.
+            InvalidateCompatibility();
             if (!ready && GoDetected)
             {
                 CoopPlugin.Log.LogError("Grading Overhaul grading disabled fail-closed: "
@@ -406,7 +513,9 @@ namespace CardShopCoop.Modules.Grading
             try
             {
                 var result = MiRemember.Invoke(null, new object[] { card, encoded });
-                return result is bool success && success;
+                // Grading Overhaul 3.4.x returns void and signals failure by a logged early
+                // return; older builds return bool. Treat a void return as success.
+                return result is bool success ? success : true;
             }
             catch (Exception error)
             {
@@ -449,13 +558,28 @@ namespace CardShopCoop.Modules.Grading
         }
 
         internal static bool ValidSubmissionCard(CardData card)
+            => ValidSubmissionCard(card, out _);
+
+        /// <summary>Validates one card destined for the grading host, reporting the exact failing
+        /// check so a refusal is diagnosable from a field log instead of a bare reason code.</summary>
+        internal static bool ValidSubmissionCard(CardData card, out string reason)
         {
-            if (card == null || card.expansionType == ECardExpansionType.None
-                || card.monsterType == EMonsterType.None
-                || !Enum.IsDefined(typeof(ECardBorderType), card.borderType)
-                || card.isChampionCard || card.cardGrade < 0
-                || card.gradedCardIndex < 0 || card.gradedCardIndex > 1000000)
+            reason = null;
+            if (card == null)
             {
+                reason = "card is null";
+                return false;
+            }
+            if (card.expansionType == ECardExpansionType.None || card.monsterType == EMonsterType.None
+                || !Enum.IsDefined(typeof(ECardBorderType), card.borderType))
+            {
+                reason = "card enum fields are invalid (" + DescribeCard(card) + ")";
+                return false;
+            }
+            if (card.isChampionCard || card.cardGrade < 0 || card.gradedCardIndex < 0
+                || card.gradedCardIndex > 1000000)
+            {
+                reason = "card identity fields are invalid (" + DescribeCard(card) + ")";
                 return false;
             }
 
@@ -464,29 +588,72 @@ namespace CardShopCoop.Modules.Grading
                 var encoded = Encoded(card);
                 if (encoded < 0 || (encoded > 10 && !Present)
                     || (encoded > 10 && (Actual(encoded) < 1 || Actual(encoded) > 10)))
+                {
+                    reason = "encoded grade " + encoded + " is invalid for the active grading "
+                        + "backend (present=" + Present + ", compatible=" + GoCompatible + ")";
                     return false;
+                }
                 if (encoded > 10 && !DecodeCert(encoded, out _, out _))
+                {
+                    reason = "encoded grade " + encoded + " did not decode to a certificate";
                     return false;
+                }
                 if (encoded == 0 && card.gradedCardIndex != 0)
+                {
+                    reason = "ungraded card carried gradedCardIndex " + card.gradedCardIndex;
                     return false;
+                }
 
                 var index = CPlayerData.GetCardSaveIndex(card);
                 var collected = CPlayerData.GetCardCollectedList(card.expansionType, card.isDestiny);
                 if (index < 0 || collected == null || index >= collected.Count)
+                {
+                    reason = "save index " + index + " is outside the live collection "
+                        + "(collected=" + (collected == null ? "null" : collected.Count.ToString())
+                        + ") for " + DescribeCard(card);
                     return false;
+                }
                 var canonical = CPlayerData.GetCardData(index, card.expansionType, card.isDestiny);
-                return canonical != null && canonical.expansionType == card.expansionType
-                    && canonical.monsterType == card.monsterType
-                    && canonical.borderType == card.borderType
-                    && canonical.isFoil == card.isFoil
-                    && canonical.isDestiny == card.isDestiny
-                    && canonical.isChampionCard == card.isChampionCard;
+                if (canonical == null)
+                {
+                    reason = "no canonical card at save index " + index + " for " + DescribeCard(card);
+                    return false;
+                }
+                if (!SameCardFields(canonical, card))
+                {
+                    reason = "card fields do not match save index " + index + ": sent "
+                        + DescribeCard(card) + ", canonical " + DescribeCard(canonical);
+                    return false;
+                }
+                return true;
             }
             catch (Exception error)
             {
+                reason = "card validation threw: " + error.Message + " for " + DescribeCard(card);
                 CoopPlugin.Log.LogWarning("grading submission card validation failed: " + error.Message);
                 return false;
             }
+        }
+
+        private static bool SameCardFields(CardData left, CardData right)
+            => left != null && right != null
+                && left.expansionType == right.expansionType
+                && left.monsterType == right.monsterType
+                && left.borderType == right.borderType
+                && left.isFoil == right.isFoil
+                && left.isDestiny == right.isDestiny
+                && left.isChampionCard == right.isChampionCard;
+
+        /// <summary>Stable, log-friendly dump of the wire-relevant card fields. Uses raw enum
+        /// ordinals because a modded expansion/monster renders a misleading vanilla name.</summary>
+        internal static string DescribeCard(CardData card)
+        {
+            if (card == null)
+                return "(null card)";
+            return "exp=" + (int)card.expansionType + " monster=" + (int)card.monsterType
+                + " border=" + (int)card.borderType + (card.isFoil ? " foil" : "")
+                + (card.isDestiny ? " destiny" : "") + (card.isChampionCard ? " champion" : "")
+                + " grade=" + card.cardGrade + " gidx=" + card.gradedCardIndex;
         }
 
         internal static bool RegisterJobCompany(GradeCardSubmitSet set, int companyId, bool useCheats)
@@ -631,8 +798,11 @@ namespace CardShopCoop.Modules.Grading
         {
             _maxSubmitSlots = 0;
             RefusalWarnings.Clear();
-            _dayStartSurfaceChecked = false;
-            _dayStartSurfaceReady = false;
+            // The day-start surface describes this process's Harmony patch install and does not
+            // change on a save load. Clearing it would let an installed-but-incompatible Grading
+            // Overhaul flip back to "compatible" and half-activate after the first load, because
+            // ComputeCompatibilityFailure only reports the day-start failure once it is checked.
+            InvalidateCompatibility();
         }
 
         private static bool CertFreeForCard(CardData card, int encoded)

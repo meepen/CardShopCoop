@@ -11,6 +11,14 @@ namespace CardShopCoop.Modules.Grading
 
         public static bool Remember(CardData card) => GradingInterop.Remember(card);
 
+        /// <summary>World signals that a predicted collection removal was rejected by the host,
+        /// so the card is back in the album. If that card sits in an unsubmitted grading
+        /// selection, it must leave the selection too or the player is left with a reserved slot
+        /// that the host never accepted (and a duplicated card if the selection is cancelled).
+        /// No-op when this process is not hosting a grading client.</summary>
+        public static void OnCardRemovalRefused(CardData card, int amount)
+            => GradingClientBehaviour.OnCardRemovalRefused(card, amount);
+
         public static void Reset() => GradingInterop.Reset();
     }
 }

@@ -25,12 +25,12 @@ namespace CardShopCoop.Modules.World
         internal static bool ApplyingRemoteCards;
 
         internal WorldCardInteraction(CoopRuntimeContext context, bool host,
-            BoxNetworkInteraction boxes = null)
+            BoxNetworkInteraction boxes = null, PlayerBoxInteraction playerBox = null)
         {
             _context = context ?? throw new ArgumentNullException(nameof(context));
             _host = host;
 
-            Containers = new WorldContainerInteraction(boxes);
+            Containers = new WorldContainerInteraction(boxes, playerBox);
             Market = new WorldMarketInteraction(context, host);
             _gradingBridge = new WorldGradingBridge(this);
             GradingWorldBridge.Attach(_gradingBridge);
@@ -211,8 +211,23 @@ namespace CardShopCoop.Modules.World
                 Card = snapshot,
             };
             WorldPrediction.Predict(WorldPrediction.CardsScope, intent,
-                () => ApplyPredictedCardDelta(snapshot, amount, isAdd),
-                () => ApplyPredictedCardDelta(snapshot, amount, !isAdd));
+                () =>
+                {
+                    ApplyPredictedCardDelta(snapshot, amount, isAdd);
+                    NotifyCardsChanged();
+                },
+                () =>
+                {
+                    ApplyPredictedCardDelta(snapshot, amount, !isAdd);
+                    NotifyCardsChanged();
+                },
+                () =>
+                {
+                    // Only THIS removal's own rejection returns the card; a cascade undo of a
+                    // later prediction must not clear a selection that was legitimately reserved.
+                    if (!isAdd)
+                        GradingApi.OnCardRemovalRefused(snapshot, amount);
+                });
             return true;
         }
 
@@ -227,8 +242,17 @@ namespace CardShopCoop.Modules.World
                 snapshot.cardGrade = GradingApi.Encoded(card);
             var intent = new GradedRemoveRequestMessage { Card = snapshot };
             WorldPrediction.Predict(WorldPrediction.CardsScope, intent,
-                () => ApplyPredictedGradedRemoval(snapshot),
-                () => ApplyPredictedCardDelta(snapshot, 1, true));
+                () =>
+                {
+                    ApplyPredictedGradedRemoval(snapshot);
+                    NotifyCardsChanged();
+                },
+                () =>
+                {
+                    ApplyPredictedCardDelta(snapshot, 1, true);
+                    NotifyCardsChanged();
+                },
+                () => GradingApi.OnCardRemovalRefused(snapshot, 1));
             return true;
         }
 
@@ -1555,7 +1579,12 @@ namespace CardShopCoop.Modules.World
                     || canonical.isDestiny != card.isDestiny
                     || canonical.isChampionCard != card.isChampionCard)
                 {
-                    reason = "card fields do not match their save index";
+                    // The card is self-inconsistent with THIS host's layout for the expansion
+                    // (e.g. the sender resolved an ordinal through a different shown list). Log
+                    // both sides with raw ordinals so the divergent field is visible next time.
+                    reason = "card fields do not match their save index (index=" + saveIndex
+                        + " sent=" + CardFieldDump(card) + " canonical=" + CardFieldDump(canonical)
+                        + ")";
                     return false;
                 }
             }
@@ -1763,6 +1792,19 @@ namespace CardShopCoop.Modules.World
             }
 
             return c.expansionType + "#" + (int)c.monsterType;
+        }
+
+        /// <summary>Raw-ordinal field dump for the save-index consistency refusal. CardIdent
+        /// alone cannot show WHICH field diverged, which is the whole question when the same
+        /// monster resolves to a different save index on the two peers.</summary>
+        private static string CardFieldDump(CardData c)
+        {
+            if (c == null)
+                return "(null card)";
+            return CardIdent(c) + "[exp=" + (int)c.expansionType + " monster=" + (int)c.monsterType
+                + " border=" + (int)c.borderType + (c.isFoil ? " foil" : "")
+                + (c.isDestiny ? " destiny" : "") + (c.isChampionCard ? " champion" : "")
+                + " grade=" + c.cardGrade + " gidx=" + c.gradedCardIndex + "]";
         }
 
         /// <summary>Warn when a card cannot be processed locally.</summary>

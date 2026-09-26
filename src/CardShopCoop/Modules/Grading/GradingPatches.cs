@@ -28,7 +28,9 @@ namespace CardShopCoop.Modules.Grading
 
         private static void ValidateGoDayStartSurface()
         {
-            if (!GradingInterop.Present)
+            // Gate on GoDetected, not Present: a previously-known-bad day-start surface must be
+            // re-derived on each module enable, never flipped ready by the "GO absent" shortcut.
+            if (!GradingInterop.GoDetected)
             {
                 GradingInterop.SetDayStartSurface(true, null);
                 return;
@@ -66,7 +68,9 @@ namespace CardShopCoop.Modules.Grading
 
         private static void TryPatchGoDayStart(Harmony harmony)
         {
-            if (!GradingInterop.Present)
+            // Gate on GoDetected, not Present: the patch must be re-attempted and its result
+            // re-derived on each module enable, even when a prior enable left it failing.
+            if (!GradingInterop.GoDetected)
             {
                 GradingInterop.SetDayStartSurface(true, null);
                 return;

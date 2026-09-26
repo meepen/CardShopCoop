@@ -179,6 +179,7 @@ namespace CardShopCoop.Modules.World
         private int _nextPackClaimToken = 1;
         private ContainerStateMessage _pendingClientState;
         private readonly BoxNetworkInteraction _boxes;
+        private readonly PlayerBoxInteraction _playerBox;
         private Guid _hostPredictionId;
         private BoxNetworkState _hostDeltaBox;
         private bool _hostDeltaTakeIntoHand;
@@ -188,9 +189,33 @@ namespace CardShopCoop.Modules.World
         private int _hostPackOpenedCount;
         private List<CompactCardDataAmount> _hostRevealedCards;
 
-        internal WorldContainerInteraction(BoxNetworkInteraction boxes = null)
+        internal WorldContainerInteraction(BoxNetworkInteraction boxes = null,
+            PlayerBoxInteraction playerBox = null)
         {
             _boxes = boxes;
+            _playerBox = playerBox;
+        }
+
+        /// <summary>Moves a container's authoritative box into the local player's hand through
+        /// the shared single-hand path, so a take can never stack a second box on one already held.</summary>
+        private void TakeIntoLocalHand(InteractablePackagingBox box)
+        {
+            if (box == null)
+            {
+                return;
+            }
+
+            if (_playerBox != null)
+            {
+                _playerBox.TakeIntoLocalHand(box);
+                return;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            if (controller != null)
+            {
+                box.StartHoldBox(true, controller.m_HoldItemPos);
+            }
         }
 
         public override string Name => "containers";
@@ -1178,8 +1203,7 @@ namespace CardShopCoop.Modules.World
 
                 if (message.TakeIntoHand && box is InteractablePackagingBox_Item item)
                 {
-                    var controller = SceneRef<InteractionPlayerController>.Get();
-                    item.StartHoldBox(true, controller.m_HoldItemPos);
+                    TakeIntoLocalHand(item);
                 }
             }
 

@@ -74,7 +74,7 @@ namespace CardShopCoop.Net.Connection
 
             try
             {
-                (manager as ICoopTransport ?? Transport)?.Dispose();
+                Transport?.Dispose();
             }
             finally
             {
@@ -92,16 +92,18 @@ namespace CardShopCoop.Net.Connection
         private void PublishAndStart(UdpDatagramTransport datagrams, bool isHost)
         {
             KcpSessionManager manager = null;
+            NetworkPump pump = null;
             var published = false;
             try
             {
                 manager = new KcpSessionManager(datagrams, isHost);
                 manager.PeerConnected += OnPeerConnected;
+                pump = (NetworkPump)NetworkPump.Wrap(LagTransport.Wrap(manager));
                 _manager = manager;
-                Transport = manager;
+                Transport = pump;
                 TransportChanged?.Invoke();
                 published = true;
-                manager.Start();
+                pump.Start();
                 if (!isHost)
                 {
                     Connected?.Invoke();
@@ -114,7 +116,14 @@ namespace CardShopCoop.Net.Connection
                     manager.PeerConnected -= OnPeerConnected;
                     try
                     {
-                        manager.Dispose();
+                        if (pump != null)
+                        {
+                            pump.Dispose();
+                        }
+                        else
+                        {
+                            manager.Dispose();
+                        }
                     }
                     finally
                     {

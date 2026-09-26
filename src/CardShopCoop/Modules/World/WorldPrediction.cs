@@ -21,6 +21,15 @@ namespace CardShopCoop.Modules.World
                 predictionId => WorldClientBehaviour.SendClientIntent(intent, predictionId),
                 apply, undo, applyLocally);
 
+        /// <summary>World intent with an explicit host-rejection callback. See
+        /// <see cref="PredictionApi.Predict(string, Action{Guid}, Action, Action, Action, bool)"/>:
+        /// the callback fires only for THIS intent's refusal, never for a cascade undo.</summary>
+        internal static Guid Predict(string scope, WorldMessage intent, Action apply, Action undo,
+            Action rejected, bool applyLocally = true)
+            => PredictionApi.Predict(scope,
+                predictionId => WorldClientBehaviour.SendClientIntent(intent, predictionId),
+                apply, undo, rejected, applyLocally);
+
         internal static void ApplyAuthoritative(WorldMessage message, Action apply)
             => PredictionApi.ApplyAuthoritative(message?.PredictionId ?? Guid.Empty, apply);
 

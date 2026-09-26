@@ -283,6 +283,8 @@ namespace CardShopCoop.Modules.World
         private readonly PropertyInfo _rigidbodyVelocity = typeof(Rigidbody).GetProperty("velocity");
         private readonly PropertyInfo _rigidbodyLinearVelocity = typeof(Rigidbody).GetProperty("linearVelocity");
         private readonly BoxNetworkInteraction _boxes;
+        private static readonly FieldInfo CurrentHoldingBoxField =
+            AccessTools.Field(typeof(InteractionPlayerController), "m_CurrentHoldingBox");
         private readonly Action<INetMessage> _broadcast;
         private readonly Action<int, INetMessage> _send;
         private readonly bool _host;
@@ -392,10 +394,9 @@ namespace CardShopCoop.Modules.World
             _applyingPrediction = true;
             try
             {
-                if (message is PlayerBoxPickupMessage pickup)
+                if (message is PlayerBoxPickupMessage)
                 {
-                    var controller = SceneRef<InteractionPlayerController>.Get();
-                    box.StartHoldBox(true, controller.m_HoldItemPos);
+                    TakeIntoLocalHand(box);
                 }
                 else if (message is PlayerBoxPlacementMessage)
                     box.DropBox(true);
@@ -408,6 +409,126 @@ namespace CardShopCoop.Modules.World
             {
                 _applyingPrediction = false;
             }
+        }
+
+        /// <summary>Puts <paramref name="box"/> into this player's hand. A player can only ever
+        /// carry one box, so a network-driven hold that arrives while another box is still held
+        /// releases the current box first instead of leaving it orphaned in the hand (which made
+        /// the old box undroppable and stacked two boxes on the same hand pose).</summary>
+        internal void TakeIntoLocalHand(InteractablePackagingBox box)
+        {
+            if (box == null)
+            {
+                return;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            if (controller == null)
+            {
+                return;
+            }
+
+            ReleaseConflictingLocalHold(box);
+            ApplyLocalHold(box);
+        }
+
+        private void ApplyLocalHold(InteractablePackagingBox box)
+        {
+            if (box == null || IsBeingPlaced(box))
+            {
+                return;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            if (controller != null)
+            {
+                box.StartHoldBox(true, controller.m_HoldItemPos);
+            }
+        }
+
+        /// <summary>Releases whatever box the controller currently holds unless it is
+        /// <paramref name="keep"/>, so only one box is ever parented to the hand pose.</summary>
+        private void ReleaseConflictingLocalHold(InteractablePackagingBox keep)
+        {
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            var current = controller == null
+                ? null
+                : CurrentHoldingBoxField?.GetValue(controller) as InteractablePackagingBox;
+            if (current == null || ReferenceEquals(current, keep))
+            {
+                return;
+            }
+
+            var id = _boxes.TryGetId(current, out var known) ? known : 0;
+            CoopPlugin.Log.LogWarning("[box-id] releasing already-held box id=" + id
+                + " before taking another into the same hand.");
+            if (id > 0)
+            {
+                // Peers still mirror this hold, so retire it with a drop before detaching the box
+                // locally; otherwise it keeps riding this player's hand on every other screen.
+                PublishForcedDrop(current, id, keep);
+                if (_localHeldBoxNetworkId == id)
+                {
+                    _localHeldBoxNetworkId = 0;
+                }
+
+                ReleaseRemoteHold(id);
+            }
+
+            current.DropBox(false);
+            controller.OnExitHoldBoxMode();
+        }
+
+        /// <summary>Tells the host (and observers) that <paramref name="box"/> is no longer held.
+        /// The drop is authoritative once the host echoes it; a rejection restores the old hold
+        /// and, because <paramref name="replacement"/> now owns the hand, releases it so the
+        /// one-box-per-hand invariant survives a refused forced drop.</summary>
+        private void PublishForcedDrop(InteractablePackagingBox box, long boxNetworkId,
+            InteractablePackagingBox replacement)
+        {
+            var placement = _host
+                ? (PlayerBoxPlacementMessage)new PlayerBoxPlacementMessage()
+                : new PlayerBoxPlacementRequestMessage();
+            placement.BoxNetworkId = boxNetworkId;
+            placement.Position = box.transform.position;
+            placement.Rotation = box.transform.rotation;
+            if (_host)
+            {
+                _broadcast(placement);
+                return;
+            }
+
+            WorldPrediction.Predict(WorldPrediction.BoxesScope, placement,
+                () => ApplyPredictedLocal(box, placement), () => ApplyLocalHold(box),
+                () => ReleaseRefusedReplacement(replacement, boxNetworkId),
+                applyLocally: false);
+        }
+
+        /// <summary>A host rejection of the forced drop means the old box should be held again; the
+        /// reconcile undo already did that, so this only relinquishes the replacement box that took
+        /// the hand. It must not exit hold mode, or it would clear the restored hold and orphan the
+        /// old box in the hand.</summary>
+        private void ReleaseRefusedReplacement(InteractablePackagingBox replacement,
+            long replacedBoxNetworkId)
+        {
+            if (replacement == null)
+            {
+                return;
+            }
+
+            // The undo re-held the old box, so this peer's authoritative local hold is the old box
+            // again; leaving the id on the replacement would later release the old box out of the
+            // hand when another player takes the replacement.
+            _localHeldBoxNetworkId = replacedBoxNetworkId;
+
+            if (IsBeingPlaced(replacement))
+            {
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[box-id] forced drop was refused; releasing replacement box "
+                + "to keep one box per hand.");
+            replacement.DropBox(false);
         }
 
         private void RestorePredictedLocal(InteractablePackagingBox box, Transform parent,
@@ -570,6 +691,13 @@ namespace CardShopCoop.Modules.World
                 // This peer already owns the box in the game's placement preview. A networked
                 // hold, drop, or throw on top of that fight the move state machine and strand the
                 // box, and the move will publish its own authoritative result when it finishes.
+                // A terminal action still means nobody holds it, so retire any mirrored hold.
+                if (message is PlayerBoxPlacementMessage || message is PlayerBoxThrowMessage)
+                {
+                    ReleaseRemoteHold(message.BoxNetworkId);
+                    ClearLocalHeldBox(message.BoxNetworkId);
+                }
+
                 CoopPlugin.Log.LogInfo("[box-id] ignoring authoritative box action while the box is being placed id="
                     + message.BoxNetworkId + " (" + message.GetType().Name + ").");
                 return false;
@@ -584,8 +712,8 @@ namespace CardShopCoop.Modules.World
                     // into our own hand; attaching it to a remote anchor would strand it.
                     CoopPlugin.Log.LogInfo("[box-id] taking authoritative hold id="
                         + pickup.BoxNetworkId + " into the local hand.");
-                    _localHeldBoxNetworkId = pickup.BoxNetworkId;
                     ApplyPredictedLocal(box, pickup);
+                    _localHeldBoxNetworkId = pickup.BoxNetworkId;
                 }
                 else
                 {

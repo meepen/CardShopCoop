@@ -20,9 +20,9 @@ namespace CardShopCoop.Net.Kcp
     /// KCP sessions, the application frame envelope, queue admission, and the PeerConnection
     /// lifecycle.  Producers may call the send methods from any thread; only an owned encoded
     /// frame is placed in a bounded queue by those calls.  Polling, KCP input/ticks, decoding,
-    /// and all public lifecycle output happen in <see cref="PumpMainThread"/>.
+    /// and all public lifecycle output happen in <see cref="PumpNetworkThread"/>.
     /// </summary>
-    public sealed class KcpSessionManager : ICoopTransport, ICoopHandshakeTransport
+    public sealed class KcpSessionManager : ICoopTransport, ICoopHandshakeTransport, ICoopStartable
     {
         // The envelope is transport-private.  It is intentionally outside Msg's DTO frame so
         // Type.FullName remains the sole application identity on the wire.
@@ -320,7 +320,7 @@ namespace CardShopCoop.Net.Kcp
         }
 
         /// <summary>Runs all bearer, KCP, decoding, and lifecycle work on one caller thread.</summary>
-        public void PumpMainThread()
+        public void PumpNetworkThread()
         {
             if (Interlocked.Exchange(ref _pumpActive, 1) != 0)
                 throw new InvalidOperationException("KCP transport cannot be pumped concurrently");
@@ -352,26 +352,26 @@ namespace CardShopCoop.Net.Kcp
                 var now = MonotonicNow();
                 var peerSignalBudget = _options.MaxPeerSignalsPerPump;
                 var disconnectRequestBudget = _options.MaxDisconnectRequestsPerPump;
-                using (CardShopCoop.Util.PerfProbe.Sample("net.signal"))
+                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.signal"))
                 {
                     DrainPeerSignals(ref peerSignalBudget);
                     DrainDisconnectRequests(ref disconnectRequestBudget);
                 }
                 _datagramsThisPump = 0;
                 _framesThisPump = 0;
-                using (CardShopCoop.Util.PerfProbe.Sample("net.poll"))
+                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.poll"))
                 {
                     _datagrams.Poll(_options.MaxDatagramsPerPump, OnDatagram);
                     CardShopCoop.Util.PerfProbe.RecordQueueDepth("net.datagrams",
                         _datagramsThisPump, _options.MaxDatagramsPerPump);
                 }
-                using (CardShopCoop.Util.PerfProbe.Sample("net.signal"))
+                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.signal"))
                 {
                     DrainPeerSignals(ref peerSignalBudget);
                     DrainDisconnectRequests(ref disconnectRequestBudget);
                 }
 
-                using (CardShopCoop.Util.PerfProbe.Sample("net.sessions"))
+                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.sessions"))
                 {
                     SessionState[] snapshot;
                     lock (_gate)
@@ -417,7 +417,10 @@ namespace CardShopCoop.Net.Kcp
                         if (state.PendingTerminalDisconnect && !state.Terminal)
                         {
                             var acked = state.Session.PendingReliableSegments == 0;
-                            if (acked || unchecked(now - state.TerminalDisconnectDeadline) >= 0)
+                            // Wrap-safe deadline test: the difference is cast to a signed int, because
+                            // a uint comparison against 0 is always true and would skip the hold.
+                            if (acked
+                                || unchecked((int)(now - state.TerminalDisconnectDeadline)) >= 0)
                             {
                                 LogInfo("coop: completing held disconnect for peer "
                                     + state.Connection.Id + " (acked=" + acked + ").");
@@ -426,7 +429,7 @@ namespace CardShopCoop.Net.Kcp
                         }
 
                         if (state.PendingDisconnectCompletion && !state.Terminal
-                            && unchecked(now - state.DisconnectCompletionDeadline) >= 0)
+                            && unchecked((int)(now - state.DisconnectCompletionDeadline)) >= 0)
                         {
                             // The peer's terminal DisconnectMessage is decoded on the async worker
                             // and can land after the last drain of this pass, especially when the
@@ -451,7 +454,7 @@ namespace CardShopCoop.Net.Kcp
                 var stopping = Volatile.Read(ref _disposeRequested);
                 // Harvest whatever the decode worker finished since the last pump. Runs before the
                 // disconnect drain so a decoded DisconnectMessage is visible to it this frame.
-                using (CardShopCoop.Util.PerfProbe.Sample("net.decode-drain"))
+                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.decode-drain"))
                 {
                     DrainDecodeResults();
                 }
@@ -459,14 +462,14 @@ namespace CardShopCoop.Net.Kcp
                 {
                     StopOnPump();
                     var shutdownResultBudget = int.MaxValue;
-                    using (CardShopCoop.Util.PerfProbe.Sample("net.disconnect-drain"))
+                    using (CardShopCoop.Util.PerfProbe.ThreadSample("net.disconnect-drain"))
                     {
                         DrainDisconnectResults(ref shutdownResultBudget);
                     }
                 }
                 else
                 {
-                    using (CardShopCoop.Util.PerfProbe.Sample("net.disconnect-drain"))
+                    using (CardShopCoop.Util.PerfProbe.ThreadSample("net.disconnect-drain"))
                     {
                         DrainDisconnectResults(ref disconnectResultBudget);
                     }
@@ -1020,7 +1023,7 @@ namespace CardShopCoop.Net.Kcp
             }
 
             bool consumed;
-            using (CardShopCoop.Util.PerfProbe.Sample("net.dgram"))
+            using (CardShopCoop.Util.PerfProbe.ThreadSample("net.dgram"))
             {
                 consumed = state.Session.InputDatagram(datagram);
             }

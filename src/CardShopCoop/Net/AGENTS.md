@@ -48,3 +48,23 @@ soft-depends on `com.zwhit.cardshopcoop` is integrated automatically). There is 
 - Preserve `Type.FullName` catalog identity when refactoring `MessageRegistry`, framing, or
   serialization. Module namespace moves intentionally change the wire contract unless both peers
   still use the same full type name. Never activate compact ids before exact catalog validation.
+
+## Threading ownership
+
+The transport pump runs on a dedicated background thread, not the Unity frame loop. `NetworkPump`
+owns that thread and is the only thing that advances the pump:
+
+- The chain is `NetworkPump(LagTransport(bearer + KcpSessionManager))`. Providers create and start
+  it; `CoopCore.Net` is the pump. Never call `PumpNetworkThread` from the Unity update loop.
+- `KcpSessionManager` is single-threaded: `Start`, `PumpNetworkThread`, `ActivateMessageIds`,
+  `Stop`, and `Dispose` all run on the network thread. `NetworkPump` marshals the lifecycle calls
+  onto it. Producers may call `Send`/`Broadcast` from any thread; they only enqueue an owned frame
+  and signal the pump, so an available message never waits for a tick.
+- Anything reachable from the pump must not touch Unity. `PeerConnected` is raised on the network
+  thread, so application work such as `SendHello` is marshalled to the Unity thread, and pump
+  sampling uses `PerfProbe.ThreadSample`, never `PerfProbe.Sample` (which calls the Unity
+  profiler).
+- Steamworks is split: `SteamAPI` init/`RunCallbacks` and the status-callback registration stay on
+  the main thread, while the bearer `Send`/`Poll` run on the network thread. Host authorization is
+  evaluated in the status callback (main) and carried with the queued change, so `Poll` never
+  touches `SteamMatchmaking`.

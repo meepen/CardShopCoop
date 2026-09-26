@@ -45,14 +45,15 @@ namespace CardShopCoop.Net
         void GracefulDisconnect(PeerConnection connection, DisconnectInfo info = null);
         void Stop();
 
-        /// <summary>Called every frame from the Unity main thread. The LAN UDP/KCP and
-        /// Steam KCP over Steam Networking Sockets transports process sends and receives here
-        /// (Steamworks is main-thread only).</summary>
-        void PumpMainThread();
+        /// <summary>Advances one transport pump step. This runs on the dedicated network
+        /// thread owned by <see cref="NetworkPump"/>, never on the Unity update loop. All
+        /// lifecycle calls (Start/Stop/Dispose/ActivateMessageIds) are marshalled onto that
+        /// same thread so bearer and KCP state stay single-threaded.</summary>
+        void PumpNetworkThread();
 
         /// <summary>Peer-silence tolerance. The Steam KCP over Steam Networking Sockets
-        /// transport needs a longer window because its keepalives also run on the
-        /// (freezable) main thread.</summary>
+        /// transport uses a longer window than LAN because Steam P2P links can be slower to
+        /// report loss. Both transports are advanced on the dedicated network thread.</summary>
         double TimeoutSeconds
         {
             get;
@@ -67,5 +68,13 @@ namespace CardShopCoop.Net
     internal interface ICoopHandshakeTransport
     {
         void SendHandshake(PeerConnection connection, INetMessage message);
+    }
+
+    /// <summary>Lifecycle seam: a transport whose bearer must be started on the network pump
+    /// thread. Kept internal so callers cannot bypass <see cref="NetworkPump"/>'s thread
+    /// ownership by starting a bearer themselves.</summary>
+    internal interface ICoopStartable
+    {
+        void Start();
     }
 }

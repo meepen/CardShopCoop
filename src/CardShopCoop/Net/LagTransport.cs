@@ -26,7 +26,7 @@ namespace CardShopCoop.Net
     /// artificial lag must not trip the peer-silence timeout, so those timers follow real
     /// wire receipt rather than delayed delivery.
     /// </summary>
-    public sealed class LagTransport : ICoopTransport, ICoopHandshakeTransport
+    public sealed class LagTransport : ICoopTransport, ICoopHandshakeTransport, ICoopStartable
     {
         private struct Pending
         {
@@ -76,7 +76,7 @@ namespace CardShopCoop.Net
         /// through here so lag applies to LAN and Steam alike. The decorator is installed
         /// unconditionally, even when both settings are currently 0: the sliders are live,
         /// so the only way a mid-session change can take effect is for this wrapper to already
-        /// be in the chain reading the config each PumpMainThread. With both values at 0 it
+        /// be in the chain reading the config each PumpNetworkThread. With both values at 0 it
         /// behaves as a transparent pass-through.</summary>
         public static ICoopTransport Wrap(ICoopTransport inner)
         {
@@ -189,6 +189,17 @@ namespace CardShopCoop.Net
             _inner.GracefulDisconnect(connection, info);
         }
 
+        public void Start()
+        {
+            if (_inner is ICoopStartable startable)
+            {
+                startable.Start();
+                return;
+            }
+
+            throw new InvalidOperationException("The wrapped transport cannot be started.");
+        }
+
         public void Stop()
         {
             _inner.Stop();
@@ -204,12 +215,12 @@ namespace CardShopCoop.Net
             _overflowWarned = false;
         }
 
-        public void PumpMainThread()
+        public void PumpNetworkThread()
         {
             // Both KCP transports do their sending and receiving here. The inner pump must
             // run first so this frame's
             // arrivals are considered for (possibly zero) delay before anything is released.
-            _inner.PumpMainThread();
+            _inner.PumpNetworkThread();
 
             var lag = ClampMs(CoopPlugin.ArtificialLagMs != null ? CoopPlugin.ArtificialLagMs.Value : 0);
             var jitter = ClampMs(CoopPlugin.ArtificialJitterMs != null ? CoopPlugin.ArtificialJitterMs.Value : 0);

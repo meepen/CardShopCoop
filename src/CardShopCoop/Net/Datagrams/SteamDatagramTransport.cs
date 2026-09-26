@@ -80,8 +80,10 @@ namespace CardShopCoop.Net.Datagrams
 
         /// <summary>
         /// Creates a host or client without exposing Steamworks identity or handle types.
-        /// Hosts must provide <paramref name="hostAuthorization"/>; it is called on the Poll
-        /// thread for each incoming Steam identity while it is being authorized.
+        /// Hosts must provide <paramref name="hostAuthorization"/>; it is called on the Steam
+        /// status-callback (main) thread for each incoming Steam identity while it is being
+        /// authorized, and the decision is carried with the queued change so Poll never needs
+        /// Steam lobby APIs.
         /// </summary>
         /// <param name="isHost">Whether this instance owns a P2P listen socket.</param>
         /// <param name="hostAuthorization">
@@ -580,13 +582,38 @@ namespace CardShopCoop.Net.Datagrams
             SteamNetConnectionStatusChangedCallback_t change,
             long callbackGeneration)
         {
+            var info = change.m_info;
+
+            // A host authorizes inbound peers here, on the Steam status-callback (main) thread,
+            // because the delegate calls main-thread-only SteamMatchmaking lobby APIs and the
+            // pump must never touch Steam. The decision travels with the queued change.
+            //
+            // The decision is taken at both Connecting and Connected: lobby membership can still
+            // be propagating when the peer's P2P link first reports Connecting, so a Connecting
+            // that does not yet read as a member is accepted provisionally and only rejected if it
+            // is still not a member at the later Connected status.
+            bool authorized = true;
+            if (_isHost
+                && (info.m_eState
+                        == ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connecting
+                    || info.m_eState
+                        == ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connected))
+            {
+                authorized = AuthorizeHostConnection(info.m_identityRemote);
+                if (!authorized && TryGetSteamId(info.m_identityRemote, out var pendingId))
+                {
+                    CoopPlugin.Log?.LogInfo("[steam] host authorization not yet confirmed for "
+                        + "state " + info.m_eState + ", id " + pendingId
+                        + " (re-checked at Connected)");
+                }
+            }
+
             lock (_lifecycleGate)
             {
                 if (_disposed || !_running || callbackGeneration != _generation)
                 {
                     return;
                 }
-                var info = change.m_info;
                 try
                 {
                     QueueStatusChangeLocked(PendingChange.Status(
@@ -595,13 +622,42 @@ namespace CardShopCoop.Net.Datagrams
                         info.m_identityRemote,
                         info.m_eState,
                         info.m_eEndReason,
-                        info.m_szEndDebug));
+                        info.m_szEndDebug,
+                        authorized));
                 }
                 catch
                 {
                     CloseConnectionLocked(change.m_hConn, "Steam status queue overflow");
                     throw;
                 }
+            }
+        }
+
+        private bool AuthorizeHostConnection(SteamNetworkingIdentity identity)
+        {
+            if (!TryGetSteamId(identity, out var remoteSteamId))
+            {
+                // ProcessConnecting rejects an invalid identity with its own reason before it
+                // consults authorization, so this value is never observed for such a change.
+                return true;
+            }
+
+            if (_hostAuthorization == null)
+            {
+                return true;
+            }
+
+            try
+            {
+                return _hostAuthorization(remoteSteamId);
+            }
+            catch (Exception error)
+            {
+                // This runs on the native Steam callback thread. A lobby lookup failure must not
+                // escape into Steam's RunCallbacks dispatch; fail closed and let the peer retry.
+                CoopPlugin.Log?.LogError(
+                    "Steam host authorization failed for an incoming connection: " + error);
+                return false;
             }
         }
 
@@ -860,17 +916,10 @@ namespace CardShopCoop.Net.Datagrams
                 return;
             }
 
-            // Authorization is intentionally evaluated while processing the queued change, not
-            // from Steam's callback. Lobby APIs and provider delegates therefore run from Poll.
-            if (!_hostAuthorization(remoteSteamId))
-            {
-                RejectConnection(
-                    change.Generation,
-                    change.Connection,
-                    "remote Steam identity is not a lobby member");
-                return;
-            }
-
+            // Authorization can still be propagating when the P2P link first reports Connecting,
+            // so accept provisionally (a Steam-level accept only lets the link establish) and
+            // enforce the final lobby-membership decision at Connected, where the status callback
+            // re-evaluates it. Rejecting here would fail a legitimate peer on a propagation race.
             lock (_lifecycleGate)
             {
                 if (_disposed || !_running || change.Generation != _generation)
@@ -921,6 +970,17 @@ namespace CardShopCoop.Net.Datagrams
                     || change.Connection != _clientConnection))
                 {
                     CloseConnectionLocked(change.Connection, "connected peer is not the expected host");
+                    return;
+                }
+
+                // Final authorization for a provisionally accepted host connection: the status
+                // callback re-evaluated lobby membership at Connected, which gives a join that
+                // raced its lobby-membership propagation time to settle.
+                if (_isHost && !change.Authorized)
+                {
+                    _acceptedConnections.Remove(change.Connection);
+                    CloseConnectionLocked(change.Connection,
+                        "remote Steam identity is not a lobby member");
                     return;
                 }
 
@@ -1383,7 +1443,8 @@ namespace CardShopCoop.Net.Datagrams
                 int endReason,
                 string endDebug,
                 DatagramPeer peer,
-                string reason)
+                string reason,
+                bool authorized)
             {
                 Kind = kind;
                 Generation = generation;
@@ -1394,6 +1455,7 @@ namespace CardShopCoop.Net.Datagrams
                 EndDebug = endDebug;
                 Peer = peer;
                 Reason = reason;
+                Authorized = authorized;
             }
 
             public readonly PendingChangeKind Kind;
@@ -1405,6 +1467,7 @@ namespace CardShopCoop.Net.Datagrams
             public readonly string EndDebug;
             public readonly DatagramPeer Peer;
             public readonly string Reason;
+            public readonly bool Authorized;
 
             public static PendingChange Status(
                 long generation,
@@ -1412,7 +1475,8 @@ namespace CardShopCoop.Net.Datagrams
                 SteamNetworkingIdentity remoteIdentity,
                 ESteamNetworkingConnectionState state,
                 int endReason,
-                string endDebug)
+                string endDebug,
+                bool authorized)
             {
                 return new PendingChange(
                     PendingChangeKind.Status,
@@ -1423,7 +1487,8 @@ namespace CardShopCoop.Net.Datagrams
                     endReason,
                     endDebug,
                     default(DatagramPeer),
-                    null);
+                    null,
+                    authorized);
             }
 
             public static PendingChange Closed(long generation, DatagramPeer peer, string reason)
@@ -1437,7 +1502,8 @@ namespace CardShopCoop.Net.Datagrams
                     0,
                     null,
                     peer,
-                    reason);
+                    reason,
+                    true);
             }
 
             public static PendingChange Available(long generation, DatagramPeer peer)
@@ -1451,7 +1517,8 @@ namespace CardShopCoop.Net.Datagrams
                     0,
                     null,
                     peer,
-                    null);
+                    null,
+                    true);
             }
         }
     }

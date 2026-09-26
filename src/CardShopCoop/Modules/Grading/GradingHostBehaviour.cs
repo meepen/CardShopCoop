@@ -199,9 +199,20 @@ namespace CardShopCoop.Modules.Grading
 
             for (var i = 0; i < cards.Count; i++)
             {
-                if (cards[i] == null || !GradingInterop.ValidSubmissionCard(cards[i])
+                if (cards[i] == null)
+                {
+                    Reject(senderConnection, message.PredictionId, cards,
+                        "grading-submit-card", bridge);
+                    return;
+                }
+
+                if (!GradingInterop.ValidSubmissionCard(cards[i], out var cardReason)
                     || !bridge.CardSetInstalled(cards[i]))
                 {
+                    CoopPlugin.Log.LogWarning("grading submission card " + i + "/" + cards.Count
+                        + " refused for connection " + senderConnection + ": "
+                        + (cardReason ?? "card set is not installed on the host")
+                        + " - " + GradingInterop.DescribeCard(cards[i]));
                     Reject(senderConnection, message.PredictionId, cards,
                         "grading-submit-card", bridge);
                     return;

@@ -13,6 +13,7 @@ namespace CardShopCoop.Modules.Prediction
             internal string Scope;
             internal Action Apply;
             internal Action Undo;
+            internal Action Rejected;
         }
 
         private static readonly Dictionary<Guid, Prediction> ById = new();
@@ -52,6 +53,14 @@ namespace CardShopCoop.Modules.Prediction
         /// and only the replay closure is needed for a later re-apply after an undo.</summary>
         public static Guid Predict(string scope, Action<Guid> send, Action apply, Action undo,
             bool applyLocally = true)
+            => Predict(scope, send, apply, undo, null, applyLocally);
+
+        /// <summary>Registers and sends a prediction with an explicit rejection callback. The
+        /// callback fires only when the HOST rejects THIS prediction - not when a later prediction
+        /// is transiently undone and re-applied while an earlier one is reconciled - so a feature
+        /// can react to its own refusal without inferring it from the generic undo closure.</summary>
+        public static Guid Predict(string scope, Action<Guid> send, Action apply, Action undo,
+            Action rejected, bool applyLocally = true)
         {
             if (!_active)
                 throw new InvalidOperationException("Client prediction is not active.");
@@ -70,6 +79,7 @@ namespace CardShopCoop.Modules.Prediction
                 Scope = scope,
                 Apply = apply,
                 Undo = undo,
+                Rejected = rejected,
             };
             if (!ByScope.TryGetValue(scope, out var predictions))
             {
@@ -181,7 +191,9 @@ namespace CardShopCoop.Modules.Prediction
                 return;
             }
 
+            var rejected = prediction.Rejected;
             Reconcile(prediction, null);
+            rejected?.Invoke();
         }
 
         private static void Reconcile(Prediction prediction, Action authoritative)
@@ -190,6 +202,15 @@ namespace CardShopCoop.Modules.Prediction
             var index = predictions.IndexOf(prediction);
             if (index < 0)
                 throw new InvalidOperationException("Prediction scope is inconsistent: " + prediction.Id + ".");
+
+            // Snapshot the predictions queued after this one before running any undo/apply.
+            // A nested Predict() during undo, the authoritative apply, or a replay registers a
+            // new prediction whose optimistic mutation has already been performed by Predict
+            // itself; replaying it again in this pass would double-apply it. Reconcile only the
+            // followers that were already queued when this reconciliation began.
+            var followers = new List<Prediction>(predictions.Count - index - 1);
+            for (var i = index + 1; i < predictions.Count; i++)
+                followers.Add(predictions[i]);
 
             _reconciling = true;
             try
@@ -202,8 +223,12 @@ namespace CardShopCoop.Modules.Prediction
                 PredictionRetired?.Invoke(prediction.Id);
                 authoritative?.Invoke();
 
-                for (var i = index; i < predictions.Count; i++)
-                    predictions[i].Apply();
+                for (var i = 0; i < followers.Count; i++)
+                {
+                    // Nested work may have already resolved a follower; replay only live ones.
+                    if (ById.ContainsKey(followers[i].Id))
+                        followers[i].Apply();
+                }
             }
             finally
             {

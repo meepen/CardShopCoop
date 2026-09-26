@@ -29,6 +29,7 @@ namespace CardShopCoop.Modules.Grading
         private bool _contentReady;
         private bool _shutdown;
         private GradeCardWebsiteUIScreen _website;
+        private GradedCardSubmitSelectScreen _submitScreen;
 
         internal static GradingClientBehaviour Active => _active;
 
@@ -99,6 +100,7 @@ namespace CardShopCoop.Modules.Grading
 
             var cap = GradingInterop.MaxSubmitSlots;
             var previous = CloneSet(submitSet);
+            _submitScreen = screen;
             PredictionApi.Predict(
                 "grading",
                 predictionId => _context.Send(1, new GradingOpMessage
@@ -111,9 +113,13 @@ namespace CardShopCoop.Modules.Grading
                 () => ApplyLocalSubmission(submitSet.m_ServiceLevel, cap, screen),
                 () =>
                 {
+                    // Runs for BOTH accept and reject (the host's accepted delta reconciles
+                    // through here before its authoritative apply), so it only restores the
+                    // selection; the accept path then clears it and the reject path reopens below.
                     CPlayerData.m_CurrentGradeCardSubmitSet = previous;
                     RefreshWebsite();
-                });
+                },
+                ReopenSubmissionScreen);
             return false;
         }
 
@@ -223,6 +229,9 @@ namespace CardShopCoop.Modules.Grading
             return -1;
         }
 
+        /// <summary>Optimistic local half of a submission: clear the selection and close the
+        /// screen. <see cref="Submit"/> restores the selection and reopens the screen if the host
+        /// rejects the intent, so a refusal never strands the cards out of view.</summary>
         private void ApplyLocalSubmission(int serviceLevel, int cap,
             GradedCardSubmitSelectScreen screen)
         {
@@ -242,9 +251,93 @@ namespace CardShopCoop.Modules.Grading
 
         private void ClearCurrentSubmission()
         {
+            _submitScreen = null;
             var current = CPlayerData.m_CurrentGradeCardSubmitSet;
             ApplyLocalSubmission(current?.m_ServiceLevel ?? 0,
                 GradingInterop.MaxSubmitSlots, null);
+        }
+
+        /// <summary>World reports that a predicted collection removal was rejected: the card is
+        /// back in the album. Drop it from any unsubmitted grading selection so the selection
+        /// only ever contains cards the host actually reserved.</summary>
+        internal static void OnCardRemovalRefused(CardData card, int amount)
+        {
+            var active = _active;
+            if (active == null || card == null || amount <= 0)
+                return;
+            active.StripRefusedSelection(card, amount);
+        }
+
+        private void StripRefusedSelection(CardData card, int amount)
+        {
+            var set = CPlayerData.m_CurrentGradeCardSubmitSet;
+            if (set?.m_CardDataList == null)
+                return;
+
+            var stripped = 0;
+            for (var i = 0; i < set.m_CardDataList.Count && stripped < amount; i++)
+            {
+                var slot = set.m_CardDataList[i];
+                if (slot == null || slot.monsterType == EMonsterType.None
+                    || !SameSelectionCard(slot, card))
+                {
+                    continue;
+                }
+
+                set.m_CardDataList[i] = new CardData();
+                stripped++;
+                UpdateSubmitPanel(i, set.m_CardDataList[i]);
+            }
+
+            if (stripped == 0)
+                return;
+
+            CoopPlugin.Log.LogWarning("grading: the host refused to reserve " + stripped
+                + " selected card(s) (" + GradingInterop.DescribeCard(card)
+                + "); removed them from the submission selection");
+            SetStatus("the host could not reserve those cards - they were returned to the album", 4f);
+            RefreshWebsite();
+        }
+
+        private static void UpdateSubmitPanel(int index, CardData card)
+        {
+            var panels = SceneRef<GradedCardSubmitSelectScreen>.Get()?.m_GradeCardPanelUIList;
+            if (panels != null && index >= 0 && index < panels.Count)
+                panels[index].UpdateCardUI(card);
+        }
+
+        private static bool SameSelectionCard(CardData left, CardData right)
+            => left != null && right != null
+                && left.expansionType == right.expansionType
+                && left.monsterType == right.monsterType
+                && left.borderType == right.borderType
+                && left.isFoil == right.isFoil
+                && left.isDestiny == right.isDestiny
+                && left.isChampionCard == right.isChampionCard
+                && left.gradedCardIndex == right.gradedCardIndex
+                && GradingInterop.Encoded(left) == GradingInterop.Encoded(right);
+
+        /// <summary>Host-rejection callback for a submission. The optimistic apply closed the
+        /// submit screen, so restoring the selection is invisible unless the screen comes back.
+        /// Prefer the website's own open path (keeps child registration correct) and fall back to
+        /// the screen itself when no free job slot blocks the website path.</summary>
+        private void ReopenSubmissionScreen()
+        {
+            var screen = _submitScreen;
+            if (screen == null || screen.IsScreenOpened())
+                return;
+
+            _website ??= SceneRef<GradeCardWebsiteUIScreen>.Get();
+            if (_website != null && _website.gameObject.activeInHierarchy
+                && CPlayerData.m_GradeCardInProgressList != null
+                && CPlayerData.m_GradeCardInProgressList.Count < 4)
+            {
+                _website.OnPressNewSubmissionButton();
+                return;
+            }
+
+            // No free job slot: still show the recovered selection rather than hiding it.
+            screen.OpenScreen();
         }
 
         private static GradeCardSubmitSet CloneSet(GradeCardSubmitSet source)
@@ -307,7 +400,7 @@ namespace CardShopCoop.Modules.Grading
         }
 
         private void SetStatus(string text, float seconds)
-            => _context.SetStatusLine?.Invoke(text, seconds);
+            => _context?.SetStatusLine?.Invoke(text, seconds);
 
         private static CardData Clone(CardData card)
         {
@@ -333,6 +426,7 @@ namespace CardShopCoop.Modules.Grading
             _active.ClearPendingDeltas();
             _active._contentReady = false;
             _active._jobIds.Clear();
+            _active._submitScreen = null;
         }
 
         private void ClearPendingDeltas()
@@ -354,6 +448,7 @@ namespace CardShopCoop.Modules.Grading
             _pendingState = null;
             ClearPendingDeltas();
             _jobIds.Clear();
+            _submitScreen = null;
             GradingInterop.Reset();
             if (ReferenceEquals(_active, this))
                 _active = null;

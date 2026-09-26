@@ -478,7 +478,7 @@ namespace CardShopCoop
             }
 
             _providerTransportSource = providerTransport;
-            Net = LagTransport.Wrap(providerTransport);
+            Net = providerTransport;
             if (Net != null && Role != CoopRole.None && _runtime == null)
             {
                 ActivateLiveModuleHooks();
@@ -500,7 +500,18 @@ namespace CardShopCoop
             }
             else if (Role == CoopRole.Client)
             {
-                SendHello();
+                // The transport raises this from its pump thread, which is the network thread.
+                // SendHello reads UnityEngine.Application and does catalog file/reflection work,
+                // so it must stay on the Unity thread rather than blocking the network pump.
+                if (Thread.CurrentThread.ManagedThreadId == _unityThreadId)
+                {
+                    SendHello();
+                }
+                else if (!TryEnqueueMainThread(SendHello))
+                {
+                    CoopPlugin.Log.LogError(
+                        "coop: could not queue the application Hello on the Unity thread");
+                }
             }
         }
 
@@ -762,63 +773,15 @@ namespace CardShopCoop
         private void ActivateMessageIdsBeforeTransfer(ICoopTransport transport,
             PeerConnection connection, int generation)
         {
-            // The Unity main thread is the KCP pump thread. Activating inline when we are already
-            // on it avoids queueing to the main-thread dispatcher that is currently running us
-            // (the world transfer itself is a main-thread action), which would block that same
-            // thread forever. Worker-thread callers still queue and wait as before.
-            if (Thread.CurrentThread.ManagedThreadId == _unityThreadId)
+            // The transport owns its pump thread and marshals activation onto it, blocking until
+            // the transition is complete. Callers (Unity or worker threads) can invoke it
+            // directly; there is no dispatcher hop or self-deadlock to work around.
+            if (!IsSessionGeneration(generation))
             {
-                if (!IsSessionGeneration(generation))
-                {
-                    throw new InvalidOperationException(
-                        "session ended before message-id activation");
-                }
-                transport.ActivateMessageIds(connection);
-                return;
+                throw new InvalidOperationException(
+                    "session ended before message-id activation");
             }
-
-            var completed = new ManualResetEventSlim(false);
-            Exception activationFailure = null;
-            if (!_dispatcher.TryEnqueue("activate-message-ids", () =>
-            {
-                try
-                {
-                    if (!IsSessionGeneration(generation))
-                    {
-                        activationFailure = new InvalidOperationException(
-                            "session ended before message-id activation");
-                    }
-                    else
-                    {
-                        transport.ActivateMessageIds(connection);
-                    }
-                }
-                catch (Exception error)
-                {
-                    activationFailure = error;
-                }
-                finally
-                {
-                    completed.Set();
-                }
-            }))
-            {
-                throw new InvalidOperationException("could not queue message-id activation");
-            }
-
-            while (!completed.Wait(50))
-            {
-                if (!IsSessionGeneration(generation))
-                {
-                    throw new InvalidOperationException("session ended before message-id activation");
-                }
-            }
-
-            if (activationFailure != null)
-            {
-                throw new InvalidOperationException("message-id activation failed",
-                    activationFailure);
-            }
+            transport.ActivateMessageIds(connection);
         }
 
         [MessageHandler(typeof(HelloMessage))]
@@ -1233,7 +1196,6 @@ namespace CardShopCoop
                 CoopPlugin.Log.LogInfo("co-op session world gate opened");
             }
 
-            Guarded("core.net-pump", () => Net.PumpMainThread());
             Application.runInBackground = true;
             using (Util.PerfProbe.Sample("core.disconnect-drain"))
             {

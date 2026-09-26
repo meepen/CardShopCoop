@@ -694,13 +694,30 @@ namespace CardShopCoop.Modules.World
             // peer has no local counterpart, so the host's creation event is the association and
             // the box is created here bound to the host id. No content or pose matching, ever.
             var box = message.SnapshotSlot >= 0
-                ? ResolveSceneSlot(state.Kind, message.SnapshotSlot)
-                : Materialize(state, message.StableEntityId);
+                ? ResolveSceneSlot(state.Kind, message.SnapshotSlot, state.BoxNetworkId)
+                : null;
             if (box == null)
             {
-                throw new InvalidOperationException("Could not materialize authoritative box id="
+                // A slot is a binding hint, not identity. The guest's transferred save can disagree
+                // with the host's live-list index (a box consumed, merged, or swept during load, a
+                // list removal, or a build-specific count), so a miss falls back to the
+                // authoritative descriptor instead of throwing the whole session down.
+                if (message.SnapshotSlot >= 0)
+                {
+                    CoopPlugin.Log.LogWarning("[box-id] snapshot slot " + message.SnapshotSlot
+                        + " did not resolve (kind=" + state.Kind + "); materializing box id="
+                        + state.BoxNetworkId + " from its descriptor.");
+                }
+
+                box = Materialize(state, message.StableEntityId);
+            }
+
+            if (box == null)
+            {
+                CoopPlugin.Log.LogWarning("[box-id] could not materialize authoritative box id="
                     + state.BoxNetworkId + " kind=" + state.Kind + " slot="
-                    + message.SnapshotSlot + ".");
+                    + message.SnapshotSlot + "; descriptor dropped.");
+                return;
             }
 
             _storedBoxes.Remove(state.BoxNetworkId);
@@ -721,8 +738,11 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        /// <summary>Guest: the box the host's snapshot slot names, captured at baseline start.</summary>
-        private InteractablePackagingBox ResolveSceneSlot(BoxNetworkKind kind, int slot)
+        /// <summary>Guest: the box the host's snapshot slot names, captured at baseline start.
+        /// A slot is only a binding hint: a destroyed entry, or a box already bound to a different
+        /// network id, does not resolve, so the caller falls back to the authoritative descriptor.</summary>
+        private InteractablePackagingBox ResolveSceneSlot(BoxNetworkKind kind, int slot,
+            long boxNetworkId)
         {
             if (!_sceneSlots.TryGetValue((byte)kind, out var boxes) || slot < 0
                 || slot >= boxes.Count)
@@ -731,7 +751,31 @@ namespace CardShopCoop.Modules.World
             }
 
             var box = boxes[slot];
-            return box == null ? null : box;
+            if (box == null)
+            {
+                return null;
+            }
+
+            if (_idsByBox.TryGetValue(box, out var boundId) && boundId != boxNetworkId)
+            {
+                if (_boxesById.ContainsKey(boundId))
+                {
+                    // The box at this slot is genuinely bound to another live network id, so it is
+                    // not the box the snapshot slot names. Let the caller materialize the
+                    // authoritative descriptor (a duplicate beats losing the session).
+                    CoopPlugin.Log.LogWarning("[box-id] snapshot slot " + slot + " for kind=" + kind
+                        + " is bound to live id=" + boundId + " (wanted " + boxNetworkId
+                        + "); materializing the authoritative box.");
+                    return null;
+                }
+
+                // A mapping whose id is no longer live is stale: fall through so the authoritative
+                // Bind rebinds this box instead of materializing a duplicate.
+                CoopPlugin.Log.LogWarning("[box-id] snapshot slot " + slot + " for kind=" + kind
+                    + " had stale id=" + boundId + "; rebinding to " + boxNetworkId + ".");
+            }
+
+            return box;
         }
 
         internal void ClientApplyDestroyed(BoxDestroyedMessage message)
