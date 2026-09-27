@@ -56,6 +56,9 @@ their real box. Co-op also works on the game's 1.0 update.**
 
 **Both players must update.**
 
+**Thanks to our alpha testers**
+- A huge thank you to **communicated_**, **universetaken**, **lalegge97_**, and **lmonstro** for spending their time testing 2.0.0 before release and helping us catch the rough edges early. Your reports and patience made this update far better.
+
 ---
 
 ## 1.3.0
