@@ -64,7 +64,6 @@ namespace CardShopCoop.Modules.World
     {
         public ushort Id;
         public int ObjType;
-        public bool Unresolved;
         public Vector3 Pos;
         public Quaternion Rot;
         public bool IsBoxed;

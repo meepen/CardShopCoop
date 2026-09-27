@@ -81,13 +81,12 @@ namespace CardShopCoop.Modules.World
                 }
 
                 var hostObjectType = item["ObjType"]?.Value<int>() ?? 0;
-                var resolved = CatalogIdMap.TryFromHostValue(PlacementWire.EnumKindFor(kind),
-                    hostObjectType, out var objectType);
+                var objectType = CatalogIdMap.FromHostValue(PlacementWire.EnumKindFor(kind),
+                    hostObjectType);
                 result.Add(new PlacementPopulationEntry
                 {
                     Id = (ushort)item["Id"].Value<int>(),
                     ObjType = objectType,
-                    Unresolved = !resolved,
                     Pos = PlacementWire.ReadVector(item, "Pos", serializer),
                     Rot = PlacementWire.ReadQuaternion(item, "Rot", serializer),
                     IsBoxed = item["IsBoxed"]?.Value<bool>() ?? false,
@@ -132,8 +131,8 @@ namespace CardShopCoop.Modules.World
             var item = JObject.Load(reader);
             var key = item["Key"].Value<int>();
             var hostType = item["Type"]?.Value<int>() ?? 0;
-            CatalogIdMap.TryFromHostValue(PlacementWire.EnumKindFor(key >> 24), hostType,
-                out var wireObjectType);
+            var wireObjectType = CatalogIdMap.FromHostValue(PlacementWire.EnumKindFor(key >> 24),
+                hostType);
             return new PlacementMoveEntry
             {
                 Key = key,

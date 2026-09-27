@@ -43,6 +43,10 @@ namespace CardShopCoop.Modules.Prediction
         {
             if (apply == null || !apply())
             {
+                // Unlike PredictionApi.Rollback, this path had no diagnostic, so a silently
+                // refused display/placement intent looked like the guest never sent it.
+                CoopPlugin.Log.LogWarning("prediction rejected -> conn " + connectionId
+                    + " id=" + predictionId + " (host apply refused).");
                 Reject(context, connectionId, predictionId);
                 return false;
             }

@@ -2726,7 +2726,12 @@ namespace CardShopCoop.Net.Kcp
         // concurrent allocations from peers that have not completed application admission.
         public int MaxHandshakeFrameBytes = 16 * 1024 * 1024;
         public int MaxReassemblyBytes = 32 * 1024 * 1024;
-        public uint PendingHandshakeTimeoutMs = 10000;
+        // The host prepares a join by saving and gzipping the world plus its mod sidecars OFF the
+        // main thread, and only then sends Welcome and activates message ids. On a large modded
+        // shop that prep can exceed a few seconds, so a short handshake window let the client (and
+        // the host itself) time the session out before Welcome even went out. Keep it well above
+        // that prep while still bounding a genuinely dead peer.
+        public uint PendingHandshakeTimeoutMs = 60000;
         public uint ReassemblyTimeoutMs = 30000;
         public Func<uint> Clock;
 

@@ -70,19 +70,31 @@ namespace CardShopCoop.Modules.Catalog
 
             public bool TryHostToLocal(EnumKind kind, int hostValue, out int localValue)
             {
+                if (_hostToLocal.TryGetValue(kind, out var forward)
+                    && forward.TryGetValue(hostValue, out var mapped))
+                {
+                    localValue = mapped;
+                    return true;
+                }
+
+                // A miss is the identity, not 0: callers that ignore the bool (the placement
+                // move converter) must still receive a usable value.
                 localValue = hostValue;
-                return _hostToLocal.TryGetValue(kind, out var forward)
-                    && forward.TryGetValue(hostValue, out localValue);
+                return false;
             }
 
             public bool TryLocalToHost(EnumKind kind, int localValue, out int hostValue)
             {
-                hostValue = localValue;
-                return _localToHost.TryGetValue(kind, out var reverse)
-                    && reverse.TryGetValue(localValue, out hostValue);
-            }
+                if (_localToHost.TryGetValue(kind, out var reverse)
+                    && reverse.TryGetValue(localValue, out var mapped))
+                {
+                    hostValue = mapped;
+                    return true;
+                }
 
-            public bool HasKind(EnumKind kind) => _hostToLocal.ContainsKey(kind);
+                hostValue = localValue;
+                return false;
+            }
 
             public int Kinds => _hostToLocal.Count;
         }
@@ -144,7 +156,11 @@ namespace CardShopCoop.Modules.Catalog
         }
 
         /// <summary>Translate a HOST numeric value into THIS process's runtime value using the
-        /// handshake map. Unmapped values (sentinels, unknown ids) pass through unchanged.</summary>
+        /// handshake map. Unmapped values pass through unchanged: the handshake identity predates
+        /// content mods finishing their runtime enum registration, so members a mod mints after the
+        /// handshake are absent from the map even though both peers mint the same ids. Treating the
+        /// miss as the identity (rather than 0 or "unresolved") is what lets those late-registered
+        /// object types match, so a guest binds their shelves and can place/price cards on them.</summary>
         internal static int FromHostValue(EnumKind kind, int hostValue)
         {
             var map = _enumMap;
@@ -157,22 +173,6 @@ namespace CardShopCoop.Modules.Catalog
         }
 
         internal static bool HasEnumMap => _enumMap != null;
-
-        /// <summary>Like <see cref="FromHostValue"/> but reports whether the value actually had a
-        /// counterpart. A kind with no table at all (this process is the host, or the kind never
-        /// carried a host table such as MonsterType) is treated as the identity and reports true;
-        /// only a kind that HAS a table but lacks this specific value reports false (unresolved).</summary>
-        internal static bool TryFromHostValue(EnumKind kind, int hostValue, out int localValue)
-        {
-            var map = _enumMap;
-            if (map == null || !map.HasKind(kind))
-            {
-                localValue = hostValue;
-                return true;
-            }
-
-            return map.TryHostToLocal(kind, hostValue, out localValue);
-        }
 
         // ------------------------------------------------------------------ type identity
 

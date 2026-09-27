@@ -116,10 +116,18 @@ namespace CardShopCoop.Modules.World
 
         private void PublishCardDisplayPlace(InteractableCardCompartment compartment)
         {
-            if (_shutdown || _cardDisplayApplying || compartment == null
-                || !_context.InGame()
-                || !WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+            if (_shutdown || _cardDisplayApplying || compartment == null || !_context.InGame())
             {
+                return;
+            }
+
+            if (!WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+            {
+                // No key means the host cannot resolve the slot, so the placement never leaves
+                // this peer. The usual cause is that the display shelf has no placement identity
+                // yet (its baseline bind missed, e.g. a runtime-registered modded object type).
+                CoopPlugin.Log.LogWarning(
+                    "[card-display] placement dropped: display shelf has no placement identity.");
                 return;
             }
 
@@ -148,9 +156,15 @@ namespace CardShopCoop.Modules.World
         private void PublishCardDisplayRemove(InteractableCardCompartment compartment, CardData card)
         {
             if (_shutdown || _cardDisplayApplying || compartment == null || card == null
-                || !_context.InGame()
-                || !WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+                || !_context.InGame())
             {
+                return;
+            }
+
+            if (!WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[card-display] removal dropped: display shelf has no placement identity.");
                 return;
             }
 

@@ -744,11 +744,6 @@ namespace CardShopCoop.Modules.World
             for (var i = 0; i < wanted.Count; i++)
             {
                 var entry = wanted[i];
-                if (entry.Unresolved)
-                {
-                    continue;
-                }
-
                 var obj = FindCandidate(current, used, entry, i, false);
                 if (obj == null && kind == PlacementApi.PlayTableKind)
                 {

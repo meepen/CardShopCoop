@@ -683,8 +683,16 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
             if (!_boxes.TryGetBox(message.BoxNetworkId, out var box))
-                throw new InvalidOperationException("Authoritative player-box action references unknown box "
-                    + message.BoxNetworkId + ".");
+            {
+                // A box lifecycle race is normal: the box can be stored, removed, or destroyed
+                // while a hold/drop/throw for it is still in flight, so an action can name an id
+                // this peer has already forgotten. On the host that is a stale intent and is
+                // rejected (rolling the requester back); on an observer it is a no-op. Never fatal:
+                // throwing here killed the reliable handler and disconnected the peer.
+                CoopPlugin.Log.LogWarning("[box-id] ignoring player-box action for unknown box id="
+                    + message.BoxNetworkId + " (" + message.GetType().Name + ").");
+                return false;
+            }
 
             if (IsBeingPlaced(box))
             {
