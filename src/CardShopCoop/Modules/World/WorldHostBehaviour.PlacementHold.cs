@@ -33,7 +33,7 @@ namespace CardShopCoop.Modules.World
             PlacementHoldBeginRequestMessage message)
         {
             if (message == null || _placementHold == null || !_context.InGame()
-                || !IsFullyJoinedSender(context))
+                || !IsJoinPhaseSender(context))
             {
                 return;
             }
@@ -52,7 +52,7 @@ namespace CardShopCoop.Modules.World
             PlacementHoldEndRequestMessage message)
         {
             if (message == null || _placementHold == null || !_context.InGame()
-                || !IsFullyJoinedSender(context))
+                || !IsJoinPhaseSender(context))
             {
                 return;
             }
@@ -80,7 +80,7 @@ namespace CardShopCoop.Modules.World
             PlacementHoldRotationRequestMessage message)
         {
             if (message == null || _placementHold == null || !_context.InGame()
-                || !IsFullyJoinedSender(context)
+                || !IsJoinPhaseSender(context)
                 || !_placementHold.IsHeldBy(message.HoldKey, context.ConnectionId))
             {
                 return;
@@ -97,17 +97,19 @@ namespace CardShopCoop.Modules.World
             _context.Broadcast(rotation);
         }
 
+        /// <summary>Observes the host entering placement move mode. Vanilla <c>StartMoveObject</c>
+        /// always runs; the postfix records the local hold and, when the hold table already names
+        /// another mover, unwinds the just-entered vanilla preview through the interaction's own
+        /// cancel path, so the single-writer invariant the table exists to enforce is kept without
+        /// suppressing vanilla.</summary>
         [HarmonyPatch(typeof(InteractableObject), "StartMoveObject")]
         private static class PlacementHoldStartPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(InteractableObject __instance)
-                => _instance?._placementHold == null
-                    || _instance._placementHold.IsAllowed(__instance);
-
             [HarmonyPostfix]
             private static void Postfix(InteractableObject __instance)
-                => _instance?._placementHold?.LocalStarted(__instance);
+            {
+                _instance?._placementHold?.LocalStarted(__instance);
+            }
         }
 
         [HarmonyPatch(typeof(InteractableObject), "AddObjectRotation")]

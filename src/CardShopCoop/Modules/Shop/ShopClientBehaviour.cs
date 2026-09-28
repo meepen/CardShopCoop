@@ -66,7 +66,7 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            PredictionApi.AckOrApply(message.PredictionId,
                 () =>
                 {
                     _pendingName = message.Name;
@@ -106,6 +106,42 @@ namespace CardShopCoop.Modules.Shop
             _pendingInitial = false;
         }
 
+        /// <summary>Records the client's rename proposal the game already performed. Vanilla's
+        /// confirm runs in every state, so the prediction only supplies the replay/undo closures and
+        /// the canonical cache/sign are synced directly.</summary>
+        private void PredictRenameObserved()
+        {
+            var (name, previous) = CaptureRename();
+            PredictionApi.Predict(
+                PredictionScope,
+                RenameSend(name),
+                () => ShopState.Apply(name),
+                () => ShopState.Apply(previous));
+
+            // Vanilla already performed the rename locally; keep the canonical cache and the
+            // sign in step without double-applying through the prediction.
+            ShopState.Apply(name);
+        }
+
+        private static (string Name, string Previous) CaptureRename()
+        {
+            var name = CPlayerData.GetPlayerName();
+            if (!ShopState.TryGet(out var previous))
+            {
+                previous = name;
+            }
+
+            CoopPlugin.Log.LogDebug("Shop rename proposal sent to host: " + name);
+            return (name, previous);
+        }
+
+        private Action<Guid> RenameSend(string name)
+            => predictionId => _context.Send(1, new ShopRenameRequestMessage
+            {
+                PredictionId = predictionId,
+                Name = name,
+            });
+
         internal void Shutdown()
         {
             if (_shutdown)
@@ -127,33 +163,19 @@ namespace CardShopCoop.Modules.Shop
         [HarmonyPatch(typeof(ShopRenamer), "OnPressConfirmShopName")]
         private static class ShopConfirmPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(ShopRenamer __instance)
+            // Vanilla performs the rename in every state - closing the UI, and during the tutorial
+            // advancing this peer's own tutorial and granting the naming bonus. The client always
+            // plays the game as vanilla, so the postfix only observes the one change it made; an
+            // invalid name is the host's call, expressed as a host rejection, not a client gate.
+            [HarmonyPostfix]
+            private static void Postfix()
             {
                 if (_active == null || !_active._context.InGame())
-                    return true;
-                var name = CPlayerData.GetPlayerName();
-
-                if (!ShopState.TryGet(out var previous))
                 {
-                    previous = name;
+                    return;
                 }
 
-                CoopPlugin.Log.LogDebug("Shop rename proposal sent to host: " + name);
-                PredictionApi.Predict(
-                    PredictionScope,
-                    predictionId => _active._context.Send(1, new ShopRenameRequestMessage
-                    {
-                        PredictionId = predictionId,
-                        Name = name,
-                    }),
-                    () => ShopState.Apply(name),
-                    () => ShopState.Apply(previous));
-
-                // The original also advances the tutorial and grants the Unity 6 naming bonus.
-                // Those are host-owned side effects, so close only the client UI here.
-                ShopInterop.CloseRenameUi(__instance);
-                return false;
+                _active.PredictRenameObserved();
             }
         }
 

@@ -175,11 +175,7 @@ namespace CardShopCoop.Modules.Decoration
                 // comes from ClientObjects (assigned by the host); assigning a fresh synthetic id
                 // here re-keyed every mapped object and made later host deltas miss, which
                 // duplicated pieces whenever the host moved them.
-                if (!TryGetHoldId(obj, out var id))
-                {
-                    id = _nextHostId++;
-                    HostIds.Add(obj, id);
-                }
+                var id = EnsureHostId(obj);
 
                 result.Placed.Add(new DecorationPose
                 {
@@ -566,6 +562,23 @@ namespace CardShopCoop.Modules.Decoration
             return HostIds.TryGetValue(obj, out var id) ? id : 0;
         }
 
+        /// <summary>Returns the host-space id of a decoration, assigning the next one when the
+        /// object does not own an id yet. Both the snapshot builder and the host delta builder
+        /// allocate through here so a piece keeps exactly one id for its lifetime.</summary>
+        internal static long EnsureHostId(InteractableObject obj)
+        {
+            if (obj == null)
+                return 0;
+            if (TryGetHoldId(obj, out var id))
+            {
+                return id;
+            }
+
+            id = _nextHostId++;
+            HostIds.Add(obj, id);
+            return id;
+        }
+
         /// <summary>True when this placed object is a decoration (its own identity space).</summary>
         internal static bool IsDecoration(InteractableObject obj)
             => obj != null && FiObjectType.GetValue(obj) is EDecoObject deco
@@ -654,19 +667,13 @@ namespace CardShopCoop.Modules.Decoration
 
             if (predictedPreview != null)
             {
-                if (IsAdoptable(predictedPreview, pose))
-                {
-                    FinalizePlacement(predictedPreview, pose);
-                    CoopPlugin.Log.LogInfo("[decoration] place id=" + pose.Id + " type="
-                        + pose.DecorationType + " adopted preview.");
-                    return predictedPreview;
-                }
-
-                // The host's authoritative piece differs from the preview (wrong type or
-                // orientation). Retire the preview so it cannot linger, then create the real one.
-                CoopPlugin.Log.LogWarning("[decoration] place id=" + pose.Id
-                    + " preview incompatible; discarding and spawning.");
-                DiscardPreview(predictedPreview);
+                // The preview was claimed by this delta's PredictionId, so it is provably the
+                // object this client predicted for this host-authoritative placement. Adopt that
+                // exact object and bind the host id to it; no type/position guess is needed.
+                FinalizePlacement(predictedPreview, pose);
+                CoopPlugin.Log.LogInfo("[decoration] place id=" + pose.Id + " type="
+                    + pose.DecorationType + " adopted preview.");
+                return predictedPreview;
             }
 
             var spawned = TryPlace(pose, 0, out var created);
@@ -674,11 +681,6 @@ namespace CardShopCoop.Modules.Decoration
                 + pose.DecorationType + " spawned ok=" + spawned + ".");
             return spawned ? created : null;
         }
-
-        private static bool IsAdoptable(InteractableObject obj, DecorationPose pose)
-            => obj != null
-                && (EDecoObject)FiObjectType.GetValue(obj) == pose.DecorationType
-                && GetVertical(obj) == pose.Vertical;
 
         /// <summary>Retires a predicted placement preview that never became authoritative
         /// (a rejected or superseded intent). Settles the move lifecycle, then removes it.</summary>
@@ -783,7 +785,14 @@ namespace CardShopCoop.Modules.Decoration
                 if (obj == null || !live.Contains(obj) || used.Contains(obj))
                 {
                     obj = null;
-                    obj = FindMatching(live, used, pose);
+                }
+                // The authoritative id did not resolve to a usable live piece. Bind that exact id
+                // to the object the maps own, and otherwise recreate the piece from the snapshot
+                // and bind the id to the new object. Never adopt a same-type or nearest local
+                // object: a stale id is not evidence that some other piece is the right one.
+                if (obj == null && TryPlace(pose, pose.Id, out var rebound) && !used.Contains(rebound))
+                {
+                    obj = rebound;
                 }
                 if (obj == null && TryPlace(pose, out var spawned))
                 {
@@ -831,30 +840,6 @@ namespace CardShopCoop.Modules.Decoration
             {
                 ClientObjects[pair.Key] = pair.Value;
             }
-        }
-
-        private static InteractableObject FindMatching(List<InteractableObject> live,
-            HashSet<InteractableObject> used, DecorationPose pose)
-        {
-            InteractableObject best = null;
-            var bestDistance = float.MaxValue;
-            for (var i = 0; i < live.Count; i++)
-            {
-                var obj = live[i];
-                if (obj == null || used.Contains(obj) || obj.GetIsMovingObject()
-                    || (EDecoObject)FiObjectType.GetValue(obj) != pose.DecorationType)
-                {
-                    continue;
-                }
-
-                var distance = (obj.transform.position - pose.Position).sqrMagnitude;
-                if (distance < bestDistance)
-                {
-                    best = obj;
-                    bestDistance = distance;
-                }
-            }
-            return best;
         }
 
         private static InteractableObject GetMapped(long id)

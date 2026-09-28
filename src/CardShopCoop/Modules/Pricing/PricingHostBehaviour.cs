@@ -118,16 +118,20 @@ namespace CardShopCoop.Modules.Pricing
             }
 
             var key = PricingInterop.CardKey(message.Card, message.EncodedGrade);
-            if (key == null || !WorldCardInteraction.TryGetDisplayedCard(message.Card,
-                message.EncodedGrade, out var displayed))
+            if (key == null
+                || !WorldCardDisplay.TryResolve(message.ShelfKey, message.Compartment,
+                    out var compartment)
+                || !WorldCardDisplay.Matches(compartment, message.Card, message.EncodedGrade))
             {
-                CoopPlugin.Log.LogWarning("[pricing] rejected card intent: not displayed card="
-                    + Describe(message.Card) + " key=" + (key ?? "null") + " grade="
+                CoopPlugin.Log.LogWarning("[pricing] rejected card intent: not the displayed card"
+                    + " shelf=" + message.ShelfKey + " compartment=" + message.Compartment
+                    + " card=" + Describe(message.Card) + " key=" + (key ?? "null") + " grade="
                     + message.EncodedGrade + ".");
                 Reject(context, message.PredictionId);
                 return;
             }
 
+            var displayed = WorldCardDisplay.Read(compartment);
             var canonical = PricingInterop.CopyCard(displayed, GradingApi.Encoded(displayed));
             if (canonical == null || GradingApi.Encoded(canonical) != message.EncodedGrade
                 || !TrySetCard(canonical, message.Price, out var actual))
@@ -156,12 +160,6 @@ namespace CardShopCoop.Modules.Pricing
                 + "/grade=" + card.cardGrade + "/saveIndex="
                 + (PricingInterop.SafeSaveIndex(card));
 
-        internal static bool Submit(SetItemPriceScreen screen)
-        {
-            var active = _active;
-            return active == null || active._shutdown || active.SubmitLocal(screen);
-        }
-
         internal static void CaptureItemSetter(EItemType type, float requestedPrice)
             => _active?.CaptureItemSetterLocal(type, requestedPrice);
 
@@ -177,81 +175,6 @@ namespace CardShopCoop.Modules.Pricing
         internal static void GradedInventoryChanged()
         {
             // Graded ownership is updated by the normal card hooks. Never scan it from Update.
-        }
-
-        private bool SubmitLocal(SetItemPriceScreen screen)
-        {
-            if (screen == null || !PricingInterop.TryReadConfirmPrice(screen, out var price))
-                return true;
-
-            if (!PricingInterop.ValidPrice(price))
-            {
-                CoopPlugin.Log.LogWarning("[pricing] host confirm rejected: invalid price " + price + ".");
-                screen.CloseScreen();
-                return false;
-            }
-
-            var item = screen.GetCurrentSettingPriceItemType();
-            var card = screen.GetCurrentSettingPriceCardData();
-            if (card != null)
-            {
-                if (!PricingInterop.ValidCard(card))
-                {
-                    // A card this build's pricing store cannot name (typically a modded
-                    // expansion). Do not hijack the confirm: let the game's own OnPressConfirm
-                    // apply it locally, exactly as it would without this mod, instead of leaving
-                    // the player stuck in the menu with no price set.
-                    CoopPlugin.Log.LogWarning("[pricing] host confirm: card is outside the local "
-                        + "pricing store (" + Describe(card)
-                        + "); deferring to the game's own confirm.");
-                    return true;
-                }
-
-                var grade = GradingApi.Encoded(card);
-                CoopPlugin.Log.LogInfo("[pricing] host confirm card saveIndex="
-                    + PricingInterop.SafeSaveIndex(card) + " grade=" + grade + " price=" + price + ".");
-                AuthorizeFromLocal(PricingInterop.CopyCard(card, grade), price, grade);
-            }
-            else
-            {
-                if (!PricingInterop.IsItemTypeValid(item))
-                {
-                    // Same fallback for an item slot our wire/store model cannot name.
-                    CoopPlugin.Log.LogWarning("[pricing] host confirm: item " + item
-                        + " is outside the local pricing store; deferring to the game's own confirm.");
-                    return true;
-                }
-
-                CoopPlugin.Log.LogInfo("[pricing] host confirm item=" + item + " price=" + price + ".");
-                AuthorizeFromLocal(item, price);
-            }
-
-            screen.CloseScreen();
-            return false;
-        }
-
-        private void AuthorizeFromLocal(EItemType type, float price)
-        {
-            if (_shutdown || !PricingInterop.IsItemTypeValid(type)
-                || !PricingInterop.ValidPrice(price) || !TrySetItem(type, price, out _))
-                return;
-            BroadcastItemDelta(Guid.Empty, type, PricingInterop.ReadItem(type));
-        }
-
-        private void AuthorizeFromLocal(CardData card, float price, int grade)
-        {
-            if (_shutdown || card == null || !PricingInterop.ValidCard(card)
-                || !PricingInterop.ValidPrice(price))
-                return;
-
-            var canonical = PricingInterop.CopyCard(card, grade);
-            var key = PricingInterop.CardKey(canonical, grade);
-            if (key == null || !TrySetCard(canonical, price, out var actual))
-                return;
-
-            GradingApi.Remember(canonical);
-            _cards[key] = new OwnedCardState { Card = canonical, Price = actual };
-            BroadcastCardDelta(Guid.Empty, canonical, actual, false);
         }
 
         private void CaptureItemSetterLocal(EItemType type, float requestedPrice)
@@ -483,7 +406,6 @@ namespace CardShopCoop.Modules.Pricing
                 return false;
             }
 
-            var previous = PricingInterop.ReadItem(type);
             _applying = true;
             try
             {
@@ -495,12 +417,9 @@ namespace CardShopCoop.Modules.Pricing
                 _applying = false;
             }
 
-            // This module prefix-suppresses SetItemPriceScreen.OnPressConfirm, which was the only
-            // caller of TutorialManager.AddTaskValue(SetItemPrice). Mirror that host-owned effect
-            // here, on the authority, whenever a confirmed price actually changes - exactly like
-            // the vanilla OnPressConfirm does. The tutorial postfix then broadcasts the delta.
-            if (Math.Abs(actual - previous) > PricingInterop.PriceEpsilon)
-                TutorialManager.AddTaskValue(ETutorialTaskCondition.SetItemPrice, 1f);
+            // The vanilla OnPressConfirm now runs unsuppressed on the host, so its own
+            // TutorialManager.AddTaskValue(SetItemPrice) call already covers the local confirm.
+            // Applying a remote intent must not advance the host's tutorial.
             return true;
         }
 

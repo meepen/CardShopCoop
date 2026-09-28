@@ -67,6 +67,9 @@ namespace CardShopCoop.Modules.Presence
         {
             _context = context ?? throw new ArgumentNullException(nameof(context));
             Active = this;
+            // Bridge the renderer's avatar-spawn notification to the narrow PresenceApi event so
+            // features riding an avatar skeleton (a carried box) can re-resolve their anchor.
+            _renderer.RemoteAvatarsChanged = PresenceApi.NotifyRemoteAvatarsChanged;
         }
 
         internal Action<PresenceModelEntry> ModelChanged;

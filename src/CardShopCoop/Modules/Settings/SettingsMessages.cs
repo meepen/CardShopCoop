@@ -18,9 +18,12 @@ namespace CardShopCoop.Modules.Settings
         public int Index;
         public ECardExpansionType Expansion;
         public float Fee;
-        public byte CashierIndex;
+        // Cashier/table intents address their target by the stable placement key, never a list
+        // index: a concurrent placement (a purchase, a move, a removal) reorders the local list,
+        // so an index could apply the edit to a different object.
+        public int CashierKey;
         public byte CashierFlags;
-        public byte TableIndex;
+        public int TableKey;
         public int TableNumber;
     }
 
@@ -33,9 +36,12 @@ namespace CardShopCoop.Modules.Settings
         }
         public bool Full = true;
         public int Index = -1;
-        // For partial cashier/table/fee mutations this is the keyed element. A value below zero
-        // retains compatibility with the legacy list-shaped partial payload.
+        // For partial fee mutations this is the price-list element. Cashier/table partials use the
+        // stable placement keys below instead, so a reordered list cannot target the wrong object.
         public int ItemIndex = -1;
+        // Stable placement keys of the cashier counter/play table a keyed partial mutation targets.
+        public int CashierKey;
+        public int TableKey;
         public int GameEventFormat;
         public int PendingGameEventFormat;
         public ECardExpansionType GameEventExpansion;
@@ -50,6 +56,12 @@ namespace CardShopCoop.Modules.Settings
         public List<float> GameEventPrices = new();
         public List<byte> CashierFlags = new();
         public List<byte> TableNumbers = new();
+        // Full-baseline only: the stable placement key of each entry in CashierFlags/TableNumbers,
+        // parallel by position within the baseline payload. A key of 0 means the host could not
+        // compute an identity for that element; the client then applies that entry to nothing
+        // instead of trusting the payload position. Partial mutations use the scalar keys above.
+        public List<int> CashierKeys = new();
+        public List<int> TableKeys = new();
     }
 
 }

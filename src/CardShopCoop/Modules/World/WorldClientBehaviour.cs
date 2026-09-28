@@ -1,3 +1,4 @@
+using System;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -46,6 +47,7 @@ namespace CardShopCoop.Modules.World
             _harmony = new Harmony("com.zwhit.cardshopcoop.world.client");
             InstallBoxNetworkInteractionPatches();
             InstallPlayerBoxInteractionPatches();
+            InstallPlayerBoxPresenceHook();
             InstallPlayerShelfInteractionPatches();
             InstallWarehouseShelfInteractionPatches();
             InstallCardInteractionPatches();
@@ -61,6 +63,7 @@ namespace CardShopCoop.Modules.World
                 return;
 
             _shutdown = true;
+            UninstallPlayerBoxPresenceHook();
             ShutdownPlacementHold();
             ShutdownPlacement();
             ShutdownCardDisplay();
@@ -116,12 +119,27 @@ namespace CardShopCoop.Modules.World
         {
             if (message is not WorldMessage worldMessage)
                 throw new System.InvalidOperationException("World client can only send WorldMessage values.");
+
+            // Direct sends from the interaction classes are fire-and-forget intents (a shelf
+            // removal, a covered-hold drop, the workbench bundle, a legacy card forward). They
+            // still need a real prediction id: the host's intent ledger rejects an empty one.
+            // None of them has the id pending on any client, so an echo is applied exactly as a
+            // remote change, never consumed as a prediction.
+            if (worldMessage.PredictionId == System.Guid.Empty)
+                worldMessage.PredictionId = System.Guid.NewGuid();
+
             WorldMessageMetadata.PrepareIntent(worldMessage);
             _context.Send(connectionId, worldMessage);
         }
 
+        // A fire-and-forget forward (a covered-hold drop, an item-box state mirror) still needs a
+        // real prediction id: the host's intent ledger requires one and treats an empty id as an
+        // unauthenticated, dedupe-unscoped message. It is not a prediction here - no client has it
+        // pending - so every valid peer simply applies the echo.
         internal static bool SendClientIntent(WorldMessage command)
-            => SendClientIntent(command, command?.PredictionId ?? System.Guid.Empty);
+            => SendClientIntent(command,
+                command == null || command.PredictionId == System.Guid.Empty
+                    ? System.Guid.NewGuid() : command.PredictionId);
 
         internal static bool SendClientIntent(WorldMessage command, System.Guid predictionId)
         {
@@ -160,11 +178,11 @@ namespace CardShopCoop.Modules.World
 
         /// <summary>Client: a worker is carrying this world box. Retire the real object from its
         /// warehouse slot; the Npc worker prop draws the carried box.</summary>
-        internal static void ApplyWorkerHeldBox(long boxNetworkId)
+        internal static void ApplyWorkerHeldBox(Guid boxNetworkId)
             => _instance?._warehouseShelfInteraction?.ApplyWorkerHeldBox(boxNetworkId);
 
         /// <summary>Client: the worker put this box down; restore the real object to a live state.</summary>
-        internal static void RestoreWorkerDroppedBox(long boxNetworkId)
+        internal static void RestoreWorkerDroppedBox(Guid boxNetworkId)
             => _instance?._warehouseShelfInteraction?.RestoreWorkerDroppedBox(boxNetworkId);
 
         internal static void ResetCardState()

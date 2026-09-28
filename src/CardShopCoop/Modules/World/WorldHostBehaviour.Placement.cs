@@ -6,6 +6,7 @@ using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using HarmonyLib;
+using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.World
@@ -13,11 +14,34 @@ namespace CardShopCoop.Modules.World
     /// <summary>Host authority for stable placement identities and settled object poses.</summary>
     public sealed partial class WorldHostBehaviour
     {
+        private const float MaxPlacementCoordinate = 1000f;
+
+        private static bool IsSanePose(Vector3 position, Quaternion rotation)
+            => IsFiniteCoordinate(position.x) && IsFiniteCoordinate(position.y)
+                && IsFiniteCoordinate(position.z)
+                && IsFinite(rotation.x) && IsFinite(rotation.y)
+                && IsFinite(rotation.z) && IsFinite(rotation.w);
+
+        private static bool IsFiniteCoordinate(float value)
+            => IsFinite(value) && Mathf.Abs(value) <= MaxPlacementCoordinate;
+
+        private static bool IsFinite(float value)
+            => !float.IsNaN(value) && !float.IsInfinity(value);
+
         private readonly PlacementPopulationState _placementPopulation = new();
         private readonly Dictionary<int, PlacementEntitySnapshot> _known = new();
+        private readonly Dictionary<ushort, int> _knownKeyById = new();
         private readonly HashSet<int> _fullyJoined = new();
         private int _applyingIntent;
         private Guid _nextMutationPrediction;
+
+        /// <summary>How far a settling player may be from the object they move. Vanilla only lets
+        /// the mover settle an object that is right in front of them, so this is a generous bound
+        /// that rejects an intent from across the shop.</summary>
+        private const float PlacementReach = 6f;
+
+        private static bool IsWithinPlacementReach(Vector3 player, Vector3 target)
+            => (player - target).sqrMagnitude <= PlacementReach * PlacementReach;
 
         internal void InstallPlacement()
         {
@@ -32,6 +56,7 @@ namespace CardShopCoop.Modules.World
             SceneManager.sceneLoaded -= OnPlacementSceneLoaded;
             _placementPopulation.Reset();
             _known.Clear();
+            _knownKeyById.Clear();
             _fullyJoined.Clear();
         }
 
@@ -91,6 +116,17 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            // A settled pose is host-applied, so it is bounded and finite before it can move a
+            // real object: an infinite/extreme vector would teleport or corrupt the transform.
+            if (!IsSanePose(message.Move.Pos, message.Move.Rot)
+                || (message.Move.IsBoxed
+                    && !IsSanePose(message.Move.BoxedPos, message.Move.BoxedRot)))
+            {
+                Reject(messageContext.Connection.Id, message.PredictionId,
+                    "placement pose is not finite/bounded");
+                return;
+            }
+
             var table = PlacementApi.ResolveObjectByKey(message.Move.Key) as InteractablePlayTable;
             if (table != null && !PlayTableHostBehaviour.IsPlacementMoveAllowed(table))
             {
@@ -105,6 +141,18 @@ namespace CardShopCoop.Modules.World
             {
                 Reject(messageContext.Connection.Id, message.PredictionId,
                     "placement identity or type is stale");
+                return;
+            }
+
+            // The requester must actually be standing at the object it settles, exactly as the
+            // trade and deodorant intents require. The authoritative presence is used, never the
+            // client-supplied pose.
+            if (!_context.PeerPresence.TryGet(messageContext.Connection.Id, out var presence)
+                || presence.Age > TimeSpan.FromSeconds(2)
+                || !IsWithinPlacementReach(presence.Position, obj.transform.position))
+            {
+                Reject(messageContext.Connection.Id, message.PredictionId,
+                    "sender is not within reach of the placement");
                 return;
             }
 
@@ -158,6 +206,7 @@ namespace CardShopCoop.Modules.World
                 _known[pair.Key] = pair.Value;
             }
 
+            RebuildKeyIndex();
             PlacementInterop.NotifyStructureChanged(-1);
         }
 
@@ -209,6 +258,7 @@ namespace CardShopCoop.Modules.World
             }
 
             _known[key] = current;
+            _knownKeyById[PlacementApi.ObjectIdFromObjectKey(key)] = key;
         }
 
         private void NotifyObjectRemoved(InteractableObject obj)
@@ -222,14 +272,10 @@ namespace CardShopCoop.Modules.World
             var key = kind < 0 ? 0 : (kind << 24) | id;
             if (kind < 0)
             {
-                foreach (var pair in _known)
-                {
-                    if (PlacementApi.ObjectIdFromObjectKey(pair.Key) == id)
-                    {
-                        key = pair.Key;
-                        break;
-                    }
-                }
+                // The object can already be gone from its list when its destroy runs, so
+                // FindKind cannot name the kind. Recover the key this object was registered
+                // under from its own id through the index instead of scanning _known.
+                _knownKeyById.TryGetValue(id, out key);
             }
 
             if (key == 0)
@@ -238,6 +284,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            _knownKeyById.Remove(id);
             if (_known.TryGetValue(key, out var known))
             {
                 PublishDelta(PlacementDeltaMessage.Remove, RemovalEntry(known), Guid.Empty);
@@ -253,10 +300,10 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private PlacementBaselineMessage BuildBaseline()
+        private PlacementBaselineMessage BuildBaseline(WorldTransferManifest manifest)
         {
             var manager = PlacementInterop.FindShelfManager();
-            var population = _placementPopulation.BuildMessage();
+            var population = _placementPopulation.BuildMessage(manifest);
             if (manager == null || population == null)
             {
                 return null;
@@ -277,7 +324,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var baseline = BuildBaseline();
+            var baseline = BuildBaseline(TransferManifestFor(connectionId));
             if (baseline != null)
             {
                 _context.Send(connectionId, baseline);
@@ -365,12 +412,33 @@ namespace CardShopCoop.Modules.World
             {
                 _known.Add(pair.Key, pair.Value);
             }
+
+            RebuildKeyIndex();
+        }
+
+        /// <summary>Rebuild the id -> key index from the live snapshot. A placement id is globally
+        /// unique to one object for its lifetime, so this is a direct object-id lookup for a
+        /// removal whose kind can no longer be read from the lists.</summary>
+        private void RebuildKeyIndex()
+        {
+            _knownKeyById.Clear();
+            foreach (var key in _known.Keys)
+            {
+                var id = PlacementApi.ObjectIdFromObjectKey(key);
+                if (id != PlacementIdentity.Invalid)
+                {
+                    _knownKeyById[id] = key;
+                }
+            }
         }
 
         private void OnPlacementSceneLoaded(Scene _, LoadSceneMode __)
         {
             _placementHold?.Reset();
             _placementPopulation.Reset();
+            // Placement ids reset with the scene, so every frozen manifest is now stale; a
+            // post-reload baseline falls back to live indices rather than binding a reused id.
+            _transferManifests.Clear();
             _known.Clear();
             PlacementIdentity.Reset();
             RefreshKnown();

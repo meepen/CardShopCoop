@@ -1,5 +1,7 @@
+using System;
 using CardShopCoop.Net;
 using CardShopCoop.Modules.PlayTable;
+using CardShopCoop.Modules.Presence;
 using HarmonyLib;
 using UnityEngine;
 
@@ -15,6 +17,16 @@ namespace CardShopCoop.Modules.World
                 : _playerBoxInteraction.CaptureLocalAction(box, isPlayer, alignBody);
         }
 
+        /// <summary>Client: subscribes to remote-avatar spawns so a held box announced in the join
+        /// baseline before the holder's avatar exists moves onto the skeleton once it does.</summary>
+        private void InstallPlayerBoxPresenceHook()
+            => PresenceApi.RemoteAvatarsChanged += OnRemoteAvatarsChanged;
+
+        private void UninstallPlayerBoxPresenceHook()
+            => PresenceApi.RemoteAvatarsChanged -= OnRemoteAvatarsChanged;
+
+        private void OnRemoteAvatarsChanged() => _playerBoxInteraction?.ReattachRemoteHolds();
+
         private void InstallPlayerBoxInteractionPatches()
         {
             _harmony.CreateClassProcessor(typeof(PlayerBoxPickupPatch)).Patch();
@@ -28,48 +40,24 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(CleanserDispenseFromBoxPatch)).Patch();
         }
 
-        internal static bool ForwardFurnitureBoxUp(InteractableObject obj, bool holdBox)
+        /// <summary>Pre-action state captured for a local furniture box-up. The hook prefix only
+        /// reads it; the postfix forwards the prediction once the game has performed the box-up.</summary>
+        private sealed class FurnitureBoxUpCapture
         {
-            if (_instance?._applyingFurniturePrediction == true)
-                return true;
-            // Play tables have a stable identity and their own occupied/reservation ownership
-            // path. Never let the generic nearest-object request race that intent.
-            if (obj is InteractablePlayTable)
-                return true;
-
-            if (!holdBox || obj == null)
-                return true;
-            // Boxing up supersedes a move: release the hold first so the host clears its moving
-            // state before it validates the box-up request.
-            _instance?._placementHold?.LocalEnded(obj);
-            if (!PlacementApi.TryMakeBoxableFurnitureEntityId(obj,
-                WorldMessageMetadata.FurnitureIdentityScope,
-                out var entityId))
-            {
-                CoopPlugin.Log.LogWarning("[box-furniture] blocked box-up with no placement identity; type="
-                    + obj.m_ObjectType + ".");
-                return false;
-            }
-
-            CoopPlugin.Log.LogInfo("[box-furniture] forwarding box-up entity=" + entityId
-                + " type=" + obj.m_ObjectType + " position=" + obj.transform.position + ".");
-            var intent = new FurnitureBoxUpRequestMessage
-            {
-                ObjectType = obj.m_ObjectType,
-                Position = obj.transform.position,
-                StableEntityId = entityId,
-            };
-            WorldPrediction.Predict(WorldPrediction.BoxesScope, intent,
-                () => _instance.ApplyPredictedFurnitureBoxUp(obj),
-                () => _instance.UndoPredictedFurnitureBoxUp(obj));
-
-            return false;
+            internal InteractableObject Object;
+            internal string EntityId;
+            internal Vector3 Position;
         }
 
         private bool _applyingFurniturePrediction;
 
         private void ApplyPredictedFurnitureBoxUp(InteractableObject obj)
         {
+            // A destroyed subject cannot be boxed up again; skip instead of throwing during a
+            // reconcile replay (the sibling undo already guards this).
+            if (obj == null)
+                return;
+
             _applyingFurniturePrediction = true;
             try
             {
@@ -112,8 +100,74 @@ namespace CardShopCoop.Modules.World
         private static class FurnitureBoxUpPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(InteractableObject __instance, bool holdBox)
-                => ForwardFurnitureBoxUp(__instance, holdBox);
+            private static void Prefix(InteractableObject __instance, bool holdBox,
+                out FurnitureBoxUpCapture __state)
+            {
+                __state = null;
+                if (_instance == null || __instance == null || !holdBox
+                    || _instance._applyingFurniturePrediction)
+                {
+                    // Our own apply/replay drives BoxUpObject with holdBox:false; the host side
+                    // has no local player to forward.
+                    return;
+                }
+
+                // Play tables have a stable identity and their own occupied/reservation ownership
+                // path. Never let the generic nearest-object request race that intent.
+                if (__instance is InteractablePlayTable)
+                {
+                    return;
+                }
+
+                // Boxing up supersedes a move: release the hold first so the host clears its moving
+                // state before it validates the box-up request. This is local hold bookkeeping, not
+                // a game-state gate; the game still runs BoxUpObject.
+                _instance._placementHold?.LocalEnded(__instance);
+                if (!PlacementApi.TryMakeBoxableFurnitureEntityId(__instance,
+                    WorldMessageMetadata.FurnitureIdentityScope,
+                    out var entityId))
+                {
+                    CoopPlugin.Log.LogWarning("[box-furniture] box-up has no placement identity; type="
+                        + __instance.m_ObjectType + "; not forwarding.");
+                    return;
+                }
+
+                __state = new FurnitureBoxUpCapture
+                {
+                    Object = __instance,
+                    EntityId = entityId,
+                    Position = __instance.transform.position,
+                };
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(FurnitureBoxUpCapture __state)
+            {
+                if (__state == null || _instance == null)
+                {
+                    return;
+                }
+
+                var obj = __state.Object;
+                // The client is the creator: the box the game just made gets its stable id here and
+                // the host binds its counterpart to the same id.
+                var package = obj.GetPackagingBoxShelf();
+                var boxId = package != null && _instance._boxNetworkInteraction != null
+                    ? _instance._boxNetworkInteraction.AssignClientCreated(package)
+                    : Guid.Empty;
+                var intent = new FurnitureBoxUpRequestMessage
+                {
+                    ObjectType = obj.m_ObjectType,
+                    Position = __state.Position,
+                    StableEntityId = __state.EntityId,
+                    BoxNetworkId = boxId,
+                };
+                // The game already boxed the furniture up; the prediction only records how to redo
+                // and undo that change through the game's own methods.
+                WorldPrediction.Predict(WorldPrediction.BoxesScope, intent,
+                    () => _instance.ApplyPredictedFurnitureBoxUp(obj),
+                    () => _instance.UndoPredictedFurnitureBoxUp(obj));
+            }
         }
 
         internal void ResetPlayerBoxInteractionState()
@@ -166,7 +220,7 @@ namespace CardShopCoop.Modules.World
             // own intent (a rejection comes as a prediction rollback), so this confirms the
             // prediction. Applying it authoritatively would first undo the hold/move/throw and
             // replay it: the box re-lerps into the hand, or the throw is re-applied.
-            WorldPrediction.ApplyConfirmed(message,
+            WorldPrediction.AckOrApply(message,
                 () => _playerBoxInteraction.ApplyIncoming(message));
             return true;
         }
@@ -175,22 +229,14 @@ namespace CardShopCoop.Modules.World
         private static class PlayerBoxPickupPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(InteractablePackagingBox __instance, bool isPlayer,
+            private static void Prefix(InteractablePackagingBox __instance, bool isPlayer,
                 out PlayerBoxInteraction.LocalAction __state)
             {
-                __state = default;
-                if (__instance != null && __instance.GetIsMovingObject())
-                {
-                    // Never take a box back into hand while it is in the game's placement preview:
-                    // hold mode layered on top of move-box mode is what let the throw corrupt it.
-                    CoopPlugin.Log.LogInfo("[box-id] ignoring hold on a box that is being placed.");
-                    return false;
-                }
-
+                // Capture only: the game decides whether a hold is valid (for example while the
+                // box is in its placement preview) and owns the mutation.
                 __state = _instance == null
                     ? default
                     : _instance.CapturePlayerBoxAction(__instance, isPlayer, false);
-                return true;
             }
 
             [HarmonyPostfix]
@@ -205,23 +251,13 @@ namespace CardShopCoop.Modules.World
         private static class PlayerBoxThrowPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(InteractablePackagingBox __instance, bool isPlayer,
+            private static void Prefix(InteractablePackagingBox __instance, bool isPlayer,
                 out PlayerBoxInteraction.LocalAction __state)
             {
-                __state = default;
-                if (isPlayer && __instance != null && __instance.GetIsMovingObject())
-                {
-                    // F while the box is in the placement preview: the box is being aimed, not
-                    // held. A throw would enable physics under the running move lerp and strand
-                    // it, so ignore the input and let placement finish.
-                    CoopPlugin.Log.LogInfo("[box-id] ignoring throw on a box that is being placed.");
-                    return false;
-                }
-
+                // Capture only: the game decides whether a throw is valid and owns the mutation.
                 __state = _instance == null
                     ? default
                     : _instance.CapturePlayerBoxAction(__instance, isPlayer, true);
-                return true;
             }
 
             [HarmonyPostfix]
@@ -263,6 +299,14 @@ namespace CardShopCoop.Modules.World
         /// player mutation so the host can mirror it and republish the box descriptor.</summary>
         internal void PublishItemBoxState(InteractablePackagingBox_Item item, bool contentsChanged)
         {
+            if (_playerBoxInteraction?.IsCoveredHold == true)
+            {
+                // A container take is creating this box on the host right now; its own op carries
+                // the authoritative open/closed state. A request sent during that window names a
+                // box the host has not created yet and would be refused.
+                return;
+            }
+
             if (item == null || _boxNetworkInteraction == null
                 || !_boxNetworkInteraction.TryGetId(item, out var id))
             {
@@ -296,10 +340,21 @@ namespace CardShopCoop.Modules.World
         [HarmonyPatch(typeof(InteractablePackagingBox_Item), "DispenseItem")]
         private static class ItemBoxContentsPatch
         {
+            [HarmonyPrefix]
+            private static void Prefix(InteractablePackagingBox_Item __instance, out int __state)
+                => __state = __instance?.m_ItemCompartment?.GetItemCount() ?? 0;
+
             [HarmonyPostfix]
-            private static void Postfix(InteractablePackagingBox_Item __instance, bool isPlayer)
+            private static void Postfix(InteractablePackagingBox_Item __instance, bool isPlayer,
+                int __state)
             {
-                if (isPlayer)
+                // DispenseItem also stores the whole box onto a box compartment (the warehouse
+                // store). That changes no contents, and by the time such a request reached the
+                // host the store had already run and released the hold, so it was refused and
+                // looked like a rollback. Only a real item dispense (the count moved) is a
+                // contents change.
+                if (isPlayer && __instance?.m_ItemCompartment != null
+                    && __instance.m_ItemCompartment.GetItemCount() != __state)
                 {
                     _instance?.PublishItemBoxState(__instance, true);
                 }

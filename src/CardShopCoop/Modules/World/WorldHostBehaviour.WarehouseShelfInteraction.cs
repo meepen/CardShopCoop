@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using CardShopCoop.Net;
 using HarmonyLib;
 
@@ -14,12 +15,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            _harmony.CreateClassProcessor(typeof(WarehouseStorePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WarehouseTakePatch)).Patch();
             if (WarehouseShelfInteraction.UsesRecords)
             {
+                _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(StoredBoxRecordArrangePatch)).Patch();
             }
             else
             {
@@ -31,7 +32,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(WarehouseStoreMessage))]
         private void HandleWarehouseStore(MessageContext context, WarehouseStoreMessage message)
         {
-            if (!_context.InGame() || !IsFullyJoinedSender(context))
+            if (!_context.InGame() || !IsJoinPhaseSender(context))
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -57,7 +58,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(WarehouseTakeMessage))]
         private void HandleWarehouseTake(MessageContext context, WarehouseTakeMessage message)
         {
-            if (!_context.InGame() || !IsFullyJoinedSender(context))
+            if (!_context.InGame() || !IsJoinPhaseSender(context))
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -72,29 +73,15 @@ namespace CardShopCoop.Modules.World
             });
         }
 
-        private bool ForwardWarehouseStore(InteractablePackagingBox_Item box, bool isPlayer,
-            ShelfCompartment compartment)
-        {
-            if (Warehouse != null && !Warehouse.PrepareHostStore(box, isPlayer, compartment))
-            {
-                return false;
-            }
-            return Warehouse?.TryForwardClientStore(box, isPlayer, compartment) ?? true;
-        }
-
-        private bool ForwardWarehouseTake(InteractableStorageCompartment storage)
-        {
-            return Warehouse?.TryForwardClientTake(storage) ?? true;
-        }
-
         private void NotifyStoredBoxRecordAdded(ShelfCompartment compartment)
         {
             Warehouse?.OnStoredBoxRecordAdded(compartment);
         }
 
-        private void NotifyStoredBoxRecordPopped(ShelfCompartment compartment, bool didPop)
+        private void NotifyStoredBoxRecordPopped(ShelfCompartment compartment, bool didPop,
+            WarehouseBoxState removed)
         {
-            Warehouse?.OnStoredBoxRecordPopped(compartment, didPop);
+            Warehouse?.OnStoredBoxRecordPopped(compartment, didPop, removed);
         }
 
         private void NotifyWarehouseBoxAdded(ShelfCompartment compartment)
@@ -108,25 +95,33 @@ namespace CardShopCoop.Modules.World
             Warehouse?.OnBoxRemoved(compartment, box);
         }
 
-        [HarmonyPatch(typeof(InteractablePackagingBox_Item), "DispenseItem")]
-        private static class WarehouseStorePatch
+        /// <summary>Records backend: the box adds its own stored record from inside
+        /// <c>OnFinishLerp</c>. Mark it for the span of that method so the AddStoredBoxRecord hook
+        /// binds the new record to exactly this box's network id - the store has already passed
+        /// every game gate by the time this runs, so a refused store can no longer strand an id.
+        /// The box instance is the hook argument; this method exists on both builds, but only the
+        /// records build actually adds a record here.</summary>
+        [HarmonyPatch(typeof(InteractablePackagingBox_Item), "OnFinishLerp")]
+        private static class BoxRecordStoreCompletePatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(InteractablePackagingBox_Item __instance, bool isPlayer,
-                ShelfCompartment targetItemCompartment)
+            private static void Prefix(InteractablePackagingBox_Item __instance)
             {
-                return _instance == null
-                    || _instance.ForwardWarehouseStore(__instance, isPlayer, targetItemCompartment);
+                _instance?.Warehouse?.BeginLocalRecordStore(__instance);
             }
-        }
 
-        [HarmonyPatch(typeof(InteractableStorageCompartment), "OnMouseButtonUp")]
-        private static class WarehouseTakePatch
-        {
-            [HarmonyPrefix]
-            private static bool Prefix(InteractableStorageCompartment __instance)
+            [HarmonyPostfix]
+            private static void Postfix()
             {
-                return _instance == null || _instance.ForwardWarehouseTake(__instance);
+                _instance?.Warehouse?.EndLocalRecordStore();
+            }
+
+            /// <summary>A throw out of the game's own OnFinishLerp would otherwise leave
+            /// <c>_currentStoreBox</c> set and bind the following record to the wrong box.</summary>
+            [HarmonyFinalizer]
+            private static void Finalizer()
+            {
+                _instance?.Warehouse?.EndLocalRecordStore();
             }
         }
 
@@ -140,13 +135,41 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>The game re-sorts a compartment's stored records by amount; the positional id
+        /// list must follow the very same permutation or it drifts. The prefix snapshots the
+        /// records' values and the postfix replays the multiset permutation onto the id list.</summary>
+        [HarmonyPatch(typeof(ShelfCompartment), "ArrangeBoxItemBasedOnItemCount")]
+        private static class StoredBoxRecordArrangePatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(ShelfCompartment __instance,
+                out List<WarehouseShelfInteraction.StoredRecordKey> __state)
+            {
+                __state = _instance?.Warehouse?.CaptureRecordOrder(__instance);
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ShelfCompartment __instance,
+                List<WarehouseShelfInteraction.StoredRecordKey> __state)
+            {
+                _instance?.Warehouse?.ApplyRecordOrder(__instance, __state);
+            }
+        }
+
         [HarmonyPatch(typeof(ShelfCompartment), "TryPopLastStoredBoxRecord")]
         private static class StoredBoxRecordPoppedPatch
         {
-            [HarmonyPostfix]
-            private static void Postfix(ShelfCompartment __instance, bool __result)
+            [HarmonyPrefix]
+            private static void Prefix(ShelfCompartment __instance, out WarehouseBoxState __state)
             {
-                _instance?.NotifyStoredBoxRecordPopped(__instance, __result);
+                __state = _instance?.Warehouse?.CapturePoppedRecord(__instance);
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ShelfCompartment __instance, bool __result,
+                WarehouseBoxState __state)
+            {
+                _instance?.NotifyStoredBoxRecordPopped(__instance, __result, __state);
             }
         }
 

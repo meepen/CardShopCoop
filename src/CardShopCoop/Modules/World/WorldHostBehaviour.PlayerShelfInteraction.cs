@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -26,7 +27,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(ShelfItemAddRequestMessage))]
         private void HandleShelfItemAdd(MessageContext context, ShelfItemAddRequestMessage message)
         {
-            if (_context == null || !_context.InGame() || !IsFullyJoinedSender(context))
+            if (_context == null || !_context.InGame() || !IsJoinPhaseSender(context))
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -51,7 +52,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(ShelfItemRemoveRequestMessage))]
         private void HandleShelfItemRemove(MessageContext context, ShelfItemRemoveRequestMessage message)
         {
-            if (_context == null || !_context.InGame() || !IsFullyJoinedSender(context))
+            if (_context == null || !_context.InGame() || !IsJoinPhaseSender(context))
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -137,14 +138,13 @@ namespace CardShopCoop.Modules.World
         private static class AddItemPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(ShelfCompartment __instance, Item item,
+            private static void Prefix(ShelfCompartment __instance, Item item,
                 bool addToFront,
                 out ShelfInteraction.LocalMutation __state)
             {
                 __state = _instance == null ? default
                     : _instance.CaptureShelfMutation(__instance, true,
                         item == null ? EItemType.None : item.GetItemType(), item);
-                return !__state.SuppressVanilla;
             }
 
             [HarmonyPostfix]
@@ -159,15 +159,26 @@ namespace CardShopCoop.Modules.World
         private static class PutItemOnShelfScopePatch
         {
             [HarmonyPrefix]
-            private static void Prefix()
+            private static void Prefix(out bool __state)
             {
-                _instance?.EnterPlayerShelfMutation();
+                __state = _instance != null;
+                if (__state)
+                {
+                    _instance.EnterPlayerShelfMutation();
+                }
             }
 
-            [HarmonyPostfix]
-            private static void Postfix()
+            /// <summary>Releases the scope from the finalizer, so a throw out of the game's own
+            /// EvaluatePutItemOnShelf still balances _playerMutationDepth. The finalizer always
+            /// runs, so the release lives here only and stays single-shot (ExitPlayerMutation
+            /// throws on an imbalanced double exit).</summary>
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
             {
-                _instance?.ExitPlayerShelfMutation();
+                if (__state)
+                {
+                    _instance?.ExitPlayerShelfMutation();
+                }
             }
         }
 
@@ -175,15 +186,22 @@ namespace CardShopCoop.Modules.World
         private static class TakeItemFromShelfScopePatch
         {
             [HarmonyPrefix]
-            private static void Prefix()
+            private static void Prefix(out bool __state)
             {
-                _instance?.EnterPlayerShelfMutation();
+                __state = _instance != null;
+                if (__state)
+                {
+                    _instance.EnterPlayerShelfMutation();
+                }
             }
 
-            [HarmonyPostfix]
-            private static void Postfix()
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
             {
-                _instance?.ExitPlayerShelfMutation();
+                if (__state)
+                {
+                    _instance?.ExitPlayerShelfMutation();
+                }
             }
         }
 
@@ -200,8 +218,8 @@ namespace CardShopCoop.Modules.World
                 }
             }
 
-            [HarmonyPostfix]
-            private static void Postfix(bool __state)
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
             {
                 if (__state)
                 {
@@ -223,8 +241,8 @@ namespace CardShopCoop.Modules.World
                 }
             }
 
-            [HarmonyPostfix]
-            private static void Postfix(bool __state)
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
             {
                 if (__state)
                 {
@@ -237,13 +255,12 @@ namespace CardShopCoop.Modules.World
         private static class RemoveItemPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(ShelfCompartment __instance, Item item,
+            private static void Prefix(ShelfCompartment __instance, Item item,
                 out ShelfInteraction.LocalMutation __state)
             {
                 __state = _instance == null ? default
                     : _instance.CaptureShelfMutation(__instance, false,
                         item == null ? EItemType.None : item.GetItemType(), item);
-                return !__state.SuppressVanilla;
             }
 
             [HarmonyPostfix]
@@ -258,12 +275,11 @@ namespace CardShopCoop.Modules.World
         private static class TakeItemToHandPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(ShelfCompartment __instance, bool getLastItem,
+            private static void Prefix(ShelfCompartment __instance, bool getLastItem,
                 out ShelfInteraction.LocalMutation __state)
             {
                 __state = _instance == null ? default
                     : _instance.CaptureShelfMutation(__instance, false, EItemType.None, null);
-                return !__state.SuppressVanilla;
             }
 
             [HarmonyPostfix]
@@ -272,6 +288,9 @@ namespace CardShopCoop.Modules.World
             {
                 if (__result != null)
                 {
+                    // TakeItemToHand is the one removal whose item is only known from the result,
+                    // so attach the exact removed item here before the post-hoc prediction.
+                    __state.Removed = __result;
                     _instance?.PublishShelfRemove(__instance, __state);
                 }
             }
@@ -355,6 +374,14 @@ namespace CardShopCoop.Modules.World
 
         private readonly Dictionary<string, ShelfInteractionMessage> _pendingClientStates = new();
 
+        // Client only: prediction ids of this peer's outstanding optimistic placements per
+        // shelf/compartment key. An incoming delta carries the host's absolute count, which does not
+        // include these, so the merge target is host count + the still-pending adds (otherwise a
+        // delta for a shelf with a pending placement walks the count backwards: client 31 vs host
+        // 32). Liveness is derived from PredictionApi, so retiring a prediction (ack or rollback)
+        // needs no parallel count.
+        private readonly Dictionary<string, List<Guid>> _pendingClientAddIds = new();
+
         private static readonly FieldInfo StoredItemsField =
             AccessTools.Field(typeof(ShelfCompartment), "m_StoredItemList");
 
@@ -380,10 +407,15 @@ namespace CardShopCoop.Modules.World
         internal struct LocalMutation
         {
             public bool Send;
-            public bool SuppressVanilla;
             public ShelfInteractionMessage Command;
             public int ShelfKey;
             public int Compartment;
+
+            // The exact item a take-to-hand removal moved into the acting hand. Set only by the
+            // TakeItemToHand postfix; a rejected take can then be undone by handing that item back
+            // through the game's own AddItem. Null for an add, a label removal, and a RemoveItem
+            // (held-box) transfer, which stays on the plain-intent path.
+            public Item Removed;
         }
 
         internal ShelfInteraction(Action<INetMessage> broadcast, Func<bool> inGame)
@@ -411,6 +443,7 @@ namespace CardShopCoop.Modules.World
         internal void Reset()
         {
             _pendingClientStates.Clear();
+            _pendingClientAddIds.Clear();
             _applying = false;
             _playerMutationDepth = 0;
         }
@@ -462,32 +495,29 @@ namespace CardShopCoop.Modules.World
             message.ItemType = targetType;
             message.ItemCount = targetCount;
 
-            // An add lets the game's own AddItem move the real item, so a rejected add can hand
-            // that exact item back. A remove is not capacity-limited and needs no host
-            // admission: the game's own method must run so the item actually reaches the hand
-            // (or a box), and the resulting count is mirrored as a plain intent. Suppressing the
-            // vanilla remove here deleted the item outright.
-            var suppressVanilla = false;
-            if (!_host)
+            // On the client, the game's own method performs the mutation: an add moves the real
+            // item with AddItem (a rejected add hands that exact item back), and a remove is not
+            // capacity-limited, so the game's method must run so the item actually reaches its
+            // destination. The client add registers its prediction here; the client take-to-hand
+            // removal registers its post-hoc prediction in PublishRemove once the removed item is
+            // known. A RemoveItem (held-box) removal stays a plain intent (see PublishRemove).
+            if (!_host && isAdd)
             {
-                if (isAdd)
-                {
-                    WorldPrediction.Predict(WorldPrediction.ShelvesScope, message,
-                        () => AddCapturedItem(compartment, item),
-                        () => ReturnCapturedItem(compartment, item),
-                        applyLocally: false);
-                }
-                else
-                {
-                    message = null;
-                }
+                // The game's own AddItem already placed the item. Register the prediction (which
+                // sends the intent) and remember its id as an outstanding optimistic placement;
+                // the pending count is derived from PredictionApi, not a parallel counter.
+                var predictionId = WorldPrediction.Predict(WorldPrediction.ShelvesScope, message,
+                    () => AddCapturedItem(compartment, item),
+                    () => ReturnCapturedItem(compartment, item));
+                RecordPendingAdd(ShelfKey(message), predictionId);
             }
 
             return new LocalMutation
             {
                 Send = true,
-                SuppressVanilla = suppressVanilla,
-                Command = _host ? null : message,
+                // The client add's prediction owns its send; every removal (and the host) publishes
+                // its intent through Publish/PublishRemove instead.
+                Command = _host || !isAdd ? null : message,
                 ShelfKey = shelfKey,
                 Compartment = compartmentIndex,
             };
@@ -566,7 +596,113 @@ namespace CardShopCoop.Modules.World
 
         internal void PublishRemove(ShelfCompartment compartment, LocalMutation mutation)
         {
-            Publish(compartment, mutation, false);
+            if (!mutation.Send || compartment == null)
+            {
+                return;
+            }
+
+            if (_host || mutation.Removed == null)
+            {
+                // Host mirror, or a removal that moved no hand-bound item. Only TakeItemToHand
+                // attaches the removed item (see LocalMutation.Removed). The other client removal,
+                // InteractablePackagingBox_Item.RemoveItemFromShelf, moves the item into an open
+                // held box in the same call, and the item alone does not identify that box, so its
+                // destination cannot be reversed faithfully as a single game-path undo. It keeps
+                // the plain id-less intent it has always used.
+                Publish(compartment, mutation, false);
+                return;
+            }
+
+            // TakeItemToHand put the item into the acting hand (the controller adds it after the
+            // game method returns). Now that the exact removed item is known, register exactly one
+            // post-hoc prediction so a host rejection hands that item back through the game's own
+            // AddItem and a replay re-takes it. The intent carries the prediction id, so a
+            // hand-bound removal is never sent as an id-less request the host could not disambiguate.
+            var removed = mutation.Removed;
+            var request = new ShelfItemRemoveRequestMessage
+            {
+                ShelfKey = mutation.ShelfKey,
+                Compartment = mutation.Compartment,
+                ItemType = compartment.GetItemType(),
+                ItemCount = compartment.GetItemCount(),
+            };
+            WorldPrediction.Predict(WorldPrediction.ShelvesScope, request,
+                () => RemoveCapturedItem(compartment, removed),
+                () => RestoreCapturedItem(compartment, removed));
+        }
+
+        /// <summary>Re-applies a predicted shelf removal: take the item off the shelf and return it
+        /// to the hand, the same two game calls the original take path makes.</summary>
+        private void RemoveCapturedItem(ShelfCompartment compartment, Item item)
+        {
+            if (compartment == null || item == null)
+            {
+                return;
+            }
+
+            try
+            {
+                _applying = true;
+                var stored = StoredItemsField?.GetValue(compartment) as List<Item>;
+                if (stored == null || !stored.Contains(item))
+                {
+                    return;
+                }
+
+                compartment.RemoveItem(item);
+                var controller = SceneRef<InteractionPlayerController>.Get();
+                if (controller != null
+                    && HoldItemListField?.GetValue(controller) is List<Item> held
+                    && !held.Contains(item))
+                {
+                    controller.AddHoldItemToFront(item);
+                }
+
+                PositionStored(compartment);
+            }
+            finally
+            {
+                _applying = false;
+            }
+        }
+
+        /// <summary>Undoes a predicted shelf removal: hand the exact removed item back to the
+        /// compartment through the game's own AddItem, and take it out of the local hand.</summary>
+        private void RestoreCapturedItem(ShelfCompartment compartment, Item item)
+        {
+            if (compartment == null || item == null)
+            {
+                return;
+            }
+
+            try
+            {
+                _applying = true;
+                var controller = SceneRef<InteractionPlayerController>.Get();
+                if (controller != null
+                    && HoldItemListField?.GetValue(controller) is List<Item> held
+                    && held.Contains(item))
+                {
+                    RemoveHoldItemMethod?.Invoke(controller, new object[] { item });
+                }
+
+                if (compartment.GetItemCount() <= 0
+                    && compartment.GetItemType() != item.GetItemType())
+                {
+                    compartment.SetCompartmentItemType(item.GetItemType());
+                    compartment.CalculatePositionList();
+                }
+
+                // The player-shelf take path removes the last item, so appending restores order.
+                compartment.AddItem(item, addToFront: false);
+                PositionStored(compartment);
+                CoopPlugin.Log.LogInfo("[shelf] rolled a rejected removal back onto "
+                    + compartment.name + ".");
+            }
+            finally
+            {
+                _applying = false;
+            }
         }
 
         /// <summary>An explicit label removal on an empty shelf. Unlike an item move this has no
@@ -593,7 +729,6 @@ namespace CardShopCoop.Modules.World
             return new LocalMutation
             {
                 Send = true,
-                SuppressVanilla = false,
                 Command = null,
                 ShelfKey = shelfKey,
                 Compartment = compartmentIndex,
@@ -627,7 +762,13 @@ namespace CardShopCoop.Modules.World
             try
             {
                 _applying = true;
-                ApplyState(compartment, message.ItemType, message.ItemCount);
+                var target = message.ItemCount;
+                if (!_host && message.ItemType != EItemType.None)
+                {
+                    target += PendingAddCount(ShelfKey(message));
+                }
+
+                ApplyState(compartment, message.ItemType, target);
             }
             finally
             {
@@ -635,6 +776,55 @@ namespace CardShopCoop.Modules.World
             }
 
             return true;
+        }
+
+        /// <summary>Client: remembers one of this peer's optimistic placements by its shelf key,
+        /// so an incoming absolute host delta can add the still-outstanding ones back.</summary>
+        private void RecordPendingAdd(string key, Guid predictionId)
+        {
+            if (_host || string.IsNullOrEmpty(key) || predictionId == Guid.Empty)
+            {
+                return;
+            }
+
+            if (!_pendingClientAddIds.TryGetValue(key, out var ids))
+            {
+                ids = new List<Guid>();
+                _pendingClientAddIds[key] = ids;
+            }
+
+            ids.Add(predictionId);
+        }
+
+        /// <summary>Client: how many of this peer's optimistic placements for the key are still
+        /// outstanding. Liveness comes from <see cref="PredictionApi.IsPending"/>, so an ack or a
+        /// rollback drops the placement with no separate bookkeeping; retired ids are pruned here.</summary>
+        private int PendingAddCount(string key)
+        {
+            if (_host || !_pendingClientAddIds.TryGetValue(key, out var ids))
+            {
+                return 0;
+            }
+
+            var live = 0;
+            for (var i = ids.Count - 1; i >= 0; i--)
+            {
+                if (PredictionApi.IsPending(ids[i]))
+                {
+                    live++;
+                }
+                else
+                {
+                    ids.RemoveAt(i);
+                }
+            }
+
+            if (ids.Count == 0)
+            {
+                _pendingClientAddIds.Remove(key);
+            }
+
+            return live;
         }
 
         private static bool ResolveHostResult(ShelfCompartment compartment,
@@ -887,7 +1077,7 @@ namespace CardShopCoop.Modules.World
             compartment.RemoveItem(item);
             if (item != null)
             {
-                ItemSpawnManager.DisableItem(item);
+                item.DisableItem();
             }
         }
 
@@ -923,7 +1113,7 @@ namespace CardShopCoop.Modules.World
                 {
                     if (items[i] != null)
                     {
-                        ItemSpawnManager.DisableItem(items[i]);
+                        items[i].DisableItem();
                     }
                 }
 
@@ -940,7 +1130,7 @@ namespace CardShopCoop.Modules.World
                     }
 
                     compartment.RemoveItem(item);
-                    ItemSpawnManager.DisableItem(item);
+                    item.DisableItem();
                 }
             }
 

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Economy;
 using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -158,6 +160,11 @@ namespace CardShopCoop.Modules.Trade
                 if (offer.Owner == connection.Id)
                 {
                     offer.Owner = 0;
+                    // Re-assert the offer to the remaining peers now that the departed actor no
+                    // longer owns it, instead of leaving them on a stale owner until the next trade
+                    // delta. This is the same kept-offer shape every other host-local offer update
+                    // uses, so the contents are unchanged and the host stays the single writer.
+                    SendOfferDelta(offer, removed: false, Guid.Empty, TradeOutcome.None, 0);
                 }
             }
         }
@@ -286,67 +293,148 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            var screen = TradeInterop.Screen;
-            if (screen == null)
+            // The actor's own vanilla accept is the single application: it already minted/took
+            // cards, spent coins and rolled the accept, and those effects are carried on the one
+            // accept intent (the client's separate forwards are suppressed). The host applies the
+            // same card + coin + offer movement here, exactly once, so the whole outcome is a
+            // single predicted action: the actor retires its prediction on the echo, every other
+            // peer applies it, and a reject rolls all of it back together.
+            switch (message.Result)
             {
-                throw new InvalidOperationException("Trade accept has no CustomerTradeCardScreen.");
+                case TradeOutcome.Accepted:
+                    if (!ApplyAcceptedEffect(connectionId, message, offer, bid))
+                    {
+                        Reject(connectionId, message);
+                        return;
+                    }
+
+                    RemoveOffer(offer);
+                    SendOfferDelta(offer, removed: true, message.PredictionId, message.Result,
+                        connectionId);
+                    FinishCustomerReservation(offer);
+                    return;
+                case TradeOutcome.WalkedAway:
+                    // The declines ran out, so vanilla minted/took nothing; only the offer ends.
+                    RemoveOffer(offer);
+                    SendOfferDelta(offer, removed: true, message.PredictionId, message.Result,
+                        connectionId);
+                    FinishCustomerReservation(offer);
+                    return;
+                case TradeOutcome.Haggle:
+                case TradeOutcome.Refused:
+                    {
+                        if (message.ResultState == null)
+                        {
+                            Reject(connectionId, message);
+                            return;
+                        }
+
+                        var updated = TradeInterop.DataFromState(message.ResultState);
+                        TradeInterop.SetStoredData(offer.Customer, updated);
+                        offer.Data = updated;
+                        SendOfferDelta(offer, removed: false, message.PredictionId, message.Result,
+                            connectionId);
+                        return;
+                    }
+                default:
+                    Reject(connectionId, message);
+                    return;
+            }
+        }
+
+        /// <summary>Host side of the one atomic accept: validates the carried effect against the
+        /// offer, admits the coin spend, and applies the card movement through the World ledger,
+        /// which also fans the card batch out to every peer tied to the trade prediction. The actor
+        /// already performed the movement locally, so its prediction retires on that echo while the
+        /// other peers apply it. Returns false (for a full reject) when the effect cannot be
+        /// admitted, having changed nothing.</summary>
+        private bool ApplyAcceptedEffect(int connectionId, TradeIntentMessage message, Offer offer,
+            float bid)
+        {
+            var data = offer.Data;
+            var trading = data.m_IsTrading;
+            if (trading && message.CoinSpent != 0f)
+            {
+                CoopPlugin.Log.LogWarning("[trade] accept for card-for-card offer " + offer.Counter
+                    + " carried a coin spend; refusing.");
+                return false;
             }
 
-            if (data.m_IsTrading && !TradeInterop.HasCard(data.m_CardData_R))
+            if (!trading && Mathf.Abs(message.CoinSpent - bid) > 0.001f)
             {
-                Reject(connectionId, message);
-                return;
+                CoopPlugin.Log.LogWarning("[trade] accept for purchase offer " + offer.Counter
+                    + " spent " + message.CoinSpent + " but the validated bid is " + bid
+                    + "; refusing.");
+                return false;
             }
 
-            if (!data.m_IsTrading && CPlayerData.m_CoinAmountDouble < bid)
+            // The card movement is host-derived, never trusted from the client: the customer's
+            // offered card and (for a card-for-card trade) the card the player must give are both
+            // read from the authoritative offer data. A client that carries anything else is
+            // desynced or hostile, so the whole accept is refused.
+            var received = data.m_CardData_L;
+            var given = trading ? data.m_CardData_R : null;
+            if (!SameCard(received, message.CardReceived) || !SameCard(given, message.CardRemoved))
             {
-                Reject(connectionId, message);
-                return;
+                CoopPlugin.Log.LogWarning("[trade] accept for offer " + offer.Counter
+                    + " carried cards that do not match the offer (received="
+                    + DescribeCard(message.CardReceived) + " expected=" + DescribeCard(received)
+                    + ", given=" + DescribeCard(message.CardRemoved) + " expected="
+                    + DescribeCard(given) + "); refusing.");
+                return false;
             }
 
-            var previousMaxDecline = data.m_MaxDeclineCount;
-            TradeInterop.OpenData(offer.Customer, data);
-            if (!data.m_IsTrading)
+            EconomyAuthority.HostSpendReservation spend = null;
+            if (!trading && message.CoinSpent > 0f
+                && !EconomyAuthority.TryReserveHostSpend(message.CoinSpent, out spend))
             {
-                TradeInterop.SetPrice(screen, bid);
+                CoopPlugin.Log.LogInfo("[trade] host cannot fund guest purchase of "
+                    + message.CoinSpent + " on offer " + offer.Counter + "; refusing the accept.");
+                return false;
             }
 
-            bool accepted;
-            CustomerTradeData updated;
-            try
+            if (received != null || given != null)
             {
-                screen.OnPressAccept();
-                accepted = TradeInterop.HasAccepted(screen);
-                updated = TradeInterop.Capture(screen);
-            }
-            finally
-            {
-                TradeInterop.SetManagerTrading(false);
+                var cards = WorldHostBehaviour.ActiveCards;
+                var batch = new CardDeltaBatchMessage { PredictionId = message.PredictionId };
+                // Give first. The strict batch only commits the received card once the card the
+                // player hands over has actually left this host; a delta that was merely relayed
+                // (this host lacks the content) or refused aborts the whole movement, so the host
+                // can never mint a card the authoritative offer did not include.
+                if (given != null)
+                {
+                    batch.Deltas.Add(new CardDeltaEntry
+                    {
+                        IsAdd = false,
+                        Amount = 1,
+                        Card = given,
+                    });
+                }
+
+                if (received != null)
+                {
+                    batch.Deltas.Add(new CardDeltaEntry
+                    {
+                        IsAdd = true,
+                        Amount = 1,
+                        Card = received,
+                    });
+                }
+
+                if (cards == null || !cards.HandleCardDeltaBatch(connectionId, batch, true))
+                {
+                    CoopPlugin.Log.LogWarning("[trade] host could not apply the card movement for "
+                        + "offer " + offer.Counter + "; refusing the accept.");
+                    return false;
+                }
             }
 
-            if (accepted)
+            if (spend != null)
             {
-                RemoveOffer(offer);
-                SendOfferDelta(offer, removed: true, message.PredictionId, TradeOutcome.Accepted,
-                    connectionId);
-                FinishCustomerReservation(offer);
-                return;
+                EconomyAuthority.QueueHostSpend(spend);
             }
 
-            TradeInterop.SetStoredData(offer.Customer, updated);
-            if (!data.m_IsTrading && previousMaxDecline <= 0)
-            {
-                RemoveOffer(offer);
-                SendOfferDelta(offer, removed: true, message.PredictionId,
-                    TradeOutcome.WalkedAway, connectionId);
-                FinishCustomerReservation(offer);
-                return;
-            }
-
-            offer.Data = updated;
-            var outcome = data.m_IsTrading || updated.m_SellCardAskPrice == data.m_SellCardAskPrice
-                ? TradeOutcome.Refused : TradeOutcome.Haggle;
-            SendOfferDelta(offer, removed: false, message.PredictionId, outcome, connectionId);
+            return true;
         }
 
         private void ResolveDecline(int connectionId, TradeIntentMessage message, Offer offer)
@@ -755,6 +843,12 @@ namespace CardShopCoop.Modules.Trade
             return copy;
         }
 
+        private static string DescribeCard(CardData card)
+            => card == null ? "<null>"
+                : card.expansionType + "/" + card.monsterType + "/" + card.borderType
+                    + (card.isFoil ? "/foil" : "") + (card.isDestiny ? "/destiny" : "")
+                    + (card.cardGrade > 0 ? "/grade" + card.cardGrade : "");
+
         private void SignalCustomerManagerReady()
         {
             _customerManagerReady = TradeInterop.Manager != null && TradeInterop.Customers != null;
@@ -829,6 +923,9 @@ namespace CardShopCoop.Modules.Trade
         [HarmonyPatch(typeof(Customer), "OnMousePress")]
         private static class CustomerPressPatch
         {
+            // Single-writer gate: a guest already owns this customer's trade session (offer.Owner
+            // != 0), so the host must not open the same customer's screen and start a second
+            // session. Only the host's own view of an unowned customer is allowed through.
             [HarmonyPrefix]
             private static bool Prefix(Customer __instance)
             {

@@ -22,6 +22,12 @@ namespace CardShopCoop.Modules.Settings
         private const byte OpTableNumber = 6;
         private const int MaxWireListCount = 255;
 
+        /// <summary>Vanilla's set-event-price screen only clamps the fee to non-negative (it lets
+        /// the player type any value the input field can hold), so the host applies the same
+        /// non-negative floor plus a generous absolute ceiling. This keeps a hostile client from
+        /// storing an absurd or precision-breaking fee in the shared price list.</summary>
+        private const float GameEventFeeMax = 1_000_000f;
+
         private static SettingsHostBehaviour _active;
         private static bool _applyingRemote;
 
@@ -50,6 +56,7 @@ namespace CardShopCoop.Modules.Settings
                 Patch(typeof(CashierCheckoutPatch));
                 Patch(typeof(CashierTradePatch));
                 Patch(typeof(TableNumberPatch));
+                Patch(typeof(DelayGoNextDayPatch));
             }
             catch (Exception error)
             {
@@ -124,7 +131,7 @@ namespace CardShopCoop.Modules.Settings
                     try
                     {
                         PriceChangeManager.SetGameEventPrice((EGameEventFormat)message.Index,
-                            message.Fee);
+                            Mathf.Clamp(message.Fee, 0f, GameEventFeeMax));
                     }
                     finally
                     {
@@ -134,13 +141,48 @@ namespace CardShopCoop.Modules.Settings
                     BroadcastMutation(5, message.Index, message.PredictionId);
                     break;
                 case OpCashier:
-                    ApplyCashier(message.CashierIndex, message.CashierFlags);
-                    BroadcastMutation(6, message.CashierIndex, message.PredictionId);
-                    break;
+                    {
+                        // The intent addresses its counter by stable placement key. Resolve it straight
+                        // back to the live object and recheck the key; a list index would not survive a
+                        // concurrent placement, and there is no index on the wire to fall back to.
+                        var counter = SettingsInterop.ResolveCashier(message.CashierKey);
+                        if (counter == null)
+                        {
+                            CoopPlugin.Log.LogWarning("Settings: stale cashier key " + message.CashierKey
+                                + " from connection " + context.Connection.Id + ".");
+                            if (message.PredictionId != Guid.Empty)
+                            {
+                                PredictionApi.Rollback(_context, context.Connection.Id,
+                                    message.PredictionId);
+                            }
+
+                            return;
+                        }
+
+                        ApplyCashier(counter, message.CashierFlags);
+                        PublishCashier(counter, "cashier intent", message.PredictionId);
+                        break;
+                    }
                 case OpTableNumber:
-                    ApplyTableNumber(message.TableIndex, message.TableNumber);
-                    BroadcastMutation(7, message.TableIndex, message.PredictionId);
-                    break;
+                    {
+                        var table = SettingsInterop.ResolveTable(message.TableKey);
+                        if (table == null)
+                        {
+                            CoopPlugin.Log.LogWarning("Settings: stale table key " + message.TableKey
+                                + " from connection " + context.Connection.Id + ".");
+                            if (message.PredictionId != Guid.Empty)
+                            {
+                                PredictionApi.Rollback(_context, context.Connection.Id,
+                                    message.PredictionId);
+                            }
+
+                            return;
+                        }
+
+                        ApplyTableNumber(table, message.TableNumber);
+                        PublishTable(table, "table number intent", message.PredictionId);
+                        break;
+                    }
                 default:
                     CoopPlugin.Log.LogWarning("Settings: unknown sub-op " + message.Op);
                     break;
@@ -210,29 +252,19 @@ namespace CardShopCoop.Modules.Settings
                     return reason == null;
 
                 case OpCashier:
-                    var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
+                    // The key resolves against the live placement registry in HandleOperation; here
+                    // only the payload's own range is checked.
                     if ((message.CashierFlags & ~3) != 0)
                     {
                         reason = "cashier flags contain unknown bits";
-                    }
-                    else if (counters == null || message.CashierIndex >= counters.Count
-                        || message.CashierIndex >= MaxWireListCount || counters[message.CashierIndex] == null)
-                    {
-                        reason = "cashier list index is out of bounds";
                     }
 
                     return reason == null;
 
                 case OpTableNumber:
-                    var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
                     if (message.TableNumber < 0 || message.TableNumber > byte.MaxValue)
                     {
                         reason = "table number is outside the wire range";
-                    }
-                    else if (tables == null || message.TableIndex >= tables.Count
-                        || message.TableIndex >= MaxWireListCount || tables[message.TableIndex] == null)
-                    {
-                        reason = "table list index is out of bounds";
                     }
 
                     return reason == null;
@@ -243,10 +275,9 @@ namespace CardShopCoop.Modules.Settings
             }
         }
 
-        private void ApplyCashier(byte index, byte flags)
+        private void ApplyCashier(InteractableCashierCounter counter, byte flags)
         {
-            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
-            if (counters == null || index >= counters.Count || counters[index] == null)
+            if (counter == null)
             {
                 return;
             }
@@ -256,14 +287,14 @@ namespace CardShopCoop.Modules.Settings
             _applyingRemote = true;
             try
             {
-                if (counters[index].CanCheckout() != checkout)
+                if (counter.CanCheckout() != checkout)
                 {
-                    counters[index].SetCanCheckout(checkout);
+                    counter.SetCanCheckout(checkout);
                 }
 
-                if (counters[index].CanTradeCard() != trade)
+                if (counter.CanTradeCard() != trade)
                 {
-                    counters[index].SetCanTradeCard(trade);
+                    counter.SetCanTradeCard(trade);
                 }
             }
             finally
@@ -273,10 +304,9 @@ namespace CardShopCoop.Modules.Settings
 
         }
 
-        private void ApplyTableNumber(byte index, int number)
+        private void ApplyTableNumber(InteractablePlayTable table, int number)
         {
-            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
-            if (tables == null || index >= tables.Count || tables[index] == null)
+            if (table == null)
             {
                 return;
             }
@@ -284,9 +314,9 @@ namespace CardShopCoop.Modules.Settings
             _applyingRemote = true;
             try
             {
-                if (tables[index].GetTournamentPlayTableNumber() != number)
+                if (table.GetTournamentPlayTableNumber() != number)
                 {
-                    tables[index].SetTournamentPlayTableNumber(Mathf.Max(0, number));
+                    table.SetTournamentPlayTableNumber(Mathf.Max(0, number));
                 }
             }
             finally
@@ -340,12 +370,15 @@ namespace CardShopCoop.Modules.Settings
                 message.GameEventPrices.Add(fees[i]);
             }
 
-            CopyCashiers(message.CashierFlags);
-            CopyTables(message.TableNumbers);
+            CopyCashiers(message.CashierFlags, message.CashierKeys);
+            CopyTables(message.TableNumbers, message.TableKeys);
             return message;
         }
 
-        private static SettingsStateMessage BuildMutation(int index, int itemIndex,
+        /// <summary>Builds one authoritative partial mutation. <paramref name="target"/> is the
+        /// keyed element for fee mutations (the price-list index) and the stable placement key for
+        /// cashier/table mutations.</summary>
+        private static SettingsStateMessage BuildMutation(int index, int target,
             Guid predictionId = default)
         {
             var message = new SettingsStateMessage
@@ -353,7 +386,6 @@ namespace CardShopCoop.Modules.Settings
                 Full = false,
                 PredictionId = predictionId,
                 Index = index,
-                ItemIndex = itemIndex,
             };
             if (index == 4)
             {
@@ -364,39 +396,42 @@ namespace CardShopCoop.Modules.Settings
             }
             else if (index == 5)
             {
+                message.ItemIndex = target;
                 var fees = CPlayerData.m_SetGameEventPriceList;
                 message.GameEventPriceCount = Math.Min(fees?.Count ?? 0, MaxWireListCount);
-                if (fees != null && itemIndex >= 0 && itemIndex < fees.Count)
+                if (fees != null && target >= 0 && target < fees.Count)
                 {
-                    message.GameEventPrices.Add(fees[itemIndex]);
+                    message.GameEventPrices.Add(fees[target]);
                 }
             }
             else if (index == 6)
             {
-                var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
-                message.CashierCount = Math.Min(counters?.Count ?? 0, MaxWireListCount);
-                if (counters != null && itemIndex >= 0 && itemIndex < counters.Count)
+                message.CashierKey = target;
+                message.CashierCount = Math.Min(
+                    SettingsInterop.FindShelfManager()?.m_CashierCounterList?.Count ?? 0,
+                    MaxWireListCount);
+                var counter = SettingsInterop.ResolveCashier(target);
+                if (counter != null)
                 {
-                    var counter = counters[itemIndex];
-                    message.CashierFlags.Add(counter == null ? (byte)3 : (byte)(
-                        (counter.CanCheckout() ? 1 : 0) | (counter.CanTradeCard() ? 2 : 0)));
+                    message.CashierFlags.Add((byte)((counter.CanCheckout() ? 1 : 0)
+                        | (counter.CanTradeCard() ? 2 : 0)));
                 }
             }
             else if (index == 7)
             {
-                var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
-                message.TableCount = Math.Min(tables?.Count ?? 0, MaxWireListCount);
-                if (tables != null && itemIndex >= 0 && itemIndex < tables.Count)
+                message.TableKey = target;
+                message.TableCount = Math.Min(
+                    SettingsInterop.FindShelfManager()?.m_PlayTableList?.Count ?? 0,
+                    MaxWireListCount);
+                var table = SettingsInterop.ResolveTable(target);
+                if (table != null)
                 {
-                    var table = tables[itemIndex];
                     message.TableNumbers.Add((byte)Mathf.Clamp(
-                        table == null ? 0 : table.GetTournamentPlayTableNumber(), 0, 255));
+                        table.GetTournamentPlayTableNumber(), 0, 255));
                 }
             }
 
-            if (itemIndex >= 0 && ((index == 5 && itemIndex >= message.GameEventPriceCount)
-                || (index == 6 && itemIndex >= message.CashierCount)
-                || (index == 7 && itemIndex >= message.TableCount)))
+            if (index == 5 && target >= 0 && target >= message.GameEventPriceCount)
             {
                 message.Tombstone = true;
             }
@@ -404,7 +439,11 @@ namespace CardShopCoop.Modules.Settings
             return message;
         }
 
-        private static void CopyCashiers(List<byte> destination)
+        /// <summary>Serializes the baseline cashier flags alongside each element's stable placement
+        /// key. The client applies by key, so a host/client list-order divergence at join cannot land
+        /// a flag on the wrong counter. An element without identity is stamped 0 (never a valid
+        /// key): the client then applies that entry to nothing rather than guessing at a position.</summary>
+        private static void CopyCashiers(List<byte> destination, List<int> keys)
         {
             var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
             for (var i = 0; counters != null && i < Mathf.Min(counters.Count, 255); i++)
@@ -417,16 +456,20 @@ namespace CardShopCoop.Modules.Settings
                 }
 
                 destination.Add(flags);
+                keys.Add(SettingsInterop.TryGetCashierKey(counters[i], out var key) ? key : 0);
             }
         }
 
-        private static void CopyTables(List<byte> destination)
+        /// <summary>Serializes the baseline table numbers alongside each table's stable placement
+        /// key, mirroring <see cref="CopyCashiers"/>.</summary>
+        private static void CopyTables(List<byte> destination, List<int> keys)
         {
             var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
             for (var i = 0; tables != null && i < Mathf.Min(tables.Count, 255); i++)
             {
                 var number = tables[i] == null ? 0 : tables[i].GetTournamentPlayTableNumber();
                 destination.Add((byte)Mathf.Clamp(number, 0, 255));
+                keys.Add(SettingsInterop.TryGetTableKey(tables[i], out var key) ? key : 0);
             }
         }
 
@@ -492,32 +535,30 @@ namespace CardShopCoop.Modules.Settings
             _active.PublishTable(table, "table number mutation");
         }
 
-        private void PublishCashier(InteractableCashierCounter counter, string source)
+        private void PublishCashier(InteractableCashierCounter counter, string source,
+            Guid predictionId = default)
         {
-            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
-            var index = counters?.IndexOf(counter) ?? -1;
-            if (counter == null || index < 0 || index > 254)
+            if (counter == null || !SettingsInterop.TryGetCashierKey(counter, out var key))
             {
                 CoopPlugin.Log.LogWarning("Settings host: " + source
                     + " could not resolve a stable cashier identity");
                 return;
             }
 
-            BroadcastMutation(6, index);
+            BroadcastMutation(6, key, predictionId);
         }
 
-        private void PublishTable(InteractablePlayTable table, string source)
+        private void PublishTable(InteractablePlayTable table, string source,
+            Guid predictionId = default)
         {
-            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
-            var index = tables?.IndexOf(table) ?? -1;
-            if (table == null || index < 0 || index > 254)
+            if (table == null || !SettingsInterop.TryGetTableKey(table, out var key))
             {
                 CoopPlugin.Log.LogWarning("Settings host: " + source
                     + " could not resolve a stable table identity");
                 return;
             }
 
-            BroadcastMutation(7, index);
+            BroadcastMutation(7, key, predictionId);
         }
 
         [HarmonyPatch(typeof(SetGameEventFormatScreen), "OnPressConfirmBtn")]
@@ -594,10 +635,7 @@ namespace CardShopCoop.Modules.Settings
                     if (format != CPlayerData.m_GameEventFormat
                         || expansion != CPlayerData.m_GameEventExpansionType)
                     {
-                        if (_active != null && !_active._shutdown)
-                        {
-                            _active.BroadcastMutation(4, -1);
-                        }
+                        BroadcastGameEvent();
                     }
 
                     yield return inner.Current;

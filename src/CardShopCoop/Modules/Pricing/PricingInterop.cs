@@ -1,5 +1,4 @@
 using System;
-using System.Reflection;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Grading;
 
@@ -8,34 +7,34 @@ namespace CardShopCoop.Modules.Pricing
     /// <summary>Common game-facing price operations and wire validation.</summary>
     internal static class PricingInterop
     {
-        private static readonly FieldInfo PriceField = typeof(SetItemPriceScreen).GetField(
-            "m_PriceSet", BindingFlags.Instance | BindingFlags.NonPublic);
         private static bool _readCardOutOfRangeLogged;
 
         internal const float PriceEpsilon = 0.0075f;
 
-        /// <summary>A named EItemType member with a live price table. The id is deliberately NOT
-        /// bounded by the vanilla list length: EPL's CollectionWeaver serves its minted members
-        /// through that list, and <see cref="CatalogApi.IsWireableItemType"/> already rejects the
-        /// unnamed raw slots in the price list's tail.</summary>
+        /// <summary>A named EItemType member whose numeric id the game's price list can actually
+        /// index. The list is indexed directly by <c>(int)type</c> in both GetItemPrice and
+        /// SetItemPrice. CGameData.PropagateLoadData pads the list to only 100 when the save has
+        /// none, while EItemType has named members up to 129, so a named member past the end would
+        /// throw and abort the join baseline. Bounding against the live Count is the fix; EPL's
+        /// CollectionWeaver never refuses an in-range index, so no catch is needed around the
+        /// getter/setter.</summary>
         internal static bool IsItemTypeValid(EItemType type)
-            => CatalogApi.IsWireableItemType(type, "pricing item")
-                && CPlayerData.m_SetItemPriceList != null;
-
-        internal static bool TryReadConfirmPrice(SetItemPriceScreen screen, out float price)
         {
-            price = 0f;
-            if (screen == null || PriceField == null)
+            if (!CatalogApi.IsWireableItemType(type, "pricing item"))
+            {
                 return false;
+            }
 
-            price = (float)PriceField.GetValue(screen);
-            return true;
+            var list = CPlayerData.m_SetItemPriceList;
+            var index = (int)type;
+            return list != null && index >= 0 && index < list.Count;
         }
 
         internal static float ReadItem(EItemType type)
         {
             if (!IsItemTypeValid(type))
                 throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown item type.");
+
             return CPlayerData.GetItemPrice(type, false);
         }
 
@@ -46,6 +45,7 @@ namespace CardShopCoop.Modules.Pricing
                 return false;
 
             CPlayerData.SetItemPrice(type, price);
+
             actual = ReadItem(type);
             return Math.Abs(actual - price) <= PriceEpsilon;
         }

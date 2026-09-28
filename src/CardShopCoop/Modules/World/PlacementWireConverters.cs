@@ -33,6 +33,8 @@ namespace CardShopCoop.Modules.World
                         writer.WriteStartObject();
                         writer.WritePropertyName("Id");
                         writer.WriteValue(entry.Id);
+                        writer.WritePropertyName("Slot");
+                        writer.WriteValue(entry.Slot);
                         writer.WritePropertyName("ObjType");
                         writer.WriteValue(PlacementWire.EnumValue(kind, entry.ObjType));
                         writer.WritePropertyName("Pos");
@@ -86,6 +88,7 @@ namespace CardShopCoop.Modules.World
                 result.Add(new PlacementPopulationEntry
                 {
                     Id = (ushort)item["Id"].Value<int>(),
+                    Slot = item["Slot"]?.Value<int>() ?? 0,
                     ObjType = objectType,
                     Pos = PlacementWire.ReadVector(item, "Pos", serializer),
                     Rot = PlacementWire.ReadQuaternion(item, "Rot", serializer),

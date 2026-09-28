@@ -16,7 +16,6 @@ namespace CardShopCoop.Modules.PlayTable
     [ServerBehaviour]
     public sealed class PlayTableHostBehaviour : CoopBehaviour
     {
-        private const float ReservationTtlSeconds = 60f;
         private const int MaxTables = 250;
         private const int MaxSeats = 8;
 
@@ -34,7 +33,6 @@ namespace CardShopCoop.Modules.PlayTable
             internal PlayTableMatchEntry Match;
             internal InteractablePlayTable Table;
             internal PlayTableSeatSnapshot SeatBefore;
-            internal Coroutine Expiry;
         }
 
         internal static PlayTableHostBehaviour Active => _active;
@@ -138,11 +136,11 @@ namespace CardShopCoop.Modules.PlayTable
                 return;
             }
 
-            var manager = PlayTableInterop.FindShelfManager();
+            // The client addresses the table by the stable placement key it received from the
+            // host. Resolve that key straight back to the live object; a list index would not
+            // survive a concurrent placement, and there is no index on the wire to fall back to.
             var table = PlacementApi.ResolveObjectByKey(message.ObjectKey) as InteractablePlayTable;
-            var tables = PlayTableInterop.Tables(manager);
-            var actualIndex = PlayTableInterop.TableIndex(manager, table);
-            if (table == null || tables == null || actualIndex < 0 || actualIndex != message.Target
+            if (table == null
                 || !PlayTablePlacementInterop.TryGetTableKey(table, out var computedKey)
                 || computedKey != message.ObjectKey)
             {
@@ -190,6 +188,15 @@ namespace CardShopCoop.Modules.PlayTable
                 return;
             }
 
+            // The client is the creator and carried the package's stable id. A non-fresh id means
+            // the client already bound a live box to it: adopting it would rebind that box, and
+            // minting a different id would desync the client's package. Reject the intent.
+            if (!WorldHostBehaviour.PushCreatedBoxId(message.BoxNetworkId))
+            {
+                Reject(owner, message.PredictionId, "package box id is not fresh");
+                return;
+            }
+
             WorldHostBehaviour.Active?.SetNextMutationPrediction(message.PredictionId);
             try
             {
@@ -202,6 +209,9 @@ namespace CardShopCoop.Modules.PlayTable
 
             if (!table.GetIsBoxedUp() || table.GetPackagingBoxShelf() == null)
             {
+                // The push parked the client's id for a box the game did not produce; release it so
+                // a later, unrelated creation cannot bind to it. No-op once consumed.
+                WorldHostBehaviour.CancelCreatedBoxId(message.BoxNetworkId);
                 Reject(owner, message.PredictionId,
                     "table boxing did not produce a package box");
             }
@@ -227,15 +237,12 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void StartMatch(PlayTableMatchIntentMessage request, int owner)
         {
-            var tables = PlayTableInterop.Tables(PlayTableInterop.FindShelfManager());
-            if (tables == null || request.TableIndex >= tables.Count || tables[request.TableIndex] == null)
-            {
-                Reject(owner, request.PredictionId, "table index unavailable");
-                return;
-            }
-
-            var table = tables[request.TableIndex];
-            if (!PlayTablePlacementInterop.TryGetTableKey(table, out var computedKey)
+            // Bind the reservation to the stable placement key alone. The client's key was
+            // assigned by this host and returned to it, so a successful resolve plus a matching
+            // recomputed key proves the local object is the one the client meant.
+            var table = PlacementApi.ResolveObjectByKey(request.TableKey) as InteractablePlayTable;
+            if (table == null
+                || !PlayTablePlacementInterop.TryGetTableKey(table, out var computedKey)
                 || request.TableKey != computedKey)
             {
                 Reject(owner, request.PredictionId, "table key mismatch");
@@ -313,14 +320,12 @@ namespace CardShopCoop.Modules.PlayTable
                     MatchId = request.MatchId,
                     OwnerConn = owner,
                     TableKey = request.TableKey,
-                    TableIndex = request.TableIndex,
                     Seat = request.Seat,
                     SideA = request.SideA,
                     Phase = PlayTableMatchEntry.StateReserved,
                 },
             };
             _reservations.Add(request.TableKey, reservation);
-            ScheduleExpiry(reservation);
             NotifyTableChanged(table, request.PredictionId, false);
             PublishMatchUpsert(reservation.Match, request.PredictionId);
         }
@@ -345,7 +350,6 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             reservation.Match.Phase = PlayTableMatchEntry.StateStarted;
-            ScheduleExpiry(reservation);
             PublishMatchUpsert(reservation.Match, request.PredictionId);
         }
 
@@ -366,27 +370,6 @@ namespace CardShopCoop.Modules.PlayTable
                 && reservation.Match.OwnerConn == owner
                 && reservation.Match.MatchId == request.MatchId;
 
-        private void ScheduleExpiry(Reservation reservation)
-        {
-            if (reservation.Expiry != null)
-            {
-                StopCoroutine(reservation.Expiry);
-            }
-
-            reservation.Expiry = StartCoroutine(ExpireReservation(reservation.Match.TableKey,
-                reservation.Match.MatchId));
-        }
-
-        private System.Collections.IEnumerator ExpireReservation(int tableKey, string matchId)
-        {
-            yield return new WaitForSecondsRealtime(ReservationTtlSeconds);
-            if (_reservations.TryGetValue(tableKey, out var reservation)
-                && reservation.Match.MatchId == matchId)
-            {
-                Release(tableKey, "lease-expired", Guid.Empty);
-            }
-        }
-
         private bool Release(int tableKey, string reason, Guid predictionId)
         {
             if (!_reservations.TryGetValue(tableKey, out var reservation))
@@ -395,12 +378,6 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _reservations.Remove(tableKey);
-            if (reservation.Expiry != null)
-            {
-                StopCoroutine(reservation.Expiry);
-                reservation.Expiry = null;
-            }
-
             PlayTableInterop.RestoreReservedSeat(reservation.Table, reservation.SeatBefore,
                 reservation.Match.Seat);
             CoopPlugin.Log.LogInfo("play-table match released table=" + tableKey + " reason=" + reason);
@@ -431,7 +408,7 @@ namespace CardShopCoop.Modules.PlayTable
             var count = Math.Min(tables.Count, MaxTables);
             for (var i = 0; i < count; i++)
             {
-                message.Tables.Add(BuildTableEntry(tables[i], i));
+                message.Tables.Add(BuildTableEntry(tables[i]));
             }
 
             foreach (var reservation in _reservations.Values)
@@ -481,22 +458,14 @@ namespace CardShopCoop.Modules.PlayTable
                 return;
             }
 
-            var manager = PlayTableInterop.FindShelfManager();
-            var index = PlayTableInterop.TableIndex(manager, table);
-            if (index < 0 || index >= MaxTables)
-            {
-                return;
-            }
-
-            var current = BuildTableEntry(table, index);
+            var current = BuildTableEntry(table);
             if (!_knownVisuals.TryGetValue(key, out var old))
             {
                 PublishVisual(CreateTableDelta(current, predictionId));
             }
             else
             {
-                if (force || old.Index != current.Index || old.Occupied != current.Occupied
-                    || old.Boxed != current.Boxed)
+                if (force || old.Occupied != current.Occupied || old.Boxed != current.Boxed)
                 {
                     PublishVisual(CreateTableDelta(current, predictionId));
                 }
@@ -511,7 +480,6 @@ namespace CardShopCoop.Modules.PlayTable
                                 PredictionId = predictionId,
                                 Operation = PlayTableVisualDeltaMessage.SeatUpdate,
                                 TableKey = key,
-                                TableIndex = current.Index,
                                 Seat = (byte)seat,
                                 SeatState = CopySeat(current.Seats[seat]),
                             });
@@ -551,7 +519,7 @@ namespace CardShopCoop.Modules.PlayTable
                 var table = tables[i];
                 if (table != null && PlayTablePlacementInterop.TryGetTableKey(table, out var key))
                 {
-                    current[key] = BuildTableEntry(table, i);
+                    current[key] = BuildTableEntry(table);
                 }
             }
 
@@ -619,13 +587,12 @@ namespace CardShopCoop.Modules.PlayTable
                 PredictionId = predictionId,
                 Operation = PlayTableVisualDeltaMessage.TableUpsert,
                 TableKey = entry.TableKey,
-                TableIndex = entry.Index,
                 Occupied = entry.Occupied,
                 Boxed = entry.Boxed,
                 Seats = CopySeats(entry.Seats),
             };
 
-        private static PlayTableEntry BuildTableEntry(InteractablePlayTable table, int index)
+        private static PlayTableEntry BuildTableEntry(InteractablePlayTable table)
         {
             var sets = table?.m_TableGameItemSetList;
             var seats = Math.Min(sets?.Count ?? 0, MaxSeats);
@@ -633,7 +600,6 @@ namespace CardShopCoop.Modules.PlayTable
             var entry = new PlayTableEntry
             {
                 TableKey = key,
-                Index = (byte)index,
                 Occupied = table != null && table.GetCurrentPlayerCount() > 0,
                 Boxed = table != null && table.GetIsBoxedUp(),
             };
@@ -687,7 +653,6 @@ namespace CardShopCoop.Modules.PlayTable
                 MatchId = source.MatchId,
                 OwnerConn = source.OwnerConn,
                 TableKey = source.TableKey,
-                TableIndex = source.TableIndex,
                 Seat = source.Seat,
                 SideA = source.SideA,
                 Phase = source.Phase,
@@ -702,14 +667,6 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
-            foreach (var reservation in _reservations.Values)
-            {
-                if (reservation.Expiry != null)
-                {
-                    StopCoroutine(reservation.Expiry);
-                }
-            }
-
             _reservations.Clear();
             _knownVisuals.Clear();
             RefreshVisuals(false);
@@ -718,10 +675,6 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void ApplyPatches()
         {
-            Patch(AccessTools.Method(typeof(InteractablePlayTable), "StartMoveObject"),
-                new HarmonyMethod(typeof(MovePatch), nameof(MovePatch.Prefix)), null);
-            Patch(AccessTools.Method(typeof(InteractablePlayTable), "BoxUpObject"),
-                new HarmonyMethod(typeof(BoxPatch), nameof(BoxPatch.Prefix)), null);
             Patch(AccessTools.Method(typeof(InteractablePlayTable), "OnDestroyed"),
                 new HarmonyMethod(typeof(TableRemovedPatch), nameof(TableRemovedPatch.Prefix)),
                 new HarmonyMethod(typeof(TableChangedPatch), nameof(TableChangedPatch.Postfix)));
@@ -746,27 +699,6 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _harmony.Patch(original, prefix, postfix);
-        }
-
-        private static class MovePatch
-        {
-            internal static bool Prefix(InteractablePlayTable __instance)
-                => _active == null || IsPlacementMoveAllowed(__instance);
-        }
-
-        private static class BoxPatch
-        {
-            internal static bool Prefix(InteractablePlayTable __instance, bool holdBox)
-            {
-                if (_active == null || !holdBox)
-                {
-                    return true;
-                }
-
-                return PlayTablePlacementInterop.TryGetTableKey(__instance, out var key)
-                    && !_active.HasActiveMatch(key) && __instance.GetCurrentPlayerCount() <= 0
-                    && !PlayTableInterop.HostPlayingAt(__instance);
-            }
         }
 
         private static class TableChangedPatch
@@ -820,14 +752,6 @@ namespace CardShopCoop.Modules.PlayTable
             _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
-            foreach (var reservation in _reservations.Values)
-            {
-                if (reservation.Expiry != null)
-                {
-                    StopCoroutine(reservation.Expiry);
-                }
-            }
-
             _reservations.Clear();
             _knownVisuals.Clear();
             _fullyJoined.Clear();

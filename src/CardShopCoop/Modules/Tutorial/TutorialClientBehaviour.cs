@@ -22,6 +22,37 @@ namespace CardShopCoop.Modules.Tutorial
         private bool _shutdown;
         private bool _joined;
         private TutorialStateMessage _pendingState;
+        // Retained single-condition deltas keyed by condition, in a stable (condition-ordered)
+        // order. A later delta for the same condition supersedes the earlier one; distinct
+        // conditions all survive so one cannot overwrite another while the scene is not ready.
+        private readonly SortedDictionary<int, PendingTutorialDelta> _pendingDeltas = new();
+
+        /// <summary>A single-condition authoritative delta retained while the tutorial scene is
+        /// not ready. It records the absolute host value and index so it can be applied from the
+        /// same lifecycle hooks as the full-state baseline. Applying it is idempotent: the value
+        /// is re-set to the absolute host value and the index to the host index.</summary>
+        private readonly struct PendingTutorialDelta
+        {
+            internal PendingTutorialDelta(int condition, float value, int tutorialIndex)
+            {
+                Condition = condition;
+                Value = value;
+                TutorialIndex = tutorialIndex;
+            }
+
+            internal int Condition
+            {
+                get;
+            }
+            internal float Value
+            {
+                get;
+            }
+            internal int TutorialIndex
+            {
+                get;
+            }
+        }
 
         private void OnEnable()
         {
@@ -73,6 +104,8 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
 
             _pendingState = message;
+            // A full baseline supersedes any single-condition deltas retained before it.
+            _pendingDeltas.Clear();
             TryApplyPending();
         }
 
@@ -81,43 +114,93 @@ namespace CardShopCoop.Modules.Tutorial
         {
             if (_shutdown)
                 return;
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () => ApplyDelta(message));
+
+            if (message.Values != null)
+            {
+                // The host sends the WHOLE TutorialDataList when the index advances. That snapshot
+                // supersedes the actor's optimistic run (the host may have continued past what the
+                // local AddTaskValue produced), so AckOrApply would retire the actor's prediction
+                // and drop the snapshot, leaving the guest behind and stalling its next intent.
+                // Confirm retires the prediction and still folds the authoritative state-set.
+                PredictionApi.Confirm(message.PredictionId, () => ApplyDelta(message));
+                return;
+            }
+
+            PredictionApi.AckOrApply(message.PredictionId, () => ApplyDelta(message));
         }
 
         private void TryApplyPending()
         {
-            if (_shutdown || _pendingState == null || _context == null || !_context.InGame())
+            if (_shutdown || _context == null || !_context.InGame())
                 return;
 
-            var state = _pendingState;
-            if (!TryApply(state))
-                return;
-            CoopPlugin.Log.LogDebug("tutorial baseline applied: index=" + state.TutorialIndex
-                + " values=" + (state.Values == null ? 0 : state.Values.Count));
-            _pendingState = null;
+            if (_pendingState != null)
+            {
+                var state = _pendingState;
+                if (!TryApply(state))
+                    return;
+                CoopPlugin.Log.LogDebug("tutorial baseline applied: index=" + state.TutorialIndex
+                    + " values=" + (state.Values == null ? 0 : state.Values.Count));
+                _pendingState = null;
+            }
+
+            TryApplyPendingDelta();
         }
 
-        private static bool PredictAction(ETutorialTaskCondition condition, float increment)
+        /// <summary>Applies the retained single-condition deltas once the tutorial scene is ready.
+        /// The full-state baseline, if any, is applied first so the deltas land on top of it. The
+        /// whole set is snapshotted and cleared before applying so a re-entrant apply cannot
+        /// observe a partially-consumed queue.</summary>
+        private void TryApplyPendingDelta()
+        {
+            if (_pendingDeltas.Count == 0)
+                return;
+            if (!TutorialInterop.IsSceneReady(TutorialInterop.FindManager())
+                || CPlayerData.m_TutorialDataList == null)
+                return;
+
+            var deltas = new List<PendingTutorialDelta>(_pendingDeltas.Values);
+            _pendingDeltas.Clear();
+            for (var i = 0; i < deltas.Count; i++)
+            {
+                var delta = deltas[i];
+                var condition = (ETutorialTaskCondition)delta.Condition;
+                ApplyLocalAction(condition, delta.Value - TutorialInterop.ValueFor(condition));
+                CPlayerData.m_TutorialIndex = delta.TutorialIndex;
+            }
+        }
+
+        /// <summary>The game already applied this tutorial change through its own
+        /// <c>AddTaskValue</c>; register one post-hoc prediction whose apply is only used to
+        /// replay after an earlier rollback, and whose undo reverts to the captured state. The
+        /// host validates and echoes the action, and a rejection rolls it back. A local decrement
+        /// (a displayed card taken back off a shelf) is observed the same way even though the host
+        /// accepts progress only: the host rejects it and the rollback restores the pre-decrement
+        /// state, after which the host's own authoritative value arrives through the normal delta.</summary>
+        private static void ForwardAction(ETutorialTaskCondition condition, float increment,
+            TutorialStateMessage previous)
         {
             var client = _active;
             if (client == null || client._shutdown || !client._joined || client._context == null
                 || !client._context.InGame())
-                return false;
+            {
+                return;
+            }
 
-            var previous = CaptureState();
             PredictionApi.Predict(
                 "tutorial",
                 predictionId => client._context.Send(1, new TutorialActionDeltaMessage
                 {
                     PredictionId = predictionId,
-                    ExpectedTutorialIndex = CPlayerData.m_TutorialIndex,
+                    // The host validates against the index it held before the increment, so send
+                    // the pre-apply capture rather than the already-advanced local index.
+                    ExpectedTutorialIndex = previous.TutorialIndex,
                     ExpectedCondition = (int)condition,
                     Action = (int)condition,
                     Increment = increment,
                 }),
                 () => ApplyLocalAction(condition, increment),
                 () => TryApply(previous));
-            return false;
         }
 
         private static TutorialStateMessage CaptureState()
@@ -175,23 +258,26 @@ namespace CardShopCoop.Modules.Tutorial
             if (message.Values != null)
             {
                 // A full-state delta is a snapshot. Retain it exactly like the baseline so a
-                // scene that is momentarily not ready cannot silently drop the host's state.
+                // scene that is momentarily not ready cannot silently drop the host's state. It
+                // supersedes any single-condition delta queued before it.
                 _pendingState = new TutorialStateMessage
                 {
                     TutorialIndex = message.TutorialIndex,
                     Values = message.Values,
                 };
+                _pendingDeltas.Clear();
                 TryApplyPending();
                 return;
             }
 
-            if (!TutorialInterop.IsSceneReady(TutorialInterop.FindManager())
-                || CPlayerData.m_TutorialDataList == null)
-                return;
-
-            var current = TutorialInterop.ValueFor((ETutorialTaskCondition)message.Condition);
-            ApplyLocalAction((ETutorialTaskCondition)message.Condition, message.Value - current);
-            CPlayerData.m_TutorialIndex = message.TutorialIndex;
+            // A single-condition delta is host-authoritative absolute state too. Retaining it (and
+            // applying it from the lifecycle hooks once the scene is ready) keeps a momentarily
+            // unavailable tutorial surface from dropping the host's progress instead of leaving the
+            // guest behind. Keying by condition keeps distinct conditions from evicting one another;
+            // a later value for the same condition supersedes the earlier one.
+            _pendingDeltas[message.Condition] = new PendingTutorialDelta(message.Condition,
+                message.Value, message.TutorialIndex);
+            TryApplyPending();
         }
 
         private static void ApplyInner(TutorialManager manager, TutorialStateMessage message)
@@ -287,6 +373,7 @@ namespace CardShopCoop.Modules.Tutorial
         {
             _joined = false;
             _pendingState = null;
+            _pendingDeltas.Clear();
         }
 
         internal void Shutdown()
@@ -308,28 +395,91 @@ namespace CardShopCoop.Modules.Tutorial
 
         private void OnDestroy() => Shutdown();
 
+        /// <summary>
+        /// True for the tutorial conditions the HOST itself produces when it applies the guest's
+        /// action intent. The guest still runs vanilla <c>AddTaskValue</c> locally (its own UI
+        /// advances immediately), but it must NOT forward a tutorial intent for these: the host's
+        /// apply path already calls <c>TutorialManager.AddTaskValue</c> for the same condition, so
+        /// forwarding would advance authoritative progress twice. The guest's local value is then
+        /// overwritten by the host's authoritative delta.
+        ///
+        /// Host-derived conditions and their call sites:
+        /// <list type="bullet">
+        /// <item><description><c>ShopLevel</c> - <c>CPlayerData.CPlayer_OnAddShopExp</c>
+        /// (CPlayerData.cs:2261), reached when the host applies the guest's XP-bearing purchase
+        /// intents (e.g. PurchasingHostBehaviour ApplyRestockSideEffects / ApplyFurnitureSideEffects,
+        /// ExpansionHostBehaviour).</description></item>
+        /// <item><description><c>CheckoutCustomer</c> -
+        /// <c>RegisterHostBehaviour.CreditGuestCheckout</c>, run when the host resolves the guest's
+        /// register Complete/CardPayment intent (the game's own credit is gated on
+        /// <c>m_IsMannedByPlayer</c>, which is false on a host applying a guest's intent).</description></item>
+        /// <item><description><c>RestockItem</c> -
+        /// <c>PurchasingHostBehaviour.ApplyRestockSideEffects</c> (PurchasingHostBehaviour.cs:946),
+        /// run when the host applies the guest's restock/scanner intent. The guest-side call sites
+        /// are RestockItemScreen.EvaluateCartCheckout and ScannerRestockScreen.EvaluateCartCheckout
+        /// (decompiled RestockItemScreen.cs:272, ScannerRestockScreen.cs:326).</description></item>
+        /// <item><description><c>UnlockBasicCardBox</c> -
+        /// <c>CatalogHostBehaviour.ApplyProductEntitlementSideEffects</c>
+        /// (CatalogHostBehaviour.cs:228), reached from the guest's product-license purchase
+        /// (PurchasingHostBehaviour.cs:497 via CatalogApi.HostApplyProductEntitlementSideEffects)
+        /// and from the catalog entitlement path (CatalogHostBehaviour.cs:122).</description></item>
+        /// <item><description><c>SellCard</c> and <c>CustomerPlay</c> - the host's own customer
+        /// simulation (<c>Customer.ExitShop</c>, decompiled Customer.cs:2798; and
+        /// <c>Customer.PlayTableGameEnded</c>, Customer.cs:3205). Customers are host-simulated
+        /// (the guest skips Customer.Start), so these are host-derived by construction.</description></item>
+        /// </list>
+        /// Every other condition is a client-player interaction the host does not re-execute with
+        /// the same method (pack opening, shelf/card placement, pricing, boxes, the open/close sign,
+        /// the play table, cashier entry), so the guest keeps forwarding those.
+        /// </summary>
+        private static bool IsHostDerived(ETutorialTaskCondition condition)
+        {
+            switch (condition)
+            {
+                case ETutorialTaskCondition.ShopLevel:
+                case ETutorialTaskCondition.CheckoutCustomer:
+                case ETutorialTaskCondition.RestockItem:
+                case ETutorialTaskCondition.UnlockBasicCardBox:
+                case ETutorialTaskCondition.SellCard:
+                case ETutorialTaskCondition.CustomerPlay:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         [HarmonyPatch(typeof(TutorialManager), "AddTaskValue")]
         private static class CreditPatch
         {
+            // Capture-only: vanilla always applies the change, then the postfix forwards one
+            // post-hoc prediction for the action the game just performed. A local decrement runs
+            // vanilla too; the host rejects it against its own progress and the rollback restores
+            // the captured state. Host-derived conditions are not forwarded at all - the host's
+            // apply path already credits the same condition, so forwarding would double it.
             [HarmonyPrefix]
-            private static bool Prefix(ETutorialTaskCondition tutorialTaskCondition, float valueAdd)
+            private static void Prefix(ETutorialTaskCondition tutorialTaskCondition, float valueAdd,
+                out TutorialStateMessage __state)
             {
+                __state = null;
                 if (_applyingRemote || _active == null || !_active._joined)
-                    return true;
+                    return;
 
-                // The host only accepts progress, so a guest's local decrement (the game calls
-                // AddTaskValue(PutCardOnShelf, -1) when a displayed card is taken back off a
-                // shelf) must not be applied here. Applying it would desync the guest from the
-                // host and could reopen a task the host has already completed.
-                if (valueAdd <= 0f)
-                {
-                    CoopPlugin.Log.LogDebug("tutorial decrement ignored on client: condition="
-                        + tutorialTaskCondition + " value=" + valueAdd + ".");
-                    return false;
-                }
+                if (_active._context == null || !_active._context.InGame())
+                    return;
 
-                PredictAction(tutorialTaskCondition, valueAdd);
-                return false;
+                if (IsHostDerived(tutorialTaskCondition))
+                    return;
+
+                __state = CaptureState();
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ETutorialTaskCondition tutorialTaskCondition, float valueAdd,
+                TutorialStateMessage __state)
+            {
+                if (__state == null)
+                    return;
+                ForwardAction(tutorialTaskCondition, valueAdd, __state);
             }
         }
 

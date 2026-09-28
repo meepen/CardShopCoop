@@ -536,7 +536,8 @@ namespace CardShopCoop
                     var connection = ConnectionFor(connectionId);
                     if (connection != null)
                         Net?.GracefulDisconnect(connection, info);
-                });
+                },
+                Relay);
             _liveRuntimeContext = context;
             _runtime = Role == CoopRole.Host
                 ? gameObject.AddComponent<ServerRuntimeBehaviour>()
@@ -823,7 +824,11 @@ namespace CardShopCoop
             }
             if (!string.Equals(hello.PluginHash, Util.ModParity.PluginHash(), StringComparison.Ordinal))
             {
-                RejectConn(connection, "your mod set differs from the host's - both players need identical mods");
+                // Name the offending mods so both players can fix the mismatch. The same
+                // bounded text is logged by RejectConn on the host and travels over the wire
+                // to the client, which logs and displays it via its normal disconnect path.
+                RejectConn(connection, Util.ModParity.DescribeMismatch(
+                    hello.PluginList, DisconnectInfo.MaxDetailLength));
                 return;
             }
 
@@ -1041,6 +1046,26 @@ namespace CardShopCoop
                     + message?.GetType().FullName);
             }
             Net.Broadcast(message);
+        }
+
+        /// <summary>Fans a host message out to every ready peer except the originating one.
+        /// Routed through the internal relay seam so it shares Broadcast's recipient admission
+        /// instead of a per-connection send that would disconnect a joining peer.</summary>
+        private void Relay(int exceptConnectionId, INetMessage message)
+        {
+            if (Net == null)
+            {
+                CoopPlugin.Log.LogError("application relay failed: no live transport for message "
+                    + message?.GetType().FullName);
+                throw new InvalidOperationException("application relay has no live transport for message "
+                    + message?.GetType().FullName);
+            }
+            if (Net is not ICoopRelayTransport relay)
+            {
+                throw new InvalidOperationException("the live transport has no relay seam for message "
+                    + message?.GetType().FullName);
+            }
+            relay.Relay(message, exceptConnectionId);
         }
 
         private PeerConnection ConnectionFor(int id)

@@ -42,6 +42,10 @@ namespace CardShopCoop.Modules.Register
         PhasePayment = 4,
         Change = 5,
         CounterLifecycle = 6,
+        // Host-authoritative customer paid amount and cash/card kind (wire addition). Unlike
+        // PhasePayment, this delta is never tied to a client prediction, so the client always
+        // applies it even when the scan that produced it confirmed the guest's own prediction.
+        PaidAmount = 7,
     }
 
     /// <summary>Complete register state sent only as a join baseline.</summary>

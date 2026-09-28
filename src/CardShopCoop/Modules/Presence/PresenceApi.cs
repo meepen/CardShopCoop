@@ -78,6 +78,13 @@ namespace CardShopCoop.Modules.Presence
             return service != null && service.TryGetRemoteCarryAnchor(holderConnectionId, out anchor);
         }
 
+        /// <summary>Raised when a remote avatar body has just spawned. A feature that parents an
+        /// object to an avatar skeleton (a carried box) can be announced before that avatar exists
+        /// on this machine, so it subscribes here to re-resolve its anchor once one does.</summary>
+        public static event Action RemoteAvatarsChanged;
+
+        internal static void NotifyRemoteAvatarsChanged() => RemoteAvatarsChanged?.Invoke();
+
         public static bool TryGetLocalPlayerPosition(out Vector3 position)
         {
             position = default(Vector3);

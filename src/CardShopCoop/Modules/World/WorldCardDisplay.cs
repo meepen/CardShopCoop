@@ -81,6 +81,10 @@ namespace CardShopCoop.Modules.World
             return stored[0].m_Card3dUI.m_CardUI.GetCardData();
         }
 
+        /// <summary>Content+grade equality against the slot that is ALREADY addressed by its
+        /// stable (shelfKey, compartment). This is only an idempotency/verification check for a
+        /// slot the caller resolved by key - never a search that identifies the slot itself.
+        /// The placed card's content is a legitimate fungible key; the slot identity is the key.</summary>
         internal static bool Matches(InteractableCardCompartment compartment, CardData card,
             int encodedGrade)
         {

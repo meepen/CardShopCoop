@@ -31,7 +31,7 @@ namespace kcp2k
         // then consider us disconnected. Raised well above kcp2k's 10s default so a client that
         // is synchronously loading the transferred world (main-thread stall) is not declared dead
         // mid-load; the connection is still torn down promptly on a real close or error.
-        public const int DEFAULT_TIMEOUT = 100000;
+        public const int DEFAULT_TIMEOUT = 600000;
         public int timeout;
         uint lastReceiveTime;
         uint currentTime;
@@ -279,7 +279,7 @@ namespace kcp2k
             // disconnect connections that can't process the load.
             // see QueueSizeDisconnect comments.
             // => include all of kcp's buffers and the unreliable queue!
-            int total = kcp.rcv_queue.Count + kcp.snd_queue.Count +
+            var total = kcp.rcv_queue.Count + kcp.snd_queue.Count +
                         kcp.rcv_buf.Count + kcp.snd_buf.Count;
             if (total >= QueueDisconnectThreshold)
             {
@@ -308,7 +308,7 @@ namespace kcp2k
             message = default;
             header = KcpHeaderReliable.Ping;
 
-            int msgSize = kcp.PeekSize();
+            var msgSize = kcp.PeekSize();
             if (msgSize <= 0)
                 return false;
 
@@ -325,7 +325,7 @@ namespace kcp2k
             }
 
             // receive from kcp
-            int received = kcp.Receive(kcpMessageBuffer, msgSize);
+            var received = kcp.Receive(kcpMessageBuffer, msgSize);
             if (received < 0)
             {
                 // if receive failed, close everything
@@ -337,7 +337,7 @@ namespace kcp2k
             }
 
             // safely extract header. attackers may send values out of enum range.
-            byte headerByte = kcpMessageBuffer[0];
+            var headerByte = kcpMessageBuffer[0];
             if (!KcpHeader.ParseReliable(headerByte, out header))
             {
                 OnError(ErrorCode.InvalidReceive, $"{GetType()}: Receive failed to parse header: {headerByte} is not defined in {typeof(KcpHeaderReliable)}.");
@@ -360,7 +360,7 @@ namespace kcp2k
             HandleChoked();
 
             // any reliable kcp message received?
-            if (ReceiveNextReliable(time, out KcpHeaderReliable header, out ArraySegment<byte> message))
+            if (ReceiveNextReliable(time, out var header, out var message))
             {
                 // message type FSM. no default so we never miss a case.
                 switch (header)
@@ -415,7 +415,7 @@ namespace kcp2k
             HandleChoked();
 
             // process all received messages
-            while (ReceiveNextReliable(time, out KcpHeaderReliable header, out ArraySegment<byte> message))
+            while (ReceiveNextReliable(time, out var header, out var message))
             {
                 // message type FSM. no default so we never miss a case.
                 switch (header)
@@ -573,7 +573,7 @@ namespace kcp2k
         protected bool OnRawInputReliable(ArraySegment<byte> message)
         {
             // input into kcp, but skip channel byte
-            int input = kcp.Input(message.Array, message.Offset, message.Count);
+            var input = kcp.Input(message.Array, message.Offset, message.Count);
             if (input != 0)
             {
                 // GetType() shows Server/ClientConn instead of just Connection.
@@ -590,8 +590,8 @@ namespace kcp2k
                 return;
 
             // safely extract header. attackers may send values out of enum range.
-            byte headerByte = message.Array[message.Offset + 0];
-            if (!KcpHeader.ParseUnreliable(headerByte, out KcpHeaderUnreliable header))
+            var headerByte = message.Array[message.Offset + 0];
+            if (!KcpHeader.ParseUnreliable(headerByte, out var header))
             {
                 OnError(ErrorCode.InvalidReceive, $"{GetType()}: Receive failed to parse header: {headerByte} is not defined in {typeof(KcpHeaderUnreliable)}.");
                 Disconnect();
@@ -683,7 +683,7 @@ namespace kcp2k
             Buffer.BlockCopy(data, 0, rawSendBuffer, 1 + 4, length);
 
             // IO send
-            ArraySegment<byte> segment = new ArraySegment<byte>(rawSendBuffer, 0, length + 1 + 4);
+            var segment = new ArraySegment<byte>(rawSendBuffer, 0, length + 1 + 4);
             RawSend(segment);
         }
 
@@ -706,7 +706,7 @@ namespace kcp2k
                 Buffer.BlockCopy(content.Array, content.Offset, kcpSendBuffer, 1, content.Count);
 
             // send to kcp for processing
-            int sent = kcp.Send(kcpSendBuffer, 0, 1 + content.Count);
+            var sent = kcp.Send(kcpSendBuffer, 0, 1 + content.Count);
             if (sent < 0)
             {
                 // GetType() shows Server/ClientConn instead of just Connection.
@@ -745,7 +745,7 @@ namespace kcp2k
                 Buffer.BlockCopy(content.Array, content.Offset, rawSendBuffer, 1 + 4 + 1, content.Count);
 
             // IO send
-            ArraySegment<byte> segment = new ArraySegment<byte>(rawSendBuffer, 0, content.Count + 1 + 4 + 1);
+            var segment = new ArraySegment<byte>(rawSendBuffer, 0, content.Count + 1 + 4 + 1);
             RawSend(segment);
             return true;
         }
@@ -809,7 +809,7 @@ namespace kcp2k
             // they are sent immediately even if we close the connection after.
             // this way we don't need to keep the connection alive for a while.
             // (glenn fiedler method)
-            for (int i = 0; i < 5; ++i)
+            for (var i = 0; i < 5; ++i)
                 SendUnreliable(KcpHeaderUnreliable.Disconnect, default);
         }
 

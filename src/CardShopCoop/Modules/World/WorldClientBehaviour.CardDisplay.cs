@@ -46,7 +46,11 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            WorldPrediction.ApplyConfirmed(message, () => ApplyCardDisplay(message));
+            // AckOrApply: the prediction's optimistic apply is a deliberate no-op (vanilla already
+            // placed the card) and the host echoes this peer's own request fields back verbatim, so
+            // the actor's local slot already matches ApplyCardDisplay (it early-returns on Matches).
+            // A remote/host delta carries no pending id and still applies.
+            WorldPrediction.AckOrApply(message, () => ApplyCardDisplay(message));
         }
 
         private void RetryPendingCardDisplay()
@@ -66,7 +70,9 @@ namespace CardShopCoop.Modules.World
                 }
 
                 _pendingCardDisplay.Remove(CardDisplayKey(message));
-                WorldPrediction.ApplyConfirmed(message, () => ApplyCardDisplay(message));
+                // Same as HandleCardDisplay: the echoed host state is this peer's own request, so
+                // the actor's slot already matches; a remote delta has no pending id.
+                WorldPrediction.AckOrApply(message, () => ApplyCardDisplay(message));
             }
         }
 
@@ -142,15 +148,17 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogInfo("[card-display] forwarding placement shelf=" + shelfKey
                 + " compartment=" + index + " card=" + card.monsterType + ".");
             // The local game already placed the card, so the prediction has no local apply to run;
-            // only a rejection needs to undo it.
-            WorldPrediction.Predict(WorldPrediction.CardDisplayScope, new CardDisplayRequestMessage
-            {
-                ShelfKey = shelfKey,
-                Compartment = index,
-                Occupied = true,
-                Card = state,
-                EncodedGrade = grade,
-            }, () => { }, () => UndoCardDisplayPlace(compartment, card));
+            // only a rejection needs to undo it. Predict records the post-hoc prediction
+            // without re-running the game mutation the hook already observed.
+            WorldPrediction.Predict(WorldPrediction.CardDisplayScope,
+                new CardDisplayRequestMessage
+                {
+                    ShelfKey = shelfKey,
+                    Compartment = index,
+                    Occupied = true,
+                    Card = state,
+                    EncodedGrade = grade,
+                }, () => { }, () => UndoCardDisplayPlace(compartment, card));
         }
 
         private void PublishCardDisplayRemove(InteractableCardCompartment compartment, CardData card)
@@ -177,14 +185,15 @@ namespace CardShopCoop.Modules.World
             var grade = WorldCardDisplay.EncodedGradeOf(card);
             CoopPlugin.Log.LogInfo("[card-display] forwarding removal shelf=" + shelfKey
                 + " compartment=" + index + " card=" + card.monsterType + ".");
-            WorldPrediction.Predict(WorldPrediction.CardDisplayScope, new CardDisplayRequestMessage
-            {
-                ShelfKey = shelfKey,
-                Compartment = index,
-                Occupied = false,
-                Card = state,
-                EncodedGrade = grade,
-            }, () => { }, () => UndoCardDisplayRemove(compartment, card));
+            WorldPrediction.Predict(WorldPrediction.CardDisplayScope,
+                new CardDisplayRequestMessage
+                {
+                    ShelfKey = shelfKey,
+                    Compartment = index,
+                    Occupied = false,
+                    Card = state,
+                    EncodedGrade = grade,
+                }, () => { }, () => UndoCardDisplayRemove(compartment, card));
         }
 
         /// <summary>A rejected placement: the card left the shared collection when it was picked up,
@@ -219,9 +228,22 @@ namespace CardShopCoop.Modules.World
         [HarmonyPatch(typeof(InteractableCardCompartment), "OnMouseButtonUp")]
         private static class CardDisplayPlacePatch
         {
+            // Capture-only prefix: record the slot's state before vanilla runs. The postfix then
+            // forwards only when vanilla actually placed a card into a previously empty slot.
+            [HarmonyPrefix]
+            private static void Prefix(InteractableCardCompartment __instance, out CardData __state)
+                => __state = WorldCardDisplay.Read(__instance);
+
             [HarmonyPostfix]
-            private static void Postfix(InteractableCardCompartment __instance)
-                => _instance?.PublishCardDisplayPlace(__instance);
+            private static void Postfix(InteractableCardCompartment __instance, CardData __state)
+            {
+                // An occupied slot makes vanilla return early without placing, so publishing on
+                // __state alone would invent a prediction for a mutation the game never performed.
+                if (__state == null && WorldCardDisplay.Read(__instance) != null)
+                {
+                    _instance?.PublishCardDisplayPlace(__instance);
+                }
+            }
         }
 
         [HarmonyPatch(typeof(InteractableCardCompartment), "OnRightMouseButtonUp")]

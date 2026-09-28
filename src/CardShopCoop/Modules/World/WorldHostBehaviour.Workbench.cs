@@ -1,6 +1,5 @@
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
-using CardShopCoop.Net.Connection;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
@@ -44,17 +43,13 @@ namespace CardShopCoop.Modules.World
             _workbenchInteraction?.HostStorageChanged(bench);
         }
 
-        [MessageHandler(typeof(WorkbenchStateRequestMessage))]
-        private void HandleWorkbenchStateRequest(MessageContext context,
-            WorkbenchStateRequestMessage message)
+        [MessageHandler(typeof(WorkbenchOpMessage))]
+        private void HandleWorkbenchOp(MessageContext context, WorkbenchOpMessage message)
         {
-            if (_context.InGame() && IsFullyJoinedSender(context) && message != null)
+            if (_context.InGame() && IsJoinPhaseSender(context) && message != null)
             {
-                ExecuteWorldCommand(context, message, () =>
-                {
-                    _workbenchInteraction?.HostApplyStateRequest(context.ConnectionId, message);
-                    return true;
-                });
+                ExecuteWorldCommand(context, message,
+                    () => _workbenchInteraction != null && _workbenchInteraction.HostApplyOp(message));
             }
             else
             {
@@ -65,25 +60,15 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(WorkbenchBundleMessage))]
         private void HandleWorkbenchBundle(MessageContext context, WorkbenchBundleMessage message)
         {
-            if (_context.InGame() && IsFullyJoinedSender(context) && message != null)
+            if (_context.InGame() && IsJoinPhaseSender(context) && message != null)
             {
                 ExecuteWorldCommand(context, message,
                     () => _workbenchInteraction != null
-                        && _workbenchInteraction.HostCompleteBundle(context.ConnectionId,
-                            message.Index));
+                        && _workbenchInteraction.HostCompleteBundle(message.Index));
             }
             else
             {
                 RejectWorldIntent(context, message);
-            }
-        }
-
-        [OnFullyJoined]
-        private void ResendWorkbenchGrants(PeerConnection connection)
-        {
-            if (connection != null && _context.InGame())
-            {
-                _workbenchInteraction?.ResendGrants(connection.Id);
             }
         }
 
@@ -125,7 +110,8 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(InteractableWorkbench __instance,
                 InteractablePackagingBox_Item itemBox, int __state)
             {
-                _instance?.PublishWorkbenchStorage(__instance);
+                // The bench change itself rides the AddItem postfix (DispenseItemFromBox feeds the
+                // bench through AddItem); only the source box needs broadcasting here.
                 if (!WorldWorkbenchInteraction.ApplyingRemote
                     && itemBox?.m_ItemCompartment != null
                     && itemBox.m_ItemCompartment.GetItemCount() != __state)
@@ -146,7 +132,8 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(InteractableWorkbench __instance,
                 InteractablePackagingBox_Item packageBox, int __state)
             {
-                _instance?.PublishWorkbenchStorage(__instance);
+                // The bench change itself rides the TakeItemToHand postfix (RemoveItemFromShelf
+                // moves the item through TakeItemToHand); only the destination box needs broadcasting.
                 if (!WorldWorkbenchInteraction.ApplyingRemote
                     && packageBox?.m_ItemCompartment != null
                     && packageBox.m_ItemCompartment.GetItemCount() != __state)

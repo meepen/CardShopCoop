@@ -27,7 +27,6 @@ namespace CardShopCoop.Modules.PlayTable
         }
         public byte Operation;
         public int TableKey;
-        public byte TableIndex;
         public bool Occupied;
         public bool Boxed;
         public byte Seat = byte.MaxValue;
@@ -68,7 +67,6 @@ namespace CardShopCoop.Modules.PlayTable
         public byte Op;
         public string MatchId;
         public int TableKey;
-        public byte TableIndex;
         public byte Seat;
         public bool SideA;
         public int DeckCardCount;
@@ -88,14 +86,16 @@ namespace CardShopCoop.Modules.PlayTable
         }
         public byte Kind = IntentKindPlayTable;
         public byte Action;
-        public byte Target;
+        /// <summary>The stable placement key of the table the action targets; never a list index.</summary>
         public int ObjectKey;
+        /// <summary>The client assigns the boxed table package's stable id at its local box-up so the
+        /// host binds its counterpart to the same id instead of allocating.</summary>
+        public Guid BoxNetworkId;
     }
 
     public sealed class PlayTableEntry
     {
         public int TableKey;
-        public byte Index;
         public bool Occupied;
         public bool Boxed;
         public List<PlayTableSeatEntry> Seats = new();
@@ -119,7 +119,6 @@ namespace CardShopCoop.Modules.PlayTable
         public string MatchId;
         public int OwnerConn;
         public int TableKey;
-        public byte TableIndex;
         public byte Seat;
         public bool SideA;
         public int Phase;

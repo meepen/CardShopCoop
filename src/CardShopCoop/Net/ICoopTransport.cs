@@ -77,4 +77,18 @@ namespace CardShopCoop.Net
     {
         void Start();
     }
+
+    /// <summary>
+    /// Internal fan-out admission used only by the host world relay. A relay is a
+    /// <see cref="ICoopTransport.Broadcast"/> that omits one connection, so it must honor the
+    /// exact same recipient admission as <c>Broadcast</c>: a peer that is disconnecting, still
+    /// completing the named handshake, or has not yet activated compact message ids is skipped
+    /// rather than treated as a hard send failure. A per-connection
+    /// <see cref="ICoopTransport.Send"/> over the connection list would disconnect a peer that
+    /// is simply still joining. Kept internal so external callers cannot reach the relay seam.
+    /// </summary>
+    internal interface ICoopRelayTransport
+    {
+        void Relay(INetMessage message, int exceptConnectionId);
+    }
 }

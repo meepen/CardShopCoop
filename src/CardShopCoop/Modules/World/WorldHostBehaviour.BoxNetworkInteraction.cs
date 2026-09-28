@@ -21,6 +21,13 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(HostItemBoxRemoveFromShelfPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(HostPackOpenerDispenseFromBoxPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(HostCleanserDispenseFromBoxPatch)).Patch();
+            // The game's restock delivery queue drains inside RestockManager.Update; mark that
+            // span so an accepted purchase's creator-assigned ids are consumed in spawn order.
+            _harmony.CreateClassProcessor(typeof(HostRestockUpdatePatch)).Patch();
+            // The delivery-id mirror is fed by the game's own enqueue and cleared by its data-load
+            // rebuild, never by the caller, so an id cannot outlive the entry it was bound to.
+            _harmony.CreateClassProcessor(typeof(HostRestockEnqueuePatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(HostRestockInitPatch)).Patch();
 
             // Record-backed 1.00 warehouse takes use this factory, which does not exist on the
             // legacy live-box build. Resolve it at runtime so the single DLL stays loadable.
@@ -36,7 +43,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(BoxDestroyRequestMessage))]
         private void HandleBoxDestroyRequest(MessageContext context, BoxDestroyRequestMessage message)
         {
-            if (_context.InGame() && IsFullyJoinedSender(context) && message != null)
+            if (_context.InGame() && IsJoinPhaseSender(context) && message != null)
             {
                 ExecuteWorldCommand(context, message, () =>
                 {
@@ -54,7 +61,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(FurnitureBoxUpRequestMessage))]
         private void HandleFurnitureBoxUp(MessageContext context, FurnitureBoxUpRequestMessage message)
         {
-            if (!_context.InGame() || !IsFullyJoinedSender(context)
+            if (!_context.InGame() || !IsJoinPhaseSender(context)
                 || message == null)
             {
                 RejectWorldIntent(context, message);
@@ -88,6 +95,18 @@ namespace CardShopCoop.Modules.World
                     return false;
                 }
 
+                // The client is the creator and carried the box's stable id; the host binds its
+                // counterpart to that exact id. A non-fresh id (already bound to a live box) must
+                // reject the intent: adopting it would rebind that box, and minting a different id
+                // would desync the creator's local box from the host's.
+                if (!_boxNetworkInteraction.PushHostCreatedId(message.BoxNetworkId))
+                {
+                    CoopPlugin.Log.LogWarning("[box-furniture] rejected box-up request entity="
+                        + (message.StableEntityId ?? "<missing>") + " type=" + message.ObjectType
+                        + " id=" + message.BoxNetworkId + ": the creator id is not fresh.");
+                    return false;
+                }
+
                 CoopPlugin.Log.LogInfo("[box-furniture] applying host box-up entity="
                     + message.StableEntityId + " type=" + message.ObjectType + ".");
                 _boxNetworkInteraction.HostPredictionId = message.PredictionId;
@@ -100,6 +119,16 @@ namespace CardShopCoop.Modules.World
                 finally
                 {
                     _boxNetworkInteraction.HostPredictionId = System.Guid.Empty;
+                }
+
+                if (match.GetPackagingBoxShelf() == null)
+                {
+                    // The push parked the creator id for a box the game did not produce; release
+                    // it so a later, unrelated creation cannot bind to it. No-op once consumed.
+                    _boxNetworkInteraction.CancelHostCreatedId(message.BoxNetworkId);
+                    CoopPlugin.Log.LogWarning("[box-furniture] box-up produced no package box entity="
+                        + (message.StableEntityId ?? "<missing>") + "; released creator id.");
+                    return false;
                 }
 
                 GrantFurnitureHold(match, context.ConnectionId);
@@ -139,7 +168,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(BoxStateRequestMessage))]
         private void HandleBoxStateRequest(MessageContext context, BoxStateRequestMessage message)
         {
-            if (_context.InGame() && IsFullyJoinedSender(context))
+            if (_context.InGame() && IsJoinPhaseSender(context))
             {
                 ExecuteWorldCommand(context, message, () =>
                 {
@@ -149,7 +178,38 @@ namespace CardShopCoop.Modules.World
                         return false;
                     }
 
-                    _boxNetworkInteraction.ApplyHostBoxState(item, message);
+                    // A box's contents are only ever rewritten by the player holding it. Opening
+                    // and closing a box on the floor is legitimate, so an open-flag-only request
+                    // stays valid; a contents change from a non-holder is rejected outright. The
+                    // sender must be the mirrored holder when one is known, so one peer can never
+                    // rewrite a box another peer is holding.
+                    if (message.ContentsChanged)
+                    {
+                        var holder = 0;
+                        var mirrored = _playerBoxInteraction != null
+                            && _playerBoxInteraction.TryGetRemoteHolder(message.BoxNetworkId,
+                                out holder);
+                        var accepted = mirrored
+                            ? holder == context.ConnectionId
+                            : _boxNetworkInteraction.IsBeingHeld(item);
+                        if (!accepted)
+                        {
+                            CoopPlugin.Log.LogWarning("[box-id] rejected box state request id="
+                                + message.BoxNetworkId + " name=" + item.name + " from conn="
+                                + context.ConnectionId + ": the sender does not hold the box (isHeld="
+                                + _boxNetworkInteraction.IsBeingHeld(item) + " mirroredHolder="
+                                + (mirrored ? holder.ToString() : "none") + ").");
+                            return false;
+                        }
+                    }
+
+                    // Validates the client's contents payload against IsValidItem/MaxItemCount
+                    // before ApplyItemState would spawn it.
+                    if (!_boxNetworkInteraction.ApplyHostBoxState(item, message))
+                    {
+                        return false;
+                    }
+
                     // The requesting player is authoritative for the box they are holding: the
                     // game's own operation already applied their local mutation and the intent
                     // carries its exact result. Echoing it back would rebuild their live
@@ -204,12 +264,6 @@ namespace CardShopCoop.Modules.World
 
         private void RegisterCreatedBox(InteractablePackagingBox box)
         {
-            if (box is InteractablePackagingBox_Item item
-                && _warehouseShelfInteraction?.TryClaimHostRecordTake(item) == true)
-            {
-                return;
-            }
-
             // FurnitureShopUIScreen creates its shelf box at Vector3.zero, then its outer
             // factory moves it to the random package spawn point. Allocate the ID here, but
             // wait for that outer factory before describing the box to clients.
@@ -281,6 +335,9 @@ namespace CardShopCoop.Modules.World
 
         private void NotifyDestroyedBox(InteractablePackagingBox box)
         {
+            // The game is tearing this box down. If this peer is holding it, release the hand first
+            // or the destroyed object stays parented to the hand as a ghost.
+            _playerBoxInteraction?.ReleaseHeldObject(box);
             _boxNetworkInteraction?.HostNotifyDestroyed(box);
         }
 
@@ -336,6 +393,40 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        [HarmonyPatch(typeof(RestockManager), "Update")]
+        private static class HostRestockUpdatePatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix()
+                => _instance?._boxNetworkInteraction?.BeginDeliverySpawns();
+
+            [HarmonyPostfix]
+            private static void Postfix()
+                => _instance?._boxNetworkInteraction?.EndDeliverySpawns();
+        }
+
+        /// <summary>The game appended a delivery entry that will spawn <c>count</c> boxes. Commit
+        /// the creator-assigned ids staged for this call to that entry. Running after the game's
+        /// own append is what keeps the mod queue in lockstep with the game waiting list.</summary>
+        [HarmonyPatch(typeof(RestockManager), nameof(RestockManager.SpawnPackageBoxItemMultipleFrame))]
+        private static class HostRestockEnqueuePatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(int count)
+                => _instance?._boxNetworkInteraction?.CommitHostDeliveryEntry(count);
+        }
+
+        /// <summary>The game clears and rebuilds its waiting list when game data finishes loading.
+        /// Resync the mirror to the rebuilt, id-less entries so no creator-assigned id outlives its
+        /// entry and positions stay aligned.</summary>
+        [HarmonyPatch(typeof(RestockManager), "Init")]
+        private static class HostRestockInitPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix()
+                => _instance?._boxNetworkInteraction?.ResyncHostDeliveryEntries();
+        }
+
         [HarmonyPatch(typeof(InteractablePackagingBox_Item), "OnDestroyed")]
         private static class ItemBoxDestroyedPatch
         {
@@ -384,10 +475,18 @@ namespace CardShopCoop.Modules.World
         [HarmonyPatch(typeof(InteractablePackagingBox_Item), "DispenseItem")]
         private static class HostItemBoxContentsPatch
         {
+            [HarmonyPrefix]
+            private static void Prefix(InteractablePackagingBox_Item __instance, out int __state)
+                => __state = __instance?.m_ItemCompartment?.GetItemCount() ?? 0;
+
             [HarmonyPostfix]
-            private static void Postfix(InteractablePackagingBox_Item __instance, bool isPlayer)
+            private static void Postfix(InteractablePackagingBox_Item __instance, bool isPlayer,
+                int __state)
             {
-                if (isPlayer)
+                // DispenseItem also stores a whole box onto a box compartment, which changes no
+                // contents; only a real item dispense publishes.
+                if (isPlayer && __instance?.m_ItemCompartment != null
+                    && __instance.m_ItemCompartment.GetItemCount() != __state)
                 {
                     _instance?.BroadcastItemBoxState(__instance);
                 }

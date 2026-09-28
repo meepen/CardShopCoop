@@ -25,6 +25,11 @@ namespace CardShopCoop.Modules.Presence
     /// </summary>
     internal sealed class PresenceAvatarRenderer
     {
+        /// <summary>Raised after a remote avatar body is spawned. A feature that parents an
+        /// object to the avatar skeleton (a carried box) can be told about the hold before the
+        /// avatar exists, so it re-resolves its anchor here.</summary>
+        internal System.Action RemoteAvatarsChanged;
+
         /// <summary>One received transform state, timestamped with local arrival time so
         /// Tick can replay motion slightly in the past instead of predicting ahead.</summary>
         private struct Snapshot
@@ -1261,7 +1266,7 @@ namespace CardShopCoop.Modules.Presence
                 {
                     try
                     {
-                        ItemSpawnManager.DisableItem(item);
+                        item.DisableItem();
                     }
                     catch (System.Exception e) { Swallow.Log(e); }
                 }
@@ -1279,7 +1284,7 @@ namespace CardShopCoop.Modules.Presence
             {
                 try
                 {
-                    ItemSpawnManager.DisableItem(av.PackProp);
+                    av.PackProp.DisableItem();
                 }
                 catch (System.Exception e) { Swallow.Log(e); }
                 av.PackProp = null;
@@ -1620,7 +1625,7 @@ namespace CardShopCoop.Modules.Presence
                     {
                         try
                         {
-                            ItemSpawnManager.DisableItem(av.PackProp);
+                            av.PackProp.DisableItem();
                         }
                         catch (System.Exception e) { Swallow.Log(e); }
                         av.PackProp = null;
@@ -1916,6 +1921,9 @@ namespace CardShopCoop.Modules.Presence
             av.NameTag = MakeTag(clone.transform, av.Name, 2.25f * heightFactor, Color.white);
             av.EmoteTag = MakeTag(clone.transform, "", 2.55f * heightFactor, new Color(1f, 0.85f, 0.2f));
             CoopPlugin.Log.LogInfo($"Spawned co-op avatar for '{av.Name}' ({(female ? "female" : "male")} model)");
+            // A carried box announced before this body existed rides a standalone anchor; now
+            // that the avatar exists, let observers move it onto the skeleton.
+            RemoteAvatarsChanged?.Invoke();
         }
 
         private static float GetCharacterHeightFactor(CC.CharacterCustomization custom)

@@ -54,7 +54,6 @@ namespace CardShopCoop.Modules.Report
                 Patch(typeof(ReportMutationPatch));
                 Patch(typeof(NextDayCoroutinePatch));
                 Patch(typeof(NextDayGatePatch));
-                Patch(typeof(ShowGoNextDayPatch));
                 Patch(typeof(TournamentEntryMutationPatch));
             }
             catch (Exception error)
@@ -627,20 +626,6 @@ namespace CardShopCoop.Modules.Report
 
                 return host.HostPressNextDay();
             }
-        }
-
-        /// <summary>
-        /// With the recap already open, the Enter/GoNextDay key belongs to the recap's own Next Day
-        /// action. The vanilla <c>ShowGoNextDayScreen</c> would call <c>OpenScreen</c>, which closes
-        /// an already-open recap, so suppress it while the recap is up. With the recap closed this
-        /// still runs vanilla, which is the first Enter that opens the menu.
-        /// </summary>
-        [HarmonyPatch(typeof(InteractionPlayerController), "ShowGoNextDayScreen")]
-        private static class ShowGoNextDayPatch
-        {
-            [HarmonyPrefix]
-            private static bool Prefix()
-                => _active == null || _active._shutdown || !EndOfDayReportScreen.IsActive();
         }
 
         /// <summary>

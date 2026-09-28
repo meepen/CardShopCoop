@@ -17,7 +17,8 @@ namespace CardShopCoop.Net
     /// that must observe transport state (Start/Stop/Dispose/ActivateMessageIds) are marshalled
     /// onto the pump thread, keeping bearer and KCP state single-threaded.
     /// </summary>
-    public sealed class NetworkPump : ICoopTransport, ICoopHandshakeTransport, ICoopStartable
+    public sealed class NetworkPump : ICoopTransport, ICoopHandshakeTransport, ICoopRelayTransport,
+        ICoopStartable
     {
         // Upper bound on how long the pump sleeps when no producer signals it. KCP
         // retransmission and pull-only bearers (Steam) rely on this cadence; every producer
@@ -302,6 +303,17 @@ namespace CardShopCoop.Net
             }
 
             handshake.SendHandshake(connection, message);
+            Signal();
+        }
+
+        void ICoopRelayTransport.Relay(INetMessage message, int exceptConnectionId)
+        {
+            if (_inner is not ICoopRelayTransport relay)
+            {
+                throw new InvalidOperationException("The wrapped transport has no relay seam");
+            }
+
+            relay.Relay(message, exceptConnectionId);
             Signal();
         }
 

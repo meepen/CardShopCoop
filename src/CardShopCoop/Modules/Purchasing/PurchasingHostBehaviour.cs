@@ -6,6 +6,7 @@ using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Economy;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Modules.Report;
+using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -99,6 +100,7 @@ namespace CardShopCoop.Modules.Purchasing
             internal readonly CatalogApi.PurchaseLicenseState CatalogLicenses;
             internal readonly bool ScannerUnlocked;
             internal readonly int EventCount;
+            internal readonly BoxNetworkInteraction.DeliveryQueueState DeliveryQueue;
 
             internal MutationSnapshot(PurchasePlan plan)
             {
@@ -145,6 +147,7 @@ namespace CardShopCoop.Modules.Purchasing
                     PendingRestockCounts.AddRange(CPlayerData.m_SpawnBoxItemCountWaitingList);
                 ScannerUnlocked = CPlayerData.m_IsScannerRestockUnlocked;
                 EventCount = QueueCount();
+                DeliveryQueue = WorldHostBehaviour.CaptureDeliveryQueueState();
             }
 
             internal void Rollback()
@@ -168,6 +171,9 @@ namespace CardShopCoop.Modules.Purchasing
                 RestoreList(PendingRestockBoxes, SceneRef<RestockManager>.Get(), PendingRestockRows);
                 RestoreList(CPlayerData.m_SpawnBoxRestockIndexWaitingList, PendingRestockIndexes);
                 RestoreList(CPlayerData.m_SpawnBoxItemCountWaitingList, PendingRestockCounts);
+                // The game waiting list is back to its pre-purchase shape; restore the ids that
+                // were bound to those entries so a failed delivery strands nothing.
+                WorldHostBehaviour.RestoreDeliveryQueueState(DeliveryQueue);
                 TrimEvents(EventCount);
                 GameInstance.m_IsItemLicenseUnlocked = GameInstanceLicenseUnlocked;
                 if (CatalogLicenses != null
@@ -339,7 +345,6 @@ namespace CardShopCoop.Modules.Purchasing
         private static PurchasingHostBehaviour _active;
         private bool _shutdown;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
 
         private void OnEnable()
         {
@@ -355,8 +360,6 @@ namespace CardShopCoop.Modules.Purchasing
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.purchasing.host");
-                _harmony.CreateClassProcessor(typeof(ProductLicenseGuardPatch)).Patch();
             }
             catch (Exception exception)
             {
@@ -365,9 +368,6 @@ namespace CardShopCoop.Modules.Purchasing
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
                 }
-
-                _harmony?.UnpatchSelf();
-                _harmony = null;
 
                 if (ReferenceEquals(_active, this))
                 {
@@ -409,9 +409,6 @@ namespace CardShopCoop.Modules.Purchasing
             {
                 _active = null;
             }
-
-            _harmony?.UnpatchSelf();
-            _harmony = null;
 
             _context = null;
         }
@@ -812,6 +809,17 @@ namespace CardShopCoop.Modules.Purchasing
                 var line = plan.Lines[i];
                 try
                 {
+                    // The purchasing client is the creator and carried the box ids in the intent.
+                    // Stage them for the game's deliver entry; the enqueue hook commits them to
+                    // that entry so the host binds each spawned box to them in order. Staging is
+                    // all-or-nothing: a non-fresh id means the client already bound a live box to
+                    // it, so the whole order is rejected rather than reminting and desyncing it.
+                    if (!WorldHostBehaviour.StageCreatedBoxIds(line.Request.BoxNetworkIds))
+                    {
+                        throw new InvalidOperationException(
+                            "delivery box ids are not fresh; rejecting the order");
+                    }
+
                     // This is the vanilla package factory. World owns the resulting physical
                     // boxes through its normal spawn/mirror patches; Purchasing owns no shelf.
                     RestockManager.SpawnPackageBoxItemMultipleFrame(line.RestockIndex,
@@ -822,6 +830,9 @@ namespace CardShopCoop.Modules.Purchasing
                 }
                 catch (Exception exception)
                 {
+                    // The enqueue hook clears the staged ids on success; a throw before it leaves
+                    // them staged for the next unrelated enqueue, so drop them here.
+                    WorldHostBehaviour.CancelStagedDeliveryIds();
                     result.Success = false;
                     result.Failure = $"restock delivery failed for '{line.Restock.name}': "
                         + exception.Message;
@@ -848,6 +859,17 @@ namespace CardShopCoop.Modules.Purchasing
             var line = plan.Lines[0];
             try
             {
+                // The client is the creator and carried the box id; the host binds its spawned
+                // counterpart to that exact id. A non-fresh id means the client already bound a
+                // live box to it; adopting it would rebind that box and minting a different id
+                // would desync the client's package, so reject the order.
+                if (line.Request.BoxNetworkIds != null && line.Request.BoxNetworkIds.Count > 0
+                    && !WorldHostBehaviour.PushCreatedBoxId(line.Request.BoxNetworkIds[0]))
+                {
+                    throw new InvalidOperationException(
+                        "furniture package id is not fresh; rejecting the order");
+                }
+
                 // The host intentionally chooses the pose. A client never supplies a transform.
                 var spawn = PurchasingInterop.RandomPackageSpawn();
                 if (spawn == null)
@@ -861,6 +883,13 @@ namespace CardShopCoop.Modules.Purchasing
             }
             catch (Exception exception)
             {
+                // A throw after the id was parked but before the game consumed it would otherwise
+                // strand it on a later, unrelated creation. No-op once consumed.
+                if (line.Request.BoxNetworkIds != null && line.Request.BoxNetworkIds.Count > 0)
+                {
+                    WorldHostBehaviour.CancelCreatedBoxId(line.Request.BoxNetworkIds[0]);
+                }
+
                 result.Success = false;
                 result.Failure = "furniture delivery failed: " + exception.Message;
                 CoopPlugin.Log.LogError($"Purchasing furniture delivery failed for {peer}: "
@@ -1063,35 +1092,6 @@ namespace CardShopCoop.Modules.Purchasing
         {
             var name = _context?.PeerName?.Invoke(connectionId);
             return string.IsNullOrEmpty(name) ? $"conn {connectionId}" : $"{name}/conn {connectionId}";
-        }
-
-        [HarmonyPatch(typeof(RestockItemPanelUI), "OnPressPurchaseButton")]
-        private static class ProductLicenseGuardPatch
-        {
-            [HarmonyPrefix]
-            private static bool Prefix(RestockItemPanelUI __instance)
-            {
-                var active = _active;
-                if (active == null || active._shutdown || !active._context.InGame())
-                {
-                    return true;
-                }
-
-                var index = PurchasingInterop.PanelIndex(__instance);
-                if (index < 0 || !CatalogApi.TryGetLicense(index, out var unlocked)
-                    || !unlocked)
-                {
-                    // An unreadable catalog state must not block a legitimate native purchase.
-                    return true;
-                }
-
-                // A guest may have unlocked this row while a host panel still displays the old
-                // license button. Refresh and suppress only this stale, already-unlocked action;
-                // a still-locked row continues through vanilla unchanged.
-                PurchasingInterop.RefreshProductLicensePanels(index);
-                active._context.SetStatusLine?.Invoke("product license is already unlocked", 5f);
-                return false;
-            }
         }
     }
 }

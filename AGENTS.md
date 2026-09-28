@@ -87,3 +87,6 @@ python scripts\game-version.py --quiet     # just the version, for scripts/CI
 ## Code standards
 1. No polling or timers. Prefer event driven always.
 2. Harmony is proven and not the issue.
+3. Do not store game-specific state. Only acceptable state we store is external information we add to the game. For example, network ID to Game Object lookups. Reuse the game data when possible.
+4. Do not do least-effort patches. Go for full fixes.
+5. No heuristical assignments. Always assign stable IDs over the network on box creation and utilize stable IDs over the network.

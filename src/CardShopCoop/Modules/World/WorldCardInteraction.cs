@@ -24,6 +24,23 @@ namespace CardShopCoop.Modules.World
 
         internal static bool ApplyingRemoteCards;
 
+        /// <summary>Client: true while a module owns a card-mutating game action and carries the
+        /// effect in its own intent, so the card patches must not register a second world
+        /// prediction and forward it. The game still performs the mutation (vanilla is never
+        /// stopped); only the duplicate forward is skipped, the same shape as EconomyActionScope
+        /// on the wallet side.</summary>
+        internal static bool SuppressClientCardForwarding;
+
+        /// <summary>Opens the card-forwarding guard for one module-owned action. Nesting is
+        /// counted by saving the previous value, and the caller must dispose it (a Harmony
+        /// finalizer for a game call) so an exception cannot leave the guard latched.</summary>
+        internal static IDisposable SuppressCardForwarding()
+        {
+            var previous = SuppressClientCardForwarding;
+            SuppressClientCardForwarding = true;
+            return new CardForwardingScope(previous);
+        }
+
         internal WorldCardInteraction(CoopRuntimeContext context, bool host,
             BoxNetworkInteraction boxes = null, PlayerBoxInteraction playerBox = null)
         {
@@ -53,63 +70,6 @@ namespace CardShopCoop.Modules.World
 
         internal static InventoryBase Inv()
             => SceneRef<InventoryBase>.Get();
-
-        /// <summary>Checks live display compartments rather than the collected-card cache.
-        /// Vanilla removes the last displayed card from that cache while it remains owned by
-        /// its shelf, so price editing must use the actual compartment as the authority.</summary>
-        internal static bool TryGetDisplayedCard(CardData requested, int encodedGrade,
-            out CardData displayed)
-        {
-            displayed = null;
-            if (requested == null)
-                return false;
-            var shelves = SceneRef<ShelfManager>.Get();
-            if (shelves == null)
-                return false;
-
-            if (TryFindDisplayedCard(shelves.m_CardShelfList, requested, encodedGrade,
-                out displayed)
-                || TryFindDisplayedCard(shelves.m_CardItemCombiShelfList, requested,
-                    encodedGrade, out displayed))
-                return true;
-            return false;
-        }
-
-        private static bool TryFindDisplayedCard<T>(IList<T> shelves, CardData requested,
-            int encodedGrade, out CardData displayed) where T : CardShelf
-        {
-            displayed = null;
-            if (shelves == null)
-                return false;
-            for (var i = 0; i < shelves.Count; i++)
-            {
-                var shelf = shelves[i];
-                var compartments = shelf?.GetCardCompartmentList();
-                if (compartments == null)
-                    continue;
-                for (var j = 0; j < compartments.Count; j++)
-                {
-                    var stored = compartments[j]?.m_StoredCardList;
-                    if (stored == null || stored.Count == 0 || stored[0] == null
-                        || stored[0].m_Card3dUI?.m_CardUI == null)
-                        continue;
-                    var candidate = stored[0].m_Card3dUI.m_CardUI.GetCardData();
-                    if (candidate == null || candidate.expansionType != requested.expansionType
-                        || candidate.monsterType != requested.monsterType
-                        || candidate.borderType != requested.borderType
-                        || candidate.isFoil != requested.isFoil
-                        || candidate.isDestiny != requested.isDestiny
-                        || candidate.isChampionCard != requested.isChampionCard)
-                        continue;
-                    if (GradingApi.Encoded(candidate) != encodedGrade)
-                        continue;
-                    displayed = SnapshotCard(candidate);
-                    displayed.cardGrade = encodedGrade;
-                    return true;
-                }
-            }
-            return false;
-        }
 
         private void Send(int connectionId, INetMessage message)
         {
@@ -192,9 +152,9 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        /// <summary>Predicts one inventory mutation. The hook suppresses vanilla's original
-        /// method and applies the same small ledger change from inside PredictionApi so the undo
-        /// closure is available when the accepted host delta arrives.</summary>
+        /// <summary>Records one inventory mutation the game ALREADY performed (the hook observes
+        /// vanilla from a postfix). The apply/undo closures redo and reverse the same change through
+        /// the game's own methods, ready for a rejection replay; the game owns the local mutation.</summary>
         internal bool PredictClientCardDelta(CardData card, int amount, bool isAdd)
         {
             if (_host || ApplyingRemoteCards || card == null || amount <= 0
@@ -231,6 +191,28 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
+        private sealed class CardForwardingScope : IDisposable
+        {
+            private readonly bool _previous;
+            private bool _disposed;
+
+            internal CardForwardingScope(bool previous)
+            {
+                _previous = previous;
+            }
+
+            public void Dispose()
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                SuppressClientCardForwarding = _previous;
+            }
+        }
+
         internal bool PredictClientGradedRemoval(CardData card)
         {
             if (_host || ApplyingRemoteCards || card == null
@@ -256,7 +238,7 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        private static void ApplyPredictedCardDelta(CardData card, int amount, bool isAdd)
+        internal static void ApplyPredictedCardDelta(CardData card, int amount, bool isAdd)
         {
             var previousRemote = ApplyingRemoteCards;
             ApplyingRemoteCards = true;
@@ -354,10 +336,19 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var message = new CardDeltaBatchRequestMessage { Deltas = entries };
-            WorldPrediction.Predict(WorldPrediction.CardsScope, message,
-                () => ApplyPredictedCardBatch(entries, false),
-                () => ApplyPredictedCardBatch(entries, true));
+            // The game already applied every change in the scope; record it as post-hoc
+            // prediction(s) so a rejection can replay it, without re-applying anything the game
+            // already did. A pack-opener reveal can exceed the per-batch wire cap, so split into
+            // capped chunks (each its own prediction); a bundle stays a single chunk.
+            for (var offset = 0; offset < entries.Count; offset += CardDeltaBatchMax)
+            {
+                var count = Math.Min(CardDeltaBatchMax, entries.Count - offset);
+                var chunk = entries.GetRange(offset, count);
+                var message = new CardDeltaBatchRequestMessage { Deltas = chunk };
+                WorldPrediction.Predict(WorldPrediction.CardsScope, message,
+                    () => ApplyPredictedCardBatch(chunk, false),
+                    () => ApplyPredictedCardBatch(chunk, true));
+            }
         }
 
         private static void ApplyPredictedCardBatch(List<CardDeltaEntry> entries, bool reverse)
@@ -445,6 +436,16 @@ namespace CardShopCoop.Modules.World
         }
 
         internal bool HandleCardDeltaBatch(int connectionId, CardDeltaBatchMessage message)
+            => HandleCardDeltaBatch(connectionId, message, requireAllApplied: false);
+
+        /// <summary>As <see cref="HandleCardDeltaBatch(int, CardDeltaBatchMessage)"/>, but when
+        /// <paramref name="requireAllApplied"/> is set the batch is one atomic movement: every
+        /// delta must truly apply on this host, and the first delta that cannot be applied -
+        /// refused, or merely relayed for content this host does not have - aborts the batch and
+        /// retracts whatever it already applied, so the host is never left with a partial
+        /// movement (for example, gaining the received card without giving up the offered one).</summary>
+        internal bool HandleCardDeltaBatch(int connectionId, CardDeltaBatchMessage message,
+            bool requireAllApplied)
         {
             if (_host && message == null)
                 return false;
@@ -469,6 +470,7 @@ namespace CardShopCoop.Modules.World
 
             var needFiltered = _host && ConnectionCount > 1;
             _batchRelayBuf.Clear();
+            var strictApplied = requireAllApplied ? new List<PendingCard>(total) : null;
             var applied = 0;
             var relayedOnly = 0;
             for (var i = 0; i < total; i++)
@@ -488,9 +490,25 @@ namespace CardShopCoop.Modules.World
                         $"card delta batch: delta {i + 1}/{total} failed to apply.", e);
                 }
 
+                if (requireAllApplied && (!ok || relayAnyway))
+                {
+                    RetractCardDeltas(strictApplied);
+                    return false;
+                }
+
                 if (!ok && !relayAnyway)
                 {
                     continue;
+                }
+
+                if (strictApplied != null)
+                {
+                    strictApplied.Add(new PendingCard
+                    {
+                        IsAdd = delta.IsAdd,
+                        Amount = delta.Amount,
+                        Card = SnapshotCard(delta.Card),
+                    });
                 }
 
                 if (ok)
@@ -502,11 +520,14 @@ namespace CardShopCoop.Modules.World
                     relayedOnly++;
                 }
 
-                if (_host && delta.IsAdd && (ok || relayAnyway))
+                // The general (non-atomic) batch records ownership per delta as it goes. A strict
+                // batch defers this until the whole movement succeeds, so an aborted batch never
+                // leaves a claim behind for a delta it retracted.
+                if (strictApplied == null && _host && delta.IsAdd && (ok || relayAnyway))
                 {
                     ConsumeGradingOwnership(connectionId, delta.Card, delta.Amount);
                 }
-                else if (_host && !delta.IsAdd && ok)
+                else if (strictApplied == null && _host && !delta.IsAdd && ok)
                 {
                     RecordGradingOwnership(connectionId, delta.Card, delta.Amount);
                 }
@@ -522,6 +543,22 @@ namespace CardShopCoop.Modules.World
                 }
             }
 
+            if (strictApplied != null)
+            {
+                for (var i = 0; i < strictApplied.Count; i++)
+                {
+                    var pending = strictApplied[i];
+                    if (pending.IsAdd)
+                    {
+                        ConsumeGradingOwnership(connectionId, pending.Card, pending.Amount);
+                    }
+                    else
+                    {
+                        RecordGradingOwnership(connectionId, pending.Card, pending.Amount);
+                    }
+                }
+            }
+
             if (applied == total && relayedOnly == 0 && total > 0)
             {
                 var authoritative = ToAuthoritative(message);
@@ -533,6 +570,24 @@ namespace CardShopCoop.Modules.World
                 RelayCardDeltaBatchToOthers(connectionId, _batchRelayBuf);
             }
             return applied > 0 || relayedOnly > 0;
+        }
+
+        /// <summary>Undoes the deltas a strict batch applied before it aborted, newest first, so a
+        /// refused atomic movement leaves this host exactly as it found it. The inverse of an add
+        /// is the same remove the general path would apply, and vice versa.</summary>
+        private static void RetractCardDeltas(List<PendingCard> applied)
+        {
+            for (var i = applied.Count - 1; i >= 0; i--)
+            {
+                var pending = applied[i];
+                if (!ApplyCardDelta(!pending.IsAdd, pending.Amount, pending.Card, out var relayAnyway)
+                    && !relayAnyway)
+                {
+                    CoopPlugin.Log.LogError("trade card movement could not be retracted for "
+                        + CardIdent(pending.Card) + " (" + (pending.IsAdd ? "add" : "remove")
+                        + " x" + pending.Amount + "); the host inventory may be inconsistent.");
+                }
+            }
         }
 
         internal bool HandleGradedRemove(int connectionId, GradedRemoveMessage message)
@@ -604,6 +659,7 @@ namespace CardShopCoop.Modules.World
             }
             _shownMonsters.Clear();
             _deltaAppliedThisFrame = 0;
+            _deltaNetThisFrame = 0;
             _deltaLogBuf.Clear();
             _binderRefreshPending = false;
             ApplyingRemoteCards = false;
@@ -1268,6 +1324,7 @@ namespace CardShopCoop.Modules.World
         // folds into one summary line for a flood. Emitted by FlushFrameCardWork.
         private static readonly List<PendingCard> _deltaLogBuf = new();
         private static int _deltaAppliedThisFrame;
+        private static int _deltaNetThisFrame;
 
         /// <summary>Returns true when the delta was actually applied - the host's relay to
         /// OTHER guests keys off this, so a delta this side REFUSED (corrupt grade, would-go-
@@ -1404,6 +1461,7 @@ namespace CardShopCoop.Modules.World
             // ordinary change; a bulk collect (hundreds of deltas in one frame) folds into one
             // summary instead of its own log flood. Both are emitted by FlushFrameCardWork.
             _deltaAppliedThisFrame++;
+            _deltaNetThisFrame += isAdd ? amount : -amount;
             if (_deltaLogBuf.Count < 5)
             {
                 _deltaLogBuf.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = SnapshotCard(card) });
@@ -1442,6 +1500,7 @@ namespace CardShopCoop.Modules.World
             }
 
             _deltaAppliedThisFrame++;
+            _deltaNetThisFrame += isAdd ? amount : -amount;
             if (_deltaLogBuf.Count < 5)
                 _deltaLogBuf.Add(new PendingCard
                 {
@@ -2194,11 +2253,13 @@ namespace CardShopCoop.Modules.World
                 }
                 else
                 {
-                    CoopPlugin.Log.LogInfo($"applied {_deltaAppliedThisFrame} card deltas");
+                    CoopPlugin.Log.LogInfo($"applied {_deltaAppliedThisFrame} card deltas (net "
+                        + (_deltaNetThisFrame >= 0 ? "+" : "") + _deltaNetThisFrame + " cards)");
                 }
 
                 _deltaLogBuf.Clear();
                 _deltaAppliedThisFrame = 0;
+                _deltaNetThisFrame = 0;
             }
             if (_binderRefreshPending)
             {

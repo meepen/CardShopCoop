@@ -30,6 +30,11 @@ namespace CardShopCoop.Modules.Staff
         private bool _shutdown;
         private Guid _intentPredictionId;
 
+        /// <summary>How far a remote player may be from a worker to begin an interaction. Vanilla
+        /// only opens the worker panel on a nearby click, so this generous bound rejects a
+        /// cross-shop begin.</summary>
+        private const float StaffInteractionReach = 5f;
+
         private void OnEnable()
         {
             if (_shutdown || _context != null)
@@ -429,12 +434,26 @@ namespace CardShopCoop.Modules.Staff
                 return false;
             }
 
+            var worker = StaffModuleInterop.GetWorkers(manager)[index];
+            if (connectionId != 0)
+            {
+                // A remote interaction must come from a player actually standing at the worker,
+                // by the same authenticated-presence rule the trade/deodorant intents use - never
+                // from the client's own position payload.
+                if (!_context.PeerPresence.TryGet(connectionId, out var presence)
+                    || presence.Age > TimeSpan.FromSeconds(2)
+                    || (presence.Position - worker.transform.position).sqrMagnitude
+                        > StaffInteractionReach * StaffInteractionReach)
+                {
+                    return false;
+                }
+            }
+
             if (_leaseOwner.TryGetValue(index, out var owner))
             {
                 return owner == connectionId;
             }
 
-            var worker = StaffModuleInterop.GetWorkers(manager)[index];
             if (connectionId != 0)
             {
                 StaffModuleInterop.AimWorkerAtPlayer(worker, playerPosition);

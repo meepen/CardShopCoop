@@ -69,10 +69,20 @@ namespace CardShopCoop.Modules.SaveTransfer
 
         /// <summary>
         /// Force-saves the live host world into the throwaway slot and returns exactly the bytes
-        /// that the client will load. <paramref name="saveStartedUtc"/> is the instant the save
-        /// began; every mod-data file written at or after it is the sidecar set to ship.
+        /// that the client will load, freezing the identity manifest for the authorizing
+        /// connection in the same instant. <paramref name="saveStartedUtc"/> is the instant the
+        /// save began; every mod-data file written at or after it is the sidecar set to ship.
         /// </summary>
         public static byte[] BuildHostPayload(out DateTime saveStartedUtc)
+            => BuildHostPayload(0, out saveStartedUtc);
+
+        /// <summary>
+        /// Force-saves the live host world into the throwaway slot and returns exactly the bytes
+        /// that the client will load, freezing the per-connection identity manifest (box slots and
+        /// placement slots) at the moment the save is serialized. <paramref name="connectionId"/>
+        /// is the authorizing peer; 0 captures no per-connection manifest.
+        /// </summary>
+        public static byte[] BuildHostPayload(int connectionId, out DateTime saveStartedUtc)
         {
             ValidateSlot(HostSnapshotSlot);
             var manager = SceneRef<CGameManager>.Get();
@@ -108,9 +118,10 @@ namespace CardShopCoop.Modules.SaveTransfer
                 manager.m_CurrentSaveLoadSlotSelectedIndex = previousSlot;
             }
 
-            // The world snapshot has now been serialized in live-list order. Capture the matching
-            // box slots immediately so the box baseline can name each scene box deterministically.
-            WorldHostBehaviour.CaptureTransferBoxSlots();
+            // The world snapshot has now been serialized in live-list order. Freeze the matching
+            // per-connection identity manifest immediately, using the game's own save filter, so
+            // the baseline can name each box/placement by its snapshot slot deterministically.
+            WorldHostBehaviour.CaptureTransferManifest(connectionId);
 
             if (IsFresh(path, timestamp))
             {

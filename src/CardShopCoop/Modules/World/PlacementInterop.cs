@@ -164,19 +164,6 @@ namespace CardShopCoop.Modules.World
         internal static bool IsBoxed(InteractableObject obj)
             => obj != null && obj.GetIsBoxedUp();
 
-        internal static Vector3 ObjectPose(InteractableObject obj)
-        {
-            if (IsBoxed(obj) && obj.GetPackagingBoxShelf() != null)
-            {
-                return obj.GetPackagingBoxShelf().transform.position;
-            }
-
-            return obj == null ? Vector3.zero : obj.transform.position;
-        }
-
-        internal static Vector3 MatchPose(PlacementPopulationEntry entry)
-            => entry.IsBoxed ? entry.BoxedPos : entry.Pos;
-
         internal static void NotifyStructureChanged(int kind)
         {
             try
@@ -654,7 +641,7 @@ namespace CardShopCoop.Modules.World
     {
         internal void Reset() => PlacementIdentity.Reset();
 
-        internal PlacementPopulationMessage BuildMessage()
+        internal PlacementPopulationMessage BuildMessage(WorldTransferManifest manifest)
         {
             var manager = PlacementInterop.FindShelfManager();
             if (manager == null)
@@ -662,13 +649,54 @@ namespace CardShopCoop.Modules.World
                 return null;
             }
 
+            if (manifest == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement] building a baseline without a frozen "
+                    + "save-time manifest; falling back to live list indices. A guest that joined "
+                    + "before this baseline may bind the wrong object if its list order differs.");
+            }
+
             var message = new PlacementPopulationMessage();
             for (var kind = 0; kind < PlacementApi.KindCount; kind++)
             {
-                message.Entries.Add(BuildKind(manager, kind));
+                message.Entries.Add(BuildKind(manager, kind, manifest));
             }
 
             return message;
+        }
+
+        /// <summary>Host: freeze, for one connection, the slot each placement entity occupies in
+        /// its kind's live list at the instant the save is written. The guest loads that exact
+        /// order, so the slot is the guest's binding key for an entity it already has. Ids are
+        /// assigned here so the frozen slot and the later baseline share one stable identity.</summary>
+        internal void CaptureTransferManifest(WorldTransferManifest manifest)
+        {
+            if (manifest == null)
+            {
+                return;
+            }
+
+            var manager = PlacementInterop.FindShelfManager();
+            for (var kind = 0; kind < PlacementApi.KindCount; kind++)
+            {
+                if (kind == PlacementApi.DecorationKind)
+                {
+                    continue;
+                }
+
+                var list = PlacementInterop.GetList(manager, kind);
+                var order = 0;
+                for (var i = 0; list != null && i < list.Count; i++)
+                {
+                    if (list[i] is not InteractableObject obj)
+                    {
+                        continue;
+                    }
+
+                    manifest.SetPlacementSlot(kind, PlacementIdentity.AssignHost(obj), order);
+                    order++;
+                }
+            }
         }
 
         internal bool Apply(PlacementPopulationMessage message)
@@ -691,10 +719,12 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        private static List<PlacementPopulationEntry> BuildKind(ShelfManager manager, int kind)
+        private static List<PlacementPopulationEntry> BuildKind(ShelfManager manager, int kind,
+            WorldTransferManifest manifest)
         {
             var list = PlacementInterop.GetList(manager, kind);
             var result = new List<PlacementPopulationEntry>();
+            var order = 0;
             for (var i = 0; list != null && i < list.Count; i++)
             {
                 if (list[i] is not InteractableObject obj)
@@ -702,9 +732,30 @@ namespace CardShopCoop.Modules.World
                     continue;
                 }
 
+                var id = PlacementIdentity.AssignHost(obj);
+                // The slot is the save-time manifest key the guest already has. With no manifest it
+                // is the live save-order index (a scene-reload re-baseline); when a manifest exists
+                // but names no slot for this id, the entity was created after the snapshot, so it
+                // must be materialized by its descriptor (-1) rather than bound to a save object.
+                var slot = -1;
+                if (manifest != null)
+                {
+                    if (!manifest.TryGetPlacementSlot(kind, id, out slot))
+                    {
+                        slot = -1;
+                    }
+                }
+                else
+                {
+                    slot = order;
+                }
+
+                order++;
+
                 var entry = new PlacementPopulationEntry
                 {
-                    Id = PlacementIdentity.AssignHost(obj),
+                    Id = id,
+                    Slot = slot,
                     ObjType = (int)obj.m_ObjectType,
                     Pos = obj.transform.position,
                     Rot = obj.transform.rotation,
@@ -731,121 +782,94 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var current = new List<InteractableObject>();
-            for (var i = 0; i < list.Count; i++)
+            for (var ordinal = 0; ordinal < wanted.Count; ordinal++)
             {
-                if (list[i] is InteractableObject obj)
-                {
-                    current.Add(obj);
-                }
-            }
-
-            var used = new HashSet<InteractableObject>();
-            for (var i = 0; i < wanted.Count; i++)
-            {
-                var entry = wanted[i];
-                var obj = FindCandidate(current, used, entry, i, false);
-                if (obj == null && kind == PlacementApi.PlayTableKind)
-                {
-                    // The play-table list can legitimately lack a host table: one may postdate the
-                    // transferred save, or a cross-build loader may skip it. A play table carries
-                    // no stored contents, so recreate it from the authoritative baseline instead of
-                    // leaving the peer without a table it can see.
-                    obj = FindCandidate(current, used, entry, i, true);
-                    if (obj == null && !entry.IsBoxed && entry.ObjType != PlacementInterop.NoType)
-                    {
-                        obj = PlacementInterop.SpawnPlacedObject(entry.ObjType, entry.Pos,
-                            entry.Rot);
-                        if (obj != null)
-                        {
-                            CoopPlugin.Log.LogInfo("[placement] baseline materialized missing play-table id="
-                                + entry.Id + " type=" + entry.ObjType + " boxed=" + entry.IsBoxed
-                                + ".");
-                        }
-                    }
-                }
-
-                if (obj == null && entry.IsBoxed)
-                {
-                    obj = PlacementInterop.SpawnBoxedObject(entry.ObjType, entry.BoxedPos,
-                        entry.BoxedRot);
-                }
-
+                var entry = wanted[ordinal];
+                var obj = ResolveBaselineObject(manager, kind, list, entry);
                 if (obj == null)
                 {
-                    if (kind == PlacementApi.PlayTableKind)
-                    {
-                        CoopPlugin.Log.LogWarning("[placement] baseline could not resolve play-table id="
-                            + entry.Id + " type=" + entry.ObjType + " boxed=" + entry.IsBoxed
-                            + " (no local table and none could be spawned).");
-                    }
-
+                    CoopPlugin.Log.LogWarning("[placement] baseline id=" + entry.Id + " kind=" + kind
+                        + " type=" + entry.ObjType + " boxed=" + entry.IsBoxed
+                        + " did not resolve and could not be recreated.");
                     continue;
                 }
 
-                if (kind == PlacementApi.PlayTableKind)
-                {
-                    CoopPlugin.Log.LogInfo("[placement] baseline bound play-table id=" + entry.Id
-                        + " to " + obj.name + " boxed=" + entry.IsBoxed + ".");
-                }
-
-                used.Add(obj);
-                PlacementIdentity.Bind(obj, entry.Id);
-                if (PlacementInterop.IsBoxed(obj) != entry.IsBoxed)
-                {
-                    if (entry.IsBoxed)
-                    {
-                        if (!PlacementInterop.IsBoxEngineOwned(obj))
-                        {
-                            PlacementInterop.BoxUpPlacedObject(obj);
-                        }
-                    }
-                    else
-                    {
-                        PlacementInterop.PlaceBoxedObject(obj, entry.Pos, entry.Rot);
-                    }
-                }
-
-                if (!entry.IsBoxed)
-                {
-                    obj.transform.SetPositionAndRotation(entry.Pos, entry.Rot);
-                    PlacementInterop.SyncTagGroup(obj.transform);
-                }
+                ReconcileBaselineObject(obj, entry);
             }
         }
 
-        private static InteractableObject FindCandidate(List<InteractableObject> current,
-            HashSet<InteractableObject> used, PlacementPopulationEntry entry, int preferredIndex,
-            bool ignoreBoxed)
+        /// <summary>The local object a baseline entry names, bound by its carried stable id. The id
+        /// may already be bound (an earlier baseline or a delta bound it), or it may name the object
+        /// at the entry's explicit transfer-time slot: host and guest reproduce the same list order
+        /// from the transferred save, so the slot belongs to that id. The slot is only trusted when
+        /// its object type matches the entry, so a save whose list order diverged (a different
+        /// furniture item now occupies that slot) can never bind an id to the wrong object. An id
+        /// that names no local object is recreated through the game's factory as the exact object it
+        /// names; a same-type or nearby object is never adopted.</summary>
+        private static InteractableObject ResolveBaselineObject(ShelfManager manager, int kind,
+            IList list, PlacementPopulationEntry entry)
         {
-            if (preferredIndex < current.Count && !used.Contains(current[preferredIndex])
-                && (int)current[preferredIndex].m_ObjectType == entry.ObjType)
+            if (PlacementIdentity.TryResolve(manager, kind, entry.Id, out var bound))
             {
-                return current[preferredIndex];
+                return bound;
             }
 
-            var best = (InteractableObject)null;
-            var distance = float.MaxValue;
-            for (var i = 0; i < current.Count; i++)
+            if (entry.Slot >= 0 && entry.Slot < list.Count
+                && list[entry.Slot] is InteractableObject slot
+                && (int)slot.m_ObjectType == entry.ObjType
+                && !PlacementIdentity.IsIdentified(slot))
             {
-                var candidate = current[i];
-                if (used.Contains(candidate) || candidate == null
-                    || (int)candidate.m_ObjectType != entry.ObjType
-                    || (!ignoreBoxed && PlacementInterop.IsBoxed(candidate) != entry.IsBoxed))
-                {
-                    continue;
-                }
+                PlacementIdentity.Bind(slot, entry.Id);
+                return slot;
+            }
 
-                var next = (PlacementInterop.ObjectPose(candidate) - PlacementInterop.MatchPose(entry))
-                    .sqrMagnitude;
-                if (next <= distance)
+            return RecreateBaselineObject(entry);
+        }
+
+        private static InteractableObject RecreateBaselineObject(PlacementPopulationEntry entry)
+        {
+            if (entry.ObjType == PlacementInterop.NoType)
+            {
+                return null;
+            }
+
+            var obj = entry.IsBoxed
+                ? PlacementInterop.SpawnBoxedObject(entry.ObjType, entry.BoxedPos, entry.BoxedRot)
+                : PlacementInterop.SpawnPlacedObject(entry.ObjType, entry.Pos, entry.Rot);
+            if (obj == null)
+            {
+                return null;
+            }
+
+            PlacementIdentity.Bind(obj, entry.Id);
+            CoopPlugin.Log.LogInfo("[placement] baseline recreated missing id=" + entry.Id
+                + " type=" + entry.ObjType + " boxed=" + entry.IsBoxed + " object=" + obj.name + ".");
+            return obj;
+        }
+
+        private static void ReconcileBaselineObject(InteractableObject obj,
+            PlacementPopulationEntry entry)
+        {
+            if (PlacementInterop.IsBoxed(obj) != entry.IsBoxed)
+            {
+                if (entry.IsBoxed)
                 {
-                    distance = next;
-                    best = candidate;
+                    if (!PlacementInterop.IsBoxEngineOwned(obj))
+                    {
+                        PlacementInterop.BoxUpPlacedObject(obj);
+                    }
+                }
+                else
+                {
+                    PlacementInterop.PlaceBoxedObject(obj, entry.Pos, entry.Rot);
                 }
             }
 
-            return best;
+            if (!entry.IsBoxed)
+            {
+                obj.transform.SetPositionAndRotation(entry.Pos, entry.Rot);
+                PlacementInterop.SyncTagGroup(obj.transform);
+            }
         }
     }
 
@@ -1035,74 +1059,34 @@ namespace CardShopCoop.Modules.World
 
             var entry = message.Entity;
             var objectKey = entry.Key;
-            var kind = objectKey >> 24;
             var obj = PlacementMoveState.ResolveObjectByKey(objectKey) as InteractableObject;
             if (obj == null)
             {
-                obj = FindCandidate(kind, entry);
+                // The stable key names no local object. A host can spawn a boxed placement object
+                // that no peer predicted (a furniture purchase, whose pose only the host chooses);
+                // recreate it through the game's factory as the exact object the key names rather
+                // than adopting a same-type or nearby local object. The box channel then adopts
+                // this exact package.
+                if (!entry.IsBoxed || entry.Type == PlacementInterop.NoType)
+                {
+                    CoopPlugin.Log.LogWarning("[placement] delta key=" + objectKey + " type="
+                        + entry.Type + " did not resolve and is not a recreatable boxed entity.");
+                    return false;
+                }
+
+                obj = PlacementInterop.SpawnBoxedObject(entry.Type, entry.BoxedPos,
+                    entry.BoxedRot);
                 if (obj == null)
                 {
-                    // A host can spawn a boxed placement object that no peer predicted (a
-                    // furniture purchase, whose pose only the host chooses). Nothing local can
-                    // adopt it, so recreate it through the game's factory before binding the
-                    // host's identity. The box channel then adopts this exact package.
-                    if (!entry.IsBoxed || entry.Type == PlacementInterop.NoType)
-                    {
-                        return false;
-                    }
-
-                    obj = PlacementInterop.SpawnBoxedObject(entry.Type, entry.BoxedPos,
-                        entry.BoxedRot);
-                    if (obj == null)
-                    {
-                        return false;
-                    }
-
-                    CoopPlugin.Log.LogInfo("[placement] materialized host-spawned boxed entity key="
-                        + objectKey + " type=" + entry.Type + ".");
-                }
-                else
-                {
-                    CoopPlugin.Log.LogInfo("[placement] adopted unbound local entity key="
-                        + objectKey + " object=" + obj.name + ".");
+                    return false;
                 }
 
+                CoopPlugin.Log.LogInfo("[placement] materialized host-spawned boxed entity key="
+                    + objectKey + " type=" + entry.Type + ".");
                 PlacementIdentity.Bind(obj, PlacementIdentity.ObjectIdFromObjectKey(objectKey));
             }
 
             return Apply(entry, false);
-        }
-
-        private static InteractableObject FindCandidate(int kind, PlacementMoveEntry entry)
-        {
-            var list = PlacementInterop.GetList(PlacementInterop.FindShelfManager(), kind);
-            InteractableObject result = null;
-            var best = float.MaxValue;
-            for (var i = 0; list != null && i < list.Count; i++)
-            {
-                if (list[i] is not InteractableObject candidate
-                    || PlacementIdentity.IsIdentified(candidate)
-                    || (entry.Type != PlacementInterop.NoType
-                        && PlacementInterop.TypeIdOf(candidate) != entry.Type))
-                {
-                    continue;
-                }
-
-                var distance = (PlacementInterop.ObjectPose(candidate)
-                    - PlacementInterop.MatchPose(new PlacementPopulationEntry
-                    {
-                        IsBoxed = entry.IsBoxed,
-                        Pos = entry.Pos,
-                        BoxedPos = entry.BoxedPos,
-                    })).sqrMagnitude;
-                if (distance < best)
-                {
-                    best = distance;
-                    result = candidate;
-                }
-            }
-
-            return result;
         }
     }
 }

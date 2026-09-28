@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Npc;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
@@ -8,7 +9,6 @@ using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using CardShopCoop.Util;
 using HarmonyLib;
-using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Staff
@@ -32,6 +32,25 @@ namespace CardShopCoop.Modules.Staff
         private bool _shutdown;
         private bool _joined;
         private int _applyingPrediction;
+
+        // Non-zero while a converted staff UI action's own game method runs between its capture
+        // prefix and its observe postfix. The nested Worker.OnPressStopInteract such an action
+        // performs must still run vanilla, but must not register its own intent: the action's
+        // prediction already covers the interaction end the host broadcasts with it.
+        private int _insideStaffAction;
+
+        /// <summary>Pre-action state carried from a converted capture-only prefix to its observe
+        /// postfix. Null means the action was not observable and must not be predicted.</summary>
+        private sealed class StaffAction
+        {
+            public Worker Worker;
+            public int Index;
+            public StaffModuleEntry Before;
+            public StaffModuleIntentMessage Message;
+            // The wallet amount vanilla debits for a hire/bonus, captured before the game spends
+            // it so a rejected prediction can refund exactly that amount.
+            public double Spend;
+        }
 
         private sealed class InteractScreenCache : Cached<WorkerInteractUIScreen>
         {
@@ -97,7 +116,7 @@ namespace CardShopCoop.Modules.Staff
             {
                 var key = DeltaKey(message);
                 if (_deferredDeltas.TryGetValue(key, out var previous))
-                    PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                    PredictionApi.Ack(previous.PredictionId);
                 _deferredDeltas[key] = message;
                 CoopPlugin.Log.LogInfo("[staff] deferred " + message.Kind + " index=" + message.Index
                     + " generation=" + message.Generation + " known="
@@ -194,18 +213,22 @@ namespace CardShopCoop.Modules.Staff
                 }
             };
 
-            // Fired and Interaction deltas confirm the client's own optimistic action. The local
-            // apply already closed/opened the interaction exactly as the host did, so undoing it
-            // first (what ApplyAuthoritative does) would reopen the worker menu before re-closing,
-            // or re-close before reopening. Every other kind can contradict the prediction, so
-            // they stay authoritative.
+            // Fired and Interaction deltas only confirm the client's own optimistic action. The
+            // local apply already closed/opened the interaction (and released the lease/busy
+            // flags) exactly as the host did, so retiring the prediction without replaying it
+            // keeps the local interaction as-is.
             if (message.Kind == StaffDeltaKind.Fired || message.Kind == StaffDeltaKind.Interaction)
             {
-                PredictionApi.ApplyConfirmed(message.PredictionId, apply);
+                PredictionApi.AckOrApply(message.PredictionId, apply);
             }
             else
             {
-                PredictionApi.ApplyAuthoritative(message.PredictionId, apply);
+                // Every other kind carries host-computed state the optimistic run does not
+                // produce: _workerGenerations (prediction snapshots leave Generation at 0, see
+                // ApplyEntry) and the Hired bootstrap/manager entry. AckOrApply retired the
+                // actor's own prediction and returned, losing that state, so Confirm retires it
+                // and still runs the authoritative apply.
+                PredictionApi.Confirm(message.PredictionId, apply);
             }
 
             return true;
@@ -458,33 +481,6 @@ namespace CardShopCoop.Modules.Staff
             }
         }
 
-        private static bool RouteInteraction(Func<StaffClientBehaviour, bool> interaction,
-            Func<StaffClientBehaviour, bool> allowOriginal = null)
-        {
-            var active = _active;
-            // While a prediction is applying (or undoing) we are already running the game's own
-            // method on purpose, so every prefix must let it through. Without this check the UI
-            // patches below re-enter their own interceptor from inside the prediction apply, which
-            // sends an unbounded stream of intents and disconnects the client.
-            if (active == null || active._shutdown || _applyingRemote
-                || active._applyingPrediction != 0)
-            {
-                return true;
-            }
-
-            if (allowOriginal != null && allowOriginal(active))
-            {
-                return true;
-            }
-
-            if (!active._joined)
-            {
-                return false;
-            }
-
-            return interaction(active);
-        }
-
         private static void EnsureHiredSlot(int index)
         {
             while (CPlayerData.m_IsWorkerHired.Count <= index)
@@ -563,43 +559,97 @@ namespace CardShopCoop.Modules.Staff
             }
         }
 
-        private bool PredictWorker(string scope, StaffModuleIntentMessage message, Worker worker,
-            StaffModuleEntry before, Action apply, Action undo = null)
+        /// <summary>Registers a post-hoc prediction for a game change this client just observed from
+        /// a hook postfix. The game already applied the mutation locally, so the prediction only
+        /// records how to replay and undo it and never re-runs it.</summary>
+        private void RegisterPostHoc(string key, StaffModuleIntentMessage message, Action apply,
+            Action undo)
         {
-            PredictionApi.Predict(scope,
+            PredictionApi.Predict(key,
                 id =>
                 {
                     message.PredictionId = id;
                     Send(message);
                 },
                 apply,
-                undo ?? (() => Restore(before, worker)));
-            return false;
+                undo);
         }
 
-        private bool InterceptHire(HireWorkerPanelUI panel)
+        /// <summary>Re-applies the wallet debit of a replayed staff action through the game's own
+        /// coin event. Queued during reconciliation, so the Hud economy observer does not forward it
+        /// as a second contribution.</summary>
+        private static void Charge(double amount)
         {
-            if (panel == null || StaffModuleInterop.PanelIsHired == null
-                || StaffModuleInterop.PanelIndex == null || StaffModuleInterop.PanelLevelRequired == null
-                || StaffModuleInterop.PanelHireFee == null)
+            if (amount > 0.0001d)
             {
-                return false;
+                CEventManager.QueueEvent(new CEventPlayer_ReduceCoin((float)amount));
+            }
+        }
+
+        /// <summary>Reverses the wallet debit of a rejected staff action through the game's own coin
+        /// event (an instant refund). Also queued during reconciliation.</summary>
+        private static void Refund(double amount)
+        {
+            if (amount > 0.0001d)
+            {
+                CEventManager.QueueEvent(new CEventPlayer_AddCoin((float)amount, true));
+            }
+        }
+
+        /// <summary>True when a client hook may register a prediction for the game change it is
+        /// about to observe: joined and in-game, not replaying/reconciling a prediction, not
+        /// applying remote state, and not inside a converted staff action. The game method always
+        /// runs; only the prediction is skipped.</summary>
+        private bool CanObserve()
+            => !_shutdown && _joined && _context != null && _context.InGame()
+                && !_applyingRemote && _applyingPrediction == 0 && _insideStaffAction == 0
+                && !PredictionApi.IsReconciling;
+
+        /// <summary>Capture-only prefix for a local hire: snapshot the manager slot before vanilla
+        /// OnPressHireButton spends the wallet and activates the worker. The postfix registers one
+        /// post-hoc Hire prediction only when the game really hired.</summary>
+        private StaffAction BeginHireAction(HireWorkerPanelUI panel)
+        {
+            if (!CanObserve() || panel == null || StaffModuleInterop.PanelIsHired == null
+                || StaffModuleInterop.PanelIndex == null)
+            {
+                return null;
             }
 
             if ((bool)StaffModuleInterop.PanelIsHired.GetValue(panel))
             {
-                return false;
+                return null;
             }
 
             var index = (int)StaffModuleInterop.PanelIndex.GetValue(panel);
-            var levelRequired = (int)StaffModuleInterop.PanelLevelRequired.GetValue(panel);
-            var fee = (float)StaffModuleInterop.PanelHireFee.GetValue(panel);
-            if (CPlayerData.m_ShopLevel + 1 < levelRequired || CPlayerData.m_CoinAmountDouble < fee)
+            var manager = StaffModuleInterop.FindWorkerManager();
+            var spend = manager != null && manager.m_WorkerDataList != null
+                && index >= 0 && index < manager.m_WorkerDataList.Count
+                && manager.m_WorkerDataList[index] != null
+                ? manager.m_WorkerDataList[index].hiringCost : 0f;
+            return new StaffAction
             {
-                return false;
+                Index = index,
+                Before = CaptureManagerEntry(index),
+                Spend = spend,
+                Message = new StaffModuleIntentMessage
+                {
+                    Kind = StaffIntentKind.Hire,
+                    Index = index,
+                },
+            };
+        }
+
+        private void EndHireAction(HireWorkerPanelUI panel, StaffAction state)
+        {
+            if (state == null || !CPlayerData.GetIsWorkerHired(state.Index))
+            {
+                return;
             }
 
-            var before = CaptureManagerEntry(index);
+            var index = state.Index;
+            var before = state.Before;
+            var spend = state.Spend;
             var predicted = before;
             predicted.Hired = true;
             predicted.HasData = true;
@@ -607,109 +657,197 @@ namespace CardShopCoop.Modules.Staff
             predicted.SecondaryTask = (byte)EWorkerTask.Rest;
             predicted.WorkerTask = (byte)EWorkerTask.Rest;
             predicted.CurrentState = (byte)EWorkerState.Idle;
-            var worker = StaffModuleInterop.TryGetWorkerFromPuppet(index, out var puppet) ? puppet : null;
-            PredictionApi.Predict(PredictionScope + ":" + index,
-                id => Send(new StaffModuleIntentMessage
+            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+                () =>
                 {
-                    PredictionId = id,
-                    Kind = StaffIntentKind.Hire,
-                    Index = index,
-                }),
-                () => ApplyEntry(index, predicted),
-                () => ApplyEntry(index, before));
-            SoundManager.GenericConfirm();
+                    // Replay re-hires through the module path, which does not spend, so mirror the
+                    // wallet debit the host owns for this hire.
+                    ApplyEntry(index, predicted);
+                    Charge(spend);
+                },
+                () =>
+                {
+                    // The vanilla OnPressHireButton already debited the guest's mirror (the Hud
+                    // observer was suppressed), so a rejection must refund it.
+                    ApplyEntry(index, before);
+                    Refund(spend);
+                });
             _context.SetStatusLine?.Invoke("hired - starting work at the host's shop", 4f);
-            return false;
         }
 
-        private bool InterceptBonus(WorkerInteractUIScreen screen)
+        /// <summary>Capture-only prefix for a salary bonus: snapshot the worker before vanilla
+        /// OnPressGiveBonus spends the wallet and boosts the worker. The postfix registers one
+        /// post-hoc Bonus prediction only when the bonus count actually rose.</summary>
+        private StaffAction BeginBonusAction(WorkerInteractUIScreen screen)
         {
+            if (!CanObserve() || screen == null)
+            {
+                return null;
+            }
+
             var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.InteractWorker, screen);
             if (worker == null)
             {
-                return false;
+                return null;
             }
 
-            var before = CaptureBefore(worker);
-            return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex,
-                new StaffModuleIntentMessage
+            return new StaffAction
+            {
+                Worker = worker,
+                Index = worker.m_WorkerIndex,
+                Before = CaptureBefore(worker),
+                // Vanilla OnPressGiveBonus debits the worker's per-day salary cost, which is also
+                // the fee the host owns for this intent.
+                Spend = worker.GetWorkerData()?.costPerDay ?? 0f,
+                Message = new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.Bonus,
                     Index = worker.m_WorkerIndex,
                 },
-                worker,
-                before,
-                () =>
+            };
+        }
+
+        private void EndBonusAction(WorkerInteractUIScreen screen, StaffAction state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            var worker = state.Worker;
+            var index = worker.m_WorkerIndex;
+            var spend = state.Spend;
+            // An unaffordable or maxed bonus changes nothing; vanilla only shows its own popup.
+            if (worker.GetBonusBoostedCount() <= state.Before.BonusCount)
+            {
+                return;
+            }
+
+            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+                () => WithPrediction(() =>
                 {
+                    // GiveSalaryBonus does not spend; mirror the wallet debit the host owns.
                     worker.GiveSalaryBonus();
                     RefreshWorker(worker);
-                    RefreshInteractScreen(screen, worker.m_WorkerIndex);
+                    RefreshInteractScreen(screen, index);
+                    Charge(spend);
+                }),
+                () =>
+                {
+                    // The vanilla OnPressGiveBonus already debited the guest's mirror (the Hud
+                    // observer was suppressed), so a rejection must refund it.
+                    Restore(state.Before, worker);
+                    Refund(spend);
                 });
         }
 
-        private bool InterceptFire(WorkerInteractUIScreen screen)
+        /// <summary>Capture-only prefix for a local fire: snapshot the worker before vanilla
+        /// OnPressFire (which fires the worker, ends the interaction and closes the screen). The
+        /// postfix registers exactly one post-hoc Fire prediction for the change the game made.</summary>
+        private StaffAction BeginFireAction(WorkerInteractUIScreen screen)
         {
+            if (!CanObserve() || screen == null)
+            {
+                return null;
+            }
+
             var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.InteractWorker, screen);
             if (worker == null)
             {
-                return false;
+                return null;
             }
 
-            var index = worker.m_WorkerIndex;
-            var before = CaptureBefore(worker);
-            return PredictWorker(PredictionScope + ":" + index,
-                new StaffModuleIntentMessage
+            _insideStaffAction++;
+            return new StaffAction
+            {
+                Worker = worker,
+                Before = CaptureBefore(worker),
+                Message = new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.Fire,
-                    Index = index,
+                    Index = worker.m_WorkerIndex,
                 },
-                worker,
-                before,
-                () =>
+            };
+        }
+
+        private void EndFireAction(WorkerInteractUIScreen screen, StaffAction state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            _insideStaffAction--;
+            var worker = state.Worker;
+            var index = worker.m_WorkerIndex;
+            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+                () => WithPrediction(() =>
                 {
                     // The host ends the interaction as part of firing (HostFire ->
-                    // HostEndInteraction), so the client ends it locally too but must not emit a
-                    // second EndInteraction intent: OnPressStopInteract is run through
-                    // WithPrediction so WorkerStopPatch lets the game method run directly instead
-                    // of predicting a competing interaction the host would reject.
+                    // HostEndInteraction), so the game path replays the fire, the interaction end
+                    // and the close together. OnPressStopInteract runs inside WithPrediction so
+                    // WorkerStopPatch lets the game method run instead of predicting a competing
+                    // interaction the host would reject.
                     worker.FireWorker();
-                    ReleaseLocalInteraction(index);
-                    WithPrediction(worker.OnPressStopInteract);
+                    worker.OnPressStopInteract();
                     screen.CloseScreen();
-                },
+                }),
                 () =>
                 {
-                    Restore(before, worker);
+                    Restore(state.Before, worker);
                     _workerLease.Add(index);
                     _workerBusy[index] = true;
                     WithRemote(worker.OnMousePress);
                 });
+            ReleaseLocalInteraction(index);
         }
 
-        private bool InterceptTask(WorkerInteractUIScreen screen, bool isPrimary)
+        /// <summary>Capture-only prefix for a task choice: snapshot the worker before vanilla
+        /// SetTaskAsPrimaryOrSecondary sets the task, ends the interaction and closes the screen.
+        /// The four tasks that only open a sub-screen mutate nothing yet, so they are not observed.</summary>
+        private StaffAction BeginTaskAction(WorkerInteractUIScreen screen, bool isPrimary)
         {
+            if (!CanObserve() || screen == null)
+            {
+                return null;
+            }
+
             var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.InteractWorker, screen);
             var task = StaffModuleInterop.TaskToSet?.GetValue(screen);
-            if (worker == null || !(task is EWorkerTask workerTask))
+            if (worker == null || task is not EWorkerTask workerTask)
             {
-                return true;
+                return null;
             }
 
             if (workerTask == EWorkerTask.RestockShelf || workerTask == EWorkerTask.SetPrice
                 || workerTask == EWorkerTask.RestockCardDisplay
                 || workerTask == EWorkerTask.RefillCardOpener)
             {
-                return true;
+                return null;
             }
 
-            var before = CaptureBefore(worker);
-            var message = BuildTaskIntent(worker, isPrimary, workerTask);
-            return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex, message, worker, before,
-                () =>
-                {
-                    WithPrediction(() => screen.SetTaskAsPrimaryOrSecondary(isPrimary));
-                    ReleaseLocalInteraction(worker.m_WorkerIndex);
-                });
+            _insideStaffAction++;
+            return new StaffAction
+            {
+                Worker = worker,
+                Before = CaptureBefore(worker),
+                Message = BuildTaskIntent(worker, isPrimary, workerTask),
+            };
+        }
+
+        private void EndTaskAction(WorkerInteractUIScreen screen, bool isPrimary, StaffAction state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            _insideStaffAction--;
+            var worker = state.Worker;
+            RegisterPostHoc(PredictionScope + ":" + worker.m_WorkerIndex, state.Message,
+                () => WithPrediction(() => screen.SetTaskAsPrimaryOrSecondary(isPrimary)),
+                () => Restore(state.Before, worker));
+            ReleaseLocalInteraction(worker.m_WorkerIndex);
         }
 
         private StaffModuleIntentMessage BuildTaskIntent(Worker worker, bool isPrimary, EWorkerTask task)
@@ -725,18 +863,12 @@ namespace CardShopCoop.Modules.Staff
             };
         }
 
-        private bool InterceptOptions(WorkerOptionUIScreen screen, bool noLabel)
+        private StaffModuleIntentMessage BuildOptionsIntent(WorkerOptionUIScreen screen, Worker worker,
+            bool noLabel)
         {
-            var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.OptionWorker, screen);
-            if (worker == null)
-            {
-                return true;
-            }
-
-            var before = CaptureBefore(worker);
             var taskIndex = (int)StaffModuleInterop.OptionTaskIndex.GetValue(screen);
             var data = worker.GetWorkerSaveData();
-            var message = new StaffModuleIntentMessage
+            return new StaffModuleIntentMessage
             {
                 Kind = StaffIntentKind.Options,
                 Index = worker.m_WorkerIndex,
@@ -754,30 +886,58 @@ namespace CardShopCoop.Modules.Staff
                 PriceMult = data.setPriceMultiplier,
                 CardPriceMult = data.setCardPriceMultiplier,
             };
-            return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex, message, worker, before,
-                () =>
-                {
-                    WithPrediction(() => screen.OnPressRestockShelfWithNoLabel(noLabel));
-                    ReleaseLocalInteraction(worker.m_WorkerIndex);
-                });
         }
 
-        private bool InterceptPriceOptions(WorkerOptionSetPriceUIScreen screen)
+        /// <summary>Capture-only prefix for a restock-option choice: snapshot the worker before
+        /// vanilla OnPressRestockShelfWithNoLabel sets the flag/task, ends the interaction and
+        /// closes the screen. The postfix registers one post-hoc Options prediction.</summary>
+        private StaffAction BeginOptionAction(WorkerOptionUIScreen screen, bool noLabel)
         {
-            var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.PriceWorker, screen);
-            if (worker == null)
+            if (!CanObserve() || screen == null)
             {
-                return true;
+                return null;
             }
 
-            var before = CaptureBefore(worker);
+            var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.OptionWorker, screen);
+            if (worker == null)
+            {
+                return null;
+            }
+
+            _insideStaffAction++;
+            return new StaffAction
+            {
+                Worker = worker,
+                Before = CaptureBefore(worker),
+                Message = BuildOptionsIntent(screen, worker, noLabel),
+            };
+        }
+
+        private void EndOptionAction(WorkerOptionUIScreen screen, bool noLabel, StaffAction state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            _insideStaffAction--;
+            var worker = state.Worker;
+            RegisterPostHoc(PredictionScope + ":" + worker.m_WorkerIndex, state.Message,
+                () => WithPrediction(() => screen.OnPressRestockShelfWithNoLabel(noLabel)),
+                () => Restore(state.Before, worker));
+            ReleaseLocalInteraction(worker.m_WorkerIndex);
+        }
+
+        private StaffModuleIntentMessage BuildPriceIntent(WorkerOptionSetPriceUIScreen screen,
+            Worker worker)
+        {
             var task = (EWorkerTask)StaffModuleInterop.PriceTask.GetValue(screen);
             var roundUp = (bool)StaffModuleInterop.PriceRoundUp.GetValue(screen);
             var canSet = (bool)StaffModuleInterop.PriceCanSetCard.GetValue(screen);
             var multiplier = (float)StaffModuleInterop.PriceMultiplier.GetValue(screen);
             var data = worker.GetWorkerSaveData();
             var isPrice = task == EWorkerTask.SetPrice;
-            var message = new StaffModuleIntentMessage
+            return new StaffModuleIntentMessage
             {
                 Kind = StaffIntentKind.Options,
                 Index = worker.m_WorkerIndex,
@@ -794,23 +954,51 @@ namespace CardShopCoop.Modules.Staff
                 PriceMult = isPrice ? multiplier : data.setPriceMultiplier,
                 CardPriceMult = isPrice ? data.setCardPriceMultiplier : multiplier,
             };
-            return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex, message, worker, before,
-                () =>
-                {
-                    WithPrediction(screen.OnPressConfirm);
-                    ReleaseLocalInteraction(worker.m_WorkerIndex);
-                });
         }
 
-        private bool InterceptPackOptions(WorkerSetPackOpenerTypeOptionScreen screen)
+        /// <summary>Capture-only prefix for a price-option confirm: snapshot the worker before
+        /// vanilla OnPressConfirm updates the price option/task, ends the interaction and closes
+        /// the screen. The postfix registers one post-hoc Options prediction.</summary>
+        private StaffAction BeginPriceAction(WorkerOptionSetPriceUIScreen screen)
         {
-            var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.PackWorker, screen);
-            if (worker == null)
+            if (!CanObserve() || screen == null)
             {
-                return true;
+                return null;
             }
 
-            var before = CaptureBefore(worker);
+            var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.PriceWorker, screen);
+            if (worker == null)
+            {
+                return null;
+            }
+
+            _insideStaffAction++;
+            return new StaffAction
+            {
+                Worker = worker,
+                Before = CaptureBefore(worker),
+                Message = BuildPriceIntent(screen, worker),
+            };
+        }
+
+        private void EndPriceAction(WorkerOptionSetPriceUIScreen screen, StaffAction state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            _insideStaffAction--;
+            var worker = state.Worker;
+            RegisterPostHoc(PredictionScope + ":" + worker.m_WorkerIndex, state.Message,
+                () => WithPrediction(screen.OnPressConfirm),
+                () => Restore(state.Before, worker));
+            ReleaseLocalInteraction(worker.m_WorkerIndex);
+        }
+
+        private StaffModuleIntentMessage BuildPackIntent(WorkerSetPackOpenerTypeOptionScreen screen,
+            Worker worker)
+        {
             var enabled = (List<bool>)StaffModuleInterop.PackEnabled.GetValue(screen);
             var current = worker.GetCardPackItemTypeEnabledList();
             var changes = new List<StaffPackChange>();
@@ -823,7 +1011,7 @@ namespace CardShopCoop.Modules.Staff
             }
 
             var data = worker.GetWorkerSaveData();
-            var message = new StaffModuleIntentMessage
+            return new StaffModuleIntentMessage
             {
                 Kind = StaffIntentKind.Pack,
                 Index = worker.m_WorkerIndex,
@@ -835,95 +1023,156 @@ namespace CardShopCoop.Modules.Staff
                     ? EWorkerTask.RefillCardOpener : data.workerTask),
                 PackChanges = changes,
             };
-            return PredictWorker(PredictionScope + ":" + worker.m_WorkerIndex, message, worker, before,
-                () =>
-                {
-                    WithPrediction(screen.OnPressConfirm);
-                    ReleaseLocalInteraction(worker.m_WorkerIndex);
-                });
         }
 
-        private bool HandleWorkerMousePress(Worker worker)
+        /// <summary>Capture-only prefix for a pack-option confirm: snapshot the worker before
+        /// vanilla OnPressConfirm applies the pack-type changes and task, ends the interaction and
+        /// closes the screen. The postfix registers one post-hoc Pack prediction.</summary>
+        private StaffAction BeginPackAction(WorkerSetPackOpenerTypeOptionScreen screen)
         {
-            if (_allowWorkerOpen)
+            if (!CanObserve() || screen == null)
             {
-                return true;
+                return null;
+            }
+
+            var worker = StaffModuleInterop.WorkerFrom(StaffModuleInterop.PackWorker, screen);
+            if (worker == null)
+            {
+                return null;
+            }
+
+            _insideStaffAction++;
+            return new StaffAction
+            {
+                Worker = worker,
+                Before = CaptureBefore(worker),
+                Message = BuildPackIntent(screen, worker),
+            };
+        }
+
+        private void EndPackAction(WorkerSetPackOpenerTypeOptionScreen screen, StaffAction state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            _insideStaffAction--;
+            var worker = state.Worker;
+            RegisterPostHoc(PredictionScope + ":" + worker.m_WorkerIndex, state.Message,
+                () => WithPrediction(screen.OnPressConfirm),
+                () => Restore(state.Before, worker));
+            ReleaseLocalInteraction(worker.m_WorkerIndex);
+        }
+
+        /// <summary>Capture-only prefix for a local worker click: vanilla OnMousePress owns the
+        /// interaction open, and the postfix registers one post-hoc BeginInteraction prediction for
+        /// the host's lease. A click that would not start a new interaction (already leased, no
+        /// position) is not observed; vanilla still runs.</summary>
+        private StaffAction BeginWorkerMouse(Worker worker)
+        {
+            if (!CanObserve() || _allowWorkerOpen || worker == null)
+            {
+                return null;
             }
 
             var index = worker.m_WorkerIndex;
-            if (_workerLease.Contains(index)
-                || _workerBusy.TryGetValue(index, out var occupied) && occupied)
+            if (_workerLease.Contains(index))
             {
-                CoopPlugin.Log.LogInfo("[staff] open blocked index=" + index
-                    + " lease=" + _workerLease.Contains(index)
-                    + " busy=" + (_workerBusy.TryGetValue(index, out var busy) && busy));
-                return false;
+                return null;
             }
 
             if (!CoopCore.TryGetLocalPlayerPosition(out var position))
             {
-                return false;
+                return null;
             }
 
-            PredictionApi.Predict(PredictionScope + ":" + index,
-                id => Send(new StaffModuleIntentMessage
+            return new StaffAction
+            {
+                Worker = worker,
+                Index = index,
+                Message = new StaffModuleIntentMessage
                 {
-                    PredictionId = id,
                     Kind = StaffIntentKind.BeginInteraction,
                     Index = index,
                     Position = position,
-                }),
-                () =>
+                },
+            };
+        }
+
+        private void EndWorkerMouse(StaffAction state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            var worker = state.Worker;
+            var index = state.Index;
+            _workerBusy[index] = true;
+            _workerLease.Add(index);
+            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+                () => WithPrediction(() =>
                 {
                     _workerBusy[index] = true;
                     _workerLease.Add(index);
-                    _allowWorkerOpen = true;
-                    try
-                    {
-                        worker.OnMousePress();
-                    }
-                    finally
-                    {
-                        _allowWorkerOpen = false;
-                    }
-                },
+                    worker.OnMousePress();
+                }),
                 () =>
                 {
                     _workerLease.Remove(index);
                     _workerBusy[index] = false;
                     WithRemote(worker.OnPressStopInteract);
                 });
-            return false;
         }
 
-        private bool HandleWorkerStopInteract(Worker worker)
+        /// <summary>Capture-only prefix for a local interaction end: vanilla OnPressStopInteract
+        /// exits the interaction, and the postfix registers one post-hoc EndInteraction prediction
+        /// once the client actually holds the lease. The internal stop calls a task/option/pack/fire
+        /// screen makes are excluded by <see cref="CanObserve"/>'s action guard.</summary>
+        private StaffAction BeginWorkerStop(Worker worker)
         {
-            var index = worker.m_WorkerIndex;
-            if (!_workerLease.Contains(index))
+            if (!CanObserve() || worker == null || !_workerLease.Contains(worker.m_WorkerIndex))
             {
-                return true;
+                return null;
             }
 
-            PredictionApi.Predict(PredictionScope + ":" + index,
-                id => Send(new StaffModuleIntentMessage
+            return new StaffAction
+            {
+                Worker = worker,
+                Index = worker.m_WorkerIndex,
+                Message = new StaffModuleIntentMessage
                 {
-                    PredictionId = id,
                     Kind = StaffIntentKind.EndInteraction,
-                    Index = index,
-                }),
-                () =>
+                    Index = worker.m_WorkerIndex,
+                },
+            };
+        }
+
+        private void EndWorkerStop(StaffAction state)
+        {
+            if (state == null)
+            {
+                return;
+            }
+
+            var worker = state.Worker;
+            var index = state.Index;
+            _workerLease.Remove(index);
+            _workerBusy[index] = false;
+            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+                () => WithPrediction(() =>
                 {
                     _workerLease.Remove(index);
                     _workerBusy[index] = false;
-                    WithPrediction(worker.OnPressStopInteract);
-                },
+                    worker.OnPressStopInteract();
+                }),
                 () =>
                 {
                     _workerLease.Add(index);
                     _workerBusy[index] = true;
                     WithRemote(worker.OnMousePress);
                 });
-            return false;
         }
 
         private void Send(StaffModuleIntentMessage message)
@@ -976,6 +1225,7 @@ namespace CardShopCoop.Modules.Staff
             _hireScreenCache.Clear();
             _applyingRemote = false;
             _allowWorkerOpen = false;
+            _insideStaffAction = 0;
         }
 
         internal void Shutdown()
@@ -1007,7 +1257,7 @@ namespace CardShopCoop.Modules.Staff
         private void ClearDeferredDeltas()
         {
             foreach (var delta in _deferredDeltas.Values)
-                PredictionApi.ConfirmSuperseded(delta.PredictionId);
+                PredictionApi.Ack(delta.PredictionId);
             _deferredDeltas.Clear();
         }
 
@@ -1015,75 +1265,149 @@ namespace CardShopCoop.Modules.Staff
         private static class HirePatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(HireWorkerPanelUI __instance)
-                => RouteInteraction(active => active.InterceptHire(__instance));
+            private static void Prefix(HireWorkerPanelUI __instance, out StaffAction __state)
+            {
+                __state = _active?.BeginHireAction(__instance);
+                if (__state != null)
+                {
+                    // OnPressHireButton spends the wallet through vanilla. The host owns that debit
+                    // for the guest's Hire intent, so the Hud observer must not also forward it.
+                    EconomyActionScope.Enter();
+                }
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(HireWorkerPanelUI __instance, StaffAction __state)
+                => _active?.EndHireAction(__instance, __state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(StaffAction __state)
+            {
+                if (__state != null)
+                {
+                    EconomyActionScope.Exit();
+                }
+            }
         }
 
         [HarmonyPatch(typeof(WorkerInteractUIScreen), nameof(WorkerInteractUIScreen.SetTaskAsPrimaryOrSecondary))]
         private static class TaskPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(WorkerInteractUIScreen __instance, bool isPrimary)
-                => RouteInteraction(active => active.InterceptTask(__instance, isPrimary));
+            private static void Prefix(WorkerInteractUIScreen __instance, bool isPrimary,
+                out StaffAction __state)
+                => __state = _active?.BeginTaskAction(__instance, isPrimary);
+
+            [HarmonyPostfix]
+            private static void Postfix(WorkerInteractUIScreen __instance, bool isPrimary,
+                StaffAction __state)
+                => _active?.EndTaskAction(__instance, isPrimary, __state);
         }
 
         [HarmonyPatch(typeof(WorkerOptionUIScreen), nameof(WorkerOptionUIScreen.OnPressRestockShelfWithNoLabel))]
         private static class OptionPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(WorkerOptionUIScreen __instance, bool isFillShelfWithoutLabel)
-                => RouteInteraction(active => active.InterceptOptions(__instance,
-                    isFillShelfWithoutLabel));
+            private static void Prefix(WorkerOptionUIScreen __instance, bool isFillShelfWithoutLabel,
+                out StaffAction __state)
+                => __state = _active?.BeginOptionAction(__instance, isFillShelfWithoutLabel);
+
+            [HarmonyPostfix]
+            private static void Postfix(WorkerOptionUIScreen __instance, bool isFillShelfWithoutLabel,
+                StaffAction __state)
+                => _active?.EndOptionAction(__instance, isFillShelfWithoutLabel, __state);
         }
 
         [HarmonyPatch(typeof(WorkerOptionSetPriceUIScreen), nameof(WorkerOptionSetPriceUIScreen.OnPressConfirm))]
         private static class PriceOptionPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(WorkerOptionSetPriceUIScreen __instance)
-                => RouteInteraction(active => active.InterceptPriceOptions(__instance));
+            private static void Prefix(WorkerOptionSetPriceUIScreen __instance,
+                out StaffAction __state)
+                => __state = _active?.BeginPriceAction(__instance);
+
+            [HarmonyPostfix]
+            private static void Postfix(WorkerOptionSetPriceUIScreen __instance, StaffAction __state)
+                => _active?.EndPriceAction(__instance, __state);
         }
 
         [HarmonyPatch(typeof(WorkerSetPackOpenerTypeOptionScreen), nameof(WorkerSetPackOpenerTypeOptionScreen.OnPressConfirm))]
         private static class PackOptionPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(WorkerSetPackOpenerTypeOptionScreen __instance)
-                => RouteInteraction(active => active.InterceptPackOptions(__instance));
+            private static void Prefix(WorkerSetPackOpenerTypeOptionScreen __instance,
+                out StaffAction __state)
+                => __state = _active?.BeginPackAction(__instance);
+
+            [HarmonyPostfix]
+            private static void Postfix(WorkerSetPackOpenerTypeOptionScreen __instance,
+                StaffAction __state)
+                => _active?.EndPackAction(__instance, __state);
         }
 
         [HarmonyPatch(typeof(WorkerInteractUIScreen), nameof(WorkerInteractUIScreen.OnPressGiveBonus))]
         private static class BonusPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(WorkerInteractUIScreen __instance)
-                => RouteInteraction(active => active.InterceptBonus(__instance));
+            private static void Prefix(WorkerInteractUIScreen __instance, out StaffAction __state)
+            {
+                __state = _active?.BeginBonusAction(__instance);
+                if (__state != null)
+                {
+                    // OnPressGiveBonus spends the wallet through vanilla. The host owns that debit
+                    // for the guest's Bonus intent, so the Hud observer must not also forward it.
+                    EconomyActionScope.Enter();
+                }
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(WorkerInteractUIScreen __instance, StaffAction __state)
+                => _active?.EndBonusAction(__instance, __state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(StaffAction __state)
+            {
+                if (__state != null)
+                {
+                    EconomyActionScope.Exit();
+                }
+            }
         }
 
         [HarmonyPatch(typeof(WorkerInteractUIScreen), nameof(WorkerInteractUIScreen.OnPressFire))]
         private static class FirePatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(WorkerInteractUIScreen __instance)
-                => RouteInteraction(active => active.InterceptFire(__instance));
+            private static void Prefix(WorkerInteractUIScreen __instance, out StaffAction __state)
+                => __state = _active?.BeginFireAction(__instance);
+
+            [HarmonyPostfix]
+            private static void Postfix(WorkerInteractUIScreen __instance, StaffAction __state)
+                => _active?.EndFireAction(__instance, __state);
         }
 
         [HarmonyPatch(typeof(Worker), nameof(Worker.OnMousePress))]
         private static class WorkerMousePatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(Worker __instance)
-                => RouteInteraction(active => active.HandleWorkerMousePress(__instance),
-                    _ => __instance == null);
+            private static void Prefix(Worker __instance, out StaffAction __state)
+                => __state = _active?.BeginWorkerMouse(__instance);
+
+            [HarmonyPostfix]
+            private static void Postfix(StaffAction __state)
+                => _active?.EndWorkerMouse(__state);
         }
 
         [HarmonyPatch(typeof(Worker), nameof(Worker.OnPressStopInteract))]
         private static class WorkerStopPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(Worker __instance)
-                => RouteInteraction(active => active.HandleWorkerStopInteract(__instance),
-                    _ => __instance == null);
+            private static void Prefix(Worker __instance, out StaffAction __state)
+                => __state = _active?.BeginWorkerStop(__instance);
+
+            [HarmonyPostfix]
+            private static void Postfix(StaffAction __state)
+                => _active?.EndWorkerStop(__state);
         }
     }
 }

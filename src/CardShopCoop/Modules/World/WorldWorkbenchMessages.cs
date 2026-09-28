@@ -5,7 +5,8 @@ namespace CardShopCoop.Modules.World
 {
     /// <summary>Host -> clients: authoritative state of one workbench - the bulk boxes stored on
     /// it and, while a bundle is running, the box tier it is producing. Sent for the join
-    /// baseline and as a complete state-set after any change (never as a mutation).</summary>
+    /// baseline and as a complete state-set after any change (never as a mutation). A non-empty
+    /// <see cref="WorldMessage.PredictionId"/> is the accepted client intent this state confirms.</summary>
     [NetworkMessage]
     public class WorkbenchStateMessage : WorldMessage
     {
@@ -15,28 +16,26 @@ namespace CardShopCoop.Modules.World
         public bool Bundling;
     }
 
-    /// <summary>Client -> host: the acting player changed one workbench (a hand/box transfer or
-    /// started a bundle). Carries the resulting complete state - the same "requesting player is
-    /// authoritative for the object they acted on" shape as the item-box state request.</summary>
+    /// <summary>Client -> host: one workbench storage edit by the acting player. The host applies
+    /// this delta to its own authoritative list and broadcasts the resulting state, so two players
+    /// editing one bench at once can no longer overwrite (or duplicate) each other's item. The
+    /// inherited <see cref="WorldMessage.PredictionId"/> confirms the edit to the sender.</summary>
     [NetworkMessage]
-    public sealed class WorkbenchStateRequestMessage : WorkbenchStateMessage
+    public sealed class WorkbenchOpMessage : WorldMessage
     {
+        public byte Index;
+        public List<EItemType> AddedTypes = new();
+        public List<EItemType> RemovedTypes = new();
+        public EItemType SpawnItemType;
+        public bool Bundling;
     }
 
-    /// <summary>Client -> host: the acting player finished the bundling animation. The host mints
-    /// the bulk box authoritatively and grants it back into their hand.</summary>
+    /// <summary>Client -> host: the acting player finished the bundling animation. The acting
+    /// client already minted the bulk box locally in vanilla <c>OnTaskCompleted</c>; the host only
+    /// clears its mirrored bundling state and republishes the bench.</summary>
     [NetworkMessage]
     public sealed class WorkbenchBundleMessage : WorldMessage
     {
         public byte Index;
-    }
-
-    /// <summary>Host -> actor: spawn this bulk box in your hand. The host owns the box and can
-    /// re-send the grant if the actor rejoins.</summary>
-    [NetworkMessage]
-    public sealed class WorkbenchGrantMessage : WorldMessage
-    {
-        public EItemType ItemType;
-        public long GrantId;
     }
 }

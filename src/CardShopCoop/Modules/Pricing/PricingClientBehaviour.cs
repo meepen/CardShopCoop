@@ -21,8 +21,15 @@ namespace CardShopCoop.Modules.Pricing
         private readonly Dictionary<string, PricingCardDeltaMessage> _pendingCardDeltas = new();
         private bool _contentReady;
         private bool _applying;
-        private bool _suppressCapture;
         private bool _shutdown;
+
+        // The game's price screen records the exact display compartment whose price tag was
+        // clicked. Carry that slot's stable ShelfKey+compartment in the price intent so the host
+        // resolves the addressed slot directly instead of searching every shelf for a content match.
+        private static readonly System.Reflection.FieldInfo FiPriceScreenIsCard =
+            AccessTools.Field(typeof(SetItemPriceScreen), "m_IsSetCardPrice");
+        private static readonly System.Reflection.FieldInfo FiPriceScreenCardCompartment =
+            AccessTools.Field(typeof(SetItemPriceScreen), "m_CurrentCardCompartment");
 
         private void OnEnable()
         {
@@ -160,7 +167,7 @@ namespace CardShopCoop.Modules.Pricing
 
         private bool ApplyItemDelta(PricingItemDeltaMessage message)
         {
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            PredictionApi.AckOrApply(message.PredictionId, () =>
             {
                 _applying = true;
                 try
@@ -177,7 +184,7 @@ namespace CardShopCoop.Modules.Pricing
 
         private bool ApplyCardDelta(PricingCardDeltaMessage message)
         {
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            PredictionApi.AckOrApply(message.PredictionId, () =>
             {
                 if (message.Removed)
                     return;
@@ -199,7 +206,7 @@ namespace CardShopCoop.Modules.Pricing
         private void DeferItemDelta(PricingItemDeltaMessage message)
         {
             if (_pendingItemDeltas.TryGetValue(message.ItemType, out var previous))
-                PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                PredictionApi.Ack(previous.PredictionId);
             _pendingItemDeltas[message.ItemType] = message;
         }
 
@@ -207,128 +214,89 @@ namespace CardShopCoop.Modules.Pricing
         {
             var key = PricingInterop.CardKey(message.Card, message.EncodedGrade) ?? "null";
             if (_pendingCardDeltas.TryGetValue(key, out var previous))
-                PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                PredictionApi.Ack(previous.PredictionId);
             _pendingCardDeltas[key] = message;
         }
 
-        internal static void EmitItem(EItemType type, float price)
-            => _active?.PredictItem(type, price);
-
-        internal static void Emit(CardData card, float price, int grade)
-            => _active?.PredictCard(card, price, grade);
-
-        internal static bool Submit(SetItemPriceScreen screen)
+        /// <summary>Prefix snapshot: the game is about to run <c>SetItemPrice</c>, so read the
+        /// pre-change value here. <see cref="float.NaN"/> means "do not record this setter"
+        /// (a remote/replay apply, an invalid slot, or no active client).</summary>
+        internal static float CaptureItemBefore(EItemType type)
         {
             var active = _active;
-            return active == null || active._shutdown || active.SubmitLocal(screen);
+            if (active == null || active._applying || !PricingInterop.IsItemTypeValid(type))
+                return float.NaN;
+            return PricingInterop.ReadItem(type);
         }
 
-        private bool SubmitLocal(SetItemPriceScreen screen)
+        /// <summary>The game already set the price (postfix). Register one post-hoc prediction
+        /// so the game keeps ownership of the local mutation and only a host rejection replays the
+        /// previous value through the game's own setter.</summary>
+        internal static void ObserveItemSetter(EItemType type, float price, float previous)
         {
-            if (screen == null || !PricingInterop.TryReadConfirmPrice(screen, out var price))
-                return true;
-            if (!PricingInterop.ValidPrice(price))
-            {
-                CoopPlugin.Log.LogWarning("[pricing] confirm ignored: invalid price " + price + ".");
-                screen.CloseScreen();
-                return false;
-            }
-
-            var item = screen.GetCurrentSettingPriceItemType();
-            var card = screen.GetCurrentSettingPriceCardData();
-            if (card != null)
-            {
-                if (!PricingInterop.ValidCard(card))
-                {
-                    // A card this build's pricing store cannot name (typically a modded
-                    // expansion). Defer to the game's own confirm so it is applied locally rather
-                    // than leaving the player stuck in the menu with no price set.
-                    CoopPlugin.Log.LogWarning("[pricing] confirm: card is outside the local pricing "
-                        + "store (saveIndex=" + PricingInterop.SafeSaveIndex(card) + " expansion="
-                        + (int)card.expansionType + " monster=" + (int)card.monsterType
-                        + " grade=" + card.cardGrade + "); deferring to the game's own confirm.");
-                    return true;
-                }
-
-                var grade = GradingApi.Encoded(card);
-                CoopPlugin.Log.LogInfo("[pricing] forwarding card price saveIndex="
-                    + PricingInterop.SafeSaveIndex(card) + " grade=" + grade + " price=" + price
-                    + ".");
-                PredictCard(PricingInterop.CopyCard(card, grade), price, grade);
-            }
-            else
-            {
-                if (!PricingInterop.IsItemTypeValid(item))
-                {
-                    CoopPlugin.Log.LogWarning("[pricing] confirm: item " + item
-                        + " is outside the local pricing store; deferring to the game's own confirm.");
-                    return true;
-                }
-
-                PredictItem(item, price);
-            }
-
-            screen.CloseScreen();
-            return false;
-        }
-
-        internal static bool InterceptItemSetter(EItemType type, float price,
-            out bool skipCapture)
-        {
-            skipCapture = false;
             var active = _active;
-            if (active == null || active._shutdown || !active.CanSend())
-                return true;
-            if (active._applying)
-            {
-                skipCapture = true;
-                return true;
-            }
-
-            skipCapture = true;
-            active._suppressCapture = true;
-            try
-            {
-                active.PredictItem(type, price);
-            }
-            finally
-            {
-                active._suppressCapture = false;
-            }
-            return false;
+            if (active == null || active._applying || float.IsNaN(previous)
+                || !active.CanSend() || !PricingInterop.IsItemTypeValid(type)
+                || !PricingInterop.ValidPrice(price))
+                return;
+            active.PredictItem(type, price, previous);
         }
 
-        internal static bool InterceptCardSetter(CardData card, float price,
-            out bool skipCapture)
+        /// <summary>Card counterpart of <see cref="CaptureItemBefore"/>.</summary>
+        internal static float CaptureCardBefore(CardData card)
         {
-            skipCapture = false;
             var active = _active;
-            if (active == null || active._shutdown || !active.CanSend())
-                return true;
-            if (active._applying)
-            {
-                skipCapture = true;
-                return true;
-            }
-
-            skipCapture = true;
-            active._suppressCapture = true;
-            try
-            {
-                active.PredictCard(card, price, GradingApi.Encoded(card));
-            }
-            finally
-            {
-                active._suppressCapture = false;
-            }
-            return false;
+            if (active == null || active._applying || !PricingInterop.ValidCard(card))
+                return float.NaN;
+            return PricingInterop.ReadCard(card);
         }
 
-        private void PredictItem(EItemType type, float price)
+        /// <summary>Card counterpart of <see cref="ObserveItemSetter"/>.</summary>
+        internal static void ObserveCardSetter(CardData card, float price, float previous)
+        {
+            var active = _active;
+            if (active == null || active._applying || float.IsNaN(previous) || card == null
+                || !active.CanSend() || !PricingInterop.ValidCard(card)
+                || !PricingInterop.ValidPrice(price))
+                return;
+            var compartment = CurrentCardPriceCompartment();
+            if (compartment == null
+                || !WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+            {
+                // No stable display slot means the host cannot address the priced card. Dropping
+                // the intent is correct: a content search would re-introduce the heuristic this
+                // binding replaces. The display protocol drops the same shelf for the same reason.
+                CoopPlugin.Log.LogWarning("[pricing] card price change had no display slot; "
+                    + "not forwarded.");
+                return;
+            }
+
+            var grade = GradingApi.Encoded(card);
+            GradingApi.Remember(card);
+            active.PredictCard(card, price, grade, previous, shelfKey, index);
+        }
+
+        /// <summary>The display compartment the local player is editing a CARD price for, or null
+        /// when the open price screen is an item edit (or none is open). The game stores the exact
+        /// compartment the price tag was clicked on, so this is the slot's stable identity, not a
+        /// content lookup. Client workers never run their state machine (NpcClientBehaviour skips
+        /// Worker.Update), so a client card price change always originates here.</summary>
+        private static InteractableCardCompartment CurrentCardPriceCompartment()
+        {
+            var screen = SceneRef<SetItemPriceScreen>.Get();
+            if (screen == null || FiPriceScreenIsCard == null
+                || !(bool)FiPriceScreenIsCard.GetValue(screen))
+            {
+                return null;
+            }
+
+            return FiPriceScreenCardCompartment?.GetValue(screen) as InteractableCardCompartment;
+        }
+
+        private void PredictItem(EItemType type, float price, float previous)
         {
             if (!CanSend())
                 return;
-            var previous = PricingInterop.ReadItem(type);
             PredictionApi.Predict(
                 "pricing-item:" + (int)type,
                 predictionId => _context.Send(1, new PricingItemIntentMessage
@@ -341,13 +309,13 @@ namespace CardShopCoop.Modules.Pricing
                 () => ApplyLocalItem(type, previous));
         }
 
-        private void PredictCard(CardData card, float price, int grade)
+        private void PredictCard(CardData card, float price, int grade, float previous,
+            int shelfKey, int compartment)
         {
             if (!CanSend())
                 return;
             var copy = PricingInterop.CopyCard(card, grade);
             var key = PricingInterop.CardKey(copy, grade);
-            var previous = PricingInterop.ReadCard(copy);
             PredictionApi.Predict(
                 "pricing-card:" + key,
                 predictionId => _context.Send(1, new PricingCardIntentMessage
@@ -356,6 +324,8 @@ namespace CardShopCoop.Modules.Pricing
                     Card = PricingInterop.CopyCard(copy, grade),
                     Price = price,
                     EncodedGrade = grade,
+                    ShelfKey = shelfKey,
+                    Compartment = compartment,
                 }),
                 () => ApplyLocalCard(copy, price),
                 () => ApplyLocalCard(copy, previous));
@@ -388,26 +358,6 @@ namespace CardShopCoop.Modules.Pricing
             }
         }
 
-        internal static void CaptureItemSetter(EItemType type, float requestedPrice)
-        {
-            // Guard the store read: a direct setter can fire for a modded slot the pricing model
-            // cannot name (the confirm was deferred to vanilla), and ReadItem would throw.
-            if (_active == null || _active._applying || _active._suppressCapture
-                || !PricingInterop.IsItemTypeValid(type))
-                return;
-            EmitItem(type, PricingInterop.ReadItem(type));
-        }
-
-        internal static void CaptureCardSetter(CardData card, float requestedPrice)
-        {
-            if (_active == null || _active._applying || _active._suppressCapture || card == null
-                || !PricingInterop.ValidCard(card))
-                return;
-            var grade = GradingApi.Encoded(card);
-            GradingApi.Remember(card);
-            Emit(card, PricingInterop.ReadCard(card), grade);
-        }
-
         internal static void InventoryReset()
         {
             if (_active == null)
@@ -420,9 +370,9 @@ namespace CardShopCoop.Modules.Pricing
         private void ClearPendingDeltas()
         {
             foreach (var delta in _pendingItemDeltas.Values)
-                PredictionApi.ConfirmSuperseded(delta.PredictionId);
+                PredictionApi.Ack(delta.PredictionId);
             foreach (var delta in _pendingCardDeltas.Values)
-                PredictionApi.ConfirmSuperseded(delta.PredictionId);
+                PredictionApi.Ack(delta.PredictionId);
             _pendingItemDeltas.Clear();
             _pendingCardDeltas.Clear();
         }

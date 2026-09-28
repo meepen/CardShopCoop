@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -100,7 +101,11 @@ namespace CardShopCoop.Modules.Decoration
                 _placementPreviews.Remove(message.PredictionId);
             }
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            // Confirm, not AckOrApply: the host's pose carries the canonical id and adopts the
+            // claimed preview. Retiring-only would skip ApplyDelta for the actor's own placement,
+            // so its preview would never be adopted or bound to the host id (the preview was
+            // already claimed above, and the retire handler no longer sees it).
+            PredictionApi.Confirm(message.PredictionId,
                 () => ApplyDelta(message, preview));
         }
 
@@ -155,13 +160,17 @@ namespace CardShopCoop.Modules.Decoration
             _context.Send(1, message);
         }
 
-        private static bool Predict(DecorationIntentMessage message, Action apply, Action undo,
-            InteractableObject preview = null)
+        /// <summary>Records a decoration action the game already performed (the hook observes
+        /// vanilla from a postfix) as one post-hoc prediction. apply/undo redo and reverse the same
+        /// change through the module's game path so a rejection can be reconciled; the game owns the
+        /// local mutation.</summary>
+        private static void Predict(DecorationIntentMessage message, Action apply,
+            Action undo, InteractableObject preview = null)
         {
             var client = _active;
             if (client == null || client._shutdown || !client._joined || client._context == null
                 || !client._context.InGame())
-                return true;
+                return;
             PredictionApi.Predict("decoration",
                 predictionId =>
                 {
@@ -170,7 +179,21 @@ namespace CardShopCoop.Modules.Decoration
                         client._placementPreviews[predictionId] = preview;
                     client._context.Send(1, message);
                 }, apply, undo);
-            return false;
+        }
+
+        /// <summary>Redoes the wallet half of a replay. Queued during reconciliation, so the Hud
+        /// economy observer does not forward it as a second contribution.</summary>
+        private static void Charge(float amount)
+        {
+            if (amount > 0.0001f)
+                CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(amount));
+        }
+
+        /// <summary>Reverses the wallet half of a rejected buy through the game's own coin event.</summary>
+        private static void Refund(float amount)
+        {
+            if (amount > 0.0001f)
+                CEventManager.QueueEvent(new CEventPlayer_AddCoin(amount, true));
         }
 
         private static DecorationStateMessage SnapshotMessage(DecorationSnapshot snapshot)
@@ -302,69 +325,150 @@ namespace CardShopCoop.Modules.Decoration
         [HarmonyPatch(typeof(PlaceDecoUIScreen), "OnPressSwitchShopDeco")]
         private static class EquipPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(PlaceDecoUIScreen __instance, int shopDecoIndex, bool isShopLotB)
+            private sealed class State
             {
-                if (!IsClientReady())
-                    return true;
-                var message = new DecorationIntentMessage
+                public DecorationSnapshot Before;
+                public int Category;
+                public int Index;
+                public bool LotB;
+            }
+
+            [HarmonyPrefix]
+            private static void Prefix(PlaceDecoUIScreen __instance, int shopDecoIndex,
+                bool isShopLotB, out State __state)
+            {
+                __state = null;
+                if (!IsClientReady() || _active._applyingState != 0)
+                    return;
+                __state = new State
                 {
-                    Action = DecorationActions.Equip,
+                    Before = DecorationInterop.Snapshot(),
                     Category = DecorationInterop.CategoryFor(__instance),
                     Index = shopDecoIndex,
                     LotB = isShopLotB,
                 };
-                var before = DecorationInterop.Snapshot();
-                return Predict(message, () =>
-                {
-                    DecorationInterop.ApplyDelta(new DecorationDeltaMessage
-                    {
-                        Action = message.Action,
-                        Category = message.Category,
-                        Index = message.Index,
-                        LotB = message.LotB,
-                    });
-                }, () => UndoState(before));
             }
+
+            [HarmonyPostfix]
+            private static void Postfix(State __state)
+            {
+                if (__state == null || !IsClientReady() || _active._applyingState != 0
+                    || PredictionApi.IsReconciling)
+                    return;
+                var message = new DecorationIntentMessage
+                {
+                    Action = DecorationActions.Equip,
+                    Category = __state.Category,
+                    Index = __state.Index,
+                    LotB = __state.LotB,
+                };
+                Predict(message, () => DecorationInterop.ApplyDelta(new DecorationDeltaMessage
+                {
+                    Action = message.Action,
+                    Category = message.Category,
+                    Index = message.Index,
+                    LotB = message.LotB,
+                }), () => UndoState(__state.Before));
+            }
+        }
+
+        private struct BuyCapture
+        {
+            public bool Armed;
+            public DecorationSnapshot Before;
+            public float UpgradeCostBefore;
+            public float SupplyCostBefore;
+        }
+
+        private static void CaptureBuy(out BuyCapture state)
+        {
+            state = default;
+            if (!IsClientReady())
+                return;
+            state.Armed = true;
+            state.Before = DecorationInterop.Snapshot();
+            // The wallet event is only queued by the vanilla buy (it runs later), but the report
+            // cost is decremented synchronously, so it is the reliable "did it charge" signal.
+            state.UpgradeCostBefore = CPlayerData.m_GameReportDataCollectPermanent.upgradeCost;
+            state.SupplyCostBefore = CPlayerData.m_GameReportDataCollectPermanent.supplyCost;
+            EconomyActionScope.Enter();
+        }
+
+        private static void ReleaseBuy(BuyCapture state)
+        {
+            if (state.Armed)
+                EconomyActionScope.Exit();
+        }
+
+        /// <summary>Completes an observed vanilla buy: the game already purchased and charged, so
+        /// register one post-hoc prediction whose replay re-charges and whose rejection refunds the
+        /// mirrored wallet alongside the restored unlock/inventory state.</summary>
+        private static void ObserveBuy(DecorationIntentMessage message, BuyCapture state)
+        {
+            if (!state.Armed)
+                return;
+            var client = _active;
+            if (client == null || client._shutdown || !client._joined || client._context == null
+                || !client._context.InGame())
+                return;
+
+            var spent = (state.UpgradeCostBefore
+                - CPlayerData.m_GameReportDataCollectPermanent.upgradeCost)
+                + (state.SupplyCostBefore
+                    - CPlayerData.m_GameReportDataCollectPermanent.supplyCost);
+            // The vanilla buy charges only when it succeeds; no charge means nothing happened.
+            if (spent <= 0.0001f)
+                return;
+
+            var before = state.Before;
+            Predict(message,
+                () =>
+                {
+                    PredictState(message, before);
+                    Charge(spent);
+                },
+                () =>
+                {
+                    UndoState(before);
+                    Refund(spent);
+                });
         }
 
         [HarmonyPatch(typeof(ShopBuyDecoUIScreen), "OnPressBuyShopDeco")]
         private static class BuyPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(int shopDecoIndex, float price)
-            {
-                if (!IsClientReady())
-                    return true;
-                var message = new DecorationIntentMessage
+            private static void Prefix(out BuyCapture __state) => CaptureBuy(out __state);
+
+            [HarmonyPostfix]
+            private static void Postfix(int shopDecoIndex, BuyCapture __state)
+                => ObserveBuy(new DecorationIntentMessage
                 {
                     Action = DecorationActions.BuyShopDecoration,
                     Category = DecorationInterop.CategoryFor((ShopBuyDecoUIScreen)null),
                     Index = shopDecoIndex,
-                };
-                var before = DecorationInterop.Snapshot();
-                return Predict(message, () => PredictState(message, before),
-                    () => UndoState(before));
-            }
+                }, __state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(BuyCapture __state) => ReleaseBuy(__state);
         }
 
         [HarmonyPatch(typeof(ShopBuyDecoUIScreen), "OnPressBuyShopDecoItem")]
         private static class BuyItemPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(EDecoObject itemType, float price)
-            {
-                if (!IsClientReady())
-                    return true;
-                var message = new DecorationIntentMessage
+            private static void Prefix(out BuyCapture __state) => CaptureBuy(out __state);
+
+            [HarmonyPostfix]
+            private static void Postfix(EDecoObject itemType, BuyCapture __state)
+                => ObserveBuy(new DecorationIntentMessage
                 {
                     Action = DecorationActions.BuyItemDecoration,
                     DecorationType = itemType,
-                };
-                var before = DecorationInterop.Snapshot();
-                return Predict(message, () => PredictState(message, before),
-                    () => UndoState(before));
-            }
+                }, __state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(BuyCapture __state) => ReleaseBuy(__state);
         }
 
         [HarmonyPatch(typeof(InteractableObject), "StartMoveObject")]
@@ -383,15 +487,48 @@ namespace CardShopCoop.Modules.Decoration
         [HarmonyPatch(typeof(InteractableObject), "PlaceMovedObject")]
         private static class PlacePatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(InteractableObject __instance)
+            private sealed class State
             {
+                public DecorationSnapshot Before;
+                public DecorationPose Pose;
+                public long ObjectId;
+                public InteractableObject Instance;
+                public InteractableObject Preview;
+            }
+
+            [HarmonyPrefix]
+            private static void Prefix(InteractableObject __instance, out State __state)
+            {
+                __state = null;
                 if (!IsClientReady() || _active._applyingState != 0 || __instance == null
                     || __instance.m_DecoObjectType == EDecoObject.None || !__instance.GetIsMovingObject()
                     || !ReferenceEquals(__instance, _active._pendingPlacement))
-                    return true;
+                    return;
                 var pose = DecorationInterop.ReadPose(__instance);
                 var objectId = DecorationInterop.ClientIdFor(__instance);
+                __state = new State
+                {
+                    Before = DecorationInterop.Snapshot(),
+                    Pose = pose,
+                    ObjectId = objectId,
+                    Instance = __instance,
+                    // A brand-new piece has no host id yet, so hand it to the delta as the preview
+                    // it may adopt instead of spawning a second piece.
+                    Preview = objectId > 0 ? null : __instance,
+                };
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(State __state)
+            {
+                var client = _active;
+                if (__state == null || client == null)
+                    return;
+                client._pendingPlacement = null;
+                if (!IsClientReady() || client._applyingState != 0 || PredictionApi.IsReconciling
+                    || __state.Instance == null || __state.Instance.GetIsMovingObject())
+                    return;
+                var pose = __state.Pose;
                 var message = new DecorationIntentMessage
                 {
                     Action = DecorationActions.Place,
@@ -401,58 +538,68 @@ namespace CardShopCoop.Modules.Decoration
                     Vertical = pose.Vertical,
                     WarehouseWallSnap = pose.WarehouseWallSnap,
                     WallIndex = pose.Wall,
-                    ObjectId = objectId,
+                    ObjectId = __state.ObjectId,
                 };
-                var before = DecorationInterop.Snapshot();
-                // Leave the preview mid-move: it keeps its colliders off and its layer ignored
-                // while the host decides. On confirmation the delta adopts it, so no second piece
-                // is ever spawned; on rejection the retire handler discards it.
-                var predicted = Predict(message, () =>
+                var instance = __state.Instance;
+                Predict(message, () =>
                 {
-                    DecorationInterop.ApplyPredictedPose(__instance, pose);
+                    DecorationInterop.ApplyPredictedPose(instance, pose);
                     SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
-                }, () => UndoState(before), objectId > 0 ? null : __instance);
-                if (predicted)
-                    return true;
-                SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
-                _active._pendingPlacement = null;
-                return false;
+                }, () => UndoState(__state.Before), __state.Preview);
             }
         }
 
         [HarmonyPatch(typeof(InteractableObject), "BoxUpObject")]
         private static class RemovePatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(InteractableObject __instance)
+            private sealed class State
             {
+                public DecorationSnapshot Before;
+                public long ObjectId;
+                public EDecoObject Type;
+                public InteractableObject Instance;
+            }
+
+            [HarmonyPrefix]
+            private static void Prefix(InteractableObject __instance, out State __state)
+            {
+                __state = null;
                 if (!IsClientReady() || _active._applyingState != 0 || __instance == null
                     || __instance.m_DecoObjectType == EDecoObject.None)
-                    return true;
+                    return;
                 var objectId = DecorationInterop.ClientIdFor(__instance);
                 if (objectId <= 0)
-                    return true;
-                var decorationType = __instance.m_DecoObjectType;
+                    return;
+                __state = new State
+                {
+                    Before = DecorationInterop.Snapshot(),
+                    ObjectId = objectId,
+                    Type = __instance.m_DecoObjectType,
+                    Instance = __instance,
+                };
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(State __state)
+            {
+                if (__state == null || !IsClientReady() || _active._applyingState != 0
+                    || PredictionApi.IsReconciling)
+                    return;
                 var message = new DecorationIntentMessage
                 {
                     Action = DecorationActions.Remove,
-                    DecorationType = decorationType,
-                    ObjectId = objectId,
+                    DecorationType = __state.Type,
+                    ObjectId = __state.ObjectId,
                 };
-                var before = DecorationInterop.Snapshot();
-                var predicted = Predict(message, () =>
+                var instance = __state.Instance;
+                Predict(message, () =>
                 {
-                    // Mirror vanilla BoxUpObject: settle the move lifecycle before destroying the
-                    // piece, otherwise the controller and the placement overlay stay active. The
-                    // authoritative delta carries the resulting inventory count.
-                    DecorationInterop.FinalizeMovedObject(__instance);
-                    DecorationInterop.RemoveLocalPlacedObject(__instance);
-                }, () => UndoState(before));
-                if (predicted)
-                    return true;
-                SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
-                _active._pendingPlacement = null;
-                return false;
+                    // Mirror vanilla BoxUpObject on replay: settle the move lifecycle before
+                    // destroying the piece. The authoritative delta carries the resulting
+                    // inventory count.
+                    DecorationInterop.FinalizeMovedObject(instance);
+                    DecorationInterop.RemoveLocalPlacedObject(instance);
+                }, () => UndoState(__state.Before));
             }
         }
 

@@ -27,7 +27,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(CardDeltaRequestMessage))]
         private void HandleCardDelta(MessageContext context, CardDeltaRequestMessage message)
         {
-            if (_context.InGame() && IsFullyJoinedSender(context))
+            if (_context.InGame() && IsJoinPhaseSender(context))
             {
                 ExecuteWorldCommand(context, message, () =>
                     _cardInteraction != null
@@ -42,7 +42,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(CardDeltaBatchRequestMessage))]
         private void HandleCardDeltaBatch(MessageContext context, CardDeltaBatchRequestMessage message)
         {
-            if (_context.InGame() && IsFullyJoinedSender(context))
+            if (_context.InGame() && IsJoinPhaseSender(context))
             {
                 ExecuteWorldCommand(context, message, ()
                     => ApplyCardDeltaBatchCommand(context, message));
@@ -56,7 +56,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(GradedRemoveRequestMessage))]
         private void HandleGradedRemove(MessageContext context, GradedRemoveRequestMessage message)
         {
-            if (_context.InGame() && IsFullyJoinedSender(context))
+            if (_context.InGame() && IsJoinPhaseSender(context))
             {
                 ExecuteWorldCommand(context, message, ()
                     => ApplyGradedRemoveCommand(context, message));
@@ -70,7 +70,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(ContainerOpMessage))]
         private void HandleContainerOp(MessageContext context, ContainerOpMessage message)
         {
-            if (_context.InGame() && IsFullyJoinedSender(context))
+            if (_context.InGame() && IsJoinPhaseSender(context))
             {
                 ExecuteWorldCommand(context, message, ()
                     => ApplyContainerCommand(context, message));

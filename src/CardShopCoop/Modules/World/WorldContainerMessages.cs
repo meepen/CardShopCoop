@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using CardShopCoop.Net;
 using UnityEngine;
@@ -15,8 +16,7 @@ namespace CardShopCoop.Modules.World
         public EItemType ItemType;
         public ushort StorageId;
         public Vector3 Position;
-        public ushort BoxId;
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
         public bool IsBig;
         public bool TurnedOn;
         public bool IsPlayer;
@@ -43,8 +43,6 @@ namespace CardShopCoop.Modules.World
         public bool ReleaseHold;
         public bool CompletePackCollection;
         public byte PackIndex;
-        public int PackOpenedCount;
-        public List<CompactCardDataAmount> RevealedCards = new();
     }
 
     public struct ContainerRecord

@@ -20,6 +20,7 @@ namespace CardShopCoop.Modules.Catalog
         private static bool _eplProbed;
         private static bool _eplLogged;
         private static bool _eplAvailable;
+        private static int _eplExtraCount;
         private static PropertyInfo _eplAssets;
         private static PropertyInfo _eplItemLibrary;
         private static PropertyInfo _eplRestockEntries;
@@ -554,19 +555,12 @@ namespace CardShopCoop.Modules.Catalog
 
         private static int EplExtraCount()
         {
+            // The EPL surface is resolved ONCE, in ProbeEplIfNeeded. It must not be re-invoked
+            // here: EplRuntimeData's getters run its static constructor, and when that cannot
+            // initialize (a mismatched EPL build) every call throws. Count is called in hot
+            // loops, so re-invoking turned one failure into a log storm.
             ProbeEplIfNeeded();
-            try
-            {
-                var currentAssets = _eplAssets?.GetValue(null);
-                var currentLibrary = currentAssets == null
-                    ? null : _eplItemLibrary?.GetValue(currentAssets);
-                return (_eplRestockEntries?.GetValue(currentLibrary) as ICollection)?.Count ?? 0;
-            }
-            catch (Exception error)
-            {
-                CoopPlugin.Log.LogWarning("Catalog EPL probe failed: " + error.Message);
-                return 0;
-            }
+            return _eplExtraCount;
         }
 
         internal static void ProbeOptionalSurfaces()
@@ -589,6 +583,7 @@ namespace CardShopCoop.Modules.Catalog
                 _eplItemLibrary = assets?.GetType().GetProperty("ItemLibrary", AnyMember);
                 var library = _eplItemLibrary?.GetValue(assets);
                 _eplRestockEntries = library?.GetType().GetProperty("RestockEntries", AnyMember);
+                _eplExtraCount = (_eplRestockEntries?.GetValue(library) as ICollection)?.Count ?? 0;
 
                 _eplServices = type?.GetProperty("Services", AnyMember);
                 var services = _eplServices?.GetValue(null);
@@ -607,7 +602,19 @@ namespace CardShopCoop.Modules.Catalog
             }
             catch (Exception error)
             {
-                CoopPlugin.Log.LogWarning("Catalog EPL surface probe failed: " + error.Message);
+                // EplRuntimeData's static constructor failed, so every cached member now throws
+                // on access. Drop them all so nothing re-triggers it, report the real cause once,
+                // and fall back to the vanilla rows for the rest of the session.
+                _eplAssets = null;
+                _eplItemLibrary = null;
+                _eplRestockEntries = null;
+                _eplServices = null;
+                _eplSaveDataManager = null;
+                _eplExtraCount = 0;
+                _eplAvailable = false;
+                _eplLogged = true;
+                CoopPlugin.Log.LogWarning("Catalog: EPL surface unavailable ("
+                    + error.GetType().Name + ": " + error.Message + "); using vanilla rows.");
             }
         }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Npc;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Modules.Presence;
@@ -44,7 +45,29 @@ namespace CardShopCoop.Modules.Register
             public ECashierCounterState State;
             public bool CashActive;
             public bool HandingOverCash;
+            // Signed wallet delta the completed checkout queued in vanilla OnPressSpaceBar
+            // (positive = sale income, negative = change paid out). Captured at observation so a
+            // rejection can reverse exactly what the local vanilla event did.
+            public double WalletDelta;
+            // True while that delta is currently applied to the local wallet. Undo reverses and
+            // clears it; a follower replay that re-completes sets it again.
+            public bool WalletApplied;
             public readonly List<int> ChangeCounts = new();
+        }
+
+        private sealed class ActionCapture
+        {
+            public InteractableCashierCounter Counter;
+            public Customer Customer;
+            public int Index;
+            public CheckoutUndo Undo;
+            public int Slot;
+            public bool IsCard;
+            public InteractableCustomerCash Cash;
+            public double Value;
+            public InteractableCounterMoneyChange Change;
+            public bool TakeBack;
+            public int GivenBefore;
         }
 
         private CoopRuntimeContext _context;
@@ -54,6 +77,7 @@ namespace CardShopCoop.Modules.Register
         private int _applyingRemote;
         private int _applyingPrediction;
         private bool _applyingBaseline;
+        private bool _evaluatingCreditCard;
         private RegisterBaselineMessage _pendingBaseline;
         private readonly Dictionary<int, int> _owners = new();
         private readonly Dictionary<int, uint> _counterGenerations = new();
@@ -92,7 +116,9 @@ namespace CardShopCoop.Modules.Register
                 var counter = RegisterInterop.Counter(index);
                 if (counter != null && counter.IsMannedByPlayer())
                 {
-                    active.PredictRelease(counter, index);
+                    // Let the game perform the exit; the ExitPatch observes it and registers the
+                    // single release prediction through the normal path.
+                    counter.OnPressEsc();
                 }
             }
         }
@@ -117,7 +143,7 @@ namespace CardShopCoop.Modules.Register
             Patch(typeof(AddChangePatch));
             Patch(typeof(RemoveChangePatch));
             Patch(typeof(FinishPatch));
-            Patch(typeof(ScanCompletionPatch));
+            Patch(typeof(FinishScanPatch));
             SceneManager.sceneLoaded += OnSceneLoaded;
             NpcClientBehaviour.CustomerManagerReady += OnReadinessSignal;
             NpcClientBehaviour.CustomerPoolChanged += OnReadinessSignal;
@@ -234,7 +260,7 @@ namespace CardShopCoop.Modules.Register
                     + message.CustomerGeneration + " pred=" + message.PredictionId);
                 var key = DeltaKey(message);
                 if (_deferredDeltas.TryGetValue(key, out var previous))
-                    PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                    PredictionApi.Ack(previous.PredictionId);
                 _deferredDeltas[key] = message;
             }
         }
@@ -246,9 +272,13 @@ namespace CardShopCoop.Modules.Register
                 return false;
             }
 
-            if (message.Kind == RegisterDeltaKind.CounterLifecycle && !message.Exists)
+            if (message.Kind == RegisterDeltaKind.CounterLifecycle)
             {
-                PredictionApi.ApplyConfirmed(message.PredictionId,
+                // Host-driven lifecycle: a tombstone (Exists=false) releases the counter, and an
+                // add (Exists=true) adopts the host generation so later deltas for a counter
+                // placed mid-session are accepted instead of rejected as unknown. No client
+                // optimistic run confirms this, so the apply runs for every peer.
+                PredictionApi.AckOrApply(message.PredictionId,
                     () => ApplyCounterLifecycle(message));
                 return true;
             }
@@ -276,11 +306,16 @@ namespace CardShopCoop.Modules.Register
             }
 
             // A delta only follows a host-applied intent (rejections arrive as a prediction
-            // rollback), so it confirms the guest's optimistic claim/release/scan. Undoing that
-            // optimism first would replay it - e.g. releasing the register would re-man the
-            // counter and yank the player back before the ownership delta clears it.
+            // rollback), so it confirms the guest's optimistic claim/release/scan. Capture that
+            // BEFORE Confirm retires the prediction, so the Scan/Change apply can tell whether it
+            // must preserve the optimistic totals (see ApplyScan/ApplyChange); AckOrApply computed
+            // the flag and then retired-and-returned, leaving it dead. The authoritative apply must
+            // still run even for the actor's own prediction because it carries host-computed fields
+            // (generations, phase totals). Undoing that optimism first would replay it - e.g.
+            // releasing the register would re-man the counter and yank the player back before the
+            // ownership delta clears it.
             var confirmedOwnPrediction = PredictionApi.IsPending(message.PredictionId);
-            PredictionApi.ApplyConfirmed(message.PredictionId, () =>
+            PredictionApi.Confirm(message.PredictionId, () =>
             {
                 _applyingRemote++;
                 try
@@ -296,7 +331,8 @@ namespace CardShopCoop.Modules.Register
         }
 
         private static bool RequiresCustomer(RegisterDeltaKind kind)
-            => kind == RegisterDeltaKind.Scan || kind == RegisterDeltaKind.Change;
+            => kind == RegisterDeltaKind.Scan || kind == RegisterDeltaKind.Change
+                || kind == RegisterDeltaKind.PaidAmount;
 
         private bool HasCounterGeneration(int index, uint generation)
             => _counterGenerations.TryGetValue(index, out var current)
@@ -333,7 +369,7 @@ namespace CardShopCoop.Modules.Register
             }
 
             var station = GetOrBuildStation(index, baseline.CounterGeneration, baseline.CustomerIndex,
-                baseline.CustomerGeneration, baseline.CustomerFemale, baseline.CharacterName,
+                baseline.CustomerGeneration, baseline.CharacterName,
                 baseline.Lines, counter);
             if (station == null)
             {
@@ -364,9 +400,12 @@ namespace CardShopCoop.Modules.Register
                     ApplyCustomerLifecycle(message);
                     break;
                 case RegisterDeltaKind.Scan:
-                    ApplyScan(message);
+                    ApplyScan(message, confirmedOwnPrediction);
                     break;
                 case RegisterDeltaKind.PhasePayment:
+                    ApplyPhaseDelta(message);
+                    break;
+                case RegisterDeltaKind.PaidAmount:
                     ApplyPhaseDelta(message);
                     break;
                 case RegisterDeltaKind.Change:
@@ -405,7 +444,7 @@ namespace CardShopCoop.Modules.Register
             }
 
             var station = GetOrBuildStation(index, message.CounterGeneration, message.CustomerIndex,
-                message.CustomerGeneration, message.CustomerFemale, message.CharacterName,
+                message.CustomerGeneration, message.CharacterName,
                 message.Lines, counter);
             if (station == null)
             {
@@ -417,7 +456,7 @@ namespace CardShopCoop.Modules.Register
                 message.ChangeStarted, message.TooMuchChange);
         }
 
-        private void ApplyScan(RegisterDeltaMessage message)
+        private void ApplyScan(RegisterDeltaMessage message, bool confirmedOwnPrediction)
         {
             if (!_stations.TryGetValue(message.Counter, out var station) || station.Carrier == null)
             {
@@ -455,6 +494,18 @@ namespace CardShopCoop.Modules.Register
                 }
             }
 
+            if (confirmedOwnPrediction)
+            {
+                // This delta confirms a scan this client already applied optimistically, and its
+                // absolute Total is the host's state only up to THIS scan. The client may have
+                // newer scans the host has not acknowledged yet, so writing the host's total here
+                // walked the register's displayed amount backwards - a player could read a stale
+                // total and enter the wrong card amount. The optimistic scan already advanced both
+                // the counter's and the customer's totals; keep them and let the host's later
+                // phase deltas reconcile.
+                return;
+            }
+
             var counter = RegisterInterop.Counter(message.Counter);
             ApplyPhase(counter, customer, message.State, message.UsingCard, message.Paid, message.Total,
                 message.CustomerTotal, message.Change, message.ChangeReady, message.ChangeStarted,
@@ -484,7 +535,7 @@ namespace CardShopCoop.Modules.Register
             }
 
             var change = RegisterInterop.FindChange(RegisterInterop.Counter(message.Counter), message.Slot,
-                message.IsCoin, message.Value);
+                message.IsCoin);
             RegisterInterop.SetGivenAmount(change, message.ChangeCount);
             var counter = RegisterInterop.Counter(message.Counter);
             var station = _stations.TryGetValue(message.Counter, out var value) ? value : null;
@@ -494,7 +545,7 @@ namespace CardShopCoop.Modules.Register
         }
 
         private LocalStation GetOrBuildStation(int index, uint counterGeneration, int customerIndex,
-            int customerGeneration, bool female, string characterName, List<RegisterLine> lines,
+            int customerGeneration, string characterName, List<RegisterLine> lines,
             InteractableCashierCounter counter)
         {
             if (counter == null)
@@ -513,7 +564,7 @@ namespace CardShopCoop.Modules.Register
             }
 
             ReleaseStation(index);
-            var carrier = FindCarrier(customerIndex, female);
+            var carrier = FindCarrier(customerIndex);
             if (carrier == null)
             {
                 return null;
@@ -581,61 +632,30 @@ namespace CardShopCoop.Modules.Register
             return station;
         }
 
-        private Customer FindCarrier(int sourceIndex, bool female)
+        /// <summary>Resolves the carrier from the host's authoritative customer list index. The Npc
+        /// module keeps the guest's customer pool index-aligned with the host and grows it with the
+        /// authoritative gender, so the slot object at that index is the correct customer; scanning
+        /// the pool for a gender match could bind the wrong (or a second) customer to the identity.
+        /// </summary>
+        private static Customer FindCarrier(int customerIndex)
         {
             var customers = SceneRef<CustomerManager>.Get()?.GetCustomerList();
-            if (customers == null)
+            if (customers == null || customerIndex < 0 || customerIndex >= customers.Count)
             {
                 return null;
             }
 
-            if (sourceIndex >= 0 && sourceIndex < customers.Count
-                && IsAvailableCarrier(customers[sourceIndex], female))
-            {
-                return customers[sourceIndex];
-            }
-
-            Customer fallback = null;
-            for (var i = 0; i < customers.Count; i++)
-            {
-                var candidate = customers[i];
-                if (!IsAvailableCarrier(candidate, female))
-                {
-                    continue;
-                }
-
-                fallback ??= candidate;
-                if (!candidate.gameObject.activeSelf)
-                {
-                    return candidate;
-                }
-            }
-
-            return fallback;
-        }
-
-        private bool IsAvailableCarrier(Customer customer, bool female)
-        {
-            if (customer == null || customer.m_IsFemale != female || NpcClientBehaviour.IsExistingCustomer(customer))
-            {
-                return false;
-            }
-
-            foreach (var station in _stations.Values)
-            {
-                if (ReferenceEquals(station.Carrier, customer))
-                {
-                    return false;
-                }
-            }
-
-            return true;
+            return customers[customerIndex];
         }
 
         private static void EnsureNpcAttachment(int index, int generation, Customer carrier)
         {
             NpcClientBehaviour.SuppressedCustomer.Add(index);
-            if (!NpcClientBehaviour.IsExistingCustomer(carrier))
+            // Attach with the host's authoritative generation, refreshing an existing mirror when
+            // the generation advanced (a reused pooled customer) instead of leaving the stale one.
+            if (!NpcClientBehaviour.IsExistingCustomer(carrier)
+                || !NpcClientBehaviour.TryGetCustomerGeneration(index, out var current)
+                || current != generation)
             {
                 NpcClientBehaviour.AttachExistingCustomer(index, generation, carrier);
             }
@@ -736,23 +756,53 @@ namespace CardShopCoop.Modules.Register
             }
 
             var money = counter.m_InteractableCounterMoneyChangeList;
-            for (var i = 0; money != null && i < money.Count; i++)
+            var counts = new int[money?.Count ?? 0];
+            for (var i = 0; changes != null && i < changes.Count; i++)
+            {
+                // RegisterChange.Slot is the denomination's m_Index, which is not necessarily its
+                // list position, so resolve it the same way FindChange does.
+                for (var m = 0; m < counts.Length; m++)
+                {
+                    if (money[m] != null && money[m].m_Index == changes[i].Slot)
+                    {
+                        counts[m] = changes[i].Count;
+                        break;
+                    }
+                }
+            }
+
+            SetChangeStack(counter, counts);
+        }
+
+        /// <summary>Rebuilds the counter's given-change stack from the authoritative per-
+        /// denomination counts. <c>ResetAmountGiven</c> clears each denomination's count and its
+        /// stack visuals but does NOT roll <c>m_CurrentMoneyChangeValue</c> or the coin/bill added
+        /// counters back, so replaying the clicks on top of the old aggregate counted the whole
+        /// change twice. The guest's displayed "given" (and its readiness) then drifted from the
+        /// host until an authoritative phase overwrote it. Zero the derived counters first so the
+        /// replay reconstructs the exact stack.</summary>
+        private static void SetChangeStack(InteractableCashierCounter counter, IList<int> counts)
+        {
+            var money = counter.m_InteractableCounterMoneyChangeList;
+            if (money == null)
+            {
+                return;
+            }
+
+            RegisterInterop.Write(counter, "m_CurrentMoneyChangeValue", 0d);
+            RegisterInterop.Write(counter, "m_ChangeMoneyAddedCount", 0);
+            RegisterInterop.Write(counter, "m_ChangeCoinAddedCount", 0);
+            for (var i = 0; i < money.Count; i++)
             {
                 money[i]?.ResetAmountGiven();
             }
 
-            for (var i = 0; changes != null && i < changes.Count; i++)
+            for (var i = 0; i < money.Count; i++)
             {
-                var wanted = changes[i];
-                var change = RegisterInterop.FindChange(counter, wanted.Slot, wanted.IsCoin, wanted.Value);
-                if (change == null)
+                var count = counts != null && i < counts.Count ? counts[i] : 0;
+                for (var n = 0; n < count; n++)
                 {
-                    continue;
-                }
-
-                for (var count = 0; count < wanted.Count; count++)
-                {
-                    change.OnMouseButtonUp();
+                    money[i]?.OnMouseButtonUp();
                 }
             }
         }
@@ -862,6 +912,19 @@ namespace CardShopCoop.Modules.Register
                 }
 
                 RestoreChangeCounts(counter, undo.ChangeCounts);
+                // UndoCheckout restores checkout state but not the wallet. The guest's local
+                // checkout ran vanilla and queued its AddCoin/ReduceCoin (the Hud observer is
+                // suppressed by EconomyActionScope, so it was never forwarded), so a rejected
+                // completion must reverse that same delta here or the mirror stays wrong until
+                // the next authoritative Hud delta. The flag tracks whether this prediction's
+                // delta is currently applied, so a follower replay that does not re-complete (its
+                // change was undone) does not cause a later rejection to refund twice.
+                if (undo.WalletApplied)
+                {
+                    ReverseWallet(undo.WalletDelta);
+                    undo.WalletApplied = false;
+                }
+
                 RebuildCashScreen(counter, customer);
                 RegisterInterop.CashScreen(counter)?.UpdateMoneyChangeAmount(undo.ChangeReady,
                     undo.Paid, undo.Total, undo.Change);
@@ -869,6 +932,35 @@ namespace CardShopCoop.Modules.Register
             finally
             {
                 _applyingRemote--;
+            }
+        }
+
+        /// <summary>The signed wallet delta vanilla's completed checkout queues: the shop's net
+        /// income from the sale (positive) or the change it pays out (negative), rounded exactly as
+        /// <c>InteractableCashierCounter.OnPressSpaceBar</c> does before queueing its coin event.
+        /// A card payment has no change, so <paramref name="change"/> is zero and
+        /// <paramref name="paid"/> is the charged amount.</summary>
+        private static double CheckoutWalletDelta(double paid, double change)
+        {
+            var value = paid - change;
+            return GameInstance.GetCurrencyConversionRate() > 1f
+                ? (double)(float)Math.Round(value, 3, MidpointRounding.AwayFromZero)
+                : (double)(float)Math.Round(value, 2, MidpointRounding.AwayFromZero);
+        }
+
+        /// <summary>Reverses a completed checkout's wallet delta through the game's own coin events
+        /// (a refund of income, or a charge-back of change the counter paid out). Only ever runs
+        /// while a prediction is being reconciled, so the Hud economy observer does not forward it
+        /// as a second contribution.</summary>
+        private static void ReverseWallet(double delta)
+        {
+            if (delta > 0.0001d)
+            {
+                CEventManager.QueueEvent(new CEventPlayer_ReduceCoin((float)delta));
+            }
+            else if (delta < -0.0001d)
+            {
+                CEventManager.QueueEvent(new CEventPlayer_AddCoin((float)(0d - delta), true));
             }
         }
 
@@ -926,15 +1018,7 @@ namespace CardShopCoop.Modules.Register
 
         private static void RestoreChangeCounts(InteractableCashierCounter counter, List<int> counts)
         {
-            var money = counter.m_InteractableCounterMoneyChangeList;
-            for (var i = 0; money != null && i < money.Count; i++)
-            {
-                money[i]?.ResetAmountGiven();
-                for (var count = 0; counts != null && i < counts.Count && count < counts[i]; count++)
-                {
-                    money[i].OnMouseButtonUp();
-                }
-            }
+            SetChangeStack(counter, counts);
         }
 
         private static void RebuildCashScreen(InteractableCashierCounter counter, Customer customer)
@@ -972,8 +1056,18 @@ namespace CardShopCoop.Modules.Register
             }
         }
 
-        private void PredictClaim(InteractableCashierCounter counter, int index)
+        private void ObserveClaim(InteractableCashierCounter counter, int index)
         {
+            // The game already manned the counter (the hook is a postfix). Record the local claim so
+            // scans can proceed, then register one post-hoc prediction: the game owns the man, and
+            // only a rejection unmounts through OnPressEsc.
+            if (_claims.Contains(index))
+            {
+                return;
+            }
+
+            _claims.Add(index);
+            _owners[index] = 0;
             PredictionApi.Predict(PredictionScope + ":" + index,
                 id => Send(new RegisterIntentMessage
                 {
@@ -981,25 +1075,23 @@ namespace CardShopCoop.Modules.Register
                     Counter = (byte)index,
                     Kind = RegisterIntentKind.Claim,
                 }),
-                () =>
-                {
-                    _claims.Add(index);
-                    _owners[index] = 0;
-                    WithPrediction(() => counter.OnMouseButtonUp());
-                },
+                () => WithPrediction(counter.OnMouseButtonUp),
                 () =>
                 {
                     _claims.Remove(index);
                     _owners[index] = 0;
                     if (counter.IsMannedByPlayer())
                     {
-                        WithPrediction(() => counter.OnPressEsc());
+                        WithPrediction(counter.OnPressEsc);
                     }
                 });
         }
 
-        private void PredictRelease(InteractableCashierCounter counter, int index)
+        private void ObserveRelease(InteractableCashierCounter counter, int index)
         {
+            // The game already un-manned the counter (postfix).
+            _claims.Remove(index);
+            _owners[index] = 0;
             PredictionApi.Predict(PredictionScope + ":" + index,
                 id => Send(new RegisterIntentMessage
                 {
@@ -1011,7 +1103,10 @@ namespace CardShopCoop.Modules.Register
                 {
                     _claims.Remove(index);
                     _owners[index] = 0;
-                    WithPrediction(() => counter.OnPressEsc());
+                    if (counter.IsMannedByPlayer())
+                    {
+                        WithPrediction(counter.OnPressEsc);
+                    }
                 },
                 () =>
                 {
@@ -1019,28 +1114,34 @@ namespace CardShopCoop.Modules.Register
                     _owners[index] = 0;
                     if (!counter.IsMannedByPlayer())
                     {
-                        WithPrediction(() => counter.OnMouseButtonUp());
+                        WithPrediction(counter.OnMouseButtonUp);
                     }
                 });
         }
 
-        private void PredictScan(InteractableCashierCounter counter, int index, int slot, bool card)
+        private void ObserveScan(ActionCapture capture)
         {
-            var customer = counter.m_CurrentCustomer;
-            CoopPlugin.Log.LogInfo("[register] predicting " + (card ? "card" : "item")
-                + " scan counter=" + index + " slot=" + slot + ".");
-            var undo = CaptureUndo(counter, customer);
-            PredictionApi.Predict(PredictionScope + ":" + index,
+            var customer = capture?.Customer;
+            if (customer == null)
+            {
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[register] observed " + (capture.IsCard ? "card" : "item")
+                + " scan counter=" + capture.Index + " slot=" + capture.Slot + ".");
+            var slot = capture.Slot;
+            var isCard = capture.IsCard;
+            PredictionApi.Predict(PredictionScope + ":" + capture.Index,
                 id => Send(new RegisterIntentMessage
                 {
                     PredictionId = id,
-                    Counter = (byte)index,
-                    Kind = card ? RegisterIntentKind.ScanCard : RegisterIntentKind.ScanItem,
+                    Counter = (byte)capture.Index,
+                    Kind = isCard ? RegisterIntentKind.ScanCard : RegisterIntentKind.ScanItem,
                     Slot = slot,
                 }),
                 () => WithPrediction(() =>
                 {
-                    if (card)
+                    if (isCard)
                     {
                         customer.GetCardInBagList()[slot].OnMouseButtonUp();
                     }
@@ -1055,12 +1156,12 @@ namespace CardShopCoop.Modules.Register
                     // snapshot recorded. UndoCheckout deliberately leaves the carrier's already
                     // accepted scans alone, so without this the reconcile re-scanned an item that
                     // still reported scanned and the session dropped on a null scan customer.
-                    if (card)
+                    if (isCard)
                     {
                         var cards = customer.GetCardInBagList();
                         if (slot >= 0 && slot < cards.Count)
                         {
-                            RegisterInterop.UnscanCard(counter, customer, cards[slot]);
+                            RegisterInterop.UnscanCard(capture.Counter, customer, cards[slot]);
                         }
                     }
                     else
@@ -1068,65 +1169,94 @@ namespace CardShopCoop.Modules.Register
                         var items = customer.GetItemInBagList();
                         if (slot >= 0 && slot < items.Count)
                         {
-                            RegisterInterop.UnscanItem(counter, customer, items[slot]);
+                            RegisterInterop.UnscanItem(capture.Counter, customer, items[slot]);
                         }
                     }
 
-                    UndoCheckout(undo);
+                    UndoCheckout(capture.Undo);
                 }));
         }
 
-        private void PredictPayment(InteractableCashierCounter counter, int index,
-            InteractableCustomerCash cash)
+        private void ObservePayment(ActionCapture capture)
         {
-            var undo = CaptureUndo(counter, counter.m_CurrentCustomer);
-            CoopPlugin.Log.LogInfo("[register] take payment sent card=" + cash.m_IsCard
-                + " counterTotal=" + RegisterInterop.Total(counter).ToString("F3")
-                + " state=" + counter.m_CashierCounterState);
-            PredictionApi.Predict(PredictionScope + ":" + index,
+            if (capture?.Cash == null || capture.Counter == null)
+            {
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[register] observed take payment card=" + capture.Cash.m_IsCard
+                + " counterTotal=" + RegisterInterop.Total(capture.Counter).ToString("F3")
+                + " state=" + capture.Counter.m_CashierCounterState);
+            PredictionApi.Predict(PredictionScope + ":" + capture.Index,
                 id => Send(new RegisterIntentMessage
                 {
                     PredictionId = id,
-                    Counter = (byte)index,
+                    Counter = (byte)capture.Index,
                     Kind = RegisterIntentKind.TakePayment,
-                    IsCard = cash.m_IsCard,
+                    IsCard = capture.Cash.m_IsCard,
                 }),
-                () => WithPrediction(cash.OnMouseButtonUp),
-                () => UndoCheckout(undo));
+                () => WithPrediction(capture.Cash.OnMouseButtonUp),
+                () => UndoCheckout(capture.Undo));
         }
 
-        private void PredictCardPayment(InteractableCashierCounter counter, int index, double value)
+        private void ObserveCardPayment(ActionCapture capture)
         {
-            var undo = CaptureUndo(counter, counter.m_CurrentCustomer);
-            CoopPlugin.Log.LogInfo("[register] card payment sent value=" + value.ToString("F3")
-                + " counterTotal=" + RegisterInterop.Total(counter).ToString("F3")
+            if (capture?.Counter == null)
+            {
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[register] observed card payment value="
+                + capture.Value.ToString("F3") + " counterTotal="
+                + RegisterInterop.Total(capture.Counter).ToString("F3")
                 + " customerTotal=" + Convert.ToDouble(RegisterInterop.Read(
-                    counter.m_CurrentCustomer, "m_TotalScannedItemCost") ?? 0f).ToString("F3")
-                + " state=" + counter.m_CashierCounterState);
-            PredictionApi.Predict(PredictionScope + ":" + index,
+                    capture.Counter.m_CurrentCustomer, "m_TotalScannedItemCost") ?? 0f).ToString("F3")
+                + " state=" + capture.Counter.m_CashierCounterState);
+            // EvaluateCreditCard runs OnPressSpaceBar, which zeroes the counter total only when the
+            // card amount matched. A mismatch leaves the total untouched and queues no coin event,
+            // so there is no wallet delta to reverse.
+            if (RegisterInterop.Total(capture.Counter) <= 0.0001d)
+            {
+                capture.Undo.WalletDelta = CheckoutWalletDelta(capture.Value, 0d);
+                capture.Undo.WalletApplied = true;
+            }
+
+            PredictionApi.Predict(PredictionScope + ":" + capture.Index,
                 id => Send(new RegisterIntentMessage
                 {
                     PredictionId = id,
-                    Counter = (byte)index,
+                    Counter = (byte)capture.Index,
                     Kind = RegisterIntentKind.CardPayment,
-                    Value = value,
+                    Value = capture.Value,
                 }),
-                () => WithPrediction(() => counter.EvaluateCreditCard(value)),
-                () => UndoCheckout(undo));
+                () => WithPrediction(() =>
+                {
+                    capture.Counter.EvaluateCreditCard(capture.Value);
+                    capture.Undo.WalletApplied =
+                        RegisterInterop.Total(capture.Counter) <= 0.0001d;
+                }),
+                () => UndoCheckout(capture.Undo));
         }
 
-        private void PredictChange(InteractableCounterMoneyChange change, bool takeBack, int index)
+        private void ObserveChange(ActionCapture capture)
         {
-            CoopPlugin.Log.LogInfo("[register] change sent slot=" + change.m_Index
-                + " coin=" + change.m_IsCoin + " takeBack=" + takeBack
+            var change = capture?.Change;
+            if (change == null)
+            {
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[register] observed change slot=" + change.m_Index
+                + " coin=" + change.m_IsCoin + " takeBack=" + capture.TakeBack
                 + " value=" + change.m_ValueDouble.ToString("F3")
                 + " given=" + RegisterInterop.GivenAmount(change)
                 + " counterTotal=" + RegisterInterop.Total(change.m_CashierCounter).ToString("F3"));
-            PredictionApi.Predict(PredictionScope + ":" + index,
+            var takeBack = capture.TakeBack;
+            PredictionApi.Predict(PredictionScope + ":" + capture.Index,
                 id => Send(new RegisterIntentMessage
                 {
                     PredictionId = id,
-                    Counter = (byte)index,
+                    Counter = (byte)capture.Index,
                     Kind = RegisterIntentKind.Change,
                     Slot = change.m_Index,
                     IsCoin = change.m_IsCoin,
@@ -1157,18 +1287,32 @@ namespace CardShopCoop.Modules.Register
                 }));
         }
 
-        private void PredictComplete(InteractableCashierCounter counter, int index)
+        private void ObserveComplete(ActionCapture capture)
         {
-            var undo = CaptureUndo(counter, counter.m_CurrentCustomer);
-            PredictionApi.Predict(PredictionScope + ":" + index,
+            if (capture?.Counter == null)
+            {
+                return;
+            }
+
+            // Vanilla OnPressSpaceBar queues the shop's net income (or a change payout) for the
+            // completed checkout. Capture that exact delta so a rejection reverses the wallet.
+            capture.Undo.WalletDelta =
+                CheckoutWalletDelta(capture.Undo.Paid, capture.Undo.Change);
+            capture.Undo.WalletApplied = true;
+            PredictionApi.Predict(PredictionScope + ":" + capture.Index,
                 id => Send(new RegisterIntentMessage
                 {
                     PredictionId = id,
-                    Counter = (byte)index,
+                    Counter = (byte)capture.Index,
                     Kind = RegisterIntentKind.Complete,
                 }),
-                () => WithPrediction(counter.OnPressSpaceBar),
-                () => UndoCheckout(undo));
+                () => WithPrediction(() =>
+                {
+                    capture.Counter.OnPressSpaceBar();
+                    capture.Undo.WalletApplied =
+                        RegisterInterop.Total(capture.Counter) <= 0.0001d;
+                }),
+                () => UndoCheckout(capture.Undo));
         }
 
         private void WithPrediction(Action action)
@@ -1222,9 +1366,10 @@ namespace CardShopCoop.Modules.Register
         {
             if (message.Kind == RegisterDeltaKind.Change)
             {
+                // Value is no longer part of the denomination's identity (m_Index + coin is), so it
+                // must not split the deferred key.
                 return message.Counter + ":" + message.CounterGeneration + ":change:"
-                    + message.Slot + ":" + message.IsCoin + ":"
-                    + message.Value.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+                    + message.Slot + ":" + message.IsCoin;
             }
             if (message.Kind == RegisterDeltaKind.Scan)
             {
@@ -1239,7 +1384,7 @@ namespace CardShopCoop.Modules.Register
         private void ClearDeferredDeltas()
         {
             foreach (var delta in _deferredDeltas.Values)
-                PredictionApi.ConfirmSuperseded(delta.PredictionId);
+                PredictionApi.Ack(delta.PredictionId);
             _deferredDeltas.Clear();
         }
 
@@ -1294,173 +1439,289 @@ namespace CardShopCoop.Modules.Register
         [HarmonyPatch(typeof(InteractableCashierCounter), "OnMouseButtonUp")]
         private static class ManningPatch
         {
+            // Capture-only: let the game man the counter, then register one post-hoc claim. The
+            // hook only observes; it never suppresses the vanilla man. A counter another peer owns
+            // is still forwarded - the host rejects the claim and the generic rollback unmounts it.
             [HarmonyPrefix]
-            private static bool Prefix(InteractableCashierCounter __instance)
+            private static void Prefix(InteractableCashierCounter __instance, out bool __state)
             {
+                __state = false;
                 var client = _active;
                 if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
                 {
-                    return true;
+                    return;
                 }
 
                 var index = RegisterInterop.Index(__instance);
-                if (index < 0 || !client._joined || !client._context.InGame()
-                    || client._owners.TryGetValue(index, out var owner) && owner > 0
-                        && !PresenceApi.IsLocalConnection(owner))
+                if (index < 0 || !client._joined || !client._context.InGame())
                 {
-                    return true;
+                    return;
                 }
 
-                client.PredictClaim(__instance, index);
-                return false;
+                __state = !__instance.IsMannedByPlayer();
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractableCashierCounter __instance, bool __state)
+            {
+                var client = _active;
+                if (!__state || client == null || __instance == null
+                    || !__instance.IsMannedByPlayer())
+                {
+                    return;
+                }
+
+                var index = RegisterInterop.Index(__instance);
+                if (index >= 0 && client._joined && client._context.InGame())
+                {
+                    client.ObserveClaim(__instance, index);
+                }
             }
         }
 
         [HarmonyPatch(typeof(InteractableCashierCounter), "OnPressEsc")]
         private static class ExitPatch
         {
+            // Capture-only: let the game un-man the counter, then forward the post-hoc release.
             [HarmonyPrefix]
-            private static bool Prefix(InteractableCashierCounter __instance)
+            private static void Prefix(InteractableCashierCounter __instance, out bool __state)
             {
+                __state = false;
                 var client = _active;
                 if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
                 {
-                    return true;
+                    return;
                 }
 
                 var index = RegisterInterop.Index(__instance);
                 if (index < 0 || !client._claims.Contains(index))
                 {
-                    return true;
+                    return;
                 }
 
-                client.PredictRelease(__instance, index);
-                return false;
+                __state = true;
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractableCashierCounter __instance, bool __state)
+            {
+                var client = _active;
+                if (!__state || client == null || __instance == null
+                    || __instance.IsMannedByPlayer())
+                {
+                    return;
+                }
+
+                var index = RegisterInterop.Index(__instance);
+                if (index >= 0)
+                {
+                    client.ObserveRelease(__instance, index);
+                }
             }
         }
 
         [HarmonyPatch(typeof(InteractableScanItem), "OnMouseButtonUp")]
         private static class ScanItemPatch
         {
+            // Capture-only prefix: snapshot the pre-scan checkout state, then let the game scan.
+            // A scan at a counter another peer owns is no longer gated on the client - vanilla
+            // performs it and the postfix forwards one observation; the host rejects it if the
+            // sender does not own the station and the generic rollback reverts the scan.
             [HarmonyPrefix]
-            private static bool Prefix(InteractableScanItem __instance)
+            private static void Prefix(InteractableScanItem __instance, out ActionCapture __state)
             {
+                __state = null;
                 var client = _active;
                 if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
                 {
-                    return true;
+                    return;
                 }
 
                 var counter = RegisterInterop.FindCounterForScanItem(__instance);
                 var station = client.Station(counter, out var index);
                 if (station == null || !ReferenceEquals(station.Carrier, counter?.m_CurrentCustomer))
                 {
-                    return true;
-                }
-
-                if (!client._claims.Contains(index))
-                {
-                    CoopPlugin.Log.LogWarning("[register] item scan blocked: counter=" + index
-                        + " is owned by another peer.");
-                    return false;
+                    return;
                 }
 
                 var slot = client.ItemSlot(__instance, index);
                 if (slot < 0)
                 {
-                    CoopPlugin.Log.LogWarning("[register] item scan blocked: the item is not in "
-                        + "counter " + index + "'s bag.");
-                    return false;
+                    return;
                 }
 
-                client.PredictScan(counter, index, slot, false);
-                return false;
+                __state = new ActionCapture
+                {
+                    Counter = counter,
+                    Customer = counter?.m_CurrentCustomer,
+                    Index = index,
+                    Slot = slot,
+                    IsCard = false,
+                    Undo = client.CaptureUndo(counter, counter?.m_CurrentCustomer),
+                };
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ActionCapture __state)
+            {
+                if (__state != null)
+                {
+                    _active?.ObserveScan(__state);
+                }
             }
         }
 
         [HarmonyPatch(typeof(InteractableCard3d), "OnMouseButtonUp")]
         private static class ScanCardPatch
         {
+            // Card counterpart of ScanItemPatch.
             [HarmonyPrefix]
-            private static bool Prefix(InteractableCard3d __instance)
+            private static void Prefix(InteractableCard3d __instance, out ActionCapture __state)
             {
+                __state = null;
                 var client = _active;
                 if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
                 {
-                    return true;
+                    return;
                 }
 
                 var counter = RegisterInterop.FindCounterForCard(__instance);
                 var station = client.Station(counter, out var index);
                 if (station == null || !ReferenceEquals(station.Carrier, counter?.m_CurrentCustomer))
                 {
-                    return true;
-                }
-
-                if (!client._claims.Contains(index))
-                {
-                    CoopPlugin.Log.LogWarning("[register] card scan blocked: counter=" + index
-                        + " is owned by another peer.");
-                    return false;
+                    return;
                 }
 
                 var slot = client.CardSlot(__instance, index);
                 if (slot < 0)
                 {
-                    CoopPlugin.Log.LogWarning("[register] card scan blocked: the card is not in "
-                        + "counter " + index + "'s bag.");
-                    return false;
+                    return;
                 }
 
-                client.PredictScan(counter, index, slot, true);
-                return false;
+                __state = new ActionCapture
+                {
+                    Counter = counter,
+                    Customer = counter?.m_CurrentCustomer,
+                    Index = index,
+                    Slot = slot,
+                    IsCard = true,
+                    Undo = client.CaptureUndo(counter, counter?.m_CurrentCustomer),
+                };
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ActionCapture __state)
+            {
+                if (__state != null)
+                {
+                    _active?.ObserveScan(__state);
+                }
             }
         }
 
         [HarmonyPatch(typeof(InteractableCustomerCash), "OnMouseButtonUp")]
         private static class PaymentPatch
         {
+            // Capture-only: let the game take the cash (the customer transitions to giving change),
+            // then forward the post-hoc payment. A payment at a station another peer owns is no
+            // longer gated on the client - the host rejects it and the rollback reverts it.
             [HarmonyPrefix]
-            private static bool Prefix(InteractableCustomerCash __instance)
+            private static void Prefix(InteractableCustomerCash __instance, out ActionCapture __state)
             {
+                __state = null;
                 var client = _active;
                 if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
                 {
-                    return true;
+                    return;
                 }
 
                 var counter = RegisterInterop.FindCounterForCash(__instance);
                 var station = client.Station(counter, out var index);
-                if (station == null || !client._claims.Contains(index))
+                if (station == null)
                 {
-                    return false;
+                    return;
                 }
 
-                client.PredictPayment(counter, index, __instance);
-                return false;
+                __state = new ActionCapture
+                {
+                    Counter = counter,
+                    Customer = counter.m_CurrentCustomer,
+                    Index = index,
+                    Cash = __instance,
+                    Undo = client.CaptureUndo(counter, counter.m_CurrentCustomer),
+                };
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ActionCapture __state)
+            {
+                if (__state != null)
+                {
+                    _active?.ObservePayment(__state);
+                }
             }
         }
 
         [HarmonyPatch(typeof(InteractableCashierCounter), "EvaluateCreditCard")]
         private static class CardPaymentPatch
         {
+            // Capture-only: let the game evaluate the card payment, then forward it. The vanilla
+            // method ends by calling OnPressSpaceBar, so flag the nested call to make FinishPatch
+            // record only the one higher-level card payment.
             [HarmonyPrefix]
-            private static bool Prefix(InteractableCashierCounter __instance, double value)
+            private static void Prefix(InteractableCashierCounter __instance, double value,
+                out ActionCapture __state)
             {
+                __state = null;
                 var client = _active;
                 if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
                 {
-                    return true;
+                    return;
                 }
 
                 var station = client.Station(__instance, out var index);
-                if (station == null || !client._claims.Contains(index))
+                if (station == null)
                 {
-                    return true;
+                    return;
                 }
 
-                client.PredictCardPayment(__instance, index, value);
-                return false;
+                client._evaluatingCreditCard = true;
+                __state = new ActionCapture
+                {
+                    Counter = __instance,
+                    Customer = __instance.m_CurrentCustomer,
+                    Index = index,
+                    Value = value,
+                    Undo = client.CaptureUndo(__instance, __instance.m_CurrentCustomer),
+                };
+                // EvaluateCreditCard ends by calling OnPressSpaceBar, which queues the counter's
+                // AddCoin/AddShopExp. The host owns that charge for the guest's CardPayment intent,
+                // so suppress the Hud observer for the vanilla event this call produces.
+                EconomyActionScope.Enter();
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ActionCapture __state)
+            {
+                var client = _active;
+                if (client != null)
+                {
+                    client._evaluatingCreditCard = false;
+                }
+
+                if (__state != null)
+                {
+                    client?.ObserveCardPayment(__state);
+                }
+            }
+
+            [HarmonyFinalizer]
+            private static void Finalizer(ActionCapture __state)
+            {
+                if (__state != null)
+                {
+                    EconomyActionScope.Exit();
+                }
             }
         }
 
@@ -1468,92 +1729,153 @@ namespace CardShopCoop.Modules.Register
         private static class AddChangePatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(InteractableCounterMoneyChange __instance)
-                => SendChange(__instance, false);
+            private static void Prefix(InteractableCounterMoneyChange __instance,
+                out ActionCapture __state)
+                => CaptureChange(__instance, false, out __state);
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractableCounterMoneyChange __instance,
+                ActionCapture __state)
+            {
+                if (__state != null && RegisterInterop.GivenAmount(__instance) != __state.GivenBefore)
+                {
+                    _active?.ObserveChange(__state);
+                }
+            }
         }
 
         [HarmonyPatch(typeof(InteractableCounterMoneyChange), "OnRightMouseButtonUp")]
         private static class RemoveChangePatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(InteractableCounterMoneyChange __instance)
-                => SendChange(__instance, true);
+            private static void Prefix(InteractableCounterMoneyChange __instance,
+                out ActionCapture __state)
+                => CaptureChange(__instance, true, out __state);
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractableCounterMoneyChange __instance,
+                ActionCapture __state)
+            {
+                if (__state != null && RegisterInterop.GivenAmount(__instance) != __state.GivenBefore)
+                {
+                    _active?.ObserveChange(__state);
+                }
+            }
         }
 
-        private static bool SendChange(InteractableCounterMoneyChange change, bool takeBack)
+        private static void CaptureChange(InteractableCounterMoneyChange change, bool takeBack,
+            out ActionCapture capture)
         {
+            capture = null;
             var client = _active;
             if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
             {
-                return true;
+                return;
             }
 
             var counter = change?.m_CashierCounter;
             var station = client.Station(counter, out var index);
             if (station == null)
             {
-                return true;
+                return;
             }
 
-            if (!client._claims.Contains(index))
+            // Vanilla already ignores a click past the change limits or outside giving change, so
+            // the postfix's GivenAmount comparison records only a click the game really performed.
+            capture = new ActionCapture
             {
-                return false;
-            }
-
-            // Match the game's own guards so a predicted click is always one the optimistic apply
-            // will really perform. Otherwise a confirming delta could be skipped locally while the
-            // host applied it, leaving the guest short.
-            if (counter == null || !counter.IsGivingChange())
-            {
-                return true;
-            }
-
-            var given = RegisterInterop.GivenAmount(change);
-            if (takeBack ? given <= 0 : given >= 100)
-            {
-                return true;
-            }
-
-            client.PredictChange(change, takeBack, index);
-            return false;
+                Counter = counter,
+                Customer = counter.m_CurrentCustomer,
+                Index = index,
+                Change = change,
+                TakeBack = takeBack,
+                GivenBefore = RegisterInterop.GivenAmount(change),
+            };
         }
 
         [HarmonyPatch(typeof(InteractableCashierCounter), "OnPressSpaceBar")]
         private static class FinishPatch
         {
+            // Capture-only: let the game complete the checkout, then forward it. The nested call
+            // inside EvaluateCreditCard is skipped so a card payment is exactly one prediction.
             [HarmonyPrefix]
-            private static bool Prefix(InteractableCashierCounter __instance)
+            private static void Prefix(InteractableCashierCounter __instance, out ActionCapture __state)
             {
+                __state = null;
                 var client = _active;
-                if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
+                if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0
+                    || client._evaluatingCreditCard)
                 {
-                    return true;
+                    return;
                 }
 
                 var station = client.Station(__instance, out var index);
-                if (station == null || !client._claims.Contains(index))
+                if (station == null)
                 {
-                    return true;
+                    return;
                 }
 
-                client.PredictComplete(__instance, index);
-                return false;
+                // Vanilla's OnPressSpaceBar only completes when the change is ready; otherwise it
+                // shows the "wrong amount" / "too much change" popup and leaves the drawer open.
+                // Let the game show its own popup and keep the register exactly as it was.
+                if (!RegisterInterop.IsChangeReady(__instance))
+                {
+                    return;
+                }
+
+                __state = new ActionCapture
+                {
+                    Counter = __instance,
+                    Customer = __instance.m_CurrentCustomer,
+                    Index = index,
+                    Undo = client.CaptureUndo(__instance, __instance.m_CurrentCustomer),
+                };
+                // OnPressSpaceBar queues the counter's AddCoin/AddShopExp. The host owns that
+                // charge for the guest's Complete intent, so suppress the Hud observer for the
+                // vanilla event this call produces.
+                EconomyActionScope.Enter();
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractableCashierCounter __instance, ActionCapture __state)
+            {
+                if (__state != null && !RegisterInterop.IsChangeReady(__instance))
+                {
+                    _active?.ObserveComplete(__state);
+                }
+            }
+
+            [HarmonyFinalizer]
+            private static void Finalizer(ActionCapture __state)
+            {
+                if (__state != null)
+                {
+                    EconomyActionScope.Exit();
+                }
             }
         }
 
         [HarmonyPatch(typeof(Customer), "EvaluateFinishScanItem")]
-        private static class ScanCompletionPatch
+        private static class FinishScanPatch
         {
-            // EvaluateFinishScanItem rolls the cash-vs-card choice and the amount with the
-            // local RNG, then flips the counter into TakingCash. On a client that prediction
-            // would disagree with the host's independent roll, so the guest could see cash,
-            // click it, and then watch it turn into a card while the host rejected the
-            // mismatched payment. The host publishes the authoritative type/amount via the
-            // phase delta and ApplyPhase performs the same transition, so the client never
-            // needs to (and must not) run it.
+            // The customer's paid amount and cash-vs-card kind are host-authoritative: only the
+            // host runs the roll. A guest must not roll its own value (UnityEngine.Random differs
+            // from the host) nor reveal the cash/card choice from a local roll; it waits for the
+            // host's prediction-free PaidAmount delta, which drives the same settle through the
+            // game's own setters. Suppressing the vanilla finish for a co-op register carrier is
+            // the deliberate exception to "never stop vanilla": the host owns this value the same
+            // way it owns another player's.
             [HarmonyPrefix]
-            private static bool Prefix()
-                => _active == null;
+            private static bool Prefix(Customer __instance)
+            {
+                var client = _active;
+                if (client == null || !client._context.InGame())
+                {
+                    return true;
+                }
+
+                return !IsCarrier(__instance);
+            }
         }
 
         private int ItemSlot(InteractableScanItem item, int counterIndex)

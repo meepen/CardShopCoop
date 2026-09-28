@@ -83,12 +83,13 @@ namespace CardShopCoop.Modules.Decoration
                 return;
 
             var accepted = false;
+            InteractableObject placed = null;
             try
             {
                 _applyingIntent = true;
                 try
                 {
-                    accepted = ApplyIntent(message);
+                    accepted = ApplyIntent(message, out placed);
                 }
                 finally
                 {
@@ -103,7 +104,9 @@ namespace CardShopCoop.Modules.Decoration
 
             if (accepted)
             {
-                var delta = BuildDelta(message);
+                // The place path hands back the exact object it mutated, so the delta is keyed by
+                // that object's id instead of being searched for by type and position.
+                var delta = BuildDelta(message, placed);
                 if (delta != null)
                     BroadcastDelta(delta);
             }
@@ -115,8 +118,9 @@ namespace CardShopCoop.Modules.Decoration
             }
         }
 
-        private bool ApplyIntent(DecorationIntentMessage message)
+        private bool ApplyIntent(DecorationIntentMessage message, out InteractableObject placed)
         {
+            placed = null;
             switch (message.Action)
             {
                 case DecorationActions.Equip:
@@ -152,7 +156,7 @@ namespace CardShopCoop.Modules.Decoration
                     var consumesInventory = message.ObjectId <= 0;
                     if (consumesInventory)
                         DecorationInterop.AdjustInventory(message.DecorationType, -1);
-                    if (!DecorationInterop.TryPlace(pose, message.ObjectId, out _))
+                    if (!DecorationInterop.TryPlace(pose, message.ObjectId, out placed))
                     {
                         if (consumesInventory)
                             DecorationInterop.AdjustInventory(message.DecorationType, 1);
@@ -226,7 +230,8 @@ namespace CardShopCoop.Modules.Decoration
             => !_shutdown && context?.Connection != null
                 && _fullyJoined.Contains(context.Connection.Id);
 
-        private static DecorationDeltaMessage BuildDelta(DecorationIntentMessage intent)
+        private static DecorationDeltaMessage BuildDelta(DecorationIntentMessage intent,
+            InteractableObject placed)
         {
             var delta = new DecorationDeltaMessage
             {
@@ -248,33 +253,14 @@ namespace CardShopCoop.Modules.Decoration
             }
             else if (intent.Action == DecorationActions.Place)
             {
-                var state = DecorationInterop.Snapshot();
-                var best = default(DecorationPose);
-                var bestDistance = float.MaxValue;
-                for (var i = 0; i < state.Placed.Count; i++)
-                {
-                    var pose = state.Placed[i];
-                    if (pose.DecorationType != intent.DecorationType)
-                        continue;
-                    if (intent.ObjectId > 0 && pose.Id == intent.ObjectId)
-                    {
-                        best = pose;
-                        bestDistance = 0f;
-                        break;
-                    }
-
-                    var distance = (pose.Position - intent.Position).sqrMagnitude;
-                    if (distance < bestDistance)
-                    {
-                        best = pose;
-                        bestDistance = distance;
-                    }
-                }
-
-                if (best == null || bestDistance == float.MaxValue)
+                // The applied object is the authoritative piece itself; read its real pose and its
+                // id directly instead of scanning the snapshot for a type/position match.
+                if (placed == null)
                     return null;
-                delta.Pose = best;
-                delta.ObjectId = best.Id;
+                var pose = DecorationInterop.ReadPose(placed);
+                pose.Id = DecorationInterop.EnsureHostId(placed);
+                delta.Pose = pose;
+                delta.ObjectId = pose.Id;
                 delta.InventoryCount = DecorationInterop.InventoryCount(intent.DecorationType);
             }
             return delta;
@@ -371,11 +357,9 @@ namespace CardShopCoop.Modules.Decoration
                 {
                     Action = DecorationActions.Place,
                     DecorationType = __instance.m_DecoObjectType,
-                    Position = __instance.transform.position,
-                    // A moved piece already owns a host id; pass it so the delta cannot bind to a
-                    // different but nearby decoration of the same type.
+                    // A moved piece already owns a host id; the delta carries that exact object.
                     ObjectId = DecorationInterop.HostIdFor(__instance),
-                }));
+                }, __instance));
             }
         }
 

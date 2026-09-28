@@ -42,6 +42,25 @@ namespace CardShopCoop.Modules.Trade
         public int CustomerGeneration;
         public uint OfferNonce;
         public float Price;
+
+        /// <summary>The outcome the actor's own vanilla run already produced. On Accept the host
+        /// records and broadcasts this instead of re-running the trade method, so cards, coins and
+        /// the accept roll are applied exactly once (by the actor). For a kept offer the resulting
+        /// state is carried in <see cref="ResultState"/>; a removed offer carries a null state.</summary>
+        public TradeOutcome Result;
+        public TradeOfferState ResultState;
+
+        /// <summary>The card the customer handed the actor (the offer's left card), part of the one
+        /// atomic accept outcome. The host applies it and fans it out; the actor already applied it
+        /// locally through vanilla, so only a full reject reverts it.</summary>
+        public CardData CardReceived;
+
+        /// <summary>The card the actor handed the customer (the offer's right card) for a
+        /// card-for-card trade; null for a coin purchase.</summary>
+        public CardData CardRemoved;
+
+        /// <summary>Coins the actor spent for a coin purchase; 0 for a card-for-card trade.</summary>
+        public float CoinSpent;
     }
 
     /// <summary>Full authoritative offer baseline sent once when a peer joins.</summary>

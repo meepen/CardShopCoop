@@ -15,7 +15,7 @@ namespace CardShopCoop.Net.Messages
     [NetworkMessage]
     public sealed class DisconnectMessage : INetMessage
     {
-        private const int MaxReasonLength = 256;
+        private const int MaxReasonLength = 1024;
         private const int MaxCodeLength = 32;
         private string _reason;
         public string Reason

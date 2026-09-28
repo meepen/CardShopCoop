@@ -161,7 +161,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             {
                 // Unity/game reads and the synchronous save must happen before the worker. Core
                 // calls this API from its main-thread dispatch path.
-                var save = SaveTransferStorage.BuildHostPayload(out var saveStartedUtc);
+                var save = SaveTransferStorage.BuildHostPayload(target.Id, out var saveStartedUtc);
                 // Capture the Unity-owned path here; enumeration and file reads happen on the worker.
                 offer = new SaveTransferOffer
                 {

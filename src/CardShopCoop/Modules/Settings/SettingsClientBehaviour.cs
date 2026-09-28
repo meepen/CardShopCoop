@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -54,6 +55,7 @@ namespace CardShopCoop.Modules.Settings
                 Patch(typeof(TableInitPatch));
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
                 SceneManager.sceneLoaded += OnSceneLoaded;
+                PlacementApi.StructureChanged += OnPlacementStructureChanged;
             }
             catch (Exception error)
             {
@@ -62,6 +64,7 @@ namespace CardShopCoop.Modules.Settings
                 _harmony = null;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
+                PlacementApi.StructureChanged -= OnPlacementStructureChanged;
                 if (handlersRegistered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -88,6 +91,13 @@ namespace CardShopCoop.Modules.Settings
         private void OnGameDataFinishLoaded(CEventPlayer_GameDataFinishLoaded _)
             => TryApplyPendingState();
 
+        /// <summary>A placement structure change materializes (or removes) a placed object, which
+        /// is also when its stable identity becomes computable. A keyed partial that arrived before
+        /// its cashier/table existed - including a runtime-added counter whose identity binds after
+        /// its Awake - is retried here, so it no longer strands until the next scene load.</summary>
+        private void OnPlacementStructureChanged(int _)
+            => TryApplyPendingState();
+
         private void TryApplyPendingState()
         {
             if (_shutdown || !_context.InGame()
@@ -100,7 +110,7 @@ namespace CardShopCoop.Modules.Settings
             {
                 var full = _pendingFullState;
                 _pendingFullState = null;
-                PredictionApi.ApplyAuthoritative(full.PredictionId, () => ApplyState(full));
+                PredictionApi.AckOrApply(full.PredictionId, () => ApplyState(full));
             }
 
             if (_pendingStates.Count > 0)
@@ -119,39 +129,28 @@ namespace CardShopCoop.Modules.Settings
                     }
 
                     _pendingStates.Remove(states[i].Key);
-                    PredictionApi.ApplyAuthoritative(state.PredictionId, () => ApplyState(state));
+                    PredictionApi.AckOrApply(state.PredictionId, () => ApplyState(state));
                 }
             }
         }
 
-        /// <summary>True when a partial mutation's keyed element exists locally. Tombstones and
-        /// list-shaped payloads never need the element (they only trim the local tail), and a
-        /// full state is applied with per-element skips.</summary>
+        /// <summary>True when a partial mutation's keyed element exists locally. Tombstones never
+        /// need the element (they only trim the local tail), and a full state is applied with
+        /// per-element skips. Cashier/table partials are keyed by their stable placement key, which
+        /// may resolve here only after the object has been materialized on this peer.</summary>
         private static bool CanApply(SettingsStateMessage message)
         {
-            if (message == null || message.Full || message.ItemIndex < 0 || message.Tombstone)
+            if (message == null || message.Full || message.Tombstone)
             {
                 return true;
             }
 
             return message.Index switch
             {
-                6 => CashierExists(message.ItemIndex),
-                7 => TableExists(message.ItemIndex),
+                6 => SettingsInterop.ResolveCashier(message.CashierKey) != null,
+                7 => SettingsInterop.ResolveTable(message.TableKey) != null,
                 _ => true,
             };
-        }
-
-        private static bool CashierExists(int index)
-        {
-            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
-            return counters != null && index >= 0 && index < counters.Count && counters[index] != null;
-        }
-
-        private static bool TableExists(int index)
-        {
-            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
-            return tables != null && index >= 0 && index < tables.Count && tables[index] != null;
         }
 
         [MessageHandler(typeof(SettingsStateMessage))]
@@ -168,7 +167,7 @@ namespace CardShopCoop.Modules.Settings
             {
                 var key = StateKey(message);
                 if (_pendingStates.TryGetValue(key, out var previous))
-                    PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                    PredictionApi.Ack(previous.PredictionId);
                 _pendingStates[key] = message;
             }
             TryApplyPendingState();
@@ -201,8 +200,8 @@ namespace CardShopCoop.Modules.Settings
                 CPlayerData.m_PendingGameEventExpansionType = message.PendingGameEventExpansion;
 
                 ApplyFees(message.GameEventPrices, message.GameEventPrices.Count);
-                ApplyCashiers(message.CashierFlags, message.CashierFlags.Count);
-                ApplyTables(message.TableNumbers, message.TableNumbers.Count);
+                ApplyCashiers(message.CashierFlags, message.CashierKeys, message.CashierFlags.Count);
+                ApplyTables(message.TableNumbers, message.TableKeys, message.TableNumbers.Count);
                 return true;
             }
             finally
@@ -243,36 +242,22 @@ namespace CardShopCoop.Modules.Settings
             }
             else if (message.Index == 6)
             {
-                var count = message.CashierCount;
-                ApplyCashierTail(count);
-                if (message.ItemIndex >= 0)
+                // The authoritative length trims/resets local tails; the keyed element then carries
+                // the one counter's flags. There is no index on the wire to fall back to.
+                ApplyCashierTail(message.CashierCount);
+                if (!message.Tombstone && message.CashierFlags.Count > 0
+                    && !ApplyCashierByKey(message.CashierKey, message.CashierFlags[0]))
                 {
-                    if (!message.Tombstone && message.CashierFlags.Count > 0
-                        && !ApplyCashier(message.ItemIndex, message.CashierFlags[0]))
-                    {
-                        return false;
-                    }
-                }
-                else
-                {
-                    ApplyCashiers(message.CashierFlags, count);
+                    return false;
                 }
             }
             else if (message.Index == 7)
             {
-                var count = message.TableCount;
-                ApplyTableTail(count);
-                if (message.ItemIndex >= 0)
+                ApplyTableTail(message.TableCount);
+                if (!message.Tombstone && message.TableNumbers.Count > 0
+                    && !ApplyTableByKey(message.TableKey, message.TableNumbers[0]))
                 {
-                    if (!message.Tombstone && message.TableNumbers.Count > 0
-                        && !ApplyTable(message.ItemIndex, message.TableNumbers[0]))
-                    {
-                        return false;
-                    }
-                }
-                else
-                {
-                    ApplyTables(message.TableNumbers, count);
+                    return false;
                 }
             }
             else
@@ -285,27 +270,41 @@ namespace CardShopCoop.Modules.Settings
         }
 
         private static string StateKey(SettingsStateMessage message)
-            => message.Index + ":" + message.ItemIndex;
+        {
+            if (message.Index == 6)
+            {
+                return "6:" + message.CashierKey;
+            }
+
+            if (message.Index == 7)
+            {
+                return "7:" + message.TableKey;
+            }
+
+            return message.Index + ":" + message.ItemIndex;
+        }
 
         private void ClearPendingStates()
         {
             foreach (var state in _pendingStates.Values)
-                PredictionApi.ConfirmSuperseded(state.PredictionId);
+                PredictionApi.Ack(state.PredictionId);
             _pendingStates.Clear();
             if (_pendingFullState != null)
-                PredictionApi.ConfirmSuperseded(_pendingFullState.PredictionId);
+                PredictionApi.Ack(_pendingFullState.PredictionId);
             _pendingFullState = null;
         }
 
-        private static bool ApplyCashier(int index, byte flags)
+        /// <summary>Applies one counter's flags addressed by its stable placement key. Returns
+        /// false when the key does not resolve here yet, so the caller retries from the counter's
+        /// init hook instead of applying against the wrong list slot.</summary>
+        private static bool ApplyCashierByKey(int key, byte flags)
         {
-            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
-            if (counters == null || index < 0 || index >= counters.Count || counters[index] == null)
+            var counter = SettingsInterop.ResolveCashier(key);
+            if (counter == null)
             {
                 return false;
             }
 
-            var counter = counters[index];
             var checkout = (flags & 1) != 0;
             var trade = (flags & 2) != 0;
             counter.SetCanCheckout(checkout);
@@ -313,15 +312,16 @@ namespace CardShopCoop.Modules.Settings
             return true;
         }
 
-        private static bool ApplyTable(int index, byte number)
+        /// <summary>Applies one table's number addressed by its stable placement key.</summary>
+        private static bool ApplyTableByKey(int key, byte number)
         {
-            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
-            if (tables == null || index < 0 || index >= tables.Count || tables[index] == null)
+            var table = SettingsInterop.ResolveTable(key);
+            if (table == null)
             {
                 return false;
             }
 
-            tables[index].SetTournamentPlayTableNumber(number);
+            table.SetTournamentPlayTableNumber(number);
             return true;
         }
 
@@ -349,11 +349,22 @@ namespace CardShopCoop.Modules.Settings
             }
         }
 
-        private static void ApplyCashiers(List<byte> flags, int count)
+        /// <summary>Applies a full baseline's cashier flags by stable key. The authoritative
+        /// length still trims the local tail, but each flagged entry is addressed by the key the
+        /// host stamped, never by list position: an order divergence at join would otherwise land
+        /// a flag on a different counter. An entry with no resolvable key is applied to nothing.</summary>
+        private static void ApplyCashiers(List<byte> flags, List<int> keys, int count)
         {
             ApplyCashierTail(count);
-            for (var i = 0; i < flags.Count; i++)
-                ApplyCashier(i, flags[i]);
+            for (var i = 0; i < flags.Count && i < keys.Count; i++)
+            {
+                if (keys[i] == 0)
+                {
+                    continue;
+                }
+
+                ApplyCashierByKey(keys[i], flags[i]);
+            }
         }
 
         private static void ApplyCashierTail(int count)
@@ -374,11 +385,21 @@ namespace CardShopCoop.Modules.Settings
             }
         }
 
-        private static void ApplyTables(List<byte> numbers, int count)
+        /// <summary>Applies a full baseline's table numbers by stable key, mirroring
+        /// <see cref="ApplyCashiers"/>: position never addresses an entry, and a key that cannot
+        /// resolve applies to nothing.</summary>
+        private static void ApplyTables(List<byte> numbers, List<int> keys, int count)
         {
             ApplyTableTail(count);
-            for (var i = 0; i < numbers.Count; i++)
-                ApplyTable(i, numbers[i]);
+            for (var i = 0; i < numbers.Count && i < keys.Count; i++)
+            {
+                if (keys[i] == 0)
+                {
+                    continue;
+                }
+
+                ApplyTableByKey(keys[i], numbers[i]);
+            }
         }
 
         private static void ApplyTableTail(int count)
@@ -444,9 +465,7 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
-            var index = counters?.IndexOf(counter) ?? -1;
-            if (index < 0)
+            if (!SettingsInterop.TryGetCashierKey(counter, out var key))
             {
                 CoopPlugin.Log.LogWarning("Settings client: cashier mutation has no stable identity");
                 return;
@@ -455,7 +474,7 @@ namespace CardShopCoop.Modules.Settings
             _active.SendIntent(new SettingsOpMessage
             {
                 Op = OpCashier,
-                CashierIndex = (byte)index,
+                CashierKey = key,
                 CashierFlags = (byte)((counter.CanCheckout() ? 1 : 0)
                     | (counter.CanTradeCard() ? 2 : 0)),
             }, () => ApplyUndo(() =>
@@ -473,9 +492,7 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
-            var index = tables?.IndexOf(table) ?? -1;
-            if (index < 0)
+            if (!SettingsInterop.TryGetTableKey(table, out var key))
             {
                 CoopPlugin.Log.LogWarning("Settings client: table mutation has no stable identity");
                 return;
@@ -484,7 +501,7 @@ namespace CardShopCoop.Modules.Settings
             _active.SendIntent(new SettingsOpMessage
             {
                 Op = OpTableNumber,
-                TableIndex = (byte)index,
+                TableKey = key,
                 TableNumber = number,
             }, () => ApplyUndo(() => table.SetTournamentPlayTableNumber(previousNumber)));
         }
@@ -496,6 +513,8 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
+            // Post-hoc prediction: the game already applied the mutation in the postfix that
+            // called here, so only a rejection's undo closure is needed.
             PredictionApi.Predict("settings",
                 predictionId =>
                 {
@@ -535,6 +554,7 @@ namespace CardShopCoop.Modules.Settings
             _shutdown = true;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
+            PlacementApi.StructureChanged -= OnPlacementStructureChanged;
             _context?.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;

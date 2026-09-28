@@ -121,6 +121,15 @@ namespace CardShopCoop.Modules.Tutorial
 
         private bool ValidateAction(TutorialActionDeltaMessage message)
         {
+            // Mirror vanilla: any defined condition may accumulate progress whenever its action
+            // genuinely happens. The game's own TutorialData list records out-of-order progress and
+            // the active subgroup consumes it when that task becomes current, so requiring the
+            // client's captured action to equal the host's CURRENT task rejected legitimate
+            // off-task progress and rolled the guest back on every pickup/placement. It was not a
+            // real guard either: a forged message can simply name the host's expected task. The
+            // host still applies the increment and broadcasts the resulting values, so it stays
+            // authoritative; only decrements stay refused (the rollback restores, then the host
+            // delta re-syncs).
             if (!Enum.IsDefined(typeof(ETutorialTaskCondition), message.Action)
                 || message.Action == (int)ETutorialTaskCondition.None)
                 return false;
@@ -128,9 +137,6 @@ namespace CardShopCoop.Modules.Tutorial
                 return false;
             if (message.Increment <= 0f || float.IsNaN(message.Increment)
                 || float.IsInfinity(message.Increment) || message.Increment > MaxActionIncrement)
-                return false;
-            if (!TutorialInterop.TryGetExpectedAction(out var expectedIndex, out var expectedAction)
-                || message.ExpectedTutorialIndex != expectedIndex || message.Action != expectedAction)
                 return false;
             return true;
         }
@@ -241,6 +247,9 @@ namespace CardShopCoop.Modules.Tutorial
             [HarmonyPostfix]
             private static void Postfix(ETutorialTaskCondition tutorialTaskCondition, int __state)
             {
+                // HandleAction already applies the change and broadcasts its own delta with the
+                // prediction id; skip the generic broadcast while it runs so an applied client
+                // intent is never broadcast twice.
                 if (_active == null || _active._applyingIntent)
                     return;
                 _active.BroadcastDelta(BuildDelta(Guid.Empty, tutorialTaskCondition, __state));

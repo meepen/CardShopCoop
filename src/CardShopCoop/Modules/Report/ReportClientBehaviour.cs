@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
@@ -19,8 +19,9 @@ using UnityEngine.SceneManagement;
 namespace CardShopCoop.Modules.Report
 {
     /// <summary>
-    /// Guest-side report mirror.  The recap is display-only: both vanilla advance paths close the
-    /// local screen instead of advancing the guest's day or charging the shared event fee again.
+    /// Guest-side report mirror. The recap is display-only: both vanilla advance paths are
+    /// suppressed on the guest and instead signal readiness to the host, which is the single
+    /// writer of the next day and the shared event fee.
     /// </summary>
     [ClientBehaviour]
     public sealed class ReportClientBehaviour : CoopBehaviour
@@ -78,7 +79,6 @@ namespace CardShopCoop.Modules.Report
                 _harmony = new Harmony("com.zwhit.cardshopcoop.report.client");
                 Patch(typeof(NextButtonPatch));
                 Patch(typeof(NextDayPatch));
-                Patch(typeof(ShowGoNextDayPatch));
                 Patch(typeof(ReportClosePatch));
                 PatchScreenReadiness();
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
@@ -145,7 +145,7 @@ namespace CardShopCoop.Modules.Report
         {
             if (_shutdown)
                 return;
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            PredictionApi.AckOrApply(message.PredictionId,
                 () => ApplyState(ToState(message)));
         }
 
@@ -443,8 +443,13 @@ namespace CardShopCoop.Modules.Report
                 return true;
             }
 
-            // While the recap still counts its totals up, the button skips the animation. It only
-            // becomes the ready action once the numbers have settled.
+            // While the recap still counts its totals up, the button skips the animation; that is
+            // also vanilla, so let it run. Once the numbers have settled the press becomes a
+            // "ready" signal for the host, and the guest must NOT run vanilla
+            // OnPressGoNextDay -> DelayGoNextDay: that would advance this guest's day and queue
+            // its own CEventPlayer_ReduceCoin for the host event fee, double-charging the shared
+            // wallet when the host's own roll-over runs. The host is the single day/fee writer; it
+            // rolls over once every player has readied and the guest mirrors the close + overlay.
             if ((bool)FiIsLerping.GetValue(screen))
             {
                 return true;
@@ -522,7 +527,7 @@ namespace CardShopCoop.Modules.Report
         }
 
         /// <summary>Mirrors vanilla <c>DelayGoNextDay</c>'s presentation on the guest: show the
-        /// "Loading Day X → X+1" overlay for the same window. The host's <c>CloseScreen</c> already
+        /// "Loading Day X â†’ X+1" overlay for the same window. The host's <c>CloseScreen</c> already
         /// closed the recap and (on the host only) advanced the day and charged the event fee.</summary>
         private void PlayNextDayRollover()
         {
@@ -627,18 +632,6 @@ namespace CardShopCoop.Modules.Report
         {
             [HarmonyPrefix]
             private static bool Prefix() => NextDay();
-        }
-
-        /// <summary>With the recap already open, the Enter/GoNextDay key belongs to the recap's own
-        /// Next Day action. The vanilla <c>ShowGoNextDayScreen</c> would call <c>OpenScreen</c>,
-        /// which closes an already-open recap, so suppress it while the recap is up. With the recap
-        /// closed this still runs vanilla, which is the first Enter that opens the menu.</summary>
-        [HarmonyPatch(typeof(InteractionPlayerController), "ShowGoNextDayScreen")]
-        private static class ShowGoNextDayPatch
-        {
-            [HarmonyPrefix]
-            private static bool Prefix()
-                => _active == null || _active._shutdown || !EndOfDayReportScreen.IsActive();
         }
 
         [HarmonyPatch(typeof(EndOfDayReportScreen), "CloseScreen")]

@@ -1,4 +1,5 @@
 using System;
+using CardShopCoop.Modules.Hud;
 using CardShopCoop.Util;
 using HarmonyLib;
 
@@ -8,11 +9,14 @@ namespace CardShopCoop.Modules.Grading
     {
         internal static void ApplyClient(Harmony harmony)
         {
+            // The client runs the vanilla submission (the game mints the job and charges the
+            // mirror); the prefix captures and the postfix registers one post-hoc prediction. The
+            // day-start maturation is no longer suppressed: the guest runs it vanilla and the host
+            // pushes the matured jobs/sets as deltas, which overwrite the local reroll.
             Try(harmony, typeof(GradedCardSubmitSelectScreen), "OnPressSubmitButton",
-                new HarmonyMethod(typeof(GradingPatches), nameof(SubmitPrefix)));
-            Try(harmony, typeof(RestockManager), "OnDayStarted",
-                new HarmonyMethod(typeof(GradingPatches), nameof(ClientMaturationPrefix)));
-            TryPatchGoDayStart(harmony);
+                new HarmonyMethod(typeof(GradingPatches), nameof(SubmitCapturePrefix)),
+                new HarmonyMethod(typeof(GradingPatches), nameof(SubmitObservePostfix)),
+                new HarmonyMethod(typeof(GradingPatches), nameof(SubmitFinalizer)));
             InstallDataLifecyclePatches(harmony);
         }
 
@@ -48,7 +52,8 @@ namespace CardShopCoop.Modules.Grading
         }
 
         private static void Try(Harmony harmony, Type type, string name,
-            HarmonyMethod prefix = null, HarmonyMethod postfix = null)
+            HarmonyMethod prefix = null, HarmonyMethod postfix = null,
+            HarmonyMethod finalizer = null)
         {
             try
             {
@@ -58,7 +63,7 @@ namespace CardShopCoop.Modules.Grading
                     CoopPlugin.Log.LogWarning("Grading patch target missing: " + type.Name + "." + name);
                     return;
                 }
-                harmony.Patch(original, prefix, postfix);
+                harmony.Patch(original, prefix: prefix, postfix: postfix, finalizer: finalizer);
             }
             catch (Exception error)
             {
@@ -66,57 +71,23 @@ namespace CardShopCoop.Modules.Grading
             }
         }
 
-        private static void TryPatchGoDayStart(Harmony harmony)
+        private static void SubmitCapturePrefix(GradedCardSubmitSelectScreen __instance,
+            out GradingClientBehaviour.SubmissionCapture __state)
         {
-            // Gate on GoDetected, not Present: the patch must be re-attempted and its result
-            // re-derived on each module enable, even when a prior enable left it failing.
-            if (!GradingInterop.GoDetected)
-            {
-                GradingInterop.SetDayStartSurface(true, null);
-                return;
-            }
-
-            try
-            {
-                if (!GradingInterop.GoDayStartMethodMatches)
-                {
-                    GradingInterop.SetDayStartSurface(false,
-                        "exact type/method signature was not found: "
-                        + "CompanyStamp_RestockManager_OnDayStartedPatch.Prefix() -> bool");
-                    return;
-                }
-
-                try
-                {
-                    harmony.Patch(GradingInterop.GoDayStartMethod, prefix: new HarmonyMethod(typeof(GradingPatches),
-                        nameof(ClientMaturationPrefix)));
-                    GradingInterop.SetDayStartSurface(true, null);
-                }
-                catch (Exception patchError)
-                {
-                    // Harmony may have installed part of a patch before reporting an error.
-                    // Roll back this exact patch id before disabling GO grading.
-                    harmony.Unpatch(GradingInterop.GoDayStartMethod, HarmonyPatchType.All, harmony.Id);
-                    GradingInterop.SetDayStartSurface(false,
-                        "exact day-start guard could not be applied: " + patchError.Message);
-                }
-            }
-            catch (Exception error)
-            {
-                GradingInterop.SetDayStartSurface(false,
-                    "exact day-start guard probe failed: " + error.Message);
-            }
-        }
-
-        private static bool SubmitPrefix(GradedCardSubmitSelectScreen __instance)
-        {
+            __state = default;
             var active = GradingClientBehaviour.Active;
-            return active == null || active.Submit(__instance);
+            if (active == null)
+                return;
+            active.CaptureSubmission(__instance, out __state);
         }
 
-        private static bool ClientMaturationPrefix()
+        private static void SubmitObservePostfix(GradingClientBehaviour.SubmissionCapture __state)
+            => GradingClientBehaviour.Active?.ObserveSubmission(__state);
+
+        private static void SubmitFinalizer(GradingClientBehaviour.SubmissionCapture __state)
         {
-            return GradingClientBehaviour.Active == null;
+            if (__state.Armed)
+                EconomyActionScope.Exit();
         }
 
         private static void HostDayStartedPostfix()

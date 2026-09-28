@@ -204,9 +204,9 @@ namespace CardShopCoop.Net.Kcp
                 return false;
             }
 
-            int offset = datagram.Offset;
-            byte channel = datagram.Array[offset];
-            Utils.Decode32U(datagram.Array, offset + CHANNEL_HEADER_SIZE, out uint messageCookie);
+            var offset = datagram.Offset;
+            var channel = datagram.Array[offset];
+            Utils.Decode32U(datagram.Array, offset + CHANNEL_HEADER_SIZE, out var messageCookie);
 
             if (channel != (byte)KcpChannel.Reliable && channel != (byte)KcpChannel.Unreliable)
             {
@@ -244,7 +244,7 @@ namespace CardShopCoop.Net.Kcp
             {
                 case (byte)KcpChannel.Reliable:
                     {
-                        bool inputAccepted = OnRawInputReliable(message);
+                        var inputAccepted = OnRawInputReliable(message);
                         if (!isServer && cookie == 0 && messageCookie != 0 && inputAccepted &&
                             IsReliableHelloPayload(message))
                         {
@@ -265,9 +265,9 @@ namespace CardShopCoop.Net.Kcp
 
         private static bool IsReliableHelloPayload(ArraySegment<byte> message)
         {
-            int offset = message.Offset;
-            int remaining = message.Count;
-            bool foundHello = false;
+            var offset = message.Offset;
+            var remaining = message.Count;
+            var foundHello = false;
 
             // Hello is sent as one unfragmented KCP PUSH containing exactly its one-byte
             // reliable header. Validate every segment so trailing truncated bytes cannot turn
@@ -277,9 +277,9 @@ namespace CardShopCoop.Net.Kcp
                 if (remaining < KcpCore.OVERHEAD)
                     return false;
 
-                byte command = message.Array[offset + 4];
-                byte fragment = message.Array[offset + 5];
-                Utils.Decode32U(message.Array, offset + 20, out uint length);
+                var command = message.Array[offset + 4];
+                var fragment = message.Array[offset + 5];
+                Utils.Decode32U(message.Array, offset + 20, out var length);
                 if (length > (uint)(remaining - KcpCore.OVERHEAD))
                     return false;
 
@@ -289,7 +289,7 @@ namespace CardShopCoop.Net.Kcp
                     foundHello = true;
                 }
 
-                int segmentSize = KcpCore.OVERHEAD + (int)length;
+                var segmentSize = KcpCore.OVERHEAD + (int)length;
                 offset += segmentSize;
                 remaining -= segmentSize;
             }

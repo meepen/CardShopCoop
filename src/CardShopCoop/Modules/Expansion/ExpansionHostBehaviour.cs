@@ -1,5 +1,6 @@
 using System;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -84,6 +85,7 @@ namespace CardShopCoop.Modules.Expansion
                 CoopPlugin.Log.LogWarning("Expansion purchase rejected peer="
                     + context.Connection.Id + " kind=" + message.Kind
                     + " reason=unsupported purchase kind");
+                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
                 return;
             }
 
@@ -96,14 +98,17 @@ namespace CardShopCoop.Modules.Expansion
             {
                 CoopPlugin.Log.LogError("Expansion purchase failed for peer "
                     + context.Connection.Id + ": " + exception);
+                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                return;
             }
 
             if (!accepted)
             {
+                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
                 return;
             }
 
-            BroadcastDelta(message.Kind);
+            BroadcastDelta(message.Kind, message.PredictionId);
         }
 
         internal void Shutdown()
@@ -250,7 +255,7 @@ namespace CardShopCoop.Modules.Expansion
                 + CPlayerData.m_CoinAmountDouble);
         }
 
-        private void BroadcastDelta(byte kind)
+        private void BroadcastDelta(byte kind, Guid predictionId)
         {
             if (_shutdown || _context == null || !_context.InGame())
             {
@@ -259,6 +264,7 @@ namespace CardShopCoop.Modules.Expansion
 
             var message = new ExpansionDeltaMessage
             {
+                PredictionId = predictionId,
                 Area = kind,
             };
             switch (kind)
@@ -300,7 +306,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(2);
+                    _active.BroadcastDelta(2, Guid.Empty);
                 }
             }
         }
@@ -313,7 +319,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(0);
+                    _active.BroadcastDelta(0, Guid.Empty);
                 }
             }
         }
@@ -326,7 +332,7 @@ namespace CardShopCoop.Modules.Expansion
             {
                 if (_active != null && !_active._shutdown && !_active._purchaseInProgress)
                 {
-                    _active.BroadcastDelta(1);
+                    _active.BroadcastDelta(1, Guid.Empty);
                 }
             }
         }

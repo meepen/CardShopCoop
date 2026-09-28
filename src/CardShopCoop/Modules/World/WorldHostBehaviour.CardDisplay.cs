@@ -18,7 +18,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(CardDisplayRequestMessage))]
         private void HandleCardDisplayRequest(MessageContext context, CardDisplayRequestMessage message)
         {
-            if (!_context.InGame() || !IsFullyJoinedSender(context) || message == null)
+            if (!_context.InGame() || !IsJoinPhaseSender(context) || message == null)
             {
                 RejectWorldIntent(context, message);
                 return;

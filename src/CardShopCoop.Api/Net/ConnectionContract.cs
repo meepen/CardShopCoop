@@ -16,7 +16,7 @@ namespace CardShopCoop.Net.Connection
     public sealed class DisconnectInfo
     {
         public const int MaxCodeLength = 32;
-        public const int MaxDetailLength = 256;
+        public const int MaxDetailLength = 1024;
 
         public string Code
         {

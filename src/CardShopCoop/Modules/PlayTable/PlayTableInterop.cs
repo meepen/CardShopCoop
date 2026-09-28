@@ -58,10 +58,6 @@ namespace CardShopCoop.Modules.PlayTable
         internal static List<InteractablePlayTable> Tables(ShelfManager manager)
             => manager == null ? null : manager.m_PlayTableList;
 
-        internal static int TableIndex(ShelfManager manager, InteractablePlayTable table)
-            => manager?.m_PlayTableList == null || table == null
-                ? -1 : manager.m_PlayTableList.IndexOf(table);
-
         internal static bool IsPlayerSeat(InteractablePlayTable table, int seat)
         {
             var list = table?.m_IsPlayerSeat;
@@ -99,6 +95,21 @@ namespace CardShopCoop.Modules.PlayTable
         internal static bool HostPlayingAt(InteractablePlayTable table)
             => HasEnteredTable(table);
 
+        /// <summary>
+        /// Resolves which of the two seats a local right-click will occupy.
+        /// </summary>
+        /// <remarks>
+        /// This is an input selection, not a shared entity, so it has no stable id to bind: the
+        /// seat only exists as the local player's position relative to the table. Vanilla derives
+        /// the very same value inline in <c>InteractablePlayTable.OnRightMouseButtonUp</c> (the
+        /// un-normalised <c>transform.position - playerCollider.position</c> dotted against
+        /// <c>transform.right</c>), and exposes no clicked-seat parameter, field, or return value
+        /// to read instead. This method therefore reproduces vanilla's exact selection using the
+        /// same dot-product rule so the prediction targets the seat the game will actually seat.
+        /// Once vanilla has seated the player, the seat is part of the table's shared
+        /// <c>m_IsSeatOccupied</c>/<c>m_IsPlayerSeat</c> state and every cross-peer message is
+        /// keyed by <c>TableKey</c>.
+        /// </remarks>
         internal static bool TryGetClickedSeat(InteractablePlayTable table, out int seat)
         {
             seat = -1;

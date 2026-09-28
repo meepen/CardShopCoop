@@ -63,27 +63,6 @@ namespace CardShopCoop.Modules.Tutorial
             return true;
         }
 
-        internal static bool TryGetExpectedAction(out int tutorialIndex, out int action)
-        {
-            tutorialIndex = CPlayerData.m_TutorialIndex;
-            action = (int)ETutorialTaskCondition.None;
-            var manager = FindManager();
-            if (!IsSceneReady(manager) || tutorialIndex <= 0
-                || tutorialIndex > manager.m_TutorialSubGroupList.Count)
-            {
-                return false;
-            }
-
-            var group = manager.m_TutorialSubGroupList[tutorialIndex - 1];
-            if (group == null || group.m_TutorialData == null)
-            {
-                return false;
-            }
-
-            action = (int)group.m_TutorialData.tutorialTaskCondition;
-            return action != (int)ETutorialTaskCondition.None;
-        }
-
         internal static float ValueFor(ETutorialTaskCondition condition)
         {
             var values = CPlayerData.m_TutorialDataList;

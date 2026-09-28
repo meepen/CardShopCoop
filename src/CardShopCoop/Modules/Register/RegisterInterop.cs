@@ -143,7 +143,7 @@ namespace CardShopCoop.Modules.Register
             => !double.IsNaN(value) && !double.IsInfinity(value);
 
         internal static InteractableCounterMoneyChange FindChange(
-            InteractableCashierCounter counter, int slot, bool isCoin, double value)
+            InteractableCashierCounter counter, int slot, bool isCoin)
         {
             var list = counter?.m_InteractableCounterMoneyChangeList;
             if (list == null || slot < 0)
@@ -151,11 +151,13 @@ namespace CardShopCoop.Modules.Register
                 return null;
             }
 
+            // m_Index is the denomination's explicit, prefab-baked index, so it identifies the
+            // change object on its own. The old value-epsilon comparison could match a different
+            // denomination whose rounded value coincided (and crossed a currency-rate change).
             for (var i = 0; i < list.Count; i++)
             {
                 var candidate = list[i];
-                if (candidate != null && candidate.m_Index == slot && candidate.m_IsCoin == isCoin
-                    && Math.Abs(candidate.m_ValueDouble - value) <= 0.0001d)
+                if (candidate != null && candidate.m_Index == slot && candidate.m_IsCoin == isCoin)
                 {
                     return candidate;
                 }
@@ -164,73 +166,20 @@ namespace CardShopCoop.Modules.Register
             return null;
         }
 
+        /// <summary>The counter a customer is currently being served at, by the customer's own
+        /// authoritative reference. Used to recover a counter from an interactable's owning
+        /// customer without scanning the counter list.</summary>
+        internal static InteractableCashierCounter CounterFor(Customer customer)
+            => Read(customer, "m_CurrentQueueCashierCounter") as InteractableCashierCounter;
+
         internal static InteractableCashierCounter FindCounterForScanItem(InteractableScanItem item)
-        {
-            var counters = Counters;
-            if (item == null || counters == null)
-            {
-                return null;
-            }
-
-            for (var i = 0; i < counters.Count; i++)
-            {
-                var customer = counters[i]?.m_CurrentCustomer;
-                var items = customer?.GetItemInBagList();
-                for (var j = 0; items != null && j < items.Count; j++)
-                {
-                    if (items[j] != null && items[j].m_InteractableScanItem == item)
-                    {
-                        return counters[i];
-                    }
-                }
-            }
-
-            return null;
-        }
+            => item == null ? null : CounterFor(Read(item, "m_CurrentCustomer") as Customer);
 
         internal static InteractableCashierCounter FindCounterForCard(InteractableCard3d card)
-        {
-            var counters = Counters;
-            if (card == null || counters == null)
-            {
-                return null;
-            }
-
-            for (var i = 0; i < counters.Count; i++)
-            {
-                var customer = counters[i]?.m_CurrentCustomer;
-                var cards = customer?.GetCardInBagList();
-                for (var j = 0; cards != null && j < cards.Count; j++)
-                {
-                    if (cards[j] == card)
-                    {
-                        return counters[i];
-                    }
-                }
-            }
-
-            return null;
-        }
+            => card == null ? null : CounterFor(Read(card, "m_CurrentCustomer") as Customer);
 
         internal static InteractableCashierCounter FindCounterForCash(InteractableCustomerCash cash)
-        {
-            var counters = Counters;
-            if (cash == null || counters == null)
-            {
-                return null;
-            }
-
-            for (var i = 0; i < counters.Count; i++)
-            {
-                var customer = counters[i]?.m_CurrentCustomer;
-                if (customer != null && customer.m_CustomerCash == cash)
-                {
-                    return counters[i];
-                }
-            }
-
-            return null;
-        }
+            => cash == null ? null : CounterFor(Read(cash, "m_CurrentCustomer") as Customer);
 
         internal static void PrepareCarrier(Customer customer, InteractableCashierCounter counter)
         {
@@ -290,6 +239,13 @@ namespace CardShopCoop.Modules.Register
             if (counter.m_CreditCardModel != null && counter.m_CreditCardModel.activeSelf)
             {
                 RestoreCreditCardMachine(counter);
+            }
+
+            // Vanilla ForceResetCounter closes the drawer when a reset happens while change was
+            // being given; without this a release/reset could leave the cash drawer stuck open.
+            if (ChangeStarted(counter) && counter.m_OpenCloseDrawerAnim != null)
+            {
+                counter.m_OpenCloseDrawerAnim.Play("CashRegisterCloseDrawer");
             }
 
             Write(counter, "m_IsUsingCard", false);

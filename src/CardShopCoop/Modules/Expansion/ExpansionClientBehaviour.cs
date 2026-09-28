@@ -1,5 +1,7 @@
 using System;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Hud;
+using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -15,6 +17,7 @@ namespace CardShopCoop.Modules.Expansion
     public sealed class ExpansionClientBehaviour : CoopBehaviour
     {
         private static ExpansionClientBehaviour _active;
+        private static int _applyingPrediction;
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
@@ -205,13 +208,26 @@ namespace CardShopCoop.Modules.Expansion
 
             var delta = pending;
             pending = null;
-            ExpansionInterop.ApplyDelta(manager, delta);
-            ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());
+            // The game already applied a client purchase locally; the host's echo either retires
+            // that prediction or (for another peer / a host-local change) applies the authoritative
+            // counts through the same path.
+            PredictionApi.AckOrApply(delta.PredictionId, () =>
+            {
+                ExpansionInterop.ApplyDelta(manager, delta);
+                ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());
+            });
         }
 
         private static void ReplacePending(ref ExpansionDeltaMessage pending,
             ExpansionDeltaMessage replacement)
         {
+            // A superseding authoritative delta retires the prediction the replaced one carried;
+            // absolute counts make the earlier message redundant.
+            if (pending != null && !ReferenceEquals(pending, replacement))
+            {
+                PredictionApi.Ack(pending.PredictionId);
+            }
+
             pending = replacement;
         }
 
@@ -222,40 +238,128 @@ namespace CardShopCoop.Modules.Expansion
             ReplacePending(ref _pendingWarehouseUnlockDelta, null);
         }
 
-        private static bool Send(byte kind)
+        /// <summary>Pre-state captured by a purchase prefix so the postfix can register one
+        /// post-hoc prediction and the undo can restore the authoritative counts.</summary>
+        private sealed class PurchaseCapture
+        {
+            public UnlockRoomManager Manager;
+            public ExpansionInterop.StateSnapshot Snapshot;
+            public int Rooms;
+            public int WarehouseRooms;
+            public bool WarehouseUnlocked;
+            public float TotalCost;
+            public int Index;
+            public bool IsShopB;
+        }
+
+        private static PurchaseCapture Capture(float totalCost, int index, bool isShopB)
         {
             var client = _active;
-            if (client == null || client._shutdown || !client._joined || !client._context.InGame()
+            if (client == null || client._shutdown || !client._joined || client._context == null
+                || !client._context.InGame() || _applyingPrediction != 0
                 || ExpansionInterop.ApplyingAuthoritativeState)
             {
-                return true;
+                return null;
             }
 
-            if (ExpansionInterop.FindUnlockManager() == null)
+            return new PurchaseCapture
             {
-                CoopPlugin.Log.LogWarning(
-                    "Expansion purchase ignored: the unlock manager is unavailable.");
-                return false;
+                Manager = ExpansionInterop.FindUnlockManager(),
+                Snapshot = ExpansionInterop.CaptureState(),
+                Rooms = CPlayerData.m_UnlockRoomCount,
+                WarehouseRooms = CPlayerData.m_UnlockWarehouseRoomCount,
+                WarehouseUnlocked = CPlayerData.m_IsWarehouseRoomUnlocked,
+                TotalCost = totalCost,
+                Index = index,
+                IsShopB = isShopB,
+            };
+        }
+
+        /// <summary>Registers one post-hoc prediction for a purchase the game just completed. The
+        /// game owns the local mutation; a host rejection restores the captured counts through the
+        /// same <c>Init</c> path.</summary>
+        private static void Observe(PurchaseCapture capture, byte kind, Action replay)
+        {
+            var client = _active;
+            if (client == null || !client._joined || client._context == null
+                || !client._context.InGame())
+            {
+                return;
             }
 
-            client._context.Send(1, new ExpansionPurchaseMessage { Kind = kind });
-            // The host owns the mutation and will broadcast the resulting state. Never run the
-            // vanilla local purchase on a guest.
-            return false;
+            CoopPlugin.Log.LogInfo("[expansion] observed purchase kind=" + kind + " rooms="
+                + CPlayerData.m_UnlockRoomCount + " warehouseRooms="
+                + CPlayerData.m_UnlockWarehouseRoomCount + " unlocked="
+                + CPlayerData.m_IsWarehouseRoomUnlocked + ".");
+            PredictionApi.Predict("expansion:" + kind,
+                id => client._context.Send(1, new ExpansionPurchaseMessage
+                {
+                    PredictionId = id,
+                    Kind = kind,
+                }),
+                () => WithPrediction(replay),
+                () => WithPrediction(() =>
+                    ExpansionInterop.RollbackState(capture.Manager, capture.Snapshot)));
+        }
+
+        private static void WithPrediction(Action action)
+        {
+            _applyingPrediction++;
+            try
+            {
+                action();
+            }
+            finally
+            {
+                _applyingPrediction--;
+            }
         }
 
         [HarmonyPatch(typeof(ExpansionShopUIScreen), "EvaluateCartCheckout")]
         private static class RoomCheckoutPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(bool isShopB)
+            private static void Prefix(ExpansionShopUIScreen __instance, float totalCost, int index,
+                bool isShopB, out PurchaseCapture __state)
             {
-                if (ExpansionInterop.ApplyingAuthoritativeState)
+                __state = Capture(totalCost, index, isShopB);
+                // EvaluateCartCheckout queues the vanilla ReduceCoin/AddShopExp below. The host
+                // owns that debit and grants the XP when it applies the ExpansionPurchaseMessage,
+                // so suppress the Hud economy observer for the vanilla events this call produces.
+                if (__state != null)
+                    EconomyActionScope.Enter();
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ExpansionShopUIScreen __instance, float totalCost, int index,
+                bool isShopB, PurchaseCapture __state)
+            {
+                if (__state == null)
                 {
-                    return true;
+                    return;
                 }
 
-                return Send(isShopB ? (byte)1 : (byte)0);
+                // EvaluateCartCheckout is a no-op unless the screen's active tab matches isShopB,
+                // and a failed affordability check mutates nothing. Only a real count change is the
+                // purchase the host must resolve.
+                var kind = isShopB ? (byte)1 : (byte)0;
+                var changed = kind == 0
+                    ? CPlayerData.m_UnlockRoomCount != __state.Rooms
+                    : CPlayerData.m_UnlockWarehouseRoomCount != __state.WarehouseRooms;
+                if (!changed)
+                {
+                    return;
+                }
+
+                Observe(__state, kind, () => __instance.EvaluateCartCheckout(__state.TotalCost,
+                    __state.Index, __state.IsShopB));
+            }
+
+            [HarmonyFinalizer]
+            private static void Finalizer(PurchaseCapture __state)
+            {
+                if (__state != null)
+                    EconomyActionScope.Exit();
             }
         }
 
@@ -263,15 +367,33 @@ namespace CardShopCoop.Modules.Expansion
         private static class LotBCheckoutPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix()
+            private static void Prefix(ExpansionShopUIScreen __instance, out PurchaseCapture __state)
             {
-                if (ExpansionInterop.ApplyingAuthoritativeState
-                    || CPlayerData.m_IsWarehouseRoomUnlocked)
+                __state = Capture(0f, 0, true);
+                // OnPressUnlockShopB queues the vanilla ReduceCoin/AddShopExp. The host owns that
+                // debit and grants the XP through the ExpansionPurchaseMessage, so suppress the Hud
+                // economy observer for the vanilla events this call produces.
+                if (__state != null)
+                    EconomyActionScope.Enter();
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ExpansionShopUIScreen __instance, PurchaseCapture __state)
+            {
+                if (__state == null
+                    || CPlayerData.m_IsWarehouseRoomUnlocked == __state.WarehouseUnlocked)
                 {
-                    return true;
+                    return;
                 }
 
-                return Send(2);
+                Observe(__state, 2, () => __instance.OnPressUnlockShopB());
+            }
+
+            [HarmonyFinalizer]
+            private static void Finalizer(PurchaseCapture __state)
+            {
+                if (__state != null)
+                    EconomyActionScope.Exit();
             }
         }
 

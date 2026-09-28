@@ -16,8 +16,8 @@ namespace CardShopCoop.Modules.Prediction
     ///   1. client: register the optimistic apply and its inverse around the local action;
     ///   2. host:   call <see cref="Admit"/> (or <see cref="Resolve"/>) with the authoritative
     ///              usage and capacity, or <see cref="Reject"/> when its own validation fails;
-    ///   3. client: <see cref="PredictionApi.ApplyAuthoritative"/> the accepted host delta, or
-    ///              <see cref="PredictionApi.ConfirmSuperseded"/> when the optimistic state is
+    ///   3. client: <see cref="PredictionApi.AckOrApply"/> the accepted host delta, or
+    ///              <see cref="PredictionApi.Ack"/> when the optimistic state is
     ///              already exactly the accepted result.
     /// </summary>
     internal static class PredictionHost

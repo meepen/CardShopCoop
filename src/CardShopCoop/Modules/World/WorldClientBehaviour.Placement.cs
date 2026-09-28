@@ -5,7 +5,6 @@ using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using HarmonyLib;
-using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.World
@@ -96,7 +95,7 @@ namespace CardShopCoop.Modules.World
         {
             if (_pendingDeltas.TryGetValue(key, out var previous))
             {
-                PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                PredictionApi.Ack(previous.PredictionId);
                 _pendingDeltas.Remove(key);
             }
         }
@@ -176,8 +175,7 @@ namespace CardShopCoop.Modules.World
             }
 
             if (message.Operation != PlacementDeltaMessage.Remove
-                && PlacementMoveState.ResolveObjectByKey(message.Entity.Key) == null
-                && !CanFindCandidate(message.Entity)
+                && !CanResolveStableKey(message.Entity)
                 && !CanMaterialize(message.Entity))
             {
                 return false;
@@ -189,7 +187,7 @@ namespace CardShopCoop.Modules.World
                 // The host applies the exact Move entry the guest sent and stamps the prediction
                 // id (a stale intent is rejected via a prediction rollback), so this delta confirms
                 // the move. Reconciling would snap the piece back to its pre-move pose first.
-                PredictionApi.ApplyConfirmed(message.PredictionId, () =>
+                PredictionApi.AckOrApply(message.PredictionId, () =>
                 {
                     if (!PlacementEntityState.Apply(message))
                     {
@@ -212,7 +210,7 @@ namespace CardShopCoop.Modules.World
         {
             var key = message.Entity.Key;
             if (_pendingDeltas.TryGetValue(key, out var previous))
-                PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                PredictionApi.Ack(previous.PredictionId);
             _pendingDeltas[key] = message;
         }
 
@@ -223,56 +221,50 @@ namespace CardShopCoop.Modules.World
             => entry != null && entry.IsBoxed && entry.Type != PlacementInterop.NoType
                 && (entry.Key >> 24) != PlacementApi.DecorationKind;
 
-        private static bool CanFindCandidate(PlacementMoveEntry entry)
+        /// <summary>True when a delta names an object this peer already holds under the stable key
+        /// the host assigned. A key that does not resolve can only be applied by materializing the
+        /// exact object the key names; there is no same-type or nearby adoption.</summary>
+        private static bool CanResolveStableKey(PlacementMoveEntry entry)
+            => entry != null && PlacementMoveState.ResolveObjectByKey(entry.Key) != null;
+
+        /// <summary>Observe the game's own PlaceMovedObject after it ran. Vanilla only clears the
+        /// moving flag and performs the place when its own validity check passed; an object still
+        /// moving means the aim was invalid and nothing happened. A placement-owned object this
+        /// peer started to move registers exactly one post-hoc prediction for the change the game
+        /// already made.</summary>
+        private void ObserveMoveIntent(InteractableObject obj)
         {
-            var list = PlacementInterop.GetList(PlacementInterop.FindShelfManager(),
-                entry.Key >> 24);
-            for (var i = 0; list != null && i < list.Count; i++)
+            if (obj == null || obj.GetIsMovingObject())
             {
-                if (list[i] is InteractableObject obj
-                    && !PlacementIdentity.IsIdentified(obj)
-                    && PlacementInterop.TypeIdOf(obj) == entry.Type)
-                {
-                    return true;
-                }
+                return;
             }
 
-            return false;
-        }
-
-        private bool CaptureMoveIntent(InteractableObject obj)
-        {
-            if (_applyingState != 0 || PredictionApi.IsReconciling || obj == null
-                || !_context.InGame())
+            // Our own apply/replay drives PlaceMovedObject through the game path; it must not
+            // register a second prediction or release a hold that is already gone.
+            if (_applyingState != 0 || PredictionApi.IsReconciling)
             {
-                return true;
+                return;
             }
 
-            var kind = PlacementInterop.FindKind(obj);
-            if (kind < 0)
+            // The local move ended (placed or otherwise): release the shared hold so observers
+            // stop the preview before the authoritative delta follows.
+            _placementHold?.LocalEnded(obj);
+
+            if (!_context.InGame() || !ReferenceEquals(_movingObject, obj) || _movingBefore == null)
             {
-                // Not a placement-owned object (a packaging box being placed, a container, ...).
-                // Its own channel owns it, so let vanilla PlaceMovedObject finish. Blocking here
-                // left a box the player dropped with the place key stuck in moving mode forever.
-                return true;
+                // Not a move this peer started through the placement channel (a hold mirror, a
+                // remote apply, or a hold we lost). Nothing to predict.
+                _movingObject = null;
+                _movingBefore = null;
+                return;
             }
 
-            if (!PlacementApi.TryMakeObjectKey(kind, obj, out var key))
-            {
-                CoopPlugin.Log.LogWarning("placement: blocked move without a stable object identity");
-                return false;
-            }
-
-            var after = PlacementEntityState.Capture(obj, key).ToEntry();
-            // PlaceMovedObject always clears m_IsBoxedUp, but this prefix runs before its body, so
-            // Capture still reports the object as boxed when it is being unboxed. Record the
-            // post-place state or the host keeps it boxed and republishes a boxed delta, which
-            // makes the client re-box the furniture instead of placing it.
-            after.IsBoxed = false;
-            after.BoxedPos = Vector3.zero;
-            after.BoxedRot = Quaternion.identity;
-            var before = ReferenceEquals(_movingObject, obj) && _movingBefore != null
-                ? _movingBefore : after;
+            // The game already placed the object, so its settled state is the post-action state
+            // (unboxed with the final pose); the prediction only records how to redo and undo it.
+            var after = PlacementEntityState.Capture(obj, _movingBefore.Key).ToEntry();
+            var before = _movingBefore;
+            _movingObject = null;
+            _movingBefore = null;
             PredictionApi.Predict(
                 PredictionScope,
                 predictionId => _context.Send(1, new PlacementMoveIntentMessage
@@ -280,46 +272,27 @@ namespace CardShopCoop.Modules.World
                     PredictionId = predictionId,
                     Move = after,
                 }),
-                () =>
-                {
-                    _applyingState++;
-                    try
-                    {
-                        if (!PlacementMoveState.Apply(after, true))
-                        {
-                            throw new InvalidOperationException(
-                                "predicted placement move could not be applied");
-                        }
-                    }
-                    finally
-                    {
-                        _applyingState--;
-                    }
-                },
-                () =>
-                {
-                    _applyingState++;
-                    try
-                    {
-                        PlacementMoveState.Apply(before, false);
-                    }
-                    finally
-                    {
-                        _applyingState--;
-                    }
-                });
-            _movingObject = null;
-            _movingBefore = null;
-            return false;
+                () => ApplyMovePrediction(after, true),
+                () => ApplyMovePrediction(before, false));
         }
 
-        private void CaptureMoveStart(InteractableObject obj)
+        /// <summary>Runs a recorded move through the game's own placement path: redo on replay of a
+        /// surviving prediction, undo on a rollback. Kept out of the prediction closure so both
+        /// directions share the single game-path helper.</summary>
+        private void ApplyMovePrediction(PlacementMoveEntry entry, bool settle)
         {
-            if (_applyingState == 0 && obj != null
-                && PlacementApi.TryMakeObjectKey(PlacementInterop.FindKind(obj), obj, out var key))
+            _applyingState++;
+            try
             {
-                _movingObject = obj;
-                _movingBefore = PlacementEntityState.Capture(obj, key).ToEntry();
+                if (!PlacementMoveState.Apply(entry, settle) && settle)
+                {
+                    throw new InvalidOperationException(
+                        "predicted placement move could not be applied");
+                }
+            }
+            finally
+            {
+                _applyingState--;
             }
         }
 
@@ -338,8 +311,10 @@ namespace CardShopCoop.Modules.World
 
         private void InstallPlacementPatches()
         {
-            Patch(typeof(InteractableObject), "StartMoveObject", nameof(MoveStartPrefix), null);
-            Patch(typeof(InteractableObject), "PlaceMovedObject", nameof(MoveIntentPrefix), null);
+            Patch(typeof(InteractableObject), "StartMoveObject", nameof(MoveStartPrefix),
+                nameof(MoveStartPostfix));
+            Patch(typeof(InteractableObject), "PlaceMovedObject", null,
+                nameof(MoveIntentPostfix));
             Patch(typeof(InteractableObject), "OnDestroyed", null,
                 nameof(InteractableObjectDestroyedPostfix));
 
@@ -390,41 +365,52 @@ namespace CardShopCoop.Modules.World
                 postfix: postfix == null ? null : new HarmonyMethod(typeof(WorldClientBehaviour), postfix));
         }
 
-        public static bool MoveStartPrefix(InteractableObject __instance)
+        /// <summary>Capture-only prefix: snapshot the pre-move pose while the object still owns its
+        /// placement identity. The game performs StartMoveObject in full; the postfix observes
+        /// whether the move actually started and takes the hold.</summary>
+        public static void MoveStartPrefix(InteractableObject __instance,
+            out PlacementMoveEntry __state)
         {
-            if (_instance == null)
+            __state = null;
+            if (_instance == null || __instance == null || _instance._applyingState != 0)
             {
-                return true;
+                return;
             }
 
-            if (_instance._placementHold != null && !_instance._placementHold.IsAllowed(__instance))
+            if (PlacementApi.TryMakeObjectKey(PlacementInterop.FindKind(__instance), __instance,
+                out var key))
             {
-                return false;
+                __state = PlacementEntityState.Capture(__instance, key).ToEntry();
             }
-
-            _instance.CaptureMoveStart(__instance);
-            _instance._placementHold?.LocalStarted(__instance);
-            return true;
         }
 
-        public static bool MoveIntentPrefix(InteractableObject __instance)
+        public static void MoveStartPostfix(InteractableObject __instance,
+            PlacementMoveEntry __state)
         {
-            if (_instance == null)
+            if (_instance == null || __instance == null || !__instance.GetIsMovingObject())
             {
-                return true;
+                // Vanilla StartMoveObject only enters move mode when the object is pickup-movable;
+                // if it did not start, there is no hold to take and nothing to observe.
+                return;
             }
 
-            // Vanilla only performs the placement (and clears the moving flag) when its own
-            // validity check passed. If it cannot place, do not release the shared hold or send a
-            // placement: the mover keeps the ghost and observers keep the preview.
-            if (__instance != null && !PlacementInterop.ReadMoveValidity(__instance))
+            if (__state != null)
             {
-                return true;
+                _instance._movingObject = __instance;
+                _instance._movingBefore = __state;
             }
 
-            _instance._placementHold?.LocalEnded(__instance);
-            return _instance.CaptureMoveIntent(__instance);
+            if (_instance._placementHold?.LocalStarted(__instance) == false)
+            {
+                // Another player owns the hold; LocalStarted unwound the vanilla preview through
+                // the game's exit path, so do not track a move this peer does not own.
+                _instance._movingObject = null;
+                _instance._movingBefore = null;
+            }
         }
+
+        public static void MoveIntentPostfix(InteractableObject __instance)
+            => _instance?.ObserveMoveIntent(__instance);
 
         public static void ShelfInitPostfix()
         {
@@ -453,7 +439,7 @@ namespace CardShopCoop.Modules.World
         private void ClearPendingDeltas()
         {
             foreach (var delta in _pendingDeltas.Values)
-                PredictionApi.ConfirmSuperseded(delta.PredictionId);
+                PredictionApi.Ack(delta.PredictionId);
             _pendingDeltas.Clear();
         }
     }

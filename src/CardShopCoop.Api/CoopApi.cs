@@ -29,10 +29,10 @@ namespace CardShopCoop.Api
         {
             get;
         }
-        Guid Predict(string scope, Action<Guid> send, Action apply, Action undo, bool applyLocally);
-        void ApplyAuthoritative(Guid predictionId, Action apply);
-        void ApplyConfirmed(Guid predictionId, Action apply);
-        void ConfirmSuperseded(Guid predictionId);
+        Guid Predict(string scope, Action<Guid> send, Action apply, Action undo);
+        void Ack(Guid predictionId);
+        void AckOrApply(Guid predictionId, Action apply);
+        void Confirm(Guid predictionId, Action apply);
         bool IsPending(Guid predictionId);
         void Rollback(ICoopContext context, int connectionId, Guid predictionId);
     }

@@ -701,7 +701,7 @@ namespace CardShopCoop.Net.Protocol
             // the optional Steamworks reference is confined to transport infrastructure. A
             // caller-supplied assembly never receives this exception, so it remains fail-fast.
             if (assembly != typeof(MessageRegistry).Assembly
-                || !(error is FileNotFoundException missing))
+                || error is not FileNotFoundException missing)
             {
                 return false;
             }

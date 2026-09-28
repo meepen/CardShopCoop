@@ -592,7 +592,7 @@ namespace CardShopCoop.Net.Datagrams
             // be propagating when the peer's P2P link first reports Connecting, so a Connecting
             // that does not yet read as a member is accepted provisionally and only rejected if it
             // is still not a member at the later Connected status.
-            bool authorized = true;
+            var authorized = true;
             if (_isHost
                 && (info.m_eState
                         == ESteamNetworkingConnectionState.k_ESteamNetworkingConnectionState_Connecting

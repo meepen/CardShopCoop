@@ -69,7 +69,7 @@ namespace CardShopCoop.Modules.Light
                 return;
 
             if (_pendingState != null)
-                PredictionApi.ConfirmSuperseded(_pendingState.PredictionId);
+                PredictionApi.Ack(_pendingState.PredictionId);
             _pendingState = message;
             TryApplyPending();
         }
@@ -85,30 +85,31 @@ namespace CardShopCoop.Modules.Light
             var pending = _pendingState;
             // The host applies the guest's absolute requested bool and echoes it, so this delta
             // confirms the toggle; reconciling would flip the switch back first.
-            PredictionApi.ApplyConfirmed(pending.PredictionId,
+            PredictionApi.AckOrApply(pending.PredictionId,
                 () => LightSwitchState.Apply(pending.IsActive));
             _pendingState = null;
         }
 
-        private bool HandleLocalLightSwitchClick()
+        /// <summary>Observes the local switch the game already toggled and records the change as
+        /// one post-hoc prediction. The game owns the toggle (the client only predicts the shared
+        /// shop-light state for the host to confirm), so a rejection rolls the switch back through
+        /// the same game surface.</summary>
+        private void ObserveToggle(bool armed, bool prior)
         {
-            if (_context == null || !_joined || !_context.InGame())
-                return true;
-            if (!LightSwitchState.TryGet(out var current))
-                return false;
+            if (!armed || _context == null || !_joined || !_context.InGame())
+                return;
+            if (!LightSwitchState.TryGet(out var after) || after == prior)
+                return;
 
-            var prior = current;
-            var predicted = !prior;
             PredictionApi.Predict(
                 PredictionScope,
                 predictionId => _context.Send(1, new LightSwitchIntentMessage
                 {
                     PredictionId = predictionId,
-                    IsActive = predicted,
+                    IsActive = after,
                 }),
-                () => LightSwitchState.Apply(predicted),
+                () => LightSwitchState.Apply(after),
                 () => LightSwitchState.Apply(prior));
-            return false;
         }
 
         private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _)
@@ -158,9 +159,29 @@ namespace CardShopCoop.Modules.Light
         [HarmonyPatch(typeof(InteractableLightSwitch), "OnMouseButtonUp")]
         private static class LightSwitchPatch
         {
+            private struct ToggleState
+            {
+                public bool Armed;
+                public bool Prior;
+            }
+
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static bool Prefix() => _active == null || _active.HandleLocalLightSwitchClick();
+            private static void Prefix(out ToggleState __state)
+            {
+                __state = default;
+                var active = _active;
+                if (active == null || !active._joined || active._context == null
+                    || !active._context.InGame())
+                    return;
+                if (!LightSwitchState.TryGet(out var prior))
+                    return;
+                __state = new ToggleState { Armed = true, Prior = prior };
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(ToggleState __state)
+                => _active?.ObserveToggle(__state.Armed, __state.Prior);
         }
 
         [HarmonyPatch(typeof(LightManager), "Awake")]

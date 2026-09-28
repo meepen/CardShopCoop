@@ -36,6 +36,9 @@ namespace CardShopCoop.Modules.Purchasing
         public bool IsBigBox;
         public string Name = "";
         public int Count;
+        /// <summary>Client-assigned stable ids for the physical boxes this line's checkout spawns,
+        /// in spawn order. The host binds each delivered box to the same id instead of allocating.</summary>
+        public List<Guid> BoxNetworkIds = new();
     }
 
     [NetworkMessage]

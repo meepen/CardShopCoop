@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Modules.Npc;
 using CardShopCoop.Runtime;
@@ -33,6 +35,43 @@ namespace CardShopCoop.Modules.Trade
             public bool ThinkingSent;
             public bool AcceptedShown;
             public bool ScreenOpen;
+            public AcceptEffect Effect;
+        }
+
+        /// <summary>Pre-action state carried from a capture-only prefix (before vanilla mutates the
+        /// offer) to the postfix that registers the one post-hoc prediction.</summary>
+        private sealed class IntentCapture
+        {
+            public TradeIntentOperation Operation;
+            public float Price;
+            public PredictionFrame Frame;
+            public TradeOfferState State;
+            public CustomerTradeData AcceptBefore;
+
+            /// <summary>The card-forwarding guard opened for the duration of the vanilla accept,
+            /// disposed from the Harmony finalizer.</summary>
+            public IDisposable CardForwarding;
+
+            /// <summary>True while the wallet EconomyActionScope for this accept is entered.</summary>
+            public bool EconomyScoped;
+        }
+
+        /// <summary>The card/coin movement a completed accept produced, captured before vanilla
+        /// so the trade prediction can replay (<see cref="ApplyPrediction"/>) and reverse
+        /// (<see cref="UndoPrediction"/>) it. Null for a kept or walked-away outcome.</summary>
+        private sealed class AcceptEffect
+        {
+            public CardData Received;
+            public CardData Given;
+            public float CoinSpent;
+        }
+
+        /// <summary>The post-action result of the actor's own vanilla accept: the outcome and, for
+        /// a kept offer, the resulting state the host must record and rebroadcast.</summary>
+        private sealed class AcceptResult
+        {
+            public TradeOutcome Outcome;
+            public TradeOfferState State;
         }
 
         private const string PredictionScope = "trade";
@@ -112,7 +151,7 @@ namespace CardShopCoop.Modules.Trade
         private void ClearPendingDeltas()
         {
             foreach (var delta in _pendingDeltas.Values)
-                PredictionApi.ConfirmSuperseded(delta.PredictionId);
+                PredictionApi.Ack(delta.PredictionId);
             _pendingDeltas.Clear();
         }
 
@@ -226,7 +265,7 @@ namespace CardShopCoop.Modules.Trade
         private void DeferDelta(TradeOfferDeltaMessage message)
         {
             if (_pendingDeltas.TryGetValue(message.Counter, out var previous))
-                PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                PredictionApi.Ack(previous.PredictionId);
             _pendingDeltas[message.Counter] = message;
         }
 
@@ -303,7 +342,12 @@ namespace CardShopCoop.Modules.Trade
 
         private void ApplyOfferDelta(TradeOfferDeltaMessage message)
         {
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            // Confirm retires the actor's own pending prediction AND always folds the host's
+            // authoritative delta: the delta must run even when it confirms our own prediction, or
+            // _awaitingPrediction (and the terminal flags) would stay set for a kept outcome and
+            // refuse the next Accept/Decline/Think locally. A remote or host-local delta takes the
+            // same apply path.
+            PredictionApi.Confirm(message.PredictionId,
                 () => ApplyOfferDeltaAuthoritative(message));
         }
 
@@ -363,7 +407,12 @@ namespace CardShopCoop.Modules.Trade
                     break;
                 case TradeOutcome.Haggle:
                 case TradeOutcome.Refused:
+                    // The offer is kept, so the actor's optimistic terminal flags must be cleared
+                    // along with _awaitingPrediction or the next Decline (which checks
+                    // _terminalSent) stays blocked. These are already false for a remote client.
                     _awaitingPrediction = false;
+                    _terminalSent = false;
+                    _acceptedShown = false;
                     TradeInterop.OpenData(offer.Carrier, TradeInterop.DataFromState(offer.State));
                     break;
                 case TradeOutcome.None:
@@ -561,7 +610,11 @@ namespace CardShopCoop.Modules.Trade
         [MessageHandler(typeof(TradeSessionMessage))]
         private void HandleSession(MessageContext context, TradeSessionMessage message)
         {
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            // AckOrApply: the only state this folds is _claimAccepted, which BeginSession already
+            // set optimistically for the actor (and the host only ever sends Accepted=true, with
+            // refusals arriving as a separate rollback), so retiring without replaying is correct.
+            // A remote peer's session has no pending id and still applies the claim.
+            PredictionApi.AckOrApply(message.PredictionId, () =>
             {
                 if (message.Accepted)
                 {
@@ -600,10 +653,22 @@ namespace CardShopCoop.Modules.Trade
             _thinkingSent = false;
             _acceptedShown = false;
             _stopHandled = false;
-            PredictIntent(TradeIntentOperation.Open, 0f);
+            // OnMousePress already opened the screen, so the game owns the open: register one
+            // post-hoc prediction for it and claim the session optimistically on top of the game
+            // change (the claim is client bookkeeping, not a game mutation).
+            if (PredictIntentObserved(TradeIntentOperation.Open, 0f))
+            {
+                _claimAccepted = true;
+            }
         }
 
-        private bool PredictIntent(TradeIntentOperation operation, float price)
+        /// <summary>Records one trade intent the game already performed (Open), so the prediction
+        /// only stores the replay/undo closures and never mutates anything now.</summary>
+        private bool PredictIntentObserved(TradeIntentOperation operation, float price)
+            => RegisterIntent(operation, price, PredictionApi.Predict);
+
+        private bool RegisterIntent(TradeIntentOperation operation, float price,
+            Func<string, Action<Guid>, Action, Action, Guid> register)
         {
             var offer = PendingOffer();
             if (!_context.InGame() || offer?.State == null || _pendingCounter < 0)
@@ -618,16 +683,185 @@ namespace CardShopCoop.Modules.Trade
             }
 
             var frame = CapturePredictionFrame(offer);
-            PredictionApi.Predict(
-                PredictionScope,
+            register(PredictionScope,
                 predictionId => SendIntent(predictionId, operation, price, offer.State),
                 () => ApplyPrediction(operation),
                 () => UndoPrediction(frame));
             return true;
         }
 
+        /// <summary>Capture-only prefix for Accept/Decline/Think: snapshot the offer and UI flags
+        /// before vanilla runs. The flags are set here (before the game method) so the screen's own
+        /// close/stop path does not send a competing Close intent; the postfix then registers the
+        /// one post-hoc prediction. The game already applied the local change, so the prediction's
+        /// apply is only used to replay after an earlier rollback.</summary>
+        private IntentCapture BeginIntent(TradeIntentOperation operation, float price,
+            CustomerTradeData acceptBefore = null)
+        {
+            var offer = PendingOffer();
+            if (!_context.InGame() || offer?.State == null || _pendingCounter < 0)
+            {
+                return null;
+            }
+
+            if (offer.State.Trading && (operation == TradeIntentOperation.Accept
+                || operation == TradeIntentOperation.Think))
+            {
+                price = 0f;
+            }
+
+            var frame = CapturePredictionFrame(offer);
+            MarkPredicted(operation);
+            return new IntentCapture
+            {
+                Operation = operation,
+                Price = price,
+                Frame = frame,
+                State = offer.State,
+                AcceptBefore = acceptBefore,
+            };
+        }
+
+        private void EndIntent(IntentCapture capture)
+        {
+            if (capture == null)
+            {
+                return;
+            }
+
+            if (capture.Operation == TradeIntentOperation.Accept)
+            {
+                var result = BuildAcceptResult(capture);
+                if (result == null)
+                {
+                    // Vanilla performed no change (insufficient funds or a missing trade card),
+                    // so there is nothing for the host to accept or roll back. Undo only the
+                    // optimistic bookkeeping the prefix set; the screen is already unchanged.
+                    RestoreIntent(capture.Frame);
+                    return;
+                }
+
+                capture.Frame.Effect = result.Outcome == TradeOutcome.Accepted
+                    ? BuildAcceptEffect(capture)
+                    : null;
+                PredictionApi.Predict(PredictionScope,
+                    predictionId => SendIntent(predictionId, capture.Operation, capture.Price,
+                        capture.State, result.Outcome, result.State, capture.Frame.Effect),
+                    () => ApplyPrediction(capture.Operation, capture.Frame.Effect),
+                    () => UndoPrediction(capture.Frame));
+                return;
+            }
+
+            PredictionApi.Predict(PredictionScope,
+                predictionId => SendIntent(predictionId, capture.Operation, capture.Price,
+                    capture.State),
+                () => ApplyPrediction(capture.Operation),
+                () => UndoPrediction(capture.Frame));
+        }
+
+        /// <summary>The card/coin movement a completed accept performed. Vanilla already applied
+        /// it through its own methods; this only records how to replay and reverse it so the one
+        /// trade prediction can fully revert on a host reject.</summary>
+        private static AcceptEffect BuildAcceptEffect(IntentCapture capture)
+        {
+            return new AcceptEffect
+            {
+                Received = CopyCard(capture.State.CardL),
+                Given = capture.State.Trading ? CopyCard(capture.State.CardR) : null,
+                CoinSpent = capture.State.Trading ? 0f : capture.Price,
+            };
+        }
+
+        /// <summary>Reads the result the actor's own vanilla accept already produced. The host
+        /// records and broadcasts this instead of re-running the trade method, so the mint/RNG/
+        /// coin spend the actor performed is the single application. Returns null when vanilla
+        /// accepted nothing and changed nothing, which the caller rolls back locally.</summary>
+        private AcceptResult BuildAcceptResult(IntentCapture capture)
+        {
+            var screen = TradeInterop.Screen;
+            if (TradeInterop.HasAccepted(screen))
+            {
+                return new AcceptResult { Outcome = TradeOutcome.Accepted };
+            }
+
+            if (!TradeInterop.IsScreenOpen(screen))
+            {
+                // Vanilla closes the screen only when the haggling ran out of declines, so the
+                // customer walked away and the offer must be removed.
+                return new AcceptResult { Outcome = TradeOutcome.WalkedAway };
+            }
+
+            var after = TradeInterop.Capture(screen);
+            var before = capture.AcceptBefore;
+            var askChanged = before != null
+                && !Mathf.Approximately(after.m_SellCardAskPrice, before.m_SellCardAskPrice);
+            var declinesChanged = before != null
+                && after.m_MaxDeclineCount != before.m_MaxDeclineCount;
+            if (!askChanged && !declinesChanged)
+            {
+                return null;
+            }
+
+            return new AcceptResult
+            {
+                Outcome = askChanged ? TradeOutcome.Haggle : TradeOutcome.Refused,
+                State = ApplyDataToState(capture.State, after),
+            };
+        }
+
+        /// <summary>Reverts only the session flags the Accept prefix set, leaving the screen and
+        /// offer state untouched (vanilla already left them unchanged).</summary>
+        private void RestoreIntent(PredictionFrame frame)
+        {
+            _claimAccepted = frame.ClaimAccepted;
+            _terminalSent = frame.TerminalSent;
+            _thinkingSent = frame.ThinkingSent;
+            _acceptedShown = frame.AcceptedShown;
+            _awaitingPrediction = false;
+        }
+
+        private static TradeOfferState ApplyDataToState(TradeOfferState baseState,
+            CustomerTradeData data)
+        {
+            var state = CloneState(baseState);
+            state.Trading = data.m_IsTrading;
+            state.CardL = CopyCard(data.m_CardData_L);
+            state.CardR = CopyCard(data.m_CardData_R);
+            state.Price = data.m_SellCardAskPrice;
+            state.MarketPrice = data.m_SellCardMarketPrice;
+            state.PriceSet = data.m_PriceSet;
+            state.LastPriceSet = data.m_LastPriceSet;
+            state.MaxDeclineCount = data.m_MaxDeclineCount;
+            state.DeclineCount = data.m_DeclineCount;
+            return state;
+        }
+
+        /// <summary>Mirrors vanilla's local UI result into the module's session flags. The game
+        /// already performed the mutation, so only bookkeeping is recorded here.</summary>
+        private void MarkPredicted(TradeIntentOperation operation)
+        {
+            switch (operation)
+            {
+                case TradeIntentOperation.Accept:
+                    _awaitingPrediction = true;
+                    _terminalSent = true;
+                    _acceptedShown = true;
+                    break;
+                case TradeIntentOperation.Decline:
+                    _awaitingPrediction = true;
+                    _terminalSent = true;
+                    break;
+                case TradeIntentOperation.Think:
+                    _awaitingPrediction = true;
+                    _claimAccepted = false;
+                    _thinkingSent = true;
+                    break;
+            }
+        }
+
         private void SendIntent(Guid predictionId, TradeIntentOperation operation, float price,
-            TradeOfferState state)
+            TradeOfferState state, TradeOutcome result = TradeOutcome.None,
+            TradeOfferState resultState = null, AcceptEffect effect = null)
         {
             _context.Send(1, new TradeIntentMessage
             {
@@ -638,6 +872,11 @@ namespace CardShopCoop.Modules.Trade
                 CustomerGeneration = state.CustomerGeneration,
                 OfferNonce = state.OfferNonce,
                 Price = price,
+                Result = result,
+                ResultState = resultState,
+                CardReceived = effect?.Received,
+                CardRemoved = effect?.Given,
+                CoinSpent = effect?.CoinSpent ?? 0f,
             });
         }
 
@@ -652,7 +891,7 @@ namespace CardShopCoop.Modules.Trade
                 ScreenOpen = TradeInterop.IsScreenOpen(TradeInterop.Screen),
             };
 
-        private void ApplyPrediction(TradeIntentOperation operation)
+        private void ApplyPrediction(TradeIntentOperation operation, AcceptEffect effect = null)
         {
             switch (operation)
             {
@@ -677,10 +916,71 @@ namespace CardShopCoop.Modules.Trade
                     ClosePredictedScreen();
                     break;
             }
+
+            if (effect != null)
+            {
+                ApplyAcceptEffect(effect);
+            }
+        }
+
+        /// <summary>Replays the card/coin movement of an accepted trade through the game's own
+        /// methods. Used only after an earlier prediction on the key was undone; the card helper
+        /// sets the remote-apply guard so the observer does not forward a second time, and the
+        /// wallet event is skipped by the Hud observer while reconciliation is running.</summary>
+        private static void ApplyAcceptEffect(AcceptEffect effect)
+        {
+            if (effect.Received != null)
+            {
+                WorldCardInteraction.ApplyPredictedCardDelta(effect.Received, 1, true);
+            }
+
+            if (effect.Given != null)
+            {
+                WorldCardInteraction.ApplyPredictedCardDelta(effect.Given, 1, false);
+            }
+
+            if (effect.CoinSpent > 0f)
+            {
+                CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(effect.CoinSpent));
+            }
+
+            if (effect.Received != null || effect.Given != null)
+            {
+                WorldClientBehaviour.ActiveCards?.NotifyCardsChanged();
+            }
+        }
+
+        /// <summary>Reverses the card/coin movement of an accepted trade, newest mutation first.</summary>
+        private static void UndoAcceptEffect(AcceptEffect effect)
+        {
+            if (effect.Given != null)
+            {
+                WorldCardInteraction.ApplyPredictedCardDelta(effect.Given, 1, true);
+            }
+
+            if (effect.Received != null)
+            {
+                WorldCardInteraction.ApplyPredictedCardDelta(effect.Received, 1, false);
+            }
+
+            if (effect.CoinSpent > 0f)
+            {
+                CEventManager.QueueEvent(new CEventPlayer_AddCoin(effect.CoinSpent, true));
+            }
+
+            if (effect.Received != null || effect.Given != null)
+            {
+                WorldClientBehaviour.ActiveCards?.NotifyCardsChanged();
+            }
         }
 
         private void UndoPrediction(PredictionFrame frame)
         {
+            if (frame.Effect != null)
+            {
+                UndoAcceptEffect(frame.Effect);
+            }
+
             var offer = PendingOffer();
             if (offer != null && frame.State != null)
             {
@@ -792,6 +1092,10 @@ namespace CardShopCoop.Modules.Trade
             var offer = PendingOffer();
             if (sendClose && !_terminalSent && !_thinkingSent && !_awaitingPrediction && offer != null)
             {
+                // A Close is a fire-and-forget notification: the host only clears the offer's owner
+                // and never resolves or rejects it, so there is no authoritative state to roll back
+                // and no prediction is registered (a registered one could never be retired). The
+                // non-empty id only satisfies the host's sender validation.
                 SendIntent(Guid.NewGuid(), TradeIntentOperation.Close, 0f, offer.State);
             }
 
@@ -878,47 +1182,55 @@ namespace CardShopCoop.Modules.Trade
         [HarmonyPatch(typeof(Customer), "OnPressStopInteract")]
         private static class CustomerStopPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(Customer __instance)
+            // The carrier customer is host-owned, but the client now plays vanilla: the game's own
+            // stop clears the carrier's trade data and resumes it. The postfix finishes the local
+            // session and sends one fire-and-forget Close intent for the host to resolve. A Close
+            // has no authoritative result to roll back, so it is not a prediction.
+            [HarmonyPostfix]
+            private static void Postfix(Customer __instance)
             {
                 var client = _active;
                 if (client == null || !client.IsCarrier(__instance, out _)
                     || client._pendingCounter < 0)
                 {
-                    return true;
+                    return;
                 }
 
                 client._stopHandled = true;
-                TradeInterop.SetStoredData(__instance, null);
                 TradeInterop.RestorePlayerUi();
                 client.EndLocalSession(!client._terminalSent && !client._thinkingSent
                     && !client._awaitingPrediction);
-                return false;
             }
         }
 
         [HarmonyPatch(typeof(CustomerTradeCardScreen), "OnPressAccept")]
         private static class AcceptPatch
         {
+            // The game owns the accept: vanilla mints/takes cards, spends coins and shows the
+            // accepted panel. The prefix snapshots the session, marks the flags so the screen's
+            // close path cannot send a competing Close, and brackets the call with the card/wallet
+            // forwarding guards so the same effect is not sent to the host twice. The postfix
+            // registers one post-hoc prediction carrying the whole card + coin + offer outcome.
             [HarmonyPrefix]
-            private static bool Prefix(CustomerTradeCardScreen __instance)
+            private static void Prefix(CustomerTradeCardScreen __instance, out IntentCapture __state)
             {
+                __state = null;
                 var client = _active;
                 var offer = client?.PendingOffer();
                 if (client == null || offer == null
                     || !ReferenceEquals(TradeInterop.CurrentCustomer(__instance), offer.Carrier))
                 {
-                    return true;
+                    return;
                 }
 
                 if (TradeInterop.HasAccepted(__instance))
                 {
-                    return true;
+                    return;
                 }
 
                 if (client._awaitingPrediction || !client._claimAccepted)
                 {
-                    return false;
+                    return;
                 }
 
                 if (!TradeInterop.IsTrading(__instance) && __instance.m_SetPriceInput != null
@@ -927,65 +1239,106 @@ namespace CardShopCoop.Modules.Trade
                     __instance.OnInputTextUpdated(__instance.m_SetPriceInput.text);
                 }
 
-                SoundManager.GenericConfirm();
-                client._awaitingPrediction = client.PredictIntent(TradeIntentOperation.Accept,
-                    TradeInterop.IsTrading(__instance) ? 0f : TradeInterop.PriceSet(__instance));
-                return false;
+                __state = client.BeginIntent(TradeIntentOperation.Accept,
+                    TradeInterop.IsTrading(__instance) ? 0f : TradeInterop.PriceSet(__instance),
+                    TradeInterop.Capture(__instance));
+                if (__state == null)
+                {
+                    return;
+                }
+
+                // Vanilla still runs; only the duplicate forwarding is suppressed. The wallet
+                // observer checks EconomyActionScope at event-queue time, and the card observer
+                // checks the card guard, so neither registers a separate intent for this accept.
+                __state.EconomyScoped = true;
+                EconomyActionScope.Enter();
+                __state.CardForwarding = WorldCardInteraction.SuppressCardForwarding();
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(IntentCapture __state) => _active?.EndIntent(__state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(IntentCapture __state)
+            {
+                if (__state == null)
+                {
+                    return;
+                }
+
+                __state.CardForwarding?.Dispose();
+                __state.CardForwarding = null;
+                if (__state.EconomyScoped)
+                {
+                    __state.EconomyScoped = false;
+                    EconomyActionScope.Exit();
+                }
             }
         }
 
         [HarmonyPatch(typeof(CustomerTradeCardScreen), "OnPressDecline")]
         private static class DeclinePatch
         {
+            // Vanilla decline closes the screen, whose close path stops the host-owned customer.
+            // The prefix marks the session terminal so the close does not send a Close instead, and
+            // the postfix registers the one Decline prediction.
             [HarmonyPrefix]
-            private static bool Prefix(CustomerTradeCardScreen __instance)
+            private static void Prefix(CustomerTradeCardScreen __instance, out IntentCapture __state)
             {
+                __state = null;
                 var client = _active;
                 var offer = client?.PendingOffer();
                 if (client == null || offer == null
                     || !ReferenceEquals(TradeInterop.CurrentCustomer(__instance), offer.Carrier))
                 {
-                    return true;
+                    return;
                 }
 
-                // A session the host never accepted (an open that was rejected) has nothing to
-                // resolve; let vanilla close the screen instead of silently swallowing the click.
+                // A session the host never accepted (a rejected open) has nothing to resolve; let
+                // vanilla close it locally.
                 if (!client._claimAccepted)
                 {
-                    return true;
+                    return;
                 }
 
                 if (!client._awaitingPrediction && !client._terminalSent)
                 {
-                    client._awaitingPrediction = client.PredictIntent(TradeIntentOperation.Decline, 0f);
+                    __state = client.BeginIntent(TradeIntentOperation.Decline, 0f);
                 }
-
-                return false;
             }
+
+            [HarmonyPostfix]
+            private static void Postfix(IntentCapture __state) => _active?.EndIntent(__state);
         }
 
         [HarmonyPatch(typeof(CustomerTradeCardScreen), "OnPressLetMeThink")]
         private static class ThinkPatch
         {
+            // Vanilla Think writes the customer's trade data and resumes it; the client now plays
+            // that path. The prefix marks the session terminal and the postfix registers the one
+            // Think prediction.
             [HarmonyPrefix]
-            private static bool Prefix(CustomerTradeCardScreen __instance)
+            private static void Prefix(CustomerTradeCardScreen __instance, out IntentCapture __state)
             {
+                __state = null;
                 var client = _active;
                 var offer = client?.PendingOffer();
                 if (client == null || offer == null
                     || !ReferenceEquals(TradeInterop.CurrentCustomer(__instance), offer.Carrier))
                 {
-                    return true;
+                    return;
                 }
 
                 if (!client._awaitingPrediction && client._claimAccepted && !client._thinkingSent)
                 {
-                    var price = TradeInterop.IsTrading(__instance) ? 0f : TradeInterop.PriceSet(__instance);
-                    client._awaitingPrediction = client.PredictIntent(TradeIntentOperation.Think, price);
+                    var price = TradeInterop.IsTrading(__instance) ? 0f
+                        : TradeInterop.PriceSet(__instance);
+                    __state = client.BeginIntent(TradeIntentOperation.Think, price);
                 }
-
-                return false;
             }
+
+            [HarmonyPostfix]
+            private static void Postfix(IntentCapture __state) => _active?.EndIntent(__state);
         }
 
         [HarmonyPatch(typeof(CustomerTradeCardScreen), "OnCloseScreen")]

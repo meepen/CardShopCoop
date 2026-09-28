@@ -306,7 +306,7 @@ namespace CardShopCoop.Modules.Presence
 
             if (message.Id == _selfId)
             {
-                PredictionApi.ApplyAuthoritative(message.PredictionId,
+                PredictionApi.AckOrApply(message.PredictionId,
                     () =>
                     {
                         _service.ApplyPredictionLocalModel(message.Entry);
@@ -416,6 +416,10 @@ namespace CardShopCoop.Modules.Presence
                 }
 
                 var previous = Clone(_lastSentModel);
+                // The editor already applied this model change through the service's game path
+                // (OnLocalModelChanged runs from the service's ModelChanged event), so register the
+                // prediction post-hoc: apply/undo only replay the change through the service, and
+                // the local send record is advanced here rather than by the prediction.
                 PredictionApi.Predict(
                     "presence.model",
                     predictionId => _context.Send(1, new PresenceModelRequestMessage
@@ -435,6 +439,7 @@ namespace CardShopCoop.Modules.Presence
                         _service.ApplyPredictionLocalModel(previous);
                         _lastSentModel = Clone(previous);
                     });
+                _lastSentModel = next;
             }
             else if (_joined)
             {

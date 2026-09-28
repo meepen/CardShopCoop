@@ -277,16 +277,18 @@ namespace CardShopCoop.Modules.Bills
         [HarmonyPatch(typeof(NotEnoughResourceTextPopup), "ShowText")]
         private static class BillPopupPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(ENotEnoughResourceText __0)
+            // Feedback routing (not a state mutation): while the host replays a guest's payment,
+            // the failure popup still shows on the host (vanilla runs) and is additionally relayed
+            // to the requesting guest.
+            [HarmonyPostfix]
+            private static void Postfix(ENotEnoughResourceText __0)
             {
                 var host = _active;
                 if (host == null || host._forwardedRequester <= 0 || host._context == null)
-                    return true;
+                    return;
 
                 host._context.Send(host._forwardedRequester,
                     new BillPopupMessage { Text = (int)__0 });
-                return false;
             }
         }
     }

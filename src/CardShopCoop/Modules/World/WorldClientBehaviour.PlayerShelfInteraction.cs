@@ -1,4 +1,4 @@
-using CardShopCoop.Net;
+﻿using CardShopCoop.Net;
 using CardShopCoop.Modules.Prediction;
 using HarmonyLib;
 
@@ -22,11 +22,13 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(ShelfItemAddMessage))]
         private void HandleShelfItemAdd(MessageContext context, ShelfItemAddMessage message)
         {
-            // Our own optimistic placement already moved the real item, so confirming the
-            // prediction keeps it in place instead of undoing and respawning it.
+            // Our own optimistic placement already moved the real item, so acknowledging the
+            // prediction keeps it in place instead of undoing and respawning it. Retiring it also
+            // drops it from the derived pending-add count, so later deltas no longer treat it as
+            // outstanding.
             if (PredictionApi.IsPending(message.PredictionId))
             {
-                PredictionApi.ConfirmSuperseded(message.PredictionId);
+                PredictionApi.Ack(message.PredictionId);
                 return;
             }
 
@@ -94,7 +96,11 @@ namespace CardShopCoop.Modules.World
             if (_shelfInteraction == null)
                 return false;
 
-            WorldPrediction.ApplyAuthoritative(message,
+            // AckOrApply: the actor's optimistic add/take already moved the real item and produced
+            // the host's absolute (type, count); the host echoes that same inventory, and applying
+            // ApplyIncoming for the actor would only re-derive it (respawning generic items through
+            // ApplyState). A remote/host delta has no pending id and still applies.
+            WorldPrediction.AckOrApply(message,
                 () => _shelfInteraction.ApplyIncoming(message));
             return true;
         }
@@ -113,12 +119,11 @@ namespace CardShopCoop.Modules.World
         private static class AddItemPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(ShelfCompartment __instance, Item item, bool addToFront,
+            private static void Prefix(ShelfCompartment __instance, Item item, bool addToFront,
                 out ShelfInteraction.LocalMutation __state)
             {
                 __state = _instance == null ? default : _instance.CaptureShelfMutation(__instance,
                     true, item == null ? EItemType.None : item.GetItemType(), item);
-                return !__state.SuppressVanilla;
             }
 
             [HarmonyPostfix]
@@ -133,15 +138,26 @@ namespace CardShopCoop.Modules.World
         private static class PutItemOnShelfScopePatch
         {
             [HarmonyPrefix]
-            private static void Prefix()
+            private static void Prefix(out bool __state)
             {
-                _instance?.EnterPlayerShelfMutation();
+                __state = _instance != null;
+                if (__state)
+                {
+                    _instance.EnterPlayerShelfMutation();
+                }
             }
 
-            [HarmonyPostfix]
-            private static void Postfix()
+            /// <summary>Releases the scope from the finalizer, so a throw out of the game's own
+            /// EvaluatePutItemOnShelf still balances _playerMutationDepth. The finalizer always
+            /// runs, so the release lives here only and stays single-shot (ExitPlayerMutation
+            /// throws on an imbalanced double exit).</summary>
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
             {
-                _instance?.ExitPlayerShelfMutation();
+                if (__state)
+                {
+                    _instance?.ExitPlayerShelfMutation();
+                }
             }
         }
 
@@ -149,15 +165,22 @@ namespace CardShopCoop.Modules.World
         private static class TakeItemFromShelfScopePatch
         {
             [HarmonyPrefix]
-            private static void Prefix()
+            private static void Prefix(out bool __state)
             {
-                _instance?.EnterPlayerShelfMutation();
+                __state = _instance != null;
+                if (__state)
+                {
+                    _instance.EnterPlayerShelfMutation();
+                }
             }
 
-            [HarmonyPostfix]
-            private static void Postfix()
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
             {
-                _instance?.ExitPlayerShelfMutation();
+                if (__state)
+                {
+                    _instance?.ExitPlayerShelfMutation();
+                }
             }
         }
 
@@ -174,8 +197,8 @@ namespace CardShopCoop.Modules.World
                 }
             }
 
-            [HarmonyPostfix]
-            private static void Postfix(bool __state)
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
             {
                 if (__state)
                 {
@@ -197,8 +220,8 @@ namespace CardShopCoop.Modules.World
                 }
             }
 
-            [HarmonyPostfix]
-            private static void Postfix(bool __state)
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
             {
                 if (__state)
                 {
@@ -211,12 +234,11 @@ namespace CardShopCoop.Modules.World
         private static class RemoveItemPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(ShelfCompartment __instance, Item item,
+            private static void Prefix(ShelfCompartment __instance, Item item,
                 out ShelfInteraction.LocalMutation __state)
             {
                 __state = _instance == null ? default : _instance.CaptureShelfMutation(__instance,
                     false, item == null ? EItemType.None : item.GetItemType(), item);
-                return !__state.SuppressVanilla;
             }
 
             [HarmonyPostfix]
@@ -231,12 +253,11 @@ namespace CardShopCoop.Modules.World
         private static class TakeItemToHandPatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(ShelfCompartment __instance, bool getLastItem,
+            private static void Prefix(ShelfCompartment __instance, bool getLastItem,
                 out ShelfInteraction.LocalMutation __state)
             {
                 __state = _instance == null ? default : _instance.CaptureShelfMutation(__instance,
                     false, EItemType.None, null);
-                return !__state.SuppressVanilla;
             }
 
             [HarmonyPostfix]
@@ -245,6 +266,9 @@ namespace CardShopCoop.Modules.World
             {
                 if (__result != null)
                 {
+                    // TakeItemToHand is the one removal whose item is only known from the result,
+                    // so attach the exact removed item here before the post-hoc prediction.
+                    __state.Removed = __result;
                     _instance?.PublishShelfRemove(__instance, __state);
                 }
             }

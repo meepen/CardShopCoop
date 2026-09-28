@@ -25,6 +25,12 @@ namespace CardShopCoop.Runtime
         {
             get;
         }
+        /// <summary>Fans a host message out to every ready peer except one, using the same
+        /// admission as a broadcast. Null on contexts that predate a live transport.</summary>
+        public Action<int, INetMessage> Relay
+        {
+            get;
+        }
         public Func<IReadOnlyList<int>> ConnectionIds
         {
             get;
@@ -56,7 +62,8 @@ namespace CardShopCoop.Runtime
             Func<int, string> peerName = null,
             Action<string, float> setStatusLine = null,
             Func<bool> preloadHold = null,
-            Action<int, DisconnectInfo> disconnect = null)
+            Action<int, DisconnectInfo> disconnect = null,
+            Action<int, INetMessage> relay = null)
         {
             Messages = messages ?? throw new ArgumentNullException(nameof(messages));
             InGame = inGame ?? throw new ArgumentNullException(nameof(inGame));
@@ -67,6 +74,7 @@ namespace CardShopCoop.Runtime
             SetStatusLine = setStatusLine;
             PreloadHold = preloadHold;
             Disconnect = disconnect;
+            Relay = relay;
             PeerPresence = new PeerPresenceProvider(TimeSpan.FromSeconds(10));
         }
 

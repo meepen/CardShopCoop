@@ -23,7 +23,7 @@ namespace kcp2k
 
             // allocate an initial pool so we have fewer (if any)
             // allocations in the first few frames (or seconds).
-            for (int i = 0; i < initialCapacity; ++i)
+            for (var i = 0; i < initialCapacity; ++i)
                 objects.Push(objectGenerator());
         }
 

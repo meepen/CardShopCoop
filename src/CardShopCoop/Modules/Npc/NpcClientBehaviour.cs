@@ -52,6 +52,7 @@ namespace CardShopCoop.Modules.Npc
             _harmony = new Harmony("com.zwhit.cardshopcoop.npc.client");
             _harmony.CreateClassProcessor(typeof(CustomerManagerPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(CustomerStartPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerActivationPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerDeactivationPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(WorkerManagerPatch)).Patch();
@@ -279,9 +280,9 @@ namespace CardShopCoop.Modules.Npc
             p.PrevRenderedPos = message.Position;
             p.HoldBig = false;
             p.HoldItemType = EItemType.None;
-            p.HoldBoxNetworkId = 0;
+            p.HoldBoxNetworkId = Guid.Empty;
             p.HoldBoxOpened = false;
-            p.AppliedHeldBoxNetworkId = 0;
+            p.AppliedHeldBoxNetworkId = Guid.Empty;
             p.GrabSequence = UnsetActionSequence;
             if (p.Go != null)
             {
@@ -437,6 +438,22 @@ namespace CardShopCoop.Modules.Npc
 
         [HarmonyPatch(typeof(Customer), "Update")]
         private static class CustomerPatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix() => _active == null;
+        }
+
+        // Vanilla Customer.Start force-hides the trade prompt and the interact collider
+        // (m_InteractCollider.SetActive(false)). On the client the pool is kept inactive until a
+        // module borrows a customer as an interaction carrier, so the carrier's Start is deferred
+        // to that first activation - i.e. it runs AFTER the borrowing module enabled the collider.
+        // A trade carrier needs that collider to be clickable, and unlike the host there is no
+        // Customer.Update driving it back on (that is suppressed right above), so the carrier ends
+        // up visible with a "!" but no click volume. The client owns the whole customer lifecycle,
+        // so skip the vanilla Start exactly like Update: its only other effect,
+        // m_DefaultStartEndModifier, is write-only in both supported builds.
+        [HarmonyPatch(typeof(Customer), "Start")]
+        private static class CustomerStartPatch
         {
             [HarmonyPrefix]
             private static bool Prefix() => _active == null;
@@ -769,7 +786,7 @@ namespace CardShopCoop.Modules.Npc
         /// box the worker took is parked (see <see cref="WorldClientBehaviour.ApplyWorkerHeldBox"/>)
         /// and this prop carries the visual, including its open/closed state.</summary>
         public static void SetWorkerBoxVisual(int index, bool visible, bool isBig, EItemType itemType,
-            long boxNetworkId, bool opened)
+            Guid boxNetworkId, bool opened)
         {
             if (_active == null)
             {
@@ -863,7 +880,7 @@ namespace CardShopCoop.Modules.Npc
 
             // The real world box the worker took must leave its shelf slot; this prop represents
             // the carried box. Only touch the World module when the held box id changes.
-            if (boxNetworkId > 0)
+            if (boxNetworkId != Guid.Empty)
             {
                 if (boxNetworkId != p.AppliedHeldBoxNetworkId)
                 {
@@ -873,7 +890,7 @@ namespace CardShopCoop.Modules.Npc
             }
             else
             {
-                p.AppliedHeldBoxNetworkId = 0;
+                p.AppliedHeldBoxNetworkId = Guid.Empty;
             }
         }
 
@@ -1036,9 +1053,9 @@ namespace CardShopCoop.Modules.Npc
             public GameObject BoxPropClosed;
             public GameObject BoxPropOutlineOpen;
             public GameObject BoxPropOutlineClosed;
-            public long HoldBoxNetworkId;
+            public Guid HoldBoxNetworkId;
             public bool HoldBoxOpened;
-            public long AppliedHeldBoxNetworkId;
+            public Guid AppliedHeldBoxNetworkId;
             public bool HoldBig;
             public EItemType HoldItemType;
             public int PendingIdentity;
@@ -1066,7 +1083,7 @@ namespace CardShopCoop.Modules.Npc
             p.BoxPropOutlineOpen = null;
             p.BoxPropOutlineClosed = null;
             // Force the next hold of this (or any) box to notify the World module again.
-            p.AppliedHeldBoxNetworkId = 0;
+            p.AppliedHeldBoxNetworkId = Guid.Empty;
             if (ReferenceEquals(prop, null) || prop == null)
             {
                 return;
@@ -1993,7 +2010,7 @@ namespace CardShopCoop.Modules.Npc
                     {
                         var releasedBoxId = p.AppliedHeldBoxNetworkId;
                         ReleaseWorkerBoxProp(p);
-                        if (releasedBoxId > 0)
+                        if (releasedBoxId != Guid.Empty)
                         {
                             WorldClientBehaviour.RestoreWorkerDroppedBox(releasedBoxId);
                         }
@@ -2213,31 +2230,198 @@ namespace CardShopCoop.Modules.Npc
             EnsureCardPackList(worker);
         }
 
+        /// <summary>Client: the live scene worker occupying a synchronized list slot, whose visual
+        /// hierarchy an appearance mod may already have replaced. Null when the slot has no worker
+        /// yet, or when its prefab gender no longer matches the snapshot (the manager template is
+        /// then the safe gender-correct source).</summary>
+        private static Worker FindLiveWorker(ushort index, bool female)
+        {
+            var workers = NpcInterop.Workers;
+            if (workers == null || index >= workers.Count)
+            {
+                return null;
+            }
+
+            var worker = workers[index];
+            return worker != null && worker.m_IsFemale == female ? worker : null;
+        }
+
+        /// <summary>Client: a real pooled customer of the requested gender to clone as a puppet,
+        /// preferring one that is inactive and has never been dressed (its generated hair/apparel
+        /// collections are empty on the clone as well). Falls back to any gendered pool member,
+        /// then null so the caller uses the manager template.</summary>
+        private static Customer FindPooledCustomer(CustomerManager manager, bool female)
+        {
+            var customers = manager?.GetCustomerList();
+            if (customers == null)
+            {
+                return null;
+            }
+
+            Customer inactive = null;
+            Customer any = null;
+            for (var i = 0; i < customers.Count; i++)
+            {
+                var customer = customers[i];
+                if (customer == null || customer.m_IsFemale != female
+                    || customer.m_CharacterCustom == null)
+                {
+                    continue;
+                }
+
+                if (!customer.m_IsActive && !customer.m_CharacterCustom.m_HasInit)
+                {
+                    return customer;
+                }
+
+                if (!customer.m_IsActive && inactive == null)
+                {
+                    inactive = customer;
+                }
+
+                if (any == null)
+                {
+                    any = customer;
+                }
+            }
+
+            return inactive ?? any;
+        }
+
+        /// <summary>Instantiate clones a live NPC's runtime-generated hair and apparel children but
+        /// not the private, non-serialized lists that reference them, so a clone's lists are empty
+        /// and the game's Initialize() cannot find (and replace) the inherited look. Repoint each
+        /// list entry at the clone's matching child, located by the sibling-index path it occupies
+        /// under the source customization, so Initialize() destroys and re-dresses normally.</summary>
+        private static void RebuildCustomizationCollections(CC.CharacterCustomization cloneCustom,
+            CC.CharacterCustomization sourceCustom)
+        {
+            RebuildCustomizationCollection(cloneCustom, sourceCustom, FiCustomizationHairObjects);
+            RebuildCustomizationCollection(cloneCustom, sourceCustom, FiCustomizationApparelObjects);
+        }
+
+        private static void RebuildCustomizationCollection(CC.CharacterCustomization cloneCustom,
+            CC.CharacterCustomization sourceCustom, FieldInfo field)
+        {
+            if (cloneCustom == null || sourceCustom == null || field == null)
+            {
+                return;
+            }
+
+            var sourceObjects = field.GetValue(sourceCustom) as IList;
+            var cloneObjects = field.GetValue(cloneCustom) as IList;
+            if (sourceObjects == null || cloneObjects == null
+                || ReferenceEquals(sourceObjects, cloneObjects))
+            {
+                return;
+            }
+
+            var rebuilt = new List<GameObject>(sourceObjects.Count);
+            for (var i = 0; i < sourceObjects.Count; i++)
+            {
+                // A generated slot the source never filled holds a destroyed placeholder (Unity
+                // fake-null); there is no clone child for it, so carry the empty slot across.
+                var sourceChild = sourceObjects[i] as GameObject;
+                var cloneChild = sourceChild == null ? null
+                    : ResolveCloneChild(sourceCustom.transform, cloneCustom.transform,
+                        sourceChild.transform);
+                rebuilt.Add(cloneChild == null ? null : cloneChild.gameObject);
+            }
+
+            cloneObjects.Clear();
+            for (var i = 0; i < rebuilt.Count; i++)
+            {
+                cloneObjects.Add(rebuilt[i]);
+            }
+        }
+
+        /// <summary>Walks the sibling-index path a source child occupies up to the source
+        /// customization root and returns the clone child at the same path, or null when the clone
+        /// does not mirror it.</summary>
+        private static Transform ResolveCloneChild(Transform sourceRoot, Transform cloneRoot,
+            Transform sourceChild)
+        {
+            if (sourceRoot == null || cloneRoot == null || sourceChild == null)
+            {
+                return null;
+            }
+
+            var indices = new List<int>();
+            var current = sourceChild;
+            while (current != null && current != sourceRoot)
+            {
+                indices.Add(current.GetSiblingIndex());
+                current = current.parent;
+            }
+
+            if (current != sourceRoot)
+            {
+                return null;
+            }
+
+            var result = cloneRoot;
+            for (var i = indices.Count - 1; i >= 0; i--)
+            {
+                if (result == null || indices[i] >= result.childCount)
+                {
+                    return null;
+                }
+
+                result = result.GetChild(indices[i]);
+            }
+
+            return result;
+        }
+
         private void Spawn(Puppet p, string charName, Vector3 pos, bool femaleHint, byte kind, ushort index)
         {
             var female = femaleHint;
             p.Female = female;
             p.Kind = kind;
             GameObject prefabObject;
+            CC.CharacterCustomization liveCustom = null;
+            var clonedLive = false;
             if (kind == KindWorker)
             {
                 var workerManager = SceneRef<WorkerManager>.Get();
-                var prefab = female ? workerManager.m_WorkerFemalePrefab : workerManager.m_WorkerPrefab;
-                // Never clone a scene worker. Its CharacterCustomization and worker data are
-                // already initialized for a real employee, and reinitializing that clone can
-                // index the wrong gender's wardrobe tables. The manager prefab is the
-                // gender-correct, uninitialized source for both supported game builds.
-                prefabObject = prefab.gameObject;
+                // Appearance mods (Sexy Workers and friends) replace the visual hierarchy on the
+                // live Worker objects in WorkerManager.m_WorkerList after Start and never touch
+                // the manager's template prefabs. Clone the live slot so the replacement model,
+                // skeleton, animator, sockets and bones survive; the template is only the
+                // fallback when this slot has no live worker yet (early join / mod not installed).
+                var liveWorker = FindLiveWorker(index, female);
+                if (liveWorker != null)
+                {
+                    prefabObject = liveWorker.gameObject;
+                    clonedLive = true;
+                }
+                else
+                {
+                    var prefab = female ? workerManager.m_WorkerFemalePrefab : workerManager.m_WorkerPrefab;
+                    prefabObject = prefab.gameObject;
+                }
             }
             else
             {
                 var customerManager = SceneRef<CustomerManager>.Get();
-                var prefab = female ? customerManager.m_CustomerFemalePrefab
-                    : customerManager.m_CustomerPrefab;
-                // Customers have no semantic interaction component on a puppet, so use the
-                // same known-good gender-correct template path as vanilla instead of borrowing
-                // and reinitializing a live pool member.
-                prefabObject = prefab.gameObject;
+                // A live pool member carries the wardrobe tables and animator the preset was
+                // authored against; the template can expose fewer slots, which makes
+                // CharacterCustomization dress throw on some game builds. Prefer one that has
+                // never dressed; an already-dressed member still works once its generated
+                // collections are rebuilt below.
+                var liveCustomer = FindPooledCustomer(customerManager, female);
+                if (liveCustomer != null)
+                {
+                    prefabObject = liveCustomer.gameObject;
+                    liveCustom = liveCustomer.m_CharacterCustom;
+                    clonedLive = true;
+                }
+                else
+                {
+                    var prefab = female ? customerManager.m_CustomerFemalePrefab
+                        : customerManager.m_CustomerPrefab;
+                    prefabObject = prefab.gameObject;
+                }
             }
 
             var holder = new GameObject("CoopNpcHolder_tmp");
@@ -2266,7 +2450,34 @@ namespace CardShopCoop.Modules.Npc
             }
             p.Custom = cust != null ? cust.m_CharacterCustom
                 : worker?.m_CharacterCustom;
-            InitializePuppetCustomization(p.Custom, charName);
+            if (p.Custom != null)
+            {
+                if (!clonedLive)
+                {
+                    // Template prefab: make it behave like an uninitialized source before dressing
+                    // (a modded template can arrive serialized with the init bit already set).
+                    InitializePuppetCustomization(p.Custom, charName);
+                }
+                else if (kind == KindWorker)
+                {
+                    // A live worker is already the employee's dressed look, and an appearance mod
+                    // may have replaced its entire visual hierarchy. Re-running Initialize() would
+                    // rebuild the now-hidden vanilla wardrobe (and can index the wrong gender's
+                    // wardrobe tables), so only mirror the authoritative name on the inert
+                    // component. Its look is complete and authoritative as-is.
+                    p.Custom.CharacterName = charName;
+                }
+                else
+                {
+                    // Instantiate copies the live customer's runtime-generated hair/apparel
+                    // children but not the private, non-serialized lists that reference them, so
+                    // the clone's lists are empty and Initialize() would throw (or stack a second
+                    // look on top). Point each entry at the clone's matching child, then dress.
+                    RebuildCustomizationCollections(p.Custom, liveCustom);
+                    p.Custom.CharacterName = charName;
+                    p.Custom.Initialize();
+                }
+            }
 
             if (worker != null)
             {

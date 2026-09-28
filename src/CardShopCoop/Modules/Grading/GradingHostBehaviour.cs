@@ -20,10 +20,9 @@ namespace CardShopCoop.Modules.Grading
     {
         private const int VanillaSlots = 8;
         private static GradingHostBehaviour _active;
-        private readonly Dictionary<GradeCardSubmitSet, int> _setIds = new();
+        private readonly Dictionary<GradeCardSubmitSet, Guid> _setIds = new();
         private readonly HashSet<int> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
-        private int _nextSetId = 1;
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
@@ -106,10 +105,9 @@ namespace CardShopCoop.Modules.Grading
 
         private void ResetInventory()
         {
-            foreach (var pair in new Dictionary<GradeCardSubmitSet, int>(_setIds))
+            foreach (var pair in new Dictionary<GradeCardSubmitSet, Guid>(_setIds))
                 BroadcastJobDelta(Guid.Empty, pair.Value, null, true);
             _setIds.Clear();
-            _nextSetId = 1;
             GradingInterop.Reset();
         }
 
@@ -145,7 +143,7 @@ namespace CardShopCoop.Modules.Grading
             if (_shutdown || !_context.InGame())
                 return;
             var list = CPlayerData.m_GradeCardInProgressList;
-            var live = new HashSet<int>();
+            var live = new HashSet<Guid>();
             if (list != null)
             {
                 for (var i = 0; i < list.Count; i++)
@@ -180,6 +178,14 @@ namespace CardShopCoop.Modules.Grading
             {
                 Reject(senderConnection, message?.PredictionId ?? Guid.Empty,
                     cards, "grading-submit-cards", bridge);
+                return;
+            }
+
+            // The client mints the job id and the host adopts it as the authoritative set id, so
+            // both peers bind the job by id. An empty or duplicated id is a broken intent.
+            if (message.JobId == Guid.Empty || _setIds.ContainsValue(message.JobId))
+            {
+                Reject(senderConnection, message.PredictionId, cards, "grading-submit-job", bridge);
                 return;
             }
 
@@ -286,6 +292,9 @@ namespace CardShopCoop.Modules.Grading
                 for (var i = 0; i < cards.Count; i++)
                     set.m_CardDataList.Add(Clone(cards[i]));
                 CPlayerData.m_GradeCardInProgressList.Add(set);
+                // Bind the client-minted job id before any further commit, so a compensation above
+                // removes exactly this binding.
+                _setIds[set] = message.JobId;
 
                 if (GradingInterop.Present)
                 {
@@ -299,7 +308,7 @@ namespace CardShopCoop.Modules.Grading
                 }
 
                 reservation.Commit();
-                var id = GetSetId(set);
+                var id = message.JobId;
                 BroadcastJobDelta(message.PredictionId, id, set, false);
                 SceneRef<GradeCardWebsiteUIScreen>.Get()?.UpdateSubmissionProgressPanelUI();
                 CoopPlugin.Log.LogInfo("grading submission accepted for connection "
@@ -415,13 +424,11 @@ namespace CardShopCoop.Modules.Grading
                 PredictionApi.Rollback(_context, connectionId, predictionId);
         }
 
-        private int GetSetId(GradeCardSubmitSet set)
+        private Guid GetSetId(GradeCardSubmitSet set)
         {
             if (!_setIds.TryGetValue(set, out var id))
             {
-                id = _nextSetId++;
-                if (_nextSetId <= 0)
-                    _nextSetId = 1;
+                id = Guid.NewGuid();
                 _setIds[set] = id;
             }
             return id;
@@ -454,7 +461,7 @@ namespace CardShopCoop.Modules.Grading
             return message;
         }
 
-        private void BroadcastJobDelta(Guid predictionId, int id, GradeCardSubmitSet set,
+        private void BroadcastJobDelta(Guid predictionId, Guid id, GradeCardSubmitSet set,
             bool removed)
         {
             if (_shutdown || !_context.InGame())

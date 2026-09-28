@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
@@ -223,7 +223,7 @@ namespace CardShopCoop.Modules.Catalog
         {
             var sideEffectIndex = -1;
             RestockData sideEffectData = null;
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () =>
+            PredictionApi.AckOrApply(message.PredictionId, () =>
             {
                 if (message.Scanner)
                 {
@@ -287,7 +287,7 @@ namespace CardShopCoop.Modules.Catalog
             var key = DeltaKey(message);
             if (_pendingDeltas.TryGetValue(key, out var previous))
             {
-                PredictionApi.ConfirmSuperseded(previous.PredictionId);
+                PredictionApi.Ack(previous.PredictionId);
             }
 
 
@@ -310,9 +310,6 @@ namespace CardShopCoop.Modules.Catalog
         internal static void ApplyPurchaseProductLicense(int index, bool unlocked)
             => _active?.ApplyLocalProduct(index, unlocked);
 
-        internal static void ApplyPurchaseProductEntitlementSideEffects(int index)
-            => _active?.ApplyLocalProductEntitlementSideEffects(index);
-
         internal static void ApplyPurchaseScannerLicense(bool unlocked)
             => _active?.ApplyLocalScanner(unlocked);
 
@@ -332,18 +329,6 @@ namespace CardShopCoop.Modules.Catalog
         {
             CPlayerData.m_IsScannerRestockUnlocked = unlocked;
             RefreshOpenScannerScreens();
-        }
-
-        private void ApplyLocalProductEntitlementSideEffects(int index)
-        {
-            if (!CatalogInterop.TryAt(index, out var data) || data == null)
-            {
-
-                throw new InvalidOperationException("Catalog accepted product could not be resolved");
-            }
-
-
-            ApplyProductEntitlementSideEffectsOnce(index, data);
         }
 
         private void ApplyProductEntitlementSideEffectsOnce(int index, RestockData data)
@@ -383,7 +368,7 @@ namespace CardShopCoop.Modules.Catalog
         {
             foreach (var delta in _pendingDeltas.Values)
             {
-                PredictionApi.ConfirmSuperseded(delta.PredictionId);
+                PredictionApi.Ack(delta.PredictionId);
             }
 
 

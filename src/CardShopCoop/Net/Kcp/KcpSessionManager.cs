@@ -22,7 +22,8 @@ namespace CardShopCoop.Net.Kcp
     /// frame is placed in a bounded queue by those calls.  Polling, KCP input/ticks, decoding,
     /// and all public lifecycle output happen in <see cref="PumpNetworkThread"/>.
     /// </summary>
-    public sealed class KcpSessionManager : ICoopTransport, ICoopHandshakeTransport, ICoopStartable
+    public sealed class KcpSessionManager : ICoopTransport, ICoopHandshakeTransport,
+        ICoopRelayTransport, ICoopStartable
     {
         // The envelope is transport-private.  It is intentionally outside Msg's DTO frame so
         // Type.FullName remains the sole application identity on the wire.
@@ -581,6 +582,24 @@ namespace CardShopCoop.Net.Kcp
             if (message == null)
                 throw new ArgumentNullException(nameof(message));
 
+            FanOut(message, null, "broadcast");
+        }
+
+        void ICoopRelayTransport.Relay(INetMessage message, int exceptConnectionId)
+        {
+            if (message == null)
+                throw new ArgumentNullException(nameof(message));
+
+            FanOut(message, exceptConnectionId, "relay");
+        }
+
+        /// <summary>
+        /// Shared broadcast/relay fan-out. Broadcast passes a null exception; a relay omits the
+        /// originating connection. Recipient admission is identical in both cases, so a relay can
+        /// never tear down a peer that <see cref="Broadcast"/> would have skipped.
+        /// </summary>
+        private void FanOut(INetMessage message, int? exceptConnectionId, string operation)
+        {
             SessionState failedState = null;
             string failure = null;
             lock (_gate)
@@ -609,6 +628,12 @@ namespace CardShopCoop.Net.Kcp
                         // must never tear down a peer that is simply still joining.
                         if (state.Connection.State == ConnectionState.Handshaking
                             || !state.MessageIdsActivated)
+                        {
+                            continue;
+                        }
+
+                        if (exceptConnectionId.HasValue
+                            && state.Connection.Id == exceptConnectionId.Value)
                         {
                             continue;
                         }
@@ -644,7 +669,7 @@ namespace CardShopCoop.Net.Kcp
             if (failure != null)
             {
                 FailApplicationSend(failedState?.Connection, message, failedState,
-                    "broadcast " + failure);
+                    operation + " " + failure);
             }
         }
 

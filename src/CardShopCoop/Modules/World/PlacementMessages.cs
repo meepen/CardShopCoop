@@ -63,6 +63,13 @@ namespace CardShopCoop.Modules.World
     public sealed class PlacementPopulationEntry
     {
         public ushort Id;
+        /// <summary>The slot this entity occupied in the host's save-time identity manifest for
+        /// its kind, captured when the transferred save was written. The guest loads that exact
+        /// order, so this is the transfer-time manifest key for an entity the guest already has.
+        /// It is only consulted when the carried stable id names no local object yet. A -1 means
+        /// the entity was created after the snapshot (or no manifest was available) and must be
+        /// materialized from its descriptor.</summary>
+        public int Slot;
         public int ObjType;
         public Vector3 Pos;
         public Quaternion Rot;

@@ -26,7 +26,8 @@ namespace CardShopCoop.Net
     /// artificial lag must not trip the peer-silence timeout, so those timers follow real
     /// wire receipt rather than delayed delivery.
     /// </summary>
-    public sealed class LagTransport : ICoopTransport, ICoopHandshakeTransport, ICoopStartable
+    public sealed class LagTransport : ICoopTransport, ICoopHandshakeTransport, ICoopRelayTransport,
+        ICoopStartable
     {
         private struct Pending
         {
@@ -159,6 +160,16 @@ namespace CardShopCoop.Net
             }
 
             handshake.SendHandshake(connection, message);
+        }
+
+        void ICoopRelayTransport.Relay(INetMessage message, int exceptConnectionId)
+        {
+            if (_inner is not ICoopRelayTransport relay)
+            {
+                throw new InvalidOperationException("The wrapped transport has no relay seam");
+            }
+
+            relay.Relay(message, exceptConnectionId);
         }
 
         public void ActivateMessageIds(PeerConnection connection)

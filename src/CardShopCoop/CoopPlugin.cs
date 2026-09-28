@@ -25,6 +25,12 @@ namespace CardShopCoop
     // minting certificate numbers. Guid copied from GO's own BepInPlugin (decompiled-grading
     // :16912), which is also the Harmony owner id used in the `before` array over there.
     [BepInDependency("munch.gradingoverhaul", BepInDependency.DependencyFlags.SoftDependency)]
+    // SOFT dependency on EnhancedPrefabLoader: no effect when EPL is absent, and when it is
+    // present it guarantees EPL's plugin initializes before ours. CatalogInterop probes the EPL
+    // surface exactly once at start (ProbeEplIfNeeded) and caches the result; this ordering is
+    // what makes "check on start only" safe instead of a chainloader-order race. Guid copied
+    // from EPL's own BepInPlugin.
+    [BepInDependency("EnhancedPrefabLoader", BepInDependency.DependencyFlags.SoftDependency)]
     public partial class CoopPlugin : BaseUnityPlugin
     {
         public const string Guid = "com.zwhit.cardshopcoop";

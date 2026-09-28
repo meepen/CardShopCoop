@@ -356,7 +356,7 @@ namespace CardShopCoop.Modules.Npc
             public int CustomerGrabSequence;
             public int WorkerActionSequence;
             public byte WorkerActionKind;
-            public long LastHeldBoxId;
+            public Guid LastHeldBoxId;
             public string IdentityName;
             public bool IdentityFemale;
             public int IdentityGeneration;
@@ -658,7 +658,7 @@ namespace CardShopCoop.Modules.Npc
 
             return NewStateDelta(KindCustomer, index, state.Generation, hostTime,
                 customer.transform, customer.m_CurrentMoveSpeed, flags, grabSequence, actionKind,
-                false, (EItemType)0, 0L, false);
+                false, (EItemType)0, Guid.Empty, false);
         }
 
         private NpcStateDeltaMessage CollectWorkerState(Worker worker, int index, float hostTime)
@@ -697,7 +697,7 @@ namespace CardShopCoop.Modules.Npc
                 ? null : FiCurrentHoldItemBox.GetValue(worker) as InteractablePackagingBox_Item;
             var holdBig = holdBox != null && holdBox.m_IsBigBox;
             var holdItemType = holdBox == null ? (EItemType)0 : holdBox.GetItemType();
-            var holdBoxNetworkId = 0L;
+            var holdBoxNetworkId = Guid.Empty;
             var holdBoxOpened = false;
             if (holdBox != null)
             {
@@ -709,7 +709,7 @@ namespace CardShopCoop.Modules.Npc
             // local copy parked off-map (the vanished-on-drop bug). The refresh is broadcast here,
             // before the state delta that tells the guest to release the prop, so the ordered link
             // applies the pose first and the release only re-enables its physics.
-            if (state.LastHeldBoxId > 0 && state.LastHeldBoxId != holdBoxNetworkId)
+            if (state.LastHeldBoxId != Guid.Empty && state.LastHeldBoxId != holdBoxNetworkId)
             {
                 WorldHostBehaviour.NotifyWorkerReleasedBox(state.LastHeldBoxId);
             }
@@ -744,13 +744,13 @@ namespace CardShopCoop.Modules.Npc
         /// restore its dropped pose instead of leaving their parked copy invisible.</summary>
         private static void ReleaseTrackedWorkerBox(NpcData state)
         {
-            if (state == null || state.LastHeldBoxId <= 0)
+            if (state == null || state.LastHeldBoxId == Guid.Empty)
             {
                 return;
             }
 
             WorldHostBehaviour.NotifyWorkerReleasedBox(state.LastHeldBoxId);
-            state.LastHeldBoxId = 0;
+            state.LastHeldBoxId = Guid.Empty;
         }
 
         private static NpcStateDeltaMessage NewInactiveDelta(byte kind, int index, int identity,
@@ -766,7 +766,7 @@ namespace CardShopCoop.Modules.Npc
 
         private static NpcStateDeltaMessage NewStateDelta(byte kind, int index, int identity,
             float hostTime, Transform transform, float speed, NpcFlags flags, int actionSequence,
-            byte actionKind, bool holdBig, EItemType holdItemType, long holdBoxNetworkId, bool holdBoxOpened)
+            byte actionKind, bool holdBig, EItemType holdItemType, Guid holdBoxNetworkId, bool holdBoxOpened)
             => new NpcStateDeltaMessage
             {
                 HostTime = hostTime,
@@ -810,7 +810,7 @@ namespace CardShopCoop.Modules.Npc
                 customer.m_IsFemale, customer.transform, customer.m_CurrentMoveSpeed, flags,
                 GetGrabSequence(index, customer.m_CurrentState),
                 customer.m_CurrentState == ECustomerState.TournamentTakePrize ? (byte)2 : (byte)1,
-                false, (EItemType)0, 0L, false);
+                false, (EItemType)0, Guid.Empty, false);
         }
 
         private NpcEntry BuildWorkerEntry(Worker worker, int index, float hostTime)
@@ -826,7 +826,7 @@ namespace CardShopCoop.Modules.Npc
             var moveSpeed = worker.m_Anim == null ? 0f : worker.m_Anim.GetFloat(HashMoveSpeed);
             var holdBox = FiCurrentHoldItemBox == null
                 ? null : FiCurrentHoldItemBox.GetValue(worker) as InteractablePackagingBox_Item;
-            var holdBoxNetworkId = 0L;
+            var holdBoxNetworkId = Guid.Empty;
             var holdBoxOpened = false;
             if (holdBox != null)
             {
@@ -851,7 +851,7 @@ namespace CardShopCoop.Modules.Npc
 
         private static NpcEntry NewEntry(byte kind, int index, int identity, string name,
             bool female, Transform transform, float speed, NpcFlags flags, int actionSequence,
-            byte actionKind, bool holdBig, EItemType holdItemType, long holdBoxNetworkId, bool holdBoxOpened)
+            byte actionKind, bool holdBig, EItemType holdItemType, Guid holdBoxNetworkId, bool holdBoxOpened)
             => new NpcEntry
             {
                 Kind = kind,

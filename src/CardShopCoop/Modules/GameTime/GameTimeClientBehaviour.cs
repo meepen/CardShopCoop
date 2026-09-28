@@ -19,6 +19,7 @@ namespace CardShopCoop.Modules.GameTime
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private DayTimeMessage _pendingMessage;
+        private bool _hasHostDay;
         private bool _shutdown;
 
         private void OnEnable()
@@ -51,13 +52,36 @@ namespace CardShopCoop.Modules.GameTime
             TryApplyPending();
         }
 
-        private static void Apply(LightManager manager, DayTimeMessage message)
+        private void Apply(LightManager manager, DayTimeMessage message)
         {
+            // A genuine day advance is a forward change after the guest has already accepted one
+            // authoritative host day. The first accepted message is only the join baseline (a late
+            // join can jump several days) and must not replay a day-start.
+            var previousDay = _hasHostDay ? CPlayerData.m_CurrentDay : message.Day;
             var morningReset = message.Hour == 8 && message.Minute == 0 && !message.HasDayEnded
                 && !message.ShopOnceOpen;
+            // A genuine advance starts the day only from a non-day-ended frame. This also keeps a
+            // late-join baseline that lands on a day-end state from replaying a dawn.
+            var dayAdvanced = message.Day > previousDay && !message.HasDayEnded;
+
             CPlayerData.m_CurrentDay = message.Day;
-            if (morningReset)
+
+            // ResetSunlightIntensity is the game's full vanilla dawn sequence: it resets the
+            // sun/shop/night lights, and its DelayUpdateEnv coroutine blends the day music and
+            // queues CEventPlayer_OnDayStarted (the only producer on the guest, because the Report
+            // module host-gates the guest's own roll-over). It must therefore run on every genuine
+            // advance, not just on the exact 08:00 frame: an authoritative correction can land a
+            // minute or two late (e.g. the dawn message is superseded while a guest overlay is up),
+            // and dayAdvanced is what tells us the guest still owes the day-start. Invoking it once
+            // per message keeps the queued event exactly-once even when morningReset is also true.
+            if (morningReset || dayAdvanced)
             {
+                if (dayAdvanced && !morningReset)
+                {
+                    CoopPlugin.Log.LogDebug(
+                        "game-time day advance applied off the morning frame; running the vanilla dawn sequence.");
+                }
+
                 CPlayerData.m_IsShopOpen = false;
                 CPlayerData.m_IsShopOnceOpen = false;
                 GameTimeInterop.ResetSunlightIntensity.Invoke(manager, null);
@@ -66,6 +90,8 @@ namespace CardShopCoop.Modules.GameTime
             {
                 CPlayerData.m_IsShopOnceOpen = message.ShopOnceOpen;
             }
+
+            _hasHostDay = true;
             GameTimeInterop.TimeHour.SetValue(manager, message.Hour);
             GameTimeInterop.TimeMin.SetValue(manager, message.Minute);
             GameTimeInterop.TimeMinFloat.SetValue(manager, message.MinuteFloat);
@@ -116,6 +142,10 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             _pendingMessage = null;
+            // Forget the accepted host day too: a rejoin baseline must be treated as a first
+            // baseline (the comment on Apply says a late join must not replay a day-start), not
+            // compared against the day of a session this guest is no longer connected to.
+            _hasHostDay = false;
         }
 
         internal void Shutdown()

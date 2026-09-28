@@ -129,22 +129,33 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        internal void LocalStarted(InteractableObject obj)
+        /// <summary>Local player started moving <paramref name="obj"/>, observed after the game's
+        /// own StartMoveObject ran. Returns false when another mover already owns the hold; in
+        /// that case the just-entered vanilla preview is unwound through the game's own exit path
+        /// so this peer does not track (or later predict) a move it does not own.</summary>
+        internal bool LocalStarted(InteractableObject obj)
         {
             if (obj == null || _localKey != 0 || !PlacementHoldKey.TryGet(obj, out var key))
             {
-                return;
-            }
-
-            if (_holders.TryGetValue(key, out var mover) && !IsLocalMover(mover))
-            {
-                return;
+                return false;
             }
 
             _localKey = key;
             _localObject = obj;
             _localBeforePosition = obj.transform.position;
             _localBeforeRotation = obj.transform.rotation;
+
+            if (_holders.TryGetValue(key, out var mover) && !IsLocalMover(mover))
+            {
+                // Another player owns this object's hold. The game already entered move mode (this
+                // runs as a postfix), so unwind it through the game's own exit path rather than
+                // suppressing StartMoveObject; the single-writer hold table stays authoritative.
+                CoopPlugin.Log.LogInfo("[placement-hold] local start refused key=" + key
+                    + " held by mover=" + mover + ".");
+                CancelLocalMove();
+                return false;
+            }
+
             CoopPlugin.Log.LogInfo("[placement-hold] local begin key=" + key + " host=" + _host + ".");
 
             if (_host)
@@ -161,6 +172,7 @@ namespace CardShopCoop.Modules.World
             // so publish the starting rotation; observers then follow rotate events from there.
             _localSentRotation = obj.transform.rotation;
             PublishRotation(_localSentRotation);
+            return true;
         }
 
         internal void LocalEnded(InteractableObject obj)

@@ -1,5 +1,6 @@
 using CardShopCoop.Net;
 using CardShopCoop.Net.Protocol;
+using System;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.Npc
@@ -31,9 +32,10 @@ namespace CardShopCoop.Modules.Npc
         public byte ActionKind;
         public bool HoldBig;
         public EItemType HoldItemType;
-        /// <summary>Stable world box network id the worker is carrying, or 0. Lets the client
-        /// remove the real warehouse box object the worker took and drive the held box prop.</summary>
-        public long HoldBoxNetworkId;
+        /// <summary>Stable world box network id the worker is carrying, or <see cref="Guid.Empty"/>.
+        /// Lets the client remove the real warehouse box object the worker took and drive the held
+        /// box prop.</summary>
+        public Guid HoldBoxNetworkId;
         /// <summary>Open/closed state of the carried box.</summary>
         public bool HoldBoxOpened;
     }
@@ -89,9 +91,10 @@ namespace CardShopCoop.Modules.Npc
         public byte ActionKind;
         public bool HoldBig;
         public EItemType HoldItemType;
-        /// <summary>Stable world box network id the worker is carrying, or 0. Lets the client
-        /// remove the real warehouse box object the worker took and drive the held box prop.</summary>
-        public long HoldBoxNetworkId;
+        /// <summary>Stable world box network id the worker is carrying, or <see cref="Guid.Empty"/>.
+        /// Lets the client remove the real warehouse box object the worker took and drive the held
+        /// box prop.</summary>
+        public Guid HoldBoxNetworkId;
         /// <summary>Open/closed state of the carried box.</summary>
         public bool HoldBoxOpened;
     }

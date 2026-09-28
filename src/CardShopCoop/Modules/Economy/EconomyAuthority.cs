@@ -104,7 +104,7 @@ namespace CardShopCoop.Modules.Economy
 
         internal static bool DeferVanillaEvent(CEvent evt)
         {
-            if (!_suppressVanillaReduction || !(evt is CEventPlayer_ReduceCoin))
+            if (!_suppressVanillaReduction || evt is not CEventPlayer_ReduceCoin)
                 return false;
 
             _suppressVanillaReduction = false;

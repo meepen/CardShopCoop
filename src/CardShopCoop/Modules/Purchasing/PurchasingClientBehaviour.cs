@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
+using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -10,8 +12,10 @@ using HarmonyLib;
 namespace CardShopCoop.Modules.Purchasing
 {
     /// <summary>
-    /// Guest checkout capture. A checkout is one intent and one send. The host owns every game
-    /// mutation while locally visible UI changes are predicted and reconciled by the outcome.
+    /// Guest checkout capture. A checkout is one intent and one send. The client plays the vanilla
+    /// checkout like any other player; the postfix observes the one purchase it performed and
+    /// forwards it. The host owns the authoritative wallet, items and entitlements, so it accepts
+    /// (the optimistic local change already matches) or rejects (the prediction is rolled back).
     /// </summary>
     [ClientBehaviour]
     public sealed class PurchasingClientBehaviour : CoopBehaviour
@@ -27,6 +31,7 @@ namespace CardShopCoop.Modules.Purchasing
 
         private sealed class PendingRequest
         {
+            internal PurchaseIntentMessage Message;
             internal PendingSurface Surface;
             internal RestockItemScreen RestockScreen;
             internal ScannerRestockScreen ScannerScreen;
@@ -37,6 +42,18 @@ namespace CardShopCoop.Modules.Purchasing
             internal List<KeyValuePair<int, int>> ScannerQuantities;
             internal Dictionary<int, int> RestockBefore;
             internal List<KeyValuePair<int, int>> ScannerBefore;
+            // The creator-assigned ids for the physical boxes this checkout's vanilla flow will
+            // spawn (carried in the intent), and the delivery-count window used to cancel the
+            // not-yet-spawned tail on a rejection.
+            internal List<Guid> BoxIds = new();
+            internal int StartDeliveries;
+            internal int AppendedDeliveries;
+            // The report cost before vanilla runs, captured so the postfix can recover the exact
+            // wallet spend the local checkout queued. A rejected prediction refunds this; a replay
+            // re-charges it.
+            internal float SupplyCostBefore;
+            internal float UpgradeCostBefore;
+            internal double Spent;
         }
 
         private static PurchasingClientBehaviour _active;
@@ -92,13 +109,18 @@ namespace CardShopCoop.Modules.Purchasing
             }
 
             _pendingRequests.Remove(outcome.PredictionId);
+            // The host accepted the purchase: its descriptors carry the very ids this checkout
+            // pre-assigned, so the local boxes bind to them as they spawn.
             // Reached only for an accepted purchase (failures come back as a rollback), so this
             // confirms the prediction; reconciling would reopen the cart/confirmation first.
-            PredictionApi.ApplyConfirmed(outcome.PredictionId, () =>
+            PredictionApi.AckOrApply(outcome.PredictionId, () =>
                 ApplyAccepted(pending));
-            if (pending.Surface == PendingSurface.ProductLicense)
-                CatalogApi.ApplyClientProductEntitlementSideEffects(pending.LocalIndex);
-            SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
+            // The client runs the vanilla checkout like any other player, so the game itself
+            // already applied the product-license entitlement side effects (achievement and the
+            // UnlockBasicCardBox tutorial task) and played SFX_CustomerBuy for its local
+            // purchase. Re-applying the side effects here would double-count the tutorial credit.
+            // A license the host accepted for a checkout vanilla refused locally is applied by
+            // the authoritative CatalogLicenseDeltaMessage, which owns the once-guard.
             ShowStatus(outcome.Text);
         }
 
@@ -126,10 +148,25 @@ namespace CardShopCoop.Modules.Purchasing
         private void Patch(Type type)
             => _harmony.CreateClassProcessor(type).Patch();
 
-        private bool InterceptRestockCheckout(RestockItemCheckoutScreen checkout)
+        /// <summary>Marks the vanilla checkout's wallet/experience side effects as owned by the
+        /// forwarded purchase intent: the host charges the accepted intent exactly once, so the Hud
+        /// economy observer must not also forward the guest's local vanilla events.</summary>
+        private static void EnterChargeScope(PendingRequest state)
+        {
+            if (state != null)
+                EconomyActionScope.Enter();
+        }
+
+        private static void ReleaseChargeScope(PendingRequest state)
+        {
+            if (state != null)
+                EconomyActionScope.Exit();
+        }
+
+        private PendingRequest CaptureRestockCheckout(RestockItemCheckoutScreen checkout)
         {
             if (!CanCapture("restock checkout"))
-                return false;
+                return null;
 
             var screen = PurchasingInterop.RestockScreen(checkout);
             if (screen == null)
@@ -143,19 +180,18 @@ namespace CardShopCoop.Modules.Purchasing
                     lines.Add(PurchasingInterop.RestockLine(entry.Key, entry.Value));
             }
 
-            Queue(new PurchaseIntentMessage
+            return BuildPending(new PurchaseIntentMessage
             {
                 Kind = PurchaseKind.Restock,
                 ScannerCheckout = false,
                 Lines = lines,
             }, PendingSurface.Restock, screen, null, null, null, -1);
-            return false;
         }
 
-        private bool InterceptScanner(ScannerRestockScreen screen)
+        private PendingRequest CaptureScanner(ScannerRestockScreen screen)
         {
             if (!CanCapture("scanner checkout"))
-                return false;
+                return null;
 
             var indexes = PurchasingInterop.ScannerIndexes(screen);
             var counts = PurchasingInterop.ScannerCounts(screen);
@@ -168,24 +204,23 @@ namespace CardShopCoop.Modules.Purchasing
                 lines.Add(PurchasingInterop.RestockLine(index, count));
             }
 
-            Queue(new PurchaseIntentMessage
+            return BuildPending(new PurchaseIntentMessage
             {
                 Kind = PurchaseKind.Restock,
                 ScannerCheckout = true,
                 Lines = lines,
             }, PendingSurface.Scanner, null, screen, null, null, -1);
-            return false;
         }
 
-        private bool InterceptFurniture(FurnitureShopConfirmPurchaseScreen screen)
+        private PendingRequest CaptureFurniture(FurnitureShopConfirmPurchaseScreen screen)
         {
             if (!CanCapture("furniture checkout"))
-                return false;
+                return null;
 
             var index = PurchasingInterop.FurnitureIndex(screen);
             var owner = PurchasingInterop.FurnitureOwner(screen);
             var data = index >= 0 ? InventoryBase.GetFurniturePurchaseData(index) : null;
-            Queue(new PurchaseIntentMessage
+            return BuildPending(new PurchaseIntentMessage
             {
                 Kind = PurchaseKind.Furniture,
                 Lines = new List<PurchaseLine>
@@ -193,43 +228,41 @@ namespace CardShopCoop.Modules.Purchasing
                     new PurchaseLine { ObjectType = data?.objectType ?? EObjectType.None, Count = 1 },
                 },
             }, PendingSurface.Furniture, null, null, screen, owner, index);
-            return false;
         }
 
-        private bool InterceptProductLicense(RestockItemPanelUI panel)
+        private PendingRequest CaptureProductLicense(RestockItemPanelUI panel)
         {
             if (!CanCapture("product license checkout"))
-                return false;
+                return null;
 
             var index = PurchasingInterop.PanelIndex(panel);
             var line = PurchasingInterop.RestockLine(index, 1);
-            Queue(new PurchaseIntentMessage
+            return BuildPending(new PurchaseIntentMessage
             {
                 Kind = PurchaseKind.ProductLicense,
                 Lines = new List<PurchaseLine> { line },
             }, PendingSurface.ProductLicense, null, null, null, null, index);
-            return false;
         }
 
-        private bool InterceptScannerLicense(ScannerRestockScreen screen)
+        private PendingRequest CaptureScannerLicense(ScannerRestockScreen screen)
         {
             if (!CanCapture("scanner unlock"))
-                return false;
+                return null;
 
-            Queue(new PurchaseIntentMessage
+            return BuildPending(new PurchaseIntentMessage
             {
                 Kind = PurchaseKind.ScannerLicense,
                 Lines = new List<PurchaseLine> { new PurchaseLine { Count = 1 } },
             }, PendingSurface.ScannerLicense, null, screen, null, null, -1);
-            return false;
         }
 
-        private void Queue(PurchaseIntentMessage message, PendingSurface surface, RestockItemScreen restock,
-            ScannerRestockScreen scanner, FurnitureShopConfirmPurchaseScreen furniture,
-            FurnitureShopUIScreen owner, int localIndex)
+        private PendingRequest BuildPending(PurchaseIntentMessage message, PendingSurface surface,
+            RestockItemScreen restock, ScannerRestockScreen scanner,
+            FurnitureShopConfirmPurchaseScreen furniture, FurnitureShopUIScreen owner, int localIndex)
         {
             var pending = new PendingRequest
             {
+                Message = message,
                 Surface = surface,
                 RestockScreen = restock,
                 ScannerScreen = scanner,
@@ -261,9 +294,79 @@ namespace CardShopCoop.Modules.Purchasing
                 }
             }
 
-            if (_context?.InGame() != true)
+            // Every checkout surface decrements a report cost synchronously (supplyCost for
+            // restock, upgradeCost for furniture/licenses) before queueing its ReduceCoin, so this
+            // snapshot is the reliable "did it charge and how much" baseline.
+            pending.SupplyCostBefore = CPlayerData.m_GameReportDataCollectPermanent.supplyCost;
+            pending.UpgradeCostBefore = CPlayerData.m_GameReportDataCollectPermanent.upgradeCost;
+
+            // Restock, scanner, and furniture checkouts spawn physical package boxes through the
+            // game's own factory before the host can accept or reject the intent. The client is
+            // the creator: it assigns each box's stable id now, carries them in the intent, and
+            // consumes them as the boxes spawn. Licenses do not create a package.
+            if (surface == PendingSurface.Restock || surface == PendingSurface.Scanner
+                || surface == PendingSurface.Furniture)
+            {
+                pending.StartDeliveries = WorldClientBehaviour.PendingClientDeliveryCount();
+                for (var i = 0; i < message.Lines.Count; i++)
+                {
+                    var line = message.Lines[i];
+                    var count = surface == PendingSurface.Furniture ? 1 : Math.Max(line.Count, 0);
+                    for (var b = 0; b < count; b++)
+                    {
+                        var id = Guid.NewGuid();
+                        line.BoxNetworkIds.Add(id);
+                        pending.BoxIds.Add(id);
+                    }
+                }
+
+                if (surface == PendingSurface.Furniture)
+                {
+                    // A furniture checkout spawns its single package synchronously.
+                    if (pending.BoxIds.Count > 0)
+                    {
+                        WorldClientBehaviour.PushClientCreatedId(pending.BoxIds[0]);
+                    }
+                }
+                else
+                {
+                    // A restock/scanner checkout queues deliveries that RestockManager.Update drains.
+                    WorldClientBehaviour.PushClientDeliveryIds(pending.BoxIds);
+                }
+            }
+
+            return pending;
+        }
+
+        /// <summary>Registers the one purchase the vanilla checkout already performed. The local
+        /// wallet/items/licenses changed through the game's own path, so the prediction sends the
+        /// intent without applying anything; the host confirms it (Ack) or rolls it back with the
+        /// generic rollback, which reopens the cart/confirmation.</summary>
+        private void Observe(PendingRequest pending)
+        {
+            if (pending == null || _context?.InGame() != true)
                 return;
 
+            // Close the checkout's synchronous enqueue window before anything can drain the
+            // delivery queue, so the rejection knows exactly what this checkout appended.
+            pending.AppendedDeliveries = Math.Max(
+                WorldClientBehaviour.PendingClientDeliveryCount() - pending.StartDeliveries, 0);
+
+            // If the checkout was refused locally (or queued no delivery), its pre-assigned ids
+            // will never spawn; release them so the host's descriptors materialize normally.
+            if (pending.Surface == PendingSurface.Furniture || pending.AppendedDeliveries == 0)
+            {
+                WorldClientBehaviour.ReleaseUnspawnedClientIds(pending.BoxIds);
+            }
+
+            // The vanilla checkout already spent the guest's mirror before this postfix. Recover
+            // the exact amount so a rejection can refund it and a replay can re-charge it.
+            pending.Spent = (pending.SupplyCostBefore
+                - CPlayerData.m_GameReportDataCollectPermanent.supplyCost)
+                + (pending.UpgradeCostBefore
+                    - CPlayerData.m_GameReportDataCollectPermanent.upgradeCost);
+
+            var message = pending.Message;
             PredictionApi.Predict(
                 "purchasing",
                 predictionId =>
@@ -277,6 +380,8 @@ namespace CardShopCoop.Modules.Purchasing
                     catch
                     {
                         _pendingRequests.Remove(predictionId);
+                        WorldClientBehaviour.RollbackClientCreated(pending.BoxIds);
+                        WorldClientBehaviour.CancelPendingClientDeliveries(pending.AppendedDeliveries);
                         throw;
                     }
                 },
@@ -289,7 +394,7 @@ namespace CardShopCoop.Modules.Purchasing
             if (_context?.InGame() == true)
                 return true;
 
-            CoopPlugin.Log.LogWarning("Purchasing blocked " + action + ": the shop is not ready");
+            CoopPlugin.Log.LogWarning("Purchasing skipped " + action + ": the shop is not ready");
             return false;
         }
 
@@ -319,6 +424,10 @@ namespace CardShopCoop.Modules.Purchasing
                     CatalogApi.ApplyClientScannerLicense(true);
                     break;
             }
+
+            // Replay after a rollback re-does the checkout that vanilla already performed once; the
+            // wallet debit must be mirrored here or the guest's balance drifts below the host's.
+            Charge(pending.Spent);
         }
 
         private static void Undo(PendingRequest pending)
@@ -346,6 +455,34 @@ namespace CardShopCoop.Modules.Purchasing
                     CatalogApi.ApplyClientScannerLicense(false);
                     break;
             }
+
+            // The vanilla checkout already debited the guest's mirror (the Hud economy observer was
+            // suppressed by EconomyActionScope), and the host owns the authoritative charge. A
+            // rejection must refund that local debit through the game's own coin event so the
+            // balance is right immediately rather than until the next authoritative wallet delta.
+            Refund(pending.Spent);
+
+            // The host sent no descriptor, so the checkout's own package boxes will never bind.
+            // Destroy them and cancel their not-yet-spawned deliveries through the game path.
+            WorldClientBehaviour.RollbackClientCreated(pending.BoxIds);
+            WorldClientBehaviour.CancelPendingClientDeliveries(pending.AppendedDeliveries);
+        }
+
+        /// <summary>Re-applies the wallet debit of a replayed checkout through the game's own coin
+        /// event. Queued during reconciliation, so the Hud economy observer does not forward it as a
+        /// second contribution.</summary>
+        private static void Charge(double amount)
+        {
+            if (amount > 0.0001d)
+                CEventManager.QueueEvent(new CEventPlayer_ReduceCoin((float)amount));
+        }
+
+        /// <summary>Reverses the wallet debit of a rejected checkout through the game's own coin
+        /// event.</summary>
+        private static void Refund(double amount)
+        {
+            if (amount > 0.0001d)
+                CEventManager.QueueEvent(new CEventPlayer_AddCoin((float)amount, true));
         }
 
         private void ShowStatus(string text)
@@ -356,10 +493,21 @@ namespace CardShopCoop.Modules.Purchasing
         [HarmonyPatch(typeof(RestockItemCheckoutScreen), "OnPressConfirmCheckout")]
         private static class RestockCheckoutPatch
         {
+            // Capture the cart before vanilla clears it; the postfix observes the one checkout the
+            // game already performed.
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static bool Prefix(RestockItemCheckoutScreen __instance)
-                => _active == null || _active.InterceptRestockCheckout(__instance);
+            private static void Prefix(RestockItemCheckoutScreen __instance, out PendingRequest __state)
+            {
+                __state = _active?.CaptureRestockCheckout(__instance);
+                EnterChargeScope(__state);
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(PendingRequest __state) => _active?.Observe(__state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(PendingRequest __state) => ReleaseChargeScope(__state);
         }
 
         [HarmonyPatch(typeof(ScannerRestockScreen), "OnPressCheckoutButton")]
@@ -367,8 +515,17 @@ namespace CardShopCoop.Modules.Purchasing
         {
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static bool Prefix(ScannerRestockScreen __instance)
-                => _active == null || _active.InterceptScanner(__instance);
+            private static void Prefix(ScannerRestockScreen __instance, out PendingRequest __state)
+            {
+                __state = _active?.CaptureScanner(__instance);
+                EnterChargeScope(__state);
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(PendingRequest __state) => _active?.Observe(__state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(PendingRequest __state) => ReleaseChargeScope(__state);
         }
 
         [HarmonyPatch(typeof(FurnitureShopConfirmPurchaseScreen), "OnPressConfirmCheckout")]
@@ -376,8 +533,18 @@ namespace CardShopCoop.Modules.Purchasing
         {
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static bool Prefix(FurnitureShopConfirmPurchaseScreen __instance)
-                => _active == null || _active.InterceptFurniture(__instance);
+            private static void Prefix(FurnitureShopConfirmPurchaseScreen __instance,
+                out PendingRequest __state)
+            {
+                __state = _active?.CaptureFurniture(__instance);
+                EnterChargeScope(__state);
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(PendingRequest __state) => _active?.Observe(__state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(PendingRequest __state) => ReleaseChargeScope(__state);
         }
 
         [HarmonyPatch(typeof(RestockItemPanelUI), "OnPressPurchaseButton")]
@@ -385,8 +552,17 @@ namespace CardShopCoop.Modules.Purchasing
         {
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static bool Prefix(RestockItemPanelUI __instance)
-                => _active == null || _active.InterceptProductLicense(__instance);
+            private static void Prefix(RestockItemPanelUI __instance, out PendingRequest __state)
+            {
+                __state = _active?.CaptureProductLicense(__instance);
+                EnterChargeScope(__state);
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(PendingRequest __state) => _active?.Observe(__state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(PendingRequest __state) => ReleaseChargeScope(__state);
         }
 
         [HarmonyPatch(typeof(ScannerRestockScreen), "OnPressUnlockButton")]
@@ -394,8 +570,17 @@ namespace CardShopCoop.Modules.Purchasing
         {
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static bool Prefix(ScannerRestockScreen __instance)
-                => _active == null || _active.InterceptScannerLicense(__instance);
+            private static void Prefix(ScannerRestockScreen __instance, out PendingRequest __state)
+            {
+                __state = _active?.CaptureScannerLicense(__instance);
+                EnterChargeScope(__state);
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(PendingRequest __state) => _active?.Observe(__state);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(PendingRequest __state) => ReleaseChargeScope(__state);
         }
     }
 }

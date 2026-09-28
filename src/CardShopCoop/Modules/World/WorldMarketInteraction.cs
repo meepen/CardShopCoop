@@ -12,15 +12,21 @@ namespace CardShopCoop.Modules.World
     /// One shared market. PriceChangeManager rerolls every item/card percent change with
     /// UnityEngine.Random at each day start, so from day 2 the joiner would price cards
     /// against a market that does not exist (host customers judge his tags against the
-    /// HOST's numbers). The joiner's roll is blocked outright and the host's post-roll
-    /// table is broadcast: item % changes, all eight per-expansion card % changes, and
-    /// the game-event price rows the phone apps read.
+    /// HOST's numbers). The client runs the day roll vanilla like every other game path;
+    /// the host's post-roll table is the authority and is broadcast: item % changes, all
+    /// eight per-expansion card % changes, and the game-event price rows the phone apps read.
+    /// The rolled percents the snapshot ships (GeneratedMarketPrice in FillMarket/ReadMarketInto)
+    /// are fully overwritten, so the client's local roll converges on the next snapshot.
     ///
-    /// Price HISTORY (the graph screens) is never shipped: the vanilla day-start append
-    /// (UpdateItemPricePercentChange / UpdatePastCardPricePercentChange) just pushes the
-    /// CURRENT values, so the client replays exactly one append per host day after
-    /// applying that day's snapshot - identical graphs without sending 30 days x
-    /// thousands of floats. The join-time save download provides the matching baseline.
+    /// The day roll also appends price HISTORY (UpdateItemPricePercentChange /
+    /// UpdatePastCardPricePercentChange) that is never shipped: m_ItemPricePercentPastChangeList
+    /// and each MarketPrice's pastPricePercentChangeList stay per-peer. The client's own history
+    /// curve is therefore local-only; there is no message that could carry it, so it is left to
+    /// the client's vanilla roll (the host keeps its own).
+    ///
+    /// Card BASES: RestockManager.GenerateCardMarketPrice only writes each card's
+    /// generatedMarketPrice base, which the snapshot ships and fully overwrites
+    /// (GeneratedMarketPrice in FillMarket/ReadMarketInto), so it runs vanilla and is observed.
     ///
     /// All writes go INTO the existing lists / MarketPrice objects, never replacing them:
     /// PriceChangeManager.Init aliases its own fields to the CPlayerData lists, so a
@@ -41,12 +47,7 @@ namespace CardShopCoop.Modules.World
             ?? WorldClientBehaviour.ActiveCards?.Market;
 
         private static bool IsHost => Current?._host == true;
-        private static bool IsClient => Current != null && !Current._host;
         private static bool InGame => Current != null && Current._context.InGame();
-
-        /// <summary>True while ClientApplyState writes host data, so any future patch on
-        /// these tables can tell a sync write from a local one.</summary>
-        public static bool ApplyingRemote;
 
         public Action<INetMessage> BroadcastState; // set by WorldCardInteraction: host -> clients
         // Client: newest snapshot received while not in game. Applied from the world-ready
@@ -89,7 +90,6 @@ namespace CardShopCoop.Modules.World
             s_dirty = false;
             InvalidateContentCache();
             s_modCardPending.Clear();
-            ApplyingRemote = false;
         }
 
         /// <summary>Invalidates the fixed EPL registry only for an explicit content, scene, or
@@ -139,13 +139,12 @@ namespace CardShopCoop.Modules.World
 
         internal static void ApplyPatches(Harmony h)
         {
-            // The joiner must never roll its own market: the shared world runtime lets one
-            // OnDayStarted event through per mirrored host day (for the HUD), and that
-            // event would run this handler's Random-driven reroll + history append.
-            // Blocking here kills both; the host snapshot is the only market writer.
-            // The host-side postfix stamps "a roll just finished" for the broadcast.
+            // The client runs PriceChangeManager.OnDayStarted vanilla. Its Random reroll is
+            // overwritten by the host's next snapshot, and the price HISTORY OnDayStarted appends
+            // is per-peer and not shipped, so there is nothing to forward. HostRolledPostfix is a
+            // host-only observer that stamps the dirty flag for the prompt broadcast; off-host it
+            // is a no-op.
             Try(h, typeof(PriceChangeManager), "OnDayStarted",
-                prefix: new HarmonyMethod(typeof(WorldMarketInteraction), nameof(ClientBlockPrefix)),
                 postfix: new HarmonyMethod(typeof(WorldMarketInteraction), nameof(HostRolledPostfix)));
             // Other writers of the synced market tables: a game-event price edit, the
             // initial load, first-seen base generation, and per-purchase cost updates.
@@ -156,10 +155,11 @@ namespace CardShopCoop.Modules.World
                 postfix: new HarmonyMethod(typeof(WorldMarketInteraction), nameof(MarkDirtyHostPostfix)));
             // RestockManager.Init is the only caller of GenerateCardMarketPrice and the one
             // place generated item cost/market bases are first filled (a newly met item).
+            // GenerateCardMarketPrice itself is NOT gated: its only output is each card's
+            // generatedMarketPrice base, which the snapshot ships and overwrites
+            // (GeneratedMarketPrice), so the game runs it and this file observes.
             Try(h, typeof(RestockManager), "Init",
                 postfix: new HarmonyMethod(typeof(WorldMarketInteraction), nameof(MarkDirtyHostPostfix)));
-            Try(h, typeof(RestockManager), "GenerateCardMarketPrice",
-                prefix: new HarmonyMethod(typeof(WorldMarketInteraction), nameof(GenerateCardMarketPriceBlockPrefix)));
             // Average item cost moves during normal gameplay (buying stock).
             Try(h, typeof(CPlayerData), "UpdateAverageItemCost",
                 postfix: new HarmonyMethod(typeof(WorldMarketInteraction), nameof(MarkDirtyHostPostfix)));
@@ -246,7 +246,7 @@ namespace CardShopCoop.Modules.World
         /// <summary>Host: a market table was written; flush on the next tick.</summary>
         public static void MarkDirtyHostPostfix()
         {
-            if (IsHost && !ApplyingRemote)
+            if (IsHost)
             {
                 s_dirty = true;
                 Current?.FlushHostMutation();
@@ -272,17 +272,9 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        public static bool ClientBlockPrefix()
-        {
-            return !IsClient;
-        }
-
-        public static bool GenerateCardMarketPriceBlockPrefix(ECardExpansionType expansionType)
-            => !IsClient;
-
         public static void HostRolledPostfix()
         {
-            // postfixes run even when the prefix skipped the original - host gate here
+            // The day roll runs on every peer; only the host broadcasts the authoritative table.
             if (IsHost)
             {
                 s_dirty = true; // a day roll changed the market; flush promptly
@@ -347,12 +339,7 @@ namespace CardShopCoop.Modules.World
 
         public void ClientApplyState(MarketStateMessage message)
         {
-            ApplyingRemote = true;
-            try
-            {
-                ClientApplyInner(message);
-            }
-            finally { ApplyingRemote = false; }
+            ClientApplyInner(message);
         }
 
         /// <summary>Client: apply now if in game, otherwise hold the newest snapshot until

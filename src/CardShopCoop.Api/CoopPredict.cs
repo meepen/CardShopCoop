@@ -24,10 +24,16 @@ namespace CardShopCoop.Api
         public static bool IsReconciling => CoopApi.Binding != null && CoopApi.Binding.IsReconciling;
         public static bool IsApplying => CoopApi.Binding != null && CoopApi.Binding.IsApplying;
 
-        /// <summary>Registers and sends a prediction. Throws when no client prediction session is
-        /// active, mirroring the built-in modules.</summary>
-        public static Guid Predict(string scope, Action<Guid> send, Action apply, Action undo,
-            bool applyLocally = true)
+        /// <summary>Registers and sends a prediction for an action the game already performed. The
+        /// local mutation is NOT performed now; only the replay/undo closures are recorded. Throws
+        /// when no client prediction session is active, mirroring the built-in modules.</summary>
+        public static Guid Predict(string scope, Action<Guid> send, Action apply, Action undo)
+        {
+            var binding = RequireBinding();
+            return binding.Predict(scope, send, apply, undo);
+        }
+
+        private static ICoopBinding RequireBinding()
         {
             var binding = CoopApi.Binding;
             if (binding == null || !binding.PredictionActive)
@@ -35,17 +41,23 @@ namespace CardShopCoop.Api
                 throw new InvalidOperationException("Co-op client prediction is not active.");
             }
 
-            return binding.Predict(scope, send, apply, undo, applyLocally);
+            return binding;
         }
 
-        public static void ApplyAuthoritative(Guid predictionId, Action apply)
-            => CoopApi.Binding?.ApplyAuthoritative(predictionId, apply);
+        /// <summary>The host accepted the prediction (the game already applied it): retire it.</summary>
+        public static void Ack(Guid predictionId)
+            => CoopApi.Binding?.Ack(predictionId);
 
-        public static void ApplyConfirmed(Guid predictionId, Action apply)
-            => CoopApi.Binding?.ApplyConfirmed(predictionId, apply);
+        /// <summary>Either this message confirms our own prediction (retire it) or is a remote change
+        /// (apply it through the game path).</summary>
+        public static void AckOrApply(Guid predictionId, Action apply)
+            => CoopApi.Binding?.AckOrApply(predictionId, apply);
 
-        public static void ConfirmSuperseded(Guid predictionId)
-            => CoopApi.Binding?.ConfirmSuperseded(predictionId);
+        /// <summary>This message resolves our own prediction (retire it without running anything
+        /// from the retire) and then ALWAYS applies the authoritative state through the game path.
+        /// Use when the host's message supersedes the client's optimistic run.</summary>
+        public static void Confirm(Guid predictionId, Action apply)
+            => CoopApi.Binding?.Confirm(predictionId, apply);
 
         public static bool IsPending(Guid predictionId)
             => CoopApi.Binding != null && CoopApi.Binding.IsPending(predictionId);

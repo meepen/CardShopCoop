@@ -46,7 +46,6 @@ namespace CardShopCoop.Modules.Register
             _harmony = new Harmony("com.zwhit.cardshopcoop.register.host");
             Patch(typeof(ManningPatch));
             Patch(typeof(ExitPatch));
-            Patch(typeof(WorkerPatch));
             Patch(typeof(CustomerPatch));
             Patch(typeof(StatePatch));
             Patch(typeof(PaymentPatch));
@@ -56,11 +55,12 @@ namespace CardShopCoop.Modules.Register
             Patch(typeof(AddChangePatch));
             Patch(typeof(RemoveChangePatch));
             Patch(typeof(FinishPatch));
+            // Subscribe before patching: a failed Patch(...) throws out of OnEnable, and the
+            // sceneLoaded subscription must survive so host scene reloads still reset stations.
+            SceneManager.sceneLoaded += OnSceneLoaded;
             Patch(typeof(CounterAddedPatch));
             Patch(typeof(CounterRemovedPatch));
             Patch(typeof(CounterDestroyedPatch));
-            Patch(typeof(ShelfManagerStartPatch));
-            SceneManager.sceneLoaded += OnSceneLoaded;
         }
 
         private void Patch(Type patchType)
@@ -162,6 +162,14 @@ namespace CardShopCoop.Modules.Register
                 else if (message.Kind == RegisterIntentKind.CardPayment
                     || message.Kind == RegisterIntentKind.Complete)
                 {
+                    // The checkout completed on this host by applying a guest's intent. The game's
+                    // own credit inside OnPressSpaceBar is gated on m_IsMannedByPlayer, which is
+                    // false here (the host never physically manned the counter), so the shared
+                    // tutorial, the end-of-day manual-checkout count, and the checkout achievement
+                    // would otherwise never advance for a guest-run register. Credit them on the
+                    // host's authoritative state; the guest's local vanilla credit is presentation
+                    // and is overwritten by the authoritative tutorial/report deltas.
+                    CreditGuestCheckout();
                     PublishCustomerLifecycle(index, true);
                 }
             }
@@ -268,8 +276,7 @@ namespace CardShopCoop.Modules.Register
                         return false;
                     }
 
-                    var change = RegisterInterop.FindChange(counter, message.Slot, message.IsCoin,
-                        message.Value);
+                    var change = RegisterInterop.FindChange(counter, message.Slot, message.IsCoin);
                     if (change == null)
                     {
                         LogIntentReject("change slot=" + message.Slot + " coin=" + message.IsCoin
@@ -579,6 +586,41 @@ namespace CardShopCoop.Modules.Register
             Broadcast(delta);
         }
 
+        /// <summary>The host is the single roller of the customer's paid amount and cash/card kind
+        /// (vanilla <c>EvaluateFinishScanItem</c> runs on the host's customer). <see cref="PublishPhase"/>
+        /// is suppressed while an intent is being applied and, when it does fire, carries the
+        /// guest's scan prediction id, so the guest's acknowledgement retires it without applying
+        /// the host's value. This delta is deliberately prediction-free so the guest always applies
+        /// the host's authoritative paid amount and kind, then presents the cash/card choice.</summary>
+        private void PublishPaidAmount(int index)
+        {
+            if (index < 0 || index >= 250)
+            {
+                return;
+            }
+
+            var counter = RegisterInterop.Counter(index);
+            var customer = counter?.m_CurrentCustomer;
+            if (counter == null || customer == null)
+            {
+                return;
+            }
+
+            var station = Observe(index, counter);
+            var delta = new RegisterDeltaMessage
+            {
+                Kind = RegisterDeltaKind.PaidAmount,
+                Counter = (byte)index,
+                CounterGeneration = station.CounterGeneration,
+                HasCustomer = true,
+                CustomerIndex = RegisterInterop.CustomerIndex(customer),
+                CustomerGeneration = (int)station.CustomerGeneration,
+                PredictionId = Guid.Empty,
+            };
+            FillPhase(delta, counter);
+            Broadcast(delta);
+        }
+
         private static void FillPhase(RegisterDeltaMessage delta, InteractableCashierCounter counter)
         {
             if (counter == null)
@@ -759,10 +801,10 @@ namespace CardShopCoop.Modules.Register
         [HarmonyPatch(typeof(InteractableCashierCounter), "OnMouseButtonUp")]
         private static class ManningPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(InteractableCashierCounter __instance)
-                => _active == null || !IsGuestOwned(__instance);
-
+            // The host always mans through vanilla; the postfix observes the host's own successful
+            // man and publishes it. The previous no-longer-needed guard that stopped the host from
+            // manning a guest-owned counter was a Harmony suppression, so it is removed: the host
+            // is authoritative and the published ownership unmounts the guest.
             [HarmonyPostfix]
             private static void Postfix(InteractableCashierCounter __instance)
             {
@@ -797,20 +839,6 @@ namespace CardShopCoop.Modules.Register
             }
         }
 
-        [HarmonyPatch(typeof(InteractableCashierCounter), "NPCStartManCounter")]
-        private static class WorkerPatch
-        {
-            [HarmonyPrefix]
-            private static bool Prefix(InteractableCashierCounter __instance)
-                => _active == null || !IsGuestOwned(__instance);
-        }
-
-        private static bool IsGuestOwned(InteractableCashierCounter counter)
-        {
-            var index = Index(counter);
-            return _active != null && index >= 0 && _active.GetStation(index).Owner > 0;
-        }
-
         [HarmonyPatch(typeof(InteractableCashierCounter), "UpdateCurrentCustomer")]
         private static class CustomerPatch
         {
@@ -824,7 +852,17 @@ namespace CardShopCoop.Modules.Register
         {
             [HarmonyPostfix]
             private static void Postfix(InteractableCashierCounter __instance)
-                => _active?.PublishPhase(Index(__instance));
+            {
+                _active?.PublishPhase(Index(__instance));
+                if (__instance != null
+                    && __instance.m_CashierCounterState == ECashierCounterState.TakingCash)
+                {
+                    // Entering TakingCash is where vanilla reveals the cash/card choice. Publish the
+                    // prediction-free paid delta here so the guest applies the host's rolled amount
+                    // and kind even when this state change came from applying the guest's own scan.
+                    _active?.PublishPaidAmount(Index(__instance));
+                }
+            }
         }
 
         [HarmonyPatch(typeof(InteractableCashierCounter), "SetCustomerPaidAmount")]
@@ -846,10 +884,18 @@ namespace CardShopCoop.Modules.Register
         [HarmonyPatch(typeof(InteractableScanItem), "OnMouseButtonUp")]
         private static class ScanItemPatch
         {
+            // The scan nulls the item's owning-customer reference, so capture the counter it
+            // belongs to before vanilla runs; the postfix publishes against that stable counter.
+            [HarmonyPrefix]
+            private static void Prefix(InteractableScanItem __instance,
+                out InteractableCashierCounter __state)
+                => __state = RegisterInterop.FindCounterForScanItem(__instance);
+
             [HarmonyPostfix]
-            private static void Postfix(InteractableScanItem __instance)
+            private static void Postfix(InteractableScanItem __instance,
+                InteractableCashierCounter __state)
             {
-                var counter = RegisterInterop.FindCounterForScanItem(__instance);
+                var counter = __state;
                 var index = Index(counter);
                 if (_active != null && index >= 0 && counter?.m_CurrentCustomer != null)
                 {
@@ -869,10 +915,18 @@ namespace CardShopCoop.Modules.Register
         [HarmonyPatch(typeof(InteractableCard3d), "OnMouseButtonUp")]
         private static class ScanCardPatch
         {
+            // Card counterpart of ScanItemPatch: capture the counter before the card's owning
+            // customer is cleared.
+            [HarmonyPrefix]
+            private static void Prefix(InteractableCard3d __instance,
+                out InteractableCashierCounter __state)
+                => __state = RegisterInterop.FindCounterForCard(__instance);
+
             [HarmonyPostfix]
-            private static void Postfix(InteractableCard3d __instance)
+            private static void Postfix(InteractableCard3d __instance,
+                InteractableCashierCounter __state)
             {
-                var counter = RegisterInterop.FindCounterForCard(__instance);
+                var counter = __state;
                 var index = Index(counter);
                 if (_active != null && index >= 0 && counter?.m_CurrentCustomer != null)
                 {
@@ -916,23 +970,11 @@ namespace CardShopCoop.Modules.Register
         [HarmonyPatch(typeof(ShelfManager), "InitCashierCounter")]
         private static class CounterAddedPatch
         {
+            // InitCashierCounter is static in both game baselines, so Harmony binds __instance to
+            // null. Bind the counter argument positionally, matching CounterRemovedPatch.
             [HarmonyPostfix]
-            private static void Postfix(InteractableCashierCounter __instance)
-                => _active?.PublishCounterLifecycle(__instance);
-        }
-
-        [HarmonyPatch(typeof(ShelfManager), "Start")]
-        private static class ShelfManagerStartPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix()
-            {
-                var counters = RegisterInterop.Counters;
-                for (var i = 0; counters != null && i < counters.Count; i++)
-                {
-                    _active?.PublishCounterLifecycle(counters[i]);
-                }
-            }
+            private static void Postfix(InteractableCashierCounter __0)
+                => _active?.PublishCounterLifecycle(__0);
         }
 
         [HarmonyPatch(typeof(ShelfManager), "RemoveCashierCounter")]

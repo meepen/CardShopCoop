@@ -105,9 +105,6 @@ namespace CardShopCoop.Modules.Catalog
         internal static void ApplyClientProductLicense(int index, bool unlocked)
             => CatalogClientBehaviour.ApplyPurchaseProductLicense(index, unlocked);
 
-        internal static void ApplyClientProductEntitlementSideEffects(int index)
-            => CatalogClientBehaviour.ApplyPurchaseProductEntitlementSideEffects(index);
-
         internal static void ApplyClientScannerLicense(bool unlocked)
             => CatalogClientBehaviour.ApplyPurchaseScannerLicense(unlocked);
 

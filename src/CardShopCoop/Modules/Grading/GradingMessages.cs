@@ -16,6 +16,11 @@ namespace CardShopCoop.Modules.Grading
         public byte ServiceLevel;
         public List<CardData> Cards = new();
         public byte CompanyId;
+
+        /// <summary>Stable client-minted identity for the job this submission creates. The host
+        /// adopts it as the authoritative set id, so both peers bind the job by id rather than by
+        /// list position.</summary>
+        public Guid JobId;
     }
 
     /// <summary>Complete authoritative grading-job state.</summary>
@@ -33,7 +38,7 @@ namespace CardShopCoop.Modules.Grading
             get; set;
         }
 
-        public int Id;
+        public Guid Id;
         public bool Removed;
         public int ServiceLevel;
         public byte DayPassed;
@@ -43,7 +48,7 @@ namespace CardShopCoop.Modules.Grading
 
     public sealed class GradingSetDto
     {
-        public int Id;
+        public Guid Id;
         public int ServiceLevel;
         public byte DayPassed;
         public float MinutePassed;

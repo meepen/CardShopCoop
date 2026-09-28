@@ -23,14 +23,23 @@ namespace CardShopCoop.Modules.Hud
         private bool _hasAuthoritativeLevel;
         private int _applyingSnapshot;
         private GameUIScreen _gameUi;
+        private readonly System.Collections.Generic.Dictionary<CEvent, PendingContribution>
+            _pendingContributions = new();
 
-        // Last authoritative values pushed by the host, kept separate from the optimistic
-        // predictions so a guest can recover the size of each confirmed change and play the
-        // game's own top-right money/experience popup.
-        private float _authoritativeCoinDisplay;
-        private int _authoritativeExperience;
-        private int _authoritativeLevel;
-        private bool _hasAuthoritativeTrack;
+        private readonly struct PendingContribution
+        {
+            internal readonly HudContributionKind Kind;
+            internal readonly float Value;
+            internal readonly HudAuthoritativeState Previous;
+
+            internal PendingContribution(HudContributionKind kind, float value,
+                HudAuthoritativeState previous)
+            {
+                Kind = kind;
+                Value = value;
+                Previous = previous;
+            }
+        }
 
         private void OnEnable()
         {
@@ -44,7 +53,11 @@ namespace CardShopCoop.Modules.Hud
                 handlersRegistered = true;
                 _active = this;
                 _harmony = new Harmony("com.zwhit.cardshopcoop.hud.client");
-                _harmony.CreateClassProcessor(typeof(LocalEconomyPatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(EconomyQueuePatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(ObservedAddCoinPatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(ObservedReduceCoinPatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(ObservedAddShopExpPatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(ObservedAddFamePatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(GameUiReadyPatch)).Patch();
                 SceneManager.sceneLoaded += OnSceneLoaded;
             }
@@ -106,18 +119,21 @@ namespace CardShopCoop.Modules.Hud
         {
             _highestNotifiedLevel = -1;
             _hasAuthoritativeLevel = false;
-            _hasAuthoritativeTrack = false;
             _gameUi = null;
         }
 
-        private bool Forward(HudContributionKind kind, float value)
+        /// <summary>
+        /// Registers one economy contribution the game already applied as a post-hoc prediction.
+        /// The game performed the local mutation through its own handler, so this only forwards the
+        /// intent and keeps the apply/undo closures for a rejection replay; a host accept retires it
+        /// (the absolute authoritative value then overwrites the mirror).
+        /// </summary>
+        private void ForwardObserved(HudContributionKind kind, float value,
+            HudAuthoritativeState previous)
         {
-            if (_shutdown || !_context.InGame())
-            {
-                return false;
-            }
+            if (_shutdown || _context == null || !_context.InGame())
+                return;
 
-            var previous = Capture();
             PredictionApi.Predict(
                 PredictionScope,
                 predictionId => _context.Send(1, new HudContributionIntent
@@ -128,7 +144,17 @@ namespace CardShopCoop.Modules.Hud
                 }),
                 () => ApplyContribution(kind, value),
                 () => Restore(previous));
-            return true;
+        }
+
+        /// <summary>Publishes one economy event captured at queue time. The capture exists because
+        /// the "owned by a module intent" and reconciliation guards must be evaluated when the game
+        /// queues the event, not when the handler later runs.</summary>
+        private void PublishObserved(CEvent evt)
+        {
+            if (evt == null || !_pendingContributions.TryGetValue(evt, out var pending))
+                return;
+            _pendingContributions.Remove(evt);
+            ForwardObserved(pending.Kind, pending.Value, pending.Previous);
         }
 
         [MessageHandler(typeof(HudAuthoritativeState))]
@@ -136,7 +162,6 @@ namespace CardShopCoop.Modules.Hud
         {
             if (state == null)
                 return;
-            Track(state);
             _pending = Clone(state);
             ApplyPendingIfReady();
         }
@@ -147,19 +172,18 @@ namespace CardShopCoop.Modules.Hud
             if (message == null)
                 return;
 
-            var confirmedOwnContribution = PredictionApi.IsPending(message.PredictionId);
-            var hadTrack = _hasAuthoritativeTrack;
-            var delta = message.CoinDisplay - _authoritativeCoinDisplay;
-            _authoritativeCoinDisplay = message.CoinDisplay;
-            _hasAuthoritativeTrack = true;
-
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            // The delta carries the host's ABSOLUTE wallet. Retire our own pending contribution and
+            // always fold the absolute in, so a host edit that interleaved with our optimistic
+            // change (which the optimistic apply alone cannot reproduce) does not drift.
+            //
+            // The mod does not fabricate a money popup here. The client plays vanilla, so every
+            // change the local player causes runs the game's own CEventPlayer_Add/ReduceCoin handler
+            // and GameUIScreen pops it exactly once; a second popup from this authoritative echo is
+            // what produced the double "-$X" for every EconomyActionScope-owned action. The cost is
+            // that a remote player's spend now updates the wallet silently (it only reaches the
+            // guest as an absolute SetCoin, which the game never pops).
+            PredictionApi.Confirm(message.PredictionId,
                 () => ApplyWallet(message.Coins, message.CoinDisplay));
-
-            // The optimistic apply already popped the local player's own change, so only remote
-            // changes (and host-driven changes with no local prediction) need a popup here.
-            if (!confirmedOwnContribution && hadTrack)
-                ShowWalletPopup(delta);
         }
 
         [MessageHandler(typeof(HudProgressDeltaMessage))]
@@ -168,21 +192,10 @@ namespace CardShopCoop.Modules.Hud
             if (message == null)
                 return;
 
-            var confirmedOwnContribution = PredictionApi.IsPending(message.PredictionId);
-            var hadTrack = _hasAuthoritativeTrack;
-            var gained = hadTrack
-                ? GainedExperience(_authoritativeLevel, _authoritativeExperience,
-                    message.Level, message.Experience)
-                : 0;
-            _authoritativeExperience = message.Experience;
-            _authoritativeLevel = message.Level;
-            _hasAuthoritativeTrack = true;
-
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            // Absolute exp/level: retire our own pending contribution and always fold the host's
+            // values in (see the wallet handler).
+            PredictionApi.Confirm(message.PredictionId,
                 () => ApplyProgress(message.Experience, message.Level));
-
-            if (!confirmedOwnContribution && gained > 0)
-                ShowExperiencePopup(gained);
         }
 
         [MessageHandler(typeof(HudFameDeltaMessage))]
@@ -191,7 +204,9 @@ namespace CardShopCoop.Modules.Hud
             if (message == null)
                 return;
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
+            // Absolute fame: retire our own pending contribution and always fold the host's
+            // value in (see the wallet handler).
+            PredictionApi.Confirm(message.PredictionId,
                 () => ApplyFame(message.Fame));
         }
 
@@ -255,70 +270,6 @@ namespace CardShopCoop.Modules.Hud
             }
 
             ApplyValues(state.Coins, state.CoinDisplay, state.Experience, state.Level, state.Fame);
-
-            // Immediate feedback for the local player's own predicted change. Reconciliation
-            // re-applies newer predictions after an undo, so skip the popup while reconciling to
-            // avoid replaying changes that already appeared.
-            if (!PredictionApi.IsReconciling)
-                ShowContributionPopup(kind, value);
-        }
-
-        private void ShowContributionPopup(HudContributionKind kind, float value)
-        {
-            switch (kind)
-            {
-                case HudContributionKind.AddCoin:
-                    ShowWalletPopup(value);
-                    break;
-                case HudContributionKind.ReduceCoin:
-                    ShowWalletPopup(-value);
-                    break;
-                case HudContributionKind.AddShopExperience:
-                    ShowExperiencePopup(Mathf.RoundToInt(value));
-                    break;
-            }
-        }
-
-        private void ShowWalletPopup(float delta)
-        {
-            if (delta == 0f || !IsGameUiReady())
-                return;
-            HudPopupBridge.ShowWallet(_gameUi, delta);
-        }
-
-        private void ShowExperiencePopup(int gained)
-        {
-            if (gained <= 0 || !IsGameUiReady())
-                return;
-            HudPopupBridge.ShowExperience(_gameUi, gained);
-        }
-
-        private void Track(HudAuthoritativeState state)
-        {
-            _authoritativeCoinDisplay = state.CoinDisplay;
-            _authoritativeExperience = state.Experience;
-            _authoritativeLevel = state.Level;
-            _hasAuthoritativeTrack = true;
-        }
-
-        /// <summary>Experience gained between two authoritative shop states, expressed as raw XP so
-        /// the popup keeps showing the true gain even when the change crossed a level boundary.</summary>
-        private static int GainedExperience(int oldLevel, int oldExperience, int newLevel,
-            int newExperience)
-        {
-            if (newLevel < oldLevel)
-                return 0;
-
-            return (int)(CumulativeExperience(newLevel, newExperience)
-                - CumulativeExperience(oldLevel, oldExperience));
-        }
-
-        private static long CumulativeExperience(int level, int experience)
-        {
-            var total = (long)experience;
-            for (var i = 0; i < level; i++)
-                total += CPlayerData.GetExpRequiredToLevelUpAtLevel(i);
-            return total;
         }
 
         private void ApplyValues(double coins, float coinDisplay, int experience, int level, int fame)
@@ -344,6 +295,20 @@ namespace CardShopCoop.Modules.Hud
         private void Restore(HudAuthoritativeState state)
         {
             ApplyValues(state.Coins, state.CoinDisplay, state.Experience, state.Level, state.Fame);
+        }
+
+        /// <summary>Records a level the local vanilla game just presented (its own
+        /// <c>CPlayer_OnAddShopExp</c> already queued the level-up). The high-water mark makes the
+        /// host's authoritative echo of the same level a no-op, so a guest's own purchase does not
+        /// present the level-up twice, while a genuinely remote level still does.</summary>
+        private void NoteLocalShopLevel()
+        {
+            var level = CPlayerData.m_ShopLevel;
+            if (!_hasAuthoritativeLevel || level > _highestNotifiedLevel)
+            {
+                _highestNotifiedLevel = level;
+                _hasAuthoritativeLevel = true;
+            }
         }
 
         private void NotifyLevel(int level)
@@ -426,12 +391,9 @@ namespace CardShopCoop.Modules.Hud
             _shutdown = true;
             _pending = null;
             _applyingSnapshot = 0;
+            _pendingContributions.Clear();
             _highestNotifiedLevel = -1;
             _hasAuthoritativeLevel = false;
-            _authoritativeCoinDisplay = 0f;
-            _authoritativeExperience = 0;
-            _authoritativeLevel = 0;
-            _hasAuthoritativeTrack = false;
             _gameUi = null;
             HudPresentationState.Clear();
             SceneManager.sceneLoaded -= OnSceneLoaded;
@@ -445,40 +407,107 @@ namespace CardShopCoop.Modules.Hud
 
         private void OnDestroy() => Shutdown();
 
+        /// <summary>
+        /// Economy observer. The client runs the game's own economy handlers (it plays vanilla),
+        /// so this no longer suppresses anything. The queue hook captures the pre-change values
+        /// while the event is still being queued, so the "owned by a module intent" scope and the
+        /// prediction-reconciliation guards are evaluated at the moment the game emits the event.
+        /// Each event that is genuinely the guest's own contribution is then forwarded once from
+        /// the matching handler postfix; a host accept retires the prediction and the host's
+        /// absolute wallet/progress/fame delta remains the only authoritative writer.
+        /// </summary>
         [HarmonyPatch(typeof(CEventManager), "QueueEvent")]
-        private static class LocalEconomyPatch
+        private static class EconomyQueuePatch
         {
             [HarmonyPrefix]
-            private static bool Prefix(CEvent evt)
+            private static void Prefix(CEvent evt)
             {
                 var active = _active;
-                if (active == null || active._applyingSnapshot != 0
-                    || evt == null || !active._context.InGame())
+                if (active == null || active._shutdown || active._context == null
+                    || !active._context.InGame() || evt == null
+                    || active._applyingSnapshot != 0
+                    || EconomyActionScope.Active
+                    || PredictionApi.IsApplying || PredictionApi.IsReconciling)
                 {
-                    return true;
+                    return;
                 }
 
-                // Economy events emitted while a prediction is being applied belong to an action
-                // the host applies authoritatively too (a guest checkout's AddCoin/AddShopExp, a
-                // worker/register action, etc.). Mirroring them here as well would credit the
-                // host twice and pop the HUD popup twice, so drop them and let the host's
-                // authoritative wallet/exp delta drive the guest.
-                if (PredictionApi.IsApplying || PredictionApi.IsReconciling)
-                {
-                    return false;
-                }
+                if (!TryGetContribution(evt, out var kind, out var value))
+                    return;
 
-                if (evt is CEventPlayer_AddCoin add)
-                    return !active.Forward(HudContributionKind.AddCoin, add.m_CoinValue);
-                if (evt is CEventPlayer_ReduceCoin reduce)
-                    return !active.Forward(HudContributionKind.ReduceCoin, reduce.m_CoinValue);
-                if (evt is CEventPlayer_AddShopExp exp)
-                    return !active.Forward(HudContributionKind.AddShopExperience, exp.m_ExpValue);
-                if (evt is CEventPlayer_AddFame fame)
-                    return !active.Forward(HudContributionKind.AddFame, fame.m_FameValue);
-
-                return true;
+                active._pendingContributions[evt] = new PendingContribution(kind, value,
+                    active.Capture());
             }
+
+            private static bool TryGetContribution(CEvent evt, out HudContributionKind kind,
+                out float value)
+            {
+                switch (evt)
+                {
+                    case CEventPlayer_AddCoin add:
+                        kind = HudContributionKind.AddCoin;
+                        value = add.m_CoinValue;
+                        return true;
+                    case CEventPlayer_ReduceCoin reduce:
+                        kind = HudContributionKind.ReduceCoin;
+                        value = reduce.m_CoinValue;
+                        return true;
+                    case CEventPlayer_AddShopExp exp:
+                        kind = HudContributionKind.AddShopExperience;
+                        value = exp.m_ExpValue;
+                        return true;
+                    case CEventPlayer_AddFame fame:
+                        kind = HudContributionKind.AddFame;
+                        value = fame.m_FameValue;
+                        return true;
+                    default:
+                        kind = default;
+                        value = 0f;
+                        return false;
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(CPlayerData), "CPlayer_OnAddCoin")]
+        private static class ObservedAddCoinPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(CEventPlayer_AddCoin __0) => _active?.PublishObserved(__0);
+        }
+
+        [HarmonyPatch(typeof(CPlayerData), "CPlayer_OnReduceCoin")]
+        private static class ObservedReduceCoinPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(CEventPlayer_ReduceCoin __0) => _active?.PublishObserved(__0);
+        }
+
+        [HarmonyPatch(typeof(CPlayerData), "CPlayer_OnAddShopExp")]
+        private static class ObservedAddShopExpPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(CEventPlayer_AddShopExp __0)
+            {
+                var active = _active;
+                if (active == null)
+                {
+                    return;
+                }
+
+                // The guest plays vanilla, so its own XP gain already ran CPlayer_OnAddShopExp,
+                // which queued the game's own ShopLeveledUp presentation. Record the level the
+                // client has now presented before forwarding, so the host's authoritative echo of
+                // that same level (ApplyProgress -> NotifyLevel) does not queue it a second time.
+                active.NoteLocalShopLevel();
+                active.PublishObserved(__0);
+            }
+        }
+
+        [HarmonyPatch(typeof(CPlayerData), "CPlayer_OnAddFame")]
+        private static class ObservedAddFamePatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(CEventPlayer_AddFame __0) => _active?.PublishObserved(__0);
         }
 
         [HarmonyPatch(typeof(GameUIScreen), "OnEnable")]

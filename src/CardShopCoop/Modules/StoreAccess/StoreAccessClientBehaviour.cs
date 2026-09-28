@@ -86,7 +86,7 @@ namespace CardShopCoop.Modules.StoreAccess
             // The local click already ran the vanilla sign path (toggle + animation), so the echo
             // of our own prediction must retire without undoing it - undoing would snap the sign
             // back and then re-animate it. ApplyDelta skips whatever already matches.
-            PredictionApi.ApplyConfirmed(message.PredictionId, () => ApplyDelta(message));
+            PredictionApi.AckOrApply(message.PredictionId, () => ApplyDelta(message));
         }
 
         private void TryApplyPending()
@@ -145,8 +145,8 @@ namespace CardShopCoop.Modules.StoreAccess
         }
 
         /// <summary>The vanilla sign click already toggled the state and started its animation;
-        /// forward the intent so the host applies and echoes it. The prediction carries no local
-        /// apply (vanilla did it) and only restores the pre-click state on a rollback.</summary>
+        /// forward the intent so the host applies and echoes it. This is a post-hoc prediction:
+        /// the game performed the toggle, so only a rejection's undo needs the pre-click state.</summary>
         private void ForwardToggle(byte which, bool before, bool after)
         {
             if (_shutdown || !_joined || _context == null || !_context.InGame() || after == before)

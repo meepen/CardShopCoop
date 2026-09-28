@@ -19,10 +19,6 @@ namespace CardShopCoop.Modules.Deodorant
         private Harmony _harmony;
         private bool _shutdown;
         private bool _joined;
-        private float _contentBefore;
-        private bool _hadContentBefore;
-        private bool _predictionStarted;
-        private bool _applyingAuthoritative;
         private readonly System.Collections.Generic.Dictionary<string, DeodorantCustomerState>
             _pendingCustomerStates = new();
 
@@ -36,7 +32,6 @@ namespace CardShopCoop.Modules.Deodorant
                 _active = this;
                 _harmony = new Harmony("com.zwhit.cardshopcoop.deodorant.client");
                 _harmony.CreateClassProcessor(typeof(SprayPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(CustomerSprayPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(CustomerManagerReadyPatch)).Patch();
                 NpcClientBehaviour.CustomerPoolChanged += ApplyPendingStates;
             }
@@ -57,8 +52,6 @@ namespace CardShopCoop.Modules.Deodorant
         private void Joined(PeerConnection _)
         {
             _joined = true;
-            _hadContentBefore = false;
-            _predictionStarted = false;
             _pendingCustomerStates.Clear();
         }
 
@@ -68,8 +61,6 @@ namespace CardShopCoop.Modules.Deodorant
             if (connection?.Id == 1)
             {
                 _joined = false;
-                _hadContentBefore = false;
-                _predictionStarted = false;
                 _pendingCustomerStates.Clear();
             }
         }
@@ -85,20 +76,19 @@ namespace CardShopCoop.Modules.Deodorant
             _harmony = null;
             NpcClientBehaviour.CustomerPoolChanged -= ApplyPendingStates;
             _joined = false;
-            _hadContentBefore = false;
-            _predictionStarted = false;
             _pendingCustomerStates.Clear();
             _context = null;
         }
 
         private void OnDestroy() => Shutdown();
 
-        private void Forward(InteractionPlayerController controller, float before, float content,
-            Vector3 position = default)
+        /// <summary>Records the spray tick the game already applied as one post-hoc prediction.
+        /// The apply/undo closures re-set the spray content through the game's own surface for a
+        /// rejection replay.</summary>
+        private void Forward(InteractionPlayerController controller, Vector3 position, float before,
+            float after)
         {
-            if (!_joined || !_context.InGame())
-                return;
-            if (position == default && !DeodorantInterop.TryGetSpray(controller, out position))
+            if (!_joined || _context == null || !_context.InGame())
                 return;
 
             PredictionApi.Predict(
@@ -107,9 +97,9 @@ namespace CardShopCoop.Modules.Deodorant
                 {
                     PredictionId = predictionId,
                     Position = position,
-                    Content = content,
+                    Content = after,
                 }),
-                () => { },
+                () => DeodorantInterop.TrySetContent(controller, after),
                 () => DeodorantInterop.TrySetContent(controller, before));
         }
 
@@ -119,9 +109,10 @@ namespace CardShopCoop.Modules.Deodorant
             if (message == null)
                 return;
 
-            // The one predicted value (spray content) is echoed verbatim and the customer state is
-            // host-computed, so this confirms the spray rather than correcting it.
-            PredictionApi.ApplyConfirmed(message.PredictionId,
+            // The spray content is echoed verbatim, but the customer state is host-computed and the
+            // client's optimistic spray never produced it. Retire our prediction, then always apply
+            // the host state so the host-computed customers overwrite the local spray.
+            PredictionApi.Confirm(message.PredictionId,
                 () => ApplyEvent(message));
         }
 
@@ -191,17 +182,8 @@ namespace CardShopCoop.Modules.Deodorant
                 return generation > state.Generation;
             }
 
-            _applyingAuthoritative = true;
-            try
-            {
-                DeodorantInterop.ApplyCustomerState(customers[state.Index], state.IsSmelly,
-                    state.SmellyMeter);
-            }
-            finally
-            {
-                _applyingAuthoritative = false;
-            }
-
+            DeodorantInterop.ApplyCustomerState(customers[state.Index], state.IsSmelly,
+                state.SmellyMeter);
             return true;
         }
 
@@ -211,62 +193,40 @@ namespace CardShopCoop.Modules.Deodorant
         [HarmonyPatch(typeof(InteractionPlayerController), "RaycastHoldSprayState")]
         private static class SprayPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(InteractionPlayerController __instance)
+            private struct SprayState
             {
-                if (_active == null)
-                    return true;
-                if (!_active._joined || !_active._context.InGame())
-                    return false;
+                public bool Armed;
+                public Vector3 Position;
+                public float Before;
+            }
 
-                if (DeodorantInterop.TryGetSprayTick(__instance, out var position,
-                    out var before, out var predictedAfter))
-                {
-                    _active._predictionStarted = true;
-                    _active.Forward(__instance, before, predictedAfter, position);
-                    return true;
-                }
+            [HarmonyPrefix]
+            private static void Prefix(InteractionPlayerController __instance, out SprayState __state)
+            {
+                __state = default;
+                var active = _active;
+                if (active == null || !active._joined || active._context == null
+                    || !active._context.InGame())
+                    return;
 
-                _active._predictionStarted = false;
-                _active._hadContentBefore = DeodorantInterop.TryGetContent(__instance,
-                    out _active._contentBefore);
-                return true;
+                // Capture the pre-tick content and muzzle position. The game performs the spray
+                // itself; the postfix observes the content drop and records the prediction.
+                if (!DeodorantInterop.TryGetSpray(__instance, out var position)
+                    || !DeodorantInterop.TryGetContent(__instance, out var before))
+                    return;
+                __state = new SprayState { Armed = true, Position = position, Before = before };
             }
 
             [HarmonyPostfix]
-            private static void Postfix(InteractionPlayerController __instance)
-            {
-                if (_active == null)
-                    return;
-
-                if (_active._predictionStarted)
-                {
-                    _active._predictionStarted = false;
-                    _active._hadContentBefore = false;
-                    return;
-                }
-
-                if (!_active._hadContentBefore)
-                    return;
-
-                var before = _active._contentBefore;
-                _active._hadContentBefore = false;
-                if (!DeodorantInterop.TryGetContent(__instance, out var after)
-                    || after >= before)
-                    return;
-                _active.Forward(__instance, before, after);
-            }
-        }
-
-        [HarmonyPatch(typeof(Customer), "DeodorantSprayCheck")]
-        private static class CustomerSprayPatch
-        {
-            [HarmonyPrefix]
-            private static bool Prefix()
+            private static void Postfix(InteractionPlayerController __instance, SprayState __state)
             {
                 var active = _active;
-                return active == null || active._context == null || !active._context.InGame()
-                    || active._applyingAuthoritative;
+                if (active == null || !__state.Armed)
+                    return;
+                if (!DeodorantInterop.TryGetContent(__instance, out var after)
+                    || after >= __state.Before)
+                    return;
+                active.Forward(__instance, __state.Position, __state.Before, after);
             }
         }
 

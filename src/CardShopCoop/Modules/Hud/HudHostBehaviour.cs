@@ -21,8 +21,6 @@ namespace CardShopCoop.Modules.Hud
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
-        private HudAuthoritativeState _lastSnapshot;
-        private bool _hasLastSnapshot;
         private Guid _pendingPredictionId;
         private readonly Dictionary<CEvent, PendingContribution> _contributionsByEvent = new();
 
@@ -215,11 +213,6 @@ namespace CardShopCoop.Modules.Hud
                 throw new InvalidOperationException("HUD contribution event kind is inconsistent.");
 
             var snapshot = Snapshot();
-            if (!_hasLastSnapshot)
-            {
-                _lastSnapshot = snapshot;
-                _hasLastSnapshot = true;
-            }
 
             switch (kind)
             {
@@ -251,8 +244,6 @@ namespace CardShopCoop.Modules.Hud
 
                     break;
             }
-
-            _lastSnapshot = snapshot;
         }
 
         private static bool TryGetContributionKind(CEvent evt, out HudContributionKind kind)
@@ -288,8 +279,6 @@ namespace CardShopCoop.Modules.Hud
         private void SendBaseline(int connectionId)
         {
             var snapshot = Snapshot();
-            _lastSnapshot = snapshot;
-            _hasLastSnapshot = true;
             _context.Send(connectionId, snapshot);
         }
 
@@ -315,8 +304,6 @@ namespace CardShopCoop.Modules.Hud
             _harmony = null;
             if (ReferenceEquals(_active, this))
                 _active = null;
-            _lastSnapshot = null;
-            _hasLastSnapshot = false;
             _pendingPredictionId = Guid.Empty;
             _contributionsByEvent.Clear();
             HudPresentationState.Clear();

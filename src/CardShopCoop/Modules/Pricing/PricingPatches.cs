@@ -6,7 +6,6 @@ namespace CardShopCoop.Modules.Pricing
     {
         internal static void Apply(Harmony harmony)
         {
-            harmony.CreateClassProcessor(typeof(PlayerConfirm)).Patch();
             harmony.CreateClassProcessor(typeof(DirectItemSetter)).Patch();
             harmony.CreateClassProcessor(typeof(DirectCardSetter)).Patch();
             harmony.CreateClassProcessor(typeof(CardAdded)).Patch();
@@ -18,14 +17,6 @@ namespace CardShopCoop.Modules.Pricing
             harmony.CreateClassProcessor(typeof(CardInventoryDefaultReset)).Patch();
             harmony.CreateClassProcessor(typeof(CardInventoryLoad)).Patch();
             harmony.CreateClassProcessor(typeof(GradedInventoryDayStarted)).Patch();
-        }
-
-        [HarmonyPatch(typeof(SetItemPriceScreen), "OnPressConfirm")]
-        private static class PlayerConfirm
-        {
-            [HarmonyPrefix]
-            private static bool Prefix(SetItemPriceScreen __instance)
-                => PricingHostBehaviour.Submit(__instance);
         }
 
         [HarmonyPatch(typeof(CPlayerData), "SetItemPrice")]
@@ -127,7 +118,6 @@ namespace CardShopCoop.Modules.Pricing
     {
         internal static void Apply(Harmony harmony)
         {
-            harmony.CreateClassProcessor(typeof(PlayerConfirm)).Patch();
             harmony.CreateClassProcessor(typeof(DirectItemSetter)).Patch();
             harmony.CreateClassProcessor(typeof(DirectCardSetter)).Patch();
             harmony.CreateClassProcessor(typeof(CardInventoryReset)).Patch();
@@ -135,42 +125,32 @@ namespace CardShopCoop.Modules.Pricing
             harmony.CreateClassProcessor(typeof(CardInventoryLoad)).Patch();
         }
 
-        [HarmonyPatch(typeof(SetItemPriceScreen), "OnPressConfirm")]
-        private static class PlayerConfirm
-        {
-            [HarmonyPrefix]
-            private static bool Prefix(SetItemPriceScreen __instance)
-                => PricingClientBehaviour.Submit(__instance);
-        }
-
         [HarmonyPatch(typeof(CPlayerData), "SetItemPrice")]
         private static class DirectItemSetter
         {
+            // Capture-only prefix: snapshot the pre-change price, then let the game's own setter
+            // run. The client no longer suppresses the confirm or the setter, so the game owns the
+            // local price mutation; the postfix observes it and registers one post-hoc prediction
+            // so a host rejection can replay the previous value.
             [HarmonyPrefix]
-            private static bool Prefix(EItemType itemType, float price, out bool __state)
-                => PricingClientBehaviour.InterceptItemSetter(itemType, price, out __state);
+            private static void Prefix(EItemType itemType, out float __state)
+                => __state = PricingClientBehaviour.CaptureItemBefore(itemType);
 
             [HarmonyPostfix]
-            private static void Postfix(EItemType itemType, float price, bool __state)
-            {
-                if (!__state)
-                    PricingClientBehaviour.CaptureItemSetter(itemType, price);
-            }
+            private static void Postfix(EItemType itemType, float price, float __state)
+                => PricingClientBehaviour.ObserveItemSetter(itemType, price, __state);
         }
 
         [HarmonyPatch(typeof(CPlayerData), "SetCardPrice")]
         private static class DirectCardSetter
         {
             [HarmonyPrefix]
-            private static bool Prefix(CardData cardData, float priceSet, out bool __state)
-                => PricingClientBehaviour.InterceptCardSetter(cardData, priceSet, out __state);
+            private static void Prefix(CardData cardData, out float __state)
+                => __state = PricingClientBehaviour.CaptureCardBefore(cardData);
 
             [HarmonyPostfix]
-            private static void Postfix(CardData cardData, float priceSet, bool __state)
-            {
-                if (!__state)
-                    PricingClientBehaviour.CaptureCardSetter(cardData, priceSet);
-            }
+            private static void Postfix(CardData cardData, float priceSet, float __state)
+                => PricingClientBehaviour.ObserveCardSetter(cardData, priceSet, __state);
         }
 
         [HarmonyPatch(typeof(CPlayerData), "ResetData")]

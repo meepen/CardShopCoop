@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using BepInEx;
@@ -218,18 +218,17 @@ namespace CardShopCoop.Runtime
         public bool IsReconciling => PredictionApi.IsReconciling;
         public bool IsApplying => PredictionApi.IsApplying;
 
-        public Guid Predict(string scope, Action<Guid> send, Action apply, Action undo,
-            bool applyLocally)
-            => PredictionApi.Predict(scope, send, apply, undo, applyLocally);
+        public Guid Predict(string scope, Action<Guid> send, Action apply, Action undo)
+            => PredictionApi.Predict(scope, send, apply, undo);
 
-        public void ApplyAuthoritative(Guid predictionId, Action apply)
-            => PredictionApi.ApplyAuthoritative(predictionId, apply);
+        public void Ack(Guid predictionId)
+            => PredictionApi.Ack(predictionId);
 
-        public void ApplyConfirmed(Guid predictionId, Action apply)
-            => PredictionApi.ApplyConfirmed(predictionId, apply);
+        public void AckOrApply(Guid predictionId, Action apply)
+            => PredictionApi.AckOrApply(predictionId, apply);
 
-        public void ConfirmSuperseded(Guid predictionId)
-            => PredictionApi.ConfirmSuperseded(predictionId);
+        public void Confirm(Guid predictionId, Action apply)
+            => PredictionApi.Confirm(predictionId, apply);
 
         public bool IsPending(Guid predictionId) => PredictionApi.IsPending(predictionId);
 

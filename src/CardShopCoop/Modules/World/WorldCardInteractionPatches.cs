@@ -6,7 +6,12 @@ namespace CardShopCoop.Modules.World
 {
     /// <summary>Harmony entry points for shared card state. These patches live beside the
     /// World behaviour instead of the process-wide legacy patch set so their callbacks always
-    /// resolve the active host/client world owner.</summary>
+    /// resolve the active host/client world owner.
+    ///
+    /// The GAME owns every mutation: each hook below is an OBSERVER. Vanilla runs its own method
+    /// to completion and the postfix records the resulting change as ONE prediction (client) or
+    /// fans it out (host). No prefix suppresses the original, so the local ledger can never drift
+    /// from what the game actually did.</summary>
     internal static class WorldCardInteractionPatches
     {
         internal static void Apply(Harmony harmony)
@@ -23,27 +28,36 @@ namespace CardShopCoop.Modules.World
         [HarmonyPatch(typeof(CPlayerData), "AddCard")]
         private static class AddCardPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(CardData cardData, int addAmount, out bool __state)
-            {
-                __state = false;
-                if (Current?.IsClient == true && !WorldCardInteraction.ApplyingRemoteCards
-                    && !SaveTransferApi.PreloadHold)
-                {
-                    __state = Current.PredictClientCardDelta(cardData, addAmount, true);
-                    return !__state;
-                }
-                return true;
-            }
-
             [HarmonyPostfix]
-            private static void Postfix(CardData cardData, int addAmount, bool __state)
+            private static void Postfix(CardData cardData, int addAmount)
             {
-                if (__state || WorldCardInteraction.ApplyingRemoteCards || Current == null)
+                var current = Current;
+                if (current == null || WorldCardInteraction.ApplyingRemoteCards
+                    || WorldCardInteraction.SuppressClientCardForwarding
+                    || SaveTransferApi.PreloadHold)
                 {
                     return;
                 }
 
+                if (current.HasClientCardBatch)
+                {
+                    // A bulk reveal (a pack-opener collect) folds every card into one atomic
+                    // batch, exactly like the workbench bundle, instead of one intent per card.
+                    current.AddClientCardBatch(cardData, addAmount, true);
+                    return;
+                }
+
+                if (current.IsClient)
+                {
+                    // The game already added the card; record how to redo/undo it and send one
+                    // intent. No local apply - the game owns the mutation.
+                    current.PredictClientCardDelta(cardData, addAmount, true);
+                    return;
+                }
+
+                // Host: the local addition is authoritative, so fan it out. Grading Overhaul keeps
+                // the live card's cardGrade as the bare 1-10 and the encoded grade in its registry,
+                // so temporarily write the encoded grade for the snapshot only.
                 var encoded = GradingApi.Present
                     ? GradingApi.Encoded(cardData) : cardData.cardGrade;
                 if (encoded > 10 && cardData.cardGrade <= 10 && cardData.cardGrade != 0)
@@ -52,7 +66,7 @@ namespace CardShopCoop.Modules.World
                     cardData.cardGrade = encoded;
                     try
                     {
-                        Current.ForwardCardDelta(cardData, addAmount, true);
+                        current.ForwardCardDelta(cardData, addAmount, true);
                     }
                     finally
                     {
@@ -61,7 +75,7 @@ namespace CardShopCoop.Modules.World
                 }
                 else
                 {
-                    Current.ForwardCardDelta(cardData, addAmount, true);
+                    current.ForwardCardDelta(cardData, addAmount, true);
                 }
             }
         }
@@ -69,96 +83,85 @@ namespace CardShopCoop.Modules.World
         [HarmonyPatch(typeof(CPlayerData), "ReduceCard")]
         private static class ReduceCardPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(CardData cardData, int reduceAmount, out bool __state)
-            {
-                __state = false;
-                if (Current?.IsClient == true && !WorldCardInteraction.ApplyingRemoteCards
-                    && !SaveTransferApi.PreloadHold)
-                {
-                    __state = Current.PredictClientCardDelta(cardData, reduceAmount, false);
-                    return !__state;
-                }
-                return true;
-            }
-
             [HarmonyPostfix]
-            private static void Postfix(CardData cardData, int reduceAmount, bool __state)
+            private static void Postfix(CardData cardData, int reduceAmount)
             {
-                if (__state || WorldCardInteraction.ApplyingRemoteCards || Current == null)
+                var current = Current;
+                if (current == null || WorldCardInteraction.ApplyingRemoteCards
+                    || WorldCardInteraction.SuppressClientCardForwarding
+                    || SaveTransferApi.PreloadHold)
                 {
                     return;
                 }
 
-                Current.ForwardCardDelta(cardData, reduceAmount, false);
+                if (current.IsClient)
+                {
+                    current.PredictClientCardDelta(cardData, reduceAmount, false);
+                    return;
+                }
+
+                current.ForwardCardDelta(cardData, reduceAmount, false);
             }
         }
 
         [HarmonyPatch(typeof(CPlayerData), "ReduceCardUsingIndex")]
         private static class ReduceCardIndexPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(int index, ECardExpansionType expansionType,
-                bool isDestiny, int reduceAmount, out bool __state)
-            {
-                __state = false;
-                var current = Current;
-                if (current?.HasClientCardBatch == true)
-                {
-                    current.AddClientCardBatch(
-                        CPlayerData.GetCardData(index, expansionType, isDestiny), reduceAmount, false);
-                    return false;
-                }
-
-                if (current?.IsClient == true && !WorldCardInteraction.ApplyingRemoteCards
-                    && !SaveTransferApi.PreloadHold)
-                {
-                    var card = CPlayerData.GetCardData(index, expansionType, isDestiny);
-                    __state = current.PredictClientCardDelta(card, reduceAmount, false);
-                    return !__state;
-                }
-                return true;
-            }
-
             [HarmonyPostfix]
             private static void Postfix(int index, ECardExpansionType expansionType,
-                bool isDestiny, int reduceAmount, bool __state)
+                bool isDestiny, int reduceAmount)
             {
-                if (__state || WorldCardInteraction.ApplyingRemoteCards || Current == null)
+                var current = Current;
+                if (current == null || WorldCardInteraction.ApplyingRemoteCards
+                    || WorldCardInteraction.SuppressClientCardForwarding
+                    || SaveTransferApi.PreloadHold)
                 {
                     return;
                 }
 
                 var card = CPlayerData.GetCardData(index, expansionType, isDestiny);
-                if (card != null)
+                if (card == null)
                 {
-                    Current.ForwardCardDelta(card, reduceAmount, false);
+                    return;
                 }
+
+                // A bulk action (bundle, donation quick-fill) folds every reduction into ONE
+                // pending transaction; CommitClientCardBatch records it once the scope closes. The
+                // game already reduced, so the batch is a post-hoc record, not a deferred apply.
+                if (current.HasClientCardBatch)
+                {
+                    current.AddClientCardBatch(card, reduceAmount, false);
+                    return;
+                }
+
+                if (current.IsClient)
+                {
+                    current.PredictClientCardDelta(card, reduceAmount, false);
+                    return;
+                }
+
+                current.ForwardCardDelta(card, reduceAmount, false);
             }
         }
 
         [HarmonyPatch(typeof(CPlayerData), "RemoveGradedCard")]
         private static class RemoveGradedCardPatch
         {
-            [HarmonyPrefix]
-            private static bool Prefix(CardData cardData, out bool __state)
-            {
-                __state = false;
-                if (Current?.IsClient == true && !WorldCardInteraction.ApplyingRemoteCards
-                    && !SaveTransferApi.PreloadHold)
-                {
-                    __state = Current.PredictClientGradedRemoval(cardData);
-                    return !__state;
-                }
-                return true;
-            }
-
             [HarmonyPostfix]
-            private static void Postfix(CardData cardData, bool __state)
+            private static void Postfix(CardData cardData)
             {
-                if (__state || WorldCardInteraction.ApplyingRemoteCards || Current == null
+                var current = Current;
+                if (current == null || WorldCardInteraction.ApplyingRemoteCards
+                    || WorldCardInteraction.SuppressClientCardForwarding
+                    || SaveTransferApi.PreloadHold
                     || cardData == null || cardData.cardGrade <= 0)
                 {
+                    return;
+                }
+
+                if (current.IsClient)
+                {
+                    current.PredictClientGradedRemoval(cardData);
                     return;
                 }
 
@@ -170,7 +173,7 @@ namespace CardShopCoop.Modules.World
                     cardData.cardGrade = encoded;
                     try
                     {
-                        Current.ForwardGradedRemoval(cardData);
+                        current.ForwardGradedRemoval(cardData);
                     }
                     finally
                     {
@@ -179,7 +182,7 @@ namespace CardShopCoop.Modules.World
                 }
                 else
                 {
-                    Current.ForwardGradedRemoval(cardData);
+                    current.ForwardGradedRemoval(cardData);
                 }
             }
         }

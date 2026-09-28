@@ -28,6 +28,13 @@ namespace CardShopCoop.Modules.Pricing
         public CardData Card;
         public float Price;
         public int EncodedGrade;
+
+        /// <summary>Placement identity of the display shelf holding the priced card:
+        /// kind&lt;&lt;24 | object id, the same key the card-display protocol uses.</summary>
+        public int ShelfKey;
+
+        /// <summary>Index of the compartment in the shelf's GetCardCompartmentList().</summary>
+        public int Compartment;
     }
 
     /// <summary>One host-owned pricing snapshot. The newest received snapshot replaces the old one.</summary>

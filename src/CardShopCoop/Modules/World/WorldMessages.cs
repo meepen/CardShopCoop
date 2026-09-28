@@ -73,7 +73,7 @@ namespace CardShopCoop.Modules.World
     /// <summary>Host-authoritative descriptor used to create one physical packaging box.</summary>
     public sealed class BoxNetworkState
     {
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
         public BoxNetworkKind Kind;
         public Vector3 Position;
         public Quaternion Rotation;
@@ -108,14 +108,14 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class BoxDestroyRequestMessage : WorldMessage
     {
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
     }
 
     /// <summary>Host -> clients: the box ID no longer represents a physical or stored box.</summary>
     [NetworkMessage]
     public sealed class BoxDestroyedMessage : WorldMessage
     {
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
     }
 
     /// <summary>Marks the end of a per-connection box creation baseline.</summary>
@@ -129,7 +129,7 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class BoxStateRequestMessage : WorldMessage
     {
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
         public bool IsBoxOpened;
         public bool ContentsChanged;
         public EItemType ItemType;
@@ -141,7 +141,7 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class BoxStateMessage : WorldMessage
     {
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
         public bool IsBoxOpened;
         public bool ContentsChanged;
         public EItemType ItemType;
@@ -206,10 +206,10 @@ namespace CardShopCoop.Modules.World
                 return "container-state";
             if (message is WorkbenchStateMessage workbench)
                 return WorkbenchEntityId(workbench.Index);
+            if (message is WorkbenchOpMessage workbenchOp)
+                return WorkbenchEntityId(workbenchOp.Index);
             if (message is WorkbenchBundleMessage bundle)
                 return WorkbenchEntityId(bundle.Index);
-            if (message is WorkbenchGrantMessage grant)
-                return grant.StableEntityId ?? "workbench-grant";
             if (message is WarehouseStateMessage)
                 return "warehouse-state";
             if (message is MarketStateMessage)
@@ -238,7 +238,8 @@ namespace CardShopCoop.Modules.World
         }
 
         internal static bool IsValidIntent(WorldMessage message)
-            => message != null && message.OperationKind == OperationFor(message)
+            => message != null && message.PredictionId != Guid.Empty
+                && message.OperationKind == OperationFor(message)
                 && message.OperationKind != WorldOperationKind.Unknown
                 && !string.IsNullOrEmpty(message.StableEntityId);
 
@@ -274,7 +275,7 @@ namespace CardShopCoop.Modules.World
                 return WorldOperationKind.CardDelta;
             if (message is GradedRemoveRequestMessage)
                 return WorldOperationKind.GradedRemove;
-            if (message is WorkbenchStateRequestMessage || message is WorkbenchBundleMessage)
+            if (message is WorkbenchOpMessage || message is WorkbenchBundleMessage)
                 return WorldOperationKind.Workbench;
             return WorldOperationKind.Unknown;
         }
@@ -286,6 +287,9 @@ namespace CardShopCoop.Modules.World
     {
         public EObjectType ObjectType;
         public Vector3 Position;
+        /// <summary>The client assigns the box's stable id at its local box-up and carries it here so
+        /// the host binds its counterpart to the same id instead of allocating one.</summary>
+        public Guid BoxNetworkId;
     }
 
     [NetworkMessage]
@@ -304,7 +308,7 @@ namespace CardShopCoop.Modules.World
 
     public sealed class WarehouseBoxState
     {
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
         public EItemType ItemType;
         public int Amount;
         public bool IsBig;
@@ -313,7 +317,7 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class WarehouseStoreMessage : WorldMessage
     {
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
         public int ShelfIndex;
         public int CompartmentIndex;
         public EItemType ItemType;
@@ -324,7 +328,7 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class WarehouseTakeMessage : WorldMessage
     {
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
         public int ShelfIndex;
         public int CompartmentIndex;
     }
@@ -337,7 +341,7 @@ namespace CardShopCoop.Modules.World
         public bool IsStore;
         public int ShelfIndex;
         public int CompartmentIndex;
-        public long BoxNetworkId;
+        public Guid BoxNetworkId;
         public EItemType ItemType;
         public int Amount;
         public bool IsBig;

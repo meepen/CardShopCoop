@@ -614,7 +614,7 @@ namespace CardShopCoop.Net.Datagrams
                     return;
                 }
 
-                EndPoint remote = CreateReceiveEndpoint(family);
+                var remote = CreateReceiveEndpoint(family);
                 int received;
                 try
                 {
@@ -648,7 +648,7 @@ namespace CardShopCoop.Net.Datagrams
                     continue;
                 }
 
-                if (!(remote is IPEndPoint endpoint)
+                if (remote is not IPEndPoint endpoint
                     || !IsUsableRemoteEndpoint(endpoint, family))
                 {
                     continue;

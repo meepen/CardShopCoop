@@ -97,7 +97,9 @@ CoopPredict.Predict("mymod", id => _context.Send(1, new MyIntent { PredictionId 
 CoopPredict.Rollback(_context, context.ConnectionId, intent.PredictionId);
 
 // client side, on the authoritative result:
-CoopPredict.ApplyAuthoritative(intent.PredictionId, () => ApplyState(message.Value));
+CoopPredict.AckOrApply(intent.PredictionId, () => ApplyState(message.Value));
+// ...or, when the authoritative value supersedes your optimistic run and must always apply:
+CoopPredict.Confirm(intent.PredictionId, () => ApplyState(message.Value));
 ```
 
 A DTO that carries a prediction id may implement `IPredictedMessage`.
