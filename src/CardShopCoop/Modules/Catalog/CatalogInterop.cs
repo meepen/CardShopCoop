@@ -19,8 +19,12 @@ namespace CardShopCoop.Modules.Catalog
             | BindingFlags.Public | BindingFlags.NonPublic;
         private static bool _eplProbed;
         private static bool _eplLogged;
-        private static bool _eplAvailable;
-        private static int _eplExtraCount;
+        private static bool _eplSurfaceFailed;
+        private static int _eplExtraCountLogged = -1;
+        // EplRuntimeData.Assets.ItemLibrary is a process-lifetime singleton and its
+        // RestockEntries list is mutated in place, so this reference stays valid while the count
+        // is read live from it (see EplExtraCount).
+        private static object _eplItemLibraryInstance;
         private static PropertyInfo _eplAssets;
         private static PropertyInfo _eplItemLibrary;
         private static PropertyInfo _eplRestockEntries;
@@ -553,14 +557,46 @@ namespace CardShopCoop.Modules.Catalog
             return _licenseList?.GetValue(null) as List<bool>;
         }
 
+        /// <summary>How many virtual rows EPL currently appends after the vanilla price list.
+        /// The number is read LIVE rather than cached at probe time: EPL builds RestockEntries
+        /// inside the game's world-load pipeline (CGameManager.LoadLobbySceneAsync), and a guest
+        /// joining from the title screen probes this surface before that load has run. Caching
+        /// the probe-time value pinned the count at zero for the whole process on those clients,
+        /// so every modded product looked absent and the first modded license delta escalated to
+        /// a session-recovery disconnect.</summary>
         private static int EplExtraCount()
         {
-            // The EPL surface is resolved ONCE, in ProbeEplIfNeeded. It must not be re-invoked
-            // here: EplRuntimeData's getters run its static constructor, and when that cannot
-            // initialize (a mismatched EPL build) every call throws. Count is called in hot
-            // loops, so re-invoking turned one failure into a log storm.
+            if (_eplSurfaceFailed)
+            {
+                return 0;
+            }
+
             ProbeEplIfNeeded();
-            return _eplExtraCount;
+            if (_eplRestockEntries == null || _eplItemLibraryInstance == null)
+            {
+                return 0;
+            }
+
+            int count;
+            try
+            {
+                count = (_eplRestockEntries.GetValue(_eplItemLibraryInstance) as ICollection)
+                    ?.Count ?? 0;
+            }
+            catch (Exception error)
+            {
+                FailEplSurface(error);
+                return 0;
+            }
+
+            if (count > 0 && count != _eplExtraCountLogged)
+            {
+                _eplExtraCountLogged = count;
+                CoopPlugin.Log.LogInfo("Catalog: EPL virtual products enabled (" + count
+                    + " rows).");
+            }
+
+            return count;
         }
 
         internal static void ProbeOptionalSurfaces()
@@ -581,23 +617,21 @@ namespace CardShopCoop.Modules.Catalog
                 _eplAssets = type?.GetProperty("Assets", AnyMember);
                 var assets = _eplAssets?.GetValue(null);
                 _eplItemLibrary = assets?.GetType().GetProperty("ItemLibrary", AnyMember);
-                var library = _eplItemLibrary?.GetValue(assets);
-                _eplRestockEntries = library?.GetType().GetProperty("RestockEntries", AnyMember);
-                _eplExtraCount = (_eplRestockEntries?.GetValue(library) as ICollection)?.Count ?? 0;
+                _eplItemLibraryInstance = _eplItemLibrary?.GetValue(assets);
+                _eplRestockEntries = _eplItemLibraryInstance?
+                    .GetType().GetProperty("RestockEntries", AnyMember);
 
                 _eplServices = type?.GetProperty("Services", AnyMember);
                 var services = _eplServices?.GetValue(null);
                 _eplSaveDataManager = services?.GetType().GetProperty("SaveDataManager", AnyMember);
                 ResolveEplSaveDataSurface(_eplSaveDataManager?.GetValue(services));
 
-                var available = _eplRestockEntries != null;
-                if (!_eplLogged || available != _eplAvailable)
+                if ((_eplRestockEntries == null || _eplItemLibraryInstance == null)
+                    && !_eplLogged)
                 {
                     _eplLogged = true;
-                    _eplAvailable = available;
-                    CoopPlugin.Log.LogInfo(!available
-                        ? "Catalog: EPL virtual products unavailable; using vanilla rows."
-                        : "Catalog: EPL virtual products enabled.");
+                    CoopPlugin.Log.LogInfo(
+                        "Catalog: EPL virtual products unavailable; using vanilla rows.");
                 }
             }
             catch (Exception error)
@@ -605,17 +639,26 @@ namespace CardShopCoop.Modules.Catalog
                 // EplRuntimeData's static constructor failed, so every cached member now throws
                 // on access. Drop them all so nothing re-triggers it, report the real cause once,
                 // and fall back to the vanilla rows for the rest of the session.
-                _eplAssets = null;
-                _eplItemLibrary = null;
-                _eplRestockEntries = null;
-                _eplServices = null;
-                _eplSaveDataManager = null;
-                _eplExtraCount = 0;
-                _eplAvailable = false;
-                _eplLogged = true;
-                CoopPlugin.Log.LogWarning("Catalog: EPL surface unavailable ("
-                    + error.GetType().Name + ": " + error.Message + "); using vanilla rows.");
+                FailEplSurface(error);
             }
+        }
+
+        /// <summary>Latches the EPL surface off after a probe or live-read failure.
+        /// EplRuntimeData's getters run its static constructor, and when that cannot initialize
+        /// (a mismatched EPL build) every access throws; Count runs in hot loops, so one failure
+        /// must not become a log storm.</summary>
+        private static void FailEplSurface(Exception error)
+        {
+            _eplAssets = null;
+            _eplItemLibrary = null;
+            _eplItemLibraryInstance = null;
+            _eplRestockEntries = null;
+            _eplServices = null;
+            _eplSaveDataManager = null;
+            _eplSurfaceFailed = true;
+            _eplLogged = true;
+            CoopPlugin.Log.LogWarning("Catalog: EPL surface unavailable ("
+                + error.GetType().Name + ": " + error.Message + "); using vanilla rows.");
         }
 
         private static void ResolveEplSaveDataSurface(object saveDataManager)

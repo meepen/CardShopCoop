@@ -216,7 +216,10 @@ namespace CardShopCoop.Modules.Npc
             var female = message.Female || HasFemaleNamePrefix(message.CharName);
             if (message.Kind == KindCustomer)
             {
-                EnsureCustomerCapacity(message.Index, female);
+                using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.capacity"))
+                {
+                    EnsureCustomerCapacity(message.Index, female);
+                }
             }
 
             var key = (message.Kind << 16) | message.Index;
@@ -236,16 +239,19 @@ namespace CardShopCoop.Modules.Npc
 
             if (puppet.HasIdentity && puppet.Identity != message.Identity && !reusedIncarnation)
             {
-                ClearPendingIdentity(puppet);
-                DestroyPuppetObject(puppet);
+                using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.destroy"))
+                {
+                    ClearPendingIdentity(puppet);
+                    ParkOrDestroyVisual(puppet);
 
-                puppet.Go = null;
-                puppet.Custom = null;
-                puppet.CharName = "";
-                puppet.Identity = 0;
-                puppet.HasIdentity = false;
-                puppet.BufCount = 0;
-                puppet.GrabSequence = UnsetActionSequence;
+                    puppet.Go = null;
+                    puppet.Custom = null;
+                    puppet.CharName = "";
+                    puppet.Identity = 0;
+                    puppet.HasIdentity = false;
+                    puppet.BufCount = 0;
+                    puppet.GrabSequence = UnsetActionSequence;
+                }
             }
 
             puppet.Kind = message.Kind;
@@ -256,8 +262,11 @@ namespace CardShopCoop.Modules.Npc
             }
 
             SetPendingIdentity(puppet, message.Identity, female);
-            Redress(puppet, message.CharName, message.Position, female,
-                message.Kind, message.Index);
+            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.redress"))
+            {
+                Redress(puppet, message.CharName, message.Position, female,
+                    message.Kind, message.Index);
+            }
         }
 
         /// <summary>Customers encode their gender in the model name ("Female3"/"Male7"); the
@@ -283,6 +292,20 @@ namespace CardShopCoop.Modules.Npc
         private void ResetPuppetForIncarnation(Puppet p, NpcIdentityDeltaMessage message)
         {
             ReleaseWorkerBoxProp(p);
+            ResetPuppetIncarnationState(p, message.Position);
+            if (p.Go != null)
+            {
+                p.Go.transform.position = message.Position;
+                p.Go.SetActive(!IsPuppetSuppressed(message.Kind, message.Index));
+            }
+        }
+
+        /// <summary>Reset every per-incarnation motion/animation field. Shared by the reused-look
+        /// fast path and by pool adoption so a freshly adopted clone starts exactly like one that
+        /// was reset in place. Does not touch clone-bound references (the clone is already
+        /// attached) or the worker box prop (released separately by the callers).</summary>
+        private static void ResetPuppetIncarnationState(Puppet p, Vector3 prevRenderedPos)
+        {
             p.BufHead = 0;
             p.BufCount = 0;
             p.Flags = default;
@@ -290,18 +313,13 @@ namespace CardShopCoop.Modules.Npc
             p.AppliedAnimSpeed = float.NaN;
             p.AnimSpeed = 0f;
             p.RenderYaw = 0f;
-            p.PrevRenderedPos = message.Position;
+            p.PrevRenderedPos = prevRenderedPos;
             p.HoldBig = false;
             p.HoldItemType = EItemType.None;
             p.HoldBoxNetworkId = Guid.Empty;
             p.HoldBoxOpened = false;
             p.AppliedHeldBoxNetworkId = Guid.Empty;
             p.GrabSequence = UnsetActionSequence;
-            if (p.Go != null)
-            {
-                p.Go.transform.position = message.Position;
-                p.Go.SetActive(!IsPuppetSuppressed(message.Kind, message.Index));
-            }
         }
 
         /// <summary>Whether a puppet for this entity must stay hidden because the register or
@@ -762,15 +780,6 @@ namespace CardShopCoop.Modules.Npc
             }
         }
 
-        private void DestroyPuppetObject(GameObject root, int rootInstanceId)
-        {
-            UnregisterPuppetRoot(rootInstanceId);
-            if (!ReferenceEquals(root, null) && root != null)
-            {
-                Destroy(root);
-            }
-        }
-
         public static Transform GetWorkerHoldAnchor(int index)
         {
             if (_active == null)
@@ -1029,6 +1038,7 @@ namespace CardShopCoop.Modules.Npc
         private class Puppet
         {
             public GameObject Go;
+            public bool VisualFromLive; // visual came from a live scene/pooled source, not the manager template
             // Unity can destroy the native object while retaining this managed wrapper. Keep the
             // id captured while the root was alive so cleanup never has to call GetInstanceID()
             // on a fake-null wrapper.
@@ -1078,6 +1088,69 @@ namespace CardShopCoop.Modules.Npc
             public int GrabSequence = UnsetActionSequence;
         }
 
+        /// <summary>A dressed clone parked in the look-keyed pool. Holds exactly the references
+        /// bound to the clone's GameObject; nothing here is per-incarnation state. The owning
+        /// <see cref="Puppet"/> slot is blanked when a visual is parked so a slot never points at
+        /// an inactive clone.</summary>
+        private sealed class PooledVisual
+        {
+            public VisualKey Key; // pool bookkeeping: which look this visual wears
+            public GameObject Go;
+            // Whether this clone's visual hierarchy came from a live scene/pooled source
+            // (possibly carrying an appearance mod) rather than the manager template.
+            public bool FromLiveSource;
+            public int RootInstanceId;
+            public Animator Anim;
+            public CC.CharacterCustomization Custom;
+            public GameObject Bag;
+            public GameObject Cash;
+            public GameObject CardFan;
+            public GameObject CardSingle;
+            public GameObject Smelly;
+            public GameObject Clean;
+            public GameObject Exclaim;
+            public Transform HoldBox;
+        }
+
+        /// <summary>The look a clone wears. Appearance is a pure function of gender, kind and the
+        /// character name (the game resolves the preset by name), so two clones with the same key
+        /// are visually interchangeable.</summary>
+        private readonly struct VisualKey : IEquatable<VisualKey>
+        {
+            internal VisualKey(byte kind, bool female, string charName)
+            {
+                Kind = kind;
+                Female = female;
+                CharName = charName ?? "";
+            }
+
+            internal byte Kind
+            {
+                get;
+            }
+            internal bool Female
+            {
+                get;
+            }
+            internal string CharName
+            {
+                get;
+            }
+
+            public bool Equals(VisualKey other)
+                => Kind == other.Kind && Female == other.Female
+                    && string.Equals(CharName, other.CharName, StringComparison.Ordinal);
+
+            public override bool Equals(object obj) => obj is VisualKey other && Equals(other);
+
+            public override int GetHashCode()
+                => ((Kind * 397) ^ (Female ? 1 : 0)) * 397
+                    ^ StringComparer.Ordinal.GetHashCode(CharName);
+
+            public override string ToString()
+                => "kind=" + Kind + " female=" + Female + " name=" + CharName;
+        }
+
         private void ReleaseWorkerBoxProp(Puppet p)
         {
             if (p == null)
@@ -1113,6 +1186,209 @@ namespace CardShopCoop.Modules.Npc
         private float _now;
         private float _clockOffset;
         private bool _clockInit;
+
+        // Look-keyed pool of dressed clones parked when an incarnation/look ends. The pool is
+        // bounded and evicts the least-recently-used visual; entries stay registered in
+        // _puppetRoots while parked so native activation suppression keeps ignoring them.
+        private const int VisualPoolCapacity = 12;
+        private readonly Dictionary<VisualKey, List<PooledVisual>> _visualPool = new();
+        private readonly List<PooledVisual> _visualPoolOrder = new(); // LRU, index 0 = oldest
+
+        /// <summary>Detach a clone from its slot and move it into the pool. Deactivates the
+        /// object, releases the worker box prop parented under it, and blanks every clone-bound
+        /// field on the slot. The root id is intentionally NOT unregistered: a parked clone must
+        /// stay in _puppetRoots until it is evicted or the pool is destroyed.</summary>
+        private PooledVisual CaptureVisual(Puppet p)
+        {
+            var visual = new PooledVisual
+            {
+                Go = p.Go,
+                RootInstanceId = p.RootInstanceId,
+                Anim = p.Anim,
+                Custom = p.Custom,
+                Bag = p.Bag,
+                Cash = p.Cash,
+                CardFan = p.CardFan,
+                CardSingle = p.CardSingle,
+                Smelly = p.Smelly,
+                Clean = p.Clean,
+                Exclaim = p.Exclaim,
+                HoldBox = p.HoldBox,
+                FromLiveSource = p.VisualFromLive,
+            };
+            if (p.Go != null)
+            {
+                p.Go.SetActive(false);
+            }
+
+            ReleaseWorkerBoxProp(p);
+
+            p.Go = null;
+            p.RootInstanceId = 0;
+            p.Anim = null;
+            p.Custom = null;
+            p.Bag = null;
+            p.Cash = null;
+            p.CardFan = null;
+            p.CardSingle = null;
+            p.Smelly = null;
+            p.Clean = null;
+            p.Exclaim = null;
+            p.HoldBox = null;
+            p.VisualFromLive = false;
+            return visual;
+        }
+
+        /// <summary>Park a dressed clone for later reuse, or hard-destroy it when no real look
+        /// exists. Parking is only valid for an initialized look (Go and Custom alive with a
+        /// committed name); anything else is torn down and its root unregistered.</summary>
+        private void ParkOrDestroyVisual(Puppet p)
+        {
+            if (p == null)
+            {
+                return;
+            }
+
+            if (p.Go == null || p.Custom == null || !p.HasIdentity
+                || string.IsNullOrEmpty(p.CharName))
+            {
+                DestroyPuppetObject(p);
+                return;
+            }
+
+            var visual = CaptureVisual(p);
+            var key = new VisualKey(p.Kind, p.Female, p.CharName);
+            visual.Key = key;
+            EvictVisualsToCapacity();
+            if (!_visualPool.TryGetValue(key, out var list))
+            {
+                list = new List<PooledVisual>();
+                _visualPool.Add(key, list);
+            }
+
+            list.Add(visual);
+            _visualPoolOrder.Add(visual);
+            CoopPlugin.Log.LogDebug("[npc-pool] park " + key + " count=" + _visualPoolOrder.Count);
+        }
+
+        /// <summary>Evict least-recently-used visuals until one more can be parked within
+        /// capacity, destroying each evicted clone and unregistering its root.</summary>
+        private void EvictVisualsToCapacity()
+        {
+            while (_visualPoolOrder.Count >= VisualPoolCapacity)
+            {
+                var victim = _visualPoolOrder[0];
+                _visualPoolOrder.RemoveAt(0);
+                RemoveFromVisualPool(victim);
+                var go = victim.Go;
+                var rootInstanceId = victim.RootInstanceId;
+                victim.Go = null;
+                victim.RootInstanceId = 0;
+                UnregisterPuppetRoot(rootInstanceId);
+                CoopPlugin.Log.LogDebug("[npc-pool] evict " + victim.Key
+                    + " count=" + _visualPoolOrder.Count);
+                if (go != null)
+                {
+                    Destroy(go);
+                }
+            }
+        }
+
+        private void RemoveFromVisualPool(PooledVisual visual)
+        {
+            if (!_visualPool.TryGetValue(visual.Key, out var list))
+            {
+                return;
+            }
+
+            list.Remove(visual);
+            if (list.Count == 0)
+            {
+                _visualPool.Remove(visual.Key);
+            }
+        }
+
+        /// <summary>Pop the most recently parked clone for a look AND source, dropping (and
+        /// retrying past) entries whose native object was destroyed under us. Entries built from
+        /// the other source are left parked: a live-sourced clone may carry an appearance mod's
+        /// hierarchy that a template clone lacks, and vice versa. Unity's fake-null makes a
+        /// destroyed wrapper liveness-checkable without throwing.</summary>
+        private bool TryTakeVisual(VisualKey key, bool fromLiveSource, out PooledVisual visual)
+        {
+            if (_visualPool.TryGetValue(key, out var list))
+            {
+                for (var i = list.Count - 1; i >= 0; i--)
+                {
+                    var candidate = list[i];
+                    if (candidate.FromLiveSource != fromLiveSource)
+                    {
+                        continue;
+                    }
+
+                    list.RemoveAt(i);
+                    if (list.Count == 0)
+                    {
+                        _visualPool.Remove(key);
+                    }
+
+                    _visualPoolOrder.Remove(candidate);
+                    if (candidate.Go != null)
+                    {
+                        visual = candidate;
+                        return true;
+                    }
+
+                    UnregisterPuppetRoot(candidate.RootInstanceId);
+                }
+            }
+
+            visual = null;
+            return false;
+        }
+
+        /// <summary>Reattach a parked clone to a slot: copy the clone-bound references back,
+        /// restore the display name, move it to the spawn point and make it visible.</summary>
+        private void ApplyVisual(Puppet p, PooledVisual visual, string charName, Vector3 pos)
+        {
+            p.Go = visual.Go;
+            p.RootInstanceId = visual.RootInstanceId;
+            p.Anim = visual.Anim;
+            p.Custom = visual.Custom;
+            p.Bag = visual.Bag;
+            p.Cash = visual.Cash;
+            p.CardFan = visual.CardFan;
+            p.CardSingle = visual.CardSingle;
+            p.Smelly = visual.Smelly;
+            p.Clean = visual.Clean;
+            p.Exclaim = visual.Exclaim;
+            p.HoldBox = visual.HoldBox;
+            p.VisualFromLive = visual.FromLiveSource;
+            p.Go.name = "CoopNpc_" + charName;
+            p.Go.transform.position = pos;
+            p.Go.SetActive(true);
+        }
+
+        /// <summary>Destroy every parked clone. Called from teardown before _puppetRoots is
+        /// cleared so a scene unload cannot leave dangling references.</summary>
+        private void DestroyVisualPool()
+        {
+            for (var i = 0; i < _visualPoolOrder.Count; i++)
+            {
+                var visual = _visualPoolOrder[i];
+                var go = visual.Go;
+                var rootInstanceId = visual.RootInstanceId;
+                visual.Go = null;
+                visual.RootInstanceId = 0;
+                UnregisterPuppetRoot(rootInstanceId);
+                if (go != null)
+                {
+                    Destroy(go);
+                }
+            }
+
+            _visualPoolOrder.Clear();
+            _visualPool.Clear();
+        }
 
         private readonly struct NpcDeltaKey : IEquatable<NpcDeltaKey>
         {
@@ -1199,6 +1475,7 @@ namespace CardShopCoop.Modules.Npc
                 DestroyPuppetObject(p);
             }
             _puppets.Clear();
+            DestroyVisualPool();
             // Also clear ids that no longer have a Puppet wrapper (for example, a failed spawn
             // destroyed by Unity between two lifecycle callbacks).
             _puppetRoots.Clear();
@@ -1598,8 +1875,7 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            ReleaseWorkerBoxProp(puppet);
-            DestroyPuppetObject(puppet);
+            ParkOrDestroyVisual(puppet);
             _puppets.Remove(key);
         }
 
@@ -1697,7 +1973,7 @@ namespace CardShopCoop.Modules.Npc
                             // stale body so it is rebuilt for this identity, exactly as the
                             // normal path does.
                             ClearPendingIdentity(visual);
-                            _active.DestroyPuppetObject(visual);
+                            _active.ParkOrDestroyVisual(visual);
 
                             visual.Go = null;
                             visual.CharName = "";
@@ -1767,7 +2043,7 @@ namespace CardShopCoop.Modules.Npc
                 if (identityChanged)
                 {
                     ClearPendingIdentity(p);
-                    _active.DestroyPuppetObject(p);
+                    _active.ParkOrDestroyVisual(p);
 
                     p.Go = null;
                     p.CharName = "";
@@ -1777,18 +2053,22 @@ namespace CardShopCoop.Modules.Npc
                     p.GrabSequence = UnsetActionSequence;
                 }
                 p.Kind = kind;
+
+                if (hasName)
+                {
+                    SetPendingIdentity(p, identity, female);
+                    Redress(p, charName, pos, female, kind, index);
+                }
+
+                // A pool adoption inside Redress calls ResetPuppetIncarnationState, which
+                // intentionally clears hold state for a new incarnation; assigning the current
+                // packet's hold state after the dress keeps it from being wiped.
                 if (kind == KindWorker)
                 {
                     p.HoldBig = ent.HoldBig;
                     p.HoldItemType = ent.HoldItemType;
                     p.HoldBoxNetworkId = ent.HoldBoxNetworkId;
                     p.HoldBoxOpened = ent.HoldBoxOpened;
-                }
-
-                if (hasName)
-                {
-                    SetPendingIdentity(p, identity, female);
-                    Redress(p, charName, pos, female, kind, index);
                 }
 
                 p.BufHead = (p.BufHead + 1) & 3;
@@ -1901,7 +2181,7 @@ namespace CardShopCoop.Modules.Npc
                 if (p.Go != null)
                 {
                     ClearPendingIdentity(p);
-                    DestroyPuppetObject(p);
+                    ParkOrDestroyVisual(p);
                     p.Go = null;
                     p.CharName = "";
                     p.Identity = 0;
@@ -1920,6 +2200,32 @@ namespace CardShopCoop.Modules.Npc
                 // Already wearing this exact look; only the incarnation advanced. Skip the
                 // JSON round-trip and hair/apparel mesh rebuild inside
                 // CharacterCustomization.Initialize(), which is otherwise unconditional.
+                CommitIdentity(p);
+                return;
+            }
+
+            // The look changed but not the gender: prefer swapping in a parked clone for the new
+            // look over re-dressing this clone in place, which pays a JSON round-trip and a full
+            // hair/apparel mesh rebuild. Only a clone built from the same kind of source is
+            // interchangeable: a live-sourced body may carry an appearance mod's hierarchy that a
+            // template body lacks (and vice versa), so pass the current clone's source flag. On a
+            // source mismatch (or any miss) the existing in-place Initialize() path runs.
+            var newKey = new VisualKey(kind, female, charName);
+            PooledVisual pooled = null;
+            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.pool"))
+            {
+                TryTakeVisual(newKey, p.VisualFromLive, out pooled);
+            }
+            if (pooled != null)
+            {
+                CoopPlugin.Log.LogDebug("[npc-pool] take " + newKey
+                    + " count=" + _visualPoolOrder.Count);
+                ParkOrDestroyVisual(p);
+                p.Female = female;
+                ApplyVisual(p, pooled, charName, pos);
+                ResetPuppetIncarnationState(p, pos);
+                SeedWorkerUi(p, index);
+                CommitSpawnTail(p, charName, pos);
                 CommitIdentity(p);
                 return;
             }
@@ -2391,60 +2697,95 @@ namespace CardShopCoop.Modules.Npc
             var female = femaleHint;
             p.Female = female;
             p.Kind = kind;
+
             GameObject prefabObject;
             CC.CharacterCustomization liveCustom = null;
             var clonedLive = false;
-            if (kind == KindWorker)
+            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.source"))
             {
-                var workerManager = SceneRef<WorkerManager>.Get();
-                // Appearance mods (Sexy Workers and friends) replace the visual hierarchy on the
-                // live Worker objects in WorkerManager.m_WorkerList after Start and never touch
-                // the manager's template prefabs. Clone the live slot so the replacement model,
-                // skeleton, animator, sockets and bones survive; the template is only the
-                // fallback when this slot has no live worker yet (early join / mod not installed).
-                var liveWorker = FindLiveWorker(index, female);
-                if (liveWorker != null)
+                if (kind == KindWorker)
                 {
-                    prefabObject = liveWorker.gameObject;
-                    clonedLive = true;
+                    var workerManager = SceneRef<WorkerManager>.Get();
+                    // Appearance mods (Sexy Workers and friends) replace the visual hierarchy on the
+                    // live Worker objects in WorkerManager.m_WorkerList after Start and never touch
+                    // the manager's template prefabs. Clone the live slot so the replacement model,
+                    // skeleton, animator, sockets and bones survive; the template is only the
+                    // fallback when this slot has no live worker yet (early join / mod not installed).
+                    var liveWorker = FindLiveWorker(index, female);
+                    if (liveWorker != null)
+                    {
+                        prefabObject = liveWorker.gameObject;
+                        clonedLive = true;
+                    }
+                    else
+                    {
+                        var prefab = female ? workerManager.m_WorkerFemalePrefab : workerManager.m_WorkerPrefab;
+                        prefabObject = prefab.gameObject;
+                    }
                 }
                 else
                 {
-                    var prefab = female ? workerManager.m_WorkerFemalePrefab : workerManager.m_WorkerPrefab;
-                    prefabObject = prefab.gameObject;
-                }
-            }
-            else
-            {
-                var customerManager = SceneRef<CustomerManager>.Get();
-                // A live pool member carries the wardrobe tables and animator the preset was
-                // authored against; the template can expose fewer slots, which makes
-                // CharacterCustomization dress throw on some game builds. Prefer one that has
-                // never dressed; an already-dressed member still works once its generated
-                // collections are rebuilt below.
-                var liveCustomer = FindPooledCustomer(customerManager, female);
-                if (liveCustomer != null)
-                {
-                    prefabObject = liveCustomer.gameObject;
-                    liveCustom = liveCustomer.m_CharacterCustom;
-                    clonedLive = true;
-                }
-                else
-                {
-                    var prefab = female ? customerManager.m_CustomerFemalePrefab
-                        : customerManager.m_CustomerPrefab;
-                    prefabObject = prefab.gameObject;
+                    var customerManager = SceneRef<CustomerManager>.Get();
+                    // A live pool member carries the wardrobe tables and animator the preset was
+                    // authored against; the template can expose fewer slots, which makes
+                    // CharacterCustomization dress throw on some game builds. Prefer one that has
+                    // never dressed; an already-dressed member still works once its generated
+                    // collections are rebuilt below.
+                    var liveCustomer = FindPooledCustomer(customerManager, female);
+                    if (liveCustomer != null)
+                    {
+                        prefabObject = liveCustomer.gameObject;
+                        liveCustom = liveCustomer.m_CharacterCustom;
+                        clonedLive = true;
+                    }
+                    else
+                    {
+                        var prefab = female ? customerManager.m_CustomerFemalePrefab
+                            : customerManager.m_CustomerPrefab;
+                        prefabObject = prefab.gameObject;
+                    }
                 }
             }
 
-            var holder = new GameObject("CoopNpcHolder_tmp");
-            holder.SetActive(false);
-            var clone = Instantiate(prefabObject, holder.transform);
-            var cloneInstanceId = clone.GetInstanceID();
-            RegisterPuppetRoot(clone);
-            clone.transform.SetParent(null, worldPositionStays: false);
-            clone.transform.position = pos;
-            Destroy(holder);
+            // A look once built is reused forever: adopt a parked clone for this exact look and
+            // skip Instantiate + CharacterCustomization.Initialize entirely. Only a clone built
+            // from the same kind of source is interchangeable: a live-sourced clone may carry an
+            // appearance mod's hierarchy that the template clone lacks, so the take is filtered by
+            // the source computed above. On a miss the existing construction path below runs
+            // unchanged with those same source variables.
+            PooledVisual pooled = null;
+            if (!string.IsNullOrEmpty(charName))
+            {
+                using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.pool"))
+                {
+                    TryTakeVisual(new VisualKey(kind, female, charName), clonedLive, out pooled);
+                }
+            }
+
+            if (pooled != null)
+            {
+                CoopPlugin.Log.LogDebug("[npc-pool] take " + pooled.Key
+                    + " count=" + _visualPoolOrder.Count);
+                ApplyVisual(p, pooled, charName, pos);
+                ResetPuppetIncarnationState(p, pos);
+                SeedWorkerUi(p, index);
+                CommitSpawnTail(p, charName, pos);
+                return;
+            }
+
+            GameObject clone;
+            int cloneInstanceId;
+            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.instantiate"))
+            {
+                var holder = new GameObject("CoopNpcHolder_tmp");
+                holder.SetActive(false);
+                clone = Instantiate(prefabObject, holder.transform);
+                cloneInstanceId = clone.GetInstanceID();
+                RegisterPuppetRoot(clone);
+                clone.transform.SetParent(null, worldPositionStays: false);
+                clone.transform.position = pos;
+                Destroy(holder);
+            }
 
             var cust = clone.GetComponent<Customer>();
             var worker = clone.GetComponent<Worker>();
@@ -2465,30 +2806,33 @@ namespace CardShopCoop.Modules.Npc
                 : worker?.m_CharacterCustom;
             if (p.Custom != null)
             {
-                if (!clonedLive)
+                using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.dress"))
                 {
-                    // Template prefab: make it behave like an uninitialized source before dressing
-                    // (a modded template can arrive serialized with the init bit already set).
-                    InitializePuppetCustomization(p.Custom, charName);
-                }
-                else if (kind == KindWorker)
-                {
-                    // A live worker is already the employee's dressed look, and an appearance mod
-                    // may have replaced its entire visual hierarchy. Re-running Initialize() would
-                    // rebuild the now-hidden vanilla wardrobe (and can index the wrong gender's
-                    // wardrobe tables), so only mirror the authoritative name on the inert
-                    // component. Its look is complete and authoritative as-is.
-                    p.Custom.CharacterName = charName;
-                }
-                else
-                {
-                    // Instantiate copies the live customer's runtime-generated hair/apparel
-                    // children but not the private, non-serialized lists that reference them, so
-                    // the clone's lists are empty and Initialize() would throw (or stack a second
-                    // look on top). Point each entry at the clone's matching child, then dress.
-                    RebuildCustomizationCollections(p.Custom, liveCustom);
-                    p.Custom.CharacterName = charName;
-                    p.Custom.Initialize();
+                    if (!clonedLive)
+                    {
+                        // Template prefab: make it behave like an uninitialized source before dressing
+                        // (a modded template can arrive serialized with the init bit already set).
+                        InitializePuppetCustomization(p.Custom, charName);
+                    }
+                    else if (kind == KindWorker)
+                    {
+                        // A live worker is already the employee's dressed look, and an appearance mod
+                        // may have replaced its entire visual hierarchy. Re-running Initialize() would
+                        // rebuild the now-hidden vanilla wardrobe (and can index the wrong gender's
+                        // wardrobe tables), so only mirror the authoritative name on the inert
+                        // component. Its look is complete and authoritative as-is.
+                        p.Custom.CharacterName = charName;
+                    }
+                    else
+                    {
+                        // Instantiate copies the live customer's runtime-generated hair/apparel
+                        // children but not the private, non-serialized lists that reference them, so
+                        // the clone's lists are empty and Initialize() would throw (or stack a second
+                        // look on top). Point each entry at the clone's matching child, then dress.
+                        RebuildCustomizationCollections(p.Custom, liveCustom);
+                        p.Custom.CharacterName = charName;
+                        p.Custom.Initialize();
+                    }
                 }
             }
 
@@ -2538,34 +2882,37 @@ namespace CardShopCoop.Modules.Npc
 
             // CharacterCustomization must survive the strip so wardrobe changes can
             // re-dress in place instead of Destroy+Instantiate churn
-            foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
+            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.strip"))
             {
-                if (mb == null)
+                foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
                 {
-                    continue;
-                }
-
-                var tn = mb.GetType().Name;
-                if (tn == "Worker" || tn == "Customer" || tn == "WorkerCollider"
-                    || tn == "NavMeshAgent" || tn == "NavMeshObstacle" || tn == "Seeker"
-                    || tn == "FunnelModifier" || tn == "InteractableObject")
-                {
-                    var behaviour = mb as Behaviour;
-                    if (behaviour != null)
+                    if (mb == null)
                     {
-                        behaviour.enabled = false;
+                        continue;
+                    }
+
+                    var tn = mb.GetType().Name;
+                    if (tn == "Worker" || tn == "Customer" || tn == "WorkerCollider"
+                        || tn == "NavMeshAgent" || tn == "NavMeshObstacle" || tn == "Seeker"
+                        || tn == "FunnelModifier" || tn == "InteractableObject")
+                    {
+                        var behaviour = mb as Behaviour;
+                        if (behaviour != null)
+                        {
+                            behaviour.enabled = false;
+                        }
                     }
                 }
-            }
-            foreach (var col in clone.GetComponentsInChildren<Collider>(true))
-            {
-                col.enabled = false;
-            }
+                foreach (var col in clone.GetComponentsInChildren<Collider>(true))
+                {
+                    col.enabled = false;
+                }
 
-            foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
-            {
-                rb.isKinematic = true;
-                rb.detectCollisions = false;
+                foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
+                {
+                    rb.isKinematic = true;
+                    rb.detectCollisions = false;
+                }
             }
 
             // Keep exactly the vanilla worker interaction surface on the puppet. The
@@ -2583,33 +2930,53 @@ namespace CardShopCoop.Modules.Npc
             // A staff snapshot can arrive before this puppet is spawned. Seed the
             // vanilla UI model from the already-downloaded save immediately; later
             // StaffState packets continue to refresh it authoritatively.
-            clone.name = "CoopNpc_" + charName;
-            p.Go = clone;
-            p.RootInstanceId = cloneInstanceId;
-            // This must run AFTER p.Go is assigned: RefreshWorkerUi looks the puppet up
-            // through that field, so seeding before it is a silent no-op and the puppet
-            // keeps the template's all-enabled pack-refill defaults until an unrelated
-            // StaffState change happens to arrive.
+            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.finish"))
+            {
+                clone.name = "CoopNpc_" + charName;
+                p.VisualFromLive = clonedLive;
+                p.Go = clone;
+                p.RootInstanceId = cloneInstanceId;
+                // This must run AFTER p.Go is assigned: RefreshWorkerUi looks the puppet up
+                // through that field, so seeding before it is a silent no-op and the puppet
+                // keeps the template's all-enabled pack-refill defaults until an unrelated
+                // StaffState change happens to arrive.
+                SeedWorkerUi(p, index);
+
+                // Prefer the Animator reference owned by the cloned Worker. Mods may leave
+                // the original Animator disabled beside a replacement Animator in the same
+                // hierarchy; GetComponentInChildren alone can select the wrong one.
+                p.Anim = worker != null && worker.m_Anim != null
+                    ? worker.m_Anim : clone.GetComponentInChildren<Animator>(true);
+                CommitSpawnTail(p, charName, pos);
+            }
+        }
+
+        /// <summary>Seed the inert Worker component's UI model from the already-downloaded staff
+        /// save. A staff snapshot can arrive before the puppet is spawned; later StaffState
+        /// packets continue to refresh it authoritatively. RefreshWorkerUi resolves the puppet via
+        /// _puppets, so the slot must already carry this index and p.Go must be assigned.</summary>
+        private void SeedWorkerUi(Puppet p, ushort index)
+        {
             var saved = CPlayerData.m_WorkerSaveDataList;
-            if (worker != null && saved != null && index < saved.Count)
+            if (p.Kind == KindWorker && saved != null && index < saved.Count)
             {
                 RefreshWorkerUi(index, saved[index]);
             }
+        }
 
-            // Prefer the Animator reference owned by the cloned Worker. Mods may leave
-            // the original Animator disabled beside a replacement Animator in the same
-            // hierarchy; GetComponentInChildren alone can select the wrong one.
-            p.Anim = worker != null && worker.m_Anim != null
-                ? worker.m_Anim : clone.GetComponentInChildren<Animator>(true);
-            // Commit the name only when the clone actually wears it. On a failed dress the clone
-            // keeps its source pooled look, so leaving the name unset makes the next name-bearing
-            // packet run ReDress against the existing clone instead of accepting the stale model.
+        /// <summary>Shared commit of the per-spawn fields. Used by the construction path and by
+        /// pool adoption so a reused clone starts exactly like a freshly built one. The display
+        /// name is committed only when the clone actually wears the look (the caller has already
+        /// set Custom.CharacterName); leaving it unset on a failed dress makes the next
+        /// name-bearing packet ReDress instead of accepting a stale model.</summary>
+        private void CommitSpawnTail(Puppet p, string charName, Vector3 pos)
+        {
             p.CharName = charName;
             p.PrevRenderedPos = pos;
             p.RenderYaw = 0f;
             p.AnimSpeed = 0f;
             p.AppliedFlags = -1;
-            clone.SetActive(true);
+            p.Go.SetActive(true);
         }
 
     }
