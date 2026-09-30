@@ -32,6 +32,15 @@ namespace CardShopCoop.Modules.Pricing
         private Harmony _harmony;
         private bool _shutdown;
         private bool _applying;
+        // One frame's pricing changes, flushed as capped batches in Update. Entries are appended
+        // in apply order and each keeps its own prediction id.
+        private readonly List<PricingItemDeltaEntry> _pendingItemDeltas = new();
+        private readonly List<PricingCardDeltaEntry> _pendingCardDeltas = new();
+
+        // Per-batch cap, mirroring WorldCardInteraction.CardDeltaBatchMax: a mass reprice is
+        // split into capped chunks so one batch cannot stall a client frame (the dispatch budget
+        // charges per entry) or exceed the encoded frame limit.
+        internal const int PricingDeltaBatchMax = 200;
 
         private void OnEnable()
         {
@@ -97,7 +106,7 @@ namespace CardShopCoop.Modules.Pricing
                 return;
             }
 
-            BroadcastItemDelta(message.PredictionId, message.ItemType,
+            QueueItemDelta(message.PredictionId, message.ItemType,
                 PricingInterop.ReadItem(message.ItemType));
         }
 
@@ -148,7 +157,7 @@ namespace CardShopCoop.Modules.Pricing
 
             GradingApi.Remember(canonical);
             _cards[key] = new OwnedCardState { Card = canonical, Price = actual };
-            BroadcastCardDelta(message.PredictionId, canonical, actual, false);
+            QueueCardDelta(message.PredictionId, canonical, actual, false);
         }
 
         private static string Describe(CardData card)
@@ -182,7 +191,7 @@ namespace CardShopCoop.Modules.Pricing
             if (_shutdown || _applying || !PricingInterop.IsItemTypeValid(type)
                 || !PricingInterop.ValidPrice(requestedPrice))
                 return;
-            BroadcastItemDelta(Guid.Empty, type, PricingInterop.ReadItem(type));
+            QueueItemDelta(Guid.Empty, type, PricingInterop.ReadItem(type));
         }
 
         private void CaptureCardSetterLocal(CardData card, float requestedPrice)
@@ -202,7 +211,7 @@ namespace CardShopCoop.Modules.Pricing
                 Card = canonical,
                 Price = ResolveCardPrice(canonical, requestedPrice),
             };
-            BroadcastCardDelta(Guid.Empty, canonical, _cards[key].Price, false);
+            QueueCardDelta(Guid.Empty, canonical, _cards[key].Price, false);
         }
 
         private void ObserveInventoryMutation(CardData card)
@@ -222,7 +231,7 @@ namespace CardShopCoop.Modules.Pricing
             if (!owned)
             {
                 _cards.Remove(key);
-                BroadcastCardDelta(Guid.Empty, canonical, 0f, true);
+                QueueCardDelta(Guid.Empty, canonical, 0f, true);
             }
             else
             {
@@ -232,13 +241,17 @@ namespace CardShopCoop.Modules.Pricing
                     Card = canonical,
                     Price = price,
                 };
-                BroadcastCardDelta(Guid.Empty, canonical, price, false);
+                QueueCardDelta(Guid.Empty, canonical, price, false);
             }
         }
 
         private void ResetInventory()
         {
             _cards.Clear();
+            // A reset means the world's pricing changed under us; anything still queued is a
+            // pre-reset absolute price and must not be replayed after the reload.
+            _pendingItemDeltas.Clear();
+            _pendingCardDeltas.Clear();
         }
 
         private PricingStateMessage BuildState()
@@ -295,28 +308,71 @@ namespace CardShopCoop.Modules.Pricing
             }
         }
 
-        private void BroadcastItemDelta(Guid predictionId, EItemType type, float price)
+        /// <summary>Queues one item price change for this frame's batch. Queuing instead of
+        /// sending keeps a mass price pass to one message per frame per peer.</summary>
+        private void QueueItemDelta(Guid predictionId, EItemType type, float price)
         {
-            if (!_shutdown && _context?.InGame() == true)
-                _context.Broadcast(new PricingItemDeltaMessage
-                {
-                    PredictionId = predictionId,
-                    ItemType = type,
-                    Price = price,
-                });
+            if (_shutdown || _context?.InGame() != true)
+                return;
+            _pendingItemDeltas.Add(new PricingItemDeltaEntry
+            {
+                PredictionId = predictionId,
+                ItemType = type,
+                Price = price,
+            });
         }
 
-        private void BroadcastCardDelta(Guid predictionId, CardData card, float price, bool removed)
+        /// <summary>Queues one card price change for this frame's batch. The card is snapshotted
+        /// here, while it is still the caller's live object.</summary>
+        private void QueueCardDelta(Guid predictionId, CardData card, float price, bool removed)
         {
-            if (!_shutdown && _context?.InGame() == true)
-                _context.Broadcast(new PricingCardDeltaMessage
-                {
-                    PredictionId = predictionId,
-                    Card = PricingInterop.CopyCard(card, GradingApi.Encoded(card)),
-                    Price = price,
-                    EncodedGrade = GradingApi.Encoded(card),
-                    Removed = removed,
-                });
+            if (_shutdown || _context?.InGame() != true)
+                return;
+            _pendingCardDeltas.Add(new PricingCardDeltaEntry
+            {
+                PredictionId = predictionId,
+                Card = PricingInterop.CopyCard(card, GradingApi.Encoded(card)),
+                Price = price,
+                EncodedGrade = GradingApi.Encoded(card),
+                Removed = removed,
+            });
+        }
+
+        /// <summary>Sends everything queued this frame in capped batches, preserving entry order
+        /// and per-entry prediction ids. Chunking mirrors the card batch: a mass reprice must not
+        /// stall a client frame (the dispatch budget charges the batch by entry count) or exceed
+        /// the encoded frame limit. A world change or shutdown drops the queue instead of
+        /// replaying stale prices into the next world.</summary>
+        private void FlushPendingDeltas()
+        {
+            if (_shutdown || _context?.InGame() != true)
+            {
+                _pendingItemDeltas.Clear();
+                _pendingCardDeltas.Clear();
+                return;
+            }
+
+            while (_pendingItemDeltas.Count > 0)
+            {
+                var count = Math.Min(PricingDeltaBatchMax, _pendingItemDeltas.Count);
+                var chunk = _pendingItemDeltas.GetRange(0, count);
+                _context.Broadcast(new PricingDeltaBatchMessage { Items = chunk });
+                _pendingItemDeltas.RemoveRange(0, count);
+            }
+
+            while (_pendingCardDeltas.Count > 0)
+            {
+                var count = Math.Min(PricingDeltaBatchMax, _pendingCardDeltas.Count);
+                var chunk = _pendingCardDeltas.GetRange(0, count);
+                _context.Broadcast(new PricingDeltaBatchMessage { Cards = chunk });
+                _pendingCardDeltas.RemoveRange(0, count);
+            }
+        }
+
+        private void Update()
+        {
+            if (_pendingItemDeltas.Count > 0 || _pendingCardDeltas.Count > 0)
+                FlushPendingDeltas();
         }
 
         private void Reject(MessageContext context, Guid predictionId)
@@ -449,6 +505,8 @@ namespace CardShopCoop.Modules.Pricing
             _cards.Clear();
             _joined.Clear();
             _baselinePending.Clear();
+            _pendingItemDeltas.Clear();
+            _pendingCardDeltas.Clear();
             if (ReferenceEquals(_active, this))
                 _active = null;
             _context = null;

@@ -46,6 +46,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 _harmony.CreateClassProcessor(typeof(WarehouseSignPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(OpenSignReadyPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(WarehouseSignReadyPatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(GuestDayStartedBlockPatch)).Patch();
             }
             catch (Exception exception)
             {
@@ -332,6 +333,16 @@ namespace CardShopCoop.Modules.StoreAccess
             [HarmonyPostfix]
             private static void Postfix(bool __state)
                 => _active?.ForwardToggle(0, __state, CPlayerData.m_IsShopOpen);
+        }
+
+        /// <summary>Guest: the shop sign's day-start reset is host-authoritative - the host's
+        /// StoreAccess delta carries the closed state and this client applies it - so the guest
+        /// does not run the local sign/flag reset at the roll-over.</summary>
+        [HarmonyPatch(typeof(InteractableOpenCloseSign), "OnDayStarted")]
+        private static class GuestDayStartedBlockPatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix() => false;
         }
 
         [HarmonyPatch(typeof(InteractableWarehouseAllowEnterSign), "OnMouseButtonUp")]

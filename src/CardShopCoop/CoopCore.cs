@@ -1447,6 +1447,12 @@ namespace CardShopCoop
                 var count = batch.Deltas?.Count ?? 0;
                 return Math.Max(1, Math.Min(count, Modules.World.WorldCardInteraction.CardDeltaBatchMax));
             }
+            if (message.Message is Modules.Pricing.PricingDeltaBatchMessage pricing)
+            {
+                var count = (pricing.Items?.Count ?? 0) + (pricing.Cards?.Count ?? 0);
+                return Math.Max(1, Math.Min(count,
+                    Modules.Pricing.PricingHostBehaviour.PricingDeltaBatchMax));
+            }
             return 1;
         }
 

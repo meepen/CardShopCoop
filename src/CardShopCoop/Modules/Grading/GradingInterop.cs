@@ -410,8 +410,13 @@ namespace CardShopCoop.Modules.Grading
             }
         }
 
+        /// <summary>Grading Overhaul's own day-start prefix. The guest wraps this method with its
+        /// local day-start block, because a higher-priority false prefix cannot stop another
+        /// mod's prefix - a patch's false return only skips the original method.</summary>
         internal static MethodInfo GoDayStartMethod => MiDayStart;
 
+        /// <summary>The resolved day-start prefix has the exact shape the guest block requires
+        /// (declared by CompanyStamp_RestockManager_OnDayStartedPatch, static, (), bool or void).</summary>
         internal static bool GoDayStartMethodMatches
             => IsFlexibleMethod(MiDayStart, TDayStartPatch, true, BoolOrVoidReturn);
 

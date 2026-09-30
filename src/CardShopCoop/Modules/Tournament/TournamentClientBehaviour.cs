@@ -436,6 +436,7 @@ namespace CardShopCoop.Modules.Tournament
             TryPatch(harmony, typeof(CustomerManager), "Start", nameof(ReadinessPostfix));
             TryPatch(harmony, typeof(CustomerManager), "Init", nameof(ReadinessPostfix));
             TryPatch(harmony, typeof(TournamentPairingScreen), "Awake", nameof(ReadinessPostfix));
+            TryBlockDayStarted(harmony, typeof(TournamentPrizeShelf));
         }
 
         private static void TryPatch(Harmony harmony, Type type, string method,
@@ -463,6 +464,33 @@ namespace CardShopCoop.Modules.Tournament
                     + method + ": " + exception.Message);
             }
         }
+
+        private static void TryBlockDayStarted(Harmony harmony, Type type)
+        {
+            try
+            {
+                var original = AccessTools.Method(type, "OnDayStarted");
+                if (original == null)
+                {
+                    CoopPlugin.Log.LogWarning("Tournament client patch target missing: "
+                        + type.Name + ".OnDayStarted");
+                    return;
+                }
+
+                harmony.Patch(original, prefix: new HarmonyMethod(
+                    typeof(TournamentClientBehaviour), nameof(BlockDayStartedPrefix)));
+            }
+            catch (Exception exception)
+            {
+                CoopPlugin.Log.LogWarning("Tournament client patch failed " + type.Name
+                    + ".OnDayStarted: " + exception.Message);
+            }
+        }
+
+        /// <summary>Guest: the prize shelf's day-start visibility refresh is host-authoritative
+        /// (the host's tournament pushes drive RefreshBoards), so the guest does not run its own
+        /// local screen/mesh coroutine at the roll-over.</summary>
+        private static bool BlockDayStartedPrefix() => false;
 
         private static bool ScheduleBlockPrefix()
         {

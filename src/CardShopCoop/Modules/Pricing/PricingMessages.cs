@@ -48,29 +48,34 @@ namespace CardShopCoop.Modules.Pricing
         public List<int> CardGrades = new();
     }
 
-    [NetworkMessage]
-    public sealed class PricingItemDeltaMessage : IPredictedMessage
+    /// <summary>One item price change inside a <see cref="PricingDeltaBatchMessage"/>.</summary>
+    public struct PricingItemDeltaEntry
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
-
+        public Guid PredictionId;
         public EItemType ItemType;
         public float Price;
     }
 
-    [NetworkMessage]
-    public sealed class PricingCardDeltaMessage : IPredictedMessage
+    /// <summary>One card price change inside a <see cref="PricingDeltaBatchMessage"/>. The card is
+    /// snapshotted when the entry is queued, never when the batch is flushed.</summary>
+    public struct PricingCardDeltaEntry
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
-
+        public Guid PredictionId;
         public CardData Card;
         public float Price;
         public int EncodedGrade;
         public bool Removed;
+    }
+
+    /// <summary>Every pricing change produced in one frame, in apply order. One message per frame
+    /// replaces the old one-message-per-change deltas so a mass price update (bulk reprice, a
+    /// day-start automation pass) cannot overflow a peer's bounded outbound queue. The entries are
+    /// append-only and each keeps its own prediction id: a later same-key entry must not swallow an
+    /// earlier prediction-bearing one, or the peer that recorded it never reconciles.</summary>
+    [NetworkMessage]
+    public sealed class PricingDeltaBatchMessage : INetMessage
+    {
+        public List<PricingItemDeltaEntry> Items = new();
+        public List<PricingCardDeltaEntry> Cards = new();
     }
 }

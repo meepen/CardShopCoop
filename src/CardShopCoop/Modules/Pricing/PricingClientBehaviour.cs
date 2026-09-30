@@ -17,8 +17,8 @@ namespace CardShopCoop.Modules.Pricing
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private PricingStateMessage _pendingState;
-        private readonly Dictionary<EItemType, PricingItemDeltaMessage> _pendingItemDeltas = new();
-        private readonly Dictionary<string, PricingCardDeltaMessage> _pendingCardDeltas = new();
+        private readonly Dictionary<EItemType, PricingItemDeltaEntry> _pendingItemDeltas = new();
+        private readonly Dictionary<string, PricingCardDeltaEntry> _pendingCardDeltas = new();
         private bool _contentReady;
         private bool _applying;
         private bool _shutdown;
@@ -97,7 +97,7 @@ namespace CardShopCoop.Modules.Pricing
             }
             if (_pendingItemDeltas.Count > 0)
             {
-                var deltas = new List<KeyValuePair<EItemType, PricingItemDeltaMessage>>(
+                var deltas = new List<KeyValuePair<EItemType, PricingItemDeltaEntry>>(
                     _pendingItemDeltas);
                 for (var i = 0; i < deltas.Count; i++)
                 {
@@ -107,7 +107,7 @@ namespace CardShopCoop.Modules.Pricing
             }
             if (_pendingCardDeltas.Count > 0)
             {
-                var deltas = new List<KeyValuePair<string, PricingCardDeltaMessage>>(
+                var deltas = new List<KeyValuePair<string, PricingCardDeltaEntry>>(
                     _pendingCardDeltas);
                 for (var i = 0; i < deltas.Count; i++)
                 {
@@ -139,40 +139,44 @@ namespace CardShopCoop.Modules.Pricing
             }
         }
 
-        [MessageHandler(typeof(PricingItemDeltaMessage))]
-        private void HandleItemDelta(MessageContext context, PricingItemDeltaMessage message)
+        [MessageHandler(typeof(PricingDeltaBatchMessage))]
+        private void HandleDeltaBatch(MessageContext context, PricingDeltaBatchMessage message)
         {
-            if (_shutdown)
+            if (_shutdown || message == null)
                 return;
-            if (!_contentReady || !_context.InGame() || WorldCardInteraction.Inv() == null)
+
+            // Entries are applied (or deferred) in the order the host produced them: the last
+            // same-key entry is the newest absolute price, and every entry reconciles exactly the
+            // prediction id it carries.
+            var ready = _contentReady && _context.InGame() && WorldCardInteraction.Inv() != null;
+            for (var i = 0; i < message.Items.Count; i++)
             {
-                DeferItemDelta(message);
-                return;
+                if (ready)
+                    ApplyItemDelta(message.Items[i]);
+                else
+                    DeferItemDelta(message.Items[i]);
             }
-            ApplyItemDelta(message);
+            for (var i = 0; i < message.Cards.Count; i++)
+            {
+                if (ready)
+                    ApplyCardDelta(message.Cards[i]);
+                else
+                    DeferCardDelta(message.Cards[i]);
+            }
         }
 
-        [MessageHandler(typeof(PricingCardDeltaMessage))]
-        private void HandleCardDelta(MessageContext context, PricingCardDeltaMessage message)
+        private bool ApplyItemDelta(PricingItemDeltaEntry entry)
         {
-            if (_shutdown)
-                return;
-            if (!_contentReady || !_context.InGame() || WorldCardInteraction.Inv() == null)
-            {
-                DeferCardDelta(message);
-                return;
-            }
-            ApplyCardDelta(message);
-        }
-
-        private bool ApplyItemDelta(PricingItemDeltaMessage message)
-        {
-            PredictionApi.AckOrApply(message.PredictionId, () =>
+            // The batch carries the host's absolute price, so Confirm (retire our prediction, then
+            // always apply the authoritative value). AckOrApply would retire our own echo without
+            // applying it, so a remote same-key entry earlier in the batch could leave us showing
+            // the older price while the host holds ours.
+            PredictionApi.Confirm(entry.PredictionId, () =>
             {
                 _applying = true;
                 try
                 {
-                    CPlayerData.SetItemPrice(message.ItemType, message.Price);
+                    CPlayerData.SetItemPrice(entry.ItemType, entry.Price);
                 }
                 finally
                 {
@@ -182,18 +186,20 @@ namespace CardShopCoop.Modules.Pricing
             return true;
         }
 
-        private bool ApplyCardDelta(PricingCardDeltaMessage message)
+        private bool ApplyCardDelta(PricingCardDeltaEntry entry)
         {
-            PredictionApi.AckOrApply(message.PredictionId, () =>
+            // Same as the item path: an absolute authoritative price that must be written even
+            // when it retires one of this client's own predictions.
+            PredictionApi.Confirm(entry.PredictionId, () =>
             {
-                if (message.Removed)
+                if (entry.Removed)
                     return;
-                var copy = PricingInterop.CopyCard(message.Card, message.EncodedGrade);
+                var copy = PricingInterop.CopyCard(entry.Card, entry.EncodedGrade);
                 GradingApi.Remember(copy);
                 _applying = true;
                 try
                 {
-                    CPlayerData.SetCardPrice(copy, message.Price);
+                    CPlayerData.SetCardPrice(copy, entry.Price);
                 }
                 finally
                 {
@@ -203,19 +209,19 @@ namespace CardShopCoop.Modules.Pricing
             return true;
         }
 
-        private void DeferItemDelta(PricingItemDeltaMessage message)
+        private void DeferItemDelta(PricingItemDeltaEntry entry)
         {
-            if (_pendingItemDeltas.TryGetValue(message.ItemType, out var previous))
+            if (_pendingItemDeltas.TryGetValue(entry.ItemType, out var previous))
                 PredictionApi.Ack(previous.PredictionId);
-            _pendingItemDeltas[message.ItemType] = message;
+            _pendingItemDeltas[entry.ItemType] = entry;
         }
 
-        private void DeferCardDelta(PricingCardDeltaMessage message)
+        private void DeferCardDelta(PricingCardDeltaEntry entry)
         {
-            var key = PricingInterop.CardKey(message.Card, message.EncodedGrade) ?? "null";
+            var key = PricingInterop.CardKey(entry.Card, entry.EncodedGrade) ?? "null";
             if (_pendingCardDeltas.TryGetValue(key, out var previous))
                 PredictionApi.Ack(previous.PredictionId);
-            _pendingCardDeltas[key] = message;
+            _pendingCardDeltas[key] = entry;
         }
 
         /// <summary>Prefix snapshot: the game is about to run <c>SetItemPrice</c>, so read the

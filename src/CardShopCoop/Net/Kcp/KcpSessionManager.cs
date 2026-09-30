@@ -2735,7 +2735,10 @@ namespace CardShopCoop.Net.Kcp
         public int MaxDisconnectRequestsPerPump = 64;
         public int MaxPendingDisconnectResults = 256;
         public int MaxDisconnectResultsPerPump = 64;
-        public int MaxReliableFrames = 256;
+        // Reliable outbound queue depth per connection (SessionState): 2048 leaves headroom for
+        // bursts such as the day-rollover mass mutations, while MaxReliableBytes still bounds
+        // memory and a genuinely stalled peer is still failed loudly.
+        public int MaxReliableFrames = 2048;
         public int MaxReliableBytes = 32 * 1024 * 1024;
         public int MaxTransientFrames = 256;
         public int MaxTransientBytes = 8 * 1024 * 1024;

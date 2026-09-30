@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using CardShopCoop.Modules.Grading;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
@@ -1960,7 +1961,20 @@ namespace CardShopCoop.Modules.World
             var cards = new List<CardData>(state.Cards.Count);
             for (var i = 0; i < state.Cards.Count; i++)
             {
-                cards.Add(FromState(state.Cards[i]));
+                var card = FromState(state.Cards[i]);
+                if (card.cardGrade > 10)
+                {
+                    // Register the host's certificate like every other reconstruction path (card
+                    // displays do the same). Grading Overhaul's anti-cheat flags any graded card
+                    // whose cert is not burned and bound on this PC - both when the box is ripped
+                    // (CPlayerData.AddCard) and when the package lists are scanned at day start or
+                    // save/load - which permanently marks host-graded cards FAKE on the guest.
+                    // BindCert keys on the content-derived save index, so this binding matches the
+                    // identity the scan later compares. No-op when Grading Overhaul is absent.
+                    GradingApi.Remember(card);
+                }
+
+                cards.Add(card);
             }
 
             return RestockManager.SpawnPackageBoxCard(cards, _cardSpawnAnchor);

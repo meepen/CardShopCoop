@@ -145,6 +145,7 @@ namespace CardShopCoop.Modules.Register
             Patch(typeof(RemoveChangePatch));
             Patch(typeof(FinishPatch));
             Patch(typeof(FinishScanPatch));
+            Patch(typeof(GuestDayStartedBlockPatch));
             SceneManager.sceneLoaded += OnSceneLoaded;
             NpcClientBehaviour.CustomerManagerReady += OnReadinessSignal;
             NpcClientBehaviour.CustomerPoolChanged += OnReadinessSignal;
@@ -1470,6 +1471,16 @@ namespace CardShopCoop.Modules.Register
         }
 
         private void OnDestroy() => Shutdown();
+
+        /// <summary>Guest: the register's day-start counter reset is host-authoritative - the host
+        /// publishes owner 0 and this client applies it (ApplyOwner calls OnPressEsc) - so the
+        /// guest does not run the local ForceResetCounter path at the roll-over.</summary>
+        [HarmonyPatch(typeof(InteractableCashierCounter), "OnDayStarted")]
+        private static class GuestDayStartedBlockPatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix() => false;
+        }
 
         [HarmonyPatch(typeof(InteractableCashierCounter), "OnMouseButtonUp")]
         private static class ManningPatch

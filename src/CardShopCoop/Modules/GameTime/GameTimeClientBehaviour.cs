@@ -66,14 +66,18 @@ namespace CardShopCoop.Modules.GameTime
 
             CPlayerData.m_CurrentDay = message.Day;
 
-            // ResetSunlightIntensity is the game's full vanilla dawn sequence: it resets the
-            // sun/shop/night lights, and its DelayUpdateEnv coroutine blends the day music and
-            // queues CEventPlayer_OnDayStarted (the only producer on the guest, because the Report
-            // module host-gates the guest's own roll-over). It must therefore run on every genuine
-            // advance, not just on the exact 08:00 frame: an authoritative correction can land a
-            // minute or two late (e.g. the dawn message is superseded while a guest overlay is up),
-            // and dayAdvanced is what tells us the guest still owes the day-start. Invoking it once
-            // per message keeps the queued event exactly-once even when morningReset is also true.
+            // ResetSunlightIntensity is the game's vanilla dawn sequence: it resets the sun/shop/
+            // night lights, and its DelayUpdateEnv coroutine blends the day music, sets the clock
+            // and queues CEventPlayer_OnDayStarted. The day-start event runs on the guest like
+            // vanilla; the host-authoritative day-start work the host replicates is instead gated
+            // at the specific listeners (shop sign, register counter, tournament prize shelf,
+            // grading maturation - including the wrap of Grading Overhaul's own prefix - installed
+            // by those modules' client behaviours), so the guest keeps every local presentation
+            // and history effect without duplicating the host's physical day-start. The sequence
+            // runs on every genuine advance, not just on the exact 08:00 frame: an authoritative
+            // correction can land a minute or two late (e.g. the dawn message is superseded while
+            // a guest overlay is up), and dayAdvanced is what tells us the guest still owes the
+            // dawn.
             if (morningReset || dayAdvanced)
             {
                 if (dayAdvanced && !morningReset)
