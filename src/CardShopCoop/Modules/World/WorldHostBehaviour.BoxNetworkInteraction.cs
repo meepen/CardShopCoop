@@ -178,11 +178,12 @@ namespace CardShopCoop.Modules.World
                         return false;
                     }
 
-                    // A box's contents are only ever rewritten by the player holding it. Opening
-                    // and closing a box on the floor is legitimate, so an open-flag-only request
-                    // stays valid; a contents change from a non-holder is rejected outright. The
-                    // sender must be the mirrored holder when one is known, so one peer can never
-                    // rewrite a box another peer is holding.
+                    // A box's contents are rewritten by the player acting on it: the holder when
+                    // one is mirrored, or whoever takes an item out of (or puts one into) an open
+                    // box on the floor. A contents change to a box another peer is holding stays
+                    // rejected outright, so one peer can never rewrite a box another peer is
+                    // carrying.
+                    var held = _boxNetworkInteraction.IsBeingHeld(item);
                     if (message.ContentsChanged)
                     {
                         var holder = 0;
@@ -191,13 +192,14 @@ namespace CardShopCoop.Modules.World
                                 out holder);
                         var accepted = mirrored
                             ? holder == context.ConnectionId
-                            : _boxNetworkInteraction.IsBeingHeld(item);
+                            : held || BoxNetworkInteraction.IsBoxOpen(item);
                         if (!accepted)
                         {
                             CoopPlugin.Log.LogWarning("[box-id] rejected box state request id="
                                 + message.BoxNetworkId + " name=" + item.name + " from conn="
                                 + context.ConnectionId + ": the sender does not hold the box (isHeld="
-                                + _boxNetworkInteraction.IsBeingHeld(item) + " mirroredHolder="
+                                + held + " open=" + BoxNetworkInteraction.IsBoxOpen(item)
+                                + " mirroredHolder="
                                 + (mirrored ? holder.ToString() : "none") + ").");
                             return false;
                         }

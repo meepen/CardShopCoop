@@ -1022,6 +1022,16 @@ namespace CardShopCoop.Modules.World
             return id != Guid.Empty && _boxesById.TryGetValue(id, out box) && box != null;
         }
 
+        /// <summary>Resolves the placed item box whose contents compartment is
+        /// <paramref name="compartment"/>. A box's contents are not a shelf, so the shelf
+        /// protocols cannot address them; the box owns its compartment as a child (the same
+        /// hierarchy fact <c>IsSyncableShelf</c> relies on to exclude box compartments).
+        /// Returns null for any other compartment.</summary>
+        internal InteractablePackagingBox_Item FindItemBox(ShelfCompartment compartment)
+            => compartment == null
+                ? null
+                : compartment.GetComponentInParent<InteractablePackagingBox_Item>(true);
+
         /// <summary>True while this peer models the box as stored in a warehouse compartment (and
         /// therefore not carried). A stored box must never be re-attached to a hand: a hold that
         /// arrives for it raced the store that put it there. The state is read from the game

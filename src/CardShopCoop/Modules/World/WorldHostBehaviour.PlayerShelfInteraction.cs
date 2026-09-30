@@ -105,6 +105,14 @@ namespace CardShopCoop.Modules.World
             _shelfInteraction?.PublishRemove(compartment, mutation);
         }
 
+        /// <summary>Resolves the placed item box whose contents compartment is
+        /// <paramref name="compartment"/>, or null when it is not a box's contents.</summary>
+        private InteractablePackagingBox_Item FindItemBox(ShelfCompartment compartment)
+            => _boxNetworkInteraction?.FindItemBox(compartment);
+
+        private bool IsBoxHeld(InteractablePackagingBox box)
+            => _boxNetworkInteraction != null && _boxNetworkInteraction.IsBeingHeld(box);
+
         /// <summary>A shelf's label (its compartment type, shown on the price tag even with no
         /// items) was removed. Removing a label clears the type on an empty compartment, which
         /// fires neither AddItem nor RemoveItem, so it needs its own publish or the other players
@@ -178,6 +186,17 @@ namespace CardShopCoop.Modules.World
                 ShelfInteraction.LocalMutation __state)
             {
                 _instance?.PublishShelfAdd(__instance, __state);
+
+                // Putting an item into an open floor box: the shelf protocol cannot address a
+                // box's contents (no furniture id), so republish the box. A held box's own
+                // item-move patch (RemoveItemFromShelf) owns its broadcast, so only a free box
+                // broadcasts here.
+                var instance = _instance;
+                var box = instance?.FindItemBox(__instance);
+                if (box != null && !instance.IsBoxHeld(box))
+                {
+                    instance.BroadcastItemBoxState(box);
+                }
             }
         }
 
@@ -318,6 +337,16 @@ namespace CardShopCoop.Modules.World
                     // so attach the exact removed item here before the post-hoc prediction.
                     __state.Removed = __result;
                     _instance?.PublishShelfRemove(__instance, __state);
+
+                    // Taking an item out of an open floor box: the shelf protocol cannot address
+                    // a box's contents, so republish the box or clients keep counting the taken
+                    // item.
+                    var instance = _instance;
+                    var box = instance?.FindItemBox(__instance);
+                    if (box != null)
+                    {
+                        instance.BroadcastItemBoxState(box);
+                    }
                 }
             }
         }
