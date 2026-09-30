@@ -120,7 +120,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _pendingMedia = message;
+            Supersede(ref _pendingMedia, message);
             if (_pendingError != null && _pendingError.Generation < message.Generation)
             {
                 // The newer media state supersedes the older pending error: retire it unapplied.
@@ -139,7 +139,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _pendingPause = message;
+            Supersede(ref _pendingPause, message);
             ReconcileWithoutController(message.PredictionId);
             ApplyLatestState();
         }
@@ -152,7 +152,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _pendingPower = message;
+            Supersede(ref _pendingPower, message);
             ReconcileWithoutController(message.PredictionId);
             ApplyLatestState();
         }
@@ -165,7 +165,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _pendingShuffle = message;
+            Supersede(ref _pendingShuffle, message);
             ReconcileWithoutController(message.PredictionId);
             ApplyLatestState();
         }
@@ -178,7 +178,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _pendingSeek = message;
+            Supersede(ref _pendingSeek, message);
             ReconcileWithoutController(message.PredictionId);
             ApplyLatestState();
         }
@@ -191,7 +191,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _pendingBarrier = message;
+            Supersede(ref _pendingBarrier, message);
             ReconcileWithoutController(message.PredictionId);
             ApplyLatestState();
         }
@@ -212,7 +212,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _pendingError = message;
+            Supersede(ref _pendingError, message);
             ReconcileWithoutController(message.PredictionId);
             ApplyLatestState();
         }
@@ -292,6 +292,22 @@ namespace CardShopCoop.Modules.Tv
                 // once the controller is ready.
                 CoopPredict.AckOrApply(predictionId, () => { });
             }
+        }
+
+        /// <summary>Replaces a pending delta with a newer one, retiring the superseded delta's
+        /// prediction first. Without this a delta that is overwritten before ApplyLatestState runs
+        /// keeps its prediction alive, so a late rollback for it reverts playback the player has
+        /// already moved past.</summary>
+        private static void Supersede<T>(ref T slot, T message)
+            where T : class, IPredictedMessage
+        {
+            var previous = slot;
+            if (previous != null && previous.PredictionId != Guid.Empty)
+            {
+                CoopPredict.Ack(previous.PredictionId);
+            }
+
+            slot = message;
         }
 
         private void ApplyLatestState()

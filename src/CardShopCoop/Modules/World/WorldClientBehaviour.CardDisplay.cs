@@ -26,6 +26,13 @@ namespace CardShopCoop.Modules.World
 
         internal void ResetCardDisplayState()
         {
+            // Dropping a retained message drops its prediction id with it; retire them so no
+            // prediction outlives the state it would have resolved.
+            foreach (var pending in _pendingCardDisplay.Values)
+            {
+                WorldPrediction.Ack(pending);
+            }
+
             _pendingCardDisplay.Clear();
             _cardDisplayApplying = false;
         }
@@ -42,15 +49,24 @@ namespace CardShopCoop.Modules.World
 
             if (!CanApplyCardDisplay(message))
             {
-                _pendingCardDisplay[CardDisplayKey(message)] = message;
+                // Retain the latest slot state until its shelf resolves. A superseded message must
+                // not leave its prediction pending forever: retire it before overwriting. (An
+                // already-retired id is a no-op.)
+                var key = CardDisplayKey(message);
+                if (_pendingCardDisplay.TryGetValue(key, out var replaced))
+                {
+                    WorldPrediction.Ack(replaced);
+                }
+
+                _pendingCardDisplay[key] = message;
                 return;
             }
 
-            // AckOrApply: the prediction's optimistic apply is a deliberate no-op (vanilla already
-            // placed the card) and the host echoes this peer's own request fields back verbatim, so
-            // the actor's local slot already matches ApplyCardDisplay (it early-returns on Matches).
-            // A remote/host delta carries no pending id and still applies.
-            WorldPrediction.AckOrApply(message, () => ApplyCardDisplay(message));
+            // Confirm: retire our own prediction AND always apply the host's authoritative slot
+            // state. Matches() makes the apply idempotent for the actor, while a host state that
+            // raced ahead of our request (or a remote delta) must still be applied - AckOrApply
+            // would retire our id and leave the slot showing our optimistic card.
+            WorldPrediction.Confirm(message, () => ApplyCardDisplay(message));
         }
 
         private void RetryPendingCardDisplay()
@@ -70,14 +86,19 @@ namespace CardShopCoop.Modules.World
                 }
 
                 _pendingCardDisplay.Remove(CardDisplayKey(message));
-                // Same as HandleCardDisplay: the echoed host state is this peer's own request, so
-                // the actor's slot already matches; a remote delta has no pending id.
-                WorldPrediction.AckOrApply(message, () => ApplyCardDisplay(message));
+                // Same as HandleCardDisplay: Confirm retires our prediction and still applies the
+                // host state, which Matches() makes idempotent after our own optimistic run.
+                WorldPrediction.Confirm(message, () => ApplyCardDisplay(message));
             }
         }
 
         private static long CardDisplayKey(CardDisplayMessage message)
             => ((long)message.ShelfKey << 32) ^ (uint)message.Compartment;
+
+        /// <summary>One prediction key per slot so a rejection on one slot cannot undo/replay an
+        /// in-flight change on another.</summary>
+        private static string CardDisplayPredictionKey(int shelfKey, int compartment)
+            => WorldPrediction.CardDisplayScope + ":" + shelfKey + ":" + compartment;
 
         private static bool CanApplyCardDisplay(CardDisplayMessage message)
             => WorldCardDisplay.TryResolve(message.ShelfKey, message.Compartment, out _);
@@ -150,7 +171,7 @@ namespace CardShopCoop.Modules.World
             // The local game already placed the card, so the prediction has no local apply to run;
             // only a rejection needs to undo it. Predict records the post-hoc prediction
             // without re-running the game mutation the hook already observed.
-            WorldPrediction.Predict(WorldPrediction.CardDisplayScope,
+            WorldPrediction.Predict(CardDisplayPredictionKey(shelfKey, index),
                 new CardDisplayRequestMessage
                 {
                     ShelfKey = shelfKey,
@@ -161,10 +182,17 @@ namespace CardShopCoop.Modules.World
                 }, () => { }, () => UndoCardDisplayPlace(compartment, card));
         }
 
-        private void PublishCardDisplayRemove(InteractableCardCompartment compartment, CardData card)
+        private void PublishCardDisplayRemove(InteractableCardCompartment compartment,
+            InteractableCard3d card3d)
         {
-            if (_shutdown || _cardDisplayApplying || compartment == null || card == null
-                || !_context.InGame())
+            if (_shutdown || _cardDisplayApplying || compartment == null || card3d == null
+                || !card3d || !_context.InGame())
+            {
+                return;
+            }
+
+            var card = card3d.m_Card3dUI?.m_CardUI?.GetCardData();
+            if (card == null)
             {
                 return;
             }
@@ -185,7 +213,7 @@ namespace CardShopCoop.Modules.World
             var grade = WorldCardDisplay.EncodedGradeOf(card);
             CoopPlugin.Log.LogInfo("[card-display] forwarding removal shelf=" + shelfKey
                 + " compartment=" + index + " card=" + card.monsterType + ".");
-            WorldPrediction.Predict(WorldPrediction.CardDisplayScope,
+            WorldPrediction.Predict(CardDisplayPredictionKey(shelfKey, index),
                 new CardDisplayRequestMessage
                 {
                     ShelfKey = shelfKey,
@@ -193,7 +221,9 @@ namespace CardShopCoop.Modules.World
                     Occupied = false,
                     Card = state,
                     EncodedGrade = grade,
-                }, () => { }, () => UndoCardDisplayRemove(compartment, card));
+                },
+                () => RedoCardDisplayRemove(compartment, card3d),
+                () => UndoCardDisplayRemove(compartment, card3d, card));
         }
 
         /// <summary>A rejected placement: the card left the shared collection when it was picked up,
@@ -208,21 +238,54 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private static void UndoCardDisplayRemove(InteractableCardCompartment compartment,
-            CardData card)
+        /// <summary>Replays an accepted (or once-undone) removal by moving the very card object
+        /// vanilla moved into the hand back out of the slot.</summary>
+        private static void RedoCardDisplayRemove(InteractableCardCompartment compartment,
+            InteractableCard3d card3d)
         {
-            if (compartment == null || card == null)
+            if (compartment == null || card3d == null || !card3d)
             {
                 return;
             }
 
-            if (compartment.m_StoredCardList != null
-                && compartment.m_StoredCardList.Count > 0)
+            WorldCardDisplay.TakeCardIntoHand(compartment, card3d);
+        }
+
+        /// <summary>Undoes a rejected removal by putting the SAME card object back on the shelf.
+        /// Spawning a fresh card here duplicated the copy vanilla already moved into the hand.</summary>
+        private static void UndoCardDisplayRemove(InteractableCardCompartment compartment,
+            InteractableCard3d card3d, CardData card)
+        {
+            if (compartment == null)
             {
-                WorldCardDisplay.Clear(compartment);
+                return;
             }
 
-            WorldCardDisplay.Place(compartment, card);
+            if (card3d != null && card3d)
+            {
+                if (WorldCardDisplay.ReturnHeldCardToShelf(compartment, card3d))
+                {
+                    return;
+                }
+
+                if (WorldCardDisplay.IsHeld(card3d))
+                {
+                    // Still in the hand but not returnable through the game's own teardown (the
+                    // paired hand lists drifted). Leave it rather than corrupt the saved hand;
+                    // the next authoritative slot state re-syncs the shelf.
+                    CoopPlugin.Log.LogWarning(
+                        "[card-display] removal undo skipped: the held card could not be "
+                        + "returned through the game's hold teardown.");
+                    return;
+                }
+            }
+
+            // The object is gone or no longer held: restore the data copy so the card is not lost.
+            if (card != null)
+            {
+                WorldCardDisplay.Clear(compartment);
+                WorldCardDisplay.Place(compartment, card);
+            }
         }
 
         [HarmonyPatch(typeof(InteractableCardCompartment), "OnMouseButtonUp")]
@@ -249,15 +312,22 @@ namespace CardShopCoop.Modules.World
         [HarmonyPatch(typeof(InteractableCardCompartment), "OnRightMouseButtonUp")]
         private static class CardDisplayRemovePatch
         {
+            // Capture the exact card object, not just its data: the undo puts this same object
+            // back on the shelf instead of spawning a second copy beside the held one.
             [HarmonyPrefix]
-            private static void Prefix(InteractableCardCompartment __instance, out CardData __state)
-                => __state = WorldCardDisplay.Read(__instance);
+            private static void Prefix(InteractableCardCompartment __instance,
+                out InteractableCard3d __state)
+            {
+                var stored = __instance?.m_StoredCardList;
+                __state = stored != null && stored.Count > 0 ? stored[0] : null;
+            }
 
             [HarmonyPostfix]
-            private static void Postfix(InteractableCardCompartment __instance, CardData __state)
+            private static void Postfix(InteractableCardCompartment __instance,
+                InteractableCard3d __state)
             {
                 // Only forward when vanilla actually took the card off the shelf.
-                if (__state != null && WorldCardDisplay.Read(__instance) == null)
+                if (__state != null && __state && WorldCardDisplay.Read(__instance) == null)
                 {
                     _instance?.PublishCardDisplayRemove(__instance, __state);
                 }

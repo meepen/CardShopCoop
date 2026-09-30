@@ -578,6 +578,74 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
+        /// <summary>Binds the identity an authoritative furniture entity id names onto the exact
+        /// object a peer already owns. The box channel calls this when a descriptor arrives for a
+        /// box this peer created: the descriptor names the host's entity for the furniture inside,
+        /// and the local object must become that entity so the placement channel resolves one
+        /// object per entity instead of materializing a duplicate. The object must match the
+        /// descriptor's expected type. Returns true when the object holds the named identity
+        /// afterwards (already or newly bound).</summary>
+        internal static bool TryAdoptBoxableFurnitureIdentity(InteractableObject obj, string entityId,
+            long worldEpoch, EObjectType expectedType)
+        {
+            if (obj == null || expectedType == EObjectType.None
+                || !TryParseFurnitureEntityId(entityId, worldEpoch, out var key))
+            {
+                return false;
+            }
+
+            var kind = key >> 24;
+            var id = ObjectIdFromObjectKey(key);
+            if (kind < 0 || kind >= PlacementApi.KindCount || kind == PlacementApi.DecorationKind
+                || id == Invalid)
+            {
+                return false;
+            }
+
+            if (obj.m_ObjectType != expectedType)
+            {
+                CoopPlugin.Log.LogWarning("[placement] furniture identity " + id + " names "
+                    + expectedType + " but the boxed object is " + obj.m_ObjectType
+                    + "; not adopting it.");
+                return false;
+            }
+
+            if (TryGet(obj, out var existing))
+            {
+                if (existing == id)
+                {
+                    return true;
+                }
+
+                CoopPlugin.Log.LogWarning("[placement] furniture identity " + id
+                    + " conflicts with the boxed object's own identity " + existing
+                    + "; the descriptor cannot adopt it.");
+                return false;
+            }
+
+            if (ById.TryGetValue(id, out var bound) && bound != null && !ReferenceEquals(bound, obj))
+            {
+                CoopPlugin.Log.LogWarning("[placement] furniture identity " + id
+                    + " is already bound to " + bound.name + "; the descriptor cannot adopt it onto "
+                    + obj.name + ".");
+                return false;
+            }
+
+            var localKind = PlacementInterop.FindKind(obj);
+            if (localKind != kind)
+            {
+                CoopPlugin.Log.LogWarning("[placement] furniture identity " + id + " is kind " + kind
+                    + " but the boxed object " + obj.name + " lives in kind " + localKind
+                    + "; not adopting it.");
+                return false;
+            }
+
+            Bind(obj, id);
+            CoopPlugin.Log.LogInfo("[placement] adopted authoritative furniture identity " + id
+                + " for boxed object " + obj.name + ".");
+            return true;
+        }
+
         private static bool TryParseFurnitureEntityId(string entityId, long worldEpoch, out int key)
         {
             key = 0;
@@ -1062,28 +1130,12 @@ namespace CardShopCoop.Modules.World
             var obj = PlacementMoveState.ResolveObjectByKey(objectKey) as InteractableObject;
             if (obj == null)
             {
-                // The stable key names no local object. A host can spawn a boxed placement object
-                // that no peer predicted (a furniture purchase, whose pose only the host chooses);
-                // recreate it through the game's factory as the exact object the key names rather
-                // than adopting a same-type or nearby local object. The box channel then adopts
-                // this exact package.
-                if (!entry.IsBoxed || entry.Type == PlacementInterop.NoType)
-                {
-                    CoopPlugin.Log.LogWarning("[placement] delta key=" + objectKey + " type="
-                        + entry.Type + " did not resolve and is not a recreatable boxed entity.");
-                    return false;
-                }
-
-                obj = PlacementInterop.SpawnBoxedObject(entry.Type, entry.BoxedPos,
-                    entry.BoxedRot);
-                if (obj == null)
-                {
-                    return false;
-                }
-
-                CoopPlugin.Log.LogInfo("[placement] materialized host-spawned boxed entity key="
-                    + objectKey + " type=" + entry.Type + ".");
-                PlacementIdentity.Bind(obj, PlacementIdentity.ObjectIdFromObjectKey(objectKey));
+                // The stable key names no local object yet. Boxed furniture is owned by the box
+                // channel: its descriptor names this exact entity and binds it onto the local
+                // object (the peer's own predicted box, or one materialized from the descriptor),
+                // after which this delta is retried. Never construct a second object here - that
+                // duplicate would be unknown to the host and could never be interacted with.
+                return false;
             }
 
             return Apply(entry, false);

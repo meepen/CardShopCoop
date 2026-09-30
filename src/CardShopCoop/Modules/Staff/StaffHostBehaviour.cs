@@ -501,18 +501,40 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishInteraction(int index, bool occupied, int grantedPeer)
         {
-            if (!_shutdown && _context.InGame())
+            if (_shutdown || !_context.InGame())
             {
-                _context.Broadcast(new StaffModuleDeltaMessage
-                {
-                    PredictionId = _intentPredictionId,
-                    Kind = StaffDeltaKind.Interaction,
-                    Index = index,
-                    Generation = EnsureGeneration(index),
-                    Granted = grantedPeer > 0,
-                    Occupied = occupied,
-                });
+                return;
             }
+
+            var message = new StaffModuleDeltaMessage
+            {
+                PredictionId = _intentPredictionId,
+                Kind = StaffDeltaKind.Interaction,
+                Index = index,
+                Generation = EnsureGeneration(index),
+                Granted = grantedPeer > 0,
+                Occupied = occupied,
+            };
+
+            // Only the granted peer may open the worker menu. Everyone else receives the same
+            // interaction state with the grant cleared, or it would open a menu (and believe it
+            // holds a lease) that belongs to another player.
+            if (grantedPeer > 0 && occupied)
+            {
+                _context.Send(grantedPeer, message);
+                _context.Relay(grantedPeer, new StaffModuleDeltaMessage
+                {
+                    PredictionId = message.PredictionId,
+                    Kind = message.Kind,
+                    Index = message.Index,
+                    Generation = message.Generation,
+                    Granted = false,
+                    Occupied = true,
+                });
+                return;
+            }
+
+            _context.Broadcast(message);
         }
 
         private void PublishWorkerBootstrap(int index)

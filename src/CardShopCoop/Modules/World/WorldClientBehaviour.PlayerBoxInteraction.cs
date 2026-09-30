@@ -1,5 +1,7 @@
 using System;
+using CardShopCoop.Attributes;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Connection;
 using CardShopCoop.Modules.PlayTable;
 using CardShopCoop.Modules.Presence;
 using HarmonyLib;
@@ -27,10 +29,22 @@ namespace CardShopCoop.Modules.World
 
         private void OnRemoteAvatarsChanged() => _playerBoxInteraction?.ReattachRemoteHolds();
 
+        /// <summary>The host connection dropped: release every mirrored remote hold now so no box
+        /// stays parented to a departed holder's avatar while the session teardown unwinds.</summary>
+        [OnClientDisconnected]
+        private void ForgetHost(PeerConnection connection, DisconnectInfo info)
+        {
+            if (connection?.Id == 1)
+            {
+                _playerBoxInteraction?.Reset();
+            }
+        }
+
         private void InstallPlayerBoxInteractionPatches()
         {
             _harmony.CreateClassProcessor(typeof(PlayerBoxPickupPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlayerBoxThrowPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PlayerBoxDropPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlayerBoxPlacementPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(FurnitureBoxUpPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(ItemBoxOpenStatePatch)).Patch();
@@ -254,6 +268,15 @@ namespace CardShopCoop.Modules.World
             private static void Prefix(InteractablePackagingBox __instance, bool isPlayer,
                 out PlayerBoxInteraction.LocalAction __state)
             {
+                // A box just taken or boxed up is still lerping into the hand, and ThrowBox does
+                // not stop that lerp: the thrown box kept being dragged to the hand until the lerp
+                // finished, which is what made the first throw after a pick-up look refused. Throw
+                // from where the box actually is.
+                if (isPlayer)
+                {
+                    __instance?.StopLerpToTransform();
+                }
+
                 // Capture only: the game decides whether a throw is valid and owns the mutation.
                 __state = _instance == null
                     ? default
@@ -265,6 +288,22 @@ namespace CardShopCoop.Modules.World
                 PlayerBoxInteraction.LocalAction __state)
             {
                 _instance?.PublishPlayerBoxThrow(__instance, __state);
+            }
+        }
+
+        /// <summary>The local player dropped the box for the game's placement preview. That
+        /// release must stop the hold lerp for the same reason a throw does: otherwise the box is
+        /// dragged back toward the hand while the moving-object logic aims it.</summary>
+        [HarmonyPatch(typeof(InteractablePackagingBox), "DropBox")]
+        private static class PlayerBoxDropPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractablePackagingBox __instance, bool isPlayer)
+            {
+                if (isPlayer)
+                {
+                    __instance?.StopLerpToTransform();
+                }
             }
         }
 

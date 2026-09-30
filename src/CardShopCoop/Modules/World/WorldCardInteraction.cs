@@ -470,7 +470,11 @@ namespace CardShopCoop.Modules.World
 
             var needFiltered = _host && ConnectionCount > 1;
             _batchRelayBuf.Clear();
-            var strictApplied = requireAllApplied ? new List<PendingCard>(total) : null;
+            // Deltas this host actually applied (retracted if the batch fails) and deltas it could
+            // only relay for content it lacks. Ownership is recorded from these AFTER the batch is
+            // known to have succeeded, so a failed batch never leaves a grading claim behind.
+            var moved = new List<PendingCard>(total);
+            var relayed = new List<PendingCard>(total);
             var applied = 0;
             var relayedOnly = 0;
             for (var i = 0; i < total; i++)
@@ -492,44 +496,39 @@ namespace CardShopCoop.Modules.World
 
                 if (requireAllApplied && (!ok || relayAnyway))
                 {
-                    RetractCardDeltas(strictApplied);
+                    RetractCardDeltas(moved);
                     return false;
                 }
 
                 if (!ok && !relayAnyway)
                 {
-                    continue;
+                    // REFUSED (invalid, overflow, or a remove this host cannot cover). Reporting
+                    // success here retired the sender's prediction while its refused deltas stayed
+                    // applied locally, diverging the two sides with no rollback. Undo what this
+                    // batch already applied and fail the whole batch, so the sender's rollback and
+                    // this host both return to the pre-batch state.
+                    CoopPlugin.Log.LogWarning("card delta batch from connection " + connectionId
+                        + " refused at delta " + (i + 1) + "/" + total
+                        + "; rolling the batch back.");
+                    RetractCardDeltas(moved);
+                    return false;
                 }
 
-                if (strictApplied != null)
+                var pending = new PendingCard
                 {
-                    strictApplied.Add(new PendingCard
-                    {
-                        IsAdd = delta.IsAdd,
-                        Amount = delta.Amount,
-                        Card = SnapshotCard(delta.Card),
-                    });
-                }
-
+                    IsAdd = delta.IsAdd,
+                    Amount = delta.Amount,
+                    Card = SnapshotCard(delta.Card),
+                };
                 if (ok)
                 {
+                    moved.Add(pending);
                     applied++;
                 }
                 else
                 {
+                    relayed.Add(pending);
                     relayedOnly++;
-                }
-
-                // The general (non-atomic) batch records ownership per delta as it goes. A strict
-                // batch defers this until the whole movement succeeds, so an aborted batch never
-                // leaves a claim behind for a delta it retracted.
-                if (strictApplied == null && _host && delta.IsAdd && (ok || relayAnyway))
-                {
-                    ConsumeGradingOwnership(connectionId, delta.Card, delta.Amount);
-                }
-                else if (strictApplied == null && _host && !delta.IsAdd && ok)
-                {
-                    RecordGradingOwnership(connectionId, delta.Card, delta.Amount);
                 }
 
                 if (needFiltered)
@@ -543,19 +542,25 @@ namespace CardShopCoop.Modules.World
                 }
             }
 
-            if (strictApplied != null)
+            // The movement succeeded: record what actually moved. A relayed add still consumes the
+            // sender's ownership claim (the old per-delta behavior), a relayed remove records none.
+            for (var i = 0; i < moved.Count; i++)
             {
-                for (var i = 0; i < strictApplied.Count; i++)
+                if (moved[i].IsAdd)
                 {
-                    var pending = strictApplied[i];
-                    if (pending.IsAdd)
-                    {
-                        ConsumeGradingOwnership(connectionId, pending.Card, pending.Amount);
-                    }
-                    else
-                    {
-                        RecordGradingOwnership(connectionId, pending.Card, pending.Amount);
-                    }
+                    ConsumeGradingOwnership(connectionId, moved[i].Card, moved[i].Amount);
+                }
+                else
+                {
+                    RecordGradingOwnership(connectionId, moved[i].Card, moved[i].Amount);
+                }
+            }
+
+            for (var i = 0; i < relayed.Count; i++)
+            {
+                if (relayed[i].IsAdd)
+                {
+                    ConsumeGradingOwnership(connectionId, relayed[i].Card, relayed[i].Amount);
                 }
             }
 

@@ -358,8 +358,10 @@ namespace CardShopCoop.Modules.Grading
                     _jobIds[replacement] = message.Id;
                 }
                 CPlayerData.m_GradeCardInProgressList = list;
-                if (message.PredictionId != Guid.Empty)
-                    ClearCurrentSubmission();
+                // This body only runs for a delta that is not ours (AckOrApply retired our own
+                // prediction in the branch above). Clearing the local submission selection and
+                // showing the "cards sent" status/SFX is the actor's own post-submit side effect;
+                // running it here would wipe a peer's in-progress selection for someone else's job.
                 RefreshWebsite();
             });
             return true;
@@ -405,14 +407,6 @@ namespace CardShopCoop.Modules.Grading
             RefreshWebsite();
             SetStatus("cards sent for grading - they mature on the host's days", 4f);
             SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
-        }
-
-        private void ClearCurrentSubmission()
-        {
-            _submitScreen = null;
-            var current = CPlayerData.m_CurrentGradeCardSubmitSet;
-            ApplyLocalSubmission(current?.m_ServiceLevel ?? 0,
-                GradingInterop.MaxSubmitSlots, null);
         }
 
         /// <summary>World reports that a predicted collection removal was rejected: the card is

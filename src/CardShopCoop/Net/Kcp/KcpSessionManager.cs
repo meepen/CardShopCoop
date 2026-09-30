@@ -505,7 +505,7 @@ namespace CardShopCoop.Net.Kcp
                 }
                 else if (!TryEncode(message, true, out var frame, out descriptor))
                 {
-                    failure = "message is not registered or exceeds the encoded frame limit";
+                    failure = "message is not registered in the active session catalog (late registrations apply next session) or exceeds the encoded frame limit";
                 }
                 else if (!QueueFrameLocked(state, frame, descriptor))
                 {
@@ -641,7 +641,7 @@ namespace CardShopCoop.Net.Kcp
                         if (compactFrame == null
                             && !TryEncode(message, true, out compactFrame, out descriptor))
                         {
-                            failure = "message is not registered or exceeds the encoded frame limit";
+                            failure = "message is not registered in the active session catalog (late registrations apply next session) or exceeds the encoded frame limit";
                             break;
                         }
 
@@ -835,7 +835,7 @@ namespace CardShopCoop.Net.Kcp
 
             if (!TryEncode(message, false, out var frame, out var descriptor))
             {
-                failure = "message is not registered or exceeds the encoded frame limit";
+                failure = "message is not registered in the active session catalog (late registrations apply next session) or exceeds the encoded frame limit";
                 return false;
             }
 

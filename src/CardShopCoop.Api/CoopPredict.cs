@@ -1,4 +1,6 @@
 using System;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace CardShopCoop.Api
 {
@@ -25,12 +27,29 @@ namespace CardShopCoop.Api
         public static bool IsApplying => CoopApi.Binding != null && CoopApi.Binding.IsApplying;
 
         /// <summary>Registers and sends a prediction for an action the game already performed. The
-        /// local mutation is NOT performed now; only the replay/undo closures are recorded. Throws
-        /// when no client prediction session is active, mirroring the built-in modules.</summary>
+        /// local mutation is NOT performed now; only the replay/undo closures are recorded. The scope
+        /// is namespaced with the calling assembly name automatically, so different mods can reuse the
+        /// same short keys. Throws when no client prediction session is active, mirroring the built-in
+        /// modules.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static Guid Predict(string scope, Action<Guid> send, Action apply, Action undo)
         {
             var binding = RequireBinding();
-            return binding.Predict(scope, send, apply, undo);
+
+            // GetCallingAssembly must run in the method the mod calls: inside a helper it would
+            // always report CardShopCoop.Api, namespacing every mod under the same prefix.
+            var caller = Assembly.GetCallingAssembly().GetName().Name;
+            return binding.Predict(NamespaceScope(scope, caller), send, apply, undo);
+        }
+
+        private static string NamespaceScope(string scope, string caller)
+        {
+            if (string.IsNullOrEmpty(scope))
+            {
+                throw new ArgumentException("A prediction scope is required.", nameof(scope));
+            }
+
+            return string.IsNullOrEmpty(caller) ? scope : caller + ":" + scope;
         }
 
         private static ICoopBinding RequireBinding()

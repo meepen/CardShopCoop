@@ -343,6 +343,23 @@ namespace CardShopCoop.Modules.Presence
             }
         }
 
+        /// <summary>The host connection dropped: remove the remote avatars/names immediately so
+        /// they cannot outlive the session teardown (which may be a frame or more away).</summary>
+        [OnClientDisconnected]
+        private void ForgetHost(PeerConnection connection, DisconnectInfo info)
+        {
+            if (connection?.Id != 1)
+            {
+                return;
+            }
+
+            PresenceApi.ClearPeerNames();
+            _rosterIds.Clear();
+            _modelIds.Clear();
+            _joined = false;
+            _service?.ClearRemoteAvatars();
+        }
+
         internal void SendEmote()
         {
             if (CanSendIntent())

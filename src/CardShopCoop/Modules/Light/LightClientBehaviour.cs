@@ -79,21 +79,27 @@ namespace CardShopCoop.Modules.Light
             if (_shutdown || _pendingState == null || _context == null || !_context.InGame())
                 return;
 
-            if (!LightInterop.IsSceneReady(LightInterop.FindSceneManager()))
+            // Both readiness and the group reference are required: Apply dereferences the group,
+            // and a throw inside this reliable handler would drop the peer.
+            if (!LightSwitchState.TryGet(out _))
                 return;
 
             var pending = _pendingState;
-            // The host applies the guest's absolute requested bool and echoes it, so this delta
-            // confirms the toggle; reconciling would flip the switch back first.
-            PredictionApi.AckOrApply(pending.PredictionId,
+            // The host message is the shop light's absolute authoritative state, and a host
+            // broadcast (its own click or automation) can cross our echo on the wire. Reconcile in
+            // layers instead of retiring and skipping: the host's value always lands, and a newer
+            // local toggle the host has not processed yet is undone and replayed rather than
+            // stranded under the crossed value. An empty or already-retired id just applies.
+            PredictionApi.ApplyAuthoritative(pending.PredictionId,
                 () => LightSwitchState.Apply(pending.IsActive));
             _pendingState = null;
         }
 
-        /// <summary>Observes the local switch the game already toggled and records the change as
-        /// one post-hoc prediction. The game owns the toggle (the client only predicts the shared
-        /// shop-light state for the host to confirm), so a rejection rolls the switch back through
-        /// the same game surface.</summary>
+        /// <summary>Observes any local shop-light toggle - the game's own switch click or another
+        /// mod's automation, both of which run through LightManager.ToggleShopLight - and records
+        /// the change as one post-hoc prediction. The game owns the toggle (the client only
+        /// predicts the shared shop-light state for the host to confirm), so a rejection rolls the
+        /// light back through the same game surface.</summary>
         private void ObserveToggle(bool armed, bool prior)
         {
             if (!armed || _context == null || !_joined || !_context.InGame())
@@ -110,6 +116,11 @@ namespace CardShopCoop.Modules.Light
                 }),
                 () => LightSwitchState.Apply(after),
                 () => LightSwitchState.Apply(prior));
+
+            // The game's click refreshes only the clicked switch's models; automation usually
+            // leaves them stale. Normalize the module's full surface now instead of waiting for
+            // the host echo, so the switch matches the light immediately.
+            LightSwitchState.Apply(after);
         }
 
         private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _)
@@ -156,7 +167,9 @@ namespace CardShopCoop.Modules.Light
 
         private void OnDestroy() => Shutdown();
 
-        [HarmonyPatch(typeof(InteractableLightSwitch), "OnMouseButtonUp")]
+        // The switch click and every mod-driven automation path run through ToggleShopLight, so
+        // hooking this mutation instead of the click keeps automation in sync, installed or not.
+        [HarmonyPatch(typeof(LightManager), "ToggleShopLight")]
         private static class LightSwitchPatch
         {
             private struct ToggleState

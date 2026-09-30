@@ -892,6 +892,16 @@ namespace CardShopCoop
                 return;
             }
 
+            try
+            {
+                _runtime?.ClientJoined(connection);
+            }
+            catch (Exception error)
+            {
+                // Feature callbacks are isolated from the control transition.
+                CoopPlugin.Log.LogError("Feature ClientJoined callbacks failed: " + error);
+            }
+
             SetStatus("Hosting - " + peerName + " joined!");
             CoopPlugin.Log.LogInfo(peerName + " passed admission; starting world transfer");
             var blobs = CatalogHandshake.BuildWelcomeBlobs();
@@ -996,6 +1006,17 @@ namespace CardShopCoop
                 Shutdown("invalid handshake phase");
                 return;
             }
+
+            try
+            {
+                _runtime?.ClientJoined(connection);
+            }
+            catch (Exception error)
+            {
+                // Feature callbacks are isolated from the control transition.
+                CoopPlugin.Log.LogError("Feature ClientJoined callbacks failed: " + error);
+            }
+
             SetStatus("Downloading " + (PresenceApi.PeerName(1) ?? "host") + "'s shop...");
         }
 
@@ -1184,6 +1205,7 @@ namespace CardShopCoop
                 _externalModsDiscovered = true;
                 ExternalCoopMods.Instance.EnsureDiscovered();
                 _persistentRuntime?.IncludeExternalPersistentBehaviours();
+                ExternalCoopMods.Instance.NotifyPersistentScanComplete();
             }
             Util.PerfProbe.BeginFrame();
             Util.PerfProbe.FlushThreadMetrics();

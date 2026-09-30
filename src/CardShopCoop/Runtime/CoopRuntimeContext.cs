@@ -85,6 +85,7 @@ namespace CardShopCoop.Runtime
         bool ICoopContext.InSession => CoopCore.Role != CoopRole.None;
         bool ICoopContext.InGame => InGame != null && InGame();
         int ICoopContext.LocalConnectionId => CoopCore.LocalConnectionId;
+        int ICoopContext.HostConnectionId => CoopCore.Role == CoopRole.Client ? 1 : -1;
         IReadOnlyList<int> ICoopContext.ConnectionIds => ConnectionIds == null
             ? Array.Empty<int>() : ConnectionIds();
         string ICoopContext.PeerName(int connectionId)

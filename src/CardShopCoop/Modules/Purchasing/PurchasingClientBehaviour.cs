@@ -111,9 +111,13 @@ namespace CardShopCoop.Modules.Purchasing
             _pendingRequests.Remove(outcome.PredictionId);
             // The host accepted the purchase: its descriptors carry the very ids this checkout
             // pre-assigned, so the local boxes bind to them as they spawn.
-            // Reached only for an accepted purchase (failures come back as a rollback), so this
-            // confirms the prediction; reconciling would reopen the cart/confirmation first.
-            PredictionApi.AckOrApply(outcome.PredictionId, () =>
+            // Confirm, not AckOrApply: retire the prediction AND always apply the local
+            // bookkeeping (clearing the cart / closing the confirmation). Vanilla normally did
+            // that already, and the apply is idempotent, but if this peer's checkout charged
+            // without clearing (or a later rollback restored the cart), skipping it strands a
+            // cart that every later click would charge again. The wallet charge stays separate:
+            // vanilla already charged, so only a replay after a rollback re-charges.
+            PredictionApi.Confirm(outcome.PredictionId, () =>
                 ApplyAccepted(pending));
             // The client runs the vanilla checkout like any other player, so the game itself
             // already applied the product-license entitlement side effects (achievement and the
@@ -366,6 +370,17 @@ namespace CardShopCoop.Modules.Purchasing
                 + (pending.UpgradeCostBefore
                     - CPlayerData.m_GameReportDataCollectPermanent.upgradeCost);
 
+            // A checkout vanilla REFUSED locally (not enough money, empty cart, already
+            // unlocked) charged nothing and cleared nothing. Forwarding it would let the host
+            // charge and create boxes for a purchase the player never made - and because the
+            // cart stayed full, every later click would charge again. There is nothing to
+            // reconcile: release the pre-assigned ids that will never spawn and stop.
+            if (pending.Spent <= 0.0001d)
+            {
+                WorldClientBehaviour.ReleaseUnspawnedClientIds(pending.BoxIds);
+                return;
+            }
+
             var message = pending.Message;
             PredictionApi.Predict(
                 "purchasing",
@@ -385,8 +400,17 @@ namespace CardShopCoop.Modules.Purchasing
                         throw;
                     }
                 },
-                () => ApplyAccepted(pending),
+                () => ReplayAccepted(pending),
                 () => Undo(pending));
+        }
+
+        /// <summary>A reconcile replay of an accepted purchase: redo the local bookkeeping and
+        /// mirror the wallet debit, because <see cref="Undo"/> refunded it while rolling the
+        /// layer back. The accepted-outcome path must NOT charge (vanilla already did).</summary>
+        private static void ReplayAccepted(PendingRequest pending)
+        {
+            ApplyAccepted(pending);
+            Charge(pending.Spent);
         }
 
         private bool CanCapture(string action)
@@ -425,9 +449,9 @@ namespace CardShopCoop.Modules.Purchasing
                     break;
             }
 
-            // Replay after a rollback re-does the checkout that vanilla already performed once; the
-            // wallet debit must be mirrored here or the guest's balance drifts below the host's.
-            Charge(pending.Spent);
+            // No wallet charge here: vanilla already charged the local mirror for the accepted
+            // purchase, and the idempotent cart/screen bookkeeping above is all that may still be
+            // needed. A replay after a rollback charges explicitly in ReplayAccepted.
         }
 
         private static void Undo(PendingRequest pending)

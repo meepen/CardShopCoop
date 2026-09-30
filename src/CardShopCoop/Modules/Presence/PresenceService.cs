@@ -340,6 +340,10 @@ namespace CardShopCoop.Modules.Presence
 
         internal void Remove(int id) => _renderer.Remove(id);
 
+        /// <summary>Client: the host connection is gone. Drop every remote avatar right away so
+        /// nothing is left standing in the shop while the session teardown unwinds.</summary>
+        internal void ClearRemoteAvatars() => _renderer.Clear();
+
         internal bool TryGetPeerCamera(int id, out Vector3 position, out Quaternion rotation)
             => _renderer.TryGetPlacementCamera(id, out position, out rotation);
 

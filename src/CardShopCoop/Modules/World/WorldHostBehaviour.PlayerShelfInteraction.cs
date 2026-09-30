@@ -36,7 +36,11 @@ namespace CardShopCoop.Modules.World
             ExecuteWorldCommand(context, message, () =>
             {
                 if (!ApplyShelfAction(message))
+                {
+                    RefreshRejectedShelfAction(context, message);
                     return false;
+                }
+
                 BroadcastWorld(new ShelfItemAddMessage
                 {
                     PredictionId = message.PredictionId,
@@ -61,7 +65,11 @@ namespace CardShopCoop.Modules.World
             ExecuteWorldCommand(context, message, () =>
             {
                 if (!ApplyShelfAction(message))
+                {
+                    RefreshRejectedShelfAction(context, message);
                     return false;
+                }
+
                 BroadcastWorld(new ShelfItemRemoveMessage
                 {
                     PredictionId = message.PredictionId,
@@ -122,6 +130,24 @@ namespace CardShopCoop.Modules.World
         private bool ApplyShelfAction(ShelfInteractionMessage message)
         {
             return _shelfInteraction != null && _shelfInteraction.ApplyIncoming(message);
+        }
+
+        /// <summary>Answers a rejected shelf intent with the compartment's authoritative
+        /// (type, count), sent to the requester before the generic rollback so its undo
+        /// reconciles to reality instead of inverting a snapshot authority has moved past.</summary>
+        private void RefreshRejectedShelfAction(MessageContext context,
+            ShelfInteractionMessage message)
+        {
+            if (context?.Connection == null || _shelfInteraction == null)
+            {
+                return;
+            }
+
+            var refresh = _shelfInteraction.BuildRefresh(message);
+            if (refresh != null)
+            {
+                SendWorldTo(context.Connection.Id, refresh);
+            }
         }
 
         private void EnterPlayerShelfMutation()
@@ -382,6 +408,17 @@ namespace CardShopCoop.Modules.World
         // needs no parallel count.
         private readonly Dictionary<string, List<Guid>> _pendingClientAddIds = new();
 
+        // Client only: prediction ids of this peer's outstanding optimistic take-to-hand removals
+        // per shelf/compartment key, the mirror of _pendingClientAddIds. An incoming absolute host
+        // delta does not include them, so the merge target must subtract the still-outstanding ones
+        // or it backfills a replacement item onto the shelf while the real one is still in the hand.
+        private readonly Dictionary<string, List<Guid>> _pendingClientRemoveIds = new();
+
+        // Client only: the exact item each live optimistic placement owns. An authoritative type
+        // change clears (pools) the compartment before a rejected placement's undo can return its
+        // item, so the clear must hand these back to the player first or the item is lost.
+        private readonly Dictionary<Guid, Item> _pendingClientAddItems = new();
+
         private static readonly FieldInfo StoredItemsField =
             AccessTools.Field(typeof(ShelfCompartment), "m_StoredItemList");
 
@@ -444,6 +481,8 @@ namespace CardShopCoop.Modules.World
         {
             _pendingClientStates.Clear();
             _pendingClientAddIds.Clear();
+            _pendingClientRemoveIds.Clear();
+            _pendingClientAddItems.Clear();
             _applying = false;
             _playerMutationDepth = 0;
         }
@@ -510,6 +549,10 @@ namespace CardShopCoop.Modules.World
                     () => AddCapturedItem(compartment, item),
                     () => ReturnCapturedItem(compartment, item));
                 RecordPendingAdd(ShelfKey(message), predictionId);
+                if (item != null)
+                {
+                    _pendingClientAddItems[predictionId] = item;
+                }
             }
 
             return new LocalMutation
@@ -589,6 +632,84 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>Client: before an authoritative type change clears a compartment, hand any item
+        /// still owned by a live pending placement back to the local player. The placement is about
+        /// to be rejected (the authority moved to a different type), and the clear would pool the
+        /// item before the placement's undo could return it.</summary>
+        private void ReturnPendingItems(ShelfCompartment compartment)
+        {
+            if (_host || compartment == null || _pendingClientAddItems.Count == 0)
+            {
+                return;
+            }
+
+            if (StoredItemsField?.GetValue(compartment) is not List<Item> stored || stored.Count == 0)
+            {
+                return;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            for (var i = stored.Count - 1; i >= 0; i--)
+            {
+                var item = stored[i];
+                if (item == null)
+                {
+                    continue;
+                }
+
+                Guid owner = Guid.Empty;
+                foreach (var pair in _pendingClientAddItems)
+                {
+                    if (ReferenceEquals(pair.Value, item) && PredictionApi.IsPending(pair.Key))
+                    {
+                        owner = pair.Key;
+                        break;
+                    }
+                }
+
+                if (owner == Guid.Empty)
+                {
+                    continue;
+                }
+
+                _pendingClientAddItems.Remove(owner);
+                compartment.RemoveItem(item);
+                if (controller != null)
+                {
+                    controller.AddHoldItemToFront(item);
+                }
+
+                CoopPlugin.Log.LogInfo("[shelf] returned a pending placement item on "
+                    + compartment.name + " before an authoritative clear.");
+            }
+
+            PrunePendingAddItems();
+            PositionStored(compartment);
+        }
+
+        /// <summary>Drops the bookkeeping for placements whose prediction already resolved.</summary>
+        private void PrunePendingAddItems()
+        {
+            if (_pendingClientAddItems.Count == 0)
+            {
+                return;
+            }
+
+            var stale = new List<Guid>();
+            foreach (var pair in _pendingClientAddItems)
+            {
+                if (!PredictionApi.IsPending(pair.Key))
+                {
+                    stale.Add(pair.Key);
+                }
+            }
+
+            for (var i = 0; i < stale.Count; i++)
+            {
+                _pendingClientAddItems.Remove(stale[i]);
+            }
+        }
+
         internal void PublishAdd(ShelfCompartment compartment, LocalMutation mutation)
         {
             Publish(compartment, mutation, true);
@@ -626,9 +747,11 @@ namespace CardShopCoop.Modules.World
                 ItemType = compartment.GetItemType(),
                 ItemCount = compartment.GetItemCount(),
             };
-            WorldPrediction.Predict(WorldPrediction.ShelvesScope, request,
+            var key = ShelfKey(request);
+            var predictionId = WorldPrediction.Predict(WorldPrediction.ShelvesScope, request,
                 () => RemoveCapturedItem(compartment, removed),
                 () => RestoreCapturedItem(compartment, removed));
+            RecordPendingRemove(key, predictionId);
         }
 
         /// <summary>Re-applies a predicted shelf removal: take the item off the shelf and return it
@@ -671,6 +794,15 @@ namespace CardShopCoop.Modules.World
         private void RestoreCapturedItem(ShelfCompartment compartment, Item item)
         {
             if (compartment == null || item == null)
+            {
+                return;
+            }
+
+            // A rejected removal means the host's compartment did not contain the item (that is
+            // the only way a remove request is refused), and the authoritative refresh has just
+            // applied that empty state. Re-adding here would resurrect a shelf entry the host
+            // does not have; the item stays where the optimistic take put it.
+            if (compartment.GetItemCount() <= 0 && compartment.GetItemType() == EItemType.None)
             {
                 return;
             }
@@ -763,9 +895,32 @@ namespace CardShopCoop.Modules.World
             {
                 _applying = true;
                 var target = message.ItemCount;
-                if (!_host && message.ItemType != EItemType.None)
+                if (!_host)
                 {
-                    target += PendingAddCount(ShelfKey(message));
+                    // A pending local add/remove only folds into the merge while the incoming
+                    // state keeps this compartment's type. A type change clears the compartment,
+                    // so those items no longer exist locally and counting them would duplicate
+                    // what the authority describes (and strand the rollback's item).
+                    var localType = compartment.GetItemType();
+                    if (localType == message.ItemType || localType == EItemType.None)
+                    {
+                        var key = ShelfKey(message);
+                        if (message.ItemType != EItemType.None)
+                        {
+                            target += PendingAddCount(key);
+                        }
+
+                        // Outstanding take-to-hand removals already decremented this peer's live
+                        // count; the host's absolute count still includes them, so subtract them
+                        // or the merge backfills a replacement for an item still in the player's
+                        // hand.
+                        target -= PendingRemoveCount(key);
+                    }
+
+                    if (target < 0)
+                    {
+                        target = 0;
+                    }
                 }
 
                 ApplyState(compartment, message.ItemType, target);
@@ -778,30 +933,79 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
+        /// <summary>Host: the compartment's authoritative (type, count) as a state message, used to
+        /// refresh a rejected add/remove request before its generic rollback. The empty prediction
+        /// id makes the requester apply it as a remote state instead of consuming a prediction.</summary>
+        internal ShelfItemAddMessage BuildRefresh(ShelfInteractionMessage failed)
+        {
+            if (failed == null)
+            {
+                return null;
+            }
+
+            var compartment = ResolveCompartment(failed.ShelfKey, failed.Compartment);
+            if (compartment == null)
+            {
+                return null;
+            }
+
+            return new ShelfItemAddMessage
+            {
+                ShelfKey = failed.ShelfKey,
+                Compartment = failed.Compartment,
+                ItemType = compartment.GetItemType(),
+                ItemCount = compartment.GetItemCount(),
+            };
+        }
+
         /// <summary>Client: remembers one of this peer's optimistic placements by its shelf key,
         /// so an incoming absolute host delta can add the still-outstanding ones back.</summary>
         private void RecordPendingAdd(string key, Guid predictionId)
         {
-            if (_host || string.IsNullOrEmpty(key) || predictionId == Guid.Empty)
+            if (!_host)
+            {
+                RecordPending(_pendingClientAddIds, key, predictionId);
+            }
+        }
+
+        /// <summary>Client: remembers one of this peer's optimistic take-to-hand removals by its
+        /// shelf key, so an incoming absolute host delta can subtract the still-outstanding ones
+        /// instead of backfilling items that are still in the player's hand.</summary>
+        private void RecordPendingRemove(string key, Guid predictionId)
+        {
+            if (!_host)
+            {
+                RecordPending(_pendingClientRemoveIds, key, predictionId);
+            }
+        }
+
+        private static void RecordPending(Dictionary<string, List<Guid>> pending, string key,
+            Guid predictionId)
+        {
+            if (string.IsNullOrEmpty(key) || predictionId == Guid.Empty)
             {
                 return;
             }
 
-            if (!_pendingClientAddIds.TryGetValue(key, out var ids))
+            if (!pending.TryGetValue(key, out var ids))
             {
                 ids = new List<Guid>();
-                _pendingClientAddIds[key] = ids;
+                pending[key] = ids;
             }
 
             ids.Add(predictionId);
         }
 
-        /// <summary>Client: how many of this peer's optimistic placements for the key are still
-        /// outstanding. Liveness comes from <see cref="PredictionApi.IsPending"/>, so an ack or a
-        /// rollback drops the placement with no separate bookkeeping; retired ids are pruned here.</summary>
-        private int PendingAddCount(string key)
+        /// <summary>Client: how many of this peer's optimistic actions of one kind for the key are
+        /// still outstanding. Liveness comes from <see cref="PredictionApi.IsPending"/>, so an ack
+        /// or a rollback drops the action with no separate bookkeeping; retired ids are pruned here.</summary>
+        private int PendingAddCount(string key) => PendingCount(_pendingClientAddIds, key);
+
+        private int PendingRemoveCount(string key) => PendingCount(_pendingClientRemoveIds, key);
+
+        private int PendingCount(Dictionary<string, List<Guid>> pending, string key)
         {
-            if (_host || !_pendingClientAddIds.TryGetValue(key, out var ids))
+            if (_host || !pending.TryGetValue(key, out var ids))
             {
                 return 0;
             }
@@ -821,7 +1025,7 @@ namespace CardShopCoop.Modules.World
 
             if (ids.Count == 0)
             {
-                _pendingClientAddIds.Remove(key);
+                pending.Remove(key);
             }
 
             return live;
@@ -1016,6 +1220,10 @@ namespace CardShopCoop.Modules.World
 
             if (compartment.GetItemType() != type)
             {
+                // The incoming type change clears the compartment; return any item still owned by
+                // a live pending placement to its player first, since the placement is about to
+                // be rejected and a pooled item cannot be handed back.
+                ReturnPendingItems(compartment);
                 Clear(compartment);
                 compartment.SetCompartmentItemType(type);
                 compartment.CalculatePositionList();

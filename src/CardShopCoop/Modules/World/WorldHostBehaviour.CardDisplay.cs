@@ -38,6 +38,22 @@ namespace CardShopCoop.Modules.World
                 {
                     if (!message.Occupied)
                     {
+                        // The removal must name the card the slot still holds. The host's own
+                        // actors can consume the displayed card while the guest's removal is in
+                        // flight (a customer buys it, a worker restocks); clearing blindly would
+                        // destroy the OTHER card's state and leave the guest holding a copy the
+                        // host no longer has.
+                        var requested = WorldCardDisplay.FromState(message.Card);
+                        if (requested == null
+                            || !WorldCardDisplay.Matches(compartment, requested,
+                                message.EncodedGrade))
+                        {
+                            CoopPlugin.Log.LogWarning("[card-display] rejected removal shelf="
+                                + message.ShelfKey + " compartment=" + message.Compartment
+                                + ": the slot does not hold the named card.");
+                            return false;
+                        }
+
                         WorldCardDisplay.Clear(compartment);
                     }
                     else

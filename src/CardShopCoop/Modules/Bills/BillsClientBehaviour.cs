@@ -1,6 +1,5 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -161,53 +160,41 @@ namespace CardShopCoop.Modules.Bills
                 ResetSessionState();
         }
 
-        private struct PaymentCapture
-        {
-            public bool Armed;
-            public BillValue Rent;
-            public BillValue Electric;
-            public BillValue Employee;
-        }
-
         /// <summary>
-        /// Captures the pre-payment values and marks the vanilla bill path as an action whose
-        /// wallet side effect the host owns. The game performs the payment itself; the postfix
-        /// observes the result and registers one post-hoc prediction (the host confirms with a
-        /// delta or rejects with the generic rollback). Forced (day-rollover) payments are
-        /// host-driven and are never predicted by a guest, but they stay inside the economy scope
-        /// so their local wallet event is not forwarded as a second charge.
+        /// Client intent for a bill payment. In a session the vanilla payment does not run: the
+        /// same bill zeroing the game would do is applied locally as a prediction (so the bill
+        /// panel and total update immediately), the intent is sent, and the host's accepted delta
+        /// retires the prediction or its rollback restores the captured values. The wallet is
+        /// host-owned - the guest never queues a coin event - so the mirror only moves when the
+        /// host's authoritative wallet snapshot arrives, and a rejection has nothing to refund.
         /// </summary>
-        private static void CapturePayment(byte billType, out PaymentCapture state)
+        private static bool BeginPayment(byte billType, bool forcePay)
         {
-            state = default;
             var client = _active;
             if (client == null || client._shutdown || !client._joined || client._context == null
                 || !client._context.InGame())
-                return;
+            {
+                return true;
+            }
 
-            state.Armed = true;
-            state.Rent = Copy(CPlayerData.GetBill(EBillType.Rent));
-            state.Electric = Copy(CPlayerData.GetBill(EBillType.Electric));
-            state.Employee = Copy(CPlayerData.GetBill(EBillType.Employee));
-            EconomyActionScope.Enter();
-        }
+            // Forced auto-payments belong to the host's day rollover (the guest's accrual is
+            // suppressed), so a guest never predicts one.
+            if (forcePay)
+                return true;
 
-        private static void ObservePayment(byte billType, bool forcePay, PaymentCapture state)
-        {
-            if (!state.Armed || forcePay)
-                return;
-            var client = _active;
-            if (client == null || client._shutdown || !client._joined || client._context == null
-                || !client._context.InGame())
-                return;
+            var rent = Copy(CPlayerData.GetBill(EBillType.Rent));
+            var electric = Copy(CPlayerData.GetBill(EBillType.Electric));
+            var employee = Copy(CPlayerData.GetBill(EBillType.Employee));
+            var amount = PaidAmount(rent, electric, employee, billType);
 
-            // Affordability and "no amount due" both leave the bills unchanged; nothing happened,
-            // so there is no action to observe. (The wallet event is only queued by vanilla, so the
-            // bill change - not the wallet - is the synchronous success signal.)
-            if (!BillsChanged(state))
-                return;
+            // Nothing due, or the mirror cannot afford it: leave the vanilla path to show its own
+            // feedback and queue nothing.
+            if (amount <= 0.0001f || CPlayerData.m_CoinAmountDouble < amount)
+                return true;
 
-            var paid = PaidAmount(state, billType);
+            ZeroPaidBills(billType);
+            BillsInterop.Refresh(BillsInterop.FindScreen());
+            SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
             PredictionApi.Predict(
                 "bills",
                 predictionId => client._context.Send(1, new BillPaymentMessage
@@ -218,42 +205,31 @@ namespace CardShopCoop.Modules.Bills
                 () =>
                 {
                     ZeroPaidBills(billType);
-                    if (paid > 0.0001f)
-                        CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(paid));
                     BillsInterop.Refresh(BillsInterop.FindScreen());
                 },
                 () =>
                 {
-                    ApplyBill(EBillType.Rent, state.Rent);
-                    ApplyBill(EBillType.Electric, state.Electric);
-                    ApplyBill(EBillType.Employee, state.Employee);
-                    if (paid > 0.0001f)
-                        CEventManager.QueueEvent(new CEventPlayer_AddCoin(paid, true));
+                    ApplyBill(EBillType.Rent, rent);
+                    ApplyBill(EBillType.Electric, electric);
+                    ApplyBill(EBillType.Employee, employee);
                     BillsInterop.Refresh(BillsInterop.FindScreen());
                 });
+            return false;
         }
 
         /// <summary>The amount the vanilla payment debits: each relevant bill's positive balance.</summary>
-        private static float PaidAmount(PaymentCapture state, byte billType)
+        private static float PaidAmount(BillValue rent, BillValue electric, BillValue employee,
+            byte billType)
         {
             if (billType == 0)
-                return Positive(state.Rent) + Positive(state.Electric) + Positive(state.Employee);
-            return Positive(billType == (byte)EBillType.Rent ? state.Rent
-                : billType == (byte)EBillType.Electric ? state.Electric
-                : state.Employee);
+                return Positive(rent) + Positive(electric) + Positive(employee);
+            return Positive(billType == (byte)EBillType.Rent ? rent
+                : billType == (byte)EBillType.Electric ? electric
+                : employee);
         }
 
         private static float Positive(BillValue value)
             => value != null && value.AmountToPay > 0f ? value.AmountToPay : 0f;
-
-        private static bool BillsChanged(PaymentCapture state)
-            => !Unchanged(CPlayerData.GetBill(EBillType.Rent), state.Rent)
-                || !Unchanged(CPlayerData.GetBill(EBillType.Electric), state.Electric)
-                || !Unchanged(CPlayerData.GetBill(EBillType.Employee), state.Employee);
-
-        private static bool Unchanged(BillData bill, BillValue value)
-            => bill != null && value != null && bill.billDayPassed == value.DayPassed
-                && Math.Abs(bill.amountToPay - value.AmountToPay) < 0.0001f;
 
         private static void ZeroPaidBills(byte billType)
         {
@@ -301,84 +277,52 @@ namespace CardShopCoop.Modules.Bills
 
         private void OnDestroy() => Shutdown();
 
-        private static void ReleaseCapture(PaymentCapture state)
-        {
-            if (state.Armed)
-                EconomyActionScope.Exit();
-        }
-
         [HarmonyPatch(typeof(RentBillScreen), "OnPressPayRentBill")]
         private static class PayRentPatch
         {
             [HarmonyPrefix]
-            private static void Prefix(bool forcePay, out PaymentCapture __state)
-                => CapturePayment((byte)EBillType.Rent, out __state);
-
-            [HarmonyPostfix]
-            private static void Postfix(bool forcePay, PaymentCapture __state)
-                => ObservePayment((byte)EBillType.Rent, forcePay, __state);
-
-            [HarmonyFinalizer]
-            private static void Finalizer(PaymentCapture __state) => ReleaseCapture(__state);
+            private static bool Prefix(bool forcePay)
+                => BeginPayment((byte)EBillType.Rent, forcePay);
         }
 
         [HarmonyPatch(typeof(RentBillScreen), "OnPressPayElectricBill")]
         private static class PayElectricPatch
         {
             [HarmonyPrefix]
-            private static void Prefix(bool forcePay, out PaymentCapture __state)
-                => CapturePayment((byte)EBillType.Electric, out __state);
-
-            [HarmonyPostfix]
-            private static void Postfix(bool forcePay, PaymentCapture __state)
-                => ObservePayment((byte)EBillType.Electric, forcePay, __state);
-
-            [HarmonyFinalizer]
-            private static void Finalizer(PaymentCapture __state) => ReleaseCapture(__state);
+            private static bool Prefix(bool forcePay)
+                => BeginPayment((byte)EBillType.Electric, forcePay);
         }
 
         [HarmonyPatch(typeof(RentBillScreen), "OnPressPaySalaryBill")]
         private static class PaySalaryPatch
         {
             [HarmonyPrefix]
-            private static void Prefix(bool forcePay, out PaymentCapture __state)
-                => CapturePayment((byte)EBillType.Employee, out __state);
-
-            [HarmonyPostfix]
-            private static void Postfix(bool forcePay, PaymentCapture __state)
-                => ObservePayment((byte)EBillType.Employee, forcePay, __state);
-
-            [HarmonyFinalizer]
-            private static void Finalizer(PaymentCapture __state) => ReleaseCapture(__state);
+            private static bool Prefix(bool forcePay)
+                => BeginPayment((byte)EBillType.Employee, forcePay);
         }
 
         [HarmonyPatch(typeof(RentBillScreen), "OnPressPayAllBill")]
         private static class PayAllPatch
         {
             [HarmonyPrefix]
-            private static void Prefix(out PaymentCapture __state)
-                => CapturePayment(0, out __state);
-
-            [HarmonyPostfix]
-            private static void Postfix(PaymentCapture __state)
-                => ObservePayment(0, false, __state);
-
-            [HarmonyFinalizer]
-            private static void Finalizer(PaymentCapture __state) => ReleaseCapture(__state);
+            private static bool Prefix() => BeginPayment(0, false);
         }
 
         [HarmonyPatch(typeof(RentBillScreen), "EvaluateNewDayBill")]
         private static class AccrualPatch
         {
-            // Day-rollover accrual is host-owned (the host advances the day and broadcasts the
-            // resulting bill values). The guest runs the vanilla path so its local state matches,
-            // but the accrual's forced auto-payments must not be forwarded as the guest's own
-            // economy contributions; the host's authoritative bill delta then overwrites.
+            // Bill accrual is host-owned ambient state: the host advances the day, accrues on its
+            // own shop state, and broadcasts the resulting values (UpdateBill/SetBill deltas plus
+            // the forced auto-payments, whose wallet events the host owns). The guest's dawn
+            // sequence runs via GameTime (ResetSunlightIntensity -> DelayUpdateEnv -> OnDayStarted)
+            // on every host day advance and on a join at 08:00, but its accrual would compute from
+            // guest-local inputs (light-on time, its worker mirror) and ADD +1 day/amounts on top of
+            // the host deltas already applied - a guest bill table the host does not have. A later
+            // Pay All then charges the guest's larger local total, the host charges its real total,
+            // and the difference is credited back. The guest therefore never accrues; it only
+            // applies the host's bill state.
             [HarmonyPrefix]
-            private static void Prefix() => EconomyActionScope.Enter();
-
-            [HarmonyFinalizer]
-            private static void Finalizer() => EconomyActionScope.Exit();
+            private static bool Prefix() => false;
         }
     }
 }

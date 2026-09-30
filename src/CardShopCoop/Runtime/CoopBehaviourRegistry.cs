@@ -104,7 +104,23 @@ namespace CardShopCoop.Runtime
             {
                 foreach (var type in types)
                 {
-                    registry.AddType(type, false);
+                    if (type.Assembly == typeof(CoopBehaviourRegistry).Assembly)
+                    {
+                        registry.AddType(type, false);
+                        continue;
+                    }
+
+                    try
+                    {
+                        registry.AddType(type, false);
+                    }
+                    catch (Exception error)
+                    {
+                        // A broken external mod must not abort session activation for everyone.
+                        // The persistent path isolates per type the same way.
+                        CoopPlugin.Log?.LogError("[api] external behaviour " + type.FullName
+                            + " failed to start; skipping it: " + error);
+                    }
                 }
                 registry.ActivateAll();
                 return registry;

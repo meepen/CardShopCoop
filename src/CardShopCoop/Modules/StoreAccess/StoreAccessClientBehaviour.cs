@@ -19,6 +19,9 @@ namespace CardShopCoop.Modules.StoreAccess
         private bool _shutdown;
         private bool _joined;
         private StoreAccessStateMessage _pendingState;
+        // The latest authoritative delta whose values are already applied but whose visible sign
+        // could not be painted yet (the world/sign was still loading). See HandleDelta.
+        private StoreAccessDeltaMessage _pendingDelta;
 
         private void OnEnable()
         {
@@ -71,7 +74,9 @@ namespace CardShopCoop.Modules.StoreAccess
             if (_shutdown)
                 return;
 
+            // The join baseline is superseded by any delta that already arrived.
             _pendingState = message;
+            _pendingDelta = null;
             TryApplyPending();
         }
 
@@ -83,20 +88,96 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-            // The local click already ran the vanilla sign path (toggle + animation), so the echo
-            // of our own prediction must retire without undoing it - undoing would snap the sign
-            // back and then re-animate it. ApplyDelta skips whatever already matches.
-            PredictionApi.AckOrApply(message.PredictionId, () => ApplyDelta(message));
+            // Confirm: retire our own prediction AND always apply the host's value. AckOrApply
+            // would retire and skip, leaving our optimistic value even when the host computed a
+            // different one (its own toggle, the day-start close, or a second guest racing the
+            // same sign). ApplyDeltaVisuals already skips a sign whose local state matches, so
+            // this is idempotent for the actor's own echo.
+            PredictionApi.Confirm(message.PredictionId, () => { });
+
+            var shopChanged = message.HasShopOpen && CPlayerData.m_IsShopOpen != message.IsShopOpen;
+            var warehouseChanged = message.HasWarehouseDoorClosed
+                && CPlayerData.m_IsWarehouseDoorClosed != message.IsWarehouseDoorClosed;
+            if (message.HasShopOpen)
+                CPlayerData.m_IsShopOpen = message.IsShopOpen;
+            if (message.HasWarehouseDoorClosed)
+                CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
+
+            // The join baseline may still be waiting for the scene. A delta only carries one
+            // sign, so fold it into that pending state rather than dropping either update.
+            if (_pendingState != null)
+            {
+                if (message.HasShopOpen)
+                    _pendingState.IsShopOpen = message.IsShopOpen;
+                if (message.HasWarehouseDoorClosed)
+                    _pendingState.IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
+                _pendingState.Animate = false;
+                return;
+            }
+
+            if (_context != null && _context.InGame() && DeltaSignsReady(message))
+            {
+                ApplyDeltaVisuals(message, shopChanged, warehouseChanged);
+                _pendingDelta = null;
+                LogDelta("applied", message);
+            }
+            else
+            {
+                // The values are authoritative now, but the visible sign cannot be painted yet
+                // (the world/sign is still loading). Hold the delta so the ready hooks repaint
+                // it, instead of moving the flag and leaving the visible sign behind.
+                _pendingDelta = message;
+                LogDelta("held until the sign is ready", message);
+            }
         }
+
+        private static void LogDelta(string action, StoreAccessDeltaMessage message)
+            => CoopPlugin.Log.LogInfo("[store-access] delta " + action + " shop="
+                + (message.HasShopOpen ? (message.IsShopOpen ? "open" : "closed") : "-")
+                + " warehouse=" + (message.HasWarehouseDoorClosed
+                    ? (message.IsWarehouseDoorClosed ? "closed" : "open") : "-") + ".");
+
+        /// <summary>True when every surface a delta carries can be resolved right now. The
+        /// warehouse access can live on the sign or, when the build/scene has no sign object, on
+        /// the unlock-room manager, exactly like the baseline apply path handles it.</summary>
+        private static bool DeltaSignsReady(StoreAccessDeltaMessage message)
+            => (!message.HasShopOpen || StoreAccessInterop.FindOpenSign() != null)
+                && (!message.HasWarehouseDoorClosed
+                    || StoreAccessInterop.FindWarehouseSign() != null
+                    || StoreAccessInterop.FindUnlockRoomManager() != null);
 
         private void TryApplyPending()
         {
-            if (_shutdown || _pendingState == null || _context == null || !_context.InGame()
-                || !StoreAccessInterop.IsSceneReady())
+            if (_shutdown || _context == null || !_context.InGame())
                 return;
 
-            Apply(_pendingState);
-            _pendingState = null;
+            if (_pendingState != null && StoreAccessInterop.IsSceneReady())
+            {
+                Apply(_pendingState);
+                _pendingState = null;
+                _pendingDelta = null;
+            }
+
+            if (_pendingDelta != null && DeltaSignsReady(_pendingDelta))
+            {
+                // Refresh only: the values were applied when the delta arrived, and animating a
+                // change that happened while the world was loading would replay it at the wrong
+                // moment.
+                if (_pendingDelta.HasShopOpen)
+                    StoreAccessInterop.RefreshOpenMesh(StoreAccessInterop.FindOpenSign());
+                if (_pendingDelta.HasWarehouseDoorClosed)
+                {
+                    var warehouseSign = StoreAccessInterop.FindWarehouseSign();
+                    if (warehouseSign != null)
+                        StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
+                    else
+                        StoreAccessInterop.RefreshWarehouseAccess(
+                            SceneRef<UnlockRoomManager>.Get());
+                }
+
+                LogDelta("painted onto the ready sign", _pendingDelta);
+                _pendingDelta = null;
+            }
         }
 
         private static void Apply(StoreAccessStateMessage message)
@@ -115,61 +196,79 @@ namespace CardShopCoop.Modules.StoreAccess
                 StoreAccessInterop.RefreshWarehouseAccess(SceneRef<UnlockRoomManager>.Get());
         }
 
-        private static void ApplyDelta(StoreAccessDeltaMessage message)
+        private static void ApplyDeltaVisuals(StoreAccessDeltaMessage message, bool shopChanged,
+            bool warehouseChanged)
         {
-            // Skip a sign whose authoritative state the local game already reached. The player's
-            // own click applied it through the vanilla path (which is still animating), so
-            // re-animating or refreshing here would fight that animation.
-            var shopChanged = message.HasShopOpen && CPlayerData.m_IsShopOpen != message.IsShopOpen;
-            var warehouseChanged = message.HasWarehouseDoorClosed
-                && CPlayerData.m_IsWarehouseDoorClosed != message.IsWarehouseDoorClosed;
-
             if (message.HasShopOpen)
-                CPlayerData.m_IsShopOpen = message.IsShopOpen;
-            if (message.HasWarehouseDoorClosed)
-                CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
-
-            if (shopChanged)
             {
                 var openSign = StoreAccessInterop.FindOpenSign();
-                if (!message.Animate || !StoreAccessInterop.PlayOpenAnimation(openSign))
-                    StoreAccessInterop.RefreshOpenMesh(openSign);
+                if (!(shopChanged && message.Animate
+                    && StoreAccessInterop.PlayOpenAnimation(openSign)))
+                {
+                    // Repaint when the value moved (animation refused or not requested), and also
+                    // when the local value already matched: the visible sign may have missed an
+                    // earlier authoritative change, and a matching flag must not hide that. A
+                    // swap in progress is the local player's own animation of the same value, so
+                    // leave it alone.
+                    if (shopChanged || !StoreAccessInterop.IsOpenSwapping(openSign))
+                        StoreAccessInterop.RefreshOpenMesh(openSign);
+                }
             }
 
-            if (warehouseChanged)
+            if (message.HasWarehouseDoorClosed)
             {
                 var warehouseSign = StoreAccessInterop.FindWarehouseSign();
-                if (!message.Animate || !StoreAccessInterop.PlayWarehouseAnimation(warehouseSign))
-                    StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
+                if (warehouseSign == null)
+                {
+                    // Some scenes surface the warehouse access through the room manager only,
+                    // exactly like the baseline apply path.
+                    StoreAccessInterop.RefreshWarehouseAccess(SceneRef<UnlockRoomManager>.Get());
+                }
+                else if (!(warehouseChanged && message.Animate
+                    && StoreAccessInterop.PlayWarehouseAnimation(warehouseSign)))
+                {
+                    if (warehouseChanged
+                        || !StoreAccessInterop.IsWarehouseSwapping(warehouseSign))
+                        StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
+                }
             }
         }
 
         /// <summary>The vanilla sign click already toggled the state and started its animation;
         /// forward the intent so the host applies and echoes it. This is a post-hoc prediction:
-        /// the game performed the toggle, so only a rejection's undo needs the pre-click state.</summary>
+        /// the game performed the toggle, so rejection undoes to the captured pre-click state and
+        /// replay re-applies the captured post-click state. A prediction owns exactly ONE sign's
+        /// key, so an undo can never restore the other sign to a stale value (a rejected shop
+        /// toggle after an accepted warehouse toggle must not clobber the warehouse).</summary>
         private void ForwardToggle(byte which, bool before, bool after)
         {
             if (_shutdown || !_joined || _context == null || !_context.InGame() || after == before)
                 return;
 
-            var previousShop = which == 0 ? before : CPlayerData.m_IsShopOpen;
-            var previousWarehouse = which == 1 ? before : CPlayerData.m_IsWarehouseDoorClosed;
+            // One prediction key per sign so an undo of one sign's prediction does not touch the
+            // other sign's in-flight toggle.
+            var predictionKey = which == 0 ? "store-access:shop" : "store-access:warehouse";
             PredictionApi.Predict(
-                "store-access",
+                predictionKey,
                 predictionId => _context.Send(1, new StoreAccessToggleMessage
                 {
                     PredictionId = predictionId,
                     Which = which,
                 }),
-                () => { },
-                () => ApplyLocal(previousShop, previousWarehouse));
+                () => ApplyLocal(which, after),
+                () => ApplyLocal(which, before));
         }
 
-        private static void ApplyLocal(bool shopOpen, bool warehouseClosed)
+        private static void ApplyLocal(byte which, bool value)
         {
-            CPlayerData.m_IsShopOpen = shopOpen;
-            CPlayerData.m_IsWarehouseDoorClosed = warehouseClosed;
-            StoreAccessInterop.RefreshOpenMesh(StoreAccessInterop.FindOpenSign());
+            if (which == 0)
+            {
+                CPlayerData.m_IsShopOpen = value;
+                StoreAccessInterop.RefreshOpenMesh(StoreAccessInterop.FindOpenSign());
+                return;
+            }
+
+            CPlayerData.m_IsWarehouseDoorClosed = value;
             StoreAccessInterop.RefreshWarehouseMesh(StoreAccessInterop.FindWarehouseSign());
         }
 
@@ -200,6 +299,7 @@ namespace CardShopCoop.Modules.StoreAccess
         {
             _joined = false;
             _pendingState = null;
+            _pendingDelta = null;
         }
 
         internal void Shutdown()

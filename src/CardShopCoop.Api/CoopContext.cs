@@ -19,36 +19,68 @@ namespace CardShopCoop.Api
     /// </summary>
     public interface ICoopContext
     {
+        /// <summary>True on the authoritative host.</summary>
         bool IsHost
         {
             get;
         }
+
+        /// <summary>True on a joining client.</summary>
         bool IsClient
         {
             get;
         }
+
+        /// <summary>True while a host or client session is established.</summary>
         bool InSession
         {
             get;
         }
+
+        /// <summary>True once the local peer has finished joining and gameplay traffic is allowed.</summary>
         bool InGame
         {
             get;
         }
+
+        /// <summary>This machine's identity in the host's roster: 0 on the host (self); on a client,
+        /// the id the host assigned to this client. It is NOT necessarily a valid <see cref="Send"/>
+        /// target in the client's own connection-id space.</summary>
         int LocalConnectionId
         {
             get;
         }
+
+        /// <summary>The connection id that addresses the host from this peer's local point of view
+        /// (always 1 on a client). -1 on the host, which has no remote host. Use this instead of a
+        /// literal 1 to send intents to the host.</summary>
+        int HostConnectionId
+        {
+            get;
+        }
+
+        /// <summary>The peers reachable from this machine: the host sees every client; a client sees
+        /// only the host (id 1).</summary>
         IReadOnlyList<int> ConnectionIds
         {
             get;
         }
+
+        /// <summary>Display name for a peer id, null if unknown.</summary>
         string PeerName(int connectionId);
+
+        /// <summary>Binds and unbinds attributed message handlers for one behaviour instance
+        /// (see <see cref="ICoopMessageRegistry"/>).</summary>
         ICoopMessageRegistry Messages
         {
             get;
         }
+
+        /// <summary>Sends to one peer by connection id; <see cref="HostConnectionId"/> addresses the
+        /// host.</summary>
         void Send(int connectionId, INetMessage message);
+
+        /// <summary>From the host, fans out to all ready peers; from a client, sends to the host.</summary>
         void Broadcast(INetMessage message);
     }
 

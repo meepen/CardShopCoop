@@ -77,12 +77,10 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(ContainerDeltaMessage))]
         private void HandleContainerDelta(MessageContext context, ContainerDeltaMessage message)
         {
-            // Accepted container ops are echoed as the host's full record state for that
-            // compartment (rejections roll the prediction back), so the receiver's apply is a
-            // state-set, not a second mutation. The host's record state supersedes the client's
-            // optimistic run (which only set a claimed flag), so always apply it.
-            WorldPrediction.Confirm(message,
-                () => _cardInteraction.Containers.ClientApplyDelta(message));
+            // The container module owns this delta's prediction lifecycle: a pack-insert echo
+            // reconciles in layers against this machine's newer in-flight inserts before it is
+            // retired, while every other record retires-and-applies (see ClientApplyDelta).
+            _cardInteraction.Containers.ClientApplyDelta(message);
         }
 
     }

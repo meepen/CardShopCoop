@@ -39,6 +39,24 @@ namespace CardShopCoop.Modules.World
         /// mistake an applied mirror for a local player action.</summary>
         internal static bool ApplyingRemote;
 
+        // Client: bumped whenever an authoritative (host) state-set lands on a bench. An edit
+        // prediction captures the epoch it was made in; a later rejection only replays its local
+        // snapshot when no newer authoritative state arrived on the same bench since - otherwise
+        // the undo would roll the bench back over that state. Keyed by the bench object, because
+        // placing or boxing furniture shifts the workbench list and an index is not an identity.
+        private readonly Dictionary<InteractableWorkbench, int> _authorityEpochs = new();
+
+        private int AuthorityEpoch(InteractableWorkbench bench)
+            => bench != null && _authorityEpochs.TryGetValue(bench, out var epoch) ? epoch : 0;
+
+        private void AdvanceAuthorityEpoch(InteractableWorkbench bench)
+        {
+            if (bench != null)
+            {
+                _authorityEpochs[bench] = AuthorityEpoch(bench) + 1;
+            }
+        }
+
         private readonly bool _host;
         private readonly Action<INetMessage> _broadcast;
         private readonly Action<int, INetMessage> _send;
@@ -56,6 +74,17 @@ namespace CardShopCoop.Modules.World
         internal void Reset()
         {
             ApplyingRemote = false;
+            _authorityEpochs.Clear();
+        }
+
+        /// <summary>Client: an absolute host state-set that resolves none of this peer's pending
+        /// predictions has just landed (or is about to). Every snapshot captured before it is
+        /// stale, so a later rejection of one of those predictions must not replay it.</summary>
+        internal void MarkAuthorityAdvanced(int index)
+        {
+            // Keyed by the bench object, not its list index: the index is a live list position and
+            // shifts when furniture is placed or boxed up, which would advance the wrong epoch.
+            AdvanceAuthorityEpoch(GetBench(index));
         }
 
         private bool InGame() => _inGame == null || _inGame();
@@ -400,6 +429,7 @@ namespace CardShopCoop.Modules.World
             }
 
             var self = this;
+            var epoch = AuthorityEpoch(bench);
             WorldPrediction.Predict(WorldPrediction.WorkbenchScope,
                 new WorkbenchOpMessage
                 {
@@ -410,7 +440,15 @@ namespace CardShopCoop.Modules.World
                     Bundling = IsBundling(bench),
                 },
                 () => self.ReplayItems(bench, after),
-                () => self.ReplayItems(bench, before));
+                () =>
+                {
+                    // A newer authoritative bench state supersedes this rejected edit's snapshot;
+                    // replaying the old list would roll the bench back over the host's state.
+                    if (self.AuthorityEpoch(bench) == epoch)
+                    {
+                        self.ReplayItems(bench, before);
+                    }
+                });
         }
 
         /// <summary>Rebuilds a bench's local list from a type sequence. Used to replay or undo a
@@ -442,6 +480,21 @@ namespace CardShopCoop.Modules.World
             }
 
             SyncBench(bench, message.StoredTypes, message.SpawnItemType, message.Bundling);
+        }
+
+        /// <summary>Host: the bench's absolute authoritative state as a refresh for a rejected
+        /// edit, sent to the requester before the generic rollback so the client reconciles to
+        /// authority instead of replaying a snapshot that has moved past it. The empty prediction
+        /// id makes the requester apply it as a state-set, not consume a prediction with it.</summary>
+        internal WorkbenchStateMessage BuildRefresh(int index)
+        {
+            if (!_host)
+            {
+                return null;
+            }
+
+            var bench = GetBench(index);
+            return bench == null ? null : BuildState(index, bench);
         }
 
         // ---------------- game-state apply ----------------

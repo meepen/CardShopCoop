@@ -55,12 +55,14 @@ namespace CardShopCoop.Modules.Register
             Patch(typeof(AddChangePatch));
             Patch(typeof(RemoveChangePatch));
             Patch(typeof(FinishPatch));
+            Patch(typeof(OutlinePatch));
             // Subscribe before patching: a failed Patch(...) throws out of OnEnable, and the
             // sceneLoaded subscription must survive so host scene reloads still reset stations.
             SceneManager.sceneLoaded += OnSceneLoaded;
             Patch(typeof(CounterAddedPatch));
             Patch(typeof(CounterRemovedPatch));
             Patch(typeof(CounterDestroyedPatch));
+            Patch(typeof(ResetCounterPatch));
         }
 
         private void Patch(Type patchType)
@@ -127,6 +129,9 @@ namespace CardShopCoop.Modules.Register
                     counter.StopCurrentWorker();
                     station.Owner = connection.Id;
                     PublishOwnership(index);
+                    // The register became this client's; stop any local highlight that was
+                    // advertising it to the host.
+                    RegisterHighlight.Clear(counter);
                     return;
                 }
 
@@ -140,6 +145,8 @@ namespace CardShopCoop.Modules.Register
 
                     station.Owner = 0;
                     PublishOwnership(index);
+                    // No highlight restore is needed here: a detached counter is raycast again
+                    // on the next frame, where a free register highlights normally.
                     return;
                 }
 
@@ -801,10 +808,35 @@ namespace CardShopCoop.Modules.Register
         [HarmonyPatch(typeof(InteractableCashierCounter), "OnMouseButtonUp")]
         private static class ManningPatch
         {
-            // The host always mans through vanilla; the postfix observes the host's own successful
-            // man and publishes it. The previous no-longer-needed guard that stopped the host from
-            // manning a guest-owned counter was a Harmony suppression, so it is removed: the host
-            // is authoritative and the published ownership unmounts the guest.
+            // A register a guest is already manning is not the host's to take, so the prefix stops
+            // the host's click from entering cashier mode (and from publishing an ownership that
+            // would yank the guest off). A free counter passes through and the postfix observes the
+            // host's own successful man and publishes it.
+            [HarmonyPrefix]
+            private static bool Prefix(InteractableCashierCounter __instance)
+            {
+                var active = _active;
+                if (active == null || __instance == null || !active._context.InGame())
+                {
+                    return true;
+                }
+
+                var index = Index(__instance);
+                if (index < 0 || index >= 250)
+                {
+                    return true;
+                }
+
+                if (active.Observe(index, __instance).Owner > 0)
+                {
+                    CoopPlugin.Log.LogInfo("[register] host left counter " + index
+                        + " to the player already manning it.");
+                    return false;
+                }
+
+                return true;
+            }
+
             [HarmonyPostfix]
             private static void Postfix(InteractableCashierCounter __instance)
             {
@@ -820,6 +852,35 @@ namespace CardShopCoop.Modules.Register
                     _active.Observe(index, __instance).Owner = -1;
                     _active.PublishOwnership(index);
                 }
+            }
+        }
+
+        [HarmonyPatch(typeof(InteractableObject), "OnRaycasted")]
+        private static class OutlinePatch
+        {
+            // The green hover outline is raised from this machine's raycast alone. A register a
+            // guest already mans is not interactable here, so it must not advertise itself (or its
+            // tooltips) as if it were. Ownership is authoritative and known before the raycast in
+            // the normal flow; a mid-look takeover is cleared when its claim is handled.
+            [HarmonyPrefix]
+            private static bool Prefix(InteractableObject __instance)
+            {
+                var active = _active;
+                if (active == null || !active._context.InGame()
+                    || !(__instance is InteractableCashierCounter counter))
+                {
+                    return true;
+                }
+
+                var index = Index(counter);
+                if (index >= 0 && active._stations.TryGetValue(index, out var station)
+                    && station.Owner > 0)
+                {
+                    RegisterHighlight.Clear(counter);
+                    return false;
+                }
+
+                return true;
             }
         }
 
@@ -991,6 +1052,38 @@ namespace CardShopCoop.Modules.Register
             [HarmonyPrefix]
             private static void Prefix(InteractableCashierCounter __instance)
                 => _active?.Tombstone(RegisterInterop.Index(__instance));
+        }
+
+        [HarmonyPatch(typeof(InteractableCashierCounter), "ForceResetCounter")]
+        private static class ResetCounterPatch
+        {
+            // Day start (CEventPlayer_OnDayStarted) force-clears the counter's manned state via
+            // ForceResetCounter, without OnPressEsc, so any station ownership - the host's -1 or
+            // a guest's id - is stale afterwards. Publish a clean 0 so nobody keeps, or is locked
+            // out of, a register no one is manning. Without the publish the ownership gate would
+            // leave guests unable to claim the host's old counter for the rest of the day. Save
+            // load recreates counters, which clears the host's station table via the scene
+            // lifecycle, so only the day-start path needs to be handled here.
+            [HarmonyPostfix]
+            private static void Postfix(InteractableCashierCounter __instance)
+            {
+                var active = _active;
+                if (active == null || __instance == null || !active._context.InGame())
+                {
+                    return;
+                }
+
+                var index = Index(__instance);
+                if (index < 0 || index >= 250 || active.GetStation(index).Owner == 0)
+                {
+                    return;
+                }
+
+                active.GetStation(index).Owner = 0;
+                active.Observe(index, __instance);
+                active.PublishOwnership(index);
+                RegisterHighlight.Clear(__instance);
+            }
         }
     }
 }

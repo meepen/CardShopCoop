@@ -249,6 +249,10 @@ namespace CardShopCoop.Net
             }
             if (!snapshot.TryGetHandler(message.GetType(), out var handler))
             {
+                Msg.LogDecodeWarning(descriptor.WireName,
+                    "coop: no handler bound for " + descriptor.WireName + " on connection "
+                    + context.ConnectionId + "; message dropped (module disabled or "
+                    + "RegisterAttributedHandlers was not called)");
                 return Reject(descriptor.WireName, descriptor.MessageType,
                     "no runtime handler is bound", context);
             }

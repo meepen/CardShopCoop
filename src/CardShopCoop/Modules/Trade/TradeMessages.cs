@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using UnityEngine;
 

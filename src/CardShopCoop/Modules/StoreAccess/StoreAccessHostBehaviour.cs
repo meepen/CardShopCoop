@@ -156,6 +156,11 @@ namespace CardShopCoop.Modules.StoreAccess
             if (_shutdown || _context == null || !_context.InGame() || message == null)
                 return;
 
+            CoopPlugin.Log.LogInfo("[store-access] host broadcast shop="
+                + (message.HasShopOpen ? (message.IsShopOpen ? "open" : "closed") : "-")
+                + " warehouse=" + (message.HasWarehouseDoorClosed
+                    ? (message.IsWarehouseDoorClosed ? "closed" : "open") : "-")
+                + " pred=" + message.PredictionId + ".");
             _context.Broadcast(message);
         }
 

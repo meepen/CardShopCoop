@@ -99,6 +99,36 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>Removes every compartment entry that represents <paramref name="boxNetworkId"/>.
+        /// A compartment entry and the currently bound object can legitimately diverge mid-flight
+        /// (a rebind, a materialized replacement, a stale listing), so removal must match by id -
+        /// and by the exact bound reference - instead of assuming the two agree. An entry left
+        /// behind is a box the host no longer has there, which then feeds ghost takes.</summary>
+        private void RemoveListedBox(ShelfCompartment compartment, Guid boxNetworkId,
+            InteractablePackagingBox_Item bound)
+        {
+            var boxes = compartment?.GetInteractablePackagingBoxList();
+            if (boxes == null)
+            {
+                return;
+            }
+
+            for (var i = boxes.Count - 1; i >= 0; i--)
+            {
+                var entry = boxes[i];
+                if (entry == null)
+                {
+                    continue;
+                }
+
+                if (ReferenceEquals(entry, bound)
+                    || (_boxes.TryGetId(entry, out var listedId) && listedId == boxNetworkId))
+                {
+                    compartment.RemoveBox(entry);
+                }
+            }
+        }
+
         internal static bool Available()
         {
             Probe();
@@ -242,11 +272,7 @@ namespace CardShopCoop.Modules.World
             else if (_boxes.TryGetBox(delta.BoxNetworkId, out var stored)
                 && stored is InteractablePackagingBox_Item item)
             {
-                var boxes = compartment.GetInteractablePackagingBoxList();
-                if (boxes != null && boxes.Contains(item))
-                {
-                    compartment.RemoveBox(item);
-                }
+                RemoveListedBox(compartment, delta.BoxNetworkId, item);
             }
 
             if (!_boxes.ClientEnsureWarehouseTake(delta.BoxNetworkId, delta.ItemType, delta.Amount,
@@ -412,12 +438,7 @@ namespace CardShopCoop.Modules.World
             else if (_boxes.TryGetBox(delta.BoxNetworkId, out var stored)
                 && stored is InteractablePackagingBox_Item live)
             {
-                var boxes = compartment.GetInteractablePackagingBoxList();
-                var inCompartment = boxes != null && boxes.Contains(live);
-                if (inCompartment)
-                {
-                    compartment.RemoveBox(live);
-                }
+                RemoveListedBox(compartment, delta.BoxNetworkId, live);
             }
             else
             {
@@ -476,15 +497,25 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (_boxes.TryGetBox(message.BoxNetworkId, out var stored)
-                && stored is InteractablePackagingBox_Item live)
+            if (!_boxes.TryGetBox(message.BoxNetworkId, out var stored)
+                || stored is not InteractablePackagingBox_Item live)
             {
-                var boxes = compartment.GetInteractablePackagingBoxList();
-                if (boxes != null && boxes.Contains(live))
-                {
-                    compartment.RemoveBox(live);
-                }
+                // The box never materialized on this peer (or its binding was already retired):
+                // there is nothing on the shelf to remove. Log it so a stuck replica is visible
+                // instead of silently surviving the authoritative take.
+                CoopPlugin.Log.LogWarning("[warehouse] remote take box=" + message.BoxNetworkId
+                    + " had no bound live box; its shelf entry could not be removed.");
+                return;
             }
+
+            RemoveListedBox(compartment, message.BoxNetworkId, live);
+
+            // The taker's own StartHoldBox cleared its stored flag before the game removed the box
+            // from the compartment; mirror that here. On the live backend the host's hold is
+            // announced BEFORE the compartment removal, so a replica left marked stored keeps a
+            // frozen box on the shelf and makes the stored-box guard discard the hold that
+            // follows, leaving the box visually on the shelf on this peer.
+            live.m_IsStored = false;
         }
 
         private static readonly Vector3 ParkedWorkerBoxPosition = new Vector3(10000f, 10000f, 10000f);
@@ -549,34 +580,33 @@ namespace CardShopCoop.Modules.World
             if (delta == null)
                 return;
 
-            // The optimistic take may still be lerping the box into the hand, and the game's
-            // store path refuses a box that is lerping (CanPickup). Stop that lerp so the same
-            // box can go straight back onto the shelf.
-            if (!_usesRecords && _boxes.TryGetBox(delta.BoxNetworkId, out var box))
+            if (!_boxes.TryGetBox(delta.BoxNetworkId, out var taken) || taken == null)
             {
-                box.StopLerpToTransform();
-            }
-
-            // A destroyed compartment has nowhere to restore the box, and ClientApplyDelta would
-            // otherwise keep the store deferred forever. Log and drop it.
-            if (ResolveCompartment(delta.ShelfIndex, delta.CompartmentIndex) == null)
-            {
-                CoopPlugin.Log.LogWarning("[warehouse] take undo for box=" + delta.BoxNetworkId
-                    + " has no live compartment [" + delta.ShelfIndex + "," + delta.CompartmentIndex
-                    + "]; skipping.");
+                // Nothing is bound locally; there is no local state to reconcile.
                 return;
             }
 
-            ClientApplyDelta(new WarehouseDeltaMessage
+            // A rejection only cancels OUR take; it must not undo a take that happened
+            // elsewhere. The other player's take and hold are sent before this rollback on the
+            // same ordered lane, so if this peer already mirrors that authoritative hold, the
+            // hold is the newer truth and the box belongs in their hands.
+            if (_playerBox != null && _playerBox.HasMirroredHold(taken, delta.BoxNetworkId))
             {
-                IsStore = true,
-                ShelfIndex = delta.ShelfIndex,
-                CompartmentIndex = delta.CompartmentIndex,
-                BoxNetworkId = delta.BoxNetworkId,
-                ItemType = delta.ItemType,
-                Amount = delta.Amount,
-                IsBig = delta.IsBig,
-            });
+                return;
+            }
+
+            // The host refreshes a rejected take with the box's authoritative state when the box
+            // really is still on the shelf; the resulting store delta already put it back through
+            // the game's own path. Re-storing again (or fabricating a shelf slot when the host's
+            // compartment does not contain the box) is what created the ghost shelf entries.
+            if (_boxes.IsStored(delta.BoxNetworkId))
+            {
+                return;
+            }
+
+            // The take did not happen and the host's shelf does not contain the box (that is why
+            // the take was rejected). Leave the box where the optimistic take put it; the next
+            // authoritative message for this id owns it.
         }
 
         internal void OnStoredBoxRecordAdded(ShelfCompartment compartment)
@@ -747,6 +777,20 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogInfo("[warehouse] remove id=" + id + " shelf="
                 + compartment.GetWarehouseIndex() + ":" + compartment.GetIndex());
             BroadcastWarehouseDelta(compartment, false, state);
+
+            // A local player take runs the game's own StartHoldBox BEFORE it removes the box from
+            // the compartment, so the hold broadcast above (from the pickup hook) raced ahead of
+            // this removal and every observer dropped it while their replica was still stored.
+            // Re-announce the hold now that the removal is on the wire, so observers attach the
+            // taken box to this host's avatar instead of keeping a frozen replica on the shelf.
+            // A worker take holds with isPlayer:false and never owns the local hand, so it is
+            // left to the NPC channel.
+            if (ReferenceEquals(_playerBox?.LocalHeldBox, box))
+            {
+                CoopPlugin.Log.LogInfo("[warehouse] re-announcing the local take hold for id=" + id
+                    + " after the shelf removal.");
+                _playerBox.PublishHostHeld(box, id);
+            }
         }
 
         internal bool HostApplyStore(WarehouseStoreMessage message, int connectionId,
@@ -888,6 +932,16 @@ namespace CardShopCoop.Modules.World
                 {
                     CoopPlugin.Log.LogWarning("[warehouse] host take rejected: box id "
                         + message.BoxNetworkId + " is not a fresh creator id.");
+
+                    // The box is the known top of the compartment, so refresh the requester with
+                    // its authoritative stored state before the generic rollback.
+                    var staleRefresh = BuildStoredRefresh(compartment, message.BoxNetworkId,
+                        message.ShelfIndex, message.CompartmentIndex);
+                    if (staleRefresh != null)
+                    {
+                        response?.Invoke(staleRefresh);
+                    }
+
                     return false;
                 }
 
@@ -924,6 +978,20 @@ namespace CardShopCoop.Modules.World
                 CoopPlugin.Log.LogWarning("[warehouse] host take REJECTED pred=" + message.PredictionId
                     + " box=" + message.BoxNetworkId + " hasTop=" + hasTop + " top=" + topId
                     + " canPickup=" + (topBox != null && topBox.CanPickup()) + ".");
+
+                // Refresh the failed prediction with the box's authoritative location whenever
+                // the compartment still holds it under that id - anywhere in the stack, live box
+                // or record. A box the shelf does not hold must not be re-stored by the client; a
+                // box it does hold must be, or the requester keeps a duplicate in hand. This is an
+                // authoritative state publication to the one peer that asked, followed by the
+                // generic rollback.
+                var refresh = BuildStoredRefresh(compartment, message.BoxNetworkId,
+                    message.ShelfIndex, message.CompartmentIndex);
+                if (refresh != null)
+                {
+                    response?.Invoke(refresh);
+                }
+
                 return false;
             }
 
@@ -943,6 +1011,70 @@ namespace CardShopCoop.Modules.World
             // every observer attaches the taken box to the taker's avatar.
             _playerBox?.AnnounceGrantedHold(result.BoxNetworkId, connectionId);
             return accepted;
+        }
+
+        /// <summary>The authoritative store descriptor for a box the compartment holds under the
+        /// given id, live or record, or null when it is not there. Used to refresh a rejected take
+        /// before its generic rollback so the requester re-stores exactly what the shelf holds -
+        /// not just when the box happens to be the top of the stack.</summary>
+        private WarehouseDeltaMessage BuildStoredRefresh(ShelfCompartment compartment,
+            Guid boxNetworkId, int shelfIndex, int compartmentIndex)
+        {
+            if (compartment == null || boxNetworkId == Guid.Empty)
+            {
+                return null;
+            }
+
+            if (_usesRecords)
+            {
+                var count = RecordCount(compartment);
+                for (var i = 0; i < count; i++)
+                {
+                    if (GetRecordId(compartment, i) != boxNetworkId
+                        || !TryReadRecord(compartment, i, out var record))
+                    {
+                        continue;
+                    }
+
+                    return new WarehouseDeltaMessage
+                    {
+                        IsStore = true,
+                        ShelfIndex = shelfIndex,
+                        CompartmentIndex = compartmentIndex,
+                        BoxNetworkId = boxNetworkId,
+                        ItemType = record.ItemType,
+                        Amount = record.Amount,
+                        IsBig = record.IsBig,
+                    };
+                }
+
+                return null;
+            }
+
+            var boxes = compartment.GetInteractablePackagingBoxList();
+            for (var i = 0; boxes != null && i < boxes.Count; i++)
+            {
+                var entry = boxes[i];
+                if (entry == null || !_boxes.TryGetId(entry, out var id) || id != boxNetworkId)
+                {
+                    continue;
+                }
+
+                return new WarehouseDeltaMessage
+                {
+                    IsStore = true,
+                    ShelfIndex = shelfIndex,
+                    CompartmentIndex = compartmentIndex,
+                    BoxNetworkId = boxNetworkId,
+                    ItemType = entry.m_ItemCompartment == null
+                        ? EItemType.None : entry.m_ItemCompartment.GetItemType(),
+                    Amount = entry.m_ItemCompartment == null
+                        ? 0 : entry.m_ItemCompartment.GetItemCount(),
+                    IsBig = entry.m_IsBigBox,
+                };
+            }
+
+            return null;
         }
 
         internal void ClientApplyState(WarehouseStateMessage message)
@@ -1030,14 +1162,24 @@ namespace CardShopCoop.Modules.World
                     // authoritative echo only confirms it, so re-adding would duplicate the box.
                     // The mirror is the game's record list by id, so a present id means it is
                     // already there.
-                    if (HasRecordId(compartment, message.BoxNetworkId))
-                        return;
+                    if (!HasRecordId(compartment, message.BoxNetworkId))
+                    {
+                        // The record conversion retires the live replica; release any claim this
+                        // peer still has on it first (the live branch does the same), or the
+                        // controller keeps holding a destroyed object.
+                        if (_boxes.TryGetBox(message.BoxNetworkId, out var live)
+                            && live is InteractablePackagingBox_Item liveItem)
+                        {
+                            _playerBox?.DetachMirroredHold(liveItem, message.BoxNetworkId);
+                            _playerBox?.ReleaseHeldObject(liveItem);
+                        }
 
-                    // Hand the authoritative id to the AddStoredBoxRecord hook, which appends it
-                    // to the mirror as the record is added.
-                    PrepareAppliedRecordId(compartment, message.BoxNetworkId);
-                    AddRecord(compartment, message.ItemType, message.Amount, message.IsBig);
-                    _boxes.ClientConvertToStoredRecord(message.BoxNetworkId);
+                        // Hand the authoritative id to the AddStoredBoxRecord hook, which appends
+                        // it to the mirror as the record is added.
+                        PrepareAppliedRecordId(compartment, message.BoxNetworkId);
+                        AddRecord(compartment, message.ItemType, message.Amount, message.IsBig);
+                        _boxes.ClientConvertToStoredRecord(message.BoxNetworkId);
+                    }
                 }
                 else if (_boxes.TryGetBox(message.BoxNetworkId, out var box)
                     && box is InteractablePackagingBox_Item item)
@@ -1051,11 +1193,31 @@ namespace CardShopCoop.Modules.World
                     var already = stored != null && stored.Contains(item);
                     if (!already)
                     {
-                        // A just-taken box may still be lerping into the hand; the game's store
-                        // path refuses a lerping box, so settle it first, exactly as the take
-                        // rollback does.
-                        item.StopLerpToTransform();
-                        item.DispenseItem(false, compartment);
+                        // The replica can still be parented to the mirrored hold anchor (the
+                        // other player was carrying this box when they stored it). Detach it
+                        // through the game's own drop path first: the store moves this exact
+                        // object into the slot, and releasing the hold below would otherwise
+                        // destroy a box that is still parented to the anchor.
+                        _playerBox?.DetachMirroredHold(item, message.BoxNetworkId);
+                        // If this peer's own hand still claims the box (for example a rejected
+                        // take left it there, and the host refreshed the stored state), release
+                        // it through the game's own drop path too, so the controller cannot keep
+                        // a claim on an object that is about to be a shelf entry.
+                        _playerBox?.ReleaseHeldObject(item);
+                        // Clear any stale compartment entry that carries this id but is not the
+                        // object being stored (a rebind or replacement left it listed), so the
+                        // store cannot end with two entries for one id.
+                        RemoveListedBox(compartment, message.BoxNetworkId, item);
+                        if (!StoreLiveBox(compartment, item)
+                            && StoreLiveBox(compartment, message.ItemType, message.Amount,
+                                message.IsBig, out var replacement))
+                        {
+                            // The carried replica could not be stored (its local compartment
+                            // state disagreed with the authoritative store); materialize the
+                            // authoritative box instead of leaving the carried copy loose and
+                            // unpickable.
+                            item = replacement;
+                        }
                     }
 
                     _boxes.BindStoredLiveBox(message.BoxNetworkId, item,
@@ -1072,6 +1234,11 @@ namespace CardShopCoop.Modules.World
                     CoopPlugin.Log.LogWarning("[warehouse] client store box=" + message.BoxNetworkId
                         + " had no bound live box; it could not be placed on the shelf.");
                 }
+
+                // The box is owned by the shelf now (or its replica is gone), so releasing the
+                // mirrored hold can no longer destroy a still-parented box. This must not run
+                // before the store: the hold anchor owns the replica until the store reparents it.
+                _playerBox?.ReleaseRemoteHoldForBox(message.BoxNetworkId);
             }
             finally
             {
@@ -1256,17 +1423,19 @@ namespace CardShopCoop.Modules.World
                     {
                         _boxes.ClientForgetPhysical(previousId, copy[i]);
                     }
+                    else if (copy[i] != null)
+                    {
+                        // No engine binding tore this save box down, and a raw Destroy would
+                        // leave it in RestockManager's item-box list as a dead entry that makes
+                        // its Update throw every out-of-bounds tick. Run the game's own teardown.
+                        _boxes.DestroyWithoutNotification(copy[i]);
+                    }
 
-                    // ClientForgetPhysical destroys through the box engine, which detaches a
-                    // stored box; only remove here if the compartment still lists it.
+                    // ClientForgetPhysical detaches a stored box; only remove here if the
+                    // compartment still lists it.
                     if (existing.Contains(copy[i]))
                     {
                         compartment.RemoveBox(copy[i]);
-                    }
-
-                    if (copy[i] != null)
-                    {
-                        UnityEngine.Object.Destroy(copy[i].gameObject);
                     }
                 }
             }
@@ -1296,7 +1465,10 @@ namespace CardShopCoop.Modules.World
             stored.DispenseItem(false, compartment);
             if (!stored.m_IsStored)
             {
-                UnityEngine.Object.Destroy(stored.gameObject);
+                // The game never registered this materialized box as stored; tear it down
+                // through OnDestroyed so it does not stay in RestockManager's list as a dead
+                // entry.
+                _boxes.DestroyWithoutNotification(stored);
                 stored = null;
                 CoopPlugin.Log.LogWarning("Materialized warehouse box was not stored; skipping.");
                 return false;
@@ -1374,7 +1546,11 @@ namespace CardShopCoop.Modules.World
                 + " name=" + box.name + " amount=" + amount + ".");
             _boxes.DetachForWarehouseTake(id);
             compartment.RemoveBox(box);
-            UnityEngine.Object.Destroy(box.gameObject);
+            // Tear down through the game's own path; a raw Object.Destroy skipped
+            // RestockManager.RemoveItemPackageBox, and the dead list entry made
+            // RestockManager.Update throw on every out-of-bounds tick (which also stopped it
+            // from rescuing any box stuck out of bounds).
+            _boxes.DestroyWithoutNotification(box);
             return true;
         }
 

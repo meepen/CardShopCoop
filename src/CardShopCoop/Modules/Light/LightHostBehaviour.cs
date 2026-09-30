@@ -123,6 +123,23 @@ namespace CardShopCoop.Modules.Light
                 SendState(peer);
         }
 
+        /// <summary>Every live toggle - the physical switch click and mod-driven automation alike -
+        /// runs through LightManager.ToggleShopLight. Apply the module's full surface locally
+        /// (automation does not update the switch models vanilla's click touches) and publish the
+        /// new state. The save-load restore and the day-rollover reset write the group directly
+        /// and are covered by the ready baselines and the GameTime mirror.</summary>
+        private void OnShopLightToggled()
+        {
+            if (_shutdown || _context == null || !_context.InGame()
+                || !LightSwitchState.TryGet(out var isActive))
+            {
+                return;
+            }
+
+            LightSwitchState.Apply(isActive);
+            BroadcastState(Guid.Empty);
+        }
+
         private bool IsPeerMessage(MessageContext context)
             => !_shutdown && context?.Connection != null
                 && _fullyJoined.Contains(context.Connection.Id);
@@ -151,11 +168,13 @@ namespace CardShopCoop.Modules.Light
 
         private void OnDestroy() => Shutdown();
 
-        [HarmonyPatch(typeof(InteractableLightSwitch), "OnMouseButtonUp")]
+        // The switch click and every mod-driven automation path run through ToggleShopLight, so
+        // hooking this mutation instead of the click keeps automation in sync, installed or not.
+        [HarmonyPatch(typeof(LightManager), "ToggleShopLight")]
         private static class LightSwitchPatch
         {
             [HarmonyPostfix]
-            private static void Postfix() => _active?.BroadcastState(Guid.Empty);
+            private static void Postfix() => _active?.OnShopLightToggled();
         }
 
         [HarmonyPatch(typeof(LightManager), "Awake")]

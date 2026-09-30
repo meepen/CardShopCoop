@@ -63,7 +63,7 @@ namespace CardShopCoop.Modules.StoreAccess
             return _warehouseSign;
         }
 
-        private static UnlockRoomManager FindUnlockRoomManager()
+        internal static UnlockRoomManager FindUnlockRoomManager()
         {
             if (_unlockRoomManager == null)
                 _unlockRoomManager = FindSceneObject<UnlockRoomManager>();
@@ -75,6 +75,14 @@ namespace CardShopCoop.Modules.StoreAccess
             if (sign != null)
                 MiOpenMesh?.Invoke(sign, null);
         }
+
+        /// <summary>True while the sign is playing its own swap animation, so an authoritative
+        /// repaint must not cut it short.</summary>
+        internal static bool IsOpenSwapping(InteractableOpenCloseSign sign)
+            => sign != null && FiOpenSwapping?.GetValue(sign) as bool? == true;
+
+        internal static bool IsWarehouseSwapping(InteractableWarehouseAllowEnterSign sign)
+            => sign != null && FiWarehouseSwapping?.GetValue(sign) as bool? == true;
 
         internal static bool PlayOpenAnimation(InteractableOpenCloseSign sign)
             => PlayAnimation(sign, FiOpenAnimation, FiOpenSwapping, MiOpenDelay);

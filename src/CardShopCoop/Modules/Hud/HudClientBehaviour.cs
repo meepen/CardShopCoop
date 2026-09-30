@@ -21,6 +21,12 @@ namespace CardShopCoop.Modules.Hud
         private static HudClientBehaviour _active;
         private int _highestNotifiedLevel = -1;
         private bool _hasAuthoritativeLevel;
+        // Per-kind counters bumped whenever an authoritative absolute for that kind is applied.
+        // A pending contribution whose rollback arrives after such a delta is already governed by
+        // it; restoring the pre-change snapshot would revert the authoritative value.
+        private int _walletVersion;
+        private int _progressVersion;
+        private int _fameVersion;
         private int _applyingSnapshot;
         private GameUIScreen _gameUi;
         private readonly System.Collections.Generic.Dictionary<CEvent, PendingContribution>
@@ -134,6 +140,7 @@ namespace CardShopCoop.Modules.Hud
             if (_shutdown || _context == null || !_context.InGame())
                 return;
 
+            var version = VersionFor(kind);
             PredictionApi.Predict(
                 PredictionScope,
                 predictionId => _context.Send(1, new HudContributionIntent
@@ -143,7 +150,35 @@ namespace CardShopCoop.Modules.Hud
                     Value = value,
                 }),
                 () => ApplyContribution(kind, value),
-                () => Restore(previous));
+                () => RestoreUnlessSuperseded(kind, version, previous));
+        }
+
+        private int VersionFor(HudContributionKind kind)
+        {
+            switch (kind)
+            {
+                case HudContributionKind.AddShopExperience:
+                    return _progressVersion;
+                case HudContributionKind.AddFame:
+                    return _fameVersion;
+                default:
+                    return _walletVersion;
+            }
+        }
+
+        /// <summary>Rolls a rejected contribution back to the captured pre-change state, unless an
+        /// authoritative absolute for the same kind has arrived since the contribution was queued.
+        /// That delta already governs the value (and folding it in also dropped the optimistic
+        /// change), so restoring the stale snapshot would revert an interleaved remote change.</summary>
+        private void RestoreUnlessSuperseded(HudContributionKind kind, int version,
+            HudAuthoritativeState previous)
+        {
+            if (VersionFor(kind) != version)
+            {
+                return;
+            }
+
+            Restore(previous);
         }
 
         /// <summary>Publishes one economy event captured at queue time. The capture exists because
@@ -212,12 +247,16 @@ namespace CardShopCoop.Modules.Hud
 
         private void Apply(HudAuthoritativeState state)
         {
+            _walletVersion++;
+            _progressVersion++;
+            _fameVersion++;
             ApplyValues(state.Coins, state.CoinDisplay, state.Experience, state.Level, state.Fame);
             NotifyLevel(state.Level);
         }
 
         private void ApplyWallet(double coins, float coinDisplay)
         {
+            _walletVersion++;
             UpdatePending(state =>
             {
                 state.Coins = coins;
@@ -229,6 +268,7 @@ namespace CardShopCoop.Modules.Hud
 
         private void ApplyProgress(int experience, int level)
         {
+            _progressVersion++;
             UpdatePending(state =>
             {
                 state.Experience = experience;
@@ -241,6 +281,7 @@ namespace CardShopCoop.Modules.Hud
 
         private void ApplyFame(int fame)
         {
+            _fameVersion++;
             UpdatePending(state => state.Fame = fame);
             ApplyValues(CPlayerData.m_CoinAmountDouble, CPlayerData.m_CoinAmount,
                 CPlayerData.m_ShopExpPoint, CPlayerData.m_ShopLevel, fame);

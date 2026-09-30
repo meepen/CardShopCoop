@@ -1,6 +1,7 @@
 using CardShopCoop.Util;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
+using CardShopCoop.Modules.Prediction;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -59,6 +60,8 @@ namespace CardShopCoop.Modules.World
         /// <summary>Set by WorldCardInteraction: host -> clients state (ContainerStateMessage).</summary>
         public Action<INetMessage> BroadcastState;
         public Action<int, INetMessage> SendToClient;
+        /// <summary>Host -> every client except one, for the per-actor hold flags.</summary>
+        internal Action<int, INetMessage> RelayState;
         internal Func<bool> InGameProvider;
         internal Func<bool> ReloadingProvider;
 
@@ -213,11 +216,15 @@ namespace CardShopCoop.Modules.World
         // click sends OpPackClaim until the collect completes or is rolled back. The host's own
         // claim maps are _packClaimOwner/_packClaimToken.
         private readonly HashSet<int> _claimedPackIndices = new();
+        // The prediction ids of this peer's pack inserts still in flight. Their echoes reconcile in
+        // layers (see ClientApplyDelta) instead of applying the stale record raw.
+        private readonly HashSet<Guid> _pendingPackInserts = new();
         private int _nextPackClaimToken = 1;
         private ContainerStateMessage _pendingClientState;
         private readonly BoxNetworkInteraction _boxes;
         private readonly PlayerBoxInteraction _playerBox;
         private Guid _hostPredictionId;
+        private int _hostActorConnectionId;
         private BoxNetworkState _hostDeltaBox;
         private bool _hostDeltaTakeIntoHand;
         private bool _hostDeltaReleaseHold;
@@ -262,12 +269,14 @@ namespace CardShopCoop.Modules.World
             _cachedContainerScreen = null;
             _cachedAmountModal = null;
             _claimedPackIndices.Clear();
+            _pendingPackInserts.Clear();
             _pendingPackCollections.Clear();
             _packClaimOwner.Clear();
             _packClaimToken.Clear();
             _nextPackClaimToken = 1;
             _pendingClientState = null;
             _hostPredictionId = Guid.Empty;
+            _hostActorConnectionId = 0;
             _hostDeltaBox = null;
             _hostDeltaTakeIntoHand = false;
             _hostDeltaReleaseHold = false;
@@ -413,7 +422,7 @@ namespace CardShopCoop.Modules.World
         private void SendHostRecord(int key)
         {
             var record = BuildRecord(key >> 8, key & 0xFF);
-            BroadcastState?.Invoke(new ContainerDeltaMessage
+            var delta = new ContainerDeltaMessage
             {
                 PredictionId = _hostPredictionId,
                 Key = key,
@@ -424,7 +433,32 @@ namespace CardShopCoop.Modules.World
                 ReleaseHold = _hostDeltaReleaseHold,
                 CompletePackCollection = _hostCompletePackCollection,
                 PackIndex = _hostPackIndex,
-            });
+            };
+
+            // TakeIntoHand / ReleaseHold describe the acting player's own hands. Only the intent's
+            // sender may apply them; every other peer receives the same record/box state with both
+            // flags cleared, or it would grab/drop a box that is not its own.
+            var actor = _hostActorConnectionId;
+            if (actor > 0 && (delta.TakeIntoHand || delta.ReleaseHold)
+                && SendToClient != null && RelayState != null)
+            {
+                SendToClient(actor, delta);
+                RelayState(actor, new ContainerDeltaMessage
+                {
+                    PredictionId = delta.PredictionId,
+                    Key = delta.Key,
+                    Record = delta.Record,
+                    HasBox = delta.HasBox,
+                    Box = delta.Box,
+                    TakeIntoHand = false,
+                    ReleaseHold = false,
+                    CompletePackCollection = delta.CompletePackCollection,
+                    PackIndex = delta.PackIndex,
+                });
+                return;
+            }
+
+            BroadcastState?.Invoke(delta);
         }
 
         private void HostChanged(int kind, object container)
@@ -508,8 +542,6 @@ namespace CardShopCoop.Modules.World
                         rec.Timer = p != null ? (FiPoOpenTimer?.GetValue(p) as float? ?? 0f) : 0f;
                         rec.OpenedCount = p != null ? p.GetPackOpenedCount() : 0;
                         rec.Cards = p?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
-                        var packNow = Time.realtimeSinceStartupAsDouble;
-                        rec.PackTimestamp = packNow;
                         // Vanilla leaves m_CurrentState at 0 when a worker (or a full
                         // hopper) starts the machine through AddItem. The UI is still
                         // processing in that case, so advertise the effective state
@@ -517,21 +549,6 @@ namespace CardShopCoop.Modules.World
                         rec.CurrentState = p != null && p.GetIsProcessing()
                             ? ((stored?.Count ?? 0) > 0 ? 1 : 2)
                             : 0;
-                        if (rec.CurrentState == 1 && p != null)
-                        {
-                            var cycleDuration = Mathf.Max(0.001f, p.m_PackOpenTime);
-                            var elapsed = Mathf.Clamp(rec.Timer, 0f, cycleDuration);
-                            rec.PackStartTimestamp = packNow - elapsed;
-                            // The game consumes one pack every cycle.  Duration is the
-                            // remaining queue from the beginning of the current cycle;
-                            // elapsed is recovered from the two synchronized timestamps.
-                            rec.PackDuration = cycleDuration * (stored?.Count ?? 0);
-                        }
-                        else
-                        {
-                            rec.PackStartTimestamp = packNow;
-                            rec.PackDuration = 0f;
-                        }
                         rec.CollectClaimed = _packClaimOwner.ContainsKey((kind << 8) | idx);
                         break;
                     }
@@ -596,6 +613,7 @@ namespace CardShopCoop.Modules.World
             else if (op == OpEmptyBoxTake || op == OpEmptyBoxStore)
                 kind = KindEmptyBoxStorage;
             _hostPredictionId = message.PredictionId;
+            _hostActorConnectionId = connId;
             try
             {
                 switch (op)
@@ -704,8 +722,25 @@ namespace CardShopCoop.Modules.World
                                 reason = "pack type is unavailable on host";
                                 break;
                             }
-                            // apply unconditionally (like a worker refill would): dropping it
-                            // would eat the pack the joiner's box already gave up
+                            // The acting client's local machine can be ahead of the authoritative
+                            // one: its vanilla collect resets the machine before this host applies
+                            // OpPackCollect (the claim round trip still has to run), and two peers
+                            // can pass their own local slot checks in the same instant. Re-check
+                            // vanilla's own player gates against the host machine so neither race
+                            // can push a pack past m_MaxPackCount (which vanilla itself never
+                            // allows). A refusal rolls the client's insert prediction back, and its
+                            // undo returns the pack to the acting hand - the pack is not eaten.
+                            if (p.GetIsProcessing())
+                            {
+                                reason = "pack opener is already running";
+                                break;
+                            }
+                            if (!p.HasEnoughSlot())
+                            {
+                                reason = "pack opener is full (" + p.GetStoredItemList().Count
+                                    + "+" + p.GetPackOpenedCount() + "/" + p.m_MaxPackCount + ")";
+                                break;
+                            }
                             var priorStored = new List<Item>(p.GetStoredItemList());
                             var priorProcessing = p.GetIsProcessing();
                             var priorTimer = FiPoOpenTimer?.GetValue(p) as float? ?? 0f;
@@ -929,6 +964,7 @@ namespace CardShopCoop.Modules.World
                     + " kind=" + kind + " index=" + idx + ": " + reason);
             }
             _hostPredictionId = Guid.Empty;
+            _hostActorConnectionId = 0;
             _hostDeltaBox = null;
             _hostDeltaTakeIntoHand = false;
             _hostDeltaReleaseHold = false;
@@ -1266,10 +1302,19 @@ namespace CardShopCoop.Modules.World
             if (message == null)
                 throw new InvalidOperationException("Authoritative container delta is missing.");
 
-            ClientApplyState(new ContainerStateMessage
+            // An insert echo reconciles in layers: the record was built before any newer local
+            // inserts still in flight, and applying it raw trimmed those newer optimistic entries
+            // away - the pack count that bounced down and back up while a guest fed a machine.
+            if (_pendingPackInserts.Remove(message.PredictionId))
             {
-                Records = new List<ContainerRecord> { message.Record },
-            });
+                WorldPrediction.ApplyAuthoritative(message, () => ApplyDeltaRecord(message));
+            }
+            else
+            {
+                // Every other record is an absolute state-set: retire this peer's own prediction
+                // (the game already applied it) or apply another peer's change directly.
+                WorldPrediction.Confirm(message, () => ApplyDeltaRecord(message));
+            }
 
             if (message.HasBox)
             {
@@ -1299,6 +1344,15 @@ namespace CardShopCoop.Modules.World
                 if (_pendingPackCollections.ContainsKey(message.PackIndex))
                     CompletePackCollection(message.PackIndex);
             }
+        }
+
+        /// <summary>Applies the single record a delta carries.</summary>
+        private void ApplyDeltaRecord(ContainerDeltaMessage message)
+        {
+            ClientApplyState(new ContainerStateMessage
+            {
+                Records = new List<ContainerRecord> { message.Record },
+            });
         }
 
         /// <summary>Retires the local claim bookkeeping once the host's collect delta arrives.
@@ -1591,7 +1645,20 @@ namespace CardShopCoop.Modules.World
                 // actually represents. In particular, AddItem auto-starts a full
                 // machine without setting m_CurrentState to 1.
                 p.m_CurrentState = rec.CurrentState;
-                FiPoOpenTimer?.SetValue(p, rec.CurrentState == 1 ? rec.Timer : 0f);
+                // Never snap the local processing clock backwards. The host's sample is already
+                // stale by the round trip, and overwriting the locally ticking timer with it made
+                // the fill bar jump backwards on every delta. Seed it only when this machine is
+                // not already running the cycle (a worker/host started the machine), and clear it
+                // when the host says the cycle ended.
+                if (rec.CurrentState != 1)
+                {
+                    FiPoOpenTimer?.SetValue(p, 0f);
+                }
+                else if (!p.GetIsProcessing())
+                {
+                    FiPoOpenTimer?.SetValue(p, rec.Timer);
+                }
+
                 PaintPackUI(p);
             }
             finally { ApplyingRemote = false; }
@@ -2282,8 +2349,18 @@ namespace CardShopCoop.Modules.World
             Current?.HostChanged(KindDonation, __instance);
         }
 
+        /// <summary>Broadcasts one host-side pack-opener change. Sync code applying a remote intent
+        /// sets <see cref="ApplyingRemote"/> and emits the intent's own single
+        /// <c>HostChanged</c>; without this guard the patched mutate method inside that apply
+        /// would broadcast the same record a second time, and the duplicate delta would re-apply
+        /// the stale record over the requesting client's reconcile.</summary>
         public static void PackOpenerChangedPostfix(InteractableAutoPackOpener __instance)
         {
+            if (ApplyingRemote)
+            {
+                return;
+            }
+
             Current?.HostChanged(KindPackOpener, __instance);
         }
 
@@ -2506,9 +2583,12 @@ namespace CardShopCoop.Modules.World
         /// <summary>Observes a pack the local player inserted. Vanilla <c>AddItem</c> already put
         /// the pack into the machine and moved the local queue, so only one <c>OpPackInsert</c> is
         /// forwarded and the apply/undo closures replay the game's own insert/remove for a
-        /// rejection. The guest's join world-load restores the host save via
-        /// <c>InteractableAutoPackOpener.LoadData</c>, which calls AddItem once per stored pack
-        /// (decompiled ~384). Those are not player inserts, so the reload forwards nothing.</summary>
+        /// rejection. An accepted insert echo reconciles in layers against this machine's own
+        /// in-flight inserts (see <see cref="ClientApplyDelta"/>) instead of applying the stale
+        /// record raw, which used to trim them and bounce the visible pack count. The guest's join
+        /// world-load restores the host save via <c>InteractableAutoPackOpener.LoadData</c>, which
+        /// calls AddItem once per stored pack (decompiled ~384). Those are not player inserts, so
+        /// the reload forwards nothing.</summary>
         public static void PackOpenerAddItemPostfix(InteractableAutoPackOpener __instance, Item item)
         {
             if (ApplyingRemote || __instance == null || item == null || Reloading)
@@ -2534,7 +2614,10 @@ namespace CardShopCoop.Modules.World
                 // a different order here would insert the WRONG product on the host
                 ItemType = item.GetItemType(),
             };
-            WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+            // One prediction key per machine: an insert echo's layered reconcile must undo/replay
+            // only this opener's own in-flight inserts, never another container's pending action.
+            Guid predictionId = Guid.Empty;
+            predictionId = WorldPrediction.Predict(PackInsertPredictionKey(idx), command,
                 () =>
                 {
                     ApplyingRemote = true;
@@ -2542,6 +2625,10 @@ namespace CardShopCoop.Modules.World
                     {
                         if (!__instance.GetStoredItemList().Contains(item))
                         {
+                            // A reconcile may have pooled the item while its prediction was in
+                            // flight (a remote record trimmed the tail); bring it back visible
+                            // before the game is handed it again.
+                            item.gameObject.SetActive(true);
                             __instance.AddItem(item, addToFront: true, isPlayer: false);
                         }
                     }
@@ -2552,6 +2639,31 @@ namespace CardShopCoop.Modules.World
                 },
                 () =>
                 {
+                    // A follower is undone only for the duration of the reconcile and is replayed
+                    // right after, so it is removed here. The retired target is left in place:
+                    // either the authoritative record being applied already carries it, or a
+                    // terminal rejection's callback hands it back.
+                    if (!PredictionApi.IsPending(predictionId)
+                        || !__instance.GetStoredItemList().Contains(item))
+                    {
+                        return;
+                    }
+
+                    ApplyingRemote = true;
+                    try
+                    {
+                        __instance.RemoveItem(item);
+                    }
+                    finally
+                    {
+                        ApplyingRemote = false;
+                    }
+                },
+                () =>
+                {
+                    // Terminal rejection: the target undo above deliberately left the pack in the
+                    // machine, so take it out here and put it back in the acting hand.
+                    self._pendingPackInserts.Remove(predictionId);
                     ApplyingRemote = true;
                     try
                     {
@@ -2566,6 +2678,7 @@ namespace CardShopCoop.Modules.World
                     }
                     RestoreHeldPack(item);
                 });
+            self._pendingPackInserts.Add(predictionId);
         }
 
         /// <summary>Observes the local player's cleanser refill. The game's own <c>AddItem</c> has
@@ -2631,6 +2744,11 @@ namespace CardShopCoop.Modules.World
         }
 
         // ---------------- shared helpers ----------------
+
+        /// <summary>One prediction key per pack opener, so an insert echo's layered reconcile only
+        /// undoes/replays that machine's own in-flight inserts.</summary>
+        private static string PackInsertPredictionKey(int idx)
+            => WorldPrediction.ContainersScope + ":pack:" + idx;
 
         /// <summary>Puts a pack that a rejected insert removed from the local hand back where it
         /// was. Vanilla's EvaluatePutItemOnShelf removes the pack from the hold list right after

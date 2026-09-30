@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
+using CardShopCoop.Net.Connection;
 using CardShopCoop.Modules.Register;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Runtime;
@@ -110,6 +111,18 @@ namespace CardShopCoop.Modules.Npc
                 {
                     workers[i].gameObject.SetActive(false);
                 }
+            }
+        }
+
+        /// <summary>The host connection dropped: deactivate every customer mirror and drop the
+        /// puppet props immediately so the scene is not left with its simulated population while
+        /// the session teardown unwinds.</summary>
+        [OnClientDisconnected]
+        private void ForgetHost(PeerConnection connection, DisconnectInfo info)
+        {
+            if (connection?.Id == 1)
+            {
+                Reset();
             }
         }
 

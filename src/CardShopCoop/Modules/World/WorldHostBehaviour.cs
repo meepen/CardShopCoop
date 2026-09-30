@@ -101,6 +101,7 @@ namespace CardShopCoop.Modules.World
             };
             _cardInteraction.Containers.BroadcastState = BroadcastWorld;
             _cardInteraction.Containers.SendToClient = SendWorldTo;
+            _cardInteraction.Containers.RelayState = RelayWorldExcept;
             _cardInteraction.Containers.InGameProvider = _context.InGame;
             _harmony = new Harmony("com.zwhit.cardshopcoop.world.host");
             InstallBoxNetworkInteractionPatches();

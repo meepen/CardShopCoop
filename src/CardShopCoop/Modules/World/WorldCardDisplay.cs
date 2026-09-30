@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
+using System.Reflection;
 using CardShopCoop.Modules.Grading;
 using CardShopCoop.Runtime;
+using HarmonyLib;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.World
@@ -178,6 +181,15 @@ namespace CardShopCoop.Modules.World
                 cardUI.m_CardUI.SetFoilCullListVisibility(true);
                 cardUI.SetSimplifyCardDistanceCull(false);
                 cardUI.m_CardUI.ResetFarDistanceCull();
+                if (card.cardGrade > 10)
+                {
+                    // A reconstructed display card carries the ENCODED grade. Register the
+                    // certificate like every other reconstruction path, or Grading Overhaul
+                    // renders the bare grade and the slot keeps failing Matches -> clear/replace
+                    // churn. No-op when Grading Overhaul is absent.
+                    GradingApi.Remember(card);
+                }
+
                 cardUI.m_CardUI.SetCardUI(card);
                 cardUI.transform.position = card3d.transform.position;
                 cardUI.transform.rotation = card3d.transform.rotation;
@@ -203,6 +215,104 @@ namespace CardShopCoop.Modules.World
 
                 return false;
             }
+        }
+
+        private static readonly FieldInfo HoldingCardsField =
+            AccessTools.Field(typeof(InteractionPlayerController), "m_CurrentHoldingCard3dList");
+
+        /// <summary>True while the game's own hand list still contains this exact card object.</summary>
+        internal static bool IsHeld(InteractableCard3d card3d)
+        {
+            if (card3d == null || !card3d || HoldingCardsField == null)
+            {
+                return false;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            var held = controller == null
+                ? null : HoldingCardsField.GetValue(controller) as List<InteractableCard3d>;
+            return held != null && held.Contains(card3d);
+        }
+
+        /// <summary>Moves the exact held card object back onto a display slot through the game's
+        /// own hold teardown, instead of spawning a second card.</summary>
+        internal static bool ReturnHeldCardToShelf(InteractableCardCompartment compartment,
+            InteractableCard3d card3d)
+        {
+            if (compartment == null || card3d == null || !card3d || HoldingCardsField == null)
+            {
+                return false;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            if (controller == null)
+            {
+                return false;
+            }
+
+            var held = HoldingCardsField.GetValue(controller) as List<InteractableCard3d>;
+            var index = held?.IndexOf(card3d) ?? -1;
+            if (held == null || index < 0)
+            {
+                return false;
+            }
+
+            // RemoveCurrentCard tears down slot 0 of BOTH m_CurrentHoldingCard3dList and the
+            // index-aligned, persisted CPlayerData.m_HoldCardDataList. Move this card to slot 0 in
+            // both lists or the game removes the wrong card's saved data: the hand then shows one
+            // card while the save rebuilds a different one after the next load. If the two lists
+            // have drifted apart, refuse rather than corrupt the save - the caller falls back.
+            var heldData = CPlayerData.m_HoldCardDataList;
+            if (heldData == null || heldData.Count != held.Count)
+            {
+                CoopPlugin.Log.LogWarning("card display: held-card lists are out of sync (objects="
+                    + held.Count + ", data=" + (heldData?.Count ?? -1)
+                    + "); refusing to return the card through RemoveCurrentCard.");
+                return false;
+            }
+
+            if (index != 0)
+            {
+                held.RemoveAt(index);
+                held.Insert(0, card3d);
+                var paired = heldData[index];
+                heldData.RemoveAt(index);
+                heldData.Insert(0, paired);
+            }
+
+            InteractionPlayerController.RemoveCurrentCard();
+            if (compartment.m_StoredCardList != null && compartment.m_StoredCardList.Count > 0)
+            {
+                Clear(compartment);
+            }
+
+            compartment.SetCardOnShelf(card3d);
+            return true;
+        }
+
+        /// <summary>Replays a removal by moving a stored card into the hand exactly like vanilla
+        /// <c>OnRightMouseButtonUp</c> does.</summary>
+        internal static bool TakeCardIntoHand(InteractableCardCompartment compartment,
+            InteractableCard3d card3d)
+        {
+            if (compartment == null || card3d == null || !card3d
+                || compartment.m_StoredCardList == null
+                || !compartment.m_StoredCardList.Contains(card3d)
+                || !InteractionPlayerController.HasEnoughSlotToHoldCard())
+            {
+                return false;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            if (controller == null)
+            {
+                return false;
+            }
+
+            InteractionPlayerController.AddHoldCard(card3d);
+            controller.EnterHoldCardMode();
+            compartment.RemoveCardFromShelf(null, null);
+            return true;
         }
     }
 }

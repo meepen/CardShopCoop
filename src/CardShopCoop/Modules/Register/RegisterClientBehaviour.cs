@@ -135,6 +135,7 @@ namespace CardShopCoop.Modules.Register
             _context.Messages.RegisterAttributedHandlers(this);
             _harmony = new Harmony("com.zwhit.cardshopcoop.register.client");
             Patch(typeof(ManningPatch));
+            Patch(typeof(OutlinePatch));
             Patch(typeof(ExitPatch));
             Patch(typeof(ScanItemPatch));
             Patch(typeof(ScanCardPatch));
@@ -354,6 +355,13 @@ namespace CardShopCoop.Modules.Register
             _owners[baseline.Counter] = baseline.Owner;
             _counterGenerations[baseline.Counter] = baseline.CounterGeneration;
             var index = (int)baseline.Counter;
+            if (IsRemoteOwner(baseline.Owner))
+            {
+                // A late join can land while the player already aims at this counter, so clear a
+                // highlight that started before the authoritative owner was known.
+                RegisterHighlight.Clear(RegisterInterop.Counter(index));
+            }
+
             if (!baseline.Exists || RegisterInterop.Counter(index) == null)
             {
                 ReleaseStation(index);
@@ -393,8 +401,7 @@ namespace CardShopCoop.Modules.Register
                     ApplyCounterLifecycle(message);
                     break;
                 case RegisterDeltaKind.Ownership:
-                    _owners[index] = message.Owner;
-                    ApplyOwner(index, RegisterInterop.Counter(index), message.Owner);
+                    ApplyOwnership(index, message.Owner);
                     break;
                 case RegisterDeltaKind.CustomerLifecycle:
                     ApplyCustomerLifecycle(message);
@@ -826,6 +833,34 @@ namespace CardShopCoop.Modules.Register
                     counter.OnPressEsc();
                 }
             }
+        }
+
+        /// <summary>True when another peer - the host (owner -1) or another client - is the
+        /// authoritative owner of this register. The local claim is a no-op state and is never
+        /// remote.</summary>
+        private bool IsRemoteOwned(int index)
+            => _owners.TryGetValue(index, out var owner) && IsRemoteOwner(owner);
+
+        private static bool IsRemoteOwner(int owner)
+            => owner != 0 && !PresenceApi.IsLocalConnection(owner);
+
+        /// <summary>Keeps the local interaction highlight honest across an authoritative ownership
+        /// change: a register that just became someone else's stops advertising itself. No
+        /// restore is needed when one frees again - a detached counter is raycast again on the
+        /// next frame and highlights normally if it is still the aimed target.</summary>
+        private void RefreshOwnershipHighlight(int index, int owner)
+        {
+            if (IsRemoteOwner(owner))
+            {
+                RegisterHighlight.Clear(RegisterInterop.Counter(index));
+            }
+        }
+
+        private void ApplyOwnership(int index, int owner)
+        {
+            _owners[index] = owner;
+            ApplyOwner(index, RegisterInterop.Counter(index), owner);
+            RefreshOwnershipHighlight(index, owner);
         }
 
         private LocalStation Station(InteractableCashierCounter counter, out int index)
@@ -1439,26 +1474,35 @@ namespace CardShopCoop.Modules.Register
         [HarmonyPatch(typeof(InteractableCashierCounter), "OnMouseButtonUp")]
         private static class ManningPatch
         {
-            // Capture-only: let the game man the counter, then register one post-hoc claim. The
-            // hook only observes; it never suppresses the vanilla man. A counter another peer owns
-            // is still forwarded - the host rejects the claim and the generic rollback unmounts it.
+            // Capture-only for a free counter: let the game man it, then register one post-hoc
+            // claim. A counter the host or another client already owns is not this player's to
+            // take: the man is suppressed (no man-then-rejection flicker) and no claim is sent,
+            // which only skips a claim the authoritative host would reject anyway.
             [HarmonyPrefix]
-            private static void Prefix(InteractableCashierCounter __instance, out bool __state)
+            private static bool Prefix(InteractableCashierCounter __instance, out bool __state)
             {
                 __state = false;
                 var client = _active;
                 if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
                 {
-                    return;
+                    return true;
                 }
 
                 var index = RegisterInterop.Index(__instance);
                 if (index < 0 || !client._joined || !client._context.InGame())
                 {
-                    return;
+                    return true;
+                }
+
+                if (client.IsRemoteOwned(index))
+                {
+                    CoopPlugin.Log.LogInfo("[register] not manning counter " + index
+                        + "; another player owns it.");
+                    return false;
                 }
 
                 __state = !__instance.IsMannedByPlayer();
+                return true;
             }
 
             [HarmonyPostfix]
@@ -1476,6 +1520,34 @@ namespace CardShopCoop.Modules.Register
                 {
                     client.ObserveClaim(__instance, index);
                 }
+            }
+        }
+
+        [HarmonyPatch(typeof(InteractableObject), "OnRaycasted")]
+        private static class OutlinePatch
+        {
+            // The green hover outline is raised from this machine's raycast alone. A register the
+            // host or another client already mans is not interactable here, so it must not
+            // advertise itself (or its tooltips) as if it were. Ownership is authoritative and
+            // known before the raycast in the normal flow; a mid-look takeover is cleared when its
+            // ownership delta arrives.
+            [HarmonyPrefix]
+            private static bool Prefix(InteractableObject __instance)
+            {
+                var client = _active;
+                if (client == null || !client._joined || !client._context.InGame()
+                    || !(__instance is InteractableCashierCounter counter))
+                {
+                    return true;
+                }
+
+                if (client.IsRemoteOwned(RegisterInterop.Index(counter)))
+                {
+                    RegisterHighlight.Clear(counter);
+                    return false;
+                }
+
+                return true;
             }
         }
 

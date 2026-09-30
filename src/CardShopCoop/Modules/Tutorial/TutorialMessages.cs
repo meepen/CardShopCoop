@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 using System;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.Tutorial

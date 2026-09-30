@@ -42,7 +42,9 @@ namespace CardShopCoop.Api
     /// if the API assembly is present; because the API ships with CardShopCoop, the normal
     /// optional-dependency pattern is to also guard direct calls with
     /// <c>BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("com.zwhit.cardshopcoop")</c>.
-    /// The attribute/DTO integration path needs no guard at all: CardShopCoop discovers it.
+    /// The attribute/DTO integration path needs no guard at all: CardShopCoop discovers it, and
+    /// auto-discovery through the BepInEx dependency graph is the preferred registration path.
+    /// Explicit registration with <see cref="Register"/> is only valid once CardShopCoop is loaded.
     /// </summary>
     public static class CoopApi
     {
@@ -66,8 +68,11 @@ namespace CardShopCoop.Api
         }
 
         /// <summary>
-        /// Escape hatch for a mod that does not want to declare a BepInEx dependency: register an
-        /// assembly's attributed DTOs and behaviours explicitly. Auto-discovery is the normal path.
+        /// Registers an assembly's attributed DTOs and behaviours explicitly. Auto-discovery through
+        /// the BepInEx dependency graph is the preferred path; use this escape hatch only for a mod
+        /// that does not declare a BepInEx dependency. Only valid once CardShopCoop is loaded and
+        /// has installed its binding (guard with <see cref="IsAvailable"/>, or declare a
+        /// <c>BepInDependency</c> on com.zwhit.cardshopcoop); otherwise this throws.
         /// </summary>
         public static void Register(Assembly assembly)
         {
@@ -76,7 +81,16 @@ namespace CardShopCoop.Api
                 throw new ArgumentNullException(nameof(assembly));
             }
 
-            Binding?.Register(assembly);
+            var binding = Binding;
+            if (binding == null)
+            {
+                throw new InvalidOperationException(
+                    "CardShopCoop has not installed its API binding yet; call CoopApi.Register from your "
+                    + "plugin's Awake after CardShopCoop is loaded (declare a BepInDependency on "
+                    + "com.zwhit.cardshopcoop, or guard with CoopApi.IsAvailable).");
+            }
+
+            binding.Register(assembly);
         }
     }
 }

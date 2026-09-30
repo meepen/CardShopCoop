@@ -326,6 +326,12 @@ namespace CardShopCoop.Modules.World
             }
 
             RegisterCreatedBox(finalizedBox);
+            // The box-up snapshot published during the spawn still describes the package at the
+            // furniture's raw spawn point; the package is only moved to its delivery spot here.
+            // Republish the settled entity now so the host snapshot and every already-deferred
+            // delta converge on the final pose. The descriptor above names the identity first, so
+            // a peer can bind the entity before this update arrives.
+            NotifyStructureChanged();
         }
 
         private static void RecordTakeBoxCreated(InteractablePackagingBox_Item __result)

@@ -71,6 +71,20 @@ namespace CardShopCoop.Modules.Economy
             return true;
         }
 
+        /// <summary>Compensates a debit this authority already queued when the caller's OWN local
+        /// work failed afterwards (a delivery/mutation failure, never a network result). The refund
+        /// is another authoritative wallet event, so the net balance is restored.</summary>
+        internal static void RefundHostSpend(double amount)
+        {
+            if (_owner == null || !IsValidAmount(amount) || amount <= 0d)
+                return;
+
+            if (SceneRef<CEventManager>.Get() == null)
+                return;
+
+            CEventManager.QueueEvent(new CEventPlayer_AddCoin((float)amount, true));
+        }
+
         // Kept as a compatibility no-op for callers which abandon a local operation after the
         // debit was admitted.  A network result can never undo an authoritative wallet event.
         public static void ReleaseHostSpend(HostSpendReservation reservation)

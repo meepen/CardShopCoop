@@ -62,13 +62,6 @@ namespace CardShopCoop.Modules.World
         public List<float> Fills;
         public int CurrentState;
         public bool CollectClaimed;
-        // The host's monotonic clock at which the current processing cycle began,
-        // the duration represented by that cycle, and the host clock at serialization.
-        // Clients translate these values to their local monotonic clock once and
-        // render between lifecycle events without sending progress snapshots.
-        public double PackStartTimestamp;
-        public float PackDuration;
-        public double PackTimestamp;
     }
 
     [NetworkMessage]

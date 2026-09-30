@@ -48,8 +48,23 @@ namespace CardShopCoop.Modules.World
         {
             if (_context.InGame() && IsJoinPhaseSender(context) && message != null)
             {
-                ExecuteWorldCommand(context, message,
-                    () => _workbenchInteraction != null && _workbenchInteraction.HostApplyOp(message));
+                ExecuteWorldCommand(context, message, () =>
+            {
+                if (_workbenchInteraction != null && _workbenchInteraction.HostApplyOp(message))
+                {
+                    return true;
+                }
+
+                // Refresh the failed edit with the bench's absolute authoritative state before the
+                // generic rollback, so the client reconciles instead of replaying its snapshot.
+                var refresh = _workbenchInteraction?.BuildRefresh(message.Index);
+                if (refresh != null)
+                {
+                    SendWorldTo(context.Connection.Id, refresh);
+                }
+
+                return false;
+            });
             }
             else
             {

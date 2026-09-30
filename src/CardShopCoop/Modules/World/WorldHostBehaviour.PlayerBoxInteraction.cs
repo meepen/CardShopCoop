@@ -18,6 +18,7 @@ namespace CardShopCoop.Modules.World
         {
             _harmony.CreateClassProcessor(typeof(PlayerBoxPickupPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlayerBoxThrowPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PlayerBoxDropPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlayerBoxPlacementPatch)).Patch();
         }
 
@@ -65,7 +66,10 @@ namespace CardShopCoop.Modules.World
                     // can attach the box to that player's avatar.
                     message.HolderConnectionId = context.ConnectionId;
                     if (!ApplyPlayerBoxAction(message))
+                    {
+                        RefreshRejectedBoxAction(context, message.BoxNetworkId);
                         return false;
+                    }
                     BroadcastWorld(new PlayerBoxPickupMessage
                     {
                         PredictionId = message.PredictionId,
@@ -92,7 +96,10 @@ namespace CardShopCoop.Modules.World
                 ExecuteWorldCommand(context, message, () =>
                 {
                     if (!ApplyPlayerBoxAction(message))
+                    {
+                        RefreshRejectedBoxAction(context, message.BoxNetworkId);
                         return false;
+                    }
                     BroadcastWorld(new PlayerBoxPlacementMessage
                     {
                         PredictionId = message.PredictionId,
@@ -117,7 +124,10 @@ namespace CardShopCoop.Modules.World
                 ExecuteWorldCommand(context, message, () =>
                 {
                     if (!ApplyPlayerBoxAction(message))
+                    {
+                        RefreshRejectedBoxAction(context, message.BoxNetworkId);
                         return false;
+                    }
                     BroadcastWorld(new PlayerBoxThrowMessage
                     {
                         PredictionId = message.PredictionId,
@@ -158,6 +168,80 @@ namespace CardShopCoop.Modules.World
             return _playerBoxInteraction != null && _playerBoxInteraction.ApplyIncoming(message);
         }
 
+        /// <summary>Answers a rejected player-box intent with the box's authoritative state, sent
+        /// to the requester before the generic rollback. Without it the client's undo would invert
+        /// a snapshot authority may already have moved past - the box stored on a shelf or held by
+        /// someone else - and leave a replica in the wrong place.</summary>
+        private void RefreshRejectedBoxAction(MessageContext context, Guid boxNetworkId)
+        {
+            if (context?.Connection == null || boxNetworkId == Guid.Empty
+                || _boxNetworkInteraction == null
+                || !_boxNetworkInteraction.TryGetBox(boxNetworkId, out var box) || box == null)
+            {
+                // Unknown or destroyed id: there is no authoritative state to send.
+                return;
+            }
+
+            if (PlayerBoxInteraction.IsBeingPlaced(box))
+            {
+                // The box is in someone's placement preview; that move publishes its own
+                // authoritative result when it settles.
+                return;
+            }
+
+            if (_boxNetworkInteraction.IsStored(boxNetworkId)
+                && box is InteractablePackagingBox_Item item
+                && item.GetBoxStoredCompartment() is ShelfCompartment compartment
+                && compartment.GetWarehouseShelf() != null)
+            {
+                // The box is on a warehouse shelf: republish its location as a store so the
+                // client takes it out of the hand through its own store path.
+                SendWorldTo(context.Connection.Id, new WarehouseDeltaMessage
+                {
+                    IsStore = true,
+                    ShelfIndex = compartment.GetWarehouseIndex(),
+                    CompartmentIndex = compartment.GetIndex(),
+                    BoxNetworkId = boxNetworkId,
+                    ItemType = item.m_ItemCompartment == null
+                        ? EItemType.None : item.m_ItemCompartment.GetItemType(),
+                    Amount = item.m_ItemCompartment == null
+                        ? 0 : item.m_ItemCompartment.GetItemCount(),
+                    IsBig = item.m_IsBigBox,
+                });
+                return;
+            }
+
+            if (_playerBoxInteraction != null
+                && ReferenceEquals(_playerBoxInteraction.LocalHeldBox, box))
+            {
+                SendWorldTo(context.Connection.Id, new PlayerBoxPickupMessage
+                {
+                    BoxNetworkId = boxNetworkId,
+                    HeldPosition = box.transform.position,
+                    HeldRotation = box.transform.rotation,
+                    HolderConnectionId = 0,
+                });
+                return;
+            }
+
+            if (_playerBoxInteraction != null
+                && _playerBoxInteraction.TryGetRemoteHolder(boxNetworkId, out var holder))
+            {
+                SendWorldTo(context.Connection.Id, new PlayerBoxPickupMessage
+                {
+                    BoxNetworkId = boxNetworkId,
+                    HeldPosition = box.transform.position,
+                    HeldRotation = box.transform.rotation,
+                    HolderConnectionId = holder,
+                });
+                return;
+            }
+
+            // Any other state (loose or placed) is left to the requester's own undo: the box
+            // action undos have no authority-changed guard, so a placement refresh here could
+            // itself be clobbered by the rollback that follows.
+        }
+
         [HarmonyPatch(typeof(InteractablePackagingBox), "StartHoldBox")]
         private static class PlayerBoxPickupPatch
         {
@@ -186,6 +270,15 @@ namespace CardShopCoop.Modules.World
             private static void Prefix(InteractablePackagingBox __instance, bool isPlayer,
                 out PlayerBoxInteraction.LocalAction __state)
             {
+                // A box just taken or boxed up is still lerping into the hand, and ThrowBox does
+                // not stop that lerp: the thrown box kept being dragged to the hand until the lerp
+                // finished, which is what made the first throw after a pick-up look refused. Throw
+                // from where the box actually is.
+                if (isPlayer)
+                {
+                    __instance?.StopLerpToTransform();
+                }
+
                 // Capture only: the game decides whether a throw is valid and owns the mutation.
                 __state = _instance == null ? default
                     : _instance.CapturePlayerBoxAction(__instance, isPlayer, true);
@@ -196,6 +289,22 @@ namespace CardShopCoop.Modules.World
                 PlayerBoxInteraction.LocalAction __state)
             {
                 _instance?.PublishPlayerBoxThrow(__instance, __state);
+            }
+        }
+
+        /// <summary>The local player dropped the box for the game's placement preview. That
+        /// release must stop the hold lerp for the same reason a throw does: otherwise the box is
+        /// dragged back toward the hand while the moving-object logic aims it.</summary>
+        [HarmonyPatch(typeof(InteractablePackagingBox), "DropBox")]
+        private static class PlayerBoxDropPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractablePackagingBox __instance, bool isPlayer)
+            {
+                if (isPlayer)
+                {
+                    __instance?.StopLerpToTransform();
+                }
             }
         }
 
@@ -455,6 +564,19 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            // A hold that crossed this player's newer local throw/drop on the wire must not pull
+            // the box back into the hand: that is what made the first throw after a take or box-up
+            // look refused, with the next attempt then working. The pending move owns the box until
+            // the host resolves it; its echo or rollback settles where the box ends up. Reconciles
+            // are exempt: they replay pickups in order to restore the layered state.
+            if (!PredictionApi.IsReconciling
+                && _boxes.TryGetId(box, out var moveId) && _boxes.HasPendingLocalMove(moveId))
+            {
+                CoopPlugin.Log.LogInfo("[box-id] hold for id=" + moveId
+                    + " crossed a pending local move; leaving the box with the move.");
+                return;
+            }
+
             var controller = SceneRef<InteractionPlayerController>.Get();
             if (controller == null)
             {
@@ -573,8 +695,27 @@ namespace CardShopCoop.Modules.World
             }
 
             WorldPrediction.Predict(WorldPrediction.BoxesScope, placement,
-                () => ApplyPredictedLocal(box, placement), () => ApplyLocalHold(box),
+                () => ApplyPredictedLocal(box, placement), () => RestoreForcedHold(box),
                 () => ReleaseRefusedReplacement(replacement));
+        }
+
+        /// <summary>Undo of a rejected forced drop: put the old box back into the local hand, unless
+        /// another player has since taken it or it was stored authoritatively. Those states are
+        /// newer than the drop we are reverting, and re-holding would claim an owned box again.</summary>
+        private void RestoreForcedHold(InteractablePackagingBox box)
+        {
+            if (box == null)
+            {
+                return;
+            }
+
+            if (_boxes.TryGetId(box, out var id)
+                && (HasMirroredHold(box, id) || _boxes.IsStored(id)))
+            {
+                return;
+            }
+
+            ApplyLocalHold(box);
         }
 
         /// <summary>A host rejection of the forced drop means the old box should be held again; the
@@ -600,11 +741,27 @@ namespace CardShopCoop.Modules.World
         private void RestorePredictedLocal(InteractablePackagingBox box, Transform parent,
             Vector3 position, Quaternion rotation, Vector3 velocity, Vector3 angularVelocity)
         {
+            // A destroyed box has nothing to restore, and the undo loop in Reconcile does not catch
+            // exceptions, so a missing subject must not fall through to a DropBox dereference.
+            if (box == null)
+            {
+                return;
+            }
+
             if (IsBeingPlaced(box))
             {
                 // Undoing a superseded box action would drop the box out of the game's placement
                 // preview, so leave the move (and its transform) alone. The move is the newer,
                 // locally-owned intent and it will send its own authoritative result.
+                return;
+            }
+
+            // Another player's hold, or an authoritative store, is newer than the rejected
+            // action. Restoring the local snapshot would pull the box out of their hands or off
+            // the shelf, so the newer authority owns it and the snapshot is dropped.
+            if (_boxes.TryGetId(box, out var id)
+                && (HasMirroredHold(box, id) || _boxes.IsStored(id)))
+            {
                 return;
             }
 
@@ -648,9 +805,12 @@ namespace CardShopCoop.Modules.World
             PublishAction(box, action, pickup);
         }
 
-        /// <summary>Announces a host box-up hold that the game applied before the package had a
-        /// network id (so the normal pickup capture was skipped). The host is already holding the
-        /// box locally; observers just need the pickup to attach it to the host's avatar.</summary>
+        /// <summary>Announces a host hold that was not covered by the normal pickup capture: a
+        /// box-up hold the game applied before the package had a network id, or a warehouse take
+        /// whose pickup had to be re-announced after its shelf-removal delta (the live backend
+        /// starts the hold before the game removes the box from the compartment). The host is
+        /// already holding the box locally; observers just need the pickup to attach it to the
+        /// host's avatar.</summary>
         internal void PublishHostHeld(InteractablePackagingBox box, Guid boxNetworkId)
         {
             if (!_host || box == null || boxNetworkId == Guid.Empty)
@@ -778,9 +938,17 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            WorldPrediction.Predict(WorldPrediction.BoxesScope, message,
+            var predictionId = WorldPrediction.Predict(WorldPrediction.BoxesScope, message,
                 () => ApplyPredictedLocal(box, message),
                 action.Undo);
+            if (message is PlayerBoxPlacementRequestMessage || message is PlayerBoxThrowRequestMessage)
+            {
+                // A granted hold or creation descriptor that reaches this peer before the host's
+                // decision does crossed this move on the wire and describes the box's earlier
+                // state; see HasPendingLocalMove. Pickups are not recorded: their own echo is the
+                // granted hold and applying it is the point.
+                _boxes.NotePendingLocalMove(message.BoxNetworkId, predictionId);
+            }
         }
 
         private static void ReadHoldPose(InteractablePackagingBox box, out Vector3 position,
@@ -961,6 +1129,35 @@ namespace CardShopCoop.Modules.World
         internal void ReleaseRemoteHoldForBox(Guid boxNetworkId)
         {
             ReleaseRemoteHold(boxNetworkId);
+        }
+
+        /// <summary>True while this peer still mirrors <paramref name="box"/> as carried by another
+        /// player, i.e. the replica is parented to this peer's hold anchor.</summary>
+        internal bool HasMirroredHold(InteractablePackagingBox box, Guid boxNetworkId)
+        {
+            if (box == null || boxNetworkId == Guid.Empty
+                || !_remoteHoldAnchors.TryGetValue(boxNetworkId, out var anchor) || anchor == null)
+            {
+                return false;
+            }
+
+            return ReferenceEquals(box.transform.parent, anchor);
+        }
+
+        /// <summary>Detaches a box this peer mirrors as remotely carried, through the game's own
+        /// drop path, so the hold anchor no longer owns it. A caller that is about to move the box
+        /// somewhere authoritative (a warehouse store) must detach first: releasing the anchor
+        /// destroys whatever is still parented to it.</summary>
+        internal bool DetachMirroredHold(InteractablePackagingBox box, Guid boxNetworkId)
+        {
+            if (!HasMirroredHold(box, boxNetworkId))
+            {
+                return false;
+            }
+
+            box.StopLerpToTransform();
+            box.DropBox(false);
+            return true;
         }
 
         /// <summary>The game is destroying <paramref name="box"/> locally. If this peer is holding
@@ -1164,8 +1361,10 @@ namespace CardShopCoop.Modules.World
             {
                 var boxNetworkId = entries[i].Key;
                 if (!_boxes.TryGetBox(boxNetworkId, out var box) || box == null
-                    || IsBeingPlaced(box))
+                    || _boxes.IsStored(boxNetworkId) || IsBeingPlaced(box))
                 {
+                    // A stored box must never be re-held onto an avatar: the store already put it
+                    // on a shelf (an avatar respawn or a third join must not lift it back out).
                     continue;
                 }
 
@@ -1181,7 +1380,7 @@ namespace CardShopCoop.Modules.World
         /// networked hold/drop/throw on top of that re-enables physics and re-parents the box
         /// while the move lerp keeps running, so it jitters in place and can no longer be picked
         /// up. A no-op until the move itself finishes.</summary>
-        private static bool IsBeingPlaced(InteractablePackagingBox box)
+        internal static bool IsBeingPlaced(InteractablePackagingBox box)
             => box != null && box.GetIsMovingObject();
 
         private static void AlignBodyToVisual(InteractablePackagingBox box)

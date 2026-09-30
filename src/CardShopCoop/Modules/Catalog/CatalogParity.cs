@@ -249,12 +249,29 @@ namespace CardShopCoop.Modules.Catalog
         // both the vanilla members and EPL's. There is deliberately no numeric "modded floor": the
         // enum object is the membership truth, and vanilla members are identical on both peers for
         // the same game build, so they can never produce a key conflict.
+        //
+        // Membership truth is not activity truth: EPL never forgets a saved value, so the loaded
+        // enum can still carry members from content packs that were uninstalled long ago. The
+        // walk below therefore routes every member through EplActiveEnums when EPL is present -
+        // an EPL mint stays only while a live EPL structure still backs it (an installed bundle
+        // descriptor or a bundle loaded this session). Vanilla members and other mods' members
+        // are never touched, and without EPL (or without a usable probe) the walk behaves exactly
+        // as it did before.
+
+        /// <summary>The EPL active-filter revision the cached <see cref="_enum"/> was built
+        /// under; -1 until the first build.</summary>
+        private static int _enumFilterVersion = -1;
 
         /// <summary>Hash of the exact canonical enum identity lines THIS PROCESS advertises. The
-        /// lines come from the loaded enum types (vanilla members plus EPL's minted members).</summary>
+        /// lines come from the loaded enum types (vanilla members plus EPL's active minted
+        /// members).</summary>
         public static string EnumHash()
         {
-            if (_enum != null)
+            // The cached hash is only valid for the filter revision it was built under: the EPL
+            // active filter starts with the prepatch source and can gain the runtime source later
+            // in a session (bundle loading runs when the lobby scene loads), and a hash cached
+            // before that would disagree with every fresh identity built after it.
+            if (_enum != null && _enumFilterVersion == EplActiveEnums.Version)
             {
                 return _enum;
             }
@@ -262,9 +279,11 @@ namespace CardShopCoop.Modules.Catalog
             try
             {
                 _enum = EnumHashForIdentity(EnumIdentity());
-                return _enum;
             }
             catch { _enum = "none"; }
+
+            // Record the revision AFTER the build: the build itself may have resolved the filter.
+            _enumFilterVersion = EplActiveEnums.Version;
             return _enum;
         }
 
@@ -277,15 +296,16 @@ namespace CardShopCoop.Modules.Catalog
             return canonical.Count == 0 ? "none" : Short(Sha1(string.Join("\n", canonical)));
         }
 
-        /// <summary>The typed enum identity THIS process advertises: every member of the modded
-        /// enum types (vanilla plus EPL/CardForge-minted members), one entry per kind, members
-        /// ordinally sorted by name. The client pairs these values with its own by name; ids never
-        /// cross the registry and are never compared for equality.</summary>
+        /// <summary>The typed enum identity THIS process advertises: every vanilla member of the
+        /// modded enum types, plus the EPL-minted members that are still backed by installed or
+        /// loaded content, one entry per kind, members ordinally sorted by name. The client pairs
+        /// these values with its own by name; ids never cross the registry and are never compared
+        /// for equality.</summary>
         public static List<EnumKindIdentityDto> EnumIdentity()
         {
             try
             {
-                var identity = BuildEnumIdentity();
+                var identity = BuildEnumIdentity(out var filtered);
                 var count = 0;
                 foreach (var kind in identity)
                 {
@@ -295,12 +315,14 @@ namespace CardShopCoop.Modules.Catalog
                 {
                     // Identity is runtime-only: none of the six enum types resolved, so this
                     // process cannot key-check custom content this session. There is deliberately
-                    // no enum_values.json fallback.
+                    // no enum_values.json fallback - and no disk registry is ever consulted; the
+                    // membership source stays the loaded enums.
                     LogEnumSourceOnce("runtime enum walk found no members (the enum types did not resolve)");
                 }
                 else
                 {
-                    LogEnumSourceOnce("runtime enums (" + count + " members)");
+                    LogEnumSourceOnce("runtime enums (" + count + " members)"
+                        + (filtered > 0 ? "; EPL active filter dropped " + filtered + " leftover members" : ""));
                 }
 
                 return identity;
@@ -369,13 +391,20 @@ namespace CardShopCoop.Modules.Catalog
         /// <summary>The typed identity resolved from the LOADED types, per kind, members sorted by
         /// name - the single source both EnumHash and EnumIdentity read. EPL injects its minted
         /// members at prepatch, so Enum.GetNames/GetValues report them for real alongside the
-        /// vanilla members, and we keep them all. Vanilla members are identical on both peers for
-        /// the same game build; the modded members are exactly the ones that can carry different
-        /// ids. A type that won't resolve is skipped, not fatal: a partial answer still beats no
-        /// handshake.</summary>
-        private static List<EnumKindIdentityDto> BuildEnumIdentity()
+        /// vanilla members; the walk keeps each one only while EplActiveEnums says a live EPL
+        /// structure still backs it (a still-installed descriptor or a bundle loaded this
+        /// session). Vanilla members are identical on both peers for the same game build; the
+        /// modded members are exactly the ones that can carry different ids.
+        /// <paramref name="filtered"/> receives how many EPL leftovers were dropped. A type that
+        /// won't resolve is skipped, not fatal: a partial answer still beats no handshake.</summary>
+        private static List<EnumKindIdentityDto> BuildEnumIdentity(out int filtered)
         {
             var result = new List<EnumKindIdentityDto>();
+            // Null unless EPL is loaded AND a live source answered. When null every member is
+            // kept, which is both correct for a vanilla game and the safe fallback whenever the
+            // probe cannot run.
+            var active = EplActiveEnums.Current();
+            filtered = 0;
             foreach (var (typeName, kind) in ModdedEnumTypes)
             {
                 try
@@ -401,6 +430,12 @@ namespace CardShopCoop.Modules.Catalog
                             id = Convert.ToInt64(values.GetValue(i));
                         }
                         catch { continue; }
+
+                        if (active != null && !active.IsActive(typeName, names[i], id))
+                        {
+                            filtered++;
+                            continue;
+                        }
 
                         members.Add(new EnumMemberDto { Name = names[i], Value = id });
                     }

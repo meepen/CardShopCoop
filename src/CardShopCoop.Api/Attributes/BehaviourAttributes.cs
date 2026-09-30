@@ -26,6 +26,12 @@ namespace CardShopCoop.Attributes
     {
     }
 
+    /// <summary>
+    /// Invoked when a client enters the session: on the host, after a joining client passes
+    /// admission and begins the world transfer; on a client, after the host accepts this client
+    /// (its Welcome is processed). Fires before [OnFullyJoined]; application traffic is not yet
+    /// allowed at this point.
+    /// </summary>
     [AttributeUsage(AttributeTargets.Method, Inherited = false)]
     public sealed class OnClientJoinedAttribute : Attribute
     {

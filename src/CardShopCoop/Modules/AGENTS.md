@@ -39,8 +39,19 @@ needed; not every feature needs every file.
 - Normal play uses the smallest useful authoritative delta; full snapshots are join baselines only.
 - Clients predict interactions immediately. Record the local apply/undo actions with one generic
   `PredictionId`, send the intent before applying the prediction, and reconcile when the accepted
-  host delta returns. A rejected intent uses the one generic prediction-rollback message. Do not
-  add module-specific rejection protocols, correction snapshots, revisions, or recovery messages.
+  host delta returns. A rejected intent uses the one generic prediction-rollback message, and the
+  host may send the affected entity's authoritative state to the requester immediately before that
+  rollback, through the module's normal state messages with an empty prediction id, so the client
+  reconciles to authority instead of inverting a snapshot authority has already moved past. Do not
+  add new rejection message types, revisions, or per-module recovery protocols. Rejections that
+  bypass a module's apply validation (world not in game, sender not yet admitted, an invalid intent
+  identity) carry only the generic rollback, so undo closures must stay correct without a refresh.
+- A client action that is still awaiting its host decision owns the entity until it resolves. An
+  authoritative hold, descriptor, or pose that reaches the client before that decision crossed the
+  local action on the wire and describes its older state, so it must not be applied over the
+  pending action (for example, a granted box hold must not pull a box the player has already thrown
+  back into their hand, and a box descriptor must not re-pose it). Track in-flight local moves by
+  their prediction id and let the action's own echo or rollback settle the state.
 - Authoritative host messages are trusted. Client handlers apply them directly without caps,
   normalization, duplicate filtering, sender checks, or malformed-host validation. Authentication
   and resource limits belong to central routing and transport.

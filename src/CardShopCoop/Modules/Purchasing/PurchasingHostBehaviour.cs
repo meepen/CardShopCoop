@@ -206,7 +206,20 @@ namespace CardShopCoop.Modules.Purchasing
                 for (var i = objects.Count - 1; i >= 0; i--)
                 {
                     if (objects[i] != null && !Objects.Contains(objects[i]))
-                        UnityEngine.Object.Destroy(objects[i]);
+                    {
+                        if (objects[i] is InteractablePackagingBox box)
+                        {
+                            // The game's own teardown removes the box from RestockManager's
+                            // packaging-box lists (and forwards the destroy). A raw Destroy left a
+                            // dead entry there, and RestockManager.Update threw on it every
+                            // out-of-bounds tick, which also disabled its box rescue.
+                            box.OnDestroyed();
+                        }
+                        else
+                        {
+                            UnityEngine.Object.Destroy(objects[i]);
+                        }
+                    }
                 }
             }
 
@@ -426,6 +439,10 @@ namespace CardShopCoop.Modules.Purchasing
             EconomyAuthority.HostSpendReservation spend = null;
             MutationSnapshot mutation = null;
             PurchasePlan plan = null;
+            // The amount of a debit that is committed but whose local work has not finished. A
+            // failure while it is non-zero refunds it, so a failed delivery can never charge the
+            // buyer for nothing.
+            var committedDebit = 0d;
             try
             {
                 if (!TryBuildPlan(message, out plan, out var error))
@@ -451,7 +468,9 @@ namespace CardShopCoop.Modules.Purchasing
                 {
                     return Failure(message, peer, "purchase failed while admitting the debit");
                 }
+
                 spend = null;
+                committedDebit = plan.Total;
 
                 mutation = new MutationSnapshot(plan);
 
@@ -463,6 +482,7 @@ namespace CardShopCoop.Modules.Purchasing
                 catch (Exception exception)
                 {
                     mutation.Rollback();
+                    RefundFailedPurchase(ref committedDebit);
                     CoopPlugin.Log.LogError($"Purchasing delivery crashed for {peer}: {exception}");
                     return Failure(message, peer, "purchase failed while delivering the order");
                 }
@@ -470,6 +490,7 @@ namespace CardShopCoop.Modules.Purchasing
                 if (!delivery.Success)
                 {
                     mutation.Rollback();
+                    RefundFailedPurchase(ref committedDebit);
                     return Failure(message, peer, delivery.Failure ?? "purchase delivery failed");
                 }
 
@@ -479,6 +500,7 @@ namespace CardShopCoop.Modules.Purchasing
                 if (Math.Abs(delivery.Charged - plan.Total) > 0.0001d)
                 {
                     mutation.Rollback();
+                    RefundFailedPurchase(ref committedDebit);
                     CoopPlugin.Log.LogError($"Purchasing canonical amount changed for "
                         + $"{peer}: "
                         + $"preflight={plan.Total}, delivered={delivery.Charged}");
@@ -509,6 +531,7 @@ namespace CardShopCoop.Modules.Purchasing
                 }
 
                 var outcome = Accepted(message, delivery.Charged);
+                committedDebit = 0d;
                 // A delayed shelf save is itself an irreversible side effect. Schedule it only
                 // after the outcome and every rollback-capable mutation have succeeded; there is
                 // then no fallible purchase work left which could require a rollback.
@@ -529,8 +552,24 @@ namespace CardShopCoop.Modules.Purchasing
                     CoopPlugin.Log.LogError("Purchasing rollback failed for " + peer + ": "
                         + rollbackError);
                 }
+                if (plan != null)
+                {
+                    RefundFailedPurchase(ref committedDebit);
+                }
                 CoopPlugin.Log.LogError($"Purchasing preflight crashed for {peer}: {exception}");
                 return Failure(message, peer, "purchase could not be validated");
+            }
+        }
+
+        /// <summary>A purchase failed after its debit was committed: give the money back through
+        /// the authority's compensating wallet event, once. The debit stays authoritative for the
+        /// successful path; this only compensates the host's own local failure.</summary>
+        private static void RefundFailedPurchase(ref double committedDebit)
+        {
+            if (committedDebit > 0d)
+            {
+                EconomyAuthority.RefundHostSpend(committedDebit);
+                committedDebit = 0d;
             }
         }
 

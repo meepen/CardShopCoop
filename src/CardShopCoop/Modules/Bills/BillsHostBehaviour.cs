@@ -98,7 +98,18 @@ namespace CardShopCoop.Modules.Bills
                     }
                     else if (!BillsInterop.TryReservePayment(message.BillType, out var spend))
                     {
-                        NotEnoughResourceTextPopup.ShowText(ENotEnoughResourceText.Money);
+                        // The guest's intent was predicted locally, so the refusal feedback
+                        // belongs to the requester, not (only) to the host screen.
+                        _forwardedRequester = peer;
+                        try
+                        {
+                            NotEnoughResourceTextPopup.ShowText(ENotEnoughResourceText.Money);
+                        }
+                        finally
+                        {
+                            _forwardedRequester = 0;
+                        }
+
                         Rollback(context, message);
                     }
                     else

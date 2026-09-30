@@ -29,6 +29,7 @@ namespace CardShopCoop.Modules.Trade
 
         private sealed class PredictionFrame
         {
+            public TradeIntentOperation Operation;
             public TradeOfferState State;
             public bool ClaimAccepted;
             public bool TerminalSent;
@@ -313,7 +314,10 @@ namespace CardShopCoop.Modules.Trade
         private void ApplyOfferState(TradeOfferState snapshot)
         {
             CoopPlugin.Log.LogInfo("[trade] client apply offer counter=" + snapshot.Counter
-                + " index=" + snapshot.CustomerIndex + " gen=" + snapshot.CustomerGeneration + ".");
+                + " index=" + snapshot.CustomerIndex + " gen=" + snapshot.CustomerGeneration
+                + " nonce=" + snapshot.OfferNonce + " ask=" + snapshot.Price.ToString("F2")
+                + " priceSet=" + snapshot.PriceSet.ToString("F2") + " trading=" + snapshot.Trading
+                + ".");
             if (!_offers.TryGetValue(snapshot.Counter, out var offer))
             {
                 offer = new LocalOffer();
@@ -610,6 +614,10 @@ namespace CardShopCoop.Modules.Trade
         [MessageHandler(typeof(TradeSessionMessage))]
         private void HandleSession(MessageContext context, TradeSessionMessage message)
         {
+            CoopPlugin.Log.LogInfo("[trade] client session counter=" + message.Counter + " index="
+                + message.CustomerIndex + " gen=" + message.CustomerGeneration + " nonce="
+                + message.OfferNonce + " accepted=" + message.Accepted + " id=" + message.PredictionId
+                + ".");
             // AckOrApply: the only state this folds is _claimAccepted, which BeginSession already
             // set optimistically for the actor (and the host only ever sends Accepted=true, with
             // refusals arriving as a separate rollback), so retiring without replaying is correct.
@@ -682,7 +690,7 @@ namespace CardShopCoop.Modules.Trade
                 price = 0f;
             }
 
-            var frame = CapturePredictionFrame(offer);
+            var frame = CapturePredictionFrame(offer, operation);
             register(PredictionScope,
                 predictionId => SendIntent(predictionId, operation, price, offer.State),
                 () => ApplyPrediction(operation),
@@ -710,7 +718,7 @@ namespace CardShopCoop.Modules.Trade
                 price = 0f;
             }
 
-            var frame = CapturePredictionFrame(offer);
+            var frame = CapturePredictionFrame(offer, operation);
             MarkPredicted(operation);
             return new IntentCapture
             {
@@ -863,6 +871,10 @@ namespace CardShopCoop.Modules.Trade
             TradeOfferState state, TradeOutcome result = TradeOutcome.None,
             TradeOfferState resultState = null, AcceptEffect effect = null)
         {
+            CoopPlugin.Log.LogInfo("[trade] client intent " + operation + " counter=" + state.Counter
+                + " index=" + state.CustomerIndex + " gen=" + state.CustomerGeneration + " nonce="
+                + state.OfferNonce + " price=" + price.ToString("F2") + " result=" + result + " id="
+                + predictionId + ".");
             _context.Send(1, new TradeIntentMessage
             {
                 PredictionId = predictionId,
@@ -880,9 +892,11 @@ namespace CardShopCoop.Modules.Trade
             });
         }
 
-        private PredictionFrame CapturePredictionFrame(LocalOffer offer)
+        private PredictionFrame CapturePredictionFrame(LocalOffer offer,
+            TradeIntentOperation operation)
             => new PredictionFrame
             {
+                Operation = operation,
                 State = CloneState(offer.State),
                 ClaimAccepted = _claimAccepted,
                 TerminalSent = _terminalSent,
@@ -976,6 +990,9 @@ namespace CardShopCoop.Modules.Trade
 
         private void UndoPrediction(PredictionFrame frame)
         {
+            CoopPlugin.Log.LogInfo("[trade] client undo " + frame.Operation + " state="
+                + (frame.State == null ? "<null>" : frame.State.Counter.ToString())
+                + " effect=" + (frame.Effect != null) + ".");
             if (frame.Effect != null)
             {
                 UndoAcceptEffect(frame.Effect);
@@ -993,6 +1010,17 @@ namespace CardShopCoop.Modules.Trade
             _thinkingSent = frame.ThinkingSent;
             _acceptedShown = frame.AcceptedShown;
             _awaitingPrediction = false;
+
+            if (frame.Operation == TradeIntentOperation.Open)
+            {
+                // The host refused the session open. There is no session, so close the screen and
+                // end the local offer: leaving it open would let the unaccepted screen's buttons
+                // run the vanilla accept unguarded (its card/coin effects would then be forwarded
+                // as separate intents into a trade the host never admitted).
+                ClosePredictedScreen();
+                EndLocalSession(false);
+                return;
+            }
 
             var screen = TradeInterop.Screen;
             var screenOpen = TradeInterop.IsScreenOpen(screen);

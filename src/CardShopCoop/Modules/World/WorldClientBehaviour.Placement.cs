@@ -162,6 +162,13 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>Client: the box engine just bound the authoritative placement identity of a
+        /// boxed furniture object (its box descriptor arrived, or this peer's own predicted box
+        /// adopted it). Retry the deltas that were deferred while the key did not resolve, so the
+        /// local object takes the host's authoritative state.</summary>
+        internal static void RetryDeferredPlacementDeltas()
+            => _instance?.ApplyPendingDeltas();
+
         private bool TryApplyDelta(PlacementDeltaMessage message)
         {
             if (PlacementInterop.FindShelfManager() == null)
@@ -175,8 +182,7 @@ namespace CardShopCoop.Modules.World
             }
 
             if (message.Operation != PlacementDeltaMessage.Remove
-                && !CanResolveStableKey(message.Entity)
-                && !CanMaterialize(message.Entity))
+                && !CanResolveStableKey(message.Entity))
             {
                 return false;
             }
@@ -214,16 +220,9 @@ namespace CardShopCoop.Modules.World
             _pendingDeltas[key] = message;
         }
 
-        /// <summary>True when a delta names a boxed object that can be recreated through the game's
-        /// package factory. This is how a peer adopts a host-spawned object it never predicted,
-        /// such as a purchased furniture package whose pose only the host chooses.</summary>
-        private static bool CanMaterialize(PlacementMoveEntry entry)
-            => entry != null && entry.IsBoxed && entry.Type != PlacementInterop.NoType
-                && (entry.Key >> 24) != PlacementApi.DecorationKind;
-
         /// <summary>True when a delta names an object this peer already holds under the stable key
-        /// the host assigned. A key that does not resolve can only be applied by materializing the
-        /// exact object the key names; there is no same-type or nearby adoption.</summary>
+        /// the host assigned. A key that does not resolve can only be applied after the box channel
+        /// binds the exact identity it names; there is no same-type or nearby adoption.</summary>
         private static bool CanResolveStableKey(PlacementMoveEntry entry)
             => entry != null && PlacementMoveState.ResolveObjectByKey(entry.Key) != null;
 

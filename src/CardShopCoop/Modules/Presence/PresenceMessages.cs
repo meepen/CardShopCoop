@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Protocol;
 using CardShopCoop.Modules.Catalog;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Api;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;

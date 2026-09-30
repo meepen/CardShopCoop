@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using UnityEngine;
@@ -82,7 +83,6 @@ namespace CardShopCoop.Modules.World
         private readonly Action<INetMessage> _broadcast;
         private readonly Dictionary<Guid, InteractablePackagingBox> _boxesById = new();
         private readonly Dictionary<InteractablePackagingBox, Guid> _idsByBox = new();
-        private readonly Dictionary<Guid, string> _furnitureEntityIds = new();
         private readonly Dictionary<Guid, BoxCreatedMessage> _pendingFurniture = new();
         // Host: creator-assigned ids carried by an accepted intent. A synchronous creation (an
         // empty-box take, a furniture box-up) pushes a single one-shot id; an asynchronous delivery
@@ -98,6 +98,13 @@ namespace CardShopCoop.Modules.World
         private Guid _pendingClientCreatedId;
         private readonly HashSet<Guid> _clientOwnedIds = new();
         private readonly Dictionary<Guid, BoxCreatedMessage> _pendingClientDescriptors = new();
+        // Client: a locally predicted throw or placement still awaiting its host decision, keyed by
+        // box id. A host message that crossed the move on the wire - a granted hold or a creation
+        // descriptor - describes the box's earlier state, so it must not re-grab the box or drag it
+        // back to an old pose; that is what made the first throw after a take or box-up look
+        // refused, with the next attempt then working. The entry is kept until the prediction
+        // resolves, then pruned lazily.
+        private readonly Dictionary<Guid, Guid> _pendingLocalMoves = new();
         private int _deliverySpawns;
         // Guest: the boxes recovered from the transferred save, indexed exactly as the host's
         // frozen snapshot slots. Captured at baseline start, before any runtime box is materialized.
@@ -176,13 +183,13 @@ namespace CardShopCoop.Modules.World
         {
             _boxesById.Clear();
             _idsByBox.Clear();
-            _furnitureEntityIds.Clear();
             _pendingFurniture.Clear();
             _pendingHostCreatedId = Guid.Empty;
             ClearHostDeliveryEntries();
             _pendingClientDeliveryIds.Clear();
             _clientOwnedIds.Clear();
             _pendingClientDescriptors.Clear();
+            _pendingLocalMoves.Clear();
             _deliverySpawns = 0;
             _sceneSlots.Clear();
             _baselineSaveBoxes.Clear();
@@ -217,7 +224,6 @@ namespace CardShopCoop.Modules.World
 
             _boxesById.Clear();
             _idsByBox.Clear();
-            _furnitureEntityIds.Clear();
             _pendingFurniture.Clear();
             // A baseline re-sends every authoritative box, so any client-owned box still awaiting
             // its descriptor is resolved by the baseline itself. Retaining an un-drained
@@ -228,6 +234,7 @@ namespace CardShopCoop.Modules.World
             _pendingClientCreatedId = Guid.Empty;
             _clientOwnedIds.Clear();
             _pendingClientDescriptors.Clear();
+            _pendingLocalMoves.Clear();
             _deliverySpawns = 0;
             CaptureSceneSlots();
         }
@@ -1021,6 +1028,37 @@ namespace CardShopCoop.Modules.World
         internal bool IsStored(Guid id)
             => id != Guid.Empty && _boxesById.TryGetValue(id, out var box) && IsStoredBox(box);
 
+        /// <summary>Records that this peer has a locally predicted throw or placement for
+        /// <paramref name="boxNetworkId"/> awaiting the host. A granted hold or creation descriptor
+        /// that arrives until the prediction resolves crossed that move on the wire and must not
+        /// override it - re-holding pulled the just-thrown box back into the hand (the first throw
+        /// after a take or box-up looked refused) and re-posing teleported it.</summary>
+        internal void NotePendingLocalMove(Guid boxNetworkId, Guid predictionId)
+        {
+            if (boxNetworkId != Guid.Empty && predictionId != Guid.Empty)
+            {
+                _pendingLocalMoves[boxNetworkId] = predictionId;
+            }
+        }
+
+        /// <summary>True while a locally predicted throw/placement for this box has not yet been
+        /// resolved by the host. Resolved entries are pruned here.</summary>
+        internal bool HasPendingLocalMove(Guid boxNetworkId)
+        {
+            if (!_pendingLocalMoves.TryGetValue(boxNetworkId, out var predictionId))
+            {
+                return false;
+            }
+
+            if (PredictionApi.IsPending(predictionId))
+            {
+                return true;
+            }
+
+            _pendingLocalMoves.Remove(boxNetworkId);
+            return false;
+        }
+
         /// <summary>Reads the game's own stored flag rather than a shadow copy. A box is stored
         /// when the game set <c>m_IsStored</c>, or while it is listed in the compartment it was
         /// stored into (the list already holds it before <c>m_BoxStoredCompartment</c> is set
@@ -1155,7 +1193,6 @@ namespace CardShopCoop.Modules.World
             // representation change, not a network destruction.
             var wasStored = IsStoredBox(box);
             Unbind(id, box);
-            _furnitureEntityIds.Remove(id);
             CoopPlugin.Log.LogInfo("[box-id] host box destroyed id=" + id + " name=" + box.name
                 + " stored=" + wasStored + ".");
             if (wasStored)
@@ -1392,25 +1429,52 @@ namespace CardShopCoop.Modules.World
             ApplyCreatedToBox(box, message);
         }
 
-        /// <summary>Applies a creation descriptor to a box already bound to its id: records the
-        /// furniture placement identity, then mirrors pose (unless the box is held) and contents.</summary>
+        /// <summary>Applies a creation descriptor to a box already bound to its id: adopts the
+        /// host's placement identity for boxed furniture, then mirrors pose (unless the box is
+        /// held) and contents.</summary>
         private void ApplyCreatedToBox(InteractablePackagingBox box, BoxCreatedMessage message)
         {
             var state = message.Box;
-            if (state.Kind == BoxNetworkKind.Furniture)
-            {
-                _furnitureEntityIds[state.BoxNetworkId] = message.StableEntityId;
-            }
-
-            if (!IsBeingHeld(box))
-            {
-                ApplyPose(box, state.Position, state.Rotation);
-            }
+            // The descriptor names the host's placement entity for the furniture inside one of
+            // this peer's boxes. Adopt that identity onto the local boxed object: the peer that
+            // created the box already holds it, and without this the placement channel would
+            // materialize a second object - a client-only ghost box the host cannot address.
+            var identityBound = state.Kind == BoxNetworkKind.Furniture
+                && AdoptFurnitureIdentity(box, message);
 
             if (box is InteractablePackagingBox_Item itemBox)
             {
                 ApplyItemState(itemBox, state);
             }
+
+            if (identityBound)
+            {
+                // A placement delta for this entity may have been deferred while the box channel
+                // had not yet bound the key; apply it now that the local object is the entity.
+                WorldClientBehaviour.RetryDeferredPlacementDeltas();
+            }
+
+            // The descriptor carries the newest authoritative pose for this box, so its pose is
+            // applied after any replayed delta: a deferred snapshot can describe the package
+            // before the host moved it to its delivery spot (a purchase's box-up precedes the
+            // spawn pose), and replaying that snapshot must not leave the box at the raw spawn.
+            // A local throw or placement still awaiting the host is newer than this descriptor
+            // though, and posing on top of it teleported the just-thrown box.
+            if (!IsBeingHeld(box) && !HasPendingLocalMove(state.BoxNetworkId))
+            {
+                ApplyPose(box, state.Position, state.Rotation);
+            }
+        }
+
+        /// <summary>Client: binds the host placement identity the descriptor names onto the local
+        /// boxed furniture object. Returns true when the object holds that identity afterwards.</summary>
+        private static bool AdoptFurnitureIdentity(InteractablePackagingBox box, BoxCreatedMessage message)
+        {
+            return box is InteractablePackagingBox_Shelf shelf
+                && TryGetBoxedFurniture(shelf, out var furniture)
+                && PlacementIdentity.TryAdoptBoxableFurnitureIdentity(furniture,
+                    message.StableEntityId, WorldMessageMetadata.FurnitureIdentityScope,
+                    message.Box.FurnitureObjectType);
         }
 
         /// <summary>Guest: the box the host's snapshot slot names, captured at baseline start.
@@ -1456,7 +1520,6 @@ namespace CardShopCoop.Modules.World
         internal void ClientApplyDestroyed(BoxDestroyedMessage message)
         {
             var wasPending = _pendingFurniture.Remove(message.BoxNetworkId);
-            _furnitureEntityIds.Remove(message.BoxNetworkId);
             _clientOwnedIds.Remove(message.BoxNetworkId);
             _pendingClientDescriptors.Remove(message.BoxNetworkId);
             if (!TryGetBox(message.BoxNetworkId, out var box))
@@ -1615,11 +1678,9 @@ namespace CardShopCoop.Modules.World
                     out var entityId))
             {
                 message.StableEntityId = entityId;
-                _furnitureEntityIds[id] = entityId;
             }
             else
             {
-                _furnitureEntityIds.Remove(id);
                 CoopPlugin.Log.LogWarning("[box-furniture] could not assign placement identity to box id="
                     + id + ".");
             }
@@ -1949,7 +2010,13 @@ namespace CardShopCoop.Modules.World
             return created.GetPackagingBoxShelf();
         }
 
-        private void DestroyWithoutNotification(InteractablePackagingBox box)
+        /// <summary>Tears a box down through the game's own <c>OnDestroyed</c> path - which is
+        /// what removes it from <c>RestockManager</c>'s packaging-box lists - while suppressing
+        /// this peer's own destroy forwarding (the caller owns the id's next life). A raw
+        /// <c>Object.Destroy</c> skips that cleanup: the dead entry stays in
+        /// <c>RestockManager.m_ItemPackagingBoxList</c> and its <c>Update</c> throws on it every
+        /// out-of-bounds tick, which also kills the loop's box rescue.</summary>
+        internal void DestroyWithoutNotification(InteractablePackagingBox box)
         {
             if (box == null)
             {

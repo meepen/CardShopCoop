@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using CardShopCoop.Net;
 using HarmonyLib;
 
@@ -44,6 +45,16 @@ namespace CardShopCoop.Modules.World
             // concurrent host edit is folded (never drift) while an overlapping newer local edit on
             // this key is undone and replayed rather than transiently despawned by our echo of this
             // list; an empty/unknown id still just applies.
+            if (message.PredictionId == Guid.Empty
+                || !Modules.Prediction.PredictionApi.IsPending(message.PredictionId))
+            {
+                // A state nobody predicted supersedes every snapshot captured before it. A state
+                // that resolves one of our own edits must not: the sibling predictions whose undos
+                // the reconcile runs first still need their snapshots, and a follower rejected
+                // later must still be able to undo itself.
+                _workbenchInteraction?.MarkAuthorityAdvanced(message.Index);
+            }
+
             WorldPrediction.ApplyAuthoritative(message,
                 () => _workbenchInteraction?.ClientApplyState(message));
         }

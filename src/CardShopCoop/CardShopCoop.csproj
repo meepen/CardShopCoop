@@ -111,6 +111,9 @@
 
   <Target Name="DeployToPlugins" AfterTargets="Build" Condition="'$(Deploy)' == 'true'">
     <Copy SourceFiles="$(TargetPath);$(TargetDir)CardShopCoop.Api.dll" DestinationFolder="$(GamePath)/BepInEx/plugins/CardShopCoop" />
+    <Copy SourceFiles="$(TargetDir)CardShopCoop.Api.xml"
+          DestinationFolder="$(GamePath)/BepInEx/plugins/CardShopCoop"
+          Condition="Exists('$(TargetDir)CardShopCoop.Api.xml')" />
   </Target>
 
   <Target Name="Package" AfterTargets="Build" Condition="'$(Package)' == 'true'">
@@ -121,6 +124,9 @@
     <RemoveDir Directories="$(PackageDirectory)" />
     <MakeDir Directories="$(PackageDirectory)/$(AssemblyName)" />
     <Copy SourceFiles="$(TargetPath);$(TargetDir)CardShopCoop.Api.dll" DestinationFolder="$(PackageDirectory)/$(AssemblyName)" />
+    <Copy SourceFiles="$(TargetDir)CardShopCoop.Api.xml"
+          DestinationFolder="$(PackageDirectory)/$(AssemblyName)"
+          Condition="Exists('$(TargetDir)CardShopCoop.Api.xml')" />
     <ZipDirectory SourceDirectory="$(PackageDirectory)" DestinationFile="$(PackageZip)" Overwrite="true" />
   </Target>
 

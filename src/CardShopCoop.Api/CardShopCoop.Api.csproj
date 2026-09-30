@@ -14,7 +14,8 @@
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <DebugType>none</DebugType>
-    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
     <ManagedPath>$(GamePath)/Card Shop Simulator_Data/Managed</ManagedPath>
@@ -47,7 +48,7 @@
     </PropertyGroup>
     <RemoveDir Directories="$(PackageDirectory)" />
     <MakeDir Directories="$(PackageDirectory)/$(AssemblyName)" />
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageDirectory)/$(AssemblyName)" />
+    <Copy SourceFiles="$(TargetPath);$(DocumentationFile)" DestinationFolder="$(PackageDirectory)/$(AssemblyName)" />
     <ZipDirectory SourceDirectory="$(PackageDirectory)" DestinationFile="$(PackageZip)" Overwrite="true" />
   </Target>
 

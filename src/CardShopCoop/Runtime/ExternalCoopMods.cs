@@ -27,6 +27,7 @@ namespace CardShopCoop.Runtime
         private readonly List<Assembly> _assemblies = new List<Assembly>();
         private readonly List<IProtocolRegistration> _registrations = new List<IProtocolRegistration>();
         private bool _discovered;
+        private bool _persistentScanComplete;
 
         public static ExternalCoopMods Instance
         {
@@ -98,7 +99,21 @@ namespace CardShopCoop.Runtime
         /// <summary>Explicit registration escape hatch for mods without a dependency attribute.</summary>
         public void Register(Assembly assembly)
         {
-            RegisterCore(assembly, "manual:" + (assembly == null ? "<null>" : assembly.GetName().Name));
+            var ownerId = "manual:" + (assembly == null ? "<null>" : assembly.GetName().Name);
+            RegisterCore(assembly, ownerId);
+            if (_persistentScanComplete && assembly != null && HasPersistentBehaviours(assembly))
+            {
+                CoopPlugin.Log?.LogError("[api] external mod '" + assembly.GetName().Name
+                    + "' registered after the persistent scan; its [PersistentBehaviour]s will not be "
+                    + "instantiated (register from your plugin's Awake, before the first frame)");
+            }
+        }
+
+        /// <summary>Marks the one-shot first-frame scan for external persistent behaviours as done,
+        /// so a late manual registration can be reported instead of silently missing them.</summary>
+        public void NotifyPersistentScanComplete()
+        {
+            _persistentScanComplete = true;
         }
 
         private static bool DependsOnUs(PluginInfo info)
@@ -180,6 +195,12 @@ namespace CardShopCoop.Runtime
 
             if (registration != null)
             {
+                if (registration.State == RegistrationState.PendingNextSession)
+                {
+                    CoopPlugin.Log?.LogInfo("[api] external mod '" + ownerId
+                        + "' registered while a session is active; its messages apply from the next session");
+                }
+
                 lock (_gate)
                 {
                     _registrations.Add(registration);
@@ -204,6 +225,38 @@ namespace CardShopCoop.Runtime
                 if (type != null && type.GetCustomAttribute<NetworkMessageAttribute>(false) != null)
                 {
                     return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasPersistentBehaviours(Assembly assembly)
+        {
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException exception)
+            {
+                types = exception.Types;
+            }
+
+            var wanted = typeof(CardShopCoop.Attributes.PersistentBehaviourAttribute).FullName;
+            foreach (var type in types)
+            {
+                if (type == null)
+                {
+                    continue;
+                }
+
+                foreach (var attribute in type.GetCustomAttributes(false))
+                {
+                    if (attribute != null && attribute.GetType().FullName == wanted)
+                    {
+                        return true;
+                    }
                 }
             }
 
