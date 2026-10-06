@@ -15,6 +15,9 @@ namespace CardShopCoop.Modules.World
     internal static class PlacementHoldKey
     {
         private const long DecorationFlag = 1L << 62;
+        private const long PendingDecorationFlag = 1L << 61;
+        private const int PendingTypeShift = 40;
+        private const int PendingConnectionShift = 32;
 
         internal static bool TryGet(InteractableObject obj, out long key)
         {
@@ -26,13 +29,13 @@ namespace CardShopCoop.Modules.World
 
             if (DecorationInterop.IsDecoration(obj))
             {
-                if (!DecorationInterop.TryGetHoldId(obj, out var decorationId) || decorationId <= 0)
+                if (DecorationInterop.TryGetHoldId(obj, out var decorationId) && decorationId > 0)
                 {
-                    return false;
+                    key = DecorationFlag | decorationId;
+                    return true;
                 }
 
-                key = DecorationFlag | decorationId;
-                return true;
+                return TryGetPendingKey(obj, out key);
             }
 
             if (!PlacementApi.TryMakeObjectKey(PlacementInterop.FindKind(obj), obj,
@@ -43,6 +46,38 @@ namespace CardShopCoop.Modules.World
 
             key = placementKey;
             return true;
+        }
+
+        /// <summary>A decoration taken from inventory has no host id until its placement intent is
+        /// accepted. The key is derived from the game's own per-object instance id plus the mover's
+        /// connection and the decoration type, so no allocation map is needed and every message of
+        /// one hold derives the identical key. Observers decode the type and render a standalone
+        /// ghost with no object to resolve.</summary>
+        private static bool TryGetPendingKey(InteractableObject obj, out long key)
+        {
+            key = 0;
+            var type = (long)obj.m_DecoObjectType;
+            if (type <= 0 || type >= (long)EDecoObject.MAX)
+            {
+                return false;
+            }
+
+            key = PendingDecorationFlag
+                | (type << PendingTypeShift)
+                | ((long)(CoopCore.LocalConnectionId & 0xFF) << PendingConnectionShift)
+                | (long)(uint)obj.GetInstanceID();
+            return true;
+        }
+
+        internal static bool IsPendingDecoration(long key) => (key & PendingDecorationFlag) != 0;
+
+        internal static bool TryGetPendingDecorationType(long key, out EDecoObject type)
+        {
+            type = (EDecoObject)((key >> PendingTypeShift) & 0xFF);
+            // MAX is a named member with no data entry; the prefab lookup indexes the list by
+            // value, so a malformed key must not reach it.
+            return type > EDecoObject.None && type < EDecoObject.MAX
+                && Enum.IsDefined(typeof(EDecoObject), type);
         }
 
         internal static InteractableObject Resolve(long key)
@@ -101,6 +136,7 @@ namespace CardShopCoop.Modules.World
         private Vector3 _localBeforePosition;
         private Quaternion _localBeforeRotation;
         private Quaternion _localSentRotation;
+        private static int _suppressedLocalStarts;
 
         internal PlacementHoldInteraction(bool host, Action<INetMessage> broadcast,
             Action<int, INetMessage> send)
@@ -108,6 +144,20 @@ namespace CardShopCoop.Modules.World
             _host = host;
             _broadcast = broadcast;
             _send = send;
+        }
+
+        /// <summary>A game-path apply drives StartMoveObject/PlaceMovedObject itself; the resulting
+        /// move lifecycle is not a player hold. Callers wrap their apply with this scope so applies
+        /// never emit hold traffic or leave a hold behind (the World release path skips during a
+        /// prediction reconcile, so an apply that started a hold could never end it).</summary>
+        internal static void BeginSuppressLocalStarts() => _suppressedLocalStarts++;
+
+        internal static void EndSuppressLocalStarts()
+        {
+            if (_suppressedLocalStarts > 0)
+            {
+                _suppressedLocalStarts--;
+            }
         }
 
         /// <summary>False when another player already holds the object, so the local move must be
@@ -135,7 +185,8 @@ namespace CardShopCoop.Modules.World
         /// so this peer does not track (or later predict) a move it does not own.</summary>
         internal bool LocalStarted(InteractableObject obj)
         {
-            if (obj == null || _localKey != 0 || !PlacementHoldKey.TryGet(obj, out var key))
+            if (_suppressedLocalStarts > 0 || obj == null || _localKey != 0
+                || !PlacementHoldKey.TryGet(obj, out var key))
             {
                 return false;
             }
@@ -251,12 +302,19 @@ namespace CardShopCoop.Modules.World
         internal void ApplyRotation(PlacementHoldRotationMessage message)
         {
             if (message == null
-                || !_remote.TryGetValue(message.HoldKey, out var hold) || hold.Obj == null)
+                || !_remote.TryGetValue(message.HoldKey, out var hold))
             {
                 return;
             }
 
-            hold.Obj.transform.rotation = message.Rotation;
+            if (hold.Obj != null)
+            {
+                hold.Obj.transform.rotation = message.Rotation;
+            }
+            else if (hold.Ghost != null)
+            {
+                hold.Ghost.transform.rotation = message.Rotation;
+            }
         }
 
         /// <summary>True when <paramref name="connectionId"/> owns the hold for
@@ -361,6 +419,21 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            if (PlacementHoldKey.IsPendingDecoration(key))
+            {
+                // In-flight decoration taken from inventory: no object exists on this observer, so
+                // the key itself carries the decoration type and we render a standalone ghost.
+                if (!PlacementHoldKey.TryGetPendingDecorationType(key, out var pendingType))
+                {
+                    CoopPlugin.Log.LogWarning("[placement-hold] pending begin with undecodable "
+                        + "decoration type key=" + key + ".");
+                    return;
+                }
+
+                StartPendingGhost(key, pendingType, message.MoverConnectionId);
+                return;
+            }
+
             var obj = PlacementHoldKey.Resolve(key);
             if (obj != null && !obj.GetIsMovingObject())
             {
@@ -397,6 +470,33 @@ namespace CardShopCoop.Modules.World
                 var hold = pair.Value;
                 if (hold.Obj == null)
                 {
+                    // In-flight decoration: drive the standalone ghost from the holder's camera.
+                    // Pending pieces are always considered valid, so no snapping or validity read.
+                    if (hold.Ghost == null)
+                    {
+                        continue;
+                    }
+
+                    if (!PresenceApi.TryGetPeerCameraForHolder(hold.MoverConnectionId,
+                        out var ghostCameraPosition, out var ghostCameraRotation))
+                    {
+                        continue;
+                    }
+
+                    var ghostTarget = ghostCameraPosition
+                        + ghostCameraRotation * Vector3.forward * PreviewDistance
+                        + ghostCameraRotation * Vector3.up * PreviewOffsetUp;
+                    if (ghostTarget.y < 0f)
+                    {
+                        ghostTarget.y = 0f;
+                    }
+
+                    hold.Ghost.transform.position = ghostTarget;
+                    if (hold.Material != null && manager != null)
+                    {
+                        hold.Material.SetColor(ColorId, manager.m_PreviewMeshValidColor);
+                    }
+
                     continue;
                 }
 
@@ -507,6 +607,58 @@ namespace CardShopCoop.Modules.World
             _remote[key] = hold;
         }
 
+        /// <summary>Renders an in-flight decoration that has not been placed yet, so no
+        /// <see cref="InteractableObject"/> exists on this observer. The decoration type from the
+        /// hold key selects the spawn prefab, which is only a temporary mesh donor: the standalone
+        /// ghost is then driven from the holder's camera by <see cref="Tick"/>.</summary>
+        private void StartPendingGhost(long key, EDecoObject type, int moverConnectionId)
+        {
+            var prefab = InventoryBase.GetSpawnDecoObjectPrefab(type);
+            if (prefab == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] pending ghost could not be built type="
+                    + type + " (no prefab).");
+                return;
+            }
+
+            var manager = PlacementInterop.FindShelfManager();
+            GameObject ghost = null;
+            Material material = null;
+            var temp = UnityEngine.Object.Instantiate(prefab);
+            try
+            {
+                // The prefab instance is a mesh donor only; keep it out of the scene.
+                temp.gameObject.SetActive(false);
+                ghost = CreateGhostMesh(temp, manager, out material, out var anchor);
+                if (ghost != null)
+                {
+                    ghost.transform.position = anchor.position;
+                    ghost.transform.rotation = anchor.rotation;
+                }
+            }
+            finally
+            {
+                UnityEngine.Object.Destroy(temp.gameObject);
+            }
+
+            if (ghost == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] pending ghost could not be built type="
+                    + type + ".");
+                return;
+            }
+
+            _remote[key] = new RemoteHold
+            {
+                Obj = null,
+                Ghost = ghost,
+                Material = material,
+                MoverConnectionId = moverConnectionId,
+            };
+            CoopPlugin.Log.LogInfo("[placement-hold] pending remote begin key=" + key + " type="
+                + type + " mover=" + moverConnectionId + " material=" + (material != null) + ".");
+        }
+
         private static void StopRemote(RemoteHold hold)
         {
             if (hold.Obj != null)
@@ -551,6 +703,14 @@ namespace CardShopCoop.Modules.World
             if (hold.Ghost != null)
             {
                 UnityEngine.Object.Destroy(hold.Ghost);
+            }
+
+            // The preview material is cloned per hold; destroy it with the ghost so repeated
+            // holds do not accumulate native materials.
+            if (hold.Material != null)
+            {
+                UnityEngine.Object.Destroy(hold.Material);
+                hold.Material = null;
             }
         }
 
@@ -628,12 +788,35 @@ namespace CardShopCoop.Modules.World
         private static GameObject CreateGhost(InteractableObject obj, ShelfManager manager,
             out Material material)
         {
+            var ghost = CreateGhostMesh(obj, manager, out material, out var anchor);
+            if (ghost == null)
+            {
+                return null;
+            }
+
+            // Match the game's own move preview: place the ghost at the world pose of the pickup
+            // mesh (which can be nested under rotated/scaled children), then reparent to the
+            // object preserving world pose. Reading the mesh's local transform instead put the
+            // ghost in the wrong place, rotation and scale whenever it was not a direct child.
+            ghost.transform.position = anchor.position;
+            ghost.transform.rotation = anchor.rotation;
+            ghost.transform.SetParent(obj.transform, true);
+            return ghost;
+        }
+
+        /// <summary>Builds an unparented see-through ghost for <paramref name="source"/>'s pickup
+        /// mesh, sharing the mover's translucent preview material and renderer settings. Returns
+        /// null when the source has no usable mesh. <paramref name="anchor"/> is the pickup-mesh
+        /// transform whose world scale the ghost is sized to; the caller positions it.</summary>
+        private static GameObject CreateGhostMesh(InteractableObject source, ShelfManager manager,
+            out Material material, out Transform anchor)
+        {
             material = null;
             // The pickup mesh may sit under rotated/scaled children; fall back to the object's own
             // MeshFilter when it is missing.
-            var sourceFilter = obj.m_PickupObjectMesh;
+            var sourceFilter = source.m_PickupObjectMesh;
             if ((sourceFilter == null || sourceFilter.sharedMesh == null)
-                && obj.TryGetComponent<MeshFilter>(out var own))
+                && source.TryGetComponent<MeshFilter>(out var own))
             {
                 sourceFilter = own;
             }
@@ -641,16 +824,18 @@ namespace CardShopCoop.Modules.World
             var mesh = sourceFilter != null ? sourceFilter.sharedMesh : null;
             if (mesh == null)
             {
+                anchor = null;
                 return null;
             }
 
+            anchor = sourceFilter != null ? sourceFilter.transform : source.transform;
             var ghost = new GameObject("CardShopCoop.PlacementGhost");
             ghost.AddComponent<MeshFilter>().sharedMesh = mesh;
             var renderer = ghost.AddComponent<MeshRenderer>();
-            var source = manager != null ? manager.m_MoveObjectPreviewRenderer : null;
-            if (source != null && source.sharedMaterial != null)
+            var preview = manager != null ? manager.m_MoveObjectPreviewRenderer : null;
+            if (preview != null && preview.sharedMaterial != null)
             {
-                material = new Material(source.sharedMaterial);
+                material = new Material(preview.sharedMaterial);
                 renderer.sharedMaterial = material;
 
                 // The see-through preview must draw over translucent shop geometry (glass walls,
@@ -673,15 +858,7 @@ namespace CardShopCoop.Modules.World
             renderer.shadowCastingMode = ShadowCastingMode.Off;
             renderer.receiveShadows = false;
             renderer.sortingOrder = short.MaxValue;
-            // Match the game's own move preview: place the ghost at the world pose of the pickup
-            // mesh (which can be nested under rotated/scaled children), then reparent to the
-            // object preserving world pose. Reading the mesh's local transform instead put the
-            // ghost in the wrong place, rotation and scale whenever it was not a direct child.
-            var anchor = sourceFilter != null ? sourceFilter.transform : obj.transform;
-            ghost.transform.position = anchor.position;
-            ghost.transform.rotation = anchor.rotation;
             ghost.transform.localScale = anchor.lossyScale + Vector3.one * 0.001f;
-            ghost.transform.SetParent(obj.transform, true);
             return ghost;
         }
     }

@@ -66,7 +66,10 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            PredictionApi.AckOrApply(message.PredictionId,
+            // Confirm, not AckOrApply: the host normalizes the name (trim/length/control), so the
+            // actor must retire its prediction AND apply the host's canonical value. AckOrApply
+            // retires the actor's own echo and skips the apply, keeping the raw input.
+            PredictionApi.Confirm(message.PredictionId,
                 () =>
                 {
                     _pendingName = message.Name;

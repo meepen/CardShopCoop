@@ -11,7 +11,12 @@ namespace CardShopCoop.Modules.World
     /// The GAME owns every mutation: each hook below is an OBSERVER. Vanilla runs its own method
     /// to completion and the postfix records the resulting change as ONE prediction (client) or
     /// fans it out (host). No prefix suppresses the original, so the local ledger can never drift
-    /// from what the game actually did.</summary>
+    /// from what the game actually did.
+    ///
+    /// A mutation the MOD made itself runs behind WorldCardInteraction.ApplyingRemoteCards; the
+    /// game's own UI never saw it, so the postfix also feeds it to the open-binder mirror
+    /// (WorldCardInteraction.RecordCardChanged). Local mutations stay on the game's own path and
+    /// need no mirroring.</summary>
     internal static class WorldCardInteractionPatches
     {
         internal static void Apply(Harmony harmony)
@@ -32,8 +37,20 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(CardData cardData, int addAmount)
             {
                 var current = Current;
-                if (current == null || WorldCardInteraction.ApplyingRemoteCards
-                    || WorldCardInteraction.SuppressClientCardForwarding
+                if (current == null)
+                {
+                    return;
+                }
+
+                if (WorldCardInteraction.ApplyingRemoteCards)
+                {
+                    // The mod applied this itself (remote delta, prediction replay, grading
+                    // move); the game's own UI never saw it, so mirror it into an open binder.
+                    WorldCardInteraction.RecordCardChanged(cardData, addAmount, true);
+                    return;
+                }
+
+                if (WorldCardInteraction.SuppressClientCardForwarding
                     || SaveTransferApi.PreloadHold)
                 {
                     return;
@@ -87,8 +104,18 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(CardData cardData, int reduceAmount)
             {
                 var current = Current;
-                if (current == null || WorldCardInteraction.ApplyingRemoteCards
-                    || WorldCardInteraction.SuppressClientCardForwarding
+                if (current == null)
+                {
+                    return;
+                }
+
+                if (WorldCardInteraction.ApplyingRemoteCards)
+                {
+                    WorldCardInteraction.RecordCardChanged(cardData, reduceAmount, false);
+                    return;
+                }
+
+                if (WorldCardInteraction.SuppressClientCardForwarding
                     || SaveTransferApi.PreloadHold)
                 {
                     return;
@@ -112,8 +139,22 @@ namespace CardShopCoop.Modules.World
                 bool isDestiny, int reduceAmount)
             {
                 var current = Current;
-                if (current == null || WorldCardInteraction.ApplyingRemoteCards
-                    || WorldCardInteraction.SuppressClientCardForwarding
+                if (current == null)
+                {
+                    return;
+                }
+
+                if (WorldCardInteraction.ApplyingRemoteCards)
+                {
+                    var changed = CPlayerData.GetCardData(index, expansionType, isDestiny);
+                    if (changed != null)
+                    {
+                        WorldCardInteraction.RecordCardChanged(changed, reduceAmount, false);
+                    }
+                    return;
+                }
+
+                if (WorldCardInteraction.SuppressClientCardForwarding
                     || SaveTransferApi.PreloadHold)
                 {
                     return;
@@ -151,8 +192,21 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(CardData cardData)
             {
                 var current = Current;
-                if (current == null || WorldCardInteraction.ApplyingRemoteCards
-                    || WorldCardInteraction.SuppressClientCardForwarding
+                if (current == null)
+                {
+                    return;
+                }
+
+                if (WorldCardInteraction.ApplyingRemoteCards)
+                {
+                    if (cardData != null && cardData.cardGrade > 0)
+                    {
+                        WorldCardInteraction.RecordCardChanged(cardData, 1, false);
+                    }
+                    return;
+                }
+
+                if (WorldCardInteraction.SuppressClientCardForwarding
                     || SaveTransferApi.PreloadHold
                     || cardData == null || cardData.cardGrade <= 0)
                 {

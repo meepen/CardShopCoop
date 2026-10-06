@@ -115,6 +115,8 @@ namespace CardShopCoop.UI
         private string _hostTimeSeen, _hostTimeText; private GUIContent _hostTimeGc;
         private string _registerSeen, _registerText; private GUIContent _registerGc;
         private string _nextDayWaitSeen, _nextDayWaitText; private GUIContent _nextDayWaitGc;
+        private string _endOfDayPendingSeen, _endOfDayPendingText;
+        private GUIContent _endOfDayPendingGc;
         private KeyCode _toggleKeySeen = KeyCode.None;
         private string _toggleHint;
 
@@ -186,27 +188,21 @@ namespace CardShopCoop.UI
             }
             if (HudApi.ToastText.Length > 0)
             {
-                if (HudApi.ToastText != _registerSeen)
-                {
-                    _registerSeen = HudApi.ToastText;
-                    _registerText = $"<size=18><color=#8ef58a>{HudApi.ToastText}</color></size>";
-                    _registerGc = new GUIContent(_registerText);
-                }
-                var sz = CoopTheme.PillSize(CoopTheme.HudPillBig, _registerGc, 740f);
-                GUI.Label(new Rect((Screen.width - sz.x) / 2f, Screen.height * 0.63f, sz.x, sz.y),
-                    _registerGc, CoopTheme.HudPillBig);
+                DrawHudPill(HudApi.ToastText, "#8ef58a", Screen.height * 0.63f,
+                    ref _registerSeen, ref _registerText, ref _registerGc);
             }
             if (HudApi.NextDayWaitActive && HudApi.NextDayWaitText.Length > 0)
             {
-                if (HudApi.NextDayWaitText != _nextDayWaitSeen)
-                {
-                    _nextDayWaitSeen = HudApi.NextDayWaitText;
-                    _nextDayWaitText = $"<size=18><color=#ffd54a>{HudApi.NextDayWaitText}</color></size>";
-                    _nextDayWaitGc = new GUIContent(_nextDayWaitText);
-                }
-                var sz = CoopTheme.PillSize(CoopTheme.HudPillBig, _nextDayWaitGc, 740f);
-                GUI.Label(new Rect((Screen.width - sz.x) / 2f, Screen.height * 0.70f, sz.x, sz.y),
-                    _nextDayWaitGc, CoopTheme.HudPillBig);
+                DrawHudPill(HudApi.NextDayWaitText, "#ffd54a", Screen.height * 0.70f,
+                    ref _nextDayWaitSeen, ref _nextDayWaitText, ref _nextDayWaitGc);
+            }
+            // The pending-open notice and the ready-gate notice share this anchor by design:
+            // a guest whose recap never opened cannot have pressed Next Day, so the two states
+            // are mutually exclusive and only one line can ever be up.
+            if (HudApi.EndOfDayPendingActive && HudApi.EndOfDayPendingText.Length > 0)
+            {
+                DrawHudPill(HudApi.EndOfDayPendingText, "#ffd54a", Screen.height * 0.70f,
+                    ref _endOfDayPendingSeen, ref _endOfDayPendingText, ref _endOfDayPendingGc);
             }
             if (!Visible)
             {
@@ -229,6 +225,25 @@ namespace CardShopCoop.UI
             // pre-call clamp only had the previous frame's height.
             _win.x = Mathf.Clamp(_win.x, 0f, Mathf.Max(0f, Screen.width - _win.width));
             _win.y = Mathf.Clamp(_win.y, 0f, Mathf.Max(0f, Screen.height - _win.height));
+        }
+
+        /// <summary>Draws one horizontally centered persistent HUD pill. OnGUI runs at least twice
+        /// per frame and matching layout/repaint passes must see the same control set, so each
+        /// line latches its source text and the GUIContent is rebuilt only when that source
+        /// changes; the styles/textures stay cached in <see cref="CoopTheme"/>.</summary>
+        private static void DrawHudPill(string source, string color, float y,
+            ref string seen, ref string cached, ref GUIContent content)
+        {
+            if (source != seen)
+            {
+                seen = source;
+                cached = $"<size=18><color={color}>{source}</color></size>";
+                content = new GUIContent(cached);
+            }
+
+            var size = CoopTheme.PillSize(CoopTheme.HudPillBig, content, 740f);
+            GUI.Label(new Rect((Screen.width - size.x) / 2f, y, size.x, size.y), content,
+                CoopTheme.HudPillBig);
         }
 
         private void WindowFn(CoopCore core, ICoopTransport net)

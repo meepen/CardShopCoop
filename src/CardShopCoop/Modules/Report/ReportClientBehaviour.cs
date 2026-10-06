@@ -21,7 +21,8 @@ namespace CardShopCoop.Modules.Report
     /// <summary>
     /// Guest-side report mirror. The recap is display-only: both vanilla advance paths are
     /// suppressed on the guest and instead signal readiness to the host, which is the single
-    /// writer of the next day and the shared event fee.
+    /// writer of the next day and the shared event fee. The recap is opened as soon as the local
+    /// player is out of any blocking screen, with a persistent HUD notice while it waits.
     /// </summary>
     [ClientBehaviour]
     public sealed class ReportClientBehaviour : CoopBehaviour
@@ -36,6 +37,16 @@ namespace CardShopCoop.Modules.Report
             ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsPhoneScreenMode");
         private static readonly FieldInfo FiCashMode =
             ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsCashCounterMode");
+        private static readonly FieldInfo FiInUiMode =
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsInUIMode");
+        private static readonly FieldInfo FiViewAlbumMode =
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsViewCardAlbumMode");
+        private static readonly FieldInfo FiExitingAlbumMode =
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsExitingViewCardAlbumMode");
+        private static readonly FieldInfo FiScanRestockMode =
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsScanRestockMode");
+        private static readonly FieldInfo FiCameraPhotoMode =
+            ReflectionSurface.RequiredField(typeof(InteractionPlayerController), "m_IsCameraTakePhotoMode");
         private static readonly FieldInfo FiLoadingGrp =
             ReflectionSurface.RequiredField(typeof(EndOfDayReportScreen), "m_LoadingScreenGrp");
         private static readonly FieldInfo FiLoadingCurrentDay =
@@ -46,6 +57,8 @@ namespace CardShopCoop.Modules.Report
         private const int CounterSlice = 0;
         private const int MoneySlice = 1;
         private const int ReviewSlice = 2;
+        private const string EndOfDayPendingNotice =
+            "End of Day pending, back out of what you are doing to proceed!";
 
         private static ReportClientBehaviour _active;
         private CoopRuntimeContext _context;
@@ -61,6 +74,20 @@ namespace CardShopCoop.Modules.Report
         private bool _nextDayLocalReady;
         private ReportNextDayWaitMessage _nextDayWait;
         private Coroutine _rolloverCoroutine;
+
+        /// <summary>True while the host's recap is owed here but has not opened yet. Every write
+        /// goes through this property so the pending notice cannot outlive the state that shows
+        /// it; writing the same value re-asserts the notice because another subsystem's HUD clear
+        /// must not desynchronize the two.</summary>
+        private bool PendingOpen
+        {
+            get => _pendingOpen;
+            set
+            {
+                _pendingOpen = value;
+                RefreshPendingNotice();
+            }
+        }
 
         private void OnEnable()
         {
@@ -134,6 +161,31 @@ namespace CardShopCoop.Modules.Report
             _active.TryApplyPendingState();
         }
 
+        /// <summary>Retries a blocked recap open while the host's report is owed. This is not an
+        /// idle poll: it only runs between the host opening the recap and this guest actually
+        /// seeing it, and each attempt re-checks the states the player must back out of first.</summary>
+        private void Update()
+        {
+            if (_shutdown || !_pendingOpen)
+            {
+                return;
+            }
+
+            if (_context == null || !_context.InGame())
+            {
+                RefreshPendingNotice();
+                return;
+            }
+
+            PendingOpen = !TryOpenReportScreen();
+        }
+
+        private void RefreshPendingNotice()
+        {
+            var show = !_shutdown && _pendingOpen && _context != null && _context.InGame();
+            HudApi.SetEndOfDayPending(show, show ? EndOfDayPendingNotice : "");
+        }
+
         [MessageHandler(typeof(ReportStateMessage))]
         private void HandleState(MessageContext context, ReportStateMessage message)
         {
@@ -197,7 +249,7 @@ namespace CardShopCoop.Modules.Report
             _clientOpenReport = default(GameReportDataCollect);
             _reviewSeq = -1;
             _haveOpenReport = false;
-            _pendingOpen = false;
+            PendingOpen = false;
             ClearNextDayWait();
         }
 
@@ -280,7 +332,7 @@ namespace CardShopCoop.Modules.Report
             if (openScreen)
             {
                 _clientOpenReport = CPlayerData.m_GameReportDataCollect;
-                _pendingOpen = !TryOpenReportScreen();
+                PendingOpen = !TryOpenReportScreen();
             }
         }
 
@@ -327,6 +379,10 @@ namespace CardShopCoop.Modules.Report
             CPlayerData.m_CustomerReviewScoreAverage = message.ReviewScoreAverage;
         }
 
+        /// <summary>Attempts to bring up the guest recap. Returns false while the local player is
+        /// still in a state the recap must not be layered on top of; the pending notice tells them
+        /// to back out and <see cref="Update"/> retries. A manned register or cash-counter position
+        /// is released here first, exactly like the vanilla End Day key does.</summary>
         private bool TryOpenReportScreen()
         {
             if (_screen == null)
@@ -342,27 +398,86 @@ namespace CardShopCoop.Modules.Report
             if (EndOfDayReportScreen.IsActive())
             {
                 _haveOpenReport = true;
-                _pendingOpen = false;
+                PendingOpen = false;
                 return true;
             }
 
             if (_ipc == null)
+            {
                 _ipc = SceneRef<InteractionPlayerController>.Get();
+            }
 
             var playerController = _ipc;
             if (playerController != null)
             {
-                if ((bool)FiPhoneMode.GetValue(playerController))
-                    return true;
+                // The player cannot back out of a counter position themselves without losing the
+                // checkout, so the game's own exit path runs here. Everything else waits: the
+                // recap must not be forced over the phone, the card album, or an open UI screen.
                 if ((bool)FiCashMode.GetValue(playerController))
+                {
                     playerController.OnExitCashCounterMode();
+                    // A manned counter also owns UI mode through its card-payment phase
+                    // (StartGivingChange calls EnterUIMode). Once the counter is unmanned that
+                    // screen has no reachable exit, because vanilla only clears the mode when the
+                    // payment completes and RaycastCashCounterState stops running while it is set.
+                    // Release it here or the recap would wait forever on a state the player cannot
+                    // back out of.
+                    if ((bool)FiInUiMode.GetValue(playerController))
+                    {
+                        playerController.ExitUIMode();
+                    }
+                }
+
                 RegisterClientBehaviour.ForceExitManned();
+                if (IsInteractionBlocking(playerController))
+                {
+                    return false;
+                }
+            }
+
+            if (IsGlobalScreenBlocking())
+            {
+                return false;
             }
 
             EndOfDayReportScreen.OpenScreen();
             _haveOpenReport = true;
-            _pendingOpen = false;
+            PendingOpen = false;
             return true;
+        }
+
+        /// <summary>Modes the player must back out of before the recap can be shown: the phone,
+        /// an open UI screen (price/restock/grading/table screens), the card album, or the phone's
+        /// scanner and camera modes. The counter position is released separately above.</summary>
+        private static bool IsInteractionBlocking(InteractionPlayerController playerController)
+        {
+            return (bool)FiPhoneMode.GetValue(playerController)
+                || (bool)FiInUiMode.GetValue(playerController)
+                || (bool)FiViewAlbumMode.GetValue(playerController)
+                || (bool)FiExitingAlbumMode.GetValue(playerController)
+                || (bool)FiScanRestockMode.GetValue(playerController)
+                || (bool)FiCameraPhotoMode.GetValue(playerController);
+        }
+
+        /// <summary>Vanilla ignores its own End Day key while the pause, settings, or loading
+        /// screens are up, so the mirrored recap waits for those too. SceneRef never fabricates a
+        /// game CSingleton the way <c>Instance</c> would.</summary>
+        private static bool IsGlobalScreenBlocking()
+        {
+            var pause = SceneRef<PauseScreen>.Get();
+            if (pause != null && pause.m_ScreenGrp != null && pause.m_ScreenGrp.activeSelf)
+            {
+                return true;
+            }
+
+            var settings = SceneRef<SettingScreen>.Get();
+            if (settings != null && settings.m_ScreenGrp != null && settings.m_ScreenGrp.activeSelf)
+            {
+                return true;
+            }
+
+            var loading = SceneRef<LoadingScreen>.Get();
+            return loading != null && loading.m_ScreenGrp != null && loading.m_ScreenGrp.activeSelf;
         }
 
         private void TryApplyPendingState()
@@ -381,7 +496,7 @@ namespace CardShopCoop.Modules.Report
 
             if (_pendingOpen)
             {
-                _pendingOpen = !TryOpenReportScreen();
+                PendingOpen = !TryOpenReportScreen();
             }
 
         }
@@ -406,6 +521,9 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
+            // The host's close always ends the pending-open state, even when this guest never got
+            // the recap open at all; otherwise the notice would outlive the day it belongs to.
+            active.PendingOpen = false;
             if (active._screen == null)
             {
                 active._screen = SceneRef<EndOfDayReportScreen>.Get();
@@ -421,7 +539,6 @@ namespace CardShopCoop.Modules.Report
                 CPlayerData.m_GameReportDataCollect = active._clientOpenReport;
 
             active._haveOpenReport = false;
-            active._pendingOpen = false;
             EndOfDayReportScreen.CloseScreen();
             FiHoldingMouseDown.SetValue(active._screen, false);
             FiMouseDownTime.SetValue(active._screen, 0f);
@@ -614,7 +731,7 @@ namespace CardShopCoop.Modules.Report
             _clientOpenReport = default(GameReportDataCollect);
             _reviewSeq = -1;
             _haveOpenReport = false;
-            _pendingOpen = false;
+            PendingOpen = false;
             ClearNextDayWait();
             _context = null;
         }

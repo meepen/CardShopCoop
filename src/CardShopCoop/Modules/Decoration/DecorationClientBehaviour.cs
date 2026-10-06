@@ -16,10 +16,14 @@ namespace CardShopCoop.Modules.Decoration
     public sealed class DecorationClientBehaviour : CoopBehaviour
     {
         private static DecorationClientBehaviour _active;
+        /// <summary>The placement attempt currently inside the game's PlaceMovedObject frame. The
+        /// game runs its commit callback (OnPlacedMovedObject) for placements, box-ups and the
+        /// World hold cancel alike; only a call made inside this peer's PlaceMovedObject frame is
+        /// a placement. The marker lives only for that synchronous frame, never across frames.</summary>
+        private static InteractableObject _placingInstance;
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private DecorationStateMessage _pendingState;
-        private InteractableObject _pendingPlacement;
         private readonly Dictionary<Guid, InteractableObject> _placementPreviews = new();
         private bool _shutdown;
         private int _applyingState;
@@ -48,8 +52,8 @@ namespace CardShopCoop.Modules.Decoration
                 _harmony.CreateClassProcessor(typeof(EquipPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyItemPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(MovePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(PlacePatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(PlaceAttemptPatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(PlacedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(RemovePatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(ShelfReadyPatch)).Patch();
             }
@@ -143,7 +147,11 @@ namespace CardShopCoop.Modules.Decoration
             _applyingState++;
             try
             {
-                DecorationInterop.ApplySnapshot(_pendingState);
+                // A prediction that is still awaiting its host decision owns its preview. A
+                // rejection state built before that intent was applied must not delete it; the
+                // preview's own echo or rollback settles it.
+                DecorationInterop.ApplySnapshot(_pendingState,
+                    keepUnlisted: _placementPreviews.ContainsValue);
                 _pendingState = null;
             }
             finally
@@ -283,7 +291,7 @@ namespace CardShopCoop.Modules.Decoration
         {
             _joined = false;
             _pendingState = null;
-            _pendingPlacement = null;
+            _placingInstance = null;
             _placementPreviews.Clear();
             _applyingState = 0;
         }
@@ -338,11 +346,12 @@ namespace CardShopCoop.Modules.Decoration
                 bool isShopLotB, out State __state)
             {
                 __state = null;
-                if (!IsClientReady() || _active._applyingState != 0)
+                if (!IsClientReady() || _active._applyingState != 0
+                    || PredictionApi.IsReconciling)
                     return;
                 __state = new State
                 {
-                    Before = DecorationInterop.Snapshot(),
+                    Before = DecorationInterop.Snapshot(authoritative: false),
                     Category = DecorationInterop.CategoryFor(__instance),
                     Index = shopDecoIndex,
                     LotB = isShopLotB,
@@ -386,7 +395,7 @@ namespace CardShopCoop.Modules.Decoration
             if (!IsClientReady())
                 return;
             state.Armed = true;
-            state.Before = DecorationInterop.Snapshot();
+            state.Before = DecorationInterop.Snapshot(authoritative: false);
             // The wallet event is only queued by the vanilla buy (it runs later), but the report
             // cost is decremented synchronously, so it is the reliable "did it charge" signal.
             state.UpgradeCostBefore = CPlayerData.m_GameReportDataCollectPermanent.upgradeCost;
@@ -471,64 +480,50 @@ namespace CardShopCoop.Modules.Decoration
             private static void Finalizer(BuyCapture __state) => ReleaseBuy(__state);
         }
 
-        [HarmonyPatch(typeof(InteractableObject), "StartMoveObject")]
-        private static class MovePatch
+        /// <summary>Marks the game's placement attempt for a decoration. This is not pending state:
+        /// the marker only exists while the synchronous PlaceMovedObject frame runs, so the other
+        /// callers of the game's commit callback can be told apart. An attempt vanilla refuses
+        /// (invalid aim) never commits and therefore registers nothing.</summary>
+        [HarmonyPatch(typeof(InteractableObject), "PlaceMovedObject")]
+        private static class PlaceAttemptPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractableObject __instance)
+            {
+                var client = _active;
+                if (client == null || !IsClientReady() || client._applyingState != 0
+                    || PredictionApi.IsReconciling || __instance == null
+                    || __instance.m_DecoObjectType == EDecoObject.None
+                    || !__instance.GetIsMovingObject())
+                    return;
+                _placingInstance = __instance;
+            }
+
+            [HarmonyFinalizer]
+            private static void Finalizer() => _placingInstance = null;
+        }
+
+        /// <summary>The game's placement commit callback. It also runs for box-up and the World
+        /// hold cancel; only a call made inside this peer's PlaceMovedObject frame is a placement
+        /// this peer must send. The intent is read from the settled object itself: its type and
+        /// pose, and the client mapping (0 = a fresh piece the host has not created yet). A
+        /// rejected placement is reconciled by the host's authoritative state, which the host
+        /// sends with the generic rollback, so no local inverse runs here.</summary>
+        [HarmonyPatch(typeof(InteractableObject), "OnPlacedMovedObject")]
+        private static class PlacedPatch
         {
             [HarmonyPostfix]
             private static void Postfix(InteractableObject __instance)
             {
-                if (!IsClientReady() || _active._applyingState != 0 || __instance == null
-                    || __instance.m_DecoObjectType == EDecoObject.None)
+                var client = _active;
+                if (client == null || __instance == null
+                    || !ReferenceEquals(_placingInstance, __instance)
+                    || !IsClientReady() || client._applyingState != 0
+                    || PredictionApi.IsReconciling)
                     return;
-                _active._pendingPlacement = __instance.GetIsMovingObject() ? __instance : null;
-            }
-        }
 
-        [HarmonyPatch(typeof(InteractableObject), "PlaceMovedObject")]
-        private static class PlacePatch
-        {
-            private sealed class State
-            {
-                public DecorationSnapshot Before;
-                public DecorationPose Pose;
-                public long ObjectId;
-                public InteractableObject Instance;
-                public InteractableObject Preview;
-            }
-
-            [HarmonyPrefix]
-            private static void Prefix(InteractableObject __instance, out State __state)
-            {
-                __state = null;
-                if (!IsClientReady() || _active._applyingState != 0 || __instance == null
-                    || __instance.m_DecoObjectType == EDecoObject.None || !__instance.GetIsMovingObject()
-                    || !ReferenceEquals(__instance, _active._pendingPlacement))
-                    return;
                 var pose = DecorationInterop.ReadPose(__instance);
                 var objectId = DecorationInterop.ClientIdFor(__instance);
-                __state = new State
-                {
-                    Before = DecorationInterop.Snapshot(),
-                    Pose = pose,
-                    ObjectId = objectId,
-                    Instance = __instance,
-                    // A brand-new piece has no host id yet, so hand it to the delta as the preview
-                    // it may adopt instead of spawning a second piece.
-                    Preview = objectId > 0 ? null : __instance,
-                };
-            }
-
-            [HarmonyPostfix]
-            private static void Postfix(State __state)
-            {
-                var client = _active;
-                if (__state == null || client == null)
-                    return;
-                client._pendingPlacement = null;
-                if (!IsClientReady() || client._applyingState != 0 || PredictionApi.IsReconciling
-                    || __state.Instance == null || __state.Instance.GetIsMovingObject())
-                    return;
-                var pose = __state.Pose;
                 var message = new DecorationIntentMessage
                 {
                     Action = DecorationActions.Place,
@@ -538,14 +533,21 @@ namespace CardShopCoop.Modules.Decoration
                     Vertical = pose.Vertical,
                     WarehouseWallSnap = pose.WarehouseWallSnap,
                     WallIndex = pose.Wall,
-                    ObjectId = __state.ObjectId,
+                    ObjectId = objectId,
                 };
-                var instance = __state.Instance;
+                var instance = __instance;
+                CoopPlugin.Log.LogInfo("[decoration] place committed id=" + objectId + " type="
+                    + pose.DecorationType + ".");
                 Predict(message, () =>
                 {
                     DecorationInterop.ApplyPredictedPose(instance, pose);
                     SceneRef<InteractionPlayerController>.Get()?.OnExitMoveObjectMode();
-                }, () => UndoState(__state.Before), __state.Preview);
+                }, () =>
+                {
+                    // A placement's local mutation is the piece's pose or its existence. A
+                    // rejected placement is restored by the authoritative state that follows the
+                    // rollback, and a fresh piece is destroyed when its prediction retires.
+                }, objectId > 0 ? null : __instance);
             }
         }
 
@@ -572,7 +574,7 @@ namespace CardShopCoop.Modules.Decoration
                     return;
                 __state = new State
                 {
-                    Before = DecorationInterop.Snapshot(),
+                    Before = DecorationInterop.Snapshot(authoritative: false),
                     ObjectId = objectId,
                     Type = __instance.m_DecoObjectType,
                     Instance = __instance,

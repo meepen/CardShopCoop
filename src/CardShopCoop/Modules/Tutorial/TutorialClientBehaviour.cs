@@ -126,7 +126,9 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
             }
 
-            PredictionApi.AckOrApply(message.PredictionId, () => ApplyDelta(message));
+            // Single-condition deltas carry the host's absolute value too (another peer or the
+            // host may have advanced the same condition), so retire and apply like a full state.
+            PredictionApi.Confirm(message.PredictionId, () => ApplyDelta(message));
         }
 
         private void TryApplyPending()

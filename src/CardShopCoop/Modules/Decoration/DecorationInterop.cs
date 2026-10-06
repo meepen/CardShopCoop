@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using CardShopCoop.Modules.World;
 using CardShopCoop.Runtime;
 using CardShopCoop.Util;
 using UnityEngine;
@@ -118,16 +119,23 @@ namespace CardShopCoop.Modules.Decoration
         private static readonly Dictionary<InteractableObject, long> HostIds =
             new(new ReferenceComparer());
         private static readonly Dictionary<long, InteractableObject> ClientObjects = new();
+        private static readonly Dictionary<InteractableObject, long> LocalIds =
+            new(new ReferenceComparer());
+        private static readonly Dictionary<long, InteractableObject> LocalObjects = new();
         private static long _nextHostId = 1;
+        private static long _nextLocalId = -1;
 
         internal static void Reset()
         {
             HostIds.Clear();
             ClientObjects.Clear();
+            LocalIds.Clear();
+            LocalObjects.Clear();
             _nextHostId = 1;
+            _nextLocalId = -1;
         }
 
-        internal static DecorationSnapshot Snapshot()
+        internal static DecorationSnapshot Snapshot(bool authoritative = true)
         {
             if (!IsSceneReady())
             {
@@ -163,6 +171,24 @@ namespace CardShopCoop.Modules.Decoration
                 HostIds.Remove(stale[i]);
             }
 
+            var staleLocal = new List<InteractableObject>();
+            foreach (var pair in LocalIds)
+            {
+                if (!liveSet.Contains(pair.Key))
+                {
+                    staleLocal.Add(pair.Key);
+                }
+            }
+            for (var i = 0; i < staleLocal.Count; i++)
+            {
+                var obj = staleLocal[i];
+                if (LocalIds.TryGetValue(obj, out var local))
+                {
+                    LocalIds.Remove(obj);
+                    LocalObjects.Remove(local);
+                }
+            }
+
             for (var i = 0; i < live.Count; i++)
             {
                 var obj = live[i];
@@ -174,8 +200,9 @@ namespace CardShopCoop.Modules.Decoration
                 // Reuse the object's stable id whenever it already has one. On a guest that id
                 // comes from ClientObjects (assigned by the host); assigning a fresh synthetic id
                 // here re-keyed every mapped object and made later host deltas miss, which
-                // duplicated pieces whenever the host moved them.
-                var id = EnsureHostId(obj);
+                // duplicated pieces whenever the host moved them. A non-authoritative (guest
+                // rollback) capture instead uses the private negative local id space.
+                var id = EnsureSnapshotId(obj, authoritative);
 
                 result.Placed.Add(new DecorationPose
                 {
@@ -192,8 +219,29 @@ namespace CardShopCoop.Modules.Decoration
             return result;
         }
 
-        internal static void ApplySnapshot(DecorationStateMessage message,
-            bool removeUnlisted = true)
+        /// <summary>Identity for a snapshot. An authoritative host baseline assigns the one host id
+        /// space. A guest's local rollback capture uses a private negative id space, so a piece the
+        /// host has not mapped yet can never claim (or shadow) a real host id, and the same object
+        /// keeps the same local id across captures.</summary>
+        private static long EnsureSnapshotId(InteractableObject obj, bool authoritative)
+        {
+            if (obj == null)
+                return 0;
+            if (TryGetHoldId(obj, out var id))
+                return id;
+            if (authoritative)
+                return EnsureHostId(obj);
+            if (!LocalIds.TryGetValue(obj, out var local))
+            {
+                local = _nextLocalId--;
+                LocalIds.Add(obj, local);
+                LocalObjects.Add(local, obj);
+            }
+            return local;
+        }
+
+        internal static void ApplySnapshot(DecorationStateMessage message, bool removeUnlisted = true,
+            Func<InteractableObject, bool> keepUnlisted = null)
         {
             ApplyList(FiWallUnlocks, message.WallUnlocks);
             ApplyList(FiFloorUnlocks, message.FloorUnlocks);
@@ -206,7 +254,7 @@ namespace CardShopCoop.Modules.Decoration
             SetInt(FiCeiling, message.Ceiling);
             SetInt(FiCeilingB, message.CeilingB);
             ApplyMaterials(message);
-            Reconcile(message.Placed, removeUnlisted);
+            Reconcile(message.Placed, removeUnlisted, keepUnlisted);
             RefreshUi();
         }
 
@@ -357,7 +405,7 @@ namespace CardShopCoop.Modules.Decoration
             }
 
             InteractableObject spawned = null;
-            var isExisting = existingId > 0;
+            var isExisting = existingId != 0;
             // Host ids live in HostIds on the authority and in ClientObjects on a guest, so an
             // existing object must be resolved through both maps. Using only HostIds silently
             // failed on clients and spawned a duplicate for every move the host published.
@@ -376,6 +424,10 @@ namespace CardShopCoop.Modules.Decoration
             }
 
             var original = isExisting ? ReadPose(spawned) : null;
+            // A module-driven placement must not look like a local player hold: the hold layer's
+            // release is skipped while a prediction reconcile runs, so an apply that started a
+            // hold could leave it stuck and block every later hold this peer takes.
+            PlacementHoldInteraction.BeginSuppressLocalStarts();
             try
             {
                 if (!isExisting)
@@ -430,6 +482,10 @@ namespace CardShopCoop.Modules.Decoration
                         + cleanupException.Message);
                 }
                 return false;
+            }
+            finally
+            {
+                PlacementHoldInteraction.EndSuppressLocalStarts();
             }
         }
 
@@ -547,7 +603,7 @@ namespace CardShopCoop.Modules.Decoration
         {
             foreach (var pair in ClientObjects)
             {
-                if (ReferenceEquals(pair.Value, obj))
+                if (pair.Key > 0 && ReferenceEquals(pair.Value, obj))
                 {
                     return pair.Key;
                 }
@@ -601,8 +657,18 @@ namespace CardShopCoop.Modules.Decoration
         /// <summary>Resolves a host-space decoration id back to the live object on either role.</summary>
         internal static bool TryResolveHoldId(long id, out InteractableObject obj)
         {
-            obj = id > 0 ? GetMapped(id) : null;
-            return obj != null || (id > 0 && TryFindHostObject(id, out obj));
+            if (id == 0)
+            {
+                obj = null;
+                return false;
+            }
+            if (id < 0)
+            {
+                obj = LocalObjects.TryGetValue(id, out var local) && local != null ? local : null;
+                return obj != null;
+            }
+            obj = GetMapped(id);
+            return obj != null || TryFindHostObject(id, out obj);
         }
 
         internal static void ApplyDelta(DecorationDeltaMessage message,
@@ -709,6 +775,11 @@ namespace CardShopCoop.Modules.Decoration
                     break;
                 }
             }
+            if (obj != null && LocalIds.TryGetValue(obj, out var local))
+            {
+                LocalIds.Remove(obj);
+                LocalObjects.Remove(local);
+            }
         }
 
         internal static void ApplyPredictedPose(InteractableObject obj, DecorationPose pose)
@@ -773,7 +844,8 @@ namespace CardShopCoop.Modules.Decoration
             return result;
         }
 
-        private static void Reconcile(IList<DecorationPose> poses, bool removeUnlisted)
+        private static void Reconcile(IList<DecorationPose> poses, bool removeUnlisted,
+            Func<InteractableObject, bool> keepUnlisted)
         {
             var used = new HashSet<InteractableObject>(new ReferenceComparer());
             var next = new Dictionary<long, InteractableObject>();
@@ -815,7 +887,8 @@ namespace CardShopCoop.Modules.Decoration
                 for (var i = 0; i < live.Count; i++)
                 {
                     var obj = live[i];
-                    if (obj != null && !used.Contains(obj) && !obj.GetIsMovingObject())
+                    if (obj != null && !used.Contains(obj) && !obj.GetIsMovingObject()
+                        && keepUnlisted?.Invoke(obj) != true)
                     {
                         RemoveLocalPlacedObject(obj);
                     }
@@ -838,14 +911,21 @@ namespace CardShopCoop.Modules.Decoration
             ClientObjects.Clear();
             foreach (var pair in next)
             {
-                ClientObjects[pair.Key] = pair.Value;
+                if (pair.Key > 0)
+                    ClientObjects[pair.Key] = pair.Value;
             }
         }
 
         private static InteractableObject GetMapped(long id)
-            => id > 0 && ClientObjects.TryGetValue(id, out var obj) ? obj : null;
+        {
+            if (id > 0)
+                return ClientObjects.TryGetValue(id, out var obj) ? obj : null;
+            if (id < 0)
+                return LocalObjects.TryGetValue(id, out var obj) ? obj : null;
+            return null;
+        }
 
-        private static void ApplyPose(InteractableObject obj, DecorationPose pose)
+        internal static void ApplyPose(InteractableObject obj, DecorationPose pose)
         {
             obj.transform.SetPositionAndRotation(pose.Position, pose.Rotation);
             RebindWallBlocker(obj, pose.WarehouseWallSnap, pose.Wall);

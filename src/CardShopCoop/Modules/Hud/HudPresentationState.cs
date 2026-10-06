@@ -14,12 +14,16 @@ namespace CardShopCoop.Modules.Hud
         private static string _hostTimeText = "";
         private static bool _nextDayWaitActive;
         private static string _nextDayWaitText = "";
+        private static bool _endOfDayPendingActive;
+        private static string _endOfDayPendingText = "";
 
         public static string ToastText => _toastText;
         public static float ToastRemaining => _toastRemaining;
         public static string HostTimeText => _hostTimeText;
         public static bool NextDayWaitActive => _nextDayWaitActive;
         public static string NextDayWaitText => _nextDayWaitText;
+        public static bool EndOfDayPendingActive => _endOfDayPendingActive;
+        public static string EndOfDayPendingText => _endOfDayPendingText;
 
         public static bool HasToast => !string.IsNullOrEmpty(_toastText) && _toastRemaining > 0f;
 
@@ -59,6 +63,14 @@ namespace CardShopCoop.Modules.Hud
             _nextDayWaitText = _nextDayWaitActive ? text : "";
         }
 
+        /// <summary>Persistent "the host ended the day but this player is still in a screen"
+        /// notice. Shown while the guest recap cannot open yet and cleared the moment it can.</summary>
+        internal static void SetEndOfDayPending(bool active, string text)
+        {
+            _endOfDayPendingActive = active && !string.IsNullOrEmpty(text);
+            _endOfDayPendingText = _endOfDayPendingActive ? text : "";
+        }
+
         internal static void Tick(float deltaTime)
         {
             if (_toastRemaining <= 0f)
@@ -80,6 +92,8 @@ namespace CardShopCoop.Modules.Hud
             _hostTimeText = "";
             _nextDayWaitActive = false;
             _nextDayWaitText = "";
+            _endOfDayPendingActive = false;
+            _endOfDayPendingText = "";
         }
     }
 }

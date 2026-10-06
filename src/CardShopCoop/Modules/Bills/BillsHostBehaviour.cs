@@ -227,11 +227,33 @@ namespace CardShopCoop.Modules.Bills
                 AmountToPay = bill == null ? 0f : bill.amountToPay,
             };
 
+        /// <summary>Answers a rejected payment with the authoritative bills under the rejected
+        /// prediction id, sent before the generic rollback. The requester's Confirm retires the
+        /// prediction and applies those values, so the rollback is ignored as already-resolved
+        /// instead of restoring the capture's stale three-bill snapshot.</summary>
         private static void Rollback(MessageContext context, BillPaymentMessage message)
         {
-            if (context?.Connection != null && message != null
-                && message.PredictionId != Guid.Empty)
-                PredictionApi.Rollback(_active._context, context.Connection.Id, message.PredictionId);
+            var active = _active;
+            if (active == null || context?.Connection == null || message == null)
+                return;
+
+            active.SendRejectionState(context.Connection.Id, message);
+
+            if (message.PredictionId != Guid.Empty)
+                PredictionApi.Rollback(active._context, context.Connection.Id, message.PredictionId);
+        }
+
+        private void SendRejectionState(int peer, BillPaymentMessage message)
+        {
+            if (_shutdown || _context == null || !_context.InGame())
+                return;
+
+            var refresh = BuildDelta(0, message.PredictionId);
+            CoopPlugin.Log.LogInfo("[bills] rejection refresh to conn " + peer
+                + " rent=" + refresh.Rent.AmountToPay + " electric=" + refresh.Electric.AmountToPay
+                + " employee=" + refresh.Employee.AmountToPay
+                + " pred=" + message.PredictionId + ".");
+            _context.Send(peer, refresh);
         }
 
         private bool IsPeerMessage(MessageContext context)

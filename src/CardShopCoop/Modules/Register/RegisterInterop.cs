@@ -221,6 +221,46 @@ namespace CardShopCoop.Modules.Register
             counter.m_CreditCardModel?.SetActive(false);
         }
 
+        /// <summary>Moves the credit card machine to the player and shows the held card, matching
+        /// the card half of vanilla <c>StartGivingChange</c>. Used when a rollback restores a card
+        /// checkout back into the giving-change phase.</summary>
+        internal static void ShowCreditCardMachine(InteractableCashierCounter counter)
+        {
+            if (counter == null)
+            {
+                return;
+            }
+
+            var machine = counter.m_CreditCardMachineModel;
+            if (machine != null && counter.m_CreditCardMachineTargetPos != null)
+            {
+                machine.position = counter.m_CreditCardMachineTargetPos.position;
+                machine.rotation = counter.m_CreditCardMachineTargetPos.rotation;
+            }
+
+            counter.m_CreditCardModel?.SetActive(true);
+        }
+
+        /// <summary>Plays the drawer clips vanilla itself uses from <c>StartGivingChange</c> and
+        /// <c>OnPressSpaceBar</c>; the drawer has no readable open/closed state.</summary>
+        internal static void OpenDrawer(InteractableCashierCounter counter)
+        {
+            counter?.m_OpenCloseDrawerAnim?.Play("CashRegisterOpenDrawer");
+        }
+
+        internal static void CloseDrawer(InteractableCashierCounter counter)
+        {
+            counter?.m_OpenCloseDrawerAnim?.Play("CashRegisterCloseDrawer");
+        }
+
+        /// <summary>Screen-side flag the counter's <c>EnableCreditCardMode</c> sets, so a rollback
+        /// can tell whether the card screen is up.</summary>
+        internal static bool CreditCardMode(InteractableCashierCounter counter)
+        {
+            var screen = CreditScreen(counter);
+            return screen != null && Read(screen, "m_IsCreditCardMode") is bool value && value;
+        }
+
         internal static void ResetCheckoutVisuals(InteractableCashierCounter counter)
         {
             if (counter == null)
@@ -243,9 +283,9 @@ namespace CardShopCoop.Modules.Register
 
             // Vanilla ForceResetCounter closes the drawer when a reset happens while change was
             // being given; without this a release/reset could leave the cash drawer stuck open.
-            if (ChangeStarted(counter) && counter.m_OpenCloseDrawerAnim != null)
+            if (ChangeStarted(counter))
             {
-                counter.m_OpenCloseDrawerAnim.Play("CashRegisterCloseDrawer");
+                CloseDrawer(counter);
             }
 
             Write(counter, "m_IsUsingCard", false);

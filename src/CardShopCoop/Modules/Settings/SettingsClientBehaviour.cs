@@ -110,7 +110,9 @@ namespace CardShopCoop.Modules.Settings
             {
                 var full = _pendingFullState;
                 _pendingFullState = null;
-                PredictionApi.AckOrApply(full.PredictionId, () => ApplyState(full));
+                // Confirm, not AckOrApply: the host's state is authoritative and can carry a
+                // clamped/transformed value the optimistic local run did not produce.
+                PredictionApi.Confirm(full.PredictionId, () => ApplyState(full));
             }
 
             if (_pendingStates.Count > 0)
@@ -129,7 +131,9 @@ namespace CardShopCoop.Modules.Settings
                     }
 
                     _pendingStates.Remove(states[i].Key);
-                    PredictionApi.AckOrApply(state.PredictionId, () => ApplyState(state));
+                    // Confirm: retire the actor's prediction and apply the host's absolute value
+                    // (the host may clamp or otherwise transform the requested value).
+                    PredictionApi.Confirm(state.PredictionId, () => ApplyState(state));
                 }
             }
         }

@@ -208,10 +208,10 @@ namespace CardShopCoop.Modules.Expansion
 
             var delta = pending;
             pending = null;
-            // The game already applied a client purchase locally; the host's echo either retires
-            // that prediction or (for another peer / a host-local change) applies the authoritative
-            // counts through the same path.
-            PredictionApi.AckOrApply(delta.PredictionId, () =>
+            // The game already applied a client purchase locally; the host echoes the absolute
+            // counts, so Confirm retires the actor's prediction AND applies them. A concurrent
+            // purchase committed elsewhere can leave the host count ahead of the local run.
+            PredictionApi.Confirm(delta.PredictionId, () =>
             {
                 ExpansionInterop.ApplyDelta(manager, delta);
                 ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());

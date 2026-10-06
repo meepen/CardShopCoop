@@ -52,6 +52,11 @@ namespace CardShopCoop.Modules.Register
             // True while that delta is currently applied to the local wallet. Undo reverses and
             // clears it; a follower replay that re-completes sets it again.
             public bool WalletApplied;
+            // Presentation state the predicted action can change. Restored on rollback so a
+            // rejected checkout cannot leave the player cursor-locked, the credit card screen up
+            // with a stale number, or the cash drawer open.
+            public bool UiMode;
+            public bool CreditCardMode;
             public readonly List<int> ChangeCounts = new();
         }
 
@@ -145,6 +150,7 @@ namespace CardShopCoop.Modules.Register
             Patch(typeof(RemoveChangePatch));
             Patch(typeof(FinishPatch));
             Patch(typeof(FinishScanPatch));
+            Patch(typeof(CashTakenGuardPatch));
             Patch(typeof(GuestDayStartedBlockPatch));
             SceneManager.sceneLoaded += OnSceneLoaded;
             NpcClientBehaviour.CustomerManagerReady += OnReadinessSignal;
@@ -726,14 +732,34 @@ namespace CardShopCoop.Modules.Register
             RegisterInterop.Write(counter, "m_IsChangeReady", changeReady);
             RegisterInterop.Write(counter, "m_IsStartGivingChange", changeStarted);
             RegisterInterop.Write(counter, "m_TooMuchChangeGiven", tooMuchChange);
+            // This block is the guest's replacement for the customer half of vanilla
+            // EvaluateFinishScanItem (the host rolls it; the result arrives in the prediction-free
+            // PaidAmount delta). Keep it in step with Customer.cs:2529-2534: the card kind, the
+            // visible hand-over only while TakingCash, and the HandingOverCash anim. The one
+            // vanilla line intentionally not mirrored is "m_IsCheckScanItemOutOfBound = false":
+            // both its writer (WaypointEndUpdate) and its only reader live inside Customer.Update,
+            // which NpcClientBehaviour suppresses for the whole client pool, so it can never
+            // matter on a guest.
             if (customer != null)
             {
                 RegisterInterop.Write(customer, "m_TotalScannedItemCost", (float)customerTotal);
                 if (customer.m_CustomerCash != null)
                 {
+                    var wasCard = customer.m_CustomerCash.m_IsCard;
                     customer.m_CustomerCash.SetIsCard(usingCard);
                     customer.m_CustomerCash.gameObject.SetActive(
                         state == (byte)ECashierCounterState.TakingCash);
+                    if (state == (byte)ECashierCounterState.TakingCash && wasCard != usingCard)
+                    {
+                        // The offer kind is host-rolled; log every flip at the moment the offer
+                        // becomes visible so a "customer shows cash but the counter expects card"
+                        // report can be traced to the delta that set it.
+                        CoopPlugin.Log.LogInfo("[register] offer counter="
+                            + RegisterInterop.Index(counter) + " "
+                            + (usingCard ? "card" : "cash") + " (was "
+                            + (wasCard ? "card" : "cash") + "), customer="
+                            + (customer.name ?? "?"));
+                    }
                 }
 
                 customer.m_Anim.SetBool("HandingOverCash",
@@ -888,6 +914,9 @@ namespace CardShopCoop.Modules.Register
                 State = counter.m_CashierCounterState,
                 CashActive = customer?.m_CustomerCash != null && customer.m_CustomerCash.gameObject.activeSelf,
                 HandingOverCash = customer?.m_Anim != null && customer.m_Anim.GetBool("HandingOverCash"),
+                UiMode = RegisterInterop.Read(SceneRef<InteractionPlayerController>.Get(),
+                    "m_IsInUIMode") is bool inUi && inUi,
+                CreditCardMode = RegisterInterop.CreditCardMode(counter),
             };
             var money = counter?.m_InteractableCounterMoneyChangeList;
             for (var i = 0; money != null && i < money.Count; i++)
@@ -907,6 +936,12 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
+            // The drawer's observable state, captured before the restore writes below overwrite
+            // both fields. Vanilla sets m_IsStartGivingChange in the card branch of
+            // StartGivingChange too, but only the cash branch ever plays the drawer: the drawer
+            // is open exactly while change is being given with CASH.
+            var drawerOpen = RegisterInterop.ChangeStarted(counter)
+                && !RegisterInterop.IsUsingCard(counter);
             _applyingRemote++;
             try
             {
@@ -936,15 +971,44 @@ namespace CardShopCoop.Modules.Register
 
                 customer.m_Anim.SetBool("HandingOverCash", undo.HandingOverCash);
                 counter.UpdateCashierCounterState(undo.State);
-                // Rolling back the moment the customer handed over a card restores the counter
-                // to a pre-giving-change phase, but vanilla only restores the credit card
-                // machine inside OnPressSpaceBar (which ran before the rollback). If the machine
-                // is left out at the player, the authoritative phase's re-entry into giving
-                // change captures that moved spot as the machine's "original" and the phone is
-                // stuck at the number pad forever. Put it back before the re-apply runs.
-                if (undo.UsingCard && undo.State != ECashierCounterState.GivingChange)
+                if (undo.UsingCard)
                 {
-                    RegisterInterop.RestoreCreditCardMachine(counter);
+                    if (undo.State == ECashierCounterState.GivingChange)
+                    {
+                        // Back in the card phase: vanilla's StartGivingChange puts the machine at
+                        // the player and shows the card, so an undone card payment or completion
+                        // must restore that pose, not the resting one.
+                        RegisterInterop.ShowCreditCardMachine(counter);
+                    }
+                    else
+                    {
+                        // Rolling back the moment the customer handed over a card restores the
+                        // counter to a pre-giving-change phase, but vanilla only restores the
+                        // credit card machine inside OnPressSpaceBar (which ran before the
+                        // rollback). If the machine is left out at the player, the authoritative
+                        // phase's re-entry into giving change captures that moved spot as the
+                        // machine's "original" and the phone is stuck at the number pad forever.
+                        // Put it back before the re-apply runs.
+                        RegisterInterop.RestoreCreditCardMachine(counter);
+                    }
+                }
+
+                // The drawer has no readable state, so compare the predicate above with the phase
+                // being restored to and animate only on a real transition. Card phases share
+                // m_IsStartGivingChange with cash giving-change but never open the drawer, so a
+                // comparison of the raw flag alone played "open" on card rollbacks and left the
+                // drawer stuck open.
+                var targetDrawerOpen = undo.ChangeStarted && !undo.UsingCard;
+                if (drawerOpen != targetDrawerOpen)
+                {
+                    if (targetDrawerOpen)
+                    {
+                        RegisterInterop.OpenDrawer(counter);
+                    }
+                    else
+                    {
+                        RegisterInterop.CloseDrawer(counter);
+                    }
                 }
 
                 RestoreChangeCounts(counter, undo.ChangeCounts);
@@ -964,6 +1028,42 @@ namespace CardShopCoop.Modules.Register
                 RebuildCashScreen(counter, customer);
                 RegisterInterop.CashScreen(counter)?.UpdateMoneyChangeAmount(undo.ChangeReady,
                     undo.Paid, undo.Total, undo.Change);
+                // A predicted payment/card action runs the game's own StartGivingChange, which can
+                // enter the counter UI mode, show the cursor and open the card screen. Nothing in
+                // the game exits that on a rollback, so restore the captured interaction state or
+                // a rejected card checkout strands the player cursor-locked with the number pad up.
+                var controller = SceneRef<InteractionPlayerController>.Get();
+                if (controller != null)
+                {
+                    var inUi = RegisterInterop.Read(controller, "m_IsInUIMode") is bool uiValue
+                        && uiValue;
+                    if (undo.UiMode && !inUi)
+                    {
+                        controller.EnterUIMode();
+                    }
+                    else if (!undo.UiMode && inUi)
+                    {
+                        controller.ExitUIMode();
+                        CoopPlugin.Log.LogInfo("[register] rollback released the counter UI mode "
+                            + "for counter=" + RegisterInterop.Index(counter) + ".");
+                    }
+                }
+
+                var creditScreen = RegisterInterop.CreditScreen(counter);
+                if (creditScreen != null)
+                {
+                    var cardMode = RegisterInterop.CreditCardMode(counter);
+                    if (undo.CreditCardMode && !cardMode)
+                    {
+                        creditScreen.EnableCreditCardMode(counter.IsMannedByPlayer());
+                    }
+                    else if (!undo.CreditCardMode && cardMode)
+                    {
+                        creditScreen.ResetCounter();
+                        CoopPlugin.Log.LogInfo("[register] rollback reset the credit card screen "
+                            + "for counter=" + RegisterInterop.Index(counter) + ".");
+                    }
+                }
             }
             finally
             {
@@ -1351,6 +1451,39 @@ namespace CardShopCoop.Modules.Register
                 () => UndoCheckout(capture.Undo));
         }
 
+        /// <summary>Diagnostic for a cash click that cannot belong to the authoritative station
+        /// carrier; prints the exact state the "customer holds cash and card" report describes.</summary>
+        private static void LogBlockedCashClick(InteractableCustomerCash cash,
+            InteractableCashierCounter counter, Customer cashCustomer)
+        {
+            var hasStation = false;
+            if (counter != null && _active != null)
+            {
+                hasStation = _active.Station(counter, out _) != null;
+            }
+
+            CoopPlugin.Log.LogWarning("[register] blocked cash click: counter="
+                + (counter == null ? "none" : RegisterInterop.Index(counter).ToString())
+                + " cashCustomer=" + (cashCustomer == null ? "null" : cashCustomer.name)
+                + " counterCustomer=" + (counter == null || counter.m_CurrentCustomer == null
+                    ? "null" : counter.m_CurrentCustomer.name)
+                + " station=" + (hasStation ? "present" : "none")
+                + " isCard=" + (cash != null && cash.m_IsCard)
+                + " cashModel=" + (cash?.m_CashModel != null && cash.m_CashModel.activeSelf)
+                + " cardModel=" + (cash?.m_CardModel != null && cash.m_CardModel.activeSelf)
+                + " state=" + (counter == null ? "none" : counter.m_CashierCounterState.ToString())
+                + " usingCard=" + (counter != null && RegisterInterop.IsUsingCard(counter)));
+        }
+
+        private static void LogCheckoutMismatch(string action, InteractableCashierCounter counter)
+        {
+            CoopPlugin.Log.LogWarning("[register] ignored " + action + " for a checkout whose "
+                + "counter customer is not the station carrier; counter="
+                + (counter == null ? "null" : RegisterInterop.Index(counter).ToString())
+                + " counterCustomer=" + (counter == null || counter.m_CurrentCustomer == null
+                    ? "null" : counter.m_CurrentCustomer.name));
+        }
+
         private void WithPrediction(Action action)
         {
             _applyingPrediction++;
@@ -1708,31 +1841,44 @@ namespace CardShopCoop.Modules.Register
             // Capture-only: let the game take the cash (the customer transitions to giving change),
             // then forward the post-hoc payment. A payment at a station another peer owns is no
             // longer gated on the client - the host rejects it and the rollback reverts it.
+            //
+            // Hardening: a cash object can outlive its checkout (a stale pooled body, a duplicate
+            // visual, a counter this guest no longer owns). Vanilla OnCashTaken has no guards and
+            // either NREs on a null counter or drives the wrong counter into GivingChange - the
+            // "click cash and the UI breaks" report. Block any click that cannot be attributed to
+            // the authoritative station carrier and log the full state so the next report is
+            // traceable.
             [HarmonyPrefix]
-            private static void Prefix(InteractableCustomerCash __instance, out ActionCapture __state)
+            private static bool Prefix(InteractableCustomerCash __instance, out ActionCapture __state)
             {
                 __state = null;
                 var client = _active;
-                if (client == null || client._applyingRemote != 0 || client._applyingPrediction != 0)
+                if (client == null || !client._context.InGame()
+                    || client._applyingRemote != 0 || client._applyingPrediction != 0)
                 {
-                    return;
+                    return true;
                 }
 
+                var cashCustomer = RegisterInterop.Read(__instance, "m_CurrentCustomer") as Customer;
                 var counter = RegisterInterop.FindCounterForCash(__instance);
                 var station = client.Station(counter, out var index);
-                if (station == null)
+                if (counter == null || cashCustomer == null
+                    || !ReferenceEquals(counter.m_CurrentCustomer, cashCustomer)
+                    || station == null || !ReferenceEquals(station.Carrier, cashCustomer))
                 {
-                    return;
+                    LogBlockedCashClick(__instance, counter, cashCustomer);
+                    return false;
                 }
 
                 __state = new ActionCapture
                 {
                     Counter = counter,
-                    Customer = counter.m_CurrentCustomer,
+                    Customer = cashCustomer,
                     Index = index,
                     Cash = __instance,
-                    Undo = client.CaptureUndo(counter, counter.m_CurrentCustomer),
+                    Undo = client.CaptureUndo(counter, cashCustomer),
                 };
+                return true;
             }
 
             [HarmonyPostfix]
@@ -1765,6 +1911,12 @@ namespace CardShopCoop.Modules.Register
                 var station = client.Station(__instance, out var index);
                 if (station == null)
                 {
+                    return;
+                }
+
+                if (!ReferenceEquals(station.Carrier, __instance.m_CurrentCustomer))
+                {
+                    LogCheckoutMismatch("card payment", __instance);
                     return;
                 }
 
@@ -1863,6 +2015,12 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
+            if (!ReferenceEquals(station.Carrier, counter?.m_CurrentCustomer))
+            {
+                LogCheckoutMismatch("change click", counter);
+                return;
+            }
+
             // Vanilla already ignores a click past the change limits or outside giving change, so
             // the postfix's GivenAmount comparison records only a click the game really performed.
             capture = new ActionCapture
@@ -1895,6 +2053,12 @@ namespace CardShopCoop.Modules.Register
                 var station = client.Station(__instance, out var index);
                 if (station == null)
                 {
+                    return;
+                }
+
+                if (!ReferenceEquals(station.Carrier, __instance.m_CurrentCustomer))
+                {
+                    LogCheckoutMismatch("complete press", __instance);
                     return;
                 }
 
@@ -1938,16 +2102,14 @@ namespace CardShopCoop.Modules.Register
             }
         }
 
-        [HarmonyPatch(typeof(Customer), "EvaluateFinishScanItem")]
-        private static class FinishScanPatch
+        [HarmonyPatch(typeof(Customer), "OnCashTaken")]
+        private static class CashTakenGuardPatch
         {
-            // The customer's paid amount and cash-vs-card kind are host-authoritative: only the
-            // host runs the roll. A guest must not roll its own value (UnityEngine.Random differs
-            // from the host) nor reveal the cash/card choice from a local roll; it waits for the
-            // host's prediction-free PaidAmount delta, which drives the same settle through the
-            // game's own setters. Suppressing the vanilla finish for a co-op register carrier is
-            // the deliberate exception to "never stop vanilla": the host owns this value the same
-            // way it owns another player's.
+            // Vanilla OnCashTaken has no guards: it drives m_CurrentQueueCashierCounter
+            // unconditionally. A stale or foreign customer body (the "cash and card at once"
+            // duplicate) either NREs on a null counter or pushes the wrong counter into
+            // GivingChange. PaymentPatch already blocks such clicks; this is the last line of
+            // defense for any path that still reaches the game method.
             [HarmonyPrefix]
             private static bool Prefix(Customer __instance)
             {
@@ -1957,7 +2119,42 @@ namespace CardShopCoop.Modules.Register
                     return true;
                 }
 
-                return !IsCarrier(__instance);
+                var counter = RegisterInterop.CounterFor(__instance);
+                if (counter != null && ReferenceEquals(counter.m_CurrentCustomer, __instance))
+                {
+                    return true;
+                }
+
+                CoopPlugin.Log.LogWarning("[register] blocked OnCashTaken for a customer with no "
+                    + "matching counter; customer=" + (__instance == null ? "null" : __instance.name)
+                    + " counter=" + (counter == null ? "null"
+                        : RegisterInterop.Index(counter).ToString()));
+                return false;
+            }
+        }
+
+        [HarmonyPatch(typeof(Customer), "EvaluateFinishScanItem")]
+        private static class FinishScanPatch
+        {
+            // The customer's paid amount and cash-vs-card kind are host-authoritative: ONLY the
+            // host runs this roll. A guest must never run it for ANY customer - every customer on
+            // a guest is a host-driven mirror (NpcClientBehaviour suppresses Customer.Update for
+            // the whole client pool), so a local roll would invent a kind and paid amount the host
+            // did not choose, and the cash/card offer would activate with the wrong payment
+            // method. The host's result travels in the prediction-free PaidAmount delta
+            // (UsingCard + Paid) and is applied through the game's own setters; the offer is
+            // activated only by that message. This is the deliberate exception to "never stop
+            // vanilla": the host owns this value the same way it owns another player's.
+            [HarmonyPrefix]
+            private static bool Prefix()
+            {
+                var client = _active;
+                if (client == null || !client._context.InGame())
+                {
+                    return true;
+                }
+
+                return false;
             }
         }
 

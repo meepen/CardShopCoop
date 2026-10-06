@@ -186,11 +186,64 @@ namespace CardShopCoop.Modules.StoreAccess
             };
         }
 
+        /// <summary>Answers a rejected intent with the affected sign's authoritative value under
+        /// the rejected prediction id, then sends the generic rollback. The requester's
+        /// <c>HandleDelta</c> Confirm retires the prediction and applies that authority, so the
+        /// trailing rollback is ignored as already-resolved instead of undoing to a pre-click
+        /// snapshot that an intervening host or other-guest toggle has moved past.</summary>
         private static void Rollback(MessageContext context, StoreAccessToggleMessage message)
         {
-            if (context?.Connection != null && message != null
-                && message.PredictionId != Guid.Empty)
-                PredictionApi.Rollback(_active._context, context.Connection.Id, message.PredictionId);
+            var active = _active;
+            if (active == null || context?.Connection == null || message == null)
+                return;
+
+            active.SendRejectionState(context.Connection.Id, message);
+
+            if (message.PredictionId != Guid.Empty)
+                PredictionApi.Rollback(active._context, context.Connection.Id, message.PredictionId);
+        }
+
+        private void SendRejectionState(int peer, StoreAccessToggleMessage message)
+        {
+            if (_shutdown || _context == null || !_context.InGame() || message.Which > 1)
+                return;
+
+            StoreAccessDeltaMessage refresh;
+            if (message.Which == 0)
+            {
+                if (StoreAccessInterop.FindOpenSign() == null)
+                    return;
+
+                refresh = new StoreAccessDeltaMessage
+                {
+                    PredictionId = message.PredictionId,
+                    HasShopOpen = true,
+                    IsShopOpen = CPlayerData.m_IsShopOpen,
+                    Animate = false,
+                };
+            }
+            else
+            {
+                if (StoreAccessInterop.FindWarehouseSign() == null
+                    && StoreAccessInterop.FindUnlockRoomManager() == null)
+                    return;
+
+                refresh = new StoreAccessDeltaMessage
+                {
+                    PredictionId = message.PredictionId,
+                    HasWarehouseDoorClosed = true,
+                    IsWarehouseDoorClosed = CPlayerData.m_IsWarehouseDoorClosed,
+                    Animate = false,
+                };
+            }
+
+            CoopPlugin.Log.LogInfo("[store-access] rejection refresh to conn " + peer
+                + " shop=" + (refresh.HasShopOpen
+                    ? (refresh.IsShopOpen ? "open" : "closed") : "-")
+                + " warehouse=" + (refresh.HasWarehouseDoorClosed
+                    ? (refresh.IsWarehouseDoorClosed ? "closed" : "open") : "-")
+                + " pred=" + message.PredictionId + ".");
+            _context.Send(peer, refresh);
         }
 
         private static StoreAccessStateMessage BuildState(bool animate)

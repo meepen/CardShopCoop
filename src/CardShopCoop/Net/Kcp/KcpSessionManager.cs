@@ -487,8 +487,8 @@ namespace CardShopCoop.Net.Kcp
         public void Send(PeerConnection connection, INetMessage message)
         {
             SessionState state = null;
-            MessageDescriptor descriptor = null;
             string failure = null;
+            var saturated = false;
             lock (_gate)
             {
                 if (connection == null || !_connections.TryGetValue(connection.Id, out state)
@@ -503,19 +503,36 @@ namespace CardShopCoop.Net.Kcp
                     failure = "connection is not ready for application traffic (phase "
                         + state.Connection.State + ")";
                 }
-                else if (!TryEncode(message, true, out var frame, out descriptor))
+                else if (!TryEncode(message, true, out var frame, out var descriptor))
                 {
                     failure = "message is not registered in the active session catalog (late registrations apply next session) or exceeds the encoded frame limit";
                 }
-                else if (!QueueFrameLocked(state, frame, descriptor))
+                else
                 {
-                    failure = "bounded outbound queue is full";
+                    // A saturated per-peer queue is that connection's own failure and is handled
+                    // below without throwing; every other admission failure stays fail-loud.
+                    switch (CanQueueFrameLocked(state, frame, descriptor))
+                    {
+                        case FrameAdmission.Admitted:
+                            EnqueueFrameLocked(state, frame, descriptor);
+                            break;
+                        case FrameAdmission.PeerCapacity:
+                            saturated = true;
+                            break;
+                        default:
+                            failure = "message exceeds the lane frame limits";
+                            break;
+                    }
                 }
             }
 
             if (failure != null)
             {
                 FailApplicationSend(connection, message, state, failure);
+            }
+            else if (saturated)
+            {
+                FailPeerAdmission(connection, message, state, "bounded outbound queue is full");
             }
         }
 
@@ -600,8 +617,8 @@ namespace CardShopCoop.Net.Kcp
         /// </summary>
         private void FanOut(INetMessage message, int? exceptConnectionId, string operation)
         {
-            SessionState failedState = null;
             string failure = null;
+            List<SessionState> saturated = null;
             lock (_gate)
             {
                 if (!Volatile.Read(ref _started) || Volatile.Read(ref _stopRequested)
@@ -645,12 +662,21 @@ namespace CardShopCoop.Net.Kcp
                             break;
                         }
 
-                        if (!CanQueueFrameLocked(state, compactFrame, descriptor))
+                        var admission = CanQueueFrameLocked(state, compactFrame, descriptor);
+                        if (admission == FrameAdmission.PeerCapacity)
                         {
-                            failedState = state;
-                            failure = "bounded outbound queue is full";
+                            // One peer's saturated queue must not cost every other peer the
+                            // frame. Remember it and keep admitting the rest; it is disconnected
+                            // after the lock is released.
+                            (saturated ??= new List<SessionState>()).Add(state);
+                            continue;
+                        }
+                        if (admission == FrameAdmission.FrameTooLarge)
+                        {
+                            failure = "message exceeds the lane frame limits";
                             break;
                         }
+
                         admissions.Add(new QueueAdmission(state, compactFrame, descriptor));
                     }
 
@@ -668,8 +694,17 @@ namespace CardShopCoop.Net.Kcp
 
             if (failure != null)
             {
-                FailApplicationSend(failedState?.Connection, message, failedState,
-                    operation + " " + failure);
+                FailApplicationSend(null, message, null, operation + " " + failure);
+                return;
+            }
+
+            if (saturated != null)
+            {
+                for (var i = 0; i < saturated.Count; i++)
+                {
+                    FailPeerAdmission(saturated[i].Connection, message, saturated[i],
+                        operation + " bounded outbound queue is full");
+                }
             }
         }
 
@@ -872,21 +907,35 @@ namespace CardShopCoop.Net.Kcp
             return true;
         }
 
+        /// <summary>Why a frame cannot enter one connection's outbound queue. A frame that is too
+        /// large for its lane can never be delivered to any peer (session/protocol error); a
+        /// peer-capacity failure is one connection's own backpressure and must not block the
+        /// other recipients of the same broadcast.</summary>
+        private enum FrameAdmission
+        {
+            Admitted,
+            FrameTooLarge,
+            PeerCapacity,
+        }
+
         private bool QueueFrameLocked(SessionState state, byte[] frame,
             MessageDescriptor descriptor)
         {
-            if (!CanQueueFrameLocked(state, frame, descriptor))
+            if (CanQueueFrameLocked(state, frame, descriptor) != FrameAdmission.Admitted)
                 return false;
 
             EnqueueFrameLocked(state, frame, descriptor);
             return true;
         }
 
-        private bool CanQueueFrameLocked(SessionState state, byte[] frame,
+        private FrameAdmission CanQueueFrameLocked(SessionState state, byte[] frame,
             MessageDescriptor descriptor)
         {
-            if (frame == null || descriptor == null || state.Terminal)
-                return false;
+            if (frame == null || descriptor == null)
+                return FrameAdmission.FrameTooLarge;
+
+            if (state.Terminal)
+                return FrameAdmission.PeerCapacity;
 
             if (!state.MessageIdsActivated
                 && frame.Length > _options.MaxHandshakeFrameBytes)
@@ -894,7 +943,7 @@ namespace CardShopCoop.Net.Kcp
                 LogWarning("KCP peer " + state.Connection.Id
                     + " rejected a pre-activation frame of " + frame.Length
                     + " bytes; limit is " + _options.MaxHandshakeFrameBytes);
-                return false;
+                return FrameAdmission.FrameTooLarge;
             }
 
             var reliable = descriptor.Reliability == Reliability.Reliable;
@@ -903,14 +952,14 @@ namespace CardShopCoop.Net.Kcp
                 if (frame.Length > _options.MaxEncodedFrameBytes
                     || frame.Length > _options.MaxReliableBytes)
                 {
-                    return false;
+                    return FrameAdmission.FrameTooLarge;
                 }
 
                 if (state.ReliableFrameCount >= _options.MaxReliableFrames
                     || state.ReliableBytes > _options.MaxReliableBytes - frame.Length)
-                    return false;
+                    return FrameAdmission.PeerCapacity;
 
-                return true;
+                return FrameAdmission.Admitted;
             }
 
             // Unreliable application messages are complete encoded frames.  The private envelope
@@ -921,14 +970,14 @@ namespace CardShopCoop.Net.Kcp
                 || frame.Length > state.Session.UnreliableMax - EnvelopeSize
                 || frame.Length > _options.MaxTransientBytes - EnvelopeSize)
             {
-                return false;
+                return FrameAdmission.FrameTooLarge;
             }
 
             if (state.TransientFrameCount >= _options.MaxTransientFrames
                 || state.TransientBytes > _options.MaxTransientBytes - frame.Length)
-                return false;
+                return FrameAdmission.PeerCapacity;
 
-            return true;
+            return FrameAdmission.Admitted;
         }
 
         private static void EnqueueFrameLocked(SessionState state, byte[] frame,
@@ -2544,25 +2593,50 @@ namespace CardShopCoop.Net.Kcp
         private void FailApplicationSend(PeerConnection connection, INetMessage message,
             SessionState state, string reason)
         {
-            var text = "KCP application send failed for peer " + (connection?.Id.ToString() ?? "<none>")
-                + " message " + (message?.GetType().FullName ?? "<null>") + ": " + reason;
+            var text = DescribeSendFailure(connection, message, reason);
             LogError(text);
             if (state != null)
             {
-                try
-                {
-                    GracefulDisconnect(connection, new DisconnectInfo(
-                        "application send failed; session recovery required", false,
-                        "send_failed", true, connection.State));
-                }
-                catch (Exception disconnectError)
-                {
-                    throw new InvalidOperationException(text + "; disconnect failed",
-                        disconnectError);
-                }
+                DisconnectAfterFailedSend(connection, text);
             }
 
             throw new InvalidOperationException(text);
+        }
+
+        /// <summary>Per-peer admission failure: this connection's queue is saturated, so that
+        /// connection fails - but the failure is not rethrown, because Broadcast/Relay has already
+        /// admitted the frame for every healthy peer and a throw here would unwind the caller's
+        /// vanilla code path. Global send failures keep the fail-loud path above.</summary>
+        private void FailPeerAdmission(PeerConnection connection, INetMessage message,
+            SessionState state, string reason)
+        {
+            var text = DescribeSendFailure(connection, message, reason);
+            LogError(text);
+            if (state != null)
+            {
+                DisconnectAfterFailedSend(connection, text);
+            }
+        }
+
+        private static string DescribeSendFailure(PeerConnection connection, INetMessage message,
+            string reason)
+            => "KCP application send failed for peer "
+                + (connection?.Id.ToString() ?? "<none>")
+                + " message " + (message?.GetType().FullName ?? "<null>") + ": " + reason;
+
+        private void DisconnectAfterFailedSend(PeerConnection connection, string text)
+        {
+            try
+            {
+                GracefulDisconnect(connection, new DisconnectInfo(
+                    "application send failed; session recovery required", false,
+                    "send_failed", true, connection.State));
+            }
+            catch (Exception disconnectError)
+            {
+                throw new InvalidOperationException(text + "; disconnect failed",
+                    disconnectError);
+            }
         }
 
         private sealed class SessionState

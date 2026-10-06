@@ -89,13 +89,20 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-            // Confirm: retire our own prediction AND always apply the host's value. AckOrApply
-            // would retire and skip, leaving our optimistic value even when the host computed a
-            // different one (its own toggle, the day-start close, or a second guest racing the
-            // same sign). ApplyDeltaVisuals already skips a sign whose local state matches, so
-            // this is idempotent for the actor's own echo.
-            PredictionApi.Confirm(message.PredictionId, () => { });
+            // ApplyAuthoritative: the host's absolute value always lands, and it is reconciled in
+            // layers so a newer local toggle still awaiting its own decision is undone and
+            // replayed instead of being stranded under this older state (a pending action owns
+            // the entity until it resolves). An empty or already-retired id just applies.
+            PredictionApi.ApplyAuthoritative(message.PredictionId,
+                () => ApplyDeltaAuthoritative(message));
+        }
 
+        /// <summary>Applies one authoritative delta: flags always move, visuals/pending handling
+        /// follow the same rules as before. Runs as the authoritative apply inside
+        /// <see cref="PredictionApi.ApplyAuthoritative(Guid, Action)"/>, so newer same-sign
+        /// predictions have already been undone and will be replayed on top of this state.</summary>
+        private void ApplyDeltaAuthoritative(StoreAccessDeltaMessage message)
+        {
             var shopChanged = message.HasShopOpen && CPlayerData.m_IsShopOpen != message.IsShopOpen;
             var warehouseChanged = message.HasWarehouseDoorClosed
                 && CPlayerData.m_IsWarehouseDoorClosed != message.IsWarehouseDoorClosed;
@@ -236,11 +243,14 @@ namespace CardShopCoop.Modules.StoreAccess
         }
 
         /// <summary>The vanilla sign click already toggled the state and started its animation;
-        /// forward the intent so the host applies and echoes it. This is a post-hoc prediction:
-        /// the game performed the toggle, so rejection undoes to the captured pre-click state and
-        /// replay re-applies the captured post-click state. A prediction owns exactly ONE sign's
-        /// key, so an undo can never restore the other sign to a stale value (a rejected shop
-        /// toggle after an accepted warehouse toggle must not clobber the warehouse).</summary>
+        /// forward the intent so the host applies and echoes it. This is a post-hoc prediction
+        /// whose redo and undo are BOTH the toggle itself: a toggle is its own inverse, so the
+        /// layered rejection in PredictionApi composes correctly even when a rollback arrives
+        /// without an authoritative refresh. Captured absolute before/after values are not
+        /// inverses under that layering - with two toggles in flight, an older rejection replays
+        /// the newer prediction from authority and the newer rejection's absolute undo would
+        /// restore the older prediction's optimistic value. A prediction owns exactly ONE sign's
+        /// key, so an undo can never touch the other sign's in-flight toggle.</summary>
         private void ForwardToggle(byte which, bool before, bool after)
         {
             if (_shutdown || !_joined || _context == null || !_context.InGame() || after == before)
@@ -256,8 +266,22 @@ namespace CardShopCoop.Modules.StoreAccess
                     PredictionId = predictionId,
                     Which = which,
                 }),
-                () => ApplyLocal(which, after),
-                () => ApplyLocal(which, before));
+                () => ToggleLocal(which),
+                () => ToggleLocal(which));
+        }
+
+        /// <summary>Flips one sign's live flag and repaints it. Both directions of a toggle
+        /// prediction use this: the host's intent is a toggle too, so this is the exact redo and
+        /// the exact inverse.</summary>
+        private static void ToggleLocal(byte which)
+        {
+            if (which == 0)
+            {
+                ApplyLocal(0, !CPlayerData.m_IsShopOpen);
+                return;
+            }
+
+            ApplyLocal(1, !CPlayerData.m_IsWarehouseDoorClosed);
         }
 
         private static void ApplyLocal(byte which, bool value)

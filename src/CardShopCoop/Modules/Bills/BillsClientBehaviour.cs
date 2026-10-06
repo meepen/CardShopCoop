@@ -82,9 +82,16 @@ namespace CardShopCoop.Modules.Bills
             if (_shutdown)
                 return;
 
-            // Host pays the exact bill the guest asked to pay and reads back the zeroed values
-            // (a rejected payment rolls the prediction back), so this confirms the prediction.
-            PredictionApi.AckOrApply(message.PredictionId, () => ApplyDelta(message));
+            // ApplyAuthoritative, not Confirm/AckOrApply: the host always sends absolute values
+            // (the zeroed bill on accept, or the current authoritative bills under the rejected
+            // id), and a delta can resolve an OLDER payment while a newer payment is still in
+            // flight on the same key. Confirm would retire the older id and apply these absolute
+            // values over the newer pending payment, wiping its optimistic effect (and its later
+            // suppressed rollback would then invert a state it no longer owns).
+            // ApplyAuthoritative undoes that newer payment, applies authority, and replays it, so
+            // every in-flight payment keeps owning its bills until its own decision arrives. An
+            // accrued bill during the round trip still lands: authority is always applied.
+            PredictionApi.ApplyAuthoritative(message.PredictionId, () => ApplyDelta(message));
         }
 
         [MessageHandler(typeof(BillPopupMessage))]
@@ -164,9 +171,12 @@ namespace CardShopCoop.Modules.Bills
         /// Client intent for a bill payment. In a session the vanilla payment does not run: the
         /// same bill zeroing the game would do is applied locally as a prediction (so the bill
         /// panel and total update immediately), the intent is sent, and the host's accepted delta
-        /// retires the prediction or its rollback restores the captured values. The wallet is
-        /// host-owned - the guest never queues a coin event - so the mirror only moves when the
-        /// host's authoritative wallet snapshot arrives, and a rejection has nothing to refund.
+        /// retires the prediction or its rollback adds the same captured values back. The redo and
+        /// undo are relative deltas of the captured bills, so they stay exact inverses when a
+        /// rejection arrives without an authoritative refresh and PredictionApi has to layer it
+        /// over other pending payments. The wallet is host-owned - the guest never queues a coin
+        /// event - so the mirror only moves when the host's authoritative wallet snapshot arrives,
+        /// and a rejection has nothing to refund.
         /// </summary>
         private static bool BeginPayment(byte billType, bool forcePay)
         {
@@ -192,7 +202,7 @@ namespace CardShopCoop.Modules.Bills
             if (amount <= 0.0001f || CPlayerData.m_CoinAmountDouble < amount)
                 return true;
 
-            ZeroPaidBills(billType);
+            ApplyPayment(billType, rent, electric, employee, refund: false);
             BillsInterop.Refresh(BillsInterop.FindScreen());
             SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
             PredictionApi.Predict(
@@ -204,14 +214,12 @@ namespace CardShopCoop.Modules.Bills
                 }),
                 () =>
                 {
-                    ZeroPaidBills(billType);
+                    ApplyPayment(billType, rent, electric, employee, refund: false);
                     BillsInterop.Refresh(BillsInterop.FindScreen());
                 },
                 () =>
                 {
-                    ApplyBill(EBillType.Rent, rent);
-                    ApplyBill(EBillType.Electric, electric);
-                    ApplyBill(EBillType.Employee, employee);
+                    ApplyPayment(billType, rent, electric, employee, refund: true);
                     BillsInterop.Refresh(BillsInterop.FindScreen());
                 });
             return false;
@@ -231,18 +239,30 @@ namespace CardShopCoop.Modules.Bills
         private static float Positive(BillValue value)
             => value != null && value.AmountToPay > 0f ? value.AmountToPay : 0f;
 
-        private static void ZeroPaidBills(byte billType)
+        /// <summary>Applies (or reverses) exactly the bill zeroing a payment performs. The
+        /// vanilla <c>SetBill(type, 0, 0)</c> is mirrored as a relative subtraction of the values
+        /// captured at payment time - identical to vanilla when nothing moved, but an exact
+        /// inverse under PredictionApi's layered rejection, where restoring a whole captured
+        /// snapshot would resurrect another still-pending payment's optimistic values when a
+        /// rollback arrives without an authoritative refresh. Pay All clears all three bills;
+        /// a single payment clears only the selected type, matching the vanilla presses.</summary>
+        private static void ApplyPayment(byte billType, BillValue rent, BillValue electric,
+            BillValue employee, bool refund)
         {
-            if (billType == 0)
-            {
-                ApplyBill(EBillType.Rent, new BillValue());
-                ApplyBill(EBillType.Electric, new BillValue());
-                ApplyBill(EBillType.Employee, new BillValue());
-            }
-            else
-            {
-                ApplyBill((EBillType)billType, new BillValue());
-            }
+            var sign = refund ? 1 : -1;
+            if (billType == 0 || billType == (byte)EBillType.Rent)
+                AddBill(EBillType.Rent, rent, sign);
+            if (billType == 0 || billType == (byte)EBillType.Electric)
+                AddBill(EBillType.Electric, electric, sign);
+            if (billType == 0 || billType == (byte)EBillType.Employee)
+                AddBill(EBillType.Employee, employee, sign);
+        }
+
+        private static void AddBill(EBillType type, BillValue captured, int sign)
+        {
+            var bill = CPlayerData.GetBill(type);
+            bill.billDayPassed += sign * captured.DayPassed;
+            bill.amountToPay += sign * captured.AmountToPay;
         }
 
         private static BillValue Copy(BillData bill)

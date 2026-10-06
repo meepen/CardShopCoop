@@ -553,7 +553,12 @@ namespace CardShopCoop.Modules.Report
             {
                 new[] { "Customer", "OnCustomerReachInsideShop" },
                 new[] { "Customer", "ExitShop" },
-                new[] { "Customer", "DeodorantSprayCheck" },
+                // Customer.DeodorantSprayCheck is deliberately absent. Its only live mutation is
+                // smellyCustomerCleaned++, which nothing renders on either supported build, and
+                // the game calls it for every customer on every spray tick - a reliable publish
+                // there is how a guest's bounded outbound queue overflows and the session dies
+                // with send_failed. If a build ever renders that counter live, sync it on a
+                // transient or coalesced lane, never the reliable report lane.
                 new[] { "Customer", "PlayTableGameEnded" },
                 new[] { "CPlayerData", "CreateDefaultData" },
                 new[] { "CPlayerData", "CPlayer_OnAddShopExp" },
@@ -596,16 +601,67 @@ namespace CardShopCoop.Modules.Report
                 }
             }
 
+            /// <summary>The pre-call report snapshot rides Harmony's per-invocation __state, so
+            /// change detection keeps no cross-call state. Many targets are hot (a customer
+            /// crossing the doorway, a checkout, a pack open); a call that mutated none of the
+            /// fields the report slices carry must not spend reliable-lane capacity.</summary>
+            [HarmonyPrefix]
+            private static void Prefix(out GameReportDataCollect __state)
+            {
+                __state = CPlayerData.m_GameReportDataCollect;
+            }
+
             [HarmonyPostfix]
-            private static void Postfix(MethodBase __originalMethod)
+            private static void Postfix(MethodBase __originalMethod, GameReportDataCollect __state)
             {
                 if (_active == null)
                     return;
                 if (string.Equals(__originalMethod?.Name, "CloseScreen", StringComparison.Ordinal))
+                {
                     _active.PublishClose();
-                else
-                    _active.PublishCounterAndMoney();
+                    return;
+                }
+
+                var report = CPlayerData.m_GameReportDataCollect;
+                if (CountersChanged(__state, report))
+                {
+                    _active.PublishDelta(BuildState(report, CounterSlice, false), CounterSlice);
+                }
+
+                if (MoneyChanged(__state, report))
+                {
+                    _active.PublishDelta(BuildState(report, MoneySlice, false), MoneySlice);
+                }
             }
+
+            private static bool CountersChanged(in GameReportDataCollect before,
+                in GameReportDataCollect after)
+                => before.customerVisited != after.customerVisited
+                || before.checkoutCount != after.checkoutCount
+                || before.customerDisatisfied != after.customerDisatisfied
+                || before.customerBoughtItem != after.customerBoughtItem
+                || before.customerBoughtCard != after.customerBoughtCard
+                || before.customerPlayed != after.customerPlayed
+                || before.storeExpGained != after.storeExpGained
+                || before.storeLevelGained != after.storeLevelGained
+                || before.itemAmountSold != after.itemAmountSold
+                || before.cardAmountSold != after.cardAmountSold
+                || before.cardPackOpened != after.cardPackOpened
+                || before.smellyCustomerCleaned != after.smellyCustomerCleaned
+                || before.manualCheckoutCount != after.manualCheckoutCount
+                || before.gemMintCardObtained != after.gemMintCardObtained;
+
+            private static bool MoneyChanged(in GameReportDataCollect before,
+                in GameReportDataCollect after)
+                => before.totalPlayTableTime != after.totalPlayTableTime
+                || before.totalItemEarning != after.totalItemEarning
+                || before.totalCardEarning != after.totalCardEarning
+                || before.totalPlayTableEarning != after.totalPlayTableEarning
+                || before.supplyCost != after.supplyCost
+                || before.upgradeCost != after.upgradeCost
+                || before.employeeCost != after.employeeCost
+                || before.rentCost != after.rentCost
+                || before.billCost != after.billCost;
         }
 
         /// <summary>

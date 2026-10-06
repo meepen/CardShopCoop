@@ -16,6 +16,10 @@ namespace CardShopCoop.Modules.Decoration
     public sealed class DecorationHostBehaviour : CoopBehaviour
     {
         private static DecorationHostBehaviour _active;
+        /// <summary>The placement attempt currently inside the game's PlaceMovedObject frame. The
+        /// commit callback also runs for box-up and the World hold cancel, so only a call made
+        /// inside this frame is a placement this host must publish.</summary>
+        private static InteractableObject _placingInstance;
         private readonly HashSet<int> _fullyJoined = new();
         private CoopRuntimeContext _context;
         private Harmony _harmony;
@@ -40,7 +44,8 @@ namespace CardShopCoop.Modules.Decoration
                 _harmony.CreateClassProcessor(typeof(EquipPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyItemPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(PlacePatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(PlaceAttemptPatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(PlacedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(RemovePatch)).Patch();
             }
             catch (Exception exception)
@@ -114,7 +119,13 @@ namespace CardShopCoop.Modules.Decoration
             {
                 CoopPlugin.Log.LogInfo("[decoration] intent rejected action=" + message.Action
                     + " type=" + message.DecorationType + " prediction=" + message.PredictionId + ".");
+                // The rollback's undo restores the requester's captured snapshot, which may be
+                // stale if the host or another guest changed the decorations during the round
+                // trip. DecorationStateMessage cannot carry the prediction id, so the
+                // authoritative snapshot follows the rollback: the undo runs first and the state
+                // then overrides it on the same reliable lane.
                 PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                SendState(context.Connection.Id);
             }
         }
 
@@ -344,22 +355,52 @@ namespace CardShopCoop.Modules.Decoration
             }
         }
 
+        /// <summary>Marks the game's placement attempt for a decoration. The marker exists only
+        /// while the synchronous PlaceMovedObject frame runs; an attempt vanilla refuses (invalid
+        /// aim) never commits and therefore publishes nothing.</summary>
         [HarmonyPatch(typeof(InteractableObject), "PlaceMovedObject")]
-        private static class PlacePatch
+        private static class PlaceAttemptPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractableObject __instance)
+            {
+                if (_active == null || _active._applyingIntent || __instance == null
+                    || __instance.m_DecoObjectType == EDecoObject.None
+                    || !__instance.GetIsMovingObject())
+                    return;
+                _placingInstance = __instance;
+            }
+
+            [HarmonyFinalizer]
+            private static void Finalizer() => _placingInstance = null;
+        }
+
+        /// <summary>The game's placement commit callback. Box-up and the World hold cancel share
+        /// it, so only a call made inside this host's PlaceMovedObject frame is published. A moved
+        /// piece already owns a host id; the delta carries that exact object.</summary>
+        [HarmonyPatch(typeof(InteractableObject), "OnPlacedMovedObject")]
+        private static class PlacedPatch
         {
             [HarmonyPostfix]
             private static void Postfix(InteractableObject __instance)
             {
-                if (_active == null || _active._applyingIntent || __instance == null
+                var host = _active;
+                if (host == null || host._applyingIntent || __instance == null
+                    || !ReferenceEquals(_placingInstance, __instance)
                     || __instance.m_DecoObjectType == EDecoObject.None)
                     return;
-                _active.BroadcastDelta(BuildDelta(new DecorationIntentMessage
+                var delta = BuildDelta(new DecorationIntentMessage
                 {
                     Action = DecorationActions.Place,
                     DecorationType = __instance.m_DecoObjectType,
-                    // A moved piece already owns a host id; the delta carries that exact object.
                     ObjectId = DecorationInterop.HostIdFor(__instance),
-                }, __instance));
+                }, __instance);
+                if (delta != null)
+                {
+                    CoopPlugin.Log.LogInfo("[decoration] host placed id=" + delta.ObjectId
+                        + " type=" + delta.DecorationType + ".");
+                    host.BroadcastDelta(delta);
+                }
             }
         }
 

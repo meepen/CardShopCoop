@@ -666,7 +666,7 @@ namespace CardShopCoop.Modules.World
             _deltaAppliedThisFrame = 0;
             _deltaNetThisFrame = 0;
             _deltaLogBuf.Clear();
-            _binderRefreshPending = false;
+            ResetBinderMirror();
             ApplyingRemoteCards = false;
             _clientCardBatch = null;
             WorldContainerInteraction.ApplyingRemote = false;
@@ -1272,6 +1272,10 @@ namespace CardShopCoop.Modules.World
 
         internal void NotifyCardsChanged()
         {
+            // Local repair (rejected prediction replay, trade undo, grading claim restore): the
+            // slots the game already changed must be put back in step even when the net change
+            // is a gain. See _binderFullResync.
+            _binderFullResync = true;
             _binderRefreshPending = true;
         }
 
@@ -1318,11 +1322,6 @@ namespace CardShopCoop.Modules.World
         internal const int CardDeltaBatchMax = 200; // deltas per CardDeltaBatch frame
         internal const int CardDeltaAmountMax = 1024;
         private readonly List<PendingCard> _batchRelayBuf = new();
-
-        // ONE binder relayout per frame, not per delta: with the book open RefreshOpenBinder
-        // invokes the game's OnSortingMethodUpdated (O(N^2) re-sort + 72-slot UI rebuild +
-        // album total recompute), which per delta is the reported 20-30s freeze.
-        private static bool _binderRefreshPending;
 
         // The per-delta apply line is the field-log diagnosis for "cards didn't show up in the
         // binder", so it survives verbatim for ordinary changes (<=5 applied in a frame) and
@@ -1384,12 +1383,15 @@ namespace CardShopCoop.Modules.World
                     // case reached the ungraded-reduce arm, returned true (a vanilla no-op) and
                     // so kept relaying - dropping the relay is what broke 3+ player sessions.
                     relayAnyway = true;
-                    // Memoized per card key, like the price path: one host log showed 995
+                    // Memoized per card slot, like the price path: one host log showed 995
                     // identical lines. Printed through CardIdent because an ordinary modded id
                     // is a small ORDINAL: below ~122 the bare monsterType renders an unrelated
                     // VANILLA name, at 123+ it renders a bare number (EMonsterType has no
                     // members up there) - neither identifies the card without the expansion.
-                    CoopPlugin.Log.LogWarning($"card delta: {CardIdent(card)} is from a card set you don't have installed - skipped");
+                    if (MarkCardWarned("missing:" + CardPriceKey(card)))
+                    {
+                        CoopPlugin.Log.LogWarning($"card delta: {CardIdent(card)} is from a card set you don't have installed - skipped");
+                    }
 
                     return false;
                 }
@@ -1465,15 +1467,14 @@ namespace CardShopCoop.Modules.World
             // receiving side - applies were completely silent. The line still goes out for an
             // ordinary change; a bulk collect (hundreds of deltas in one frame) folds into one
             // summary instead of its own log flood. Both are emitted by FlushFrameCardWork.
+            // The open-binder mirror also learns about this apply from the observer patches
+            // (RecordCardChanged) - the mutation above ran behind ApplyingRemoteCards.
             _deltaAppliedThisFrame++;
             _deltaNetThisFrame += isAdd ? amount : -amount;
             if (_deltaLogBuf.Count < 5)
             {
                 _deltaLogBuf.Add(new PendingCard { IsAdd = isAdd, Amount = amount, Card = SnapshotCard(card) });
             }
-            // Deferred to the end of the frame: RefreshOpenBinder is O(N^2) re-sort + full UI
-            // rebuild whenever the book is open, and running it per delta is the 20-30s freeze.
-            _binderRefreshPending = true;
             return true;
         }
 
@@ -1513,7 +1514,6 @@ namespace CardShopCoop.Modules.World
                     Amount = amount,
                     Card = SnapshotCard(card),
                 });
-            _binderRefreshPending = true;
             return true;
         }
 
@@ -1637,19 +1637,44 @@ namespace CardShopCoop.Modules.World
                 var canonical = CPlayerData.GetCardData(saveIndex, card.expansionType,
                     card.isDestiny);
                 if (canonical == null || canonical.expansionType != card.expansionType
-                    || canonical.monsterType != card.monsterType
-                    || canonical.borderType != card.borderType
-                    || canonical.isFoil != card.isFoil
-                    || canonical.isDestiny != card.isDestiny
-                    || canonical.isChampionCard != card.isChampionCard)
+                    || canonical.monsterType != card.monsterType)
                 {
-                    // The card is self-inconsistent with THIS host's layout for the expansion
-                    // (e.g. the sender resolved an ordinal through a different shown list). Log
-                    // both sides with raw ordinals so the divergent field is visible next time.
+                    // The card does not resolve back to the slot it claimed (the sender resolved
+                    // an ordinal through a different shown list, or a cross-build card). Applying
+                    // it would credit some other card's slot, so it stays refused and both sides
+                    // are logged with raw ordinals so the divergent field is visible next time.
                     reason = "card fields do not match their save index (index=" + saveIndex
                         + " sent=" + CardFieldDump(card) + " canonical=" + CardFieldDump(canonical)
                         + ")";
                     return false;
+                }
+                if (canonical.borderType != card.borderType
+                    || canonical.isFoil != card.isFoil
+                    || canonical.isDestiny != card.isDestiny
+                    || canonical.isChampionCard != card.isChampionCard)
+                {
+                    // Field logs (2.0.0, paired host+client): a guest's modded pull was rolled
+                    // back and lost because the same NAMED content pack was defined differently
+                    // at this save slot on the two PCs - a pack update on one side, or two
+                    // bundles declaring one expansion name. For a VANILLA expansion the border
+                    // and foil ARE part of the save index, so a mismatch can only be a bogus or
+                    // cross-build card and stays refused. For a modded (EPL-style) expansion the
+                    // slot is the monster ordinal (plus the foil bit only when the pack rolls
+                    // random foils); the border and the other definition fields never move it,
+                    // so this host can represent the card exactly as its own album defines that
+                    // slot - 1.0.x applied it the same way. Refusing deleted the pull from BOTH
+                    // sides (the sender undoes its prediction), which is the reported "modded
+                    // cards vanish when a guest opens packs". Accept it, and say so once per
+                    // slot so content drift is still visible in the log.
+                    if (IsVanillaCardExpansion(card.expansionType))
+                    {
+                        reason = "card fields do not match their save index (index=" + saveIndex
+                            + " sent=" + CardFieldDump(card) + " canonical="
+                            + CardFieldDump(canonical) + ")";
+                        return false;
+                    }
+
+                    WarnCardDefinitionDivergence(card, canonical, saveIndex);
                 }
             }
             catch (Exception error)
@@ -1708,10 +1733,67 @@ namespace CardShopCoop.Modules.World
         /// <summary>Drop the shown-monster cache. Called from world reset beside the other
         /// session state:
         /// the next session may load a different save/content set, and a stale membership set
-        /// would either refuse cards this install now has or accept ones it doesn't.</summary>
+        /// would either refuse cards this install now has or accept ones it doesn't. The
+        /// once-per-slot warning memo is dropped with it, since a rejoin may legitimately have
+        /// new content to warn about.</summary>
         internal static void ClearCardSetCache()
         {
             _shownMonsters.Clear();
+            _cardWarnedKeys.Clear();
+        }
+
+        /// <summary>Card slots a warning has already been printed for this session, so a repeated
+        /// pull of one card cannot flood the log (pre-2.0 memoized these; the 2.0 rewrite lost the
+        /// memo but kept the comment promising it). Bounded: once the cap is reached new keys are
+        /// not remembered - a warning must never grow memory without limit.</summary>
+        private static readonly HashSet<string> _cardWarnedKeys = new(StringComparer.Ordinal);
+        private const int CardWarnedKeysMax = 512;
+
+        /// <summary>True for the expansions the GAME itself ships: exactly the members below
+        /// ECardExpansionType.MAX. Vanilla save indices are dense - they pack the shown-list
+        /// position, the border and (on expansions with a foil slot) the foil bit into one slot -
+        /// so border/foil ARE part of the slot identity. Every modded expansion is minted by EPL's
+        /// prepatcher at and above 200000 (EnumPatcher's startingValue), far outside the game's
+        /// enum space, and its save index is the monster ordinal alone (plus the foil bit when the
+        /// pack rolls random foils) - which is exactly why a definition mismatch is benign there
+        /// and fatal here. Range, not a member list: a game update that adds an expansion before
+        /// MAX is included automatically, and CardIdent already draws the same line.</summary>
+        internal static bool IsVanillaCardExpansion(ECardExpansionType expansion)
+            => (int)expansion >= (int)ECardExpansionType.Tetramon
+                && (int)expansion < (int)ECardExpansionType.MAX;
+
+        /// <summary>Returns true the first time this key is warned in a session, so the caller can
+        /// log exactly once per card slot. Never throws and never grows past the cap.</summary>
+        private static bool MarkCardWarned(string key)
+        {
+            if (key == null || _cardWarnedKeys.Contains(key)
+                || _cardWarnedKeys.Count >= CardWarnedKeysMax)
+            {
+                return false;
+            }
+
+            _cardWarnedKeys.Add(key);
+            return true;
+        }
+
+        /// <summary>Host: the sender's copy of a modded content pack defines this save slot
+        /// differently (a pack update on one side, or two bundles declaring one expansion name).
+        /// The slot is still valid here, so the delta is applied - this only makes the content
+        /// drift visible, once per slot, with both raw definitions side by side.</summary>
+        private static void WarnCardDefinitionDivergence(CardData card, CardData canonical,
+            int saveIndex)
+        {
+            if (!MarkCardWarned("diverged:" + (int)card.expansionType + ":" + (int)card.monsterType
+                + ":" + (card.isFoil ? 1 : 0)))
+            {
+                return;
+            }
+
+            CoopPlugin.Log.LogWarning("card delta: " + CardIdent(card)
+                + " is defined differently on this host (index=" + saveIndex
+                + " sent=" + CardFieldDump(card) + " canonical=" + CardFieldDump(canonical)
+                + "); the card is stored as this host defines that slot - make sure both players "
+                + "installed the same version of the pack");
         }
 
         /// <summary>Membership test: does a data row for this monster exist under this expansion
@@ -1883,8 +1965,6 @@ namespace CardShopCoop.Modules.World
         }
 
         // Resolve the live binder through the non-fabricating scene reference.
-        private static readonly System.Reflection.MethodInfo MiBinderResort =
-            HarmonyLib.AccessTools.Method(typeof(CollectionBinderFlipAnimCtrl), "OnSortingMethodUpdated");
         private static readonly System.Reflection.FieldInfo FiBinderIsBookOpen =
             HarmonyLib.AccessTools.Field(typeof(CollectionBinderFlipAnimCtrl), "m_IsBookOpen");
         // Extra binder internals we read to recompute the OPEN album's total-value text after a
@@ -1897,12 +1977,16 @@ namespace CardShopCoop.Modules.World
         private static readonly System.Reflection.FieldInfo FiBinderExpansionType =
             HarmonyLib.AccessTools.Field(typeof(CollectionBinderFlipAnimCtrl), "m_ExpansionType");
 
-        /// <summary>Make an ALREADY-OPEN collection binder re-lay-out after a card change.
-        /// SetCanUpdateSort alone only ARMS a gate the vanilla per-frame Update never
-        /// consumes, so a traded/pulled card stayed invisible until the player flipped a
-        /// page or reopened the binder. When the book is open we also invoke the game's own
-        /// OnSortingMethodUpdated (backToFirstPage:false, keeps the current page) which
-        /// rebuilds the sorted list + relays out all page groups, so the card appears now.</summary>
+        /// <summary>End-of-frame catch-up for a card change while the collection binder is up.
+        /// SetCanUpdateSort alone only ARMS the game's own open-time re-sort (the vanilla
+        /// per-frame Update never consumes it while the book is open), so the open binder
+        /// would stay stale. We deliberately do NOT invoke OnSortingMethodUpdated on a live
+        /// book: that moved every card to a new slot and left the emptied slots' raycast
+        /// proxies behind, which is the reported "card moved there but cannot be taken".
+        /// Instead ApplyOpenBinderCardChanges rewrites only the affected slots the way vanilla
+        /// itself does when a card is taken out, arming the re-sort so holes heal on reopen.
+        /// The total-value text is refreshed here because the open path is the only other
+        /// writer of it.</summary>
         private static void RefreshOpenBinder()
         {
             try
@@ -1916,18 +2000,17 @@ namespace CardShopCoop.Modules.World
 
                 ctrl.SetCanUpdateSort(canSort: true);
                 var isOpen = FiBinderIsBookOpen != null && (bool)FiBinderIsBookOpen.GetValue(ctrl);
-                if (isOpen && MiBinderResort != null)
+                if (isOpen)
                 {
-                    MiBinderResort.Invoke(ctrl, new object[] { false }); // backToFirstPage:false
+                    ApplyOpenBinderCardChanges(ctrl);
                 }
 
-                // OnSortingMethodUpdated re-lays out the cards but NEVER touches the total-value
-                // text - that write only happens in the binder OPEN path. So a traded/pulled card
-                // showed up on the page but the "total value" header stayed stale (the reported
-                // "total value differs"). While the book is open, mirror the exact SetTotalValue
-                // call the open path (CollectionBinderFlipAnimCtrl.Update ~807-830) would make for
-                // the CURRENTLY open album. Behind the isOpen guard so a delta with no binder up
-                // costs nothing.
+                // The binder's own open path is the only other writer of the total-value text -
+                // it never updates while the book is open. So a traded/pulled card showed up on
+                // the page but the "total value" header stayed stale (the reported "total value
+                // differs"). Mirror the exact SetTotalValue call the open path
+                // (CollectionBinderFlipAnimCtrl.Update ~807-830) would make for the CURRENTLY
+                // open album. Behind the isOpen guard so a delta with no binder up costs nothing.
                 if (isOpen && FiBinderUI != null)
                 {
                     var ui = FiBinderUI.GetValue(ctrl) as CollectionBinderUI;
@@ -2242,8 +2325,8 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        /// <summary>End of frame: flush card-delta diagnostics and perform one binder relayout
-        /// for everything applied this frame.</summary>
+        /// <summary>End of frame: flush card-delta diagnostics and mirror everything applied this
+        /// frame into the binder, if one is open.</summary>
         private void FlushFrameCardWork()
         {
             if (_deltaAppliedThisFrame > 0)
@@ -2270,6 +2353,7 @@ namespace CardShopCoop.Modules.World
             {
                 _binderRefreshPending = false;
                 RefreshOpenBinder();
+                ClearBinderMirrorFrame();
             }
         }
 

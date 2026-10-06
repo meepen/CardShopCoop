@@ -176,23 +176,11 @@ namespace CardShopCoop.Modules.World
         }
 
         /// <summary>Vanilla expansions are owned by the dense GenCardMarketPriceList sync;
-        /// only modded (EPL) expansions go through the delta hook.</summary>
+        /// only modded (EPL) expansions go through the delta hook. The oracle itself lives with
+        /// the other card-identity facts (WorldCardInteraction.IsVanillaCardExpansion) so the
+        /// game-vs-modded boundary is defined exactly once.</summary>
         private static bool IsVanillaCardExpansion(ECardExpansionType expansion)
-        {
-            switch (expansion)
-            {
-                case ECardExpansionType.Tetramon:
-                case ECardExpansionType.Destiny:
-                case ECardExpansionType.Ghost:
-                case ECardExpansionType.Megabot:
-                case ECardExpansionType.FantasyRPG:
-                case ECardExpansionType.CatJob:
-                case ECardExpansionType.Ascension:
-                    return true;
-                default:
-                    return false;
-            }
-        }
+            => WorldCardInteraction.IsVanillaCardExpansion(expansion);
 
         private static long ModCardKey(ECardExpansionType expansion, int index, bool isDestiny)
         {
