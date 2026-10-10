@@ -15,6 +15,8 @@ jobs:
     name: Build plugin
     runs-on: [self-hosted, linux, cardshop-game]
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     env:
       CARDSHOP_GAMEPATH: /game
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
@@ -55,7 +57,9 @@ jobs:
           path: dist
           if-no-files-found: error
 
-  release:
+  # The three publish targets are independent jobs (each only needs the build), so a failure in one
+  # never blocks the others.
+  release-github:
     name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
@@ -63,8 +67,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Check out first so the default clean does not wipe the downloaded dist/ afterwards. The
-      # checkout provides the release scripts and the checkout git metadata `gh release create` needs.
       - name: Check out source
         uses: actions/checkout@v7
 
@@ -74,12 +76,25 @@ jobs:
           name: dist
           path: dist
 
-      - name: Read plugin version
-        id: version
-        shell: bash
-        run: |
-          version=$(sed -n 's/.*<CardShopCoopVersion>\(.*\)<\/CardShopCoopVersion>.*/\1/p' Directory.Build.props)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/publish-github.sh "${{ needs.build.outputs.version }}"
+
+  release-thunderstore:
+    name: Publish to Thunderstore
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
@@ -91,37 +106,46 @@ jobs:
           dotnet tool install --global tcli
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      # Stable tags go to Thunderstore; every tag creates the matching GitHub release (prerelease
-      # for names with a "-suffix"). See scripts/publish.sh.
-      - name: Publish release
+      - name: Publish to Thunderstore
         env:
           TCLI_AUTH_TOKEN: ${{ secrets.THUNDERSTORE_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash scripts/publish.sh "${{ steps.version.outputs.version }}"
+        run: bash scripts/publish-thunderstore.sh "${{ needs.build.outputs.version }}"
+
+  release-nexus:
+    name: Publish to Nexus Mods
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
 
       # Nexus Mods uploads use the official action and a pre-created file group. Each is skipped
       # until the matching repository variable is configured: vars.NEXUSMODS_FILE_ID and
       # vars.NEXUSMODS_CUSTOMTV_FILE_ID (with the NEXUSMODS_API_KEY secret).
       - name: Publish core to Nexus Mods
-        if: ${{ !contains(github.ref_name, '-') && vars.NEXUSMODS_FILE_ID != '' }}
+        if: ${{ vars.NEXUSMODS_FILE_ID != '' }}
         uses: Nexus-Mods/upload-action@v1.0.0-beta.10
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ vars.NEXUSMODS_FILE_ID }}
-          filename: dist/nexus/CardShopCoopCommunity-${{ steps.version.outputs.version }}.zip
-          version: ${{ steps.version.outputs.version }}
+          filename: dist/nexus/CardShopCoopCommunity-${{ needs.build.outputs.version }}.zip
+          version: ${{ needs.build.outputs.version }}
           category: main
-          display_name: CardShopCoopCommunity ${{ steps.version.outputs.version }}
+          display_name: CardShopCoopCommunity ${{ needs.build.outputs.version }}
           description: True co-op multiplayer for TCG Card Shop Simulator.
 
       - name: Publish Custom TV to Nexus Mods
-        if: ${{ !contains(github.ref_name, '-') && vars.NEXUSMODS_CUSTOMTV_FILE_ID != '' }}
+        if: ${{ vars.NEXUSMODS_CUSTOMTV_FILE_ID != '' }}
         uses: Nexus-Mods/upload-action@v1.0.0-beta.10
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
           file_id: ${{ vars.NEXUSMODS_CUSTOMTV_FILE_ID }}
-          filename: dist/nexus/CardShopCoopCommunity_CustomTv-${{ steps.version.outputs.version }}.zip
-          version: ${{ steps.version.outputs.version }}
+          filename: dist/nexus/CardShopCoopCommunity_CustomTv-${{ needs.build.outputs.version }}.zip
+          version: ${{ needs.build.outputs.version }}
           category: main
-          display_name: CardShopCoopCommunity Custom TV ${{ steps.version.outputs.version }}
+          display_name: CardShopCoopCommunity Custom TV ${{ needs.build.outputs.version }}
           description: RTCGO Custom TV playback sync for CardShopCoopCommunity.

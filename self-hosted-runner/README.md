@@ -63,8 +63,9 @@ git push origin v2.0.1
 ```
 
 The tag must match the version exactly. GitHub Actions then runs `scripts/build.sh` (builds and
-packages every distributable into `dist/`) and `scripts/publish.sh` (creates the GitHub release and,
-on stable tags, publishes to Thunderstore + Nexus Mods).
+packages every distributable into `dist/`), and publishes through three independent jobs so one
+failing cannot block the others: the GitHub release (`scripts/publish-github.sh`), Thunderstore
+(`scripts/publish-thunderstore.sh`, stable tags only), and Nexus Mods (the official upload action).
 
 ## Publishing setup (one-time)
 

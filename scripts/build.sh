@@ -12,7 +12,7 @@
 #   dist/thunderstore/...                            Thunderstore packages (see scripts/thunderstore-package.sh)
 #   dist/nexus/...                                   Nexus Mods packages   (see scripts/nexus-package.sh)
 #
-# Publishing is a separate step: scripts/publish.sh.
+# Publishing is separate: scripts/publish-github.sh and scripts/publish-thunderstore.sh.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
