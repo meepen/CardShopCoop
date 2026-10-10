@@ -146,7 +146,7 @@ jobs:
           file_id: ${{ vars.NEXUSMODS_INTEROP_FILE_ID }}
           filename: dist/nexus/CardShopCoopCommunity_ExternalModInterop-${{ needs.build.outputs.version }}.zip
           version: ${{ needs.build.outputs.version }}
-          category: main
+          category: optional
           display_name: CardShopCoopCommunity ExternalModInterop ${{ needs.build.outputs.version }}
           description: Optional external-mod interop bundle for CardShopCoopCommunity.
 

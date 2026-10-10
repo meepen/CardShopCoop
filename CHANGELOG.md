@@ -3,6 +3,17 @@
 True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 **same version** — the join handshake enforces it.
 
+## 2.0.3
+**CardShopCoopCommunity is now on Nexus Mods, and the optional add-on package got a clearer name.**
+
+- The mod now ships on Nexus Mods (TCG Card Shop Simulator) alongside GitHub and Thunderstore.
+- The optional add-on package is now `CardShopCoopCommunity_ExternalModInterop` — the external-mod
+  interop bundle, which currently ships RTCGO Custom TV sync. The old
+  `CardShopCoopCommunity_CustomTv` name is retired.
+- No in-game changes.
+
+**Both players must update.**
+
 ## 2.0.2
 **Thunderstore packaging fix: the optional Custom TV add-on now installs cleanly.**
 
