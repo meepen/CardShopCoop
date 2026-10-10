@@ -5,6 +5,11 @@ on:
     branches: [master, main]
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      discord:
+        description: Post the current changelog to Discord (tests the webhook; nothing else runs)
+        type: boolean
+        default: false
 
 concurrency:
   group: build-${{ github.ref }}
@@ -13,6 +18,7 @@ concurrency:
 jobs:
   build:
     name: Build plugin
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.discord) }}
     runs-on: [self-hosted, linux, cardshop-game]
     timeout-minutes: 30
     outputs:
@@ -188,16 +194,15 @@ jobs:
 
   release-discord:
     name: Post changelog to Discord
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.discord) }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
         uses: actions/checkout@v7
 
-      # Posts the "## <version>" changelog to a channel webhook for every v* tag (alphas/betas too).
-      # Skipped when the secret is unset.
+      # Posts the "## <version>" changelog for every v* tag (alphas/betas too), or on a manual
+      # "discord" dispatch. Skipped when the secret is unset.
       - name: Post to Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: bash scripts/publish-discord.sh "${{ needs.build.outputs.version }}"
+        run: bash scripts/publish-discord.sh
