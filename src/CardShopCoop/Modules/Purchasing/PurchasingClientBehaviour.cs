@@ -216,22 +216,38 @@ namespace CardShopCoop.Modules.Purchasing
             }, PendingSurface.Scanner, null, screen, null, null, -1);
         }
 
-        private PendingRequest CaptureFurniture(FurnitureShopConfirmPurchaseScreen screen)
+        /// <summary>Captures one furniture checkout at the engine, the game's single mutation
+        /// point for a furniture purchase. Vanilla reaches the engine only from the game's own
+        /// confirmation screen (which is still open when it calls in and closes itself
+        /// afterwards), so when that screen is open for this index the capture records it for the
+        /// close/reopen bookkeeping. A replacement shop UI - Furniture Overhaul's page - calls
+        /// the engine directly and never opens the confirmation screen, and the same capture
+        /// forwards it.</summary>
+        private PendingRequest CaptureFurniture(FurnitureShopUIScreen owner, int index)
         {
             if (!CanCapture("furniture checkout"))
                 return null;
 
-            var index = PurchasingInterop.FurnitureIndex(screen);
-            var owner = PurchasingInterop.FurnitureOwner(screen);
             var data = index >= 0 ? InventoryBase.GetFurniturePurchaseData(index) : null;
+            if (data == null)
+                return null;
+
+            var confirmation = PurchasingInterop.OpenFurnitureConfirmation(owner, index);
+            if (confirmation == null)
+            {
+                CoopPlugin.Log.LogInfo("Purchasing captured a furniture checkout that bypassed "
+                    + "the confirmation screen (index " + index + ", type "
+                    + (int)data.objectType + ").");
+            }
+
             return BuildPending(new PurchaseIntentMessage
             {
                 Kind = PurchaseKind.Furniture,
                 Lines = new List<PurchaseLine>
                 {
-                    new PurchaseLine { ObjectType = data?.objectType ?? EObjectType.None, Count = 1 },
+                    new PurchaseLine { ObjectType = data.objectType, Count = 1 },
                 },
-            }, PendingSurface.Furniture, null, null, screen, owner, index);
+            }, PendingSurface.Furniture, null, null, confirmation, owner, index);
         }
 
         private PendingRequest CaptureProductLicense(RestockItemPanelUI panel)
@@ -469,8 +485,12 @@ namespace CardShopCoop.Modules.Purchasing
                             pending.ScannerBefore);
                     break;
                 case PendingSurface.Furniture:
-                    PurchasingInterop.ReopenFurnitureConfirmation(pending.FurnitureOwner,
-                        pending.LocalIndex);
+                    // A rejected checkout reopens the game's confirmation screen so the player can
+                    // retry; a checkout that bypassed it (a replacement shop UI) has nothing to
+                    // reopen.
+                    if (pending.FurnitureScreen != null)
+                        PurchasingInterop.ReopenFurnitureConfirmation(pending.FurnitureOwner,
+                            pending.LocalIndex);
                     break;
                 case PendingSurface.ProductLicense:
                     CatalogApi.ApplyClientProductLicense(pending.LocalIndex, false);
@@ -552,15 +572,23 @@ namespace CardShopCoop.Modules.Purchasing
             private static void Finalizer(PendingRequest __state) => ReleaseChargeScope(__state);
         }
 
-        [HarmonyPatch(typeof(FurnitureShopConfirmPurchaseScreen), "OnPressConfirmCheckout")]
+        /// <summary>The furniture checkout engine, the game's single mutation point for a
+        /// furniture purchase. Vanilla reaches it only from <c>FurnitureShopConfirmPurchaseScreen</c>
+        /// (still open when it calls in; it closes itself afterwards), and a replacement shop UI
+        /// calls it directly. One capture covers both; <see cref="CaptureFurniture"/> records the
+        /// open confirmation screen so an acceptance can close it and a rejection can reopen it,
+        /// and both stay absent for a bypassing UI.</summary>
+        [HarmonyPatch(typeof(FurnitureShopUIScreen), "EvaluateCartCheckout")]
         private static class FurnitureCheckoutPatch
         {
+            // Capture before vanilla charges and spawns; the scope suppresses the Hud economy
+            // observer so the host's accepted intent is the only charge.
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static void Prefix(FurnitureShopConfirmPurchaseScreen __instance,
+            private static void Prefix(FurnitureShopUIScreen __instance, int index,
                 out PendingRequest __state)
             {
-                __state = _active?.CaptureFurniture(__instance);
+                __state = _active?.CaptureFurniture(__instance, index);
                 EnterChargeScope(__state);
             }
 

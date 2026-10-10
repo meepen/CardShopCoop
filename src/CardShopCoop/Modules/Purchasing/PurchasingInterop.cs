@@ -41,6 +41,8 @@ namespace CardShopCoop.Modules.Purchasing
             typeof(FurnitureShopConfirmPurchaseScreen), "m_Index");
         private static readonly FieldInfo FiFurnitureOwner = AccessTools.Field(
             typeof(FurnitureShopConfirmPurchaseScreen), "m_FurnitureShopUIScreen");
+        private static readonly FieldInfo FiFurnitureConfirmScreen = AccessTools.Field(
+            typeof(FurnitureShopUIScreen), "m_ConfirmPurchaseScreen");
         private static readonly Type PlatformManagerType = AccessTools.TypeByName("GA.PlatformManager");
         private static readonly PropertyInfo PlatformManagerInstance = PlatformManagerType?.GetProperty(
             "Instance", BindingFlags.Public | BindingFlags.Static);
@@ -75,6 +77,24 @@ namespace CardShopCoop.Modules.Purchasing
         internal static FurnitureShopUIScreen FurnitureOwner(
             FurnitureShopConfirmPurchaseScreen screen)
             => FiFurnitureOwner?.GetValue(screen) as FurnitureShopUIScreen;
+
+        /// <summary>The game's confirmation screen while it is open for this exact purchase
+        /// index, otherwise null. Vanilla's confirm screen calls the checkout engine and closes
+        /// itself after, so an open matching screen means the checkout came from it; a
+        /// replacement shop UI (Furniture Overhaul) never opens it and its stale index must not
+        /// match. Null when either private field is missing on an unsupported build.</summary>
+        internal static FurnitureShopConfirmPurchaseScreen OpenFurnitureConfirmation(
+            FurnitureShopUIScreen owner, int index)
+        {
+            if (owner == null || index < 0 || FiFurnitureConfirmScreen == null)
+                return null;
+
+            var screen = FiFurnitureConfirmScreen.GetValue(owner) as FurnitureShopConfirmPurchaseScreen;
+            if (screen == null || !screen.IsScreenOpened())
+                return null;
+
+            return FurnitureIndex(screen) == index ? screen : null;
+        }
 
         internal static PurchaseLine RestockLine(int index, int count)
         {

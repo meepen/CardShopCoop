@@ -1,6 +1,7 @@
 using CardShopCoop.Util;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
+using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Prediction;
 using System;
 using System.Collections;
@@ -380,6 +381,22 @@ namespace CardShopCoop.Modules.World
             return list[idx] as T;
         }
 
+        /// <summary>True when a bulk donation box is a defined game object type and therefore
+        /// safe for the raw compact-card-list sync. A content mod can reuse
+        /// <see cref="InteractableBulkDonationBox"/> for furniture whose card list is an opaque
+        /// encoded structure - Furniture Overhaul stores its multi-compartment Bargain Bin and
+        /// Card Scanner state, including negative sentinel indexes, in the same field - and
+        /// clearing or replacing that list over the wire corrupts it. A modded box carries a raw
+        /// EObjectType cast that is not a defined member, while every vanilla (and EPL-minted)
+        /// type is one; the None sentinel is a defined member, so it is refused explicitly (see
+        /// CatalogIdMap's sentinel note). The check is a pure function of the value, so every
+        /// peer classifies the same box the same way and raw list indexes stay untouched for
+        /// vanilla boxes.</summary>
+        private static bool IsSyncedDonationBox(InteractableBulkDonationBox box)
+            => box != null
+                && (int)box.m_ObjectType != (int)EObjectType.None
+                && CatalogIdMap.IsDefined(EnumKind.ObjectType, (int)box.m_ObjectType);
+
         // ---------------- host: change pushes ----------------
 
         private List<int> GetContainerKeys()
@@ -410,12 +427,23 @@ namespace CardShopCoop.Modules.World
 
             for (var i = 0; i < list.Count && i < 250; i++)
             {
-                if (list[i] != null)
+                if (list[i] == null)
                 {
-                    var key = (kind << 8) | i;
-                    result.Add(key);
-                    _hostKeys[list[i]] = key;
+                    continue;
                 }
+
+                // Modded boxes never enter the key set, so the join baseline, the change pushes
+                // and the client-intent resolution all skip them while vanilla raw indexes and
+                // wire ids stay exactly as before.
+                if (kind == KindDonation
+                    && !IsSyncedDonationBox(list[i] as InteractableBulkDonationBox))
+                {
+                    continue;
+                }
+
+                var key = (kind << 8) | i;
+                result.Add(key);
+                _hostKeys[list[i]] = key;
             }
         }
 
@@ -518,7 +546,14 @@ namespace CardShopCoop.Modules.World
                 case KindDonation:
                     {
                         var b = Get<InteractableBulkDonationBox>(kind, idx);
-                        rec.Cards = b?.GetCompactCardDataAmountList() ?? new List<CompactCardDataAmount>();
+                        if (!IsSyncedDonationBox(b))
+                        {
+                            // Defense in depth: the key enumeration already excludes modded
+                            // boxes; a record must never expose their encoded list.
+                            break;
+                        }
+
+                        rec.Cards = b.GetCompactCardDataAmountList();
                         break;
                     }
                 case KindPackOpener:
@@ -628,6 +663,14 @@ namespace CardShopCoop.Modules.World
                                 reason = "container does not exist";
                                 break;
                             }
+
+                            if (kind == KindDonation
+                                && !IsSyncedDonationBox(Get<InteractableBulkDonationBox>(kind, idx)))
+                            {
+                                reason = "donation box is not synced";
+                                break;
+                            }
+
                             if (cards == null)
                             {
                                 reason = "container card payload is missing";
@@ -1271,8 +1314,15 @@ namespace CardShopCoop.Modules.World
                             rec.Cards, rec.CanWorkerTake);
                         break;
                     case KindDonation:
-                        ApplyContentInPlace(Get<InteractableBulkDonationBox>(kind, idx), rec.Cards);
-                        break;
+                        {
+                            var donation = Get<InteractableBulkDonationBox>(kind, idx);
+                            if (IsSyncedDonationBox(donation))
+                            {
+                                ApplyContentInPlace(donation, rec.Cards);
+                            }
+
+                            break;
+                        }
                     case KindPackOpener:
                         ApplyPackState(Get<InteractableAutoPackOpener>(kind, idx), rec);
                         if (rec.CollectClaimed)
@@ -1387,6 +1437,11 @@ namespace CardShopCoop.Modules.World
         private void ApplyContentInPlace(InteractableBulkDonationBox box,
             List<CompactCardDataAmount> cards)
         {
+            if (!IsSyncedDonationBox(box))
+            {
+                return;
+            }
+
             ApplyingRemote = true;
             try
             {
@@ -2162,7 +2217,8 @@ namespace CardShopCoop.Modules.World
         internal static void DonationContentPostfix(InteractableBulkDonationBox __instance)
         {
             var self = Current;
-            if (ApplyingRemote || __instance == null || self == null)
+            if (ApplyingRemote || __instance == null || self == null
+                || !IsSyncedDonationBox(__instance))
             {
                 return;
             }
@@ -2331,7 +2387,10 @@ namespace CardShopCoop.Modules.World
 
         public static void HostDonationContentPostfix(InteractableBulkDonationBox __instance)
         {
-            Current?.HostChanged(KindDonation, __instance);
+            // Modded boxes (Furniture Overhaul's Bargain Bin/Scanner) are not synced; the key
+            // enumeration would refuse them anyway, so skip before doing any work.
+            if (IsSyncedDonationBox(__instance))
+                Current?.HostChanged(KindDonation, __instance);
         }
 
         public static void HostWorkerTakePostfix(InteractableCardStorageShelf __instance)
@@ -2346,7 +2405,8 @@ namespace CardShopCoop.Modules.World
 
         public static void DonationRandomCardPostfix(InteractableBulkDonationBox __instance)
         {
-            Current?.HostChanged(KindDonation, __instance);
+            if (IsSyncedDonationBox(__instance))
+                Current?.HostChanged(KindDonation, __instance);
         }
 
         /// <summary>Broadcasts one host-side pack-opener change. Sync code applying a remote intent

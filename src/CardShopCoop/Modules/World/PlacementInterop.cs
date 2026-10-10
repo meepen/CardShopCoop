@@ -1112,7 +1112,7 @@ namespace CardShopCoop.Modules.World
                     as InteractableObject;
                 if (removed != null)
                 {
-                    PlacementIdentity.Forget(removed);
+                    DestroyRemovedEntity(removed);
                 }
 
                 return true;
@@ -1139,6 +1139,23 @@ namespace CardShopCoop.Modules.World
             }
 
             return Apply(entry, false);
+        }
+
+        /// <summary>The host publishes a remove only for an entity it no longer holds, so the
+        /// local counterpart was destroyed there (trashed or sold furniture). The box channels
+        /// deliberately keep boxed furniture alive when a package is retired (unbox, warehouse
+        /// move), so this is the one place that turns a host-side destruction into the matching
+        /// local destruction. Without it the client kept an inactive ghost inside the game's
+        /// lists - the register's cashier-counter list and every other list-index consumer then
+        /// drifted from the host, and the ghost itself never cleared.
+        ///
+        /// The game's own destroy entry point is used rather than a raw <c>Object.Destroy</c>: it
+        /// removes the object from its <c>ShelfManager</c> list, disables its compartments and
+        /// destroys its world UI group and GameObject, exactly as when the host destroys it.</summary>
+        private static void DestroyRemovedEntity(InteractableObject obj)
+        {
+            PlacementIdentity.Forget(obj);
+            obj.OnDestroyed();
         }
     }
 }

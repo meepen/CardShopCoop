@@ -105,7 +105,7 @@ namespace CardShopCoop.Modules.Register
             {
                 var index = message.Counter;
                 var counter = RegisterInterop.Counter(index);
-                var station = counter == null ? null : Observe(index, counter);
+                var station = counter == null ? null : ObservePublishing(index, counter);
                 if (counter == null)
                 {
                     Reject(connection.Id, message.PredictionId);
@@ -388,6 +388,34 @@ namespace CardShopCoop.Modules.Register
             return generation == 0 ? 1u : generation;
         }
 
+        /// <summary>Observe for a live broadcast path: when this index now names a different
+        /// counter object than the station remembered - a destroyed counter shifted the list, or
+        /// the object was replaced - the new generation must reach the clients before the
+        /// caller's delta. Clients gate every non-ownership delta on the generation they hold for
+        /// the index (see <c>HasCounterGeneration</c>), and a list shift is not an add/remove
+        /// event, so without this publish a shifted counter's deltas were deferred forever.
+        /// Prediction-free on purpose: this corrects state, it does not confirm the intent whose
+        /// publish happened to notice the shift.</summary>
+        private Station ObservePublishing(int index, InteractableCashierCounter counter)
+        {
+            var station = GetStation(index);
+            var rebound = !ReferenceEquals(station.Counter, counter);
+            var observed = Observe(index, counter);
+            if (rebound)
+            {
+                Broadcast(new RegisterDeltaMessage
+                {
+                    Kind = RegisterDeltaKind.CounterLifecycle,
+                    Counter = (byte)index,
+                    CounterGeneration = observed.CounterGeneration,
+                    Exists = true,
+                    PredictionId = Guid.Empty,
+                });
+            }
+
+            return observed;
+        }
+
         private RegisterBaselineMessage BuildBaseline()
         {
             var baseline = new RegisterBaselineMessage();
@@ -502,7 +530,7 @@ namespace CardShopCoop.Modules.Register
         private RegisterDeltaMessage NewDelta(int index, RegisterDeltaKind kind)
         {
             var counter = RegisterInterop.Counter(index);
-            var station = counter == null ? GetStation(index) : Observe(index, counter);
+            var station = counter == null ? GetStation(index) : ObservePublishing(index, counter);
             return new RegisterDeltaMessage
             {
                 Kind = kind,
@@ -613,7 +641,7 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
-            var station = Observe(index, counter);
+            var station = ObservePublishing(index, counter);
             var delta = new RegisterDeltaMessage
             {
                 Kind = RegisterDeltaKind.PaidAmount,
@@ -827,7 +855,7 @@ namespace CardShopCoop.Modules.Register
                     return true;
                 }
 
-                if (active.Observe(index, __instance).Owner > 0)
+                if (active.ObservePublishing(index, __instance).Owner > 0)
                 {
                     CoopPlugin.Log.LogInfo("[register] host left counter " + index
                         + " to the player already manning it.");
@@ -849,7 +877,7 @@ namespace CardShopCoop.Modules.Register
                 var index = Index(__instance);
                 if (index >= 0 && index < 250)
                 {
-                    _active.Observe(index, __instance).Owner = -1;
+                    _active.ObservePublishing(index, __instance).Owner = -1;
                     _active.PublishOwnership(index);
                 }
             }
@@ -1080,7 +1108,7 @@ namespace CardShopCoop.Modules.Register
                 }
 
                 active.GetStation(index).Owner = 0;
-                active.Observe(index, __instance);
+                active.ObservePublishing(index, __instance);
                 active.PublishOwnership(index);
                 RegisterHighlight.Clear(__instance);
             }
