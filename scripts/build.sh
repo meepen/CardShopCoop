@@ -9,6 +9,7 @@
 #   dist/CardShopCoop-<version>.zip                  GitHub release / manual install
 #   dist/CardShopCoop.Api-<version>.zip              API-only package
 #   dist/CardShopCoop.ExternalModInterop.zip         Custom TV bundle
+#   dist/CardShopCoop.SampleMod-src-<version>.zip    Example-mod source (Nexus "miscellaneous")
 #   dist/thunderstore/...                            Thunderstore packages (see scripts/thunderstore-package.sh)
 #   dist/nexus/...                                   Nexus Mods packages   (see scripts/nexus-package.sh)
 #
@@ -36,6 +37,11 @@ dotnet build src/CardShopCoop.CustomTv/CardShopCoop.CustomTv.csproj -c Release -
 cp "src/CardShopCoop/bin/Release/CardShopCoop-${version}.zip" dist/
 cp "src/CardShopCoop.Api/bin/Release/CardShopCoop.Api-${version}.zip" dist/
 cp "src/CardShopCoop.CustomTv/bin/Release/CardShopCoop.ExternalModInterop.zip" dist/
+
+# Example-mod source, tracked files only (for a Nexus "miscellaneous" file). git archive excludes
+# bin/obj and anything else not committed.
+git archive --format=zip --prefix=CardShopCoop.SampleMod/ \
+  -o "dist/CardShopCoop.SampleMod-src-${version}.zip" HEAD:samples/CardShopCoop.SampleMod
 
 bash scripts/thunderstore-package.sh "$version"
 bash scripts/nexus-package.sh "$version"
