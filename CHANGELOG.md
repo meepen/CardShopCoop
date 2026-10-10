@@ -3,6 +3,14 @@
 True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 **same version** — the join handshake enforces it.
 
+## 2.0.5
+**Maintenance release — no in-game changes.**
+
+- Removed a third-party platform link from the README to comply with host service guidelines.
+- Releases are now also announced in the community Discord.
+
+**Both players must update — the version changed.**
+
 ## 2.0.4
 **Maintenance release — no in-game changes.**
 
