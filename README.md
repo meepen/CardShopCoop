@@ -49,4 +49,4 @@ This mod is open source. Feel free to contribute at our [GitHub](https://github.
 
 ### Original Mod
 
-This mod is based off of [CardShopCoop](https://www.nexusmods.com/tcgcardshopsimulator/mods/1117) ([Github](https://github.com/DeliriumPulse/CardShopCoop)).
+This mod is based off of [CardShopCoop](https://github.com/DeliriumPulse/CardShopCoop).
