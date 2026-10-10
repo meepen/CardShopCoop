@@ -48,7 +48,7 @@ namespace CardShopCoop.Modules.Report
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.report.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.report.host");
                 Patch(typeof(ReportOpenPatch));
                 Patch(typeof(ReviewAddPatch));
                 Patch(typeof(ReportMutationPatch));

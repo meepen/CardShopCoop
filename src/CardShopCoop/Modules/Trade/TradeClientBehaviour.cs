@@ -105,7 +105,7 @@ namespace CardShopCoop.Modules.Trade
             _context = RuntimeContext;
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
-            _harmony = new Harmony("com.zwhit.cardshopcoop.trade.client");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.trade.client");
             _harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerStopPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(AcceptPatch)).Patch();

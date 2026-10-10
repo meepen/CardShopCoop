@@ -5,10 +5,10 @@
     <AssemblyName>CardShopCoop.CustomTv</AssemblyName>
     <AssemblyTitle>CardShopCoop.CustomTv</AssemblyTitle>
     <RootNamespace>CardShopCoop.CustomTv</RootNamespace>
-    <Company>DeliriumPulse</Company>
-    <Product>CardShopCoop Custom TV</Product>
-    <Description>RTCGO Custom TV co-op sync for CardShopCoop. Optional separate download.</Description>
-    <Authors>DeliriumPulse</Authors>
+    <Company>Devin 'Meepen' Korb</Company>
+    <Product>CardShopCoopCommunity Custom TV</Product>
+    <Description>RTCGO Custom TV co-op sync for CardShopCoopCommunity. Optional separate download.</Description>
+    <Authors>Devin 'Meepen' Korb</Authors>
     <Version>$(CardShopCoopVersion)</Version>
     <LangVersion>9</LangVersion>
     <Nullable>disable</Nullable>

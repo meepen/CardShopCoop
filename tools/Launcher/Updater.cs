@@ -13,7 +13,7 @@ namespace CardShopCoopLauncher
     /// <summary>All the update plumbing, UI-free so the window stays readable.</summary>
     internal static class Updater
     {
-        public const string Repo = "DeliriumPulse/CardShopCoop";
+        public const string Repo = "meepen/CardShopCoop";
         public const string GameProcess = "Card Shop Simulator";
         public const string SteamAppId = "3070070";
         private const string DefaultGamePath =

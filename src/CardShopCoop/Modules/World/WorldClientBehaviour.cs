@@ -44,7 +44,7 @@ namespace CardShopCoop.Modules.World
             _cardInteraction.Containers.SendOp = message => SendWorldCommand(1, message);
             _cardInteraction.Containers.InGameProvider = _context.InGame;
             _cardInteraction.Containers.ReloadingProvider = _context.PreloadHold;
-            _harmony = new Harmony("com.zwhit.cardshopcoop.world.client");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.world.client");
             InstallBoxNetworkInteractionPatches();
             InstallPlayerBoxInteractionPatches();
             InstallPlayerBoxPresenceHook();

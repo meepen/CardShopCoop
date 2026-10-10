@@ -36,7 +36,7 @@ namespace CardShopCoop.Modules.Bills
                 handlersRegistered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.bills.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.bills.host");
                 _harmony.CreateClassProcessor(typeof(BillChangedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BillSetPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BillPopupPatch)).Patch();

@@ -38,7 +38,7 @@ namespace CardShopCoop.Modules.Light
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycle = true;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.light.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.light.client");
                 _harmony.CreateClassProcessor(typeof(LightSwitchPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(LightReadyPatch)).Patch();
             }

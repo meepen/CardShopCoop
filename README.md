@@ -1,4 +1,4 @@
-# CardShopCoop
+# CardShopCoopCommunity
 
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20shop-2ec484)](https://discord.gg/eNswvvTYbQ)
 
@@ -29,8 +29,6 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
 - **Live world**: customers and workers mirrored as motion-smoothed puppets
   (snapshot-interpolated, not jittery extrapolation), full day/night cycle and lighting
   sync, avatars with real carried items (boxes with product, card fans, binders).
-- **Allow NSFW**: when off, the Nude wardrobe option is hidden and fully nude players
-  appear in the game's random clothed customer look; when on, nude appearances are allowed.
 - **Mod-stack aware**: plugin-set and card-ID-registry parity checks at join with
   readable rejections, automatic `enum_values.json` sync (backup + install + "restart
   and rejoin"), product-catalog diffing with plain-language warnings, refunds when an
@@ -43,7 +41,7 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
 1. Install [BepInEx 5](https://github.com/BepInEx/BepInEx) (5.4.23 x64) into the game
    folder — most modded installs already have it.
 2. Drop `CardShopCoop.dll` into `BepInEx/plugins/` on **both** PCs.
-3. Both players must run the **same CardShopCoop version** and the **same mod set**
+3. Both players must run the **same CardShopCoopCommunity version** and the **same mod set**
    (including content data packs) — the join handshake tells you exactly what differs
    if not.
 4. In game, press **F2** for the co-op window. Host: load your save, click Host.
@@ -67,7 +65,7 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
   one-off/CI build. Don't edit the csproj.
 - `tools/Decomp/` — regenerates the decompiled game-assembly reference locally
   (ILSpy; the output is not part of this repo).
-- Ready-to-install builds: see [Releases](https://github.com/DeliriumPulse/CardShopCoop/releases)
+- Ready-to-install builds: see [Releases](https://github.com/meepen/CardShopCoop/releases)
   or the Nexus page.
 
 ## Architecture notes
@@ -91,10 +89,10 @@ BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
   registries differently per machine.
 - **For other mods**: a separate `CardShopCoop.Api.dll` exposes a small, optional-dependency-safe
   contract. Add a soft `[BepInDependency]`, reference the API with copy-local off, mark your DTOs
-  and behaviours with attributes, and CardShopCoop discovers you automatically. See
+  and behaviours with attributes, and CardShopCoopCommunity discovers you automatically. See
   `docs/third-party-integration.md` and `samples/CardShopCoop.SampleMod`.
 - **Custom TV** co-op sync ships in the optional `CardShopCoop.ExternalModInterop.zip` bundle
-  (currently containing the `CardShopCoop.CustomTv` plugin); install it alongside CardShopCoop
+  (currently containing the `CardShopCoop.CustomTv` plugin); install it alongside CardShopCoopCommunity
   (both players) to share TV playback.
 - Game gotchas that cost us dearly (see the feature modules and git history):
   dead statics (`CGameManager.Player`), auto-creating `CSingleton<T>.Instance`,

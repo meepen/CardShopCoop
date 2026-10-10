@@ -30,7 +30,7 @@ namespace CardShopCoop.Modules.Deodorant
             try
             {
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.deodorant.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.deodorant.client");
                 _harmony.CreateClassProcessor(typeof(SprayPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(CustomerManagerReadyPatch)).Patch();
                 NpcClientBehaviour.CustomerPoolChanged += ApplyPendingStates;

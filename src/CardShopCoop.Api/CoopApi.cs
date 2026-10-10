@@ -38,13 +38,13 @@ namespace CardShopCoop.Api
     }
 
     /// <summary>
-    /// Entry point for an integrating mod. Every member is safe when CardShopCoop is absent only
-    /// if the API assembly is present; because the API ships with CardShopCoop, the normal
+    /// Entry point for an integrating mod. Every member is safe when CardShopCoopCommunity is absent only
+    /// if the API assembly is present; because the API ships with CardShopCoopCommunity, the normal
     /// optional-dependency pattern is to also guard direct calls with
-    /// <c>BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("com.zwhit.cardshopcoop")</c>.
-    /// The attribute/DTO integration path needs no guard at all: CardShopCoop discovers it, and
+    /// <c>BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("dev.meepen.cardshopcoop")</c>.
+    /// The attribute/DTO integration path needs no guard at all: CardShopCoopCommunity discovers it, and
     /// auto-discovery through the BepInEx dependency graph is the preferred registration path.
-    /// Explicit registration with <see cref="Register"/> is only valid once CardShopCoop is loaded.
+    /// Explicit registration with <see cref="Register"/> is only valid once CardShopCoopCommunity is loaded.
     /// </summary>
     public static class CoopApi
     {
@@ -54,13 +54,13 @@ namespace CardShopCoop.Api
             set;
         }
 
-        /// <summary>True while CardShopCoop is loaded and has installed its binding.</summary>
+        /// <summary>True while CardShopCoopCommunity is loaded and has installed its binding.</summary>
         public static bool IsAvailable => Binding != null;
 
         /// <summary>The live session context, or null when not connected.</summary>
         public static ICoopContext Context => Binding == null ? null : Binding.Context;
 
-        /// <summary>Optional shared log source. CardShopCoop sets this at startup.</summary>
+        /// <summary>Optional shared log source. CardShopCoopCommunity sets this at startup.</summary>
         public static ManualLogSource Log
         {
             get;
@@ -70,9 +70,9 @@ namespace CardShopCoop.Api
         /// <summary>
         /// Registers an assembly's attributed DTOs and behaviours explicitly. Auto-discovery through
         /// the BepInEx dependency graph is the preferred path; use this escape hatch only for a mod
-        /// that does not declare a BepInEx dependency. Only valid once CardShopCoop is loaded and
+        /// that does not declare a BepInEx dependency. Only valid once CardShopCoopCommunity is loaded and
         /// has installed its binding (guard with <see cref="IsAvailable"/>, or declare a
-        /// <c>BepInDependency</c> on com.zwhit.cardshopcoop); otherwise this throws.
+        /// <c>BepInDependency</c> on dev.meepen.cardshopcoop); otherwise this throws.
         /// </summary>
         public static void Register(Assembly assembly)
         {
@@ -85,9 +85,9 @@ namespace CardShopCoop.Api
             if (binding == null)
             {
                 throw new InvalidOperationException(
-                    "CardShopCoop has not installed its API binding yet; call CoopApi.Register from your "
-                    + "plugin's Awake after CardShopCoop is loaded (declare a BepInDependency on "
-                    + "com.zwhit.cardshopcoop, or guard with CoopApi.IsAvailable).");
+                    "CardShopCoopCommunity has not installed its API binding yet; call CoopApi.Register from your "
+                    + "plugin's Awake after CardShopCoopCommunity is loaded (declare a BepInDependency on "
+                    + "dev.meepen.cardshopcoop, or guard with CoopApi.IsAvailable).");
             }
 
             binding.Register(assembly);

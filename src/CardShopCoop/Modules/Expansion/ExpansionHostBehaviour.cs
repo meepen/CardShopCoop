@@ -33,7 +33,7 @@ namespace CardShopCoop.Modules.Expansion
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.expansion.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.expansion.host");
                 _harmony.CreateClassProcessor(typeof(ExpansionChangedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(ShopRoomChangedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(WarehouseRoomChangedPatch)).Patch();

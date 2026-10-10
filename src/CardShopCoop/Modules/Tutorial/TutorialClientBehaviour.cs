@@ -72,7 +72,7 @@ namespace CardShopCoop.Modules.Tutorial
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycle = true;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.tutorial.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.tutorial.client");
                 _harmony.CreateClassProcessor(typeof(CreditPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(TutorialReadyPatch)).Patch();
             }

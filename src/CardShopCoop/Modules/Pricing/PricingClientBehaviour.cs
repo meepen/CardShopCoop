@@ -43,7 +43,7 @@ namespace CardShopCoop.Modules.Pricing
                 _context.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.pricing.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.pricing.client");
                 PricingClientPatches.Apply(_harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }

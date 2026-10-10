@@ -11,11 +11,11 @@ using CardShopCoop.Net.Protocol;
 namespace CardShopCoop.Runtime
 {
     /// <summary>
-    /// Discovers other mods that integrate with CardShopCoop and installs the public
+    /// Discovers other mods that integrate with CardShopCoopCommunity and installs the public
     /// <see cref="CoopApi"/> binding for them.
     ///
     /// Discovery is dependency-driven: a mod declares
-    /// <c>[BepInDependency("com.zwhit.cardshopcoop", SoftDependency)]</c> and marks its DTOs and
+    /// <c>[BepInDependency("dev.meepen.cardshopcoop", SoftDependency)]</c> and marks its DTOs and
     /// behaviours with the public attributes; no registration call is required. BepInEx loads us
     /// before any dependent, so by the first frame every dependent has an instance and its
     /// assembly can be registered. Running later would also be safe for DTOs (the catalog only
@@ -53,7 +53,7 @@ namespace CardShopCoop.Runtime
             }
         }
 
-        /// <summary>Scans the BepInEx plugin graph once for dependents of CardShopCoop.</summary>
+        /// <summary>Scans the BepInEx plugin graph once for dependents of CardShopCoopCommunity.</summary>
         public void EnsureDiscovered()
         {
             lock (_gate)
@@ -83,7 +83,7 @@ namespace CardShopCoop.Runtime
                     if (assembly == null)
                     {
                         CoopPlugin.Log?.LogWarning("[api] '" + info.Metadata.GUID
-                            + "' depends on CardShopCoop but has no live instance; skipping integration");
+                            + "' depends on CardShopCoopCommunity but has no live instance; skipping integration");
                         continue;
                     }
 

@@ -36,7 +36,7 @@ namespace CardShopCoop.Modules.Npc
             _context = RuntimeContext;
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
-            _harmony = new Harmony("com.zwhit.cardshopcoop.npc.host");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.npc.host");
             _harmony.CreateClassProcessor(typeof(CustomerManagerStartPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerPopulationPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerUpdatePatch)).Patch();

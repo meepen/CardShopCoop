@@ -52,7 +52,7 @@ namespace CardShopCoop.Modules.Grading
                 _active = this;
                 _context.Messages.RegisterAttributedHandlers(this);
                 registered = true;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.grading.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.grading.host");
                 GradingPatches.ApplyHost(_harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }

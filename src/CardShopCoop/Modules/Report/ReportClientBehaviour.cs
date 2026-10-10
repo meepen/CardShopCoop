@@ -103,7 +103,7 @@ namespace CardShopCoop.Modules.Report
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.report.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.report.client");
                 Patch(typeof(NextButtonPatch));
                 Patch(typeof(NextDayPatch));
                 Patch(typeof(ShowGoNextDayPatch));

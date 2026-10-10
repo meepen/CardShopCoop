@@ -37,7 +37,7 @@ namespace CardShopCoop.Net
     /// </summary>
     public static class NetHelpers
     {
-        private const string Description = "CardShopCoop";
+        private const string Description = "CardShopCoopCommunity";
         private const int LeaseSeconds = 86400;      // 24h; re-asked every time hosting starts
         private const int HttpTimeoutMs = 4000;
         private const int MaxHttpBytes = 512 * 1024; // a router that streams forever gets cut off

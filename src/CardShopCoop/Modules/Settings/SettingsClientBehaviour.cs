@@ -44,7 +44,7 @@ namespace CardShopCoop.Modules.Settings
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.settings.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.settings.client");
                 Patch(typeof(GameEventFormatPatch));
                 Patch(typeof(GameEventResetPatch));
                 Patch(typeof(GameEventFeePatch));

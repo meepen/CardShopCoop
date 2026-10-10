@@ -38,7 +38,7 @@ namespace CardShopCoop.Modules.Bills
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycleSubscribed = true;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.bills.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.bills.client");
                 _harmony.CreateClassProcessor(typeof(PayRentPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(PayElectricPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(PaySalaryPatch)).Patch();

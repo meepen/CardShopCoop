@@ -45,7 +45,7 @@ namespace CardShopCoop.Modules.Staff
             _context = RuntimeContext;
             _context.Messages.RegisterAttributedHandlers(this);
             _active = this;
-            _harmony = new Harmony("com.zwhit.cardshopcoop.staff.module.host");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.staff.module.host");
             Patch(typeof(WorkerMousePatch));
             Patch(typeof(WorkerStopPatch));
             Patch(typeof(WorkerLifecyclePatch));

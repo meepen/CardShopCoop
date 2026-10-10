@@ -7,7 +7,7 @@ namespace CardShopCoop.Api
     /// <c>[ServerBehaviour]</c>, <c>[ClientBehaviour]</c>, or <c>[PersistentBehaviour]</c> and
     /// CardShopCoop creates it in the live session and assigns <see cref="Context"/>.
     ///
-    /// A mod may instead use plain <see cref="MonoBehaviour"/>; CardShopCoop accepts any
+    /// A mod may instead use plain <see cref="MonoBehaviour"/>; CardShopCoopCommunity accepts any
     /// attributed component. The base class is only a convenience that carries the context.
     /// </summary>
     public abstract class CoopBehaviour : MonoBehaviour

@@ -41,7 +41,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycle = true;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.store-access.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.store-access.client");
                 _harmony.CreateClassProcessor(typeof(OpenSignPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(WarehouseSignPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(OpenSignReadyPatch)).Patch();

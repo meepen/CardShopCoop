@@ -40,7 +40,7 @@ namespace CardShopCoop.Modules.Decoration
                 registered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.decoration.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.decoration.host");
                 _harmony.CreateClassProcessor(typeof(EquipPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyItemPatch)).Patch();

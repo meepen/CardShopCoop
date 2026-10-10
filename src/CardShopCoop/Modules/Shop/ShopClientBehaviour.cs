@@ -32,7 +32,7 @@ namespace CardShopCoop.Modules.Shop
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.shop.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.shop.client");
                 _harmony.CreateClassProcessor(typeof(ShopConfirmPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(ShopRenamerReadyPatch)).Patch();
             }

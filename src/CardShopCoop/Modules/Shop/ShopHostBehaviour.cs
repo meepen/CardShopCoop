@@ -35,7 +35,7 @@ namespace CardShopCoop.Modules.Shop
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.shop.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.shop.host");
                 _harmony.CreateClassProcessor(typeof(ShopConfirmPatch)).Patch();
             }
             catch (Exception exception)

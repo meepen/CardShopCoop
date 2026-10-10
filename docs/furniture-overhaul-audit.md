@@ -102,7 +102,7 @@ call (one intent per unit), not per click. Currently moot because no intent is s
 static `QOLCoop.CoopApi`). With no `QOLCoop` assembly the bridge no-ops cleanly (every guard is
 null-safe; verified) and registers channels `fo.paint`, `fo.rug`, `fo.mode`, `fo.bargain`,
 `fo.claw`, `fo.claw.play`, `fo.paint.live`, `fo.order` against that other API. It never looks
-for `com.zwhit.cardshopcoop`.
+for `dev.meepen.cardshopcoop`.
 
 Consequence in a CardShopCoop session (both peers have FO): no FO state channel is shared.
 

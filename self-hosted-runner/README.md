@@ -22,7 +22,7 @@ stored in the repository or GitHub.
 
 ## Configure the runner
 
-Create a fine-grained token for `DeliriumPulse/CardShopCoop` with repository **Administration: Read
+Create a fine-grained token for `meepen/CardShopCoop` with repository **Administration: Read
 and write** permission. Store it only in `.env`:
 
 ```bash

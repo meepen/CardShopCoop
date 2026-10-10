@@ -77,7 +77,7 @@ namespace CardShopCoop.Modules.Staff
             _context = RuntimeContext;
             _context.Messages.RegisterAttributedHandlers(this);
             _active = this;
-            _harmony = new Harmony("com.zwhit.cardshopcoop.staff.module.client");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.staff.module.client");
             Patch(typeof(HirePatch));
             Patch(typeof(TaskPatch));
             Patch(typeof(OptionPatch));

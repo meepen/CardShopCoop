@@ -31,7 +31,7 @@ namespace CardShopCoop.Util
 
         internal static void Install()
         {
-            var harmony = new Harmony("com.zwhit.cardshopcoop.screen-singletons");
+            var harmony = new Harmony("dev.meepen.cardshopcoop.screen-singletons");
             TryPatch(harmony, typeof(CGameManager), "OnLevelFinishedLoading",
                 nameof(ReportLevelFinishedLoading));
             TryPatch(harmony, typeof(LoadingScreen), "CloseScreen", nameof(ReportLoadingScreenClose));
@@ -68,7 +68,7 @@ namespace CardShopCoop.Util
                 CoopPlugin.Log.LogWarning(
                     "[screens] " + screenType.Name + " is latched to a destroyed object: "
                     + "CSingleton<T>.isSet is still true while the native screen is gone, so the game "
-                    + "keeps reading the dead scene object. CardShopCoop does not modify game state.");
+                    + "keeps reading the dead scene object. CardShopCoopCommunity does not modify game state.");
             }
 
             var instanceText = instance == null

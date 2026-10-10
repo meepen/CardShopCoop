@@ -33,7 +33,7 @@ namespace CardShopCoop.Modules.GameTime
             _active = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("com.zwhit.cardshopcoop.game-time.client");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.game-time.client");
             _harmony.CreateClassProcessor(typeof(LightManagerReadyPatch)).Patch();
             _context.Messages.RegisterAttributedHandlers(this);
         }

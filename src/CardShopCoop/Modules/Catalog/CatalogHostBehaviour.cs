@@ -45,7 +45,7 @@ namespace CardShopCoop.Modules.Catalog
                 registered = true;
                 _active = this;
                 CatalogInterop.ProbeOptionalSurfaces();
-                _harmony = new Harmony("com.zwhit.cardshopcoop.catalog.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.catalog.host");
                 _harmony.CreateClassProcessor(typeof(ProductLicensePatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(ScannerUnlockPatch)).Patch();
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);

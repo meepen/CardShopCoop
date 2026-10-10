@@ -5,10 +5,10 @@
     <AssemblyName>CardShopCoop</AssemblyName>
     <AssemblyTitle>CardShopCoop</AssemblyTitle>
     <RootNamespace>CardShopCoop</RootNamespace>
-    <Company>DeliriumPulse</Company>
-    <Product>CardShopCoop</Product>
-    <Description>CardShopCoop for TCG Card Shop Simulator.</Description>
-    <Authors>DeliriumPulse</Authors>
+    <Company>Devin 'Meepen' Korb</Company>
+    <Product>CardShopCoopCommunity</Product>
+    <Description>CardShopCoopCommunity for TCG Card Shop Simulator.</Description>
+    <Authors>Devin 'Meepen' Korb</Authors>
     <Version>$(CardShopCoopVersion)</Version>
     <LangVersion>9</LangVersion>
     <Nullable>disable</Nullable>

@@ -23,7 +23,7 @@ namespace CardShopCoop.Modules.Economy
 
             try
             {
-                _harmony = new Harmony("com.zwhit.cardshopcoop.economy");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.economy");
                 _harmony.CreateClassProcessor(typeof(QueueEventPatch)).Patch();
                 _active = true;
             }

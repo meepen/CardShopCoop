@@ -548,7 +548,7 @@ namespace CardShopCoop.UI
             }
             GUILayout.Space(8f);
 
-            GUILayout.Label("Settings are saved to BepInEx/config/com.zwhit.cardshopcoop.cfg.", CoopTheme.LabelDim);
+            GUILayout.Label("Settings are saved to BepInEx/config/dev.meepen.cardshopcoop.cfg.", CoopTheme.LabelDim);
         }
 
         private static bool HiddenCategoryVisible()

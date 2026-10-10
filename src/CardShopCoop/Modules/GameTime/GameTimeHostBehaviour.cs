@@ -27,7 +27,7 @@ namespace CardShopCoop.Modules.GameTime
 
             _context = RuntimeContext;
             _active = this;
-            _harmony = new Harmony("com.zwhit.cardshopcoop.game-time.host");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.game-time.host");
             _harmony.CreateClassProcessor(typeof(TimeChangedPatch)).Patch();
         }
 

@@ -35,7 +35,7 @@ namespace CardShopCoop.Modules.SessionInput
             }
 
             SessionInputRuntime.Attach(this);
-            _harmony = new HarmonyLib.Harmony("com.zwhit.cardshopcoop.session-input." + role);
+            _harmony = new HarmonyLib.Harmony("dev.meepen.cardshopcoop.session-input." + role);
             SessionInputPatches.Apply(_harmony);
         }
 

@@ -44,7 +44,7 @@ namespace CardShopCoop.Modules.Expansion
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.expansion.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.expansion.client");
                 _harmony.CreateClassProcessor(typeof(RoomCheckoutPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(LotBCheckoutPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(ExpansionManagerReadyPatch)).Patch();
