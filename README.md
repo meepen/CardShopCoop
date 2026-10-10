@@ -1,3 +1,5 @@
+![CardShopCoopCommunity](https://raw.githubusercontent.com/meepen/CardShopCoop/main/gallery/logo.png)
+
 # CardShopCoopCommunity
 
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20shop-2ec484)](https://discord.gg/eNswvvTYbQ)
