@@ -185,3 +185,19 @@ jobs:
           description: Source code for the minimal CardShopCoop integration example.
           changelog: ${{ vars.NEXUSMODS_MOD_ID != '' && steps.changelog.outputs.text || '' }}
           mod_id: ${{ vars.NEXUSMODS_MOD_ID }}
+
+  release-discord:
+    name: Post changelog to Discord
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      # Posts the "## <version>" changelog to a channel webhook for every v* tag (alphas/betas too).
+      # Skipped when the secret is unset.
+      - name: Post to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: bash scripts/publish-discord.sh "${{ needs.build.outputs.version }}"

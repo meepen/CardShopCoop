@@ -81,5 +81,8 @@ failing cannot block the others: the GitHub release (`scripts/publish-github.sh`
 - **Release changelog**: the `## <version>` section of `CHANGELOG.md` is used automatically as the
   GitHub release body and each Nexus file version's changelog (Thunderstore already renders the
   whole `CHANGELOG.md`). A release with no matching section fails the release jobs.
+- **Discord**: create a channel webhook (channel → Integrations → Webhooks) and store its URL as the
+  repository secret `DISCORD_WEBHOOK_URL`; every `v*` release (alphas/betas included) posts its
+  changelog to it. Skipped when the secret is unset.
 - The runner image installs `zip`/`unzip` (see `docker/Dockerfile`); rebuild it with
   `docker compose --env-file .env -f docker/compose.yml up -d --build` after changing it.
