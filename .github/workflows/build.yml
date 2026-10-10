@@ -125,7 +125,7 @@ jobs:
 
       # Nexus Mods uploads use the official action and a pre-created file group. Each is skipped
       # until the matching repository variable is configured: vars.NEXUSMODS_FILE_ID and
-      # vars.NEXUSMODS_CUSTOMTV_FILE_ID (with the NEXUSMODS_API_KEY secret).
+      # vars.NEXUSMODS_INTEROP_FILE_ID (with the NEXUSMODS_API_KEY secret).
       - name: Publish core to Nexus Mods
         if: ${{ vars.NEXUSMODS_FILE_ID != '' }}
         uses: Nexus-Mods/upload-action@v1.0.0-beta.10
@@ -138,14 +138,14 @@ jobs:
           display_name: CardShopCoopCommunity ${{ needs.build.outputs.version }}
           description: True co-op multiplayer for TCG Card Shop Simulator.
 
-      - name: Publish Custom TV to Nexus Mods
-        if: ${{ vars.NEXUSMODS_CUSTOMTV_FILE_ID != '' }}
+      - name: Publish ExternalModInterop to Nexus Mods
+        if: ${{ vars.NEXUSMODS_INTEROP_FILE_ID != '' }}
         uses: Nexus-Mods/upload-action@v1.0.0-beta.10
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_id: ${{ vars.NEXUSMODS_CUSTOMTV_FILE_ID }}
-          filename: dist/nexus/CardShopCoopCommunity_CustomTv-${{ needs.build.outputs.version }}.zip
+          file_id: ${{ vars.NEXUSMODS_INTEROP_FILE_ID }}
+          filename: dist/nexus/CardShopCoopCommunity_ExternalModInterop-${{ needs.build.outputs.version }}.zip
           version: ${{ needs.build.outputs.version }}
           category: main
-          display_name: CardShopCoopCommunity Custom TV ${{ needs.build.outputs.version }}
-          description: RTCGO Custom TV playback sync for CardShopCoopCommunity.
+          display_name: CardShopCoopCommunity ExternalModInterop ${{ needs.build.outputs.version }}
+          description: Optional external-mod interop bundle for CardShopCoopCommunity.

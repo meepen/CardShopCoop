@@ -72,10 +72,10 @@ failing cannot block the others: the GitHub release (`scripts/publish-github.sh`
 - **Thunderstore** (`tcg-card-shop-simulator`, team `CardShopCoop`): create the team, add a Service
   Account, and store its token as the repository secret `THUNDERSTORE_TOKEN`. Add the mod icon at
   `thunderstore/icon.png` (must be a 256x256 PNG). Packages: `CardShopCoopCommunity` and
-  `CardShopCoopCommunity_CustomTv`.
+  `CardShopCoopCommunity_ExternalModInterop`.
 - **Nexus Mods**: create the mod page and one file group per package, then store the API key as the
   secret `NEXUSMODS_API_KEY` and the file-group ids as repository variables `NEXUSMODS_FILE_ID`
-  (core) and `NEXUSMODS_CUSTOMTV_FILE_ID` (Custom TV). Nexus uploads are skipped until those
+  (core) and `NEXUSMODS_INTEROP_FILE_ID` (ExternalModInterop). Nexus uploads are skipped until those
   variables are set.
 - The runner image installs `zip`/`unzip` (see `docker/Dockerfile`); rebuild it with
   `docker compose --env-file .env -f docker/compose.yml up -d --build` after changing it.

@@ -9,10 +9,10 @@
 #   dist/CardShopCoop-<version>.zip            -> CardShopCoop/CardShopCoop.dll, CardShopCoop.Api.dll
 #   dist/CardShopCoop.ExternalModInterop.zip   -> CardShopCoop.CustomTv/CardShopCoop.CustomTv.dll
 #
-# and the Thunderstore metadata in thunderstore/ (manifest.core.json, manifest.customtv.json,
-# CustomTv-README.md, icon.png at 256x256). Writes:
+# and the Thunderstore metadata in thunderstore/ (manifest.core.json, manifest.interop.json,
+# ExternalModInterop-README.md, icon.png at 256x256). Writes:
 #   dist/thunderstore/CardShopCoopCommunity-<version>.zip
-#   dist/thunderstore/CardShopCoopCommunity_CustomTv-<version>.zip
+#   dist/thunderstore/CardShopCoopCommunity_ExternalModInterop-<version>.zip
 #
 # Thunderstore requires a zip whose root holds manifest.json, icon.png and README.md, with the
 # plugin files laid out under BepInEx/plugins/.
@@ -66,16 +66,16 @@ cp README.md "$core_pkg/README.md"
 cp CHANGELOG.md "$core_pkg/CHANGELOG.md"
 ( cd "$core_pkg" && zip -q -r "../CardShopCoopCommunity-${version}.zip" BepInEx manifest.json icon.png README.md CHANGELOG.md )
 
-# --- custom tv package ----------------------------------------------------
+# --- external mod interop package -----------------------------------------
 tv_src="$work/.tv-src"
 tv_pkg="$work/.tv"
 unzip_into "dist/CardShopCoop.ExternalModInterop.zip" "$tv_src"
 mkdir -p "$tv_pkg/BepInEx/plugins"
 cp "$tv_src/CardShopCoop.CustomTv/CardShopCoop.CustomTv.dll" "$tv_pkg/BepInEx/plugins/"
-settle_manifest "$meta/manifest.customtv.json" "$tv_pkg/manifest.json"
+settle_manifest "$meta/manifest.interop.json" "$tv_pkg/manifest.json"
 cp "$icon" "$tv_pkg/icon.png"
-cp "$meta/CustomTv-README.md" "$tv_pkg/README.md"
-( cd "$tv_pkg" && zip -q -r "../CardShopCoopCommunity_CustomTv-${version}.zip" BepInEx manifest.json icon.png README.md )
+cp "$meta/ExternalModInterop-README.md" "$tv_pkg/README.md"
+( cd "$tv_pkg" && zip -q -r "../CardShopCoopCommunity_ExternalModInterop-${version}.zip" BepInEx manifest.json icon.png README.md )
 
 rm -rf "$core_src" "$core_pkg" "$tv_src" "$tv_pkg"
 
