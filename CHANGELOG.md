@@ -3,6 +3,15 @@
 True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 **same version** — the join handshake enforces it.
 
+## 2.0.2
+**Thunderstore packaging fix: the optional Custom TV add-on now installs cleanly.**
+
+- The RTCGO Custom TV co-op add-on is published as its own Thunderstore package and declares
+  CardShopCoopCommunity as a dependency, so it installs alongside the mod automatically. No gameplay
+  or sync changes.
+
+**Both players must update — the version changed.**
+
 ## 2.0.1
 **New maintainers, new name — same co-op. The mod is now CardShopCoopCommunity.**
 

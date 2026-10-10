@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <!-- Single source of truth for the plugin's public/release version. -->
-    <CardShopCoopVersion>2.0.1</CardShopCoopVersion>
+    <CardShopCoopVersion>2.0.2</CardShopCoopVersion>
     <!-- "Deploy" is a solution configuration meaning "build and copy into the game". A
          command-line -p:Deploy=true still works and wins over this default. -->
     <Deploy Condition="'$(Configuration)' == 'Deploy'">true</Deploy>

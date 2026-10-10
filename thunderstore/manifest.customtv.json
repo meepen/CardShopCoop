@@ -5,6 +5,6 @@
   "description": "RTCGO Custom TV playback sync for CardShopCoopCommunity.",
   "dependencies": [
     "BepInEx-BepInExPack-5.4.2305",
-    "Meepen-CardShopCoopCommunity-__VERSION__"
+    "CardShopCoop-CardShopCoopCommunity-__VERSION__"
   ]
 }

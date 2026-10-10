@@ -20,7 +20,7 @@ cd "$root"
 
 version="${1:-$(sed -n 's/.*<CardShopCoopVersion>\(.*\)<\/CardShopCoopVersion>.*/\1/p' Directory.Build.props)}"
 
-thunderstore_namespace="Meepen"
+thunderstore_namespace="CardShopCoop"
 thunderstore_community="tcg-card-shop-simulator"
 website="https://github.com/meepen/CardShopCoop"
 

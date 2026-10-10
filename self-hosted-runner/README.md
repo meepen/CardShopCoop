@@ -69,7 +69,7 @@ failing cannot block the others: the GitHub release (`scripts/publish-github.sh`
 
 ## Publishing setup (one-time)
 
-- **Thunderstore** (`tcg-card-shop-simulator`, team `Meepen`): create the team, add a Service
+- **Thunderstore** (`tcg-card-shop-simulator`, team `CardShopCoop`): create the team, add a Service
   Account, and store its token as the repository secret `THUNDERSTORE_TOKEN`. Add the mod icon at
   `thunderstore/icon.png` (must be a 256x256 PNG). Packages: `CardShopCoopCommunity` and
   `CardShopCoopCommunity_CustomTv`.

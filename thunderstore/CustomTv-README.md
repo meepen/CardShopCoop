@@ -1,7 +1,7 @@
 # CardShopCoopCommunity Custom TV
 
 Optional add-on that shares **RTCGO Custom TV** playback between players in a
-[CardShopCoopCommunity](https://thunderstore.io/c/tcg-card-shop-simulator/p/Meepen/CardShopCoopCommunity/) session.
+[CardShopCoopCommunity](https://thunderstore.io/c/tcg-card-shop-simulator/p/CardShopCoop/CardShopCoopCommunity/) session.
 
 - Requires **CardShopCoopCommunity** — it is declared as a dependency, so the mod manager installs it for you.
 - **Both players must install it** for TV state to sync. Without it, co-op works exactly as normal and
