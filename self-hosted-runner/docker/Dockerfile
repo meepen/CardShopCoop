@@ -17,4 +17,10 @@ ENV DOTNET_ROOT=/usr/share/dotnet \
 RUN mkdir -p /home/runner/.nuget \
  && chown -R runner:runner /home/runner/.nuget
 
+# zip/unzip are used by the release packaging scripts (scripts/thunderstore-package.sh,
+# scripts/nexus-package.sh).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends zip unzip \
+ && rm -rf /var/lib/apt/lists/*
+
 USER runner

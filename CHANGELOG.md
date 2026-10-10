@@ -1,7 +1,21 @@
-# CardShopCoop — Changelog
+# CardShopCoopCommunity — Changelog
 
 True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 **same version** — the join handshake enforces it.
+
+## 2.0.1
+**New maintainers, new name — same co-op. The mod is now CardShopCoopCommunity.**
+
+- CardShopCoop is now **CardShopCoopCommunity**, maintained by Devin "Meepen" Korb. Nothing about how
+  you play changes: the same features, the same host-authoritative co-op, the same shared shop.
+- The mod's plugin id changed to `dev.meepen.cardshopcoop`. BepInEx names the config file after that id,
+  so your settings move to a fresh `BepInEx/config/dev.meepen.cardshopcoop.cfg` and start at their
+  defaults — set your name, the host port, and your preferences once more. Your saves and world are
+  untouched.
+- The external-mod integration contract keeps its `CardShopCoop.Api` assembly name. Add-ons that
+  soft-depend on the old id should update their dependency to `dev.meepen.cardshopcoop`.
+
+**Both players must update: the new build only connects to the new build.**
 
 ## 2.0.0
 **The biggest co-op update yet. Every shared feature now runs on its own co-op module, the

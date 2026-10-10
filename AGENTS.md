@@ -1,6 +1,6 @@
 ## Project
 
-CardShopCoop is the marketed name of the `CardShopCoop` BepInEx 5 / Harmony
+CardShopCoopCommunity is the marketed name of the `CardShopCoop` BepInEx 5 / Harmony
 plugin for **TCG Card Shop Simulator**, a Unity
 2021.3 Mono game. The mod references the game's managed assemblies at build time and
 patches game behavior at runtime. The game's logic is in `Assembly-CSharp.dll`.

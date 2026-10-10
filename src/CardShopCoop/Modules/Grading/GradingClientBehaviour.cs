@@ -50,7 +50,7 @@ namespace CardShopCoop.Modules.Grading
                 // authoritative state; retiring the prediction must also drop the job binding so a
                 // later delta cannot adopt a job the host never accepted.
                 PredictionApi.PredictionRetired += RetireLocalJob;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.grading.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.grading.client");
                 GradingPatches.ApplyClient(_harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }

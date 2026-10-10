@@ -138,7 +138,7 @@ namespace CardShopCoop.Modules.Register
             _context = RuntimeContext;
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
-            _harmony = new Harmony("com.zwhit.cardshopcoop.register.client");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.register.client");
             Patch(typeof(ManningPatch));
             Patch(typeof(OutlinePatch));
             Patch(typeof(ExitPatch));

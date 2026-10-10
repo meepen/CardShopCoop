@@ -50,7 +50,7 @@ namespace CardShopCoop.Modules.Catalog
                 registered = true;
                 _active = this;
                 CatalogInterop.ProbeOptionalSurfaces();
-                _harmony = new Harmony("com.zwhit.cardshopcoop.catalog.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.catalog.client");
                 CatalogPatches.ApplyClientLifecycle(_harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;

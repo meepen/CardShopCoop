@@ -61,7 +61,7 @@ namespace CardShopCoop.Modules.Tv
                 registered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.tv.host.runtime");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.tv.host.runtime");
                 ApplyPatches(_harmony);
                 OnControllerLifecycle();
             }

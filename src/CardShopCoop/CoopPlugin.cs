@@ -33,8 +33,8 @@ namespace CardShopCoop
     [BepInDependency("EnhancedPrefabLoader", BepInDependency.DependencyFlags.SoftDependency)]
     public partial class CoopPlugin : BaseUnityPlugin
     {
-        public const string Guid = "com.zwhit.cardshopcoop";
-        public const string Name = "CardShopCoop";
+        public const string Guid = "dev.meepen.cardshopcoop";
+        public const string Name = "CardShopCoopCommunity";
         public static ManualLogSource Log;
 
         public static ConfigEntry<int> Port;
@@ -125,7 +125,7 @@ namespace CardShopCoop
             EnableGameCheatMenu = Config.Bind("Hidden", "EnableGameCheatMenu", false,
                 "TESTING ONLY. Allows the game's 1.00 cheat menu to open in solo mode or for the HOST. Clients are always blocked. Requires ShowHiddenCategory=true as an additional safety gate.");
             ShowHiddenCategory = Config.Bind("Hidden", "ShowHiddenCategory", false,
-                "TESTING ONLY. Shows the hidden category in the CardShopCoop window. The game cheat menu cannot open unless this and EnableGameCheatMenu are both enabled.");
+                "TESTING ONLY. Shows the hidden category in the CardShopCoopCommunity window. The game cheat menu cannot open unless this and EnableGameCheatMenu are both enabled.");
 
             // Bind one enable/disable checkbox per feature module and say exactly what will run.
             // Kept beside the config binds so the [modules] line appears before anything it can

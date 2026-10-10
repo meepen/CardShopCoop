@@ -75,7 +75,7 @@ namespace CardShopCoop.Modules.Purchasing
                 registered = true;
                 PredictionApi.PredictionRetired += RetirePendingRequest;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.purchasing.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.purchasing.client");
                 Patch(typeof(RestockCheckoutPatch));
                 Patch(typeof(ScannerCheckoutPatch));
                 Patch(typeof(FurnitureCheckoutPatch));

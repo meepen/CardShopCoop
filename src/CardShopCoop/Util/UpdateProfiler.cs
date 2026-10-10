@@ -21,7 +21,7 @@ namespace CardShopCoop.Util
     /// </summary>
     internal static class UpdateProfiler
     {
-        private const string HarmonyId = "com.zwhit.cardshopcoop.perf.update-profiler";
+        private const string HarmonyId = "dev.meepen.cardshopcoop.perf.update-profiler";
         private static readonly string[] CallbackPhases = { "Update", "LateUpdate" };
 
         private sealed class Stat

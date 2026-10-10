@@ -25,7 +25,7 @@ namespace CardShopCoop.Util
             try
             {
                 var pid = Process.GetCurrentProcess().Id;
-                Path = System.IO.Path.Combine(gameRoot, "BepInEx", $"CardShopCoop_{pid}.log");
+                Path = System.IO.Path.Combine(gameRoot, "BepInEx", $"CardShopCoopCommunity_{pid}.log");
                 // no AutoFlush: an OS flush per line stalls the main thread under disk or
                 // antivirus pressure, so lines are batched and flushed at most once/second
                 _writer = new StreamWriter(Path, append: false);

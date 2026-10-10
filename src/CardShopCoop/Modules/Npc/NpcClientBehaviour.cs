@@ -50,7 +50,7 @@ namespace CardShopCoop.Modules.Npc
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("com.zwhit.cardshopcoop.npc.client");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.npc.client");
             _harmony.CreateClassProcessor(typeof(CustomerManagerPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerStartPatch)).Patch();

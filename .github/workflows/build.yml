@@ -44,37 +44,15 @@ jobs:
             exit 1
           fi
 
-      - name: Restore
-        run: dotnet restore src/CardShopCoop/CardShopCoop.csproj --locked-mode --configfile NuGet.Config
+      - name: Build and package everything
+        shell: bash
+        run: bash scripts/build.sh
 
-      - name: Build and package API
-        run: dotnet build src/CardShopCoop.Api/CardShopCoop.Api.csproj -c Release -p:Package=true --no-restore
-
-      - name: Build and package
-        run: dotnet build src/CardShopCoop/CardShopCoop.csproj -c Release -p:Deploy=false -p:Package=true --no-restore
-
-      - name: Build and package external mod interop
-        run: dotnet build src/CardShopCoop.CustomTv/CardShopCoop.CustomTv.csproj -c Release -p:Deploy=false -p:Package=true
-
-      - name: Upload API artifact
+      - name: Upload packages
         uses: actions/upload-artifact@v7
         with:
-          name: api-package
-          path: src/CardShopCoop.Api/bin/Release/CardShopCoop.Api-${{ steps.version.outputs.version }}.zip
-          if-no-files-found: error
-
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: plugin-package
-          path: src/CardShopCoop/bin/Release/CardShopCoop-${{ steps.version.outputs.version }}.zip
-          if-no-files-found: error
-
-      - name: Upload external mod interop artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: external-mod-interop
-          path: src/CardShopCoop.CustomTv/bin/Release/CardShopCoop.ExternalModInterop.zip
+          name: dist
+          path: dist
           if-no-files-found: error
 
   release:
@@ -85,32 +63,65 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download package artifact
+      # Check out first so the default clean does not wipe the downloaded dist/ afterwards. The
+      # checkout provides the release scripts and the checkout git metadata `gh release create` needs.
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Download packages
         uses: actions/download-artifact@v8
         with:
-          name: plugin-package
+          name: dist
           path: dist
 
-      - name: Download API artifact
-        uses: actions/download-artifact@v8
+      - name: Read plugin version
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/.*<CardShopCoopVersion>\(.*\)<\/CardShopCoopVersion>.*/\1/p' Directory.Build.props)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
         with:
-          name: api-package
-          path: dist
+          dotnet-version: 9.x
 
-      - name: Download external mod interop artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: external-mod-interop
-          path: dist
+      - name: Install Thunderstore CLI
+        run: |
+          dotnet tool install --global tcli
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      - name: Create stable GitHub release
-        if: ${{ !contains(github.ref_name, '-') }}
+      # Stable tags go to Thunderstore; every tag creates the matching GitHub release (prerelease
+      # for names with a "-suffix"). See scripts/publish.sh.
+      - name: Publish release
         env:
+          TCLI_AUTH_TOKEN: ${{ secrets.THUNDERSTORE_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" dist/*.zip --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes
+        run: bash scripts/publish.sh "${{ steps.version.outputs.version }}"
 
-      - name: Create prerelease GitHub release
-        if: ${{ contains(github.ref_name, '-') }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" dist/*.zip --repo "${{ github.repository }}" --title "${{ github.ref_name }}" --generate-notes --prerelease
+      # Nexus Mods uploads use the official action and a pre-created file group. Each is skipped
+      # until the matching repository variable is configured: vars.NEXUSMODS_FILE_ID and
+      # vars.NEXUSMODS_CUSTOMTV_FILE_ID (with the NEXUSMODS_API_KEY secret).
+      - name: Publish core to Nexus Mods
+        if: ${{ !contains(github.ref_name, '-') && vars.NEXUSMODS_FILE_ID != '' }}
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.10
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ vars.NEXUSMODS_FILE_ID }}
+          filename: dist/nexus/CardShopCoopCommunity-${{ steps.version.outputs.version }}.zip
+          version: ${{ steps.version.outputs.version }}
+          category: main
+          display_name: CardShopCoopCommunity ${{ steps.version.outputs.version }}
+          description: True co-op multiplayer for TCG Card Shop Simulator.
+
+      - name: Publish Custom TV to Nexus Mods
+        if: ${{ !contains(github.ref_name, '-') && vars.NEXUSMODS_CUSTOMTV_FILE_ID != '' }}
+        uses: Nexus-Mods/upload-action@v1.0.0-beta.10
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ vars.NEXUSMODS_CUSTOMTV_FILE_ID }}
+          filename: dist/nexus/CardShopCoopCommunity_CustomTv-${{ steps.version.outputs.version }}.zip
+          version: ${{ steps.version.outputs.version }}
+          category: main
+          display_name: CardShopCoopCommunity Custom TV ${{ steps.version.outputs.version }}
+          description: RTCGO Custom TV playback sync for CardShopCoopCommunity.

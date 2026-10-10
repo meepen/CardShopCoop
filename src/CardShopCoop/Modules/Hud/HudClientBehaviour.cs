@@ -58,7 +58,7 @@ namespace CardShopCoop.Modules.Hud
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.hud.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.hud.client");
                 _harmony.CreateClassProcessor(typeof(EconomyQueuePatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(ObservedAddCoinPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(ObservedReduceCoinPatch)).Patch();

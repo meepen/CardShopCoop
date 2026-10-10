@@ -48,7 +48,7 @@ namespace CardShopCoop.Modules.Decoration
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycle = true;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.decoration.client");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.decoration.client");
                 _harmony.CreateClassProcessor(typeof(EquipPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyItemPatch)).Patch();

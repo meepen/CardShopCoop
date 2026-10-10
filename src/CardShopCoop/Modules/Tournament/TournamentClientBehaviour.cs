@@ -44,7 +44,7 @@ namespace CardShopCoop.Modules.Tournament
                 _context.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.tournament.client.runtime");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.tournament.client.runtime");
                 ApplyPatches(_harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
                 SceneManager.sceneLoaded += OnSceneLoaded;

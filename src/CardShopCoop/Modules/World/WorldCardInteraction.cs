@@ -1,11 +1,9 @@
 using System;
 using System.Collections.Generic;
-using GradedRemoveMessage = CardShopCoop.Modules.World.GradedRemoveMessage;
 using CardShopCoop.Net;
 using CardShopCoop.Modules.Grading;
 using CardShopCoop.Modules.SaveTransfer;
 using CardShopCoop.Runtime;
-using UnityEngine;
 
 namespace CardShopCoop.Modules.World
 {

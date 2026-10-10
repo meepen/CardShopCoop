@@ -7,8 +7,8 @@ namespace CardShopCoop.Api
 {
     /// <summary>
     /// Optional-dependency-safe logging for integrating mods. Every call no-ops when the API is
-    /// loaded but CardShopCoop has not installed its binding. Because the API assembly ships with
-    /// CardShopCoop, a direct call when CardShopCoop may be absent must still be guarded — see
+    /// loaded but CardShopCoopCommunity has not installed its binding. Because the API assembly ships with
+    /// CardShopCoopCommunity, a direct call when CardShopCoopCommunity may be absent must still be guarded — see
     /// <see cref="CoopApi"/> for the guard pattern.
     /// </summary>
     public static class CoopLog

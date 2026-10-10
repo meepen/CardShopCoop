@@ -90,7 +90,7 @@ namespace CardShopCoop.Modules.PlayTable
             PlacementApi.StructureChanged += OnPlacementStructureChanged;
             _context.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("com.zwhit.cardshopcoop.play-table.client");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.play-table.client");
             ApplyPatches();
         }
 

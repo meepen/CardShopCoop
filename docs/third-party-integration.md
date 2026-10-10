@@ -1,8 +1,8 @@
-# Integrating with CardShopCoop
+# Integrating with CardShopCoopCommunity
 
-CardShopCoop exposes a small public contract, **`CardShopCoop.Api`**, so another mod can add
-co-op behaviour to its own content without depending on CardShopCoop's internals — and without
-breaking when CardShopCoop is not installed.
+CardShopCoopCommunity exposes a small public contract, **`CardShopCoop.Api`**, so another mod can add
+co-op behaviour to its own content without depending on CardShopCoopCommunity's internals — and without
+breaking when CardShopCoopCommunity is not installed.
 
 The complete, buildable reference is [`samples/CardShopCoop.SampleMod`](../samples/CardShopCoop.SampleMod).
 It is a shared counter: a client intent, a host-authoritative broadcast, and a join baseline.
@@ -24,16 +24,16 @@ It is a shared counter: a client intent, a host-authoritative broadcast, and a j
 
 2. **Declare a soft BepInEx dependency.**
    ```csharp
-   [BepInDependency("com.zwhit.cardshopcoop", BepInDependency.DependencyFlags.SoftDependency)]
+   [BepInDependency("dev.meepen.cardshopcoop", BepInDependency.DependencyFlags.SoftDependency)]
    ```
-   Soft means your plugin still loads (and simply does nothing co-op related) when CardShopCoop is
-   absent. CardShopCoop also uses this dependency to discover you.
+   Soft means your plugin still loads (and simply does nothing co-op related) when CardShopCoopCommunity is
+   absent. CardShopCoopCommunity also uses this dependency to discover you.
 
 3. **Mark your DTOs and behaviours with the public attributes.** That is the entire integration.
 
 ## Discovery: no registration call
 
-CardShopCoop scans the BepInEx plugin graph for plugins that depend on it and registers their
+CardShopCoopCommunity scans the BepInEx plugin graph for plugins that depend on it and registers their
 assemblies automatically. It picks up:
 
 - every `[NetworkMessage]` DTO from your assembly,
@@ -48,7 +48,7 @@ is never bound, inbound messages for it are dropped with a rate-limited warning 
 
 There is nothing else to call and no central allowlist to edit. If you cannot or do not want to
 declare the dependency, `CoopApi.Register(assembly)` is an explicit escape hatch: call it from
-your plugin's `Awake` on the main thread and only once CardShopCoop is loaded — guard with
+your plugin's `Awake` on the main thread and only once CardShopCoopCommunity is loaded — guard with
 `CoopApi.IsAvailable` first, because without a dependency BepInEx does not guarantee load order
 (which is why auto-discovery is preferred). It throws when the binding is not installed. A late
 call still registers your `[NetworkMessage]` DTOs, but they only apply from the next session, and
@@ -143,23 +143,23 @@ A DTO that carries a prediction id may implement `IPredictedMessage`.
   dependency; guard with `CoopApi.IsAvailable` and call from `Awake` on the main thread. See
   **Discovery** for the full contract; auto-discovery is preferred.
 - `CoopLog.Info/Warn/Error`, `CoopLog.Swallow` — logging that no-ops when the API is loaded but
-  CardShopCoop has not installed its binding. They are still a hard reference to the API assembly,
-  so read the guard rule under **What to expect** before calling them when CardShopCoop may be
+  CardShopCoopCommunity has not installed its binding. They are still a hard reference to the API assembly,
+  so read the guard rule under **What to expect** before calling them when CardShopCoopCommunity may be
   absent.
 - `CoopReflection.OptionalType/Field/Method/Property` — optional cross-mod reflection with
   one-shot diagnostics; `Required*` variants throw loudly.
 
 ## What to expect
 
-- **Works without CardShopCoop.** Your plugin loads either way. The API assembly ships with
-  CardShopCoop, so when CardShopCoop is absent the API types cannot be resolved at all. The
+- **Works without CardShopCoopCommunity.** Your plugin loads either way. The API assembly ships with
+  CardShopCoopCommunity, so when CardShopCoopCommunity is absent the API types cannot be resolved at all. The
   attribute path needs no guard: a behaviour whose base type cannot load is simply never
   discovered, and your plugin still loads. Every direct call to `CoopApi`, `CoopLog`, `CoopPredict`,
   or `CoopReflection` must be guarded, and the guarded call must live in its own method:
   ```csharp
   private void Awake()
   {
-      if (!BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("com.zwhit.cardshopcoop"))
+      if (!BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("dev.meepen.cardshopcoop"))
       {
           return;
       }
@@ -224,7 +224,7 @@ the installed DLL.
 | `ICoopContext` | live session: role, connections, `HostConnectionId`, send/broadcast, message registry |
 | `CoopMessageContext` | inbound message context for external handlers |
 | `CoopPredict` / `IPredictedMessage` | generic client prediction |
-| `CoopLog` / `CoopReflection` | logging and reflection helpers (guard direct calls when CardShopCoop may be absent) |
+| `CoopLog` / `CoopReflection` | logging and reflection helpers (guard direct calls when CardShopCoopCommunity may be absent) |
 | `[ServerBehaviour]`, `[ClientBehaviour]`, `[PersistentBehaviour]`, `[OnClientJoined]` | behaviour roles and join lifecycle |
 | `[NetworkMessage]`, `[MessageHandler]`, `INetMessage` | message contract |
 | `PeerConnection`, `ConnectionState`, `DisconnectInfo` | connection contract |

@@ -1,106 +1,50 @@
-# CardShopCoop
+# CardShopCoopCommunity
 
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20shop-2ec484)](https://discord.gg/eNswvvTYbQ)
 
-**True co-op multiplayer for TCG Card Shop Simulator.** Run the shop together — shared
-money, XP, collection, and customers — using KCP over Steam Networking Sockets (invites or a
-public lobby browser) or LAN over UDP/KCP. Built mod-first: it syncs by game IDs and plays nice with the PTCGO / Enhanced
-Prefab Loader content-mod stack, including automatic card-database alignment between
-players.
+**True co-op multiplayer for TCG Card Shop Simulator.** -- Run your shop with other players!
+This mod synchronizes your shop with anyone you join's shop, allowing you to run the game
+the exact same as if you were running it on your own! Join via Steam or via the LAN / internet.
 
-BepInEx 5 plugin, Unity 2021.3 Mono, no game assets redistributed.
+**Mod Aware** -- Works with most QoL and mods that add things to the base game. This means
+new cards, card packs, furniture, workers, etc.
+
+**Mod Expandable** -- For mods that add new custom logic, such as the Custom TV mod, the mod
+owners can expand it. The Custom TV was expanded by us as an example as an optional download!
 
 ## Features
 
-- **Steam lobbies**: friends-list invites, or a browsable/searchable public lobby list
-  with optional passwords. LAN UDP/KCP fallback (port 27886). 2 players primary; extra
-  joiners supported via host relay.
-- **One shop, one truth** (host-authoritative): money, XP, level, fame, the card
-  collection (including graded cards), item and card prices, shelf stock, card display
-  walls, loose boxes (carry them, throw them, trash them), placed furniture, licenses,
-  bills, room expansions, decorations, signs, tournaments, grading, the daily market,
-  and the end-of-day report are all shared.
-- **Both players can work**: the joiner serves the register through the vanilla interaction
-  flow (click the counter to man it, click items/cards to scan, take payment, give change,
-  and press Space to finish),
-  runs customer trade-ins/sell-ins through the game's real trade screen, restocks,
-  prices, orders stock and furniture, hires staff, pays bills, and buys licenses and
-  expansions — everything lands in the host's real simulation and echoes back.
-- **Live world**: customers and workers mirrored as motion-smoothed puppets
-  (snapshot-interpolated, not jittery extrapolation), full day/night cycle and lighting
-  sync, avatars with real carried items (boxes with product, card fans, binders).
-- **Allow NSFW**: when off, the Nude wardrobe option is hidden and fully nude players
-  appear in the game's random clothed customer look; when on, nude appearances are allowed.
-- **Mod-stack aware**: plugin-set and card-ID-registry parity checks at join with
-  readable rejections, automatic `enum_values.json` sync (backup + install + "restart
-  and rejoin"), product-catalog diffing with plain-language warnings, refunds when an
-  ordered product doesn't exist on the host.
-- **Joiners risk nothing**: the joiner receives the host's save at join, plays in a
-  dedicated scratch slot, and never writes their own saves.
+- **Steam lobbies**: Friends-list invites, or a browsable/searchable public lobby list
+  with optional passwords.
+- **Play over IP**: You can host over IP / LAN if Steam isn't what you want.
+- **Both players can work**: All vanilla gameplay preserved as best as possible, so
+all users can interact the exact same as the host.
+- **Live world**: all players can see everything the others see, as the other users
+change and play!
+- **Mod-aware**: We network all loaded mods and cards, to ensure each client has the
+the required content before you join!
+- **Joiners risk nothing**: Any games you join work without change to any of your local
+saves.
 
 ## Install
 
 1. Install [BepInEx 5](https://github.com/BepInEx/BepInEx) (5.4.23 x64) into the game
    folder — most modded installs already have it.
 2. Drop `CardShopCoop.dll` into `BepInEx/plugins/` on **both** PCs.
-3. Both players must run the **same CardShopCoop version** and the **same mod set**
+3. Both players must run the **same CardShopCoopCommunity version** and the **same mod set**
    (including content data packs) — the join handshake tells you exactly what differs
    if not.
 4. In game, press **F2** for the co-op window. Host: load your save, click Host.
    Friend: Join via Steam invite, the lobby browser, or a LAN IP (UDP/KCP).
 
-## Repo layout
-
-- `CardShopCoop.sln` — all plugin projects. Build the **Deploy** configuration to build and copy
-  everything into the game in one step (`dotnet build CardShopCoop.sln -c Deploy`).
-- `src/CardShopCoop/` — the core plugin (session, transport, modules, UI). Build:
-  `dotnet build -c Release` (deployment is opt-in; use `-p:Deploy=true` only when you want the DLL
-  copied into the game's plugins directory).
-- `src/CardShopCoop.Api/` — the public integration contract other mods reference (ships with core).
-- `src/CardShopCoop.CustomTv/` — optional RTCGO Custom TV sync, built on the public API.
-- `samples/CardShopCoop.SampleMod/` — a minimal example integration.
-- `docs/third-party-integration.md` — how another mod integrates.
-  The game install path (`GamePath`) is resolved by `Directory.Build.props`:
-  point it at your install by copying `Directory.Build.user.props.example` to
-  `Directory.Build.user.props` (git-ignored), or set the `CARDSHOP_GAMEPATH`
-  environment variable. `dotnet build -p:GamePath=...` overrides either for a
-  one-off/CI build. Don't edit the csproj.
-- `tools/Decomp/` — regenerates the decompiled game-assembly reference locally
-  (ILSpy; the output is not part of this repo).
-- Ready-to-install builds: see [Releases](https://github.com/DeliriumPulse/CardShopCoop/releases)
-  or the Nexus page.
-
-## Architecture notes
-
-- **Host-authoritative everywhere**: the host runs the only real simulation; the client
-  suppresses its own customers/workers/day-end via Harmony and mirrors state. Client
-  actions forward as ops the host executes through vanilla code paths, then authoritative
-  state echoes back (hash-gated snapshot-diff engines with staggered timers).
-- **Two network lanes**: reliable ordered KCP frames for state, unreliable no-delay for
-  15 Hz positions and 8 Hz NPC batches (sized below the shared 1200-byte datagram limit).
-  Remote motion renders ~150 ms behind on a snapshot ring buffer.
-- **Extensible protocol catalog**: message DTOs are registered by `Type.FullName`. Peers must
-  match the same frozen, ordinally ordered catalog during the named handshake; subsequent frames
-  use its zero-based 16-bit IDs on both UDP and Steam.
-- **Transport trust**: Steam sessions use Steam's authenticated connection identity. Direct
-  UDP/KCP sessions are not encrypted and do not provide cryptographic host identity, so use them
-  only on a trusted LAN or through a trusted VPN; the optional room password is admission control,
-  not transport encryption.
-- **Identity over indexes**: anything that crosses the wire is keyed by item identity
-  (type + size + name), never by list position — content mods can order their
-  registries differently per machine.
-- **For other mods**: a separate `CardShopCoop.Api.dll` exposes a small, optional-dependency-safe
-  contract. Add a soft `[BepInDependency]`, reference the API with copy-local off, mark your DTOs
-  and behaviours with attributes, and CardShopCoop discovers you automatically. See
-  `docs/third-party-integration.md` and `samples/CardShopCoop.SampleMod`.
-- **Custom TV** co-op sync ships in the optional `CardShopCoop.ExternalModInterop.zip` bundle
-  (currently containing the `CardShopCoop.CustomTv` plugin); install it alongside CardShopCoop
-  (both players) to share TV playback.
-- Game gotchas that cost us dearly (see the feature modules and git history):
-  dead statics (`CGameManager.Player`), auto-creating `CSingleton<T>.Instance`,
-  `SpawnItem` being a save-loader not an adder, price tags living in separate canvas
-  groups, and raw-`itemType`-indexed tables ~200k entries long under content mods.
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Mod Source
+
+This mod is open source. Feel free to contribute at our [GitHub](https://github.com/meepen/CardShopCoop).
+
+### Original Mod
+
+This mod is based off of [CardShopCoop](https://www.nexusmods.com/tcgcardshopsimulator/mods/1117) ([Github](https://github.com/DeliriumPulse/CardShopCoop)).

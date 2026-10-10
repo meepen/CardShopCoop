@@ -332,7 +332,7 @@ namespace CardShopCoop.Runtime
 
     internal static class SceneLifecycleHooks
     {
-        private static readonly Harmony Harmony = new("com.zwhit.cardshopcoop.scene-lifecycle");
+        private static readonly Harmony Harmony = new("dev.meepen.cardshopcoop.scene-lifecycle");
         private static readonly Dictionary<Type, List<Action<Component>>> ReadyHandlers = new();
         private static readonly Dictionary<Type, List<Action<Component>>> GoneHandlers = new();
         private static readonly HashSet<Type> Patched = new();

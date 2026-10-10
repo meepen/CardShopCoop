@@ -121,7 +121,7 @@ namespace CardShopCoop.Modules.Grading
             if (!GradingInterop.GoDayStartMethodMatches)
             {
                 CoopPlugin.Log.LogError("Grading Overhaul's day-start prefix does not match this "
-                    + "CardShopCoop build (expected "
+                    + "CardShopCoopCommunity build (expected "
                     + "CompanyStamp_RestockManager_OnDayStartedPatch.Prefix() -> bool/void); the "
                     + "guest cannot block its local grading.");
                 return;

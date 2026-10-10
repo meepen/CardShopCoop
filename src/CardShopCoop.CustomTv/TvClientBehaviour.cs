@@ -55,7 +55,7 @@ namespace CardShopCoop.Modules.Tv
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.tv.client.runtime");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.tv.client.runtime");
                 ApplyPatches(_harmony);
                 OnControllerLifecycle();
             }

@@ -7,7 +7,7 @@ services:
         DOTNET_INSTALL_VERSION: ${DOTNET_INSTALL_VERSION:-9.0.100}
     restart: unless-stopped
     environment:
-      REPO_URL: https://github.com/DeliriumPulse/CardShopCoop
+      REPO_URL: https://github.com/meepen/CardShopCoop
       RUNNER_SCOPE: repo
       RUNNER_NAME_PREFIX: cardshopcoop
       LABELS: linux,cardshop-game

@@ -22,7 +22,7 @@ stored in the repository or GitHub.
 
 ## Configure the runner
 
-Create a fine-grained token for `DeliriumPulse/CardShopCoop` with repository **Administration: Read
+Create a fine-grained token for `meepen/CardShopCoop` with repository **Administration: Read
 and write** permission. Store it only in `.env`:
 
 ```bash
@@ -58,9 +58,23 @@ Update `CardShopCoopVersion` in `../Directory.Build.props`, commit it, and push 
 tag:
 
 ```bash
-git tag v1.1.0
-git push origin v1.1.0
+git tag v2.0.1
+git push origin v2.0.1
 ```
 
-The tag must match the version exactly. GitHub Actions builds and publishes the package as a
-GitHub Release.
+The tag must match the version exactly. GitHub Actions then runs `scripts/build.sh` (builds and
+packages every distributable into `dist/`) and `scripts/publish.sh` (creates the GitHub release and,
+on stable tags, publishes to Thunderstore + Nexus Mods).
+
+## Publishing setup (one-time)
+
+- **Thunderstore** (`tcg-card-shop-simulator`, team `Meepen`): create the team, add a Service
+  Account, and store its token as the repository secret `THUNDERSTORE_TOKEN`. Add the mod icon at
+  `thunderstore/icon.png` (must be a 256x256 PNG). Packages: `CardShopCoopCommunity` and
+  `CardShopCoopCommunity_CustomTv`.
+- **Nexus Mods**: create the mod page and one file group per package, then store the API key as the
+  secret `NEXUSMODS_API_KEY` and the file-group ids as repository variables `NEXUSMODS_FILE_ID`
+  (core) and `NEXUSMODS_CUSTOMTV_FILE_ID` (Custom TV). Nexus uploads are skipped until those
+  variables are set.
+- The runner image installs `zip`/`unzip` (see `docker/Dockerfile`); rebuild it with
+  `docker compose --env-file .env -f docker/compose.yml up -d --build` after changing it.

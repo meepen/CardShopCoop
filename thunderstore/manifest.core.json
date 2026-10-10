@@ -1,0 +1,9 @@
+{
+  "name": "CardShopCoopCommunity",
+  "version_number": "__VERSION__",
+  "website_url": "https://github.com/meepen/CardShopCoop",
+  "description": "True co-op multiplayer for TCG Card Shop Simulator.",
+  "dependencies": [
+    "BepInEx-BepInExPack-5.4.2305"
+  ]
+}

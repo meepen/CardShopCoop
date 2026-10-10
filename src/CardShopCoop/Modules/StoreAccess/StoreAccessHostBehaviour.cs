@@ -35,7 +35,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 registered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.store-access.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.store-access.host");
                 _harmony.CreateClassProcessor(typeof(SignChangedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(WarehouseSignChangedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(StoreOpenedPatch)).Patch();

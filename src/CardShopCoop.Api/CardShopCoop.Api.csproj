@@ -5,10 +5,10 @@
     <AssemblyName>CardShopCoop.Api</AssemblyName>
     <AssemblyTitle>CardShopCoop.Api</AssemblyTitle>
     <RootNamespace>CardShopCoop.Api</RootNamespace>
-    <Company>DeliriumPulse</Company>
-    <Product>CardShopCoop.Api</Product>
-    <Description>Public integration contract for CardShopCoop. Optional-dependency safe.</Description>
-    <Authors>DeliriumPulse</Authors>
+    <Company>Devin 'Meepen' Korb</Company>
+    <Product>CardShopCoopCommunity.Api</Product>
+    <Description>Public integration contract for CardShopCoopCommunity. Optional-dependency safe.</Description>
+    <Authors>Devin 'Meepen' Korb</Authors>
     <Version>$(CardShopCoopVersion)</Version>
     <LangVersion>9</LangVersion>
     <Nullable>disable</Nullable>

@@ -28,7 +28,7 @@ namespace CardShopCoop.Modules.DebugTools
             }
 
             DebugToolsRuntime.Attach(this);
-            _harmony = new HarmonyLib.Harmony("com.zwhit.cardshopcoop.debug-tools." + role);
+            _harmony = new HarmonyLib.Harmony("dev.meepen.cardshopcoop.debug-tools." + role);
             DebugToolsPatches.Apply(_harmony);
             DebugToolsRuntime.BootstrapCheatManager();
         }

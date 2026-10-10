@@ -43,7 +43,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
 
             _active = this;
-            _harmony = new HarmonyLib.Harmony("com.zwhit.cardshopcoop.save-transfer." + role);
+            _harmony = new HarmonyLib.Harmony("dev.meepen.cardshopcoop.save-transfer." + role);
             SaveTransferPatches.Apply(_harmony);
         }
 

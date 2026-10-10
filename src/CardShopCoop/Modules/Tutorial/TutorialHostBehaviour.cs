@@ -38,7 +38,7 @@ namespace CardShopCoop.Modules.Tutorial
                 registered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.tutorial.host");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.tutorial.host");
                 _harmony.CreateClassProcessor(typeof(TutorialVisibilityPatch)).Patch();
             }
             catch (Exception exception)

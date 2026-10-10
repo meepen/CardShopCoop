@@ -43,7 +43,7 @@ namespace CardShopCoop.Modules.Register
             _context = RuntimeContext;
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
-            _harmony = new Harmony("com.zwhit.cardshopcoop.register.host");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.register.host");
             Patch(typeof(ManningPatch));
             Patch(typeof(ExitPatch));
             Patch(typeof(CustomerPatch));

@@ -48,7 +48,7 @@ namespace CardShopCoop.Modules.PlayTable
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("com.zwhit.cardshopcoop.play-table.host");
+            _harmony = new Harmony("dev.meepen.cardshopcoop.play-table.host");
             ApplyPatches();
             RefreshVisuals(false);
         }

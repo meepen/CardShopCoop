@@ -138,7 +138,7 @@ namespace CardShopCoop.Modules.Grading
                     else
                     {
                         CoopPlugin.Log.LogWarning("Grading Overhaul is present but not compatible with "
-                            + "this CardShopCoop build - running the vanilla grading fallback "
+                            + "this CardShopCoopCommunity build - running the vanilla grading fallback "
                             + "(8 slots, raw grades, no Grading Overhaul integration)");
                     }
                 }

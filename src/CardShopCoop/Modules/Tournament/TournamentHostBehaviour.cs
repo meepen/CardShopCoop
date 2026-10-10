@@ -32,7 +32,7 @@ namespace CardShopCoop.Modules.Tournament
             try
             {
                 _active = this;
-                _harmony = new Harmony("com.zwhit.cardshopcoop.tournament.host.runtime");
+                _harmony = new Harmony("dev.meepen.cardshopcoop.tournament.host.runtime");
                 ApplyPatches(_harmony);
             }
             catch (Exception exception)
