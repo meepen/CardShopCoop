@@ -3,6 +3,15 @@
 True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 **same version** — the join handshake enforces it.
 
+## 2.0.4
+**Maintenance release — no in-game changes.**
+
+- Build/release tooling only: the GitHub release and each Nexus Mods file version now publish
+  these notes automatically.
+- No gameplay, sync, or save changes.
+
+**Both players must update — the version changed.**
+
 ## 2.0.3
 **CardShopCoopCommunity is now on Nexus Mods, and the optional add-on package got a clearer name.**
 
