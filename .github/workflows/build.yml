@@ -117,15 +117,31 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
       - name: Download packages
         uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist
 
+      # The "## <version>" section of CHANGELOG.md, published as each Nexus file version's changelog.
+      - name: Read changelog
+        id: changelog
+        shell: bash
+        run: |
+          text="$(bash scripts/changelog-extract.sh "${{ needs.build.outputs.version }}")"
+          {
+            echo "text<<CHANGELOG_EOF"
+            echo "$text"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       # Nexus Mods uploads use the official action and a pre-created file group. Each is skipped
-      # until the matching repository variable is configured: vars.NEXUSMODS_FILE_ID and
-      # vars.NEXUSMODS_INTEROP_FILE_ID (with the NEXUSMODS_API_KEY secret).
+      # until the matching repository variable is configured: vars.NEXUSMODS_FILE_ID,
+      # vars.NEXUSMODS_INTEROP_FILE_ID, vars.NEXUSMODS_SAMPLE_FILE_ID (with the NEXUSMODS_API_KEY
+      # secret). The per-version changelog needs vars.NEXUSMODS_MOD_ID.
       - name: Publish core to Nexus Mods
         if: ${{ vars.NEXUSMODS_FILE_ID != '' }}
         uses: Nexus-Mods/upload-action@v1.0.0-beta.10
@@ -137,6 +153,8 @@ jobs:
           category: main
           display_name: CardShopCoopCommunity ${{ needs.build.outputs.version }}
           description: True co-op multiplayer for TCG Card Shop Simulator.
+          changelog: ${{ vars.NEXUSMODS_MOD_ID != '' && steps.changelog.outputs.text || '' }}
+          mod_id: ${{ vars.NEXUSMODS_MOD_ID }}
 
       - name: Publish ExternalModInterop to Nexus Mods
         if: ${{ vars.NEXUSMODS_INTEROP_FILE_ID != '' }}
@@ -149,6 +167,8 @@ jobs:
           category: optional
           display_name: CardShopCoopCommunity ExternalModInterop ${{ needs.build.outputs.version }}
           description: Optional external-mod interop bundle for CardShopCoopCommunity.
+          changelog: ${{ vars.NEXUSMODS_MOD_ID != '' && steps.changelog.outputs.text || '' }}
+          mod_id: ${{ vars.NEXUSMODS_MOD_ID }}
 
       # Example-mod source as a Nexus "miscellaneous" file. Skipped until configured with
       # vars.NEXUSMODS_SAMPLE_FILE_ID.
@@ -163,3 +183,5 @@ jobs:
           category: miscellaneous
           display_name: CardShopCoop Example Mod Source ${{ needs.build.outputs.version }}
           description: Source code for the minimal CardShopCoop integration example.
+          changelog: ${{ vars.NEXUSMODS_MOD_ID != '' && steps.changelog.outputs.text || '' }}
+          mod_id: ${{ vars.NEXUSMODS_MOD_ID }}

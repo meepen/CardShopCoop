@@ -74,9 +74,12 @@ failing cannot block the others: the GitHub release (`scripts/publish-github.sh`
   `thunderstore/icon.png` (must be a 256x256 PNG). Packages: `CardShopCoopCommunity` and
   `CardShopCoopCommunity_ExternalModInterop`.
 - **Nexus Mods**: create the mod page and one file group per package, then store the API key as the
-  secret `NEXUSMODS_API_KEY` and the file-group ids as repository variables `NEXUSMODS_FILE_ID`
-  (core) and `NEXUSMODS_INTEROP_FILE_ID` (ExternalModInterop) and `NEXUSMODS_SAMPLE_FILE_ID`
-  (example-mod source, misc). Nexus uploads are skipped until those
-  variables are set.
+  secret `NEXUSMODS_API_KEY` and the ids as repository variables: `NEXUSMODS_FILE_ID` (core file),
+  `NEXUSMODS_INTEROP_FILE_ID` (ExternalModInterop file), `NEXUSMODS_SAMPLE_FILE_ID` (example-mod
+  source file), and `NEXUSMODS_MOD_ID` (the mod page id, `1786`, used to publish each version's
+  changelog). Nexus uploads are skipped until those variables are set.
+- **Release changelog**: the `## <version>` section of `CHANGELOG.md` is used automatically as the
+  GitHub release body and each Nexus file version's changelog (Thunderstore already renders the
+  whole `CHANGELOG.md`). A release with no matching section fails the release jobs.
 - The runner image installs `zip`/`unzip` (see `docker/Dockerfile`); rebuild it with
   `docker compose --env-file .env -f docker/compose.yml up -d --build` after changing it.

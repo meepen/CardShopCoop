@@ -5,13 +5,13 @@
 # Usage:
 #   scripts/publish-github.sh [version]
 #
-# Attaches the user-facing app zips AND the Thunderstore packages, so the ready-to-upload
-# Thunderstore zips are also available from the GitHub release. Runs independently of the
-# Thunderstore/Nexus publishing, so a failure there cannot block this.
+# Uses the "## <version>" section of CHANGELOG.md as the release body (so the player-facing notes are
+# published here too) and attaches the user-facing app zips AND the Thunderstore packages. Runs
+# independently of the Thunderstore/Nexus publishing, so a failure there cannot block this.
 #
 # Env:
 #   GH_TOKEN          GitHub token for `gh release` (required)
-#   GITHUB_REF_NAME   tag, e.g. v2.0.1 (defaults to v<version>)
+#   GITHUB_REF_NAME   tag, e.g. v2.0.3 (defaults to v<version>)
 #   GITHUB_REPOSITORY owner/repo (defaults to the checkout's remote)
 set -euo pipefail
 
@@ -23,6 +23,12 @@ tag="${GITHUB_REF_NAME:-v${version}}"
 repository="${GITHUB_REPOSITORY:-}"
 
 : "${GH_TOKEN:?GH_TOKEN must be set to create the GitHub release}"
+
+notes_file="$(mktemp)"
+if ! bash scripts/changelog-extract.sh "$version" > "$notes_file" 2>/dev/null; then
+  echo "error: no CHANGELOG.md section for ${version}; add one before releasing." >&2
+  exit 1
+fi
 
 shopt -s nullglob
 files=(dist/*.zip dist/thunderstore/*.zip)
@@ -38,11 +44,12 @@ if [[ -n "$repository" ]]; then
 fi
 
 if gh release view "$tag" "${repo_args[@]}" >/dev/null 2>&1; then
-  echo "GitHub release ${tag} already exists; uploading assets"
+  echo "GitHub release ${tag} already exists; uploading assets and notes"
   gh release upload "$tag" "${files[@]}" --clobber "${repo_args[@]}"
+  gh release edit "$tag" --notes-file "$notes_file" "${repo_args[@]}"
 else
   echo "Creating GitHub release ${tag}"
-  create_args=(release create "$tag" "${files[@]}" --title "$tag" --generate-notes)
+  create_args=(release create "$tag" "${files[@]}" --title "$tag" --notes-file "$notes_file")
   if [[ "$tag" == *-* ]]; then
     create_args+=(--prerelease)
   fi
