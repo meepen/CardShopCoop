@@ -258,7 +258,7 @@ namespace CardShopCoop.UI
         private void AlertWindowFn()
         {
             CoopTheme.DrawWindowChrome(new Rect(0f, 0f, _alertWin.width, _alertWin.height),
-                "CO-OP ERROR", "");
+                CoopAlert.Header, "");
             GUILayout.Label(CoopAlert.Title, CoopTheme.LabelWrap);
             if (CoopAlert.RepeatCount > 1)
             {

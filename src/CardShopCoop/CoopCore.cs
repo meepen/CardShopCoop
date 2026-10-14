@@ -193,6 +193,7 @@ namespace CardShopCoop
         /// succeeds.</summary>
         private readonly Dictionary<string, string> _backendErrors = new();
         private readonly HashSet<INetworkingBackend> _wired = new();
+        private int _wiredBackendsVersion = -1;
         private readonly object _sessionLock = new();
         private CoopTransportGroup _group;
         private ICoopTransport _pump;
@@ -553,23 +554,79 @@ namespace CardShopCoop
         }
 
         /// <summary>
+        /// Subscribes Core to each backend's events the moment the backend exists, rather than only
+        /// when a session first starts. The Steam transport registers itself from its own plugin's
+        /// Awake, which BepInEx runs after this core plugin's, and a Steam invite can arrive at any
+        /// moment - including before the player has ever hosted or joined this run. Wiring only
+        /// inside <see cref="ConnectBackend"/> left <see cref="INetworkingBackend.JoinRequested"/>
+        /// with no subscriber until a first session, so accepting an invite did nothing at all. The
+        /// Backends getter refreshes the cached list when the set changes; the version guard keeps
+        /// this to one wiring pass per change.
+        /// </summary>
+        private void EnsureBackendsWired()
+        {
+            var backends = Backends;
+            if (_wiredBackendsVersion == _backendsVersion)
+            {
+                return;
+            }
+
+            foreach (var backend in backends)
+            {
+                EnsureBackendWired(backend);
+            }
+
+            // Advance the guard only after the whole set is wired, so a backend whose subscription
+            // threw leaves the version stale and the remaining backends are retried next frame
+            // rather than being skipped for the rest of the run.
+            _wiredBackendsVersion = _backendsVersion;
+        }
+
+        /// <summary>
         /// A backend received an out-of-band join request the player accepted (a Steam invite).
         /// Session admission belongs to the runtime, so this just starts a client session - on the
         /// Unity thread, which is where ConnectBackend must run.
         /// </summary>
         private void OnBackendJoinRequested(INetworkingBackend backend, FieldValues values)
         {
-            if (Role != CoopRole.None)
-            {
-                CoopPlugin.Log.LogInfo("ignoring an inbound join request - already in a session");
-                return;
-            }
-
-            if (!TryEnqueueMainThread(() => ConnectBackend(backend, ConnectMode.Join, values)))
+            if (!TryEnqueueMainThread(() => HandleInviteOnMainThread(backend, values)))
             {
                 CoopPlugin.Log.LogError(
                     "coop: could not queue the inbound join request on the Unity thread");
             }
+        }
+
+        /// <summary>
+        /// Runs an accepted invite on the Unity thread, where the role and scene state are safe to
+        /// read and where <see cref="ConnectBackend"/> must run. An invite can only ever start a
+        /// client session; when that is impossible the player is told why instead of the request
+        /// being dropped silently.
+        /// </summary>
+        private void HandleInviteOnMainThread(INetworkingBackend backend, FieldValues values)
+        {
+            if (Role != CoopRole.None)
+            {
+                CoopPlugin.Log.LogInfo("ignoring an inbound join request - already in a session");
+                UI.CoopAlert.Show(
+                    "You're already in a co-op session.",
+                    "Stop hosting or leave the session before accepting a friend's invite.",
+                    header: "CO-OP INVITE");
+                return;
+            }
+
+            if (InGameLevel())
+            {
+                // Joining borrows the host's world, which only replaces the world cleanly from the
+                // Title screen; the game refuses the join from inside a loaded shop for that reason.
+                CoopPlugin.Log.LogInfo("declining an inbound join request - a shop is loaded");
+                UI.CoopAlert.Show(
+                    "Join from the main menu to accept this invite.",
+                    "Return to the Title screen (Back to menu), then ask your friend to invite you again.",
+                    header: "CO-OP INVITE");
+                return;
+            }
+
+            ConnectBackend(backend, ConnectMode.Join, values);
         }
 
         private void OnBackendConnectResult(INetworkingBackend backend, ConnectionId handle,
@@ -1515,6 +1572,9 @@ namespace CardShopCoop
                 _persistentRuntime?.IncludeExternalPersistentBehaviours();
                 ExternalCoopMods.Instance.NotifyPersistentScanComplete();
             }
+            // Attach to every backend's events as soon as the backend is offered, so an out-of-band
+            // join request (a Steam invite) is heard even before the player has started a session.
+            EnsureBackendsWired();
             Util.PerfProbe.BeginFrame();
             Util.PerfProbe.FlushThreadMetrics();
             using (Util.PerfProbe.Sample("core.dispatcher"))
