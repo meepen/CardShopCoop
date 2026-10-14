@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"game version: {version}")
         if unity:
             print(f"unity version: {unity}")
-        # Handy for the decompiled/<gameversion>/ convention in AGENTS.md.
+        # Handy for the decompiled/<gameversion>/ convention (see the decompile skill).
         print(f"suggested decompile dir: decompiled/{version}")
     return 0
 
