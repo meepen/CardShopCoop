@@ -140,6 +140,11 @@ namespace CardShopCoop.UI
                 _nameField = core.EffectivePlayerName;
             }
 
+            // Logs the live entity census every 30 s. Draw runs every OnGUI frame (the HUD path
+            // below draws even when the window is closed), so this keeps logging regardless of
+            // whether the SETTINGS tab is open. See EntityCensus.
+            EntityCensus.Tick();
+
             // ---- HUD overlays (outside the window) ----
             if (!Visible)
             {
@@ -591,6 +596,41 @@ namespace CardShopCoop.UI
             DrawConfigIntSlider(CoopPlugin.ArtificialJitterMs, 0, 1000, "Jitter");
             GUILayout.Space(8f);
 
+            GUILayout.Label("Settings are saved to BepInEx/config/dev.meepen.cardshopcoop.cfg.", CoopTheme.LabelDim);
+
+            // Bottom-of-panel diagnostics: a count that climbs on its own is the runaway-spawn /
+            // ghost-box symptom made visible. Also logged every 30 s (see EntityCensus.Tick).
+            GUILayout.Space(8f);
+            GUILayout.Label("ENTITIES (DEBUG)", CoopTheme.SectionHeader);
+            GUILayout.Label(EntityCensus.Text(), CoopTheme.LabelDimWrap);
+            GUILayout.Label("Live scene counts, rebuilt about once a second and logged every "
+                + "30 seconds. Watch for one that climbs by itself - that is the entity leak.",
+                CoopTheme.LabelDimWrap);
+        }
+
+        private static bool HiddenCategoryVisible()
+        {
+            return CoopPlugin.ShowHiddenCategory != null && CoopPlugin.ShowHiddenCategory.Value;
+        }
+
+        private static void DrawHidden(CoopCore core)
+        {
+            DrawConfigToggle(CoopPlugin.ShowHiddenCategory, "Show hidden category");
+            DrawConfigToggle(CoopPlugin.EnableGameCheatMenu, "Enable game cheat menu");
+            // Bound only on builds with the entitlement gate (Game Pass), so this draws nothing on
+            // the Steam build.
+            DrawConfigToggle(CoopPlugin.ForceDeluxeFurniture, "Force deluxe furniture");
+            GUILayout.Space(8f);
+
+            DrawModuleToggles();
+        }
+
+        /// <summary>The diagnostic module checkboxes. Moved to the HIDDEN tab because turning a
+        /// module off is a support action, not a normal setting. Every control writes straight to
+        /// its ConfigEntry, which persists to disk, so this is a front-end for the config file
+        /// rather than a second source of truth.</summary>
+        private static void DrawModuleToggles()
+        {
             GUILayout.Label("MODULES (DIAGNOSTIC)", CoopTheme.SectionHeader);
             GUILayout.Label("Uncheck a module to turn it off entirely - its patches, handlers and "
                 + "per-frame work stop. Use this to find which module costs frame rate. Applies "
@@ -610,23 +650,6 @@ namespace CardShopCoop.UI
                     entry.Value = enabled; // ConfigEntry writes the file itself
                 }
             }
-            GUILayout.Space(8f);
-
-            GUILayout.Label("Settings are saved to BepInEx/config/dev.meepen.cardshopcoop.cfg.", CoopTheme.LabelDim);
-        }
-
-        private static bool HiddenCategoryVisible()
-        {
-            return CoopPlugin.ShowHiddenCategory != null && CoopPlugin.ShowHiddenCategory.Value;
-        }
-
-        private static void DrawHidden(CoopCore core)
-        {
-            DrawConfigToggle(CoopPlugin.ShowHiddenCategory, "Show hidden category");
-            DrawConfigToggle(CoopPlugin.EnableGameCheatMenu, "Enable game cheat menu");
-            // Bound only on builds with the entitlement gate (Game Pass), so this draws nothing on
-            // the Steam build.
-            DrawConfigToggle(CoopPlugin.ForceDeluxeFurniture, "Force deluxe furniture");
         }
 
         private static void DrawConfigToggle(ConfigEntry<bool> entry, string label)
