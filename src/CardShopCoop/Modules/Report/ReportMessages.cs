@@ -92,7 +92,8 @@ namespace CardShopCoop.Modules.Report
     }
 
     /// <summary>Guest intent: this player pressed Next Day and is ready for the day to roll over.
-    /// The host advances only once every connected player has readied.</summary>
+    /// The host advances once every connected player has readied, or when the auto-continue timer
+    /// armed by the first readiness runs out.</summary>
     [NetworkMessage]
     public sealed class ReportNextDayReadyMessage : INetMessage
     {
@@ -100,11 +101,14 @@ namespace CardShopCoop.Modules.Report
 
     /// <summary>Host view of the end-of-day ready gate: the names of the players who have not
     /// pressed Next Day yet. <see cref="Active"/> is false while no gate is running (nobody has
-    /// pressed, or the day already advanced), which tells guests to clear their waiting notice.</summary>
+    /// pressed, or the day already advanced), which tells guests to clear their waiting notice.
+    /// <see cref="CountdownSeconds"/> carries the whole seconds left on the auto-continue timer
+    /// the host armed when the first player readied; 0 means no timer is running.</summary>
     [NetworkMessage]
     public sealed class ReportNextDayWaitMessage : INetMessage
     {
         public bool Active;
         public List<string> Pending = new();
+        public int CountdownSeconds;
     }
 }

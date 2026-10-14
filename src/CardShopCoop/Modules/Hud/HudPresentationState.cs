@@ -1,4 +1,5 @@
 using System;
+using UnityEngine;
 
 namespace CardShopCoop.Modules.Hud
 {
@@ -14,6 +15,11 @@ namespace CardShopCoop.Modules.Hud
         private static string _hostTimeText = "";
         private static bool _nextDayWaitActive;
         private static string _nextDayWaitText = "";
+
+        /// <summary>Deadline (Time.time) of the end-of-day auto-continue countdown, or -1 when no
+        /// timer is running. Stored rather than the remaining seconds so the pill ticks live
+        /// between updates without anyone resending state.</summary>
+        private static float _nextDayCountdownEnd = -1f;
         private static bool _endOfDayPendingActive;
         private static string _endOfDayPendingText = "";
 
@@ -21,7 +27,7 @@ namespace CardShopCoop.Modules.Hud
         public static float ToastRemaining => _toastRemaining;
         public static string HostTimeText => _hostTimeText;
         public static bool NextDayWaitActive => _nextDayWaitActive;
-        public static string NextDayWaitText => _nextDayWaitText;
+        public static string NextDayWaitText => ComposeNextDayWaitText();
         public static bool EndOfDayPendingActive => _endOfDayPendingActive;
         public static string EndOfDayPendingText => _endOfDayPendingText;
 
@@ -56,11 +62,32 @@ namespace CardShopCoop.Modules.Hud
         }
 
         /// <summary>Persistent "waiting for other players" line, shown while the end-of-day
-        /// ready gate is waiting on players who have not pressed Next Day.</summary>
-        internal static void SetNextDayWait(bool active, string text)
+        /// ready gate is waiting on players who have not pressed Next Day. When a countdown is
+        /// armed the reader sees how long until the day continues without them; the countdown is
+        /// composed here so host and guests tick from one shared formula.</summary>
+        internal static void SetNextDayWait(bool active, string text, int countdownSeconds = 0)
         {
             _nextDayWaitActive = active && !string.IsNullOrEmpty(text);
             _nextDayWaitText = _nextDayWaitActive ? text : "";
+            _nextDayCountdownEnd = _nextDayWaitActive && countdownSeconds > 0
+                ? Time.time + countdownSeconds
+                : -1f;
+        }
+
+        /// <summary>The wait line, prefixed with the live auto-continue countdown while one is
+        /// armed. Once the deadline passes, the plain waiting text remains until the actual
+        /// day-advance state arrives — the countdown itself is no longer true.</summary>
+        private static string ComposeNextDayWaitText()
+        {
+            if (_nextDayCountdownEnd < 0f)
+            {
+                return _nextDayWaitText;
+            }
+
+            var remaining = Mathf.CeilToInt(_nextDayCountdownEnd - Time.time);
+            return remaining <= 0
+                ? _nextDayWaitText
+                : "Next day in " + remaining + "s - " + _nextDayWaitText;
         }
 
         /// <summary>Persistent "the host ended the day but this player is still in a screen"
@@ -92,6 +119,7 @@ namespace CardShopCoop.Modules.Hud
             _hostTimeText = "";
             _nextDayWaitActive = false;
             _nextDayWaitText = "";
+            _nextDayCountdownEnd = -1f;
             _endOfDayPendingActive = false;
             _endOfDayPendingText = "";
         }

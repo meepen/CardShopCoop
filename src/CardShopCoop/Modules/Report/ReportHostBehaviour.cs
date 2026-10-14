@@ -24,6 +24,11 @@ namespace CardShopCoop.Modules.Report
         private const int MoneySlice = 1;
         private const int ReviewSlice = 2;
 
+        /// <summary>How long after the first player readies the day rolls over even if others
+        /// are still pending. The timer arms once per gate and is cancelled by an all-ready
+        /// advance, so it never shortens a roll the whole table agreed on.</summary>
+        private const int NextDayAutoContinueSeconds = 30;
+
         private static ReportHostBehaviour _active;
         private CoopRuntimeContext _context;
         private Harmony _harmony;
@@ -34,6 +39,8 @@ namespace CardShopCoop.Modules.Report
         private bool _nextDayGateActive;
         private bool _advancingNextDay;
         private bool _nextDayAdvancing;
+        private Coroutine _nextDayCountdown;
+        private float _nextDayCountdownStart;
 
         private void OnEnable()
         {
@@ -132,8 +139,9 @@ namespace CardShopCoop.Modules.Report
             }
         }
 
-        /// <summary>A guest is ready for the day to roll. The host records it and advances only
-        /// once every connected player has readied.</summary>
+        /// <summary>A guest is ready for the day to roll. The host records it and advances once
+        /// every connected player has readied — or when the auto-continue deadline armed by the
+        /// first readiness runs out, whichever comes first.</summary>
         [MessageHandler(typeof(ReportNextDayReadyMessage))]
         private void HandleNextDayReady(MessageContext context, ReportNextDayReadyMessage message)
         {
@@ -160,7 +168,8 @@ namespace CardShopCoop.Modules.Report
         }
 
         /// <summary>Host-side gate for its own Next Day press: record the host's readiness and only
-        /// let the vanilla advance run once every player has readied.</summary>
+        /// let the vanilla advance run once every player has readied — or once the auto-continue
+        /// deadline fires while players are still pending.</summary>
         private bool HostPressNextDay()
         {
             if (_shutdown || _context == null || !_context.InGame())
@@ -203,6 +212,64 @@ namespace CardShopCoop.Modules.Report
             return true;
         }
 
+        /// <summary>Arms the auto-continue deadline: one shot per gate, anchored to the first
+        /// readiness while others are still pending. Never restarted while it runs, so the
+        /// deadline the table saw when the gate opened is the deadline that fires.</summary>
+        private void EnsureNextDayCountdown()
+        {
+            if (_nextDayCountdown != null || !isActiveAndEnabled)
+            {
+                return;
+            }
+
+            _nextDayCountdownStart = Time.time;
+            _nextDayCountdown = StartCoroutine(NextDayAutoContinue());
+        }
+
+        private void StopNextDayCountdown()
+        {
+            if (_nextDayCountdown == null)
+            {
+                return;
+            }
+
+            StopCoroutine(_nextDayCountdown);
+            _nextDayCountdown = null;
+        }
+
+        /// <summary>Fires the day roll when the auto-continue deadline passes. The gate may have
+        /// closed between arming and now (everyone readied, or the day already advanced); only
+        /// roll when the gate is still genuinely waiting.</summary>
+        private IEnumerator NextDayAutoContinue()
+        {
+            yield return new WaitForSeconds(NextDayAutoContinueSeconds);
+            _nextDayCountdown = null;
+            if (_shutdown || _nextDayAdvancing || !_nextDayGateActive
+                || _context == null || !_context.InGame())
+            {
+                yield break;
+            }
+
+            CoopPlugin.Log.LogInfo("Next-day auto-continue fired after "
+                + NextDayAutoContinueSeconds + "s; still pending: "
+                + string.Join(", ", BuildPendingNextDayNames()));
+            AdvanceNextDay();
+        }
+
+        /// <summary>Whole seconds left on the auto-continue timer, for display and the wait
+        /// broadcast. The floor of one second keeps an armed gate from ever rendering a zero
+        /// countdown; a disarmed gate reports none.</summary>
+        private int NextDayCountdownRemaining()
+        {
+            if (_nextDayCountdown == null)
+            {
+                return 0;
+            }
+
+            var elapsed = Time.time - _nextDayCountdownStart;
+            return Mathf.Max(1, Mathf.CeilToInt(NextDayAutoContinueSeconds - elapsed));
+        }
+
         private void AdvanceNextDay()
         {
             ResetNextDayGate();
@@ -242,6 +309,7 @@ namespace CardShopCoop.Modules.Report
             _nextDayHostReady = false;
             _nextDayGateActive = false;
             _nextDayReadyPeers.Clear();
+            StopNextDayCountdown();
         }
 
         private void BroadcastNextDayWait()
@@ -251,14 +319,26 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
+            if (_nextDayGateActive && !AllNextDayReady())
+            {
+                // Every gate that is actively waiting carries the auto-continue deadline, so
+                // (re)assert it here: this is the one funnel every state change that shows the
+                // wait flows through, and the deadline stays anchored to the first readiness.
+                EnsureNextDayCountdown();
+            }
+
+            var countdown = _nextDayGateActive ? NextDayCountdownRemaining() : 0;
             var pending = BuildPendingNextDayNames();
-            var showHostWait = _nextDayHostReady && pending.Count > 0;
+            // The host sees the wait whenever the gate can end the day without them - including
+            // before they have readied, because the auto-continue fires either way.
+            var showHostWait = _nextDayGateActive && pending.Count > 0;
             HudApi.SetNextDayWait(showHostWait,
-                showHostWait ? "Waiting for: " + string.Join(", ", pending) : "");
+                showHostWait ? "Waiting for: " + string.Join(", ", pending) : "", countdown);
             _context.Broadcast(new ReportNextDayWaitMessage
             {
                 Active = _nextDayGateActive,
                 Pending = pending,
+                CountdownSeconds = countdown,
             });
         }
 
@@ -521,6 +601,7 @@ namespace CardShopCoop.Modules.Report
             _nextDayGateActive = false;
             _advancingNextDay = false;
             _nextDayAdvancing = false;
+            StopNextDayCountdown();
             HudApi.SetNextDayWait(false, "");
             _context = null;
         }
