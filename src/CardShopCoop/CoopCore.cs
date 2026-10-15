@@ -207,6 +207,17 @@ namespace CardShopCoop
         private bool _externalModsDiscovered;
         private bool _sessionInGame;
         private bool _worldReady;
+
+        /// <summary>True while the game's own loading screen is up - a scene or save load. Set by
+        /// the <see cref="Util.GameLoadingGuard"/> hook on LoadingScreen.OpenScreen and cleared by
+        /// CEventPlayer_FinishHideLoadingScreen.</summary>
+        private bool _gameLoading;
+
+        /// <summary>True while co-op is forcing <see cref="Application.runInBackground"/> true. The
+        /// value the field held before the first force is remembered so it can be restored once
+        /// neither a session nor a load needs it, instead of leaving it changed.</summary>
+        private bool _runInBackgroundHeld;
+        private bool _runInBackgroundBeforeHold;
         private int _localConnectionId = -1;
         private int _sessionGeneration = 1;
         private ulong _autoJoinSteamLobby;
@@ -286,6 +297,7 @@ namespace CardShopCoop
                 (text, seconds) => SetStatus(text), () => SaveTransferApi.PreloadHold,
                 null));
             SceneManager.sceneLoaded += OnSceneLoaded;
+            Util.GameLoadingGuard.Install();
 
             ReadCommandLine();
             _backends = NetworkingBackends.All();
@@ -308,6 +320,7 @@ namespace CardShopCoop
         {
             CEventManager.AddListener<CEventPlayer_OnOpenCardPack>(OnLocalPackOpened);
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
+            CEventManager.AddListener<CEventPlayer_FinishHideLoadingScreen>(OnGameLoadingFinished);
             var manager = CEventManager.Instance;
             if (manager != null)
             {
@@ -1550,7 +1563,9 @@ namespace CardShopCoop
             _hostVersion = "";
             _hostGameVersion = "";
             _hostUnityVersion = "";
-            Application.runInBackground = false;
+            // runInBackground is deliberately NOT reset here: UpdateRunInBackground owns it now,
+            // and a load that is still in progress when the session ends (a world reload) must keep
+            // the game running until the loading screen is gone. It restores the pre-co-op value.
             Role = CoopRole.None;
             SetStatus(reason == null ? "Not connected" : "Not connected (" + reason + ")");
         }
@@ -1558,6 +1573,43 @@ namespace CardShopCoop
         private static void SaveTransferRuntimeReset()
         {
             SaveTransferRuntime.ResetForShutdown();
+        }
+
+        /// <summary>
+        /// Keeps the game running while its window is unfocused. There are two reasons, and both
+        /// are deliberately above the "Net == null" return so a session that has a role but no
+        /// transport yet is still covered:
+        ///
+        ///  - A co-op session is live (<see cref="Role"/> != None): a host waiting on its address
+        ///    build or its lobby, and a client still joining, are exactly the moments the player
+        ///    has switched away, and pausing there stalls the very start they are waiting on.
+        ///  - The game's own loading screen is up and NO session is live: the game forces
+        ///    runInBackground false at startup, so an unfocused window would otherwise pause the
+        ///    player and stall the scene or save load the player is waiting on. This is skipped
+        ///    while a session is live only because the first reason already holds the value true.
+        ///
+        /// The value the game (or another mod) had before co-op first forced it is remembered and
+        /// restored once neither reason applies, so runInBackground is left as we found it rather
+        /// than pinned.
+        /// </summary>
+        private void UpdateRunInBackground()
+        {
+            var sessionActive = Role != CoopRole.None;
+            var loadingOverride = !sessionActive && _gameLoading;
+            if (sessionActive || loadingOverride)
+            {
+                if (!_runInBackgroundHeld)
+                {
+                    _runInBackgroundBeforeHold = Application.runInBackground;
+                    _runInBackgroundHeld = true;
+                }
+                Application.runInBackground = true;
+            }
+            else if (_runInBackgroundHeld)
+            {
+                Application.runInBackground = _runInBackgroundBeforeHold;
+                _runInBackgroundHeld = false;
+            }
         }
 
         private void Update()
@@ -1603,12 +1655,7 @@ namespace CardShopCoop
             {
                 SaveTransferApi.ClearBorrowedWorldIfSafe(false);
             }
-            // Keep the game running while it is unfocused for the WHOLE of any session - not merely
-            // once a transport object exists. A host waiting on its address build or its lobby, and a
-            // client still joining, are exactly the moments the player has switched away, and pausing
-            // there stalls the very start they are waiting on. This used to sit BELOW the "Net == null"
-            // return, so a session that had a role but no transport yet never got it.
-            Application.runInBackground = Role != CoopRole.None;
+            UpdateRunInBackground();
 
             if (Net == null)
             {
@@ -2011,6 +2058,23 @@ namespace CardShopCoop
             CoopPlugin.Log.LogInfo("co-op: shop data finished loading; hosting is now admitted");
         }
 
+        /// <summary>Called by the <see cref="Util.GameLoadingGuard"/> hook on the game's
+        /// LoadingScreen.OpenScreen. Marks the start of a scene or save load; the end arrives as
+        /// CEventPlayer_FinishHideLoadingScreen (see <see cref="OnGameLoadingFinished"/>).</summary>
+        internal static void NotifyGameLoadingStarted()
+        {
+            var core = Instance;
+            if (core != null)
+            {
+                core._gameLoading = true;
+            }
+        }
+
+        private void OnGameLoadingFinished(CEventPlayer_FinishHideLoadingScreen _)
+        {
+            _gameLoading = false;
+        }
+
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
             _worldReady = false;
@@ -2266,6 +2330,7 @@ namespace CardShopCoop
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CEventManager.RemoveListener<CEventPlayer_OnOpenCardPack>(OnLocalPackOpened);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
+            CEventManager.RemoveListener<CEventPlayer_FinishHideLoadingScreen>(OnGameLoadingFinished);
             Shutdown("plugin unloaded");
             try
             {
