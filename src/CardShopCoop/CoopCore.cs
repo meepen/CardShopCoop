@@ -210,14 +210,9 @@ namespace CardShopCoop
 
         /// <summary>True while the game's own loading screen is up - a scene or save load. Set by
         /// the <see cref="Util.GameLoadingGuard"/> hook on LoadingScreen.OpenScreen and cleared by
-        /// CEventPlayer_FinishHideLoadingScreen.</summary>
+        /// CEventPlayer_FinishHideLoadingScreen, with GameInstance.m_HasFinishHideLoadingScreen as
+        /// a backstop (see <see cref="UpdateRunInBackground"/>).</summary>
         private bool _gameLoading;
-
-        /// <summary>True while co-op is forcing <see cref="Application.runInBackground"/> true. The
-        /// value the field held before the first force is remembered so it can be restored once
-        /// neither a session nor a load needs it, instead of leaving it changed.</summary>
-        private bool _runInBackgroundHeld;
-        private bool _runInBackgroundBeforeHold;
         private int _localConnectionId = -1;
         private int _sessionGeneration = 1;
         private ulong _autoJoinSteamLobby;
@@ -1565,7 +1560,7 @@ namespace CardShopCoop
             _hostUnityVersion = "";
             // runInBackground is deliberately NOT reset here: UpdateRunInBackground owns it now,
             // and a load that is still in progress when the session ends (a world reload) must keep
-            // the game running until the loading screen is gone. It restores the pre-co-op value.
+            // the game running until the loading screen is gone.
             Role = CoopRole.None;
             SetStatus(reason == null ? "Not connected" : "Not connected (" + reason + ")");
         }
@@ -1576,40 +1571,35 @@ namespace CardShopCoop
         }
 
         /// <summary>
-        /// Keeps the game running while its window is unfocused. There are two reasons, and both
-        /// are deliberately above the "Net == null" return so a session that has a role but no
-        /// transport yet is still covered:
+        /// Keeps the game running while its window is unfocused, for exactly two reasons:
         ///
         ///  - A co-op session is live (<see cref="Role"/> != None): a host waiting on its address
         ///    build or its lobby, and a client still joining, are exactly the moments the player
         ///    has switched away, and pausing there stalls the very start they are waiting on.
-        ///  - The game's own loading screen is up and NO session is live: the game forces
-        ///    runInBackground false at startup, so an unfocused window would otherwise pause the
-        ///    player and stall the scene or save load the player is waiting on. This is skipped
-        ///    while a session is live only because the first reason already holds the value true.
+        ///  - The game's own loading screen is up and NO session is live: the game never lowers its
+        ///    run-in-background default at runtime (CGameManager.changeFramerate is dead code that
+        ///    is never started), so an unfocused window would otherwise pause the player and stall
+        ///    the scene or save load the player is waiting on. This is skipped while a session is
+        ///    live only because the first reason already holds the value true.
         ///
-        /// The value the game (or another mod) had before co-op first forced it is remembered and
-        /// restored once neither reason applies, so runInBackground is left as we found it rather
-        /// than pinned.
+        /// Otherwise the idle behavior applies and the window pauses when unfocused - what co-op
+        /// has always done outside a session. The value is RECOMPUTED, not captured and restored:
+        /// the engine default is whatever Unity's Player Settings says (the game never changes it),
+        /// so capturing "the value before the load" would faithfully restore that default and pin
+        /// the game to running in the background even when idle.
         /// </summary>
         private void UpdateRunInBackground()
         {
-            var sessionActive = Role != CoopRole.None;
-            var loadingOverride = !sessionActive && _gameLoading;
-            if (sessionActive || loadingOverride)
+            // The game sets this true only once the loading screen has fully faded out, and back
+            // false on the next OpenScreen. It is the ground truth for "the load is over", used to
+            // clear the start flag in case the finish event landed on a manager the scene change
+            // replaced and never reached us.
+            if (_gameLoading && GameInstance.m_HasFinishHideLoadingScreen)
             {
-                if (!_runInBackgroundHeld)
-                {
-                    _runInBackgroundBeforeHold = Application.runInBackground;
-                    _runInBackgroundHeld = true;
-                }
-                Application.runInBackground = true;
+                _gameLoading = false;
             }
-            else if (_runInBackgroundHeld)
-            {
-                Application.runInBackground = _runInBackgroundBeforeHold;
-                _runInBackgroundHeld = false;
-            }
+
+            Application.runInBackground = Role != CoopRole.None || _gameLoading;
         }
 
         private void Update()
