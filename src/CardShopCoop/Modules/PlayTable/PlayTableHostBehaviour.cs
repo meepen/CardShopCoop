@@ -603,10 +603,15 @@ namespace CardShopCoop.Modules.PlayTable
                 Occupied = table != null && table.GetCurrentPlayerCount() > 0,
                 Boxed = table != null && table.GetIsBoxedUp(),
             };
+            // InteractablePlayTable.Awake calls ShelfManager.InitPlayTable (hooked by
+            // TableAddedPatch) before it fills the seat lists and hides each seat's item set, so
+            // a new table's sets still read active here. Report a seat Awake has not set up yet
+            // as inactive, matching what Awake does next.
+            var initializedSeats = table?.m_OccupiedCustomer?.Count ?? 0;
             for (var seat = 0; seat < seats; seat++)
             {
                 var set = sets[seat];
-                var active = set != null && set.gameObject.activeSelf;
+                var active = set != null && set.gameObject.activeSelf && seat < initializedSeats;
                 var data = set?.m_TableGameItemSetData;
                 entry.Seats.Add(new PlayTableSeatEntry
                 {
