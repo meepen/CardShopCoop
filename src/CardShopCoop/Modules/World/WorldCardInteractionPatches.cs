@@ -21,6 +21,7 @@ namespace CardShopCoop.Modules.World
     {
         internal static void Apply(Harmony harmony)
         {
+            harmony.CreateClassProcessor(typeof(AddCardCertPatch)).Patch();
             harmony.CreateClassProcessor(typeof(AddCardPatch)).Patch();
             harmony.CreateClassProcessor(typeof(ReduceCardPatch)).Patch();
             harmony.CreateClassProcessor(typeof(ReduceCardIndexPatch)).Patch();
@@ -31,6 +32,33 @@ namespace CardShopCoop.Modules.World
 
         private static WorldCardInteraction Current => WorldHostBehaviour.ActiveCards
             ?? WorldClientBehaviour.ActiveCards;
+
+        /// <summary>Runs AHEAD of Grading Overhaul's priority-800 anti-cheat prefix on
+        /// CPlayerData.AddCard (this prefix is priority 900, and a higher priority runs first).
+        /// Every inventory add passes through here - the graded delivery-box reveal, a
+        /// save-recovered card box, a graded pack, a trade - so registering the certificate here
+        /// means Grading Overhaul never sees a host-graded card whose certificate is unburned or
+        /// unbound and never re-encodes it as FAKE (which also prices it at 0.01x). The per-path
+        /// Remember calls remain as defence in depth. No-op without Grading Overhaul or for an
+        /// ungraded card, so the vanilla path is untouched. Prints the decoded
+        /// COMPANY/grade/certificate on both host and client.</summary>
+        [HarmonyPatch(typeof(CPlayerData), "AddCard")]
+        private static class AddCardCertPatch
+        {
+            [HarmonyPrefix]
+            [HarmonyPriority(900)]
+            private static void Prefix(CardData cardData)
+            {
+                var current = Current;
+                if (current == null)
+                {
+                    return;
+                }
+
+                WorldCardInteraction.RegisterGradedCardCert(cardData,
+                    current.IsHost ? "host add" : "client add");
+            }
+        }
 
         [HarmonyPatch(typeof(CPlayerData), "AddCard")]
         private static class AddCardPatch
@@ -126,6 +154,14 @@ namespace CardShopCoop.Modules.World
                 if (current.IsClient)
                 {
                     current.PredictClientCardDelta(cardData, reduceAmount, false);
+                    return;
+                }
+
+                // Host: a binder take that raced a remote removal reduces the album below zero.
+                // Undo it and drop the spawned hand card instead of fanning out a removal the
+                // album cannot cover (the duplication seen when two players take the same card).
+                if (WorldCardInteraction.TryRefuseHostBinderTake(cardData, reduceAmount))
+                {
                     return;
                 }
 
@@ -235,7 +271,9 @@ namespace CardShopCoop.Modules.World
                 {
                     // The host's own slot was stale too: the game removed nothing, so there is
                     // no change to fan out (forwarding one would consume a same-key row on a
-                    // peer's album instead).
+                    // peer's album instead). If this was a binder take, vanilla still spawned a
+                    // hand card the album does not own - drop it.
+                    WorldCardInteraction.RefuseHostBinderTake(cardData);
                     return;
                 }
 

@@ -35,9 +35,9 @@ namespace CardShopCoop.Modules.Hud
             HudPresentationState.SetHostTime(text);
         }
 
-        internal static void SetNextDayWait(bool active, string text)
+        internal static void SetNextDayWait(bool active, string text, int countdownSeconds = 0)
         {
-            HudPresentationState.SetNextDayWait(active, text);
+            HudPresentationState.SetNextDayWait(active, text, countdownSeconds);
         }
 
         internal static void SetEndOfDayPending(bool active, string text)

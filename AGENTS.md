@@ -70,33 +70,6 @@ locations, the live test pair, and the decompiled baseline inventory — is docu
 `local-install` skill (`.opencode/skills/local-install/SKILL.md`), not here. Load it with
 `@local-install` when you need to build, deploy, or read logs on this machine.
 
-## Decompiled game source
-
-The game ships no source, only bytecode. Use `tools/Decomp` to generate readable C# from
-the managed assemblies; the output is git-ignored and must not be committed.
-
-Run it with an assembly path and output directory. Decompiled output is versioned by the
-game build it came from, so a new game update never overwrites the baseline used for
-diffs:
-
-```powershell
-dotnet tools\Decomp\bin\Release\net9.0\Decomp.dll `
-  "<GamePath>\Card Shop Simulator_Data\Managed\Assembly-CSharp.dll" `
-  "<repo-root>\decompiled\<gameversion>\Assembly-CSharp"
-```
-
-Two things are project-wide. Decompiled output is versioned by the game build it
-came from, so a new game update never overwrites the baseline used for diffs; to see what an
-update changed, diff two version directories directly
-(`git diff --no-index decompiled\<a>\Assembly-CSharp decompiled\<b>\Assembly-CSharp`).
-
-The repo bundles a helper to get a game version from a game path:
-
-```powershell
-python scripts\game-version.py            # game + Unity version, and the suggested dir name
-python scripts\game-version.py --quiet     # just the version, for scripts/CI
-```
-
 ## Code standards
 1. No polling or timers. Prefer event driven always.
 2. Harmony is proven and not the issue.

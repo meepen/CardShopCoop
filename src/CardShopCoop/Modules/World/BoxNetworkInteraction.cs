@@ -1981,7 +1981,7 @@ namespace CardShopCoop.Modules.World
                     // save/load - which permanently marks host-graded cards FAKE on the guest.
                     // BindCert keys on the content-derived save index, so this binding matches the
                     // identity the scan later compares. No-op when Grading Overhaul is absent.
-                    GradingApi.Remember(card);
+                    WorldCardInteraction.RegisterGradedCardCert(card, "box materialize");
                 }
 
                 cards.Add(card);

@@ -103,6 +103,10 @@ namespace CardShopCoop.Modules.World
         private const float PreviewDistance = 3f;
         private const float PreviewOffsetUp = -0.1f;
 
+        /// <summary>Reach of the move raycast that snaps a held piece onto the surface under the
+        /// crosshair: vanilla <c>InteractionPlayerController.m_RayDistance</c> (5) times 1.5.</summary>
+        private const float MoveRayDistance = 7.5f;
+
         private static readonly FieldInfo MovingObjectField =
             AccessTools.Field(typeof(InteractableObject), "m_IsMovingObject");
         private static readonly FieldInfo SnappingPosField =
@@ -510,8 +514,12 @@ namespace CardShopCoop.Modules.World
                     continue;
                 }
 
-                var target = cameraPosition + cameraRotation * Vector3.forward * PreviewDistance
-                    + cameraRotation * Vector3.up * PreviewOffsetUp;
+                // Replicate the mover's own placement: vanilla raycasts from the crosshair and snaps
+                // the piece onto the surface it hits, falling back to three metres straight ahead only
+                // when nothing is in reach. Without this the observer's copy floated ahead of where the
+                // mover actually sees it (and poked through floors and windows).
+                ResolveMoveTarget(hold.Obj, cameraPosition, cameraRotation, out var target,
+                    out var normal);
                 if (target.y < 0f)
                 {
                     target.y = 0f;
@@ -521,13 +529,39 @@ namespace CardShopCoop.Modules.World
                 // reads as lag on an observer that is not the one aiming. Keep it in free-lerp mode
                 // so it tracks the holder's camera every frame.
                 SnappingPosField?.SetValue(hold.Obj, false);
-                hold.Obj.SetTargetMovePosition(target, cameraRotation * Vector3.up, null);
+                hold.Obj.SetTargetMovePosition(target, normal, null);
                 if (hold.Material != null && manager != null)
                 {
                     hold.Material.SetColor(ColorId, PlacementInterop.ReadMoveValidity(hold.Obj)
                         ? manager.m_PreviewMeshValidColor : manager.m_PreviewMeshInvalidColor);
                 }
             }
+        }
+
+        /// <summary>Resolves where a held object should sit for an observer from the holder's
+        /// streamed camera pose, mirroring <c>InteractionPlayerController.RaycastMovingObjectState</c>:
+        /// cast from the crosshair against the same layers vanilla uses and take the surface hit,
+        /// otherwise place the piece <see cref="PreviewDistance"/> ahead of the camera. The hit normal
+        /// only matters for wall-mounted (vertical) pieces; the free-lerp fallback passes the camera's
+        /// up vector like <c>SetMovePositionToCamera</c>.</summary>
+        private static void ResolveMoveTarget(InteractableObject obj, Vector3 cameraPosition,
+            Quaternion cameraRotation, out Vector3 target, out Vector3 normal)
+        {
+            var forward = cameraRotation * Vector3.forward;
+            var up = cameraRotation * Vector3.up;
+            var mask = obj != null && obj.m_IsDecorationVertical
+                ? LayerMask.GetMask("DecorationBlocker", "DecorationBlockerRaycast")
+                : LayerMask.GetMask("ShopModel", "Ground", "Glass", "Obstacles");
+            if (mask != 0 && Physics.Raycast(new Ray(cameraPosition, forward), out var hit,
+                MoveRayDistance, mask))
+            {
+                target = hit.point;
+                normal = hit.normal;
+                return;
+            }
+
+            target = cameraPosition + forward * PreviewDistance + up * PreviewOffsetUp;
+            normal = up;
         }
 
         internal void Reset()
@@ -835,24 +869,8 @@ namespace CardShopCoop.Modules.World
             var preview = manager != null ? manager.m_MoveObjectPreviewRenderer : null;
             if (preview != null && preview.sharedMaterial != null)
             {
-                material = new Material(preview.sharedMaterial);
+                material = CreatePreviewMaterial(preview.sharedMaterial);
                 renderer.sharedMaterial = material;
-
-                // The see-through preview must draw over translucent shop geometry (glass walls,
-                // windows, doors) instead of being half-hidden behind it. The stock preview
-                // material shares the transparent queue with the glass, so force it to the overlay
-                // queue and ignore depth like a highlight.
-                if (material.HasProperty("_ZWrite"))
-                {
-                    material.SetFloat("_ZWrite", 0f);
-                }
-
-                if (material.HasProperty("_ZTest"))
-                {
-                    material.SetFloat("_ZTest", (float)CompareFunction.Always);
-                }
-
-                material.renderQueue = (int)RenderQueue.Overlay;
             }
 
             renderer.shadowCastingMode = ShadowCastingMode.Off;
@@ -860,6 +878,51 @@ namespace CardShopCoop.Modules.World
             renderer.sortingOrder = short.MaxValue;
             ghost.transform.localScale = anchor.lossyScale + Vector3.one * 0.001f;
             return ghost;
+        }
+
+        /// <summary>Builds the ghost's see-through material from the game's own move-preview
+        /// material. The stock preview draws in the geometry queue and is depth-tested
+        /// (<c>ZTest LEqual</c>, <c>ZWrite Off</c>), so a depth-writing window or door in front of
+        /// it still hides the ghost. Its shader exposes no <c>_ZTest</c>, so forcing depth off with
+        /// a material property cannot take effect; when that is the case this swaps in the engine's
+        /// built-in unlit overlay shader, which ignores depth, keeping the same flat translucent look
+        /// (the stock preview material carries no texture, only <c>_Color</c>). If no such shader is
+        /// present the stock material is kept so the ghost still renders, just depth-tested.</summary>
+        private static Material CreatePreviewMaterial(Material stock)
+        {
+            var material = new Material(stock);
+            if (material.HasProperty("_ZWrite"))
+            {
+                material.SetFloat("_ZWrite", 0f);
+            }
+
+            if (material.HasProperty("_ZTest"))
+            {
+                material.SetFloat("_ZTest", (float)CompareFunction.Always);
+            }
+
+            if (!material.HasProperty("_ZTest"))
+            {
+                var alwaysOnTop = Shader.Find("Hidden/Internal-Colored")
+                    ?? Shader.Find("Sprites/Default");
+                if (alwaysOnTop != null)
+                {
+                    var color = material.HasProperty(ColorId) ? material.GetColor(ColorId) : Color.white;
+                    var replacement = new Material(alwaysOnTop);
+                    replacement.SetColor(ColorId, color);
+                    UnityEngine.Object.Destroy(material);
+                    material = replacement;
+                }
+                else
+                {
+                    CoopPlugin.Log.LogWarning("placement-hold: preview shader exposes no _ZTest and "
+                        + "no depth-ignoring shader was found, so the ghost may be occluded by "
+                        + "depth-writing glass.");
+                }
+            }
+
+            material.renderQueue = (int)RenderQueue.Overlay;
+            return material;
         }
     }
 }

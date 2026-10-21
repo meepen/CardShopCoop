@@ -58,7 +58,8 @@ needed; not every feature needs every file.
 - Modules must not introduce central DTO allowlists or module-specific exceptions into generic
   network code.
 - Verify game interactions against both required baselines: legacy `decompiled\1.0-25315983`
-  and beta `decompiled\1.00`. Anything present in only one build must be accessed by reflection
+  and beta `decompiled\1.00` (regenerating or diffing baselines is covered by the
+  `decompile` skill). Anything present in only one build must be accessed by reflection
   (use the established `WarehouseBoxSync.Probe` pattern); never directly reference such types.
 - During migrations, delete feature-specific legacy code after the new module owns the flow,
   including relevant `Sync`, `Patches/GamePatches.cs`, `CoopCore*`, and generic `Net/Messages`

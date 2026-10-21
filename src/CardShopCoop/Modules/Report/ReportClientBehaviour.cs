@@ -73,6 +73,11 @@ namespace CardShopCoop.Modules.Report
         private bool _shutdown;
         private bool _nextDayLocalReady;
         private ReportNextDayWaitMessage _nextDayWait;
+
+        /// <summary>Local anchor for the host's auto-continue deadline: set from the countdown in
+        /// the latest wait message when it arrived, so the pill ticks between broadcasts without
+        /// the host resending. -1 when no timer is running.</summary>
+        private float _nextDayCountdownEnd = -1f;
         private Coroutine _rolloverCoroutine;
 
         /// <summary>True while the host's recap is owed here but has not opened yet. Every write
@@ -595,7 +600,8 @@ namespace CardShopCoop.Modules.Report
         }
 
         /// <summary>Tells the host this guest is ready for the next day. The recap stays open (with
-        /// the wait notice) until every player has readied and the host rolls the day over.</summary>
+        /// the wait notice) until the host rolls the day over — every player readied, or the
+        /// auto-continue deadline elapsed.</summary>
         private void ReadyForNextDay()
         {
             if (_context == null || !_context.InGame())
@@ -627,7 +633,22 @@ namespace CardShopCoop.Modules.Report
             }
 
             _nextDayWait = message;
+            _nextDayCountdownEnd = message.CountdownSeconds > 0
+                ? Time.time + message.CountdownSeconds
+                : -1f;
             ApplyNextDayWaitUi();
+        }
+
+        /// <summary>Whole seconds left on the host's auto-continue timer, recomputed from the
+        /// local anchor so re-asserting the notice never extends the host's deadline.</summary>
+        private int NextDayCountdownRemaining()
+        {
+            if (_nextDayCountdownEnd < 0f)
+            {
+                return 0;
+            }
+
+            return Mathf.Max(1, Mathf.CeilToInt(_nextDayCountdownEnd - Time.time));
         }
 
         private void ApplyNextDayWaitUi()
@@ -640,13 +661,15 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            HudApi.SetNextDayWait(true, "Waiting for: " + string.Join(", ", wait.Pending));
+            HudApi.SetNextDayWait(true, "Waiting for: " + string.Join(", ", wait.Pending),
+                NextDayCountdownRemaining());
         }
 
         private void ClearNextDayWait()
         {
             _nextDayLocalReady = false;
             _nextDayWait = null;
+            _nextDayCountdownEnd = -1f;
             HudApi.SetNextDayWait(false, "");
         }
 

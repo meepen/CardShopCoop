@@ -193,6 +193,7 @@ namespace CardShopCoop
         /// succeeds.</summary>
         private readonly Dictionary<string, string> _backendErrors = new();
         private readonly HashSet<INetworkingBackend> _wired = new();
+        private int _wiredBackendsVersion = -1;
         private readonly object _sessionLock = new();
         private CoopTransportGroup _group;
         private ICoopTransport _pump;
@@ -206,6 +207,12 @@ namespace CardShopCoop
         private bool _externalModsDiscovered;
         private bool _sessionInGame;
         private bool _worldReady;
+
+        /// <summary>True while the game's own loading screen is up - a scene or save load. Set by
+        /// the <see cref="Util.GameLoadingGuard"/> hook on LoadingScreen.OpenScreen and cleared by
+        /// CEventPlayer_FinishHideLoadingScreen, with GameInstance.m_HasFinishHideLoadingScreen as
+        /// a backstop (see <see cref="UpdateRunInBackground"/>).</summary>
+        private bool _gameLoading;
         private int _localConnectionId = -1;
         private int _sessionGeneration = 1;
         private ulong _autoJoinSteamLobby;
@@ -285,6 +292,7 @@ namespace CardShopCoop
                 (text, seconds) => SetStatus(text), () => SaveTransferApi.PreloadHold,
                 null));
             SceneManager.sceneLoaded += OnSceneLoaded;
+            Util.GameLoadingGuard.Install();
 
             ReadCommandLine();
             _backends = NetworkingBackends.All();
@@ -307,6 +315,7 @@ namespace CardShopCoop
         {
             CEventManager.AddListener<CEventPlayer_OnOpenCardPack>(OnLocalPackOpened);
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
+            CEventManager.AddListener<CEventPlayer_FinishHideLoadingScreen>(OnGameLoadingFinished);
             var manager = CEventManager.Instance;
             if (manager != null)
             {
@@ -553,23 +562,79 @@ namespace CardShopCoop
         }
 
         /// <summary>
+        /// Subscribes Core to each backend's events the moment the backend exists, rather than only
+        /// when a session first starts. The Steam transport registers itself from its own plugin's
+        /// Awake, which BepInEx runs after this core plugin's, and a Steam invite can arrive at any
+        /// moment - including before the player has ever hosted or joined this run. Wiring only
+        /// inside <see cref="ConnectBackend"/> left <see cref="INetworkingBackend.JoinRequested"/>
+        /// with no subscriber until a first session, so accepting an invite did nothing at all. The
+        /// Backends getter refreshes the cached list when the set changes; the version guard keeps
+        /// this to one wiring pass per change.
+        /// </summary>
+        private void EnsureBackendsWired()
+        {
+            var backends = Backends;
+            if (_wiredBackendsVersion == _backendsVersion)
+            {
+                return;
+            }
+
+            foreach (var backend in backends)
+            {
+                EnsureBackendWired(backend);
+            }
+
+            // Advance the guard only after the whole set is wired, so a backend whose subscription
+            // threw leaves the version stale and the remaining backends are retried next frame
+            // rather than being skipped for the rest of the run.
+            _wiredBackendsVersion = _backendsVersion;
+        }
+
+        /// <summary>
         /// A backend received an out-of-band join request the player accepted (a Steam invite).
         /// Session admission belongs to the runtime, so this just starts a client session - on the
         /// Unity thread, which is where ConnectBackend must run.
         /// </summary>
         private void OnBackendJoinRequested(INetworkingBackend backend, FieldValues values)
         {
-            if (Role != CoopRole.None)
-            {
-                CoopPlugin.Log.LogInfo("ignoring an inbound join request - already in a session");
-                return;
-            }
-
-            if (!TryEnqueueMainThread(() => ConnectBackend(backend, ConnectMode.Join, values)))
+            if (!TryEnqueueMainThread(() => HandleInviteOnMainThread(backend, values)))
             {
                 CoopPlugin.Log.LogError(
                     "coop: could not queue the inbound join request on the Unity thread");
             }
+        }
+
+        /// <summary>
+        /// Runs an accepted invite on the Unity thread, where the role and scene state are safe to
+        /// read and where <see cref="ConnectBackend"/> must run. An invite can only ever start a
+        /// client session; when that is impossible the player is told why instead of the request
+        /// being dropped silently.
+        /// </summary>
+        private void HandleInviteOnMainThread(INetworkingBackend backend, FieldValues values)
+        {
+            if (Role != CoopRole.None)
+            {
+                CoopPlugin.Log.LogInfo("ignoring an inbound join request - already in a session");
+                UI.CoopAlert.Show(
+                    "You're already in a co-op session.",
+                    "Stop hosting or leave the session before accepting a friend's invite.",
+                    header: "CO-OP INVITE");
+                return;
+            }
+
+            if (InGameLevel())
+            {
+                // Joining borrows the host's world, which only replaces the world cleanly from the
+                // Title screen; the game refuses the join from inside a loaded shop for that reason.
+                CoopPlugin.Log.LogInfo("declining an inbound join request - a shop is loaded");
+                UI.CoopAlert.Show(
+                    "Join from the main menu to accept this invite.",
+                    "Return to the Title screen (Back to menu), then ask your friend to invite you again.",
+                    header: "CO-OP INVITE");
+                return;
+            }
+
+            ConnectBackend(backend, ConnectMode.Join, values);
         }
 
         private void OnBackendConnectResult(INetworkingBackend backend, ConnectionId handle,
@@ -1493,7 +1558,9 @@ namespace CardShopCoop
             _hostVersion = "";
             _hostGameVersion = "";
             _hostUnityVersion = "";
-            Application.runInBackground = false;
+            // runInBackground is deliberately NOT reset here: UpdateRunInBackground owns it now,
+            // and a load that is still in progress when the session ends (a world reload) must keep
+            // the game running until the loading screen is gone.
             Role = CoopRole.None;
             SetStatus(reason == null ? "Not connected" : "Not connected (" + reason + ")");
         }
@@ -1501,6 +1568,38 @@ namespace CardShopCoop
         private static void SaveTransferRuntimeReset()
         {
             SaveTransferRuntime.ResetForShutdown();
+        }
+
+        /// <summary>
+        /// Keeps the game running while its window is unfocused, for exactly two reasons:
+        ///
+        ///  - A co-op session is live (<see cref="Role"/> != None): a host waiting on its address
+        ///    build or its lobby, and a client still joining, are exactly the moments the player
+        ///    has switched away, and pausing there stalls the very start they are waiting on.
+        ///  - The game's own loading screen is up and NO session is live: the game never lowers its
+        ///    run-in-background default at runtime (CGameManager.changeFramerate is dead code that
+        ///    is never started), so an unfocused window would otherwise pause the player and stall
+        ///    the scene or save load the player is waiting on. This is skipped while a session is
+        ///    live only because the first reason already holds the value true.
+        ///
+        /// Otherwise the idle behavior applies and the window pauses when unfocused - what co-op
+        /// has always done outside a session. The value is RECOMPUTED, not captured and restored:
+        /// the engine default is whatever Unity's Player Settings says (the game never changes it),
+        /// so capturing "the value before the load" would faithfully restore that default and pin
+        /// the game to running in the background even when idle.
+        /// </summary>
+        private void UpdateRunInBackground()
+        {
+            // The game sets this true only once the loading screen has fully faded out, and back
+            // false on the next OpenScreen. It is the ground truth for "the load is over", used to
+            // clear the start flag in case the finish event landed on a manager the scene change
+            // replaced and never reached us.
+            if (_gameLoading && GameInstance.m_HasFinishHideLoadingScreen)
+            {
+                _gameLoading = false;
+            }
+
+            Application.runInBackground = Role != CoopRole.None || _gameLoading;
         }
 
         private void Update()
@@ -1515,6 +1614,9 @@ namespace CardShopCoop
                 _persistentRuntime?.IncludeExternalPersistentBehaviours();
                 ExternalCoopMods.Instance.NotifyPersistentScanComplete();
             }
+            // Attach to every backend's events as soon as the backend is offered, so an out-of-band
+            // join request (a Steam invite) is heard even before the player has started a session.
+            EnsureBackendsWired();
             Util.PerfProbe.BeginFrame();
             Util.PerfProbe.FlushThreadMetrics();
             using (Util.PerfProbe.Sample("core.dispatcher"))
@@ -1543,12 +1645,7 @@ namespace CardShopCoop
             {
                 SaveTransferApi.ClearBorrowedWorldIfSafe(false);
             }
-            // Keep the game running while it is unfocused for the WHOLE of any session - not merely
-            // once a transport object exists. A host waiting on its address build or its lobby, and a
-            // client still joining, are exactly the moments the player has switched away, and pausing
-            // there stalls the very start they are waiting on. This used to sit BELOW the "Net == null"
-            // return, so a session that had a role but no transport yet never got it.
-            Application.runInBackground = Role != CoopRole.None;
+            UpdateRunInBackground();
 
             if (Net == null)
             {
@@ -1951,6 +2048,23 @@ namespace CardShopCoop
             CoopPlugin.Log.LogInfo("co-op: shop data finished loading; hosting is now admitted");
         }
 
+        /// <summary>Called by the <see cref="Util.GameLoadingGuard"/> hook on the game's
+        /// LoadingScreen.OpenScreen. Marks the start of a scene or save load; the end arrives as
+        /// CEventPlayer_FinishHideLoadingScreen (see <see cref="OnGameLoadingFinished"/>).</summary>
+        internal static void NotifyGameLoadingStarted()
+        {
+            var core = Instance;
+            if (core != null)
+            {
+                core._gameLoading = true;
+            }
+        }
+
+        private void OnGameLoadingFinished(CEventPlayer_FinishHideLoadingScreen _)
+        {
+            _gameLoading = false;
+        }
+
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
             _worldReady = false;
@@ -2206,6 +2320,7 @@ namespace CardShopCoop
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CEventManager.RemoveListener<CEventPlayer_OnOpenCardPack>(OnLocalPackOpened);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
+            CEventManager.RemoveListener<CEventPlayer_FinishHideLoadingScreen>(OnGameLoadingFinished);
             Shutdown("plugin unloaded");
             try
             {

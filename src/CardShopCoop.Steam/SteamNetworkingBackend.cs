@@ -10,6 +10,7 @@ using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Net.Networking;
 using CardShopCoop.Api;
+using UnityEngine;
 
 namespace CardShopCoop.Steam
 {
@@ -37,6 +38,10 @@ namespace CardShopCoop.Steam
         private long _active;
         private long _pending;
         private string _lobbyId = "";
+        /// <summary>The lobby id WE are currently hosting, captured when the lobby goes live.
+        /// Distinct from <see cref="_lobbyId"/>, which is only ever the join target the player
+        /// typed or pasted. Zero while not hosting.</summary>
+        private ulong _hostedLobby;
         private volatile bool _busy;
         private volatile string _step;
         private Action<ConnectionId, ConnectResult> _pendingResult;
@@ -53,7 +58,14 @@ namespace CardShopCoop.Steam
             _config = new ConfigFile(
                 Path.Combine(Paths.ConfigPath, "dev.meepen.cardshopcoop.steam.cfg"), true);
 
-            _bridge.OnLobbyLive = _ => Settle(new ConnectResult(true), liveFailure: false);
+            _bridge.OnLobbyLive = lobby =>
+            {
+                // Remember our own hosted lobby id so the host can copy it: the Steam overlay
+                // invite can fail to reach a friend, and the raw id is the fallback they paste
+                // into the join box (or pass to +connect_lobby).
+                _hostedLobby = lobby;
+                Settle(new ConnectResult(true), liveFailure: false);
+            };
             _bridge.OnConnectedToHost = transport =>
             {
                 if (ReferenceEquals(transport, _rawTransport))
@@ -289,6 +301,7 @@ namespace CardShopCoop.Steam
 
             _rawTransport = null;
             _transport = null;
+            _hostedLobby = 0;
             try
             {
                 _bridge.Leave();
@@ -301,6 +314,12 @@ namespace CardShopCoop.Steam
         }
 
         // ------------------------------------------------------------------ presentation
+
+        /// <summary>The lobby id we are currently hosting, or "" when not hosting. Read by the
+        /// host's Copy lobby id button; never the join target (<see cref="_lobbyId"/>).</summary>
+        private string HostedLobbyId => _hostedLobby == 0
+            ? ""
+            : _hostedLobby.ToString(CultureInfo.InvariantCulture);
 
         public IReadOnlyList<BackendAction> Actions => BuildActions();
 
@@ -316,6 +335,26 @@ namespace CardShopCoop.Steam
                 // it does not show.
                 new BackendAction("invite", "Invite friend  (Steam overlay)",
                     () => _bridge.OpenInviteDialog(), mode: ConnectMode.Host, phase: ActionPhase.Live),
+                // The overlay invite is the normal path, but it can fail to reach a friend (their
+                // overlay closed, they accepted at a bad moment, or the invite never arrived). The
+                // lobby id is the fallback: the friend pastes it into the join box, or launches with
+                // +connect_lobby. Sits directly under Invite friend, host-only and live-only, the
+                // same as the id it hands out - before the lobby exists there is nothing to copy.
+                new BackendAction("copyLobbyId", "Copy lobby id",
+                    () =>
+                    {
+                        var id = HostedLobbyId;
+                        if (!string.IsNullOrEmpty(id))
+                        {
+                            GUIUtility.systemCopyBuffer = id;
+                        }
+                    },
+                    enabled: !string.IsNullOrEmpty(HostedLobbyId),
+                    tooltip: "Copy this lobby's numeric id. A friend can paste it into the Steam "
+                        + "lobby id box (or launch with +connect_lobby) if the overlay invite "
+                        + "doesn't reach them.",
+                    icon: "copy",
+                    mode: ConnectMode.Host, phase: ActionPhase.Live),
                 // Connect sits ON the lobby-id row, so the id and the button that uses it are read
                 // together. It goes through the core's normal start path rather than Join directly,
                 // so a Connect press is the same thing as the container's Join button.
