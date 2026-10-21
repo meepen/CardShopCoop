@@ -77,10 +77,23 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
         }
 
-        /// <summary>Only clear the process latch after the client is actually out of a level.</summary>
+        /// <summary>Only clear the process latch after the client is actually out of a level AND
+        /// no session is still running.
+        ///
+        /// The role half is load-bearing. A client authorizes the transfer while it is still on the
+        /// Title screen, where <c>inGame</c> is false, and
+        /// <see cref="SaveTransferProcessBehaviour"/>'s process-lifetime Update calls this every
+        /// frame. Checking only <c>inGame</c> therefore cleared the latch seconds before the
+        /// borrowed world even loaded, leaving the guest's
+        /// save guard held up by <c>Role == Client</c> alone. The moment a kick or a leave set Role
+        /// to None, the game's back-to-menu save was allowed and wrote the host's world into the
+        /// guest's own slot 0 (observed on the Game Pass log as a native GameData_0 save right after
+        /// Role became None). Keeping the latch while a session is live also preserves
+        /// <see cref="SaveTransferRuntime.CanWriteSave"/> and TryAdmitHostStart's
+        /// "leave the joined shop before hosting" rule for the whole borrowed session.</summary>
         public static void ClearBorrowedWorldIfSafe(bool inGame)
         {
-            if (inGame)
+            if (inGame || CurrentRole != CoopRole.None)
             {
                 return;
             }

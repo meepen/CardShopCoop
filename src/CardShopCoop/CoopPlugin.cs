@@ -81,6 +81,9 @@ namespace CardShopCoop
             CoopApi.Log = Logger;
             ProtectPluginHost();
             Runtime.SceneRef.Install();
+            // The Unity 6 builds latch CSingleton<T> forever (see SingletonLatchGuard); repair the
+            // latch before any game scene can hand a destroyed object to a second world's Awake.
+            Util.SingletonLatchGuard.Install();
             Util.ScreenSingletonGuard.Install();
             try
             {
