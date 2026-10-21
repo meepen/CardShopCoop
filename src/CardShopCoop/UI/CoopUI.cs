@@ -596,7 +596,10 @@ namespace CardShopCoop.UI
             DrawConfigIntSlider(CoopPlugin.ArtificialJitterMs, 0, 1000, "Jitter");
             GUILayout.Space(8f);
 
-            GUILayout.Label("Settings are saved to BepInEx/config/dev.meepen.cardshopcoop.cfg.", CoopTheme.LabelDim);
+            // LabelDimWrap, not LabelDim: this line is wider than the panel, and a non-wrapping
+            // label would push the whole scroll content out horizontally instead of folding onto a
+            // second row.
+            GUILayout.Label("Settings are saved to BepInEx/config/dev.meepen.cardshopcoop.cfg.", CoopTheme.LabelDimWrap);
 
             // Bottom-of-panel diagnostics: a count that climbs on its own is the runaway-spawn /
             // ghost-box symptom made visible. Also logged every 30 s (see EntityCensus.Tick).

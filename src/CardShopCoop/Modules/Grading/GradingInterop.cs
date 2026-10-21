@@ -785,6 +785,63 @@ namespace CardShopCoop.Modules.Grading
             }
         }
 
+        /// <summary>Human-readable "COMPANY grade=N cert=N" for an encoded grade, or null when
+        /// the value is ungraded, Grading Overhaul is absent/incompatible, or it does not decode.
+        /// Reflection-only and fail-soft: this is a diagnostic and must never throw on a hot
+        /// path. The certificate serial is what makes a "fake"/"$0.01" report traceable.</summary>
+        internal static string DescribeEncoded(int encoded)
+        {
+            if (encoded <= 10 || !GoCompatible || MiDecodeFull == null || TCompany == null)
+                return null;
+
+            try
+            {
+                var args = new object[] { encoded, Enum.ToObject(TCompany, 0), 0, 0 };
+                MiDecodeFull.Invoke(null, args);
+                var companyId = Convert.ToInt32(args[1]);
+                var actualGrade = Convert.ToInt32(args[2]);
+                var cert = Convert.ToInt32(args[3]);
+                var company = Enum.IsDefined(TCompany, companyId)
+                    ? Enum.GetName(TCompany, companyId)
+                    : companyId.ToString();
+                return company + " grade=" + actualGrade + " cert=" + cert;
+            }
+            catch (Exception error)
+            {
+                CoopLog.Swallow(error);
+                return null;
+            }
+        }
+
+        /// <summary>True when this PC already has the card's certificate burned AND bound to
+        /// this card's save slot, i.e. Grading Overhaul's anti-cheat will accept it. Lets a
+        /// caller skip re-registering (and Grading Overhaul re-logging) a certificate this side
+        /// already handled. False without Grading Overhaul, on a decode failure, or on a genuine
+        /// conflict (the cert is bound to a different slot).</summary>
+        internal static bool IsCertRegistered(CardData card)
+        {
+            if (card == null || !GoCompatible || MiHasBinding == null || MiIsBoundTo == null
+                || TCompany == null)
+            {
+                return false;
+            }
+
+            if (!DecodeCert(Encoded(card), out var companyId, out var cert))
+                return false;
+
+            try
+            {
+                var company = Enum.ToObject(TCompany, companyId);
+                return (bool)MiHasBinding.Invoke(null, new object[] { company, cert })
+                    && (bool)MiIsBoundTo.Invoke(null, new object[] { company, cert, card });
+            }
+            catch (Exception error)
+            {
+                CoopLog.Swallow(error);
+                return false;
+            }
+        }
+
         internal static bool CheatFlagged(int encoded)
         {
             if (MiCheat == null)

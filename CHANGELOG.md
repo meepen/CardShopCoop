@@ -3,6 +3,13 @@
 True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 **same version** — the join handshake enforces it.
 
+## 2.1.2
+- Added a 30s timer before day rollover automatically happens after one user is ready.
+- Fixed an issue when accepting an invite on Steam while in game not joining the other player's game properly. Thanks @navsigda on Discord for the report!
+- Fixed the host keeping a duplicate when both players take the last copy of the same card out of the binder at the same time. The guest's copy was already handled; the host's own take could still go through against an album that no longer had the card, leaving both players holding a copy the shared collection only ever owned once.
+- Grading Overhaul no longer marks client-opened graded cards as fake (visible as $0.01).
+- Modified the loading screen logic to enable "Run in Background" mode so I can load the game while doing other stuff in development.
+
 ## 2.1.1
 - Fixed: the option to host via Steam could disappear entirely, leaving only IP / LAN. Thanks @navsigda on Discord for the report!
 

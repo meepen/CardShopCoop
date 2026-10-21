@@ -255,7 +255,12 @@ namespace CardShopCoop.UI
             Tab = MakeTab(_tabTex, _tabHoverTex, TextDim);
             TabSelected = MakeTab(_tabSelectedTex, _tabSelectedTex, Color.white);
 
-            Toggle = new GUIStyle(GUI.skin.toggle) { richText = true, fontSize = 12 };
+            // wordWrap: a wrapping label's minimum layout width is its longest WORD, not the whole
+            // line. Without it a long checkbox label (the cross-build join opt-in on the SETTINGS
+            // tab is the one that exposed this) gives the toggle a minimum width equal to the full
+            // text, which in turn widens the shared scroll content past the viewport and clips the
+            // whole panel. Wrapping keeps the toggle inside the panel instead.
+            Toggle = new GUIStyle(GUI.skin.toggle) { richText = true, fontSize = 12, wordWrap = true };
             SetTextColorAllStates(Toggle, Text);
 
             ButtonSecondary = MakeButton(_secondaryTex, _secondaryHoverTex, _secondaryActiveTex, Text);

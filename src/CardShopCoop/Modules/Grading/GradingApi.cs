@@ -11,6 +11,15 @@ namespace CardShopCoop.Modules.Grading
 
         public static bool Remember(CardData card) => GradingInterop.Remember(card);
 
+        /// <summary>Human-readable "COMPANY grade=N cert=N" for a graded card, or null when it is
+        /// ungraded / Grading Overhaul is absent. Diagnostics only.</summary>
+        public static string DescribeCert(CardData card)
+            => card == null ? null : GradingInterop.DescribeEncoded(GradingInterop.Encoded(card));
+
+        /// <summary>True when this PC already holds the card's certificate burned and bound to
+        /// the card's save slot.</summary>
+        public static bool IsCertRegistered(CardData card) => GradingInterop.IsCertRegistered(card);
+
         /// <summary>World signals that a predicted collection removal was rejected by the host,
         /// so the card is back in the album. If that card sits in an unsubmitted grading
         /// selection, it must leave the selection too or the player is left with a reserved slot

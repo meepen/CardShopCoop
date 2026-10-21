@@ -1341,6 +1341,53 @@ namespace CardShopCoop.Modules.World
             _binderRefreshPending = true;
         }
 
+        /// <summary>Registers a graded card's certificate with Grading Overhaul BEFORE the game
+        /// adds it to the inventory, and prints the decoded COMPANY/grade/certificate so a
+        /// "fake"/"$0.01" report is traceable on BOTH host and client. Called from every
+        /// reconstruction path the mod owns AND from the CPlayerData.AddCard prefix that runs
+        /// ahead of Grading Overhaul's priority-800 anti-cheat (see WorldCardInteractionPatches),
+        /// so no local add can leave a host-graded certificate unburned/unbound. No-op and no log
+        /// when Grading Overhaul is absent or the card is ungraded - the vanilla path is
+        /// untouched.</summary>
+        internal static void RegisterGradedCardCert(CardData card, string context)
+        {
+            if (card == null || card.cardGrade <= 0 || !GradingApi.Present)
+            {
+                return; // ungraded, or no Grading Overhaul - nothing to register, nothing to log
+            }
+
+            var encoded = GradingApi.Encoded(card);
+            if (encoded <= 10)
+            {
+                return;
+            }
+
+            var cert = GradingApi.DescribeCert(card) ?? ("encoded=" + encoded);
+            var registered = GradingApi.IsCertRegistered(card);
+            if (!registered)
+            {
+                GradingApi.Remember(card);
+                registered = GradingApi.IsCertRegistered(card);
+            }
+
+            var key = context + "|" + cert;
+            if (_loggedCertKeys.Count < LoggedCertKeysMax && _loggedCertKeys.Add(key))
+            {
+                var line = "grading cert " + (registered ? "ok" : "NOT registered") + " ("
+                    + context + "): " + cert + " " + CardIdent(card);
+                // A card that could not be registered is exactly the one Grading Overhaul will
+                // flag FAKE / price at 0.01x, so it stands out from the normal lines.
+                if (registered)
+                {
+                    CoopPlugin.Log.LogInfo(line);
+                }
+                else
+                {
+                    CoopPlugin.Log.LogWarning(line);
+                }
+            }
+        }
+
         private sealed class RemoteCardApplyScope : IDisposable
         {
             private readonly bool _previous;
@@ -1822,6 +1869,7 @@ namespace CardShopCoop.Modules.World
         {
             _shownMonsters.Clear();
             _cardWarnedKeys.Clear();
+            _loggedCertKeys.Clear();
         }
 
         /// <summary>Card slots a warning has already been printed for this session, so a repeated
@@ -1830,6 +1878,11 @@ namespace CardShopCoop.Modules.World
         /// not remembered - a warning must never grow memory without limit.</summary>
         private static readonly HashSet<string> _cardWarnedKeys = new(StringComparer.Ordinal);
         private const int CardWarnedKeysMax = 512;
+
+        /// <summary>Certificates already logged this session, so a bulk reveal prints each cert
+        /// once instead of once per card and cannot flood the log. Bounded like the warn memo.</summary>
+        private static readonly HashSet<string> _loggedCertKeys = new(StringComparer.Ordinal);
+        private const int LoggedCertKeysMax = 2048;
 
         /// <summary>True for the expansions the GAME itself ships: exactly the members below
         /// ECardExpansionType.MAX. Vanilla save indices are dense - they pack the shown-list
@@ -1989,6 +2042,20 @@ namespace CardShopCoop.Modules.World
 
                 return false;
             }
+        }
+
+        /// <summary>Diagnostic suffix carrying the decoded certificate of a graded card, so the
+        /// per-delta log lines a field report quotes identify the exact slab (company, grade,
+        /// serial). Empty for an ungraded card or without Grading Overhaul.</summary>
+        private static string CertSuffix(CardData card)
+        {
+            if (card == null || card.cardGrade <= 0)
+            {
+                return string.Empty;
+            }
+
+            var cert = GradingApi.DescribeCert(card);
+            return cert == null ? string.Empty : " [cert " + cert + "]";
         }
 
         /// <summary>Human-readable card id for the log lines that can now carry MODDED cards.
@@ -2461,7 +2528,7 @@ namespace CardShopCoop.Modules.World
                     for (var i = 0; i < _deltaLogBuf.Count; i++)
                     {
                         var d = _deltaLogBuf[i];
-                        CoopPlugin.Log.LogInfo($"card delta applied: {(d.IsAdd ? "+" : "-")}{d.Amount} {CardIdent(d.Card)}{(d.Card.cardGrade > 0 ? $" (grade {d.Card.cardGrade})" : d.Card.isFoil ? " (foil)" : "")}");
+                        CoopPlugin.Log.LogInfo($"card delta applied: {(d.IsAdd ? "+" : "-")}{d.Amount} {CardIdent(d.Card)}{(d.Card.cardGrade > 0 ? $" (grade {d.Card.cardGrade})" : d.Card.isFoil ? " (foil)" : "")}{CertSuffix(d.Card)}");
                     }
                 }
                 else

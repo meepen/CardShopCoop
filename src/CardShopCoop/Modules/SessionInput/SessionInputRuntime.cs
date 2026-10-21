@@ -276,9 +276,29 @@ namespace CardShopCoop.Modules.SessionInput
             }
         }
 
+        /// <summary>The game's own "a shop level is loaded" flag (<c>CGameManager.m_IsGameLevel</c>).
+        /// The module must not touch the controller's UI mode, cursor or walker while it is false -
+        /// boot, a scene change, or a guest's world reload. Those calls read the game's CSingleton
+        /// UI objects (the CenterDot) while the real ones do not exist yet, which both throws on a
+        /// latched/destroyed instance and can fabricate a persistent bare singleton that shadows
+        /// the real one for the rest of the run (the same hazard SceneRef exists to avoid).</summary>
+        private static bool GameLevelReady()
+        {
+            var manager = SceneRef<CGameManager>.Get();
+            return manager != null && manager.m_IsGameLevel;
+        }
+
         private static void ReconcileModalOwnership()
         {
             RefreshPauseMenuOpen();
+            if (!GameLevelReady())
+            {
+                // No shop level yet: leave the controller untouched. The next reconcile after the
+                // level loads claims or releases the modal; the stale owner/controller from the
+                // previous scene is dropped there by the controller-identity check.
+                return;
+            }
+
             if (_windowModalRequested && !HasAnyOwner(VanillaModalOwners))
             {
                 AcquireWindowModal();

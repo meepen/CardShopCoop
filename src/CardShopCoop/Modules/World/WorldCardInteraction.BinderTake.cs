@@ -19,6 +19,15 @@ namespace CardShopCoop.Modules.World
     /// reduce that only fed a binder screen (grading selection, bulk donation, deck edit) adds
     /// nothing to the hand and leaves its binding empty, so its refusal keeps the collection-only
     /// behavior.
+    ///
+    /// The HOST's own take never travels as a prediction - the host is the authority and vanilla
+    /// already performed it - so when the host loses the same race (a guest's accepted removal
+    /// consumed the copy while the open binder still showed the slot) nothing refused it: the
+    /// album went negative and the spawned hand card survived, the same duplication on the other
+    /// side. <see cref="TryRefuseHostBinderTake"/>/<see cref="RefuseHostBinderTake"/> close that
+    /// gap: the host observer undoes the reduction (or, for a graded row that was already gone,
+    /// nothing) and marks the binding Refused, and the finalizer despawns the hand card the same
+    /// way a refused client prediction does.
     /// </summary>
     internal sealed partial class WorldCardInteraction
     {
@@ -27,6 +36,15 @@ namespace CardShopCoop.Modules.World
         private sealed class BinderTakeBinding
         {
             internal InteractableCard3d Card3d;
+
+            /// <summary>Host only: the game took a card the shared album no longer owned (the take
+            /// raced a remote removal). The reduction was undone here, and the hand card the game
+            /// still spawned must be despawned when the take closes. Client refusals never set
+            /// this - they despawn from the prediction's rejected callback instead.</summary>
+            internal bool Refused;
+
+            /// <summary>The card a refused host take moved, kept for the despawn log.</summary>
+            internal CardData Card;
         }
 
         /// <summary>One invocation of a binder method that can put a card into the hand. The held
@@ -115,6 +133,19 @@ namespace CardShopCoop.Modules.World
                 scope.Bindings[i].Card3d = held[candidate];
                 candidate++;
             }
+
+            // A refused HOST take spawned a hand card the album does not own (see
+            // TryRefuseHostBinderTake): remove it through the game's own hold teardown now, the
+            // same way a refused client prediction despawns from its rejected callback. Client
+            // bindings never carry Refused, so this loop only ever runs on the host.
+            for (var i = 0; i < scope.Bindings.Count; i++)
+            {
+                var binding = scope.Bindings[i];
+                if (binding.Refused)
+                {
+                    DespawnRejectedBinderTake(binding, binding.Card);
+                }
+            }
         }
 
         /// <summary>Client: remembers an in-flight binder pick so its refusal can despawn the exact
@@ -131,6 +162,69 @@ namespace CardShopCoop.Modules.World
             var binding = new BinderTakeBinding();
             scope.Bindings.Add(binding);
             return binding;
+        }
+
+        /// <summary>Host: the game performed a binder take on a card the shared album no longer
+        /// owns. Vanilla's take reads the slot straight off the open binder and reduces without
+        /// checking ownership (CollectionBinderFlipAnimCtrl.OnRightMouseButtonUp), so when a
+        /// remote removal had already consumed the copy - the binder still showed the slot until
+        /// the end-of-frame mirror hid it - the host reduced the album below zero and STILL
+        /// spawned a hand card. The host never predicts its own take, so nothing else would
+        /// refuse it: both players keep a copy, the reported duplication. Undo the reduction
+        /// through the game path and remember the take so <see cref="EndBinderTake"/> despawns
+        /// the spawned card. Returns false outside a binder take or when the reduction was
+        /// legitimate, so the caller forwards normally.</summary>
+        internal static bool TryRefuseHostBinderTake(CardData card, int amount)
+        {
+            if (_binderTakeScope == null || card == null || amount <= 0 || card.cardGrade > 0)
+            {
+                return false;
+            }
+
+            // A take is legitimate while the album still held the copy: the count lands on 0
+            // (the last copy) or above. Only a reduction that drove it negative means the copy
+            // was already gone - ReduceCard subtracts without a floor.
+            if (CPlayerData.GetCardAmount(card) >= 0)
+            {
+                return false;
+            }
+
+            // Restore the album exactly as the client's refused prediction does, behind the
+            // remote-apply guard so the correction is not forwarded as a fresh gain.
+            ApplyPredictedCardDelta(card, amount, isAdd: true);
+            MarkHostBinderTakeRefused(card);
+            CoopPlugin.Log.LogWarning("binder take refused on the host: " + CardIdent(card)
+                + " was already taken by another player; the album was restored and the hand "
+                + "card will be removed.");
+            return true;
+        }
+
+        /// <summary>Host: a graded binder take matched no album row (the certificate was already
+        /// consumed by a remote removal). There is nothing to undo - the album never lost a row -
+        /// but vanilla still spawned a hand card, so remember the take for despawn.</summary>
+        internal static bool RefuseHostBinderTake(CardData card)
+        {
+            if (_binderTakeScope == null || card == null)
+            {
+                return false;
+            }
+
+            MarkHostBinderTakeRefused(card);
+            CoopPlugin.Log.LogWarning("graded binder take refused on the host: " + CardIdent(card)
+                + " had no album row left; the spawned hand card will be removed.");
+            return true;
+        }
+
+        private static void MarkHostBinderTakeRefused(CardData card)
+        {
+            var binding = CreateBinderTakeBinding();
+            if (binding == null)
+            {
+                return;
+            }
+
+            binding.Refused = true;
+            binding.Card = SnapshotCard(card);
         }
 
         /// <summary>Client: the host refused a binder pick - remove the card the game spawned
