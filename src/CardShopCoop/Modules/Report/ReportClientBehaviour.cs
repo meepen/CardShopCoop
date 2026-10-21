@@ -552,6 +552,12 @@ namespace CardShopCoop.Modules.Report
             }
 
             SoundManager.SetEnableSound_CoinIncrease(false);
+            // EndOfDayReportScreen.Update fires OnPressGoNextButton every 0.05 s while the click or
+            // Enter key is held, and once more on release. When an early press completes the gate, the host's inactive wait clears the ready
+            // flag before its close reaches this guest, so the second press re-arms it and sends a
+            // ready the advancing host ignores. Clear it again once the recap is gone, or the next
+            // day's press is swallowed and the host waits for this guest forever.
+            _active.ClearNextDayWait();
         }
 
         private static bool NextButton(EndOfDayReportScreen screen)
