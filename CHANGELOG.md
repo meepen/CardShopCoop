@@ -9,6 +9,14 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 - Fixed the host keeping a duplicate when both players take the last copy of the same card out of the binder at the same time. The guest's copy was already handled; the host's own take could still go through against an album that no longer had the card, leaving both players holding a copy the shared collection only ever owned once.
 - Grading Overhaul no longer marks client-opened graded cards as fake (visible as $0.01).
 - Modified the loading screen logic to enable "Run in Background" mode so I can load the game while doing other stuff in development.
+- Fixed the client's shop sign showing a name before the shop was named.
+- Fixed a new play table reporting its seats as occupied to clients.
+- Fixed the next day's ready press being ignored after closing the day recap.
+- Fixed remote furniture moving without the normal move preview.
+- Fixed the co-op window getting cut off when a label was too wide.
+- Added a Copy lobby id button under Invite friend.
+- Fixed errors from the mod touching the cursor before a shop level loaded.
+- Moved module toggles to the HIDDEN tab and added an entity count debug line.
 
 ## 2.1.1
 - Fixed: the option to host via Steam could disappear entirely, leaving only IP / LAN. Thanks @navsigda on Discord for the report!
