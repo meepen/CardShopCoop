@@ -70,6 +70,7 @@ namespace CardShopCoop.UI
         private int _presetSelection;
         private readonly List<int> _presetSelectionBuffer = new(1) { 0 };
         private int _characterSnapshotGeneration = -1;
+        private int _characterEditorGeneration = -1;
         private CC.CharacterCustomization _characterCustomizer;
         private readonly List<List<string>> _hairOptions = new();
         private readonly List<int> _hairSelections = new();
@@ -699,7 +700,9 @@ namespace CardShopCoop.UI
         private void DrawCharacterSelector(CoopCore core)
         {
             if (Event.current.type == EventType.Layout
-                && (!_characterSnapshotReady || _characterSnapshotGeneration != PresenceApi.PlayerModelGeneration))
+                && (!_characterSnapshotReady
+                    || _characterSnapshotGeneration != PresenceApi.PlayerModelGeneration
+                    || _characterEditorGeneration != PresenceApi.EditorGeneration))
             {
                 var model = PresenceApi.GetLocalPlayerModel();
                 _characterFemale = model.Female;
@@ -716,6 +719,7 @@ namespace CardShopCoop.UI
                 CacheWardrobeControls();
                 _characterSnapshotReady = true;
                 _characterSnapshotGeneration = PresenceApi.PlayerModelGeneration;
+                _characterEditorGeneration = PresenceApi.EditorGeneration;
             }
             if (!_characterSnapshotReady)
             {
@@ -793,7 +797,8 @@ namespace CardShopCoop.UI
                 return;
             }
 
-            for (var slot = 0; slot < _characterCustomizer.HairTables.Count; slot++)
+            var hairSlots = PresenceApi.DressableHairSlots(_characterCustomizer);
+            for (var slot = 0; slot < hairSlots; slot++)
             {
                 var options = new List<string> { "None" };
                 var table = _characterCustomizer.HairTables[slot];
@@ -812,7 +817,8 @@ namespace CardShopCoop.UI
                 _hairColors.Add(ReadHairColor(data, slot));
             }
 
-            for (var slot = 0; slot < _characterCustomizer.ApparelTables.Count; slot++)
+            var apparelSlots = PresenceApi.DressableApparelSlots(_characterCustomizer);
+            for (var slot = 0; slot < apparelSlots; slot++)
             {
                 var options = new List<string>();
                 var names = new List<string>();

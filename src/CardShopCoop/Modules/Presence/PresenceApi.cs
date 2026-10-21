@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System;
+using CardShopCoop.Runtime;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.Presence
@@ -147,6 +148,10 @@ namespace CardShopCoop.Modules.Presence
 
         public static int PlayerModelGeneration => PresenceService.Active?.ModelGeneration ?? 0;
 
+        /// <summary>Changes whenever the wardrobe editor template is (re)created or torn down.
+        /// The window snapshots the template, so it must refresh when this moves.</summary>
+        public static int EditorGeneration => PresenceService.Active?.EditorGeneration ?? 0;
+
         public static bool IsLocalConnection(int connectionId)
         {
             if (connectionId == 0 && PresenceHostBehaviour.Active != null)
@@ -167,6 +172,14 @@ namespace CardShopCoop.Modules.Presence
 
         public static CC.CharacterCustomization GetLocalCustomization()
             => PresenceService.Active?.GetLocalCustomization();
+
+        /// <summary>Wardrobe slots this body can actually dress (table count bounded by the
+        /// runtime collections). The window must not offer a row beyond this.</summary>
+        internal static int DressableHairSlots(CC.CharacterCustomization custom)
+            => CharacterClone.DressableHairSlots(custom);
+
+        internal static int DressableApparelSlots(CC.CharacterCustomization custom)
+            => CharacterClone.DressableApparelSlots(custom);
 
         public static void CommitLocalCustomization() => PresenceService.Active?.CommitCustomization();
 

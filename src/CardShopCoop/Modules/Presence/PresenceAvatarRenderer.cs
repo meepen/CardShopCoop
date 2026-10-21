@@ -89,6 +89,7 @@ namespace CardShopCoop.Modules.Presence
             public float EmoteTimer;
             public bool EverPositioned;
             public bool HasState;
+            public bool SpawnFailed;      // dressing threw; wait for a new appearance before retrying
             public bool HoldingBoxPose;    // last value pushed to the animator, to skip redundant SetBool
             public bool HoldingBoxPoseSet;
             public bool HasModel;
@@ -104,13 +105,21 @@ namespace CardShopCoop.Modules.Presence
         private static readonly int IsHoldingBoxHash = Animator.StringToHash("IsHoldingBox");
         private readonly Dictionary<int, RemoteAvatar> _avatars = new();
         internal int Count => _avatars.Count;
+
+        /// <summary>Bumped whenever the editor template is (re)created or torn down, so the
+        /// window can re-snapshot its wardrobe controls after a failed template recovers.</summary>
+        internal int EditorGeneration => _editorGeneration;
         private bool _loggedAnimParams;
         private GameObject _editorHolder;
         private CC.CharacterCustomization _editorCustomization;
         private bool _editorFemale;
+        private bool _editorFailed;
+        private bool _editorFailedFemale;
+        private int _editorGeneration;
         private GameObject _previewBody;
         private CC.CharacterCustomization _previewCustomization;
         private string _previewSignature;
+        private string _previewFailedSignature;
         private const string ApparelTintPrefix = "CardShopCoop.ApparelTint.";
 
         public void SetName(int connId, string name)
@@ -157,6 +166,8 @@ namespace CardShopCoop.Modules.Presence
             av.Female = female;
             av.ModelIndex = modelIndex;
             av.CustomizationJson = customizationJson;
+            // A new authoritative appearance is a fresh chance to build the body.
+            av.SpawnFailed = false;
             if (changed && av.Go != null)
             {
                 // Rebuild only on an explicit appearance change. All movement/hold state is
@@ -215,8 +226,15 @@ namespace CardShopCoop.Modules.Presence
 
         public void ApplyLocalModel(CC.CharacterCustomization custom, PresenceModelEntry model)
         {
-            custom.CharacterName = (model.Female ? "Female" : "Male") + model.ModelIndex;
-            custom.Initialize();
+            if (custom == null)
+            {
+                // The wardrobe template is unavailable (its creation failed and was latched);
+                // the model data still changes, but there is no body to apply it to.
+                return;
+            }
+
+            CharacterClone.PrepareForDressing(custom, null,
+                (model.Female ? "Female" : "Male") + model.ModelIndex, "character editor apply");
             if (!string.IsNullOrEmpty(model.CustomizationJson))
             {
                 var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(model.CustomizationJson);
@@ -229,6 +247,7 @@ namespace CardShopCoop.Modules.Presence
         private static void ApplyCharacterData(CC.CharacterCustomization custom,
             CC.CC_CharacterData data)
         {
+            AlignWardrobeToTables(custom, data);
             var savedApparelTints = data.ColorProperties != null
                 ? data.ColorProperties.FindAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal))
                 : new List<CC.CC_Property>();
@@ -244,6 +263,73 @@ namespace CardShopCoop.Modules.Presence
             }
 
             ApplyStoredApparelTints(custom, savedApparelTints);
+        }
+
+        /// <summary>The game's ApplyCharacterVars indexes HairTables[slot]/ApparelTables[slot]
+        /// for every saved wardrobe name, so a payload captured on a build (or appearance mod)
+        /// with more slots than the body it is now applied to throws. Match the payload to this
+        /// body's tables: extra slots have nowhere to go, missing ones fall back to the game's
+        /// empty/None entry.</summary>
+        private static void AlignWardrobeToTables(CC.CharacterCustomization custom,
+            CC.CC_CharacterData data)
+        {
+            if (custom == null || data == null)
+            {
+                return;
+            }
+
+            var hairSlots = CharacterClone.DressableHairSlots(custom);
+            data.HairNames ??= new List<string>();
+            while (data.HairNames.Count < hairSlots)
+            {
+                data.HairNames.Add("");
+            }
+
+            if (data.HairNames.Count > hairSlots)
+            {
+                data.HairNames.RemoveRange(hairSlots, data.HairNames.Count - hairSlots);
+            }
+
+            data.HairColor ??= new List<CC.CC_Property>();
+            while (data.HairColor.Count < hairSlots)
+            {
+                data.HairColor.Add(new CC.CC_Property { stringValue = "" });
+            }
+
+            if (data.HairColor.Count > hairSlots)
+            {
+                data.HairColor.RemoveRange(hairSlots, data.HairColor.Count - hairSlots);
+            }
+
+            for (var i = 0; i < data.HairColor.Count; i++)
+            {
+                data.HairColor[i] ??= new CC.CC_Property { stringValue = "" };
+            }
+
+            var apparelSlots = CharacterClone.DressableApparelSlots(custom);
+            data.ApparelNames ??= new List<string>();
+            while (data.ApparelNames.Count < apparelSlots)
+            {
+                data.ApparelNames.Add("");
+            }
+
+            if (data.ApparelNames.Count > apparelSlots)
+            {
+                data.ApparelNames.RemoveRange(apparelSlots,
+                    data.ApparelNames.Count - apparelSlots);
+            }
+
+            data.ApparelMaterials ??= new List<int>();
+            while (data.ApparelMaterials.Count < apparelSlots)
+            {
+                data.ApparelMaterials.Add(0);
+            }
+
+            if (data.ApparelMaterials.Count > apparelSlots)
+            {
+                data.ApparelMaterials.RemoveRange(apparelSlots,
+                    data.ApparelMaterials.Count - apparelSlots);
+            }
         }
 
         private static void ApplyStoredApparelTints(CC.CharacterCustomization custom, List<CC.CC_Property> tints)
@@ -596,11 +682,26 @@ namespace CardShopCoop.Modules.Presence
             return FindCustomization(root);
         }
 
+        /// <summary>Allows one fresh template attempt after the user reopens the character tab.
+        /// A persistent failure is logged and latched by <see cref="GetEditorCustomization"/>;
+        /// retrying it on every OnGUI pass is what blanked the window.</summary>
+        internal void ResetEditorFailure()
+        {
+            _editorFailed = false;
+        }
+
         public CC.CharacterCustomization GetEditorCustomization(bool female)
         {
             if (_editorCustomization != null && _editorFemale == female)
             {
                 return _editorCustomization;
+            }
+
+            if (_editorFailed && _editorFailedFemale == female)
+            {
+                // Already failed for this gender. Rebuilding it every UI pass would throw from
+                // OnGUI and blank the window; the tab re-open (ResetEditorFailure) retries.
+                return null;
             }
 
             if (_editorHolder != null)
@@ -615,27 +716,60 @@ namespace CardShopCoop.Modules.Presence
                 return null;
             }
 
-            var prefab = female ? customers.m_CustomerFemalePrefab : customers.m_CustomerPrefab;
-            if (prefab == null)
+            var source = CharacterClone.FindCustomerSource(customers, female);
+            if (source == null)
             {
                 return null;
             }
 
+            var sourceCustom = source.m_CharacterCustom;
             _editorHolder = new GameObject("CoopCharacterEditorTemplate");
             _editorHolder.SetActive(false);
-            var clone = Object.Instantiate(prefab.gameObject, _editorHolder.transform);
+            var clone = Object.Instantiate(source.gameObject, _editorHolder.transform);
             var customer = clone.GetComponent<Customer>();
-            _editorCustomization = customer != null
+            var customization = customer != null
                 ? customer.m_CharacterCustom
                 : clone.GetComponentInChildren<CC.CharacterCustomization>(true);
+            try
+            {
+                CharacterClone.PrepareForDressing(customization, sourceCustom, source.transform,
+                    clone.transform, (female ? "Female" : "Male") + "0", "character editor template");
+            }
+            catch (System.Exception error)
+            {
+                // A cosmetic template must never take the co-op window down with it: clean up,
+                // log the full failure, and degrade to a model-less character panel until the
+                // tab is reopened.
+                Object.DestroyImmediate(_editorHolder);
+                _editorHolder = null;
+                _editorCustomization = null;
+                _editorFailed = true;
+                _editorFailedFemale = female;
+                CoopPlugin.Log.LogError("character editor template failed ("
+                    + (female ? "female" : "male") + "): " + error);
+                return null;
+            }
+
+            if (customization == null)
+            {
+                // A template with no CharacterCustomization cannot be used at all; latch it like
+                // a failure so it is not instantiated again on every UI pass.
+                Object.DestroyImmediate(_editorHolder);
+                _editorHolder = null;
+                _editorCustomization = null;
+                _editorFailed = true;
+                _editorFailedFemale = female;
+                CoopPlugin.Log.LogError("character editor template for the "
+                    + (female ? "female" : "male") + " body has no CharacterCustomization.");
+                return null;
+            }
+
+            _editorFailed = false;
+            _editorCustomization = customization;
+            _editorGeneration++;
             SceneComponentRegistry<CC.CharacterCustomization>.Register(_editorCustomization);
             _editorFemale = female;
-            if (_editorCustomization != null)
-            {
-                _editorCustomization.CharacterName = (female ? "Female" : "Male") + "0";
-                _editorCustomization.Initialize();
-                CoopPlugin.Log.LogInfo($"character editor template: {(female ? "female" : "male")}, hair slots={_editorCustomization.HairTables.Count}, apparel slots={_editorCustomization.ApparelTables.Count}, presets={(_editorCustomization.Presets != null && _editorCustomization.Presets.Presets != null ? _editorCustomization.Presets.Presets.Count : 0)}");
-            }
+            CoopPlugin.Log.LogInfo($"character editor template: {(female ? "female" : "male")}, hair slots={_editorCustomization.HairTables.Count}, apparel slots={_editorCustomization.ApparelTables.Count}, presets={(_editorCustomization.Presets != null && _editorCustomization.Presets.Presets != null ? _editorCustomization.Presets.Presets.Count : 0)}");
             return _editorCustomization;
         }
 
@@ -669,7 +803,7 @@ namespace CardShopCoop.Modules.Presence
 
         public bool SetHairColor(CC.CharacterCustomization custom, int slot, Color color)
         {
-            if (custom == null || slot < 0 || custom.HairTables == null || slot >= custom.HairTables.Count
+            if (custom == null || slot < 0 || slot >= CharacterClone.DressableHairSlots(custom)
                 || custom.StoredCharacterData == null)
             {
                 return false;
@@ -695,7 +829,7 @@ namespace CardShopCoop.Modules.Presence
         public bool SetApparelTint(CC.CharacterCustomization custom, int slot, Color color)
         {
             if (custom == null || custom.StoredCharacterData == null || slot < 0
-                || custom.ApparelTables == null || slot >= custom.ApparelTables.Count)
+                || slot >= CharacterClone.DressableApparelSlots(custom))
             {
                 return false;
             }
@@ -766,7 +900,7 @@ namespace CardShopCoop.Modules.Presence
 
         public bool ClearHair(CC.CharacterCustomization custom, int slot)
         {
-            if (custom == null || slot < 0 || slot >= custom.HairTables.Count)
+            if (custom == null || slot < 0 || slot >= CharacterClone.DressableHairSlots(custom))
             {
                 return false;
             }
@@ -814,7 +948,7 @@ namespace CardShopCoop.Modules.Presence
 
         public bool ClearApparel(CC.CharacterCustomization custom, int slot)
         {
-            if (custom == null || slot < 0 || slot >= custom.ApparelTables.Count)
+            if (custom == null || slot < 0 || slot >= CharacterClone.DressableApparelSlots(custom))
             {
                 return false;
             }
@@ -1043,6 +1177,8 @@ namespace CardShopCoop.Modules.Presence
 
             _editorHolder = null;
             _editorCustomization = null;
+            _editorFailed = false;
+            _editorGeneration++;
             DestroyPreview();
         }
 
@@ -1057,9 +1193,24 @@ namespace CardShopCoop.Modules.Presence
             var signature = (model.Female ? "F" : "M") + model.ModelIndex + ":" + (model.CustomizationJson ?? "");
             if (_previewBody == null || _previewSignature != signature)
             {
+                if (signature == _previewFailedSignature)
+                {
+                    // This exact look already failed once; rebuilding it every frame would keep
+                    // throwing from the renderer and churn through Customer clones.
+                    return;
+                }
+
                 DestroyPreview();
-                SpawnPreview(model);
-                _previewSignature = signature;
+                try
+                {
+                    SpawnPreview(model);
+                    _previewSignature = signature;
+                }
+                catch (System.Exception error)
+                {
+                    _previewFailedSignature = signature;
+                    CoopPlugin.Log.LogError("character preview failed: " + error);
+                }
             }
             if (_previewBody == null)
             {
@@ -1095,6 +1246,8 @@ namespace CardShopCoop.Modules.Presence
             _previewBody = null;
             _previewCustomization = null;
             _previewSignature = null;
+            // An explicit teardown (tab closed / world left) permits one fresh attempt next time.
+            _previewFailedSignature = null;
         }
 
         private void SpawnPreview(PresenceModelEntry model)
@@ -1105,69 +1258,96 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            var prefab = model.Female ? customers.m_CustomerFemalePrefab : customers.m_CustomerPrefab;
-            if (prefab == null)
+            var source = CharacterClone.FindCustomerSource(customers, model.Female);
+            if (source == null)
             {
                 return;
             }
 
+            var sourceCustom = source.m_CharacterCustom;
             var holder = new GameObject("CoopCharacterPreviewHolder_tmp");
             holder.SetActive(false);
-            var clone = Object.Instantiate(prefab.gameObject, holder.transform);
-            clone.transform.SetParent(null, false);
-            clone.SetActive(true);
-            Object.Destroy(holder);
-
-            var customer = clone.GetComponent<Customer>();
-            HideCustomerProps(customer, "character preview");
-            _previewCustomization = customer != null ? customer.m_CharacterCustom
-                : clone.GetComponentInChildren<CC.CharacterCustomization>(true);
-            if (_previewCustomization != null)
+            var clone = Object.Instantiate(source.gameObject, holder.transform);
+            try
             {
-                _previewCustomization.CharacterName = (model.Female ? "Female" : "Male") + model.ModelIndex;
-                _previewCustomization.Initialize();
-                // A null payload, a nude payload with NSFW off, or an undecodable payload
-                // all keep the game's initialized (clothed) preset instead of stripping it.
-                if (!string.IsNullOrEmpty(model.CustomizationJson))
+                clone.transform.SetParent(null, false);
+                clone.SetActive(true);
+                Object.Destroy(holder);
+                holder = null;
+
+                var customer = clone.GetComponent<Customer>();
+                HideCustomerProps(customer, "character preview");
+                var customization = customer != null ? customer.m_CharacterCustom
+                    : clone.GetComponentInChildren<CC.CharacterCustomization>(true);
+                if (customization != null)
                 {
-                    var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(model.CustomizationJson);
-                    if (data != null && (CoopPlugin.AllowNsfw.Value || !IsNude(data)))
+                    // The source can be a live, already-dressed pooled customer (Game Pass /
+                    // high-end-console build); prepare the clone before the game dresses it.
+                    CharacterClone.PrepareForDressing(customization, sourceCustom, source.transform,
+                        clone.transform, (model.Female ? "Female" : "Male") + model.ModelIndex,
+                        "character preview");
+                    // A null payload, a nude payload with NSFW off, or an undecodable payload
+                    // all keep the game's initialized (clothed) preset instead of stripping it.
+                    if (!string.IsNullOrEmpty(model.CustomizationJson))
                     {
-                        _previewCustomization.StoredCharacterData = data;
-                        ApplyCharacterData(_previewCustomization, data);
-                        ClearEmptyWardrobeSlots(_previewCustomization, data);
+                        var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(model.CustomizationJson);
+                        if (data != null && (CoopPlugin.AllowNsfw.Value || !IsNude(data)))
+                        {
+                            customization.StoredCharacterData = data;
+                            ApplyCharacterData(customization, data);
+                            ClearEmptyWardrobeSlots(customization, data);
+                        }
                     }
                 }
-            }
 
-            foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
-            {
-                if (mb == null)
+                foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
                 {
-                    continue;
+                    if (mb == null)
+                    {
+                        continue;
+                    }
+
+                    var name = mb.GetType().Name;
+                    if (name == "CopyPose" || name == "BlendshapeManager" || name == "ScaleCharacter"
+                        || name == "CharacterCustomization" || name == "TransformBone" || name == "MipBiasAdjust")
+                    {
+                        continue;
+                    }
+
+                    Object.DestroyImmediate(mb);
+                }
+                foreach (var col in clone.GetComponentsInChildren<Collider>(true))
+                {
+                    Object.DestroyImmediate(col);
                 }
 
-                var name = mb.GetType().Name;
-                if (name == "CopyPose" || name == "BlendshapeManager" || name == "ScaleCharacter"
-                    || name == "CharacterCustomization" || name == "TransformBone" || name == "MipBiasAdjust")
+                foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
                 {
-                    continue;
+                    Object.DestroyImmediate(rb);
                 }
 
-                Object.DestroyImmediate(mb);
+                clone.name = "CoopCharacterPreview";
+                _previewCustomization = customization;
+                _previewBody = clone;
             }
-            foreach (var col in clone.GetComponentsInChildren<Collider>(true))
+            catch
             {
-                Object.DestroyImmediate(col);
-            }
+                // A body that never became _previewBody would stay in the scene as a live
+                // Customer clone on every retry.
+                if (clone != null)
+                {
+                    Object.Destroy(clone);
+                }
 
-            foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
+                throw;
+            }
+            finally
             {
-                Object.DestroyImmediate(rb);
+                if (holder != null)
+                {
+                    Object.Destroy(holder);
+                }
             }
-
-            clone.name = "CoopCharacterPreview";
-            _previewBody = clone;
         }
 
         /// <summary>Tears down the spawned body AND the animator/pose flags Tick tracks for
@@ -1195,6 +1375,9 @@ namespace CardShopCoop.Modules.Presence
         {
             foreach (var av in _avatars.Values)
             {
+                // An explicit receiver-side appearance change (the NSFW filter) is a fresh
+                // chance to build a body that failed to spawn earlier.
+                av.SpawnFailed = false;
                 DespawnBody(av);
             }
         }
@@ -1466,7 +1649,7 @@ namespace CardShopCoop.Modules.Presence
                     av.HeldCards3d.Clear();
                     av.HeldSig = "";
                     av.CardSig = "";
-                    if (av.HasState)
+                    if (av.HasState && !av.SpawnFailed)
                     {
                         var ts = Util.PerfProbe.Start();
                         try
@@ -1764,197 +1947,229 @@ namespace CardShopCoop.Modules.Presence
             }
 
             var female = (nameHash & 1) == 1;
-            var prefab = female ? cm.m_CustomerFemalePrefab : cm.m_CustomerPrefab;
             if (av.HasModel)
             {
                 female = av.Female;
-                prefab = female ? cm.m_CustomerFemalePrefab : cm.m_CustomerPrefab;
-            }
-            if (prefab == null)
-            {
-                prefab = cm.m_CustomerPrefab != null ? cm.m_CustomerPrefab : cm.m_CustomerFemalePrefab;
             }
 
-            if (prefab == null)
+            // Clone a source that carries the wardrobe tables and animator the appearance was
+            // authored against. On the Game Pass / high-end-console build the manager's prefab is
+            // a live pooled customer rather than a template asset; PrepareForDressing below makes
+            // that clone behave like the uninitialized template Initialize() expects.
+            var source = CharacterClone.FindCustomerSource(cm, female);
+            if (source == null)
+            {
+                female = !female;
+                source = CharacterClone.FindCustomerSource(cm, female);
+            }
+            if (source == null)
             {
                 return;
             }
+
+            var sourceCustom = source.m_CharacterCustom;
 
             // Instantiate under an inactive holder (defers Awake), position it, then
             // activate and IMMEDIATELY dress + strip within this same call - no game
             // Update/Start can run in between, so the Customer AI never gets a frame.
             var holder = new GameObject("CoopAvatarHolder_tmp");
             holder.SetActive(false);
-            var clone = Object.Instantiate(prefab.gameObject, holder.transform);
-            clone.transform.SetParent(null, worldPositionStays: false);
-            clone.transform.position = av.TargetPos;
-            clone.SetActive(true);
-            Object.Destroy(holder);
-
-            var cust = clone.GetComponent<Customer>();
-            // The character Animator is Customer.m_Anim, not necessarily the first Animator found
-            // in the hierarchy: the 1.00 Game Pass prefab carries an extra parameter-less Animator
-            // that GetComponentInChildren returned first, so the avatar was driven through an
-            // Animator with no MoveSpeed/IsHoldingBox parameters. Capture the game's own reference
-            // before the component strip below destroys the Customer behaviour that holds it.
-            var characterAnimator = cust != null ? cust.m_Anim : null;
-            if (cust != null)
+            var clone = Object.Instantiate(source.gameObject, holder.transform);
+            try
             {
-                var hasJson = !string.IsNullOrEmpty(av.CustomizationJson);
-                if (!av.HasModel)
+                clone.transform.SetParent(null, worldPositionStays: false);
+                clone.transform.position = av.TargetPos;
+                clone.SetActive(true);
+                Object.Destroy(holder);
+                holder = null;
+
+                var cust = clone.GetComponent<Customer>();
+                // The character Animator is Customer.m_Anim, not necessarily the first Animator found
+                // in the hierarchy: the 1.00 Game Pass prefab carries an extra parameter-less Animator
+                // that GetComponentInChildren returned first, so the avatar was driven through an
+                // Animator with no MoveSpeed/IsHoldingBox parameters. Capture the game's own reference
+                // before the component strip below destroys the Customer behaviour that holds it.
+                var characterAnimator = cust != null ? cust.m_Anim : null;
+                if (cust != null)
                 {
-                    // No model was sent: fall back to the game's own random clothed wardrobe.
-                    cust.RandomizeCharacterMesh();
-                }
-                else
-                {
-                    cust.m_CharacterCustom.CharacterName = (female ? "Female" : "Male") + av.ModelIndex;
-                    cust.m_CharacterCustom.Initialize();
-                    if (!hasJson)
+                    var hasJson = !string.IsNullOrEmpty(av.CustomizationJson);
+                    if (!av.HasModel)
                     {
+                        // No model was sent: fall back to the game's own random clothed wardrobe.
+                        // A live source has already dressed this clone, so give its private
+                        // collections the inherited children before anything can re-Initialize it.
+                        CharacterClone.RebuildInheritedCollections(cust.m_CharacterCustom,
+                            sourceCustom, source.transform, clone.transform);
                         cust.RandomizeCharacterMesh();
                     }
                     else
                     {
-                        var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(
-                            av.CustomizationJson);
-                        // NSFW off: dress only the nude slots instead of randomizing the whole
-                        // character, so the player's hair/body/other clothes survive.
-                        if (!CoopPlugin.AllowNsfw.Value)
+                        CharacterClone.PrepareForDressing(cust.m_CharacterCustom, sourceCustom,
+                            source.transform, clone.transform,
+                            (female ? "Female" : "Male") + av.ModelIndex, "remote avatar");
+                        if (hasJson)
                         {
-                            ClotheNudeSlots(cust.m_CharacterCustom, data);
+                            var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(
+                                av.CustomizationJson);
+                            // NSFW off: dress only the nude slots instead of randomizing the whole
+                            // character, so the player's hair/body/other clothes survive.
+                            if (!CoopPlugin.AllowNsfw.Value)
+                            {
+                                ClotheNudeSlots(cust.m_CharacterCustom, data);
+                            }
+
+                            cust.m_CharacterCustom.StoredCharacterData = data;
+                            ApplyCharacterData(cust.m_CharacterCustom, data);
+                            ClearEmptyWardrobeSlots(cust.m_CharacterCustom, data);
                         }
-
-                        cust.m_CharacterCustom.StoredCharacterData = data;
-                        ApplyCharacterData(cust.m_CharacterCustom, data);
-                        ClearEmptyWardrobeSlots(cust.m_CharacterCustom, data);
                     }
                 }
-            }
 
-            // Customer prefabs include held-item and FX props; avatars are visual-only.
-            HideCustomerProps(cust, "remote avatar");
+                // Customer prefabs include held-item and FX props; avatars are visual-only.
+                HideCustomerProps(cust, "remote avatar");
 
-            // Strip game logic but KEEP the cosmetic rig helpers (CC namespace): CopyPose
-            // drives hair/apparel bones every LateUpdate - destroying it is why hair froze.
-            foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
-            {
-                if (mb == null)
+                // Strip game logic but KEEP the cosmetic rig helpers (CC namespace): CopyPose
+                // drives hair/apparel bones every LateUpdate - destroying it is why hair froze.
+                foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
                 {
-                    continue;
-                }
-
-                var tn = mb.GetType().Name;
-                if (tn == "CopyPose" || tn == "BlendshapeManager" || tn == "ScaleCharacter"
-                    || tn == "TransformBone" || tn == "MipBiasAdjust")
-                {
-                    continue;
-                }
-
-                Object.DestroyImmediate(mb);
-            }
-            foreach (var comp in clone.GetComponentsInChildren<Component>(true))
-            {
-                if (comp == null)
-                {
-                    continue;
-                }
-
-                var n = comp.GetType().Name;
-                if (n == "NavMeshAgent" || n == "NavMeshObstacle" || n == "Seeker" || n == "FunnelModifier")
-                {
-                    Object.DestroyImmediate(comp);
-                }
-            }
-            foreach (var col in clone.GetComponentsInChildren<Collider>(true))
-            {
-                Object.DestroyImmediate(col);
-            }
-
-            foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
-            {
-                Object.DestroyImmediate(rb);
-            }
-
-            clone.name = "CoopAvatar_" + av.Name;
-
-            av.Go = clone;
-            av.Anim = characterAnimator != null
-                ? characterAnimator
-                : clone.GetComponentInChildren<Animator>(true);
-            av.EverPositioned = true;
-            av.HasMoveSpeed = false;
-            av.HasHoldingBox = false;
-            av.HasRenderedPosition = false;
-            av.AnimSpeed = 0f;
-            av.AppliedAnimSpeed = float.NaN;
-            av.HoldingBoxPoseSet = false; // fresh Animator: the pose must be pushed once
-
-            if (av.Anim != null)
-            {
-                foreach (var p in av.Anim.parameters)
-                {
-                    if (p.name == "MoveSpeed" && p.type == AnimatorControllerParameterType.Float)
+                    if (mb == null)
                     {
-                        av.HasMoveSpeed = true;
+                        continue;
                     }
 
-                    if (p.name == "IsHoldingBox" && p.type == AnimatorControllerParameterType.Bool)
+                    var tn = mb.GetType().Name;
+                    if (tn == "CopyPose" || tn == "BlendshapeManager" || tn == "ScaleCharacter"
+                        || tn == "TransformBone" || tn == "MipBiasAdjust")
                     {
-                        av.HasHoldingBox = true;
+                        continue;
+                    }
+
+                    Object.DestroyImmediate(mb);
+                }
+                foreach (var comp in clone.GetComponentsInChildren<Component>(true))
+                {
+                    if (comp == null)
+                    {
+                        continue;
+                    }
+
+                    var n = comp.GetType().Name;
+                    if (n == "NavMeshAgent" || n == "NavMeshObstacle" || n == "Seeker" || n == "FunnelModifier")
+                    {
+                        Object.DestroyImmediate(comp);
                     }
                 }
-                if (!_loggedAnimParams)
+                foreach (var col in clone.GetComponentsInChildren<Collider>(true))
                 {
-                    _loggedAnimParams = true;
-                    var sb = new StringBuilder("Avatar animator params: ");
+                    Object.DestroyImmediate(col);
+                }
+
+                foreach (var rb in clone.GetComponentsInChildren<Rigidbody>(true))
+                {
+                    Object.DestroyImmediate(rb);
+                }
+
+                clone.name = "CoopAvatar_" + av.Name;
+
+                av.Go = clone;
+                av.Anim = characterAnimator != null
+                    ? characterAnimator
+                    : clone.GetComponentInChildren<Animator>(true);
+                av.EverPositioned = true;
+                av.HasMoveSpeed = false;
+                av.HasHoldingBox = false;
+                av.HasRenderedPosition = false;
+                av.AnimSpeed = 0f;
+                av.AppliedAnimSpeed = float.NaN;
+                av.HoldingBoxPoseSet = false; // fresh Animator: the pose must be pushed once
+
+                if (av.Anim != null)
+                {
                     foreach (var p in av.Anim.parameters)
                     {
-                        sb.Append(p.name).Append(' ');
+                        if (p.name == "MoveSpeed" && p.type == AnimatorControllerParameterType.Float)
+                        {
+                            av.HasMoveSpeed = true;
+                        }
+
+                        if (p.name == "IsHoldingBox" && p.type == AnimatorControllerParameterType.Bool)
+                        {
+                            av.HasHoldingBox = true;
+                        }
                     }
+                    if (!_loggedAnimParams)
+                    {
+                        _loggedAnimParams = true;
+                        var sb = new StringBuilder("Avatar animator params: ");
+                        foreach (var p in av.Anim.parameters)
+                        {
+                            sb.Append(p.name).Append(' ');
+                        }
 
-                    CoopPlugin.Log.LogInfo(sb.ToString());
+                        CoopPlugin.Log.LogInfo(sb.ToString());
+                    }
                 }
-            }
 
-            var heightFactor = GetCharacterHeightFactor(cust != null ? cust.m_CharacterCustom : null);
-            av.NameTag = MakeTag(clone.transform, av.Name, 2.25f * heightFactor, Color.white);
-            av.EmoteTag = MakeTag(clone.transform, "", 2.55f * heightFactor, new Color(1f, 0.85f, 0.2f));
-            // key= names which dictionary slot this body belongs to (1 = host on a client,
-            // 1000+id = a remote peer), so a phantom avatar for the local player is unambiguous.
-            // active/renderers/animator say whether the spawned body is actually a visible,
-            // animatable character on this build - the 1.00 client resolved a zero-parameter
-            // Animator here once, which the old line did not name.
-            var spawnRenderers = clone.GetComponentsInChildren<Renderer>(true);
-            var enabledRenderers = 0;
-            for (var i = 0; i < spawnRenderers.Length; i++)
-            {
-                if (spawnRenderers[i] != null && spawnRenderers[i].enabled)
+                var heightFactor = GetCharacterHeightFactor(cust != null ? cust.m_CharacterCustom : null);
+                av.NameTag = MakeTag(clone.transform, av.Name, 2.25f * heightFactor, Color.white);
+                av.EmoteTag = MakeTag(clone.transform, "", 2.55f * heightFactor, new Color(1f, 0.85f, 0.2f));
+                // key= names which dictionary slot this body belongs to (1 = host on a client,
+                // 1000+id = a remote peer), so a phantom avatar for the local player is unambiguous.
+                // active/renderers/animator say whether the spawned body is actually a visible,
+                // animatable character on this build - the 1.00 client resolved a zero-parameter
+                // Animator here once, which the old line did not name.
+                var spawnRenderers = clone.GetComponentsInChildren<Renderer>(true);
+                var enabledRenderers = 0;
+                for (var i = 0; i < spawnRenderers.Length; i++)
                 {
-                    enabledRenderers++;
+                    if (spawnRenderers[i] != null && spawnRenderers[i].enabled)
+                    {
+                        enabledRenderers++;
+                    }
+                }
+
+                var controller = av.Anim != null && av.Anim.runtimeAnimatorController != null
+                    ? av.Anim.runtimeAnimatorController.name : "<none>";
+                // DestroyImmediate above can run a component's OnDestroy callback as a side effect,
+                // and on some builds that callback switches the body off. Re-assert the root here so
+                // the avatar is always spawned visible regardless of what the strip did.
+                clone.SetActive(true);
+                if (!clone.activeInHierarchy)
+                {
+                    // Bug telemetry: the stripped avatar body still came up inactive on this build,
+                    // so remote players would be invisible even though the spawn succeeded.
+                    CoopPlugin.Log.LogWarning($"Co-op avatar body for '{av.Name}' key={av.ConnId} "
+                        + "was inactive after stripping on this build.");
+                }
+
+                CoopPlugin.Log.LogInfo($"Spawned co-op avatar for '{av.Name}' key={av.ConnId} "
+                    + $"({(female ? "female" : "male")} model) active={clone.activeInHierarchy} "
+                    + $"renderers={enabledRenderers}/{spawnRenderers.Length} animator={controller}");
+                // A carried box announced before this body existed rides a standalone anchor; now
+                // that the avatar exists, let observers move it onto the skeleton.
+                RemoteAvatarsChanged?.Invoke();
+            }
+            catch (System.Exception error)
+            {
+                // A body that never reached av.Go would be rebuilt and leaked again on every
+                // frame. Destroy this attempt, latch the failure until the appearance changes,
+                // and let the rest of the presence tick run.
+                if (clone != null)
+                {
+                    Object.Destroy(clone);
+                }
+
+                av.SpawnFailed = true;
+                CoopPlugin.Log.LogError("co-op avatar spawn failed for '" + av.Name + "' key="
+                    + av.ConnId + ": " + error);
+            }
+            finally
+            {
+                if (holder != null)
+                {
+                    Object.Destroy(holder);
                 }
             }
-
-            var controller = av.Anim != null && av.Anim.runtimeAnimatorController != null
-                ? av.Anim.runtimeAnimatorController.name : "<none>";
-            // DestroyImmediate above can run a component's OnDestroy callback as a side effect,
-            // and on some builds that callback switches the body off. Re-assert the root here so
-            // the avatar is always spawned visible regardless of what the strip did.
-            clone.SetActive(true);
-            if (!clone.activeInHierarchy)
-            {
-                // Bug telemetry: the stripped avatar body still came up inactive on this build,
-                // so remote players would be invisible even though the spawn succeeded.
-                CoopPlugin.Log.LogWarning($"Co-op avatar body for '{av.Name}' key={av.ConnId} "
-                    + "was inactive after stripping on this build.");
-            }
-
-            CoopPlugin.Log.LogInfo($"Spawned co-op avatar for '{av.Name}' key={av.ConnId} "
-                + $"({(female ? "female" : "male")} model) active={clone.activeInHierarchy} "
-                + $"renderers={enabledRenderers}/{spawnRenderers.Length} animator={controller}");
-            // A carried box announced before this body existed rides a standalone anchor; now
-            // that the avatar exists, let observers move it onto the skeleton.
-            RemoteAvatarsChanged?.Invoke();
         }
 
         private static float GetCharacterHeightFactor(CC.CharacterCustomization custom)

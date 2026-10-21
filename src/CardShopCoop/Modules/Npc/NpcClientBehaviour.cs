@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
@@ -699,10 +698,6 @@ namespace CardShopCoop.Modules.Npc
             AccessTools.Method(typeof(Worker), "EvaluateWorkerAttribute");
         private static readonly MethodInfo MiEvaluateSkillLevel =
             AccessTools.Method(typeof(Worker), "EvaluateSkillLevel");
-        private static readonly FieldInfo FiCustomizationHairObjects =
-            AccessTools.Field(typeof(CC.CharacterCustomization), "HairObjects");
-        private static readonly FieldInfo FiCustomizationApparelObjects =
-            AccessTools.Field(typeof(CC.CharacterCustomization), "ApparelObjects");
 
         [Flags]
         private enum NpcFlags : ushort
@@ -2395,8 +2390,7 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            p.Custom.CharacterName = charName;
-            p.Custom.Initialize();
+            CharacterClone.PrepareForDressing(p.Custom, null, charName, "npc puppet re-dress");
             p.CharName = charName;
             p.Female = female;
             p.Go.name = "CoopNpc_" + charName;
@@ -2650,56 +2644,6 @@ namespace CardShopCoop.Modules.Npc
             }
         }
 
-        /// <summary>Discard generated customization collections on the puppet instance only.
-        /// Some modded prefabs arrive serialized as already initialized even though the worker
-        /// or customer manager expects its source to be a template. Rebuilding these collections
-        /// on the clone gives Initialize() the same contract as an uninitialized prefab and never
-        /// touches the scene-owned source.</summary>
-        private static void ResetCustomizationCollection(CC.CharacterCustomization custom,
-            FieldInfo field)
-        {
-            if (custom == null || field == null)
-            {
-                return;
-            }
-
-            var objects = field.GetValue(custom) as IList;
-            if (objects == null)
-            {
-                objects = new List<GameObject>();
-                field.SetValue(custom, objects);
-                return;
-            }
-
-            for (var i = 0; i < objects.Count; i++)
-            {
-                if (objects[i] is GameObject generated && generated != null)
-                {
-                    Destroy(generated);
-                }
-            }
-
-            objects.Clear();
-        }
-
-        private static void InitializePuppetCustomization(CC.CharacterCustomization custom,
-            string charName)
-        {
-            // A prefab must be a template, but an appearance mod can serialize the init bit on
-            // its source. Reset only the instantiated clone before its one initialization; never
-            // call Initialize() on a live worker/customer customization and never alter that
-            // source's private lists.
-            if (custom.m_HasInit)
-            {
-                ResetCustomizationCollection(custom, FiCustomizationHairObjects);
-                ResetCustomizationCollection(custom, FiCustomizationApparelObjects);
-                custom.m_HasInit = false;
-            }
-
-            custom.CharacterName = charName;
-            custom.Initialize();
-        }
-
         private static void EnsureWorkerCollections(Worker worker)
         {
             if (worker == null)
@@ -2739,133 +2683,6 @@ namespace CardShopCoop.Modules.Npc
             return worker != null && worker.m_IsFemale == female ? worker : null;
         }
 
-        /// <summary>Client: a real pooled customer of the requested gender to clone as a puppet,
-        /// preferring one that is inactive and has never been dressed (its generated hair/apparel
-        /// collections are empty on the clone as well). Falls back to any gendered pool member,
-        /// then null so the caller uses the manager template.</summary>
-        private static Customer FindPooledCustomer(CustomerManager manager, bool female)
-        {
-            var customers = manager?.GetCustomerList();
-            if (customers == null)
-            {
-                return null;
-            }
-
-            Customer inactive = null;
-            Customer any = null;
-            for (var i = 0; i < customers.Count; i++)
-            {
-                var customer = customers[i];
-                if (customer == null || customer.m_IsFemale != female
-                    || customer.m_CharacterCustom == null)
-                {
-                    continue;
-                }
-
-                if (!customer.m_IsActive && !customer.m_CharacterCustom.m_HasInit)
-                {
-                    return customer;
-                }
-
-                if (!customer.m_IsActive && inactive == null)
-                {
-                    inactive = customer;
-                }
-
-                if (any == null)
-                {
-                    any = customer;
-                }
-            }
-
-            return inactive ?? any;
-        }
-
-        /// <summary>Instantiate clones a live NPC's runtime-generated hair and apparel children but
-        /// not the private, non-serialized lists that reference them, so a clone's lists are empty
-        /// and the game's Initialize() cannot find (and replace) the inherited look. Repoint each
-        /// list entry at the clone's matching child, located by the sibling-index path it occupies
-        /// under the source customization, so Initialize() destroys and re-dresses normally.</summary>
-        private static void RebuildCustomizationCollections(CC.CharacterCustomization cloneCustom,
-            CC.CharacterCustomization sourceCustom)
-        {
-            RebuildCustomizationCollection(cloneCustom, sourceCustom, FiCustomizationHairObjects);
-            RebuildCustomizationCollection(cloneCustom, sourceCustom, FiCustomizationApparelObjects);
-        }
-
-        private static void RebuildCustomizationCollection(CC.CharacterCustomization cloneCustom,
-            CC.CharacterCustomization sourceCustom, FieldInfo field)
-        {
-            if (cloneCustom == null || sourceCustom == null || field == null)
-            {
-                return;
-            }
-
-            var sourceObjects = field.GetValue(sourceCustom) as IList;
-            var cloneObjects = field.GetValue(cloneCustom) as IList;
-            if (sourceObjects == null || cloneObjects == null
-                || ReferenceEquals(sourceObjects, cloneObjects))
-            {
-                return;
-            }
-
-            var rebuilt = new List<GameObject>(sourceObjects.Count);
-            for (var i = 0; i < sourceObjects.Count; i++)
-            {
-                // A generated slot the source never filled holds a destroyed placeholder (Unity
-                // fake-null); there is no clone child for it, so carry the empty slot across.
-                var sourceChild = sourceObjects[i] as GameObject;
-                var cloneChild = sourceChild == null ? null
-                    : ResolveCloneChild(sourceCustom.transform, cloneCustom.transform,
-                        sourceChild.transform);
-                rebuilt.Add(cloneChild == null ? null : cloneChild.gameObject);
-            }
-
-            cloneObjects.Clear();
-            for (var i = 0; i < rebuilt.Count; i++)
-            {
-                cloneObjects.Add(rebuilt[i]);
-            }
-        }
-
-        /// <summary>Walks the sibling-index path a source child occupies up to the source
-        /// customization root and returns the clone child at the same path, or null when the clone
-        /// does not mirror it.</summary>
-        private static Transform ResolveCloneChild(Transform sourceRoot, Transform cloneRoot,
-            Transform sourceChild)
-        {
-            if (sourceRoot == null || cloneRoot == null || sourceChild == null)
-            {
-                return null;
-            }
-
-            var indices = new List<int>();
-            var current = sourceChild;
-            while (current != null && current != sourceRoot)
-            {
-                indices.Add(current.GetSiblingIndex());
-                current = current.parent;
-            }
-
-            if (current != sourceRoot)
-            {
-                return null;
-            }
-
-            var result = cloneRoot;
-            for (var i = indices.Count - 1; i >= 0; i--)
-            {
-                if (result == null || indices[i] >= result.childCount)
-                {
-                    return null;
-                }
-
-                result = result.GetChild(indices[i]);
-            }
-
-            return result;
-        }
-
         private void Spawn(Puppet p, string charName, Vector3 pos, bool femaleHint, byte kind, ushort index)
         {
             var female = femaleHint;
@@ -2873,7 +2690,8 @@ namespace CardShopCoop.Modules.Npc
             p.Kind = kind;
 
             GameObject prefabObject;
-            CC.CharacterCustomization liveCustom = null;
+            CC.CharacterCustomization sourceCustom = null;
+            Transform sourceRoot = null;
             var clonedLive = false;
             using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.source"))
             {
@@ -2889,12 +2707,16 @@ namespace CardShopCoop.Modules.Npc
                     if (liveWorker != null)
                     {
                         prefabObject = liveWorker.gameObject;
+                        sourceCustom = liveWorker.m_CharacterCustom;
+                        sourceRoot = liveWorker.transform;
                         clonedLive = true;
                     }
                     else
                     {
                         var prefab = female ? workerManager.m_WorkerFemalePrefab : workerManager.m_WorkerPrefab;
                         prefabObject = prefab.gameObject;
+                        sourceCustom = prefab.m_CharacterCustom;
+                        sourceRoot = prefab.transform;
                     }
                 }
                 else
@@ -2903,13 +2725,14 @@ namespace CardShopCoop.Modules.Npc
                     // A live pool member carries the wardrobe tables and animator the preset was
                     // authored against; the template can expose fewer slots, which makes
                     // CharacterCustomization dress throw on some game builds. Prefer one that has
-                    // never dressed; an already-dressed member still works once its generated
-                    // collections are rebuilt below.
-                    var liveCustomer = FindPooledCustomer(customerManager, female);
-                    if (liveCustomer != null)
+                    // never dressed; an already-dressed member still works because the clone
+                    // preparation rebuilds its generated collections.
+                    if (CharacterClone.TryFindPooledCustomer(customerManager, female,
+                        out var liveCustomer))
                     {
                         prefabObject = liveCustomer.gameObject;
-                        liveCustom = liveCustomer.m_CharacterCustom;
+                        sourceCustom = liveCustomer.m_CharacterCustom;
+                        sourceRoot = liveCustomer.transform;
                         clonedLive = true;
                     }
                     else
@@ -2917,6 +2740,8 @@ namespace CardShopCoop.Modules.Npc
                         var prefab = female ? customerManager.m_CustomerFemalePrefab
                             : customerManager.m_CustomerPrefab;
                         prefabObject = prefab.gameObject;
+                        sourceCustom = prefab != null ? prefab.m_CharacterCustom : null;
+                        sourceRoot = prefab != null ? prefab.transform : null;
                     }
                 }
             }
@@ -2982,30 +2807,28 @@ namespace CardShopCoop.Modules.Npc
             {
                 using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.dress"))
                 {
-                    if (!clonedLive)
-                    {
-                        // Template prefab: make it behave like an uninitialized source before dressing
-                        // (a modded template can arrive serialized with the init bit already set).
-                        InitializePuppetCustomization(p.Custom, charName);
-                    }
-                    else if (kind == KindWorker)
+                    if (clonedLive && kind == KindWorker)
                     {
                         // A live worker is already the employee's dressed look, and an appearance mod
                         // may have replaced its entire visual hierarchy. Re-running Initialize() would
                         // rebuild the now-hidden vanilla wardrobe (and can index the wrong gender's
                         // wardrobe tables), so only mirror the authoritative name on the inert
                         // component. Its look is complete and authoritative as-is.
+                        //
+                        // ReDress can still Initialize() this clone later when its look changes, so
+                        // give it the same collection contract now: point its private lists at the
+                        // inherited generated children instead of leaving them empty.
+                        CharacterClone.RebuildInheritedCollections(p.Custom, sourceCustom, sourceRoot,
+                            clone.transform);
                         p.Custom.CharacterName = charName;
                     }
                     else
                     {
-                        // Instantiate copies the live customer's runtime-generated hair/apparel
-                        // children but not the private, non-serialized lists that reference them, so
-                        // the clone's lists are empty and Initialize() would throw (or stack a second
-                        // look on top). Point each entry at the clone's matching child, then dress.
-                        RebuildCustomizationCollections(p.Custom, liveCustom);
-                        p.Custom.CharacterName = charName;
-                        p.Custom.Initialize();
+                        // Template or live customer: make the clone a valid wardrobe template
+                        // (rebuilding inherited generated collections when the source was already
+                        // dressed) before the game dresses it.
+                        CharacterClone.PrepareForDressing(p.Custom, sourceCustom, sourceRoot,
+                            clone.transform, charName, "npc puppet");
                     }
                 }
             }

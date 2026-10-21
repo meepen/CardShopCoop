@@ -75,6 +75,7 @@ namespace CardShopCoop.Modules.Presence
 
         internal Action<PresenceModelEntry> ModelChanged;
         internal int ModelGeneration => _modelGeneration;
+        internal int EditorGeneration => _renderer.EditorGeneration;
 
         internal void Tick(float deltaTime)
         {
@@ -428,7 +429,16 @@ namespace CardShopCoop.Modules.Presence
         internal List<CC.CC_Property> GetLocalSliders()
             => _renderer.GetBlendshapes(GetLocalCustomization());
 
-        internal void SetPreview(bool active) => _previewVisible = active;
+        internal void SetPreview(bool active)
+        {
+            if (active && !_previewVisible)
+            {
+                // Reopening the tab is an explicit request to try the character template again.
+                _renderer.ResetEditorFailure();
+            }
+
+            _previewVisible = active;
+        }
 
         internal void CommitCustomization()
         {
@@ -555,18 +565,30 @@ namespace CardShopCoop.Modules.Presence
         internal void SetModel(bool female, int modelIndex)
         {
             EnsureLocalModel();
-            RecordChange();
             var genderChanged = _localModel.Female != female;
+            PresenceModelEntry preset = null;
+            if (genderChanged)
+            {
+                preset = _renderer.TryCreateRandomPresetModel(female);
+                if (preset == null)
+                {
+                    // The target gender's wardrobe template is unavailable. Keep the current
+                    // appearance instead of committing a payload-less model (which would save
+                    // over the player's real look).
+                    CoopPlugin.Log.LogWarning("character model change skipped: no usable wardrobe "
+                        + "template for the " + (female ? "female" : "male") + " body.");
+                    _modelGeneration++;
+                    return;
+                }
+            }
+
+            RecordCurrentChange();
             _localModel.Female = female;
             _localModel.ModelIndex = Mathf.Max(0, modelIndex);
             if (genderChanged)
             {
-                var preset = _renderer.TryCreateRandomPresetModel(female);
-                _localModel.CustomizationJson = preset?.CustomizationJson;
-                if (preset != null)
-                {
-                    _localModel.ModelIndex = preset.ModelIndex;
-                }
+                _localModel.CustomizationJson = preset.CustomizationJson;
+                _localModel.ModelIndex = preset.ModelIndex;
             }
 
             _autoRepair = false;
@@ -735,6 +757,15 @@ namespace CardShopCoop.Modules.Presence
         private void RecordChange()
         {
             EnsureLocalModel();
+            RecordCurrentChange();
+        }
+
+        /// <summary>History push for a caller that has already ensured the local model. Keeping
+        /// the ensure out of SetModel matters: resolving the target gender's preset changes the
+        /// renderer's template, and a second EnsureLocalModel would rebuild the old gender's
+        /// template only to throw it away.</summary>
+        private void RecordCurrentChange()
+        {
             Push(_undo, _lastCommittedModel ?? _localModel);
             _redo.Clear();
         }
