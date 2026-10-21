@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.Linq.Expressions;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using CardShopCoop.Api;
 
 namespace CardShopCoop.Util
@@ -29,21 +29,29 @@ namespace CardShopCoop.Util
     /// <c>AutoCleanserStatusUI.Start</c> threw on a destroyed m_ScreenGrp,
     /// <c>InteractionPlayerController.Start -&gt; CenterDot.SetVisibility</c> threw on a destroyed
     /// CenterDot, <c>PauseScreen.CloseScreen</c> threw on a destroyed m_CameraController, and
-    /// <c>Card3dUISpawner.Update</c> then threw every frame on <c>m_Cam.transform</c>. <see
-    /// cref="ScreenSingletonGuard"/> repairs six screens, but only from four game entry points that
-    /// run after scene Awake, so it cannot save the second load.
+    /// <c>Card3dUISpawner.Update</c> then threw every frame on <c>m_Cam.transform</c>.
     ///
-    /// The fix is the legacy semantics, applied to every concrete <c>CSingleton&lt;T&gt;</c> in the
-    /// process: before the getter body runs, clear a latch whose cached instance is dead. The body
-    /// then resolves the live scene object exactly as the public build does. The guard is inert on
-    /// the public build, which has no <c>isSet</c> field.
+    /// The first attempt patched <c>CSingleton&lt;T&gt;.Instance</c> itself (one prefix per closed
+    /// generic type). That hard-crashes Unity's Mono the first time a patched getter runs - the
+    /// shipped Game Pass build died inside <c>CEventManager.Instance</c> during
+    /// <c>CoopPlugin.Awake</c>, with the native stack under
+    /// <c>GameObject.AddComponent&lt;CoopCore&gt;</c> and <c>mono_unity_class_has_failure</c>.
+    /// Generic-method patching is not safe there, so the latch is now repaired from the outside:
+    /// this guard never patches a generic method. It sweeps every latch at the game's own scene
+    /// lifecycle boundaries - singleton <c>Awake</c>/<c>OnEnable</c>, the game's scene-loaded
+    /// handlers, and Unity's scene events - and clears only a latch whose cached instance is already
+    /// dead. The game's next <c>Instance</c> access then resolves the live scene object exactly as
+    /// the public build does. Inert on the public build, which has no <c>isSet</c> field.
     /// </summary>
     internal static class SingletonLatchGuard
     {
-        private static readonly BindingFlags StaticPrivate =
-            BindingFlags.Static | BindingFlags.NonPublic;
+        private static readonly BindingFlags StaticAll =
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
+        private static readonly List<Latch> Latches = new();
+        private static readonly HashSet<MethodBase> Patched = new();
         private static bool _installed;
+        private static bool _sweeping;
 
         internal static void Install()
         {
@@ -53,11 +61,8 @@ namespace CardShopCoop.Util
             }
             _installed = true;
 
-            var closedTypes = CollectClosedSingletonTypes();
-            var isSetField = closedTypes.Count == 0
-                ? null
-                : closedTypes[0].GetField("isSet", StaticPrivate);
-            if (isSetField == null)
+            CollectLatches();
+            if (Latches.Count == 0 || Latches[0].IsSet == null)
             {
                 CoopPlugin.Log.LogInfo(
                     "singleton latch guard: inactive (this build's CSingleton has no isSet latch)");
@@ -65,64 +70,136 @@ namespace CardShopCoop.Util
             }
 
             var harmony = new Harmony("dev.meepen.cardshopcoop.singleton-latch");
-            var patched = 0;
+            var patchedMethods = 0;
             var failed = 0;
-            for (var i = 0; i < closedTypes.Count; i++)
+            for (var i = 0; i < Latches.Count; i++)
             {
-                try
+                patchedMethods += PatchDeclared(harmony, Latches[i].ComponentType, "Awake", ref failed);
+                patchedMethods += PatchDeclared(harmony, Latches[i].ComponentType, "OnEnable",
+                    ref failed);
+            }
+
+            // The game's own scene-loaded handlers read latched singletons from their bodies. These
+            // are the two entry points that run before the rest of the load, and both are plain
+            // (non-generic) methods, so patching them is safe. The Game Pass-only platform hook is
+            // resolved by name because it does not exist on the public build.
+            patchedMethods += PatchDeclared(harmony, typeof(CGameManager), "OnLevelFinishedLoading",
+                ref failed);
+            var platform = typeof(CGameManager).Assembly.GetType("GA.PlatformManager", false);
+            if (platform != null)
+            {
+                var onSceneLoaded = platform.GetMethod("OnSceneLoaded",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, new[] { typeof(string) }, null);
+                if (onSceneLoaded != null)
                 {
-                    if (PatchSingleton(harmony, closedTypes[i]))
-                    {
-                        patched++;
-                    }
-                }
-                catch (Exception error)
-                {
-                    failed++;
-                    CoopPlugin.Log.LogWarning("singleton latch guard: could not patch "
-                        + closedTypes[i].Name + ": " + error.Message);
+                    patchedMethods += PatchMethod(harmony, onSceneLoaded, ref failed);
                 }
             }
 
-            CoopPlugin.Log.LogInfo("singleton latch guard: patched " + patched
-                + " CSingleton<T> getter(s)"
-                + (failed == 0 ? "" : ", " + failed + " failed")
-                + " so a destroyed latch re-resolves instead of being returned");
+            // Belt and braces: if a scene unload finishes before the new scene's Awake hooks run,
+            // this clears the latches at the earliest possible moment. sceneLoaded covers Start and
+            // Update for any type whose own Awake/OnEnable did not touch a singleton.
+            SceneManager.sceneUnloaded += OnSceneUnloaded;
+            SceneManager.sceneLoaded += OnSceneLoaded;
+
+            Sweep("install");
+            CoopPlugin.Log.LogInfo("singleton latch guard: sweeping " + Latches.Count
+                + " CSingleton<T> latch(es) from " + patchedMethods + " lifecycle hook(s)"
+                + (failed == 0 ? "" : ", " + failed + " patch(es) failed")
+                + "; a destroyed latch is cleared before the game reads it");
         }
 
-        private static bool PatchSingleton(Harmony harmony, Type singletonType)
+        private static int PatchDeclared(Harmony harmony, Type type, string methodName, ref int failed)
         {
-            var isSetField = singletonType.GetField("isSet", StaticPrivate);
-            var instanceField = singletonType.GetField("instance", StaticPrivate);
-            var getter = singletonType.GetProperty("Instance",
-                BindingFlags.Static | BindingFlags.Public)?.GetGetMethod(true);
-            if (isSetField == null || instanceField == null || getter == null)
+            // DeclaredOnly: never patch a shared base implementation (UIScreenBase.Start and
+            // friends) once per derived type, and never patch a generic method.
+            var method = type.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public
+                | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+            if (method == null || method.IsGenericMethodDefinition || method.ContainsGenericParameters)
             {
-                return false;
+                return 0;
+            }
+            return PatchMethod(harmony, method, ref failed);
+        }
+
+        private static int PatchMethod(Harmony harmony, MethodBase method, ref int failed)
+        {
+            if (!Patched.Add(method))
+            {
+                return 0;
             }
 
-            var componentType = singletonType.GetGenericArguments()[0];
-            var helperType = typeof(SingletonLatchRepair<>).MakeGenericType(componentType);
-            helperType.GetMethod("Configure",
-                    BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
-                .Invoke(null, new object[]
-                {
-                    CompileBoolGetter(isSetField),
-                    CompileObjectGetter(instanceField),
-                    CompileBoolSetter(isSetField)
-                });
+            try
+            {
+                harmony.Patch(method,
+                    prefix: new HarmonyMethod(typeof(SingletonLatchGuard), nameof(SweepPrefix)));
+                return 1;
+            }
+            catch (Exception error)
+            {
+                failed++;
+                CoopPlugin.Log.LogWarning("singleton latch guard: could not patch "
+                    + method.DeclaringType?.Name + "." + method.Name + ": " + error.Message);
+                return 0;
+            }
+        }
 
-            var prefix = helperType.GetMethod("Prefix", StaticPrivate);
-            harmony.Patch(getter, prefix: new HarmonyMethod(prefix));
-            return true;
+        private static void OnSceneUnloaded(Scene _) => Sweep("scene unloaded");
+        private static void OnSceneLoaded(Scene _, LoadSceneMode __) => Sweep("scene loaded");
+        private static void SweepPrefix() => Sweep("object init");
+
+        /// <summary>Clear every latch whose cached instance is dead. A live instance is left alone,
+        /// including a DontDestroyOnLoad singleton such as Card3dUISpawner.</summary>
+        private static void Sweep(string site)
+        {
+            if (_sweeping)
+            {
+                return;
+            }
+
+            _sweeping = true;
+            try
+            {
+                for (var i = 0; i < Latches.Count; i++)
+                {
+                    var latch = Latches[i];
+                    try
+                    {
+                        if (!(bool)latch.IsSet.GetValue(null))
+                        {
+                            continue;
+                        }
+
+                        if (latch.Instance.GetValue(null) is UnityEngine.Object live && live != null)
+                        {
+                            continue;
+                        }
+
+                        latch.IsSet.SetValue(null, false);
+                        CoopLog.WarnOnce("singleton:repair:" + latch.Name,
+                            "[singleton] " + latch.Name + " was latched to a destroyed object and "
+                            + "never released it; cleared isSet during " + site
+                            + " so Instance resolves the live scene object instead of handing the "
+                            + "game a dead one.");
+                    }
+                    catch (Exception error)
+                    {
+                        CoopLog.Swallow(error);
+                    }
+                }
+            }
+            finally
+            {
+                _sweeping = false;
+            }
         }
 
         /// <summary>Every distinct <c>CSingleton&lt;T&gt;</c> closed type used by a loaded assembly.
         /// Walking the base chain (rather than matching <c>CSingleton&lt;Foo&gt;</c> exactly) also
         /// covers a type that inherits a game singleton subclass.</summary>
-        private static List<Type> CollectClosedSingletonTypes()
+        private static void CollectLatches()
         {
-            var result = new List<Type>();
             var seen = new HashSet<Type>();
             var singletonDefinition = typeof(CSingleton<>);
             var assemblies = AppDomain.CurrentDomain.GetAssemblies();
@@ -135,8 +212,8 @@ namespace CardShopCoop.Util
                 }
                 catch (ReflectionTypeLoadException error)
                 {
-                    // Harmony/EPL-patched assemblies routinely contain a few types that cannot
-                    // load on one build. The loadable remainder still needs the guard.
+                    // EPL-patched assemblies routinely contain a few types that cannot load on one
+                    // build. The loadable remainder still needs the guard.
                     types = error.Types;
                 }
                 catch (Exception error)
@@ -169,77 +246,28 @@ namespace CardShopCoop.Util
 
                         if (seen.Add(b))
                         {
-                            result.Add(b);
+                            Latches.Add(new Latch(b));
                         }
                         break;
                     }
                 }
             }
-            return result;
         }
 
-        // Expressions, not AccessTools.StaticFieldRefAccess: Harmony's static ref accessor throws
-        // inside its DynamicMethod for a field reached through CSingleton<T> (verified against the
-        // shipped 1.00 Game Pass assembly). Expression.Compile reads the same closed static field
-        // directly and is exercised by the build-time check.
-        private static Func<bool> CompileBoolGetter(FieldInfo field)
-            => Expression.Lambda<Func<bool>>(Expression.Field(null, field)).Compile();
-
-        /// <summary>The instance field's static type is the concrete component; read it as
-        /// <see cref="UnityEngine.Object"/> so the caller gets Unity's destroyed-object null check.</summary>
-        private static Func<UnityEngine.Object> CompileObjectGetter(FieldInfo field)
-            => Expression.Lambda<Func<UnityEngine.Object>>(
-                Expression.Convert(Expression.Field(null, field), typeof(UnityEngine.Object)))
-                .Compile();
-
-        private static Action<bool> CompileBoolSetter(FieldInfo field)
+        private sealed class Latch
         {
-            var value = Expression.Parameter(typeof(bool), "value");
-            return Expression.Lambda<Action<bool>>(
-                Expression.Assign(Expression.Field(null, field), value), value).Compile();
-        }
-    }
+            internal readonly Type ComponentType;
+            internal readonly string Name;
+            internal readonly FieldInfo IsSet;
+            internal readonly FieldInfo Instance;
 
-    /// <summary>
-    /// One closed <c>CSingleton&lt;T&gt;</c> latch: compiled accessors plus the Harmony prefix.
-    /// The accessors live on this closed generic type so the hot getter path does no dictionary
-    /// lookup or reflection - only two delegate calls after the cheap <c>isSet</c> test.
-    /// </summary>
-    internal static class SingletonLatchRepair<T> where T : Component
-    {
-        private static Func<bool> _isSet;
-        private static Func<UnityEngine.Object> _readInstance;
-        private static Action<bool> _writeIsSet;
-
-        internal static void Configure(Func<bool> isSet,
-            Func<UnityEngine.Object> readInstance, Action<bool> writeIsSet)
-        {
-            _isSet = isSet;
-            _readInstance = readInstance;
-            _writeIsSet = writeIsSet;
-        }
-
-        /// <summary>Harmony prefix on <c>CSingleton&lt;T&gt;.Instance</c>. Harmony injects nothing
-        /// here: the original getter still runs afterwards and performs the actual re-resolve.</summary>
-        private static void Prefix()
-        {
-            if (!_isSet())
+            internal Latch(Type singletonType)
             {
-                return;
+                ComponentType = singletonType.GetGenericArguments()[0];
+                Name = ComponentType.Name;
+                IsSet = singletonType.GetField("isSet", StaticAll);
+                Instance = singletonType.GetField("instance", StaticAll);
             }
-
-            // Unity's == is the authority for "the native object is gone", which is exactly the
-            // state a latch holds after its scene unloads.
-            if (_readInstance() != null)
-            {
-                return;
-            }
-
-            _writeIsSet(false);
-            CoopLog.WarnOnce("singleton:repair:" + typeof(T).Name,
-                "[singleton] " + typeof(T).Name + " was latched to a destroyed object and never "
-                + "released it; cleared isSet so Instance resolves the live scene object instead "
-                + "of handing the game a dead one.");
         }
     }
 }
