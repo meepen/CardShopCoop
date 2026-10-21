@@ -213,6 +213,12 @@ namespace CardShopCoop
         /// CEventPlayer_FinishHideLoadingScreen, with GameInstance.m_HasFinishHideLoadingScreen as
         /// a backstop (see <see cref="UpdateRunInBackground"/>).</summary>
         private bool _gameLoading;
+
+        /// <summary>The latest invite accepted while a load was in flight. The load's destination
+        /// decides whether it can be joined (Title) or must be declined (a shop), so it is held
+        /// until the load finishes.</summary>
+        private INetworkingBackend _deferredInviteBackend;
+        private FieldValues _deferredInviteValues;
         private int _localConnectionId = -1;
         private int _sessionGeneration = 1;
         private ulong _autoJoinSteamLobby;
@@ -482,6 +488,8 @@ namespace CardShopCoop
         private void BeginSession(CoopRole role)
         {
             _shutdownCompleted = false;
+            _deferredInviteBackend = null;
+            _deferredInviteValues = null;
             _dispatcher.Start();
             Interlocked.Increment(ref _sessionGeneration);
             Role = role;
@@ -612,6 +620,17 @@ namespace CardShopCoop
         /// </summary>
         private void HandleInviteOnMainThread(INetworkingBackend backend, FieldValues values)
         {
+            if (Role == CoopRole.None && _gameLoading)
+            {
+                // Title -> shop and shop -> Title look identical during the load. Defer until the
+                // destination is known: joining a load in flight would start a session that
+                // OnSceneLoaded immediately kills.
+                _deferredInviteBackend = backend;
+                _deferredInviteValues = values;
+                CoopPlugin.Log.LogInfo("deferring an inbound join request until the load finishes");
+                return;
+            }
+
             if (!CanJoinFromHere())
             {
                 // Joining borrows the host's world, which only replaces the world cleanly from the
@@ -1565,6 +1584,8 @@ namespace CardShopCoop
             Runtime.SceneRef.ClearAll();
             _dispatchBuffer.Clear();
             _dispatchRejectedConnections.Clear();
+            _deferredInviteBackend = null;
+            _deferredInviteValues = null;
             _localConnectionId = -1;
             _sessionInGame = false;
             HostPassword = "";
@@ -1611,6 +1632,7 @@ namespace CardShopCoop
             if (_gameLoading && GameInstance.m_HasFinishHideLoadingScreen)
             {
                 _gameLoading = false;
+                ProcessDeferredInvite();
             }
 
             Application.runInBackground = Role != CoopRole.None || _gameLoading;
@@ -2077,6 +2099,23 @@ namespace CardShopCoop
         private void OnGameLoadingFinished(CEventPlayer_FinishHideLoadingScreen _)
         {
             _gameLoading = false;
+            ProcessDeferredInvite();
+        }
+
+        /// <summary>Applies the invite held across a load, once the destination is known. At the
+        /// Title screen this joins; in a shop the normal admission guard declines it.</summary>
+        private void ProcessDeferredInvite()
+        {
+            if (_deferredInviteBackend == null || _gameLoading)
+            {
+                return;
+            }
+
+            var backend = _deferredInviteBackend;
+            var values = _deferredInviteValues;
+            _deferredInviteBackend = null;
+            _deferredInviteValues = null;
+            HandleInviteOnMainThread(backend, values);
         }
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
@@ -2086,6 +2125,20 @@ namespace CardShopCoop
             // subscriptions follow the instance that is dispatching.
             RegisterEventListeners();
             Runtime.SceneRef.NotifySceneLoaded(scene);
+
+            if (_gameLoading && scene.name == "Title"
+                && LoadingScreen.m_Instance != null
+                && !LoadingScreen.m_Instance.gameObject.activeInHierarchy)
+            {
+                // ShelfManager.CheckLoadCorrect deactivates the LoadingScreen before it can run
+                // FinishLoading's fade-out, so neither the finish event nor the static flag ever
+                // arrives. The Title scene is the end of that recovery path; clear the guard.
+                CoopPlugin.Log.LogWarning(
+                    "coop: loading screen was torn down before it finished; clearing the load guard");
+                _gameLoading = false;
+                ProcessDeferredInvite();
+            }
+
             if (scene.name == "Title" && Role == CoopRole.Client && Net != null)
             {
                 Shutdown("left the session");
