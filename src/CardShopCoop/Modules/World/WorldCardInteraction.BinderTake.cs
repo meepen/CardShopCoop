@@ -16,10 +16,10 @@ namespace CardShopCoop.Modules.World
     /// The card object cannot be captured where the prediction is registered: the game reduces
     /// the collection BEFORE it moves the card into the hand. So the two binder methods that can
     /// end in a hand card open a scope; the observer-side prediction binds itself while the scope
-    /// runs, and the scope's finalizer pairs it with whatever the hold list actually gained. A
-    /// reduce that only fed a binder screen (grading selection, bulk donation, deck edit) adds
-    /// nothing to the hand and leaves its binding empty, so its refusal keeps the collection-only
-    /// behavior.
+    /// runs, and the scope's finalizer pairs it with whatever the hold list actually gained - or
+    /// the display slot vanilla auto-placed it on. A reduce that only fed a binder screen
+    /// (grading selection, bulk donation, deck edit) adds nothing to the hand and leaves its
+    /// binding empty, so its refusal keeps the collection-only behavior.
     ///
     /// The HOST's own take never travels as a prediction - the host is the authority and vanilla
     /// already performed it - so when the host loses the same race (a guest's accepted removal
@@ -46,6 +46,10 @@ namespace CardShopCoop.Modules.World
 
             /// <summary>The card a refused host take moved, kept for the despawn log.</summary>
             internal CardData Card;
+
+            /// <summary>Set when the card was auto-placed on a display compartment instead of
+            /// staying in the hand: the slot to empty if the prediction is refused.</summary>
+            internal InteractableCardCompartment Compartment;
         }
 
         /// <summary>One invocation of a binder method that can put a card into the hand. The held
@@ -59,6 +63,15 @@ namespace CardShopCoop.Modules.World
             internal BinderTakeScope Previous;
             internal List<InteractableCard3d> HeldBefore;
             internal readonly List<BinderTakeBinding> Bindings = new();
+            internal readonly List<BinderPlacement> Placements = new();
+        }
+
+        /// <summary>A card the game auto-placed on a display during a binder take (vanilla
+        /// EnterHoldCardMode places the current hold card when a display slot was primed).</summary>
+        private sealed class BinderPlacement
+        {
+            internal InteractableCard3d Card;
+            internal InteractableCardCompartment Compartment;
         }
 
         /// <summary>One in-flight client graded removal. <see cref="Superseded"/> means the shared
@@ -133,6 +146,23 @@ namespace CardShopCoop.Modules.World
 
                 scope.Bindings[i].Card3d = held[candidate];
                 candidate++;
+            }
+
+            // A card auto-placed on a primed display never enters the held list. Pair the
+            // placements recorded for this scope with the bindings the held diff left empty.
+            var placedIndex = 0;
+            for (var i = 0;
+                i < scope.Bindings.Count && placedIndex < scope.Placements.Count; i++)
+            {
+                var binding = scope.Bindings[i];
+                if (binding.Card3d != null)
+                {
+                    continue;
+                }
+
+                var placement = scope.Placements[placedIndex++];
+                binding.Card3d = placement.Card;
+                binding.Compartment = placement.Compartment;
             }
 
             // A refused HOST take spawned a hand card the album does not own (see
@@ -237,9 +267,38 @@ namespace CardShopCoop.Modules.World
             binding.Card = SnapshotCard(card);
         }
 
+        /// <summary>Records a card the game auto-placed on a display while a binder take was open.
+        /// Only cards that were not already in the hand at scope start can be this take:
+        /// EnterHoldCardMode places slot 0, which may be an older held card.</summary>
+        internal static void RecordBinderPlacement(InteractableCardCompartment compartment,
+            InteractableCard3d card)
+        {
+            var scope = _binderTakeScope;
+            if (scope == null || scope.HeldBefore == null || compartment == null || card == null
+                || scope.Bindings.Count == 0 || scope.HeldBefore.Contains(card))
+            {
+                return;
+            }
+
+            for (var i = 0; i < scope.Placements.Count; i++)
+            {
+                if (ReferenceEquals(scope.Placements[i].Card, card))
+                {
+                    return;
+                }
+            }
+
+            scope.Placements.Add(new BinderPlacement
+            {
+                Card = card,
+                Compartment = compartment,
+            });
+        }
+
         /// <summary>Client: the host refused a binder pick - remove the card the game spawned
-        /// into the hand through the game's own teardown. A card the player already moved out of
-        /// the hand is left alone: its destination's own sync owns it now.</summary>
+        /// into the hand through the game's own teardown, or empty the display slot when vanilla
+        /// auto-placed it there. A card the player moved somewhere else is left alone: its
+        /// destination's own sync owns it now.</summary>
         private static void DespawnRejectedBinderTake(BinderTakeBinding binding, CardData card)
         {
             if (binding == null)
@@ -249,8 +308,14 @@ namespace CardShopCoop.Modules.World
 
             var card3d = binding.Card3d;
             binding.Card3d = null;
-            if (card3d == null || !card3d || !WorldCardDisplay.IsHeld(card3d))
+            if (card3d == null || !card3d)
             {
+                return;
+            }
+
+            if (!WorldCardDisplay.IsHeld(card3d))
+            {
+                DespawnPlacedBinderTake(binding, card3d, card);
                 return;
             }
 
@@ -264,6 +329,28 @@ namespace CardShopCoop.Modules.World
 
             CoopPlugin.Log.LogInfo("binder pick refused: removed " + CardIdent(card)
                 + " from the hand.");
+        }
+
+        /// <summary>Client: a refused take was auto-placed on a display slot (vanilla
+        /// EnterHoldCardMode's primed-display branch). Empty that slot through the compartment's
+        /// own teardown, then destroy the card object and return its UI.</summary>
+        private static void DespawnPlacedBinderTake(BinderTakeBinding binding,
+            InteractableCard3d card3d, CardData card)
+        {
+            var compartment = binding.Compartment;
+            binding.Compartment = null;
+            if (compartment == null || compartment.m_StoredCardList == null
+                || compartment.m_StoredCardList.Count == 0
+                || !ReferenceEquals(compartment.m_StoredCardList[0], card3d))
+            {
+                // The player moved it after the take; that destination owns it now.
+                return;
+            }
+
+            compartment.RemoveCardFromShelf(null, null);
+            card3d.OnDestroyed();
+            CoopPlugin.Log.LogInfo("binder pick refused: removed " + CardIdent(card)
+                + " from a display slot.");
         }
 
         /// <summary>Client: tracks one in-flight graded removal so a competing accepted removal of

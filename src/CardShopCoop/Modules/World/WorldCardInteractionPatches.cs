@@ -28,6 +28,7 @@ namespace CardShopCoop.Modules.World
             harmony.CreateClassProcessor(typeof(RemoveGradedCardPatch)).Patch();
             harmony.CreateClassProcessor(typeof(BinderTakeScopePatch)).Patch();
             harmony.CreateClassProcessor(typeof(BinderCloseTakeScopePatch)).Patch();
+            harmony.CreateClassProcessor(typeof(BinderPlacementScopePatch)).Patch();
         }
 
         private static WorldCardInteraction Current => WorldHostBehaviour.ActiveCards
@@ -327,6 +328,18 @@ namespace CardShopCoop.Modules.World
 
             [HarmonyFinalizer]
             private static void Finalizer() => WorldCardInteraction.EndBinderTake();
+        }
+
+        /// <summary>Captures a card the game auto-placed on a display during a binder take
+        /// (vanilla <c>EnterHoldCardMode</c> places the current hold card when a slot was primed).
+        /// A refused client prediction then empties that slot instead of leaving a duplicate.</summary>
+        [HarmonyPatch(typeof(InteractableCardCompartment), "SetCardOnShelf")]
+        private static class BinderPlacementScopePatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(InteractableCardCompartment __instance,
+                InteractableCard3d card)
+                => WorldCardInteraction.RecordBinderPlacement(__instance, card);
         }
     }
 }
