@@ -16,7 +16,7 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 - Fixed the co-op window getting cut off when a label was too wide.
 - Added a Copy lobby id button under Invite friend.
 - Fixed errors from the mod touching the cursor before a shop level loaded.
-- Moved module toggles to the HIDDEN tab and added an entity count debug line.
+- Moved module toggles to the HIDDEN tab.
 
 ## 2.1.1
 - Fixed: the option to host via Steam could disappear entirely, leaving only IP / LAN. Thanks @navsigda on Discord for the report!

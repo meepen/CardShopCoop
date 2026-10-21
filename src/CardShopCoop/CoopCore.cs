@@ -612,12 +612,25 @@ namespace CardShopCoop
         /// </summary>
         private void HandleInviteOnMainThread(INetworkingBackend backend, FieldValues values)
         {
+            // A join that is still connecting has no session to protect. Steam has already
+            // consumed the invite, so refusing it would make the player ask for another one even
+            // though they never got into a game. Tear the pending attempt down the same way the
+            // Leave button does, then start the new one below.
+            if (Role == CoopRole.Client && (Net == null || Net.ConnectionCount == 0))
+            {
+                CoopPlugin.Log.LogInfo("replacing the pending join with a new invite");
+                Disconnect();
+            }
+
             if (Role != CoopRole.None)
             {
                 CoopPlugin.Log.LogInfo("ignoring an inbound join request - already in a session");
+                var hosting = Role == CoopRole.Host;
                 UI.CoopAlert.Show(
-                    "You're already in a co-op session.",
-                    "Stop hosting or leave the session before accepting a friend's invite.",
+                    hosting ? "You're already hosting a co-op session."
+                        : "You're already in a co-op session.",
+                    hosting ? "Stop hosting before accepting a friend's invite."
+                        : "Leave the session before accepting a friend's invite.",
                     header: "CO-OP INVITE");
                 return;
             }

@@ -4,6 +4,7 @@ using System.Reflection;
 using CardShopCoop.Modules.Decoration;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
+using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -103,9 +104,10 @@ namespace CardShopCoop.Modules.World
         private const float PreviewDistance = 3f;
         private const float PreviewOffsetUp = -0.1f;
 
-        /// <summary>Reach of the move raycast that snaps a held piece onto the surface under the
-        /// crosshair: vanilla <c>InteractionPlayerController.m_RayDistance</c> (5) times 1.5.</summary>
-        private const float MoveRayDistance = 7.5f;
+        /// <summary>Vanilla's move raycast reaches <c>InteractionPlayerController.m_RayDistance * 1.5</c>.
+        /// Read the live field so a reach mod is mirrored; the vanilla default is 5.</summary>
+        private const float DefaultRayDistance = 5f;
+        private const float MoveRayReach = 1.5f;
 
         private static readonly FieldInfo MovingObjectField =
             AccessTools.Field(typeof(InteractableObject), "m_IsMovingObject");
@@ -552,8 +554,10 @@ namespace CardShopCoop.Modules.World
             var mask = obj != null && obj.m_IsDecorationVertical
                 ? LayerMask.GetMask("DecorationBlocker", "DecorationBlockerRaycast")
                 : LayerMask.GetMask("ShopModel", "Ground", "Glass", "Obstacles");
+            var reach = (SceneRef<InteractionPlayerController>.Get()?.m_RayDistance
+                ?? DefaultRayDistance) * MoveRayReach;
             if (mask != 0 && Physics.Raycast(new Ray(cameraPosition, forward), out var hit,
-                MoveRayDistance, mask))
+                reach, mask))
             {
                 target = hit.point;
                 normal = hit.normal;

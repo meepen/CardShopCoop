@@ -648,7 +648,8 @@ namespace CardShopCoop.Modules.Report
                 return 0;
             }
 
-            return Mathf.Max(1, Mathf.CeilToInt(_nextDayCountdownEnd - Time.time));
+            var remaining = _nextDayCountdownEnd - Time.time;
+            return remaining <= 0f ? 0 : Mathf.Max(1, Mathf.CeilToInt(remaining));
         }
 
         private void ApplyNextDayWaitUi()

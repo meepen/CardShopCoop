@@ -140,11 +140,6 @@ namespace CardShopCoop.UI
                 _nameField = core.EffectivePlayerName;
             }
 
-            // Logs the live entity census every 30 s. Draw runs every OnGUI frame (the HUD path
-            // below draws even when the window is closed), so this keeps logging regardless of
-            // whether the SETTINGS tab is open. See EntityCensus.
-            EntityCensus.Tick();
-
             // ---- HUD overlays (outside the window) ----
             if (!Visible)
             {
@@ -600,15 +595,6 @@ namespace CardShopCoop.UI
             // label would push the whole scroll content out horizontally instead of folding onto a
             // second row.
             GUILayout.Label("Settings are saved to BepInEx/config/dev.meepen.cardshopcoop.cfg.", CoopTheme.LabelDimWrap);
-
-            // Bottom-of-panel diagnostics: a count that climbs on its own is the runaway-spawn /
-            // ghost-box symptom made visible. Also logged every 30 s (see EntityCensus.Tick).
-            GUILayout.Space(8f);
-            GUILayout.Label("ENTITIES (DEBUG)", CoopTheme.SectionHeader);
-            GUILayout.Label(EntityCensus.Text(), CoopTheme.LabelDimWrap);
-            GUILayout.Label("Live scene counts, rebuilt about once a second and logged every "
-                + "30 seconds. Watch for one that climbs by itself - that is the entity leak.",
-                CoopTheme.LabelDimWrap);
         }
 
         private static bool HiddenCategoryVisible()

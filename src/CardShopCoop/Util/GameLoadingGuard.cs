@@ -1,3 +1,4 @@
+using System;
 using HarmonyLib;
 
 namespace CardShopCoop.Util
@@ -33,8 +34,18 @@ namespace CardShopCoop.Util
                 return;
             }
 
-            harmony.Patch(original,
-                prefix: new HarmonyMethod(typeof(GameLoadingGuard), nameof(ReportLoadingScreenOpen)));
+            try
+            {
+                harmony.Patch(original,
+                    prefix: new HarmonyMethod(typeof(GameLoadingGuard), nameof(ReportLoadingScreenOpen)));
+            }
+            catch (Exception error)
+            {
+                // Optional guard: losing it only means an unfocused load can still pause. It must
+                // never abort CoopCore.Awake and disable co-op for the run.
+                CoopPlugin.Log.LogWarning("[loading] patch failed for LoadingScreen.OpenScreen: "
+                    + error.Message);
+            }
         }
 
         private static void ReportLoadingScreenOpen()
