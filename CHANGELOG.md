@@ -29,6 +29,7 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 - Fixed decorations briefly going missing or duplicating after a guest reloads the world.
 - Fixed a rejected decoration placement leaving a player stuck in placement mode or taking the item out of inventory.
 - Fixed a failed decoration or expansion purchase still charging the host.
+- The other player's shop sign now updates as a new shop name is typed, before it is confirmed. Only one player can rename the shop at a time, so two players cannot fight over the name.
 
 ## 2.1.1
 - Fixed: the option to host via Steam could disappear entirely, leaving only IP / LAN. Thanks @navsigda on Discord for the report!

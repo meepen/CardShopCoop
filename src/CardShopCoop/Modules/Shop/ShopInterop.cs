@@ -135,7 +135,85 @@ namespace CardShopCoop.Modules.Shop
             return applied;
         }
 
-        /// <summary>Close the client UI without running host-owned tutorial and entitlement code.</summary>
+        /// <summary>True while this renamer is still the tutorial's first-shop naming step. A
+        /// blocked tutorial auto-open uses this to decide whether it still needs to retry.</summary>
+        internal static bool IsTutorialRenamer(ShopRenamer renamer)
+            => renamer != null && Convert.ToBoolean(FiIsTutorial.GetValue(renamer));
+
+        /// <summary>The screens are separate objects from the controller, which is routinely
+        /// inactive during normal play. Test the screens themselves so callers can tell whether
+        /// the rename UI is actually open.</summary>
+        internal static bool HasOpenRenameScreen(ShopRenamer renamer)
+        {
+            if (renamer == null)
+            {
+                return false;
+            }
+
+            return (renamer.m_IntroScreen != null && renamer.m_IntroScreen.activeSelf)
+                || (renamer.m_NameScreen != null && renamer.m_NameScreen.activeSelf)
+                || (renamer.m_ConfirmNameScreen != null && renamer.m_ConfirmNameScreen.activeSelf);
+        }
+
+        /// <summary>True when any scene renamer has one of its screens open, including a UI that
+        /// was already open before this session's behaviour started.</summary>
+        internal static bool HasAnyOpenRenameScreen()
+        {
+            var renamers = FindSignRenamers();
+            for (var i = 0; i < renamers.Length; i++)
+            {
+                if (HasOpenRenameScreen(renamers[i]))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>The scene renamer still waiting for the tutorial's first shop name, including
+        /// the routinely inactive controller whose screen objects are separate.</summary>
+        internal static ShopRenamer FindTutorialRenamer()
+        {
+            var renamers = FindSignRenamers();
+            for (var i = 0; i < renamers.Length; i++)
+            {
+                if (IsTutorialRenamer(renamers[i]))
+                {
+                    return renamers[i];
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Paints an unconfirmed editor draft. The input field is deliberately untouched:
+        /// only the editor's local vanilla path writes it, so remote echoes cannot move the
+        /// editor's caret.</summary>
+        internal static bool ApplyPreviewText(ShopRenamer renamer, string name)
+        {
+            var applied = false;
+            if (renamer.m_ShopName != null)
+            {
+                renamer.m_ShopName.text = name;
+                applied = true;
+            }
+            if (renamer.m_SetName != null)
+            {
+                renamer.m_SetName.text = name;
+                applied = true;
+            }
+            if (renamer.m_SetNameInputDisplay != null)
+            {
+                renamer.m_SetNameInputDisplay.text = name;
+                applied = true;
+            }
+            return applied;
+        }
+
+        /// <summary>Close the client UI without running host-owned tutorial and entitlement code.
+        /// Only touches UI modes when one of this renamer's screens was actually open, so a
+        /// rename broadcast cannot yank a player out of an unrelated screen.</summary>
         internal static void CloseRenameUi(ShopRenamer renamer)
         {
             if (renamer == null)
@@ -143,14 +221,39 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
+            var hadIntro = renamer.m_IntroScreen != null && renamer.m_IntroScreen.activeSelf;
+            var hadName = renamer.m_NameScreen != null && renamer.m_NameScreen.activeSelf;
+            var hadConfirm = renamer.m_ConfirmNameScreen != null
+                && renamer.m_ConfirmNameScreen.activeSelf;
+
             renamer.m_IntroScreen?.SetActive(false);
             renamer.m_NameScreen?.SetActive(false);
             renamer.m_ConfirmNameScreen?.SetActive(false);
             renamer.gameObject.SetActive(false);
+            if (!hadIntro && !hadName && !hadConfirm)
+            {
+                return;
+            }
+
+            if (hadConfirm)
+            {
+                ControllerScreenUIExtManager.OnCloseScreen(
+                    renamer.m_ControllerScreenUIExtension_ConfirmNameScreen);
+            }
+            if (hadName)
+            {
+                ControllerScreenUIExtManager.OnCloseScreen(
+                    renamer.m_ControllerScreenUIExtension_NameScreen);
+            }
+            if (hadIntro)
+            {
+                ControllerScreenUIExtManager.OnCloseScreen(
+                    renamer.m_ControllerScreenUIExtension_IntroScreen);
+            }
+
             SceneRef<InteractionPlayerController>.Get()?.ExitUIMode();
             SceneRef<InteractionPlayerController>.Get()?.ExitLockMoveMode();
             GameUIScreen.SetGameUIVisible(true);
-            ControllerScreenUIExtManager.OnCloseScreen(renamer.m_ControllerScreenUIExtension_ConfirmNameScreen);
         }
 
         /// <summary>Replays the side effects that vanilla performs when the tutorial shop is
