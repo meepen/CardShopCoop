@@ -157,14 +157,20 @@ namespace CardShopCoop.Modules.Shop
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
             _shutdown = true;
             _pendingName = null;
             _pendingInitial = false;
             _pendingUnnamed = false;
             _context?.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
             _harmony?.UnpatchSelf();
             _harmony = null;
             _context = null;

@@ -32,7 +32,10 @@ namespace CardShopCoop.Modules.Decoration
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -55,6 +58,7 @@ namespace CardShopCoop.Modules.Decoration
                 _harmony.CreateClassProcessor(typeof(PlaceAttemptPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(PlacedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(RemovePatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(LockedRoomHiddenPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(ShelfReadyPatch)).Patch();
             }
             catch (Exception exception)
@@ -68,10 +72,18 @@ namespace CardShopCoop.Modules.Decoration
                     SceneManager.sceneLoaded -= OnSceneLoaded;
                 }
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 PredictionApi.PredictionRetired -= OnPredictionRetired;
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 ResetSessionState();
                 DecorationInterop.Reset();
                 _context = null;
@@ -83,7 +95,10 @@ namespace CardShopCoop.Modules.Decoration
         private void HandleState(MessageContext context, DecorationStateMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _pendingState = message;
             TryApplyPending();
@@ -93,10 +108,13 @@ namespace CardShopCoop.Modules.Decoration
         private void HandleDelta(MessageContext context, DecorationDeltaMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
             // Take the predicted preview out of the map before the authoritative apply runs. On
             // success the apply adopts it; on rollback the prediction is retired without this
             // delta and the retire handler discards it. Either way the preview is claimed once.
+
             InteractableObject preview = null;
             if (message.Action == DecorationActions.Place
                 && _placementPreviews.TryGetValue(message.PredictionId, out var tracked))
@@ -116,7 +134,10 @@ namespace CardShopCoop.Modules.Decoration
         private void OnPredictionRetired(Guid predictionId)
         {
             if (!_placementPreviews.TryGetValue(predictionId, out var preview))
+            {
                 return;
+            }
+
 
             _placementPreviews.Remove(predictionId);
             DecorationInterop.DiscardPreview(preview);
@@ -126,7 +147,11 @@ namespace CardShopCoop.Modules.Decoration
             InteractableObject preview = null)
         {
             if (_active != null)
+            {
                 _active._applyingState++;
+            }
+
+
             try
             {
                 DecorationInterop.ApplyDelta(message, preview);
@@ -134,25 +159,43 @@ namespace CardShopCoop.Modules.Decoration
             finally
             {
                 if (_active != null)
+                {
                     _active._applyingState--;
+                }
+
             }
         }
 
         private void TryApplyPending()
         {
-            if (_shutdown || _pendingState == null || _context == null || !_context.InGame()
+            if (_shutdown || _context == null || !_context.InGame()
                 || !DecorationInterop.IsSceneReady())
+            {
                 return;
+            }
+
+
+            if (_pendingState == null && !DecorationInterop.HasDeferredPoses)
+            {
+                return;
+            }
+
 
             _applyingState++;
             try
             {
-                // A prediction that is still awaiting its host decision owns its preview. A
-                // rejection state built before that intent was applied must not delete it; the
-                // preview's own echo or rollback settles it.
-                DecorationInterop.ApplySnapshot(_pendingState,
-                    keepUnlisted: _placementPreviews.ContainsValue);
-                _pendingState = null;
+                if (_pendingState != null)
+                {
+                    // A prediction that is still awaiting its host decision owns its preview. A
+                    // rejection state built before that intent was applied must not delete it; the
+                    // preview's own echo or rollback settles it.
+                    DecorationInterop.ApplySnapshot(_pendingState,
+                        keepUnlisted: _placementPreviews.ContainsValue);
+                    _pendingState = null;
+                }
+                // A delta that arrived before this peer could materialise its pose is retried from
+                // the same lifecycle hooks that make the scene usable. No timer, no polling.
+                DecorationInterop.RetryDeferred();
             }
             finally
             {
@@ -163,7 +206,10 @@ namespace CardShopCoop.Modules.Decoration
         private void Send(DecorationIntentMessage message)
         {
             if (_shutdown || !_joined || _context == null || !_context.InGame() || message == null)
+            {
                 return;
+            }
+
 
             _context.Send(1, message);
         }
@@ -178,13 +224,21 @@ namespace CardShopCoop.Modules.Decoration
             var client = _active;
             if (client == null || client._shutdown || !client._joined || client._context == null
                 || !client._context.InGame())
+            {
                 return;
+            }
+
+
             PredictionApi.Predict("decoration",
                 predictionId =>
                 {
                     message.PredictionId = predictionId;
                     if (preview != null)
+                    {
                         client._placementPreviews[predictionId] = preview;
+                    }
+
+
                     client._context.Send(1, message);
                 }, apply, undo);
         }
@@ -194,14 +248,20 @@ namespace CardShopCoop.Modules.Decoration
         private static void Charge(float amount)
         {
             if (amount > 0.0001f)
+            {
                 CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(amount));
+            }
+
         }
 
         /// <summary>Reverses the wallet half of a rejected buy through the game's own coin event.</summary>
         private static void Refund(float amount)
         {
             if (amount > 0.0001f)
+            {
                 CEventManager.QueueEvent(new CEventPlayer_AddCoin(amount, true));
+            }
+
         }
 
         private static DecorationStateMessage SnapshotMessage(DecorationSnapshot snapshot)
@@ -244,7 +304,11 @@ namespace CardShopCoop.Modules.Decoration
                     : null,
             };
             if (message.Action == DecorationActions.BuyItemDecoration)
+            {
                 predicted.InventoryCount = DecorationInterop.InventoryCount(message.DecorationType) + 1;
+            }
+
+
             ApplyDelta(predicted);
             // A local move is still in the vanilla move lifecycle. Keep the local preview visible
             // until the hook exits it; the authoritative delta will create/resolve its stable id.
@@ -257,8 +321,21 @@ namespace CardShopCoop.Modules.Decoration
 
         private static void UndoState(DecorationSnapshot before)
         {
+            if (before == null || before.Generation != DecorationInterop.Generation)
+            {
+                // A guest reload can cross this action: the snapshot describes the outgoing world,
+                // so its poses and inventory must not be applied to the new one. The authoritative
+                // state that follows the rollback is the current world's truth.
+                CoopPlugin.Log.LogInfo("decoration rollback skipped: its scene is gone.");
+                return;
+            }
+
             if (_active != null)
+            {
                 _active._applyingState++;
+            }
+
+
             try
             {
                 // A rollback restores owned state, but must not delete pieces the host already
@@ -268,7 +345,10 @@ namespace CardShopCoop.Modules.Decoration
             finally
             {
                 if (_active != null)
+                {
                     _active._applyingState--;
+                }
+
             }
         }
 
@@ -278,6 +358,10 @@ namespace CardShopCoop.Modules.Decoration
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
             DecorationInterop.Reset();
+            // Previews are objects from the outgoing scene. An accept that arrives after the
+            // reload must resolve or spawn the host's piece instead of adopting a destroyed one.
+            _placementPreviews.Clear();
+            _placingInstance = null;
             TryApplyPending();
         }
 
@@ -307,13 +391,20 @@ namespace CardShopCoop.Modules.Decoration
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
         {
             if (connection?.Id == 1)
+            {
                 ResetSessionState();
+            }
+
         }
 
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             PredictionApi.PredictionRetired -= OnPredictionRetired;
@@ -322,7 +413,11 @@ namespace CardShopCoop.Modules.Decoration
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             ResetSessionState();
             DecorationInterop.Reset();
             _context = null;
@@ -348,7 +443,11 @@ namespace CardShopCoop.Modules.Decoration
                 __state = null;
                 if (!IsClientReady() || _active._applyingState != 0
                     || PredictionApi.IsReconciling)
+                {
                     return;
+                }
+
+
                 __state = new State
                 {
                     Before = DecorationInterop.Snapshot(authoritative: false),
@@ -363,7 +462,11 @@ namespace CardShopCoop.Modules.Decoration
             {
                 if (__state == null || !IsClientReady() || _active._applyingState != 0
                     || PredictionApi.IsReconciling)
+                {
                     return;
+                }
+
+
                 var message = new DecorationIntentMessage
                 {
                     Action = DecorationActions.Equip,
@@ -393,7 +496,11 @@ namespace CardShopCoop.Modules.Decoration
         {
             state = default;
             if (!IsClientReady())
+            {
                 return;
+            }
+
+
             state.Armed = true;
             state.Before = DecorationInterop.Snapshot(authoritative: false);
             // The wallet event is only queued by the vanilla buy (it runs later), but the report
@@ -406,7 +513,10 @@ namespace CardShopCoop.Modules.Decoration
         private static void ReleaseBuy(BuyCapture state)
         {
             if (state.Armed)
+            {
                 EconomyActionScope.Exit();
+            }
+
         }
 
         /// <summary>Completes an observed vanilla buy: the game already purchased and charged, so
@@ -415,11 +525,18 @@ namespace CardShopCoop.Modules.Decoration
         private static void ObserveBuy(DecorationIntentMessage message, BuyCapture state)
         {
             if (!state.Armed)
+            {
                 return;
+            }
+
+
             var client = _active;
             if (client == null || client._shutdown || !client._joined || client._context == null
                 || !client._context.InGame())
+            {
                 return;
+            }
+
 
             var spent = (state.UpgradeCostBefore
                 - CPlayerData.m_GameReportDataCollectPermanent.upgradeCost)
@@ -427,7 +544,10 @@ namespace CardShopCoop.Modules.Decoration
                     - CPlayerData.m_GameReportDataCollectPermanent.supplyCost);
             // The vanilla buy charges only when it succeeds; no charge means nothing happened.
             if (spent <= 0.0001f)
+            {
                 return;
+            }
+
 
             var before = state.Before;
             Predict(message,
@@ -450,11 +570,12 @@ namespace CardShopCoop.Modules.Decoration
             private static void Prefix(out BuyCapture __state) => CaptureBuy(out __state);
 
             [HarmonyPostfix]
-            private static void Postfix(int shopDecoIndex, BuyCapture __state)
+            private static void Postfix(ShopBuyDecoUIScreen __instance, int shopDecoIndex,
+                BuyCapture __state)
                 => ObserveBuy(new DecorationIntentMessage
                 {
                     Action = DecorationActions.BuyShopDecoration,
-                    Category = DecorationInterop.CategoryFor((ShopBuyDecoUIScreen)null),
+                    Category = DecorationInterop.CategoryFor(__instance),
                     Index = shopDecoIndex,
                 }, __state);
 
@@ -495,7 +616,11 @@ namespace CardShopCoop.Modules.Decoration
                     || PredictionApi.IsReconciling || __instance == null
                     || __instance.m_DecoObjectType == EDecoObject.None
                     || !__instance.GetIsMovingObject())
+                {
                     return;
+                }
+
+
                 _placingInstance = __instance;
             }
 
@@ -520,7 +645,10 @@ namespace CardShopCoop.Modules.Decoration
                     || !ReferenceEquals(_placingInstance, __instance)
                     || !IsClientReady() || client._applyingState != 0
                     || PredictionApi.IsReconciling)
+                {
                     return;
+                }
+
 
                 var pose = DecorationInterop.ReadPose(__instance);
                 var objectId = DecorationInterop.ClientIdFor(__instance);
@@ -568,10 +696,18 @@ namespace CardShopCoop.Modules.Decoration
                 __state = null;
                 if (!IsClientReady() || _active._applyingState != 0 || __instance == null
                     || __instance.m_DecoObjectType == EDecoObject.None)
+                {
                     return;
+                }
+
+
                 var objectId = DecorationInterop.ClientIdFor(__instance);
                 if (objectId <= 0)
+                {
                     return;
+                }
+
+
                 __state = new State
                 {
                     Before = DecorationInterop.Snapshot(authoritative: false),
@@ -586,7 +722,11 @@ namespace CardShopCoop.Modules.Decoration
             {
                 if (__state == null || !IsClientReady() || _active._applyingState != 0
                     || PredictionApi.IsReconciling)
+                {
                     return;
+                }
+
+
                 var message = new DecorationIntentMessage
                 {
                     Action = DecorationActions.Remove,
@@ -603,6 +743,19 @@ namespace CardShopCoop.Modules.Decoration
                     DecorationInterop.RemoveLocalPlacedObject(instance);
                 }, () => UndoState(__state.Before));
             }
+        }
+
+        /// <summary>Room and warehouse expansion hide the blocker and return its wall decorations
+        /// to the inventory on the acting peer. The host owns that removal and publishes a Remove
+        /// delta with the resulting count, so skip the guest's optimistic removal: a rejected
+        /// purchase then leaves the pieces in place instead of deleting them locally for good.
+        /// Non-decoration objects keep vanilla's furniture box-up, which the World module owns.</summary>
+        [HarmonyPatch(typeof(InteractableObject), "OnLockedRoomHidden")]
+        private static class LockedRoomHiddenPatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix(InteractableObject __instance)
+                => __instance == null || __instance.m_DecoObjectType == EDecoObject.None;
         }
 
         [HarmonyPatch(typeof(ShelfManager), "Awake")]

@@ -46,7 +46,7 @@ namespace CardShopCoop.Modules.World
             // this key is undone and replayed rather than transiently despawned by our echo of this
             // list; an empty/unknown id still just applies.
             if (message.PredictionId == Guid.Empty
-                || !Modules.Prediction.PredictionApi.IsPending(message.PredictionId))
+                || !Prediction.PredictionApi.IsPending(message.PredictionId))
             {
                 // A state nobody predicted supersedes every snapshot captured before it. A state
                 // that resolves one of our own edits must not: the sibling predictions whose undos

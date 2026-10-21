@@ -5,7 +5,6 @@ using CardShopCoop.Net.Protocol;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Api;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.Presence

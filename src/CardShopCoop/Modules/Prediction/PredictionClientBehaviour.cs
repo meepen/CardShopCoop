@@ -12,7 +12,11 @@ namespace CardShopCoop.Modules.Prediction
         private void OnEnable()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             PredictionApi.Start();
             RuntimeContext.Messages.RegisterAttributedHandlers(this);
         }
@@ -24,7 +28,11 @@ namespace CardShopCoop.Modules.Prediction
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             PredictionApi.Stop();

@@ -65,7 +65,7 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            using (CardShopCoop.Util.PerfProbe.Sample("module.presence.host-update"))
+            using (Util.PerfProbe.Sample("module.presence.host-update"))
             {
                 UpdateInner();
             }

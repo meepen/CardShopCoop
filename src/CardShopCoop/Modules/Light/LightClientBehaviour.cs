@@ -24,7 +24,10 @@ namespace CardShopCoop.Modules.Light
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -53,9 +56,17 @@ namespace CardShopCoop.Modules.Light
                     SceneManager.sceneLoaded -= OnSceneLoaded;
                 }
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 ResetSessionState();
                 _context = null;
                 throw;
@@ -66,10 +77,17 @@ namespace CardShopCoop.Modules.Light
         private void HandleState(MessageContext context, LightSwitchStateMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             if (_pendingState != null)
+            {
                 PredictionApi.Ack(_pendingState.PredictionId);
+            }
+
+
             _pendingState = message;
             TryApplyPending();
         }
@@ -77,12 +95,18 @@ namespace CardShopCoop.Modules.Light
         private void TryApplyPending()
         {
             if (_shutdown || _pendingState == null || _context == null || !_context.InGame())
+            {
                 return;
+            }
 
             // Both readiness and the group reference are required: Apply dereferences the group,
             // and a throw inside this reliable handler would drop the peer.
+
             if (!LightSwitchState.TryGet(out _))
+            {
                 return;
+            }
+
 
             var pending = _pendingState;
             // The host message is the shop light's absolute authoritative state, and a host
@@ -103,9 +127,16 @@ namespace CardShopCoop.Modules.Light
         private void ObserveToggle(bool armed, bool prior)
         {
             if (!armed || _context == null || !_joined || !_context.InGame())
+            {
                 return;
+            }
+
+
             if (!LightSwitchState.TryGet(out var after) || after == prior)
+            {
                 return;
+            }
+
 
             PredictionApi.Predict(
                 PredictionScope,
@@ -140,7 +171,10 @@ namespace CardShopCoop.Modules.Light
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
         {
             if (connection?.Id == 1)
+            {
                 ResetSessionState();
+            }
+
         }
 
         private void ResetSessionState()
@@ -152,7 +186,11 @@ namespace CardShopCoop.Modules.Light
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -160,7 +198,11 @@ namespace CardShopCoop.Modules.Light
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             ResetSessionState();
             _context = null;
         }
@@ -186,9 +228,17 @@ namespace CardShopCoop.Modules.Light
                 var active = _active;
                 if (active == null || !active._joined || active._context == null
                     || !active._context.InGame())
+                {
                     return;
+                }
+
+
                 if (!LightSwitchState.TryGet(out var prior))
+                {
                     return;
+                }
+
+
                 __state = new ToggleState { Armed = true, Prior = prior };
             }
 

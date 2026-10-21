@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -129,7 +128,11 @@ namespace CardShopCoop.Modules.Tournament
         {
             if (_shutdown || !_context.InGame() || !TryBuildState(out var state)
                 || index < 0 || index >= state.PrizeSlots.Count)
+            {
                 return;
+            }
+
+
             Publish(new TournamentDeltaMessage
             {
                 Kind = 1,
@@ -154,7 +157,11 @@ namespace CardShopCoop.Modules.Tournament
                     BracketCount = state.Bracket.Count,
                 };
                 for (var i = start; i < start + BracketBatchSize && i < state.Bracket.Count; i++)
+                {
                     delta.Bracket.Add(state.Bracket[i]);
+                }
+
+
                 Publish(delta);
             }
         }
@@ -353,12 +360,21 @@ namespace CardShopCoop.Modules.Tournament
         private static void PrizeChangedPostfix(HostTournamentSelectPrizeScreen __instance)
         {
             if (_active == null)
+            {
                 return;
+            }
+
+
             var index = TournamentInterop.PrizeIndex(__instance);
             if (index >= 0)
+            {
                 _active.NotifyPrize(index);
+            }
             else
+            {
                 _active.NotifyPrizes();
+            }
+
         }
 
         private static void BracketChangedPostfix()

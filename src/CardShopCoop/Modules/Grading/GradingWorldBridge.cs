@@ -49,10 +49,18 @@ namespace CardShopCoop.Modules.Grading
         public static void Attach(IGradingWorldBridge bridge)
         {
             if (bridge == null)
+            {
+
                 throw new ArgumentNullException(nameof(bridge));
+            }
+
 
             if (_current != null && !ReferenceEquals(_current, bridge))
+            {
+
                 throw new InvalidOperationException("A different grading World bridge is already attached.");
+            }
+
 
             _current = bridge;
         }
@@ -60,7 +68,11 @@ namespace CardShopCoop.Modules.Grading
         public static void Detach(IGradingWorldBridge bridge)
         {
             if (ReferenceEquals(_current, bridge))
+            {
+
                 _current = null;
+            }
+
         }
     }
 }

@@ -17,6 +17,18 @@ True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
 - Added a Copy lobby id button under Invite friend.
 - Fixed errors from the mod touching the cursor before a shop level loaded.
 - Moved module toggles to the HIDDEN tab.
+- Fixed modded item prices not syncing between players - their shelf price tags now show the other player's price, and price changes work in both directions. Thanks @ilvincio_tv on Discord for the report!
+- Fixed modded card market prices drifting apart after a day roll; both players now see the same market values.
+- Fixed the joining player's price history graphs not updating after a day roll.
+- Fixed the Xbox Game Pass version's CHARACTER tab. Thanks @effskie on Discord for the report!
+- Fixed decoration styles (wall, floor and ceiling) not changing for the other player, and the guest's change button doing nothing.
+- Fixed a decoration style you cannot afford still showing as bought for the other player.
+- Fixed your open decoration screen still showing the old style after the other player changed it.
+- Fixed wall decorations floating in mid-air for the other player after a shop expansion, and the returned items not reaching their inventory.
+- Fixed decorations sometimes not appearing for the other player, or appearing twice when they join.
+- Fixed decorations briefly going missing or duplicating after a guest reloads the world.
+- Fixed a rejected decoration placement leaving a player stuck in placement mode or taking the item out of inventory.
+- Fixed a failed decoration or expansion purchase still charging the host.
 
 ## 2.1.1
 - Fixed: the option to host via Steam could disappear entirely, leaving only IP / LAN. Thanks @navsigda on Discord for the report!

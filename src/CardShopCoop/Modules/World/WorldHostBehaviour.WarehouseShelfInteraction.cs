@@ -41,7 +41,12 @@ namespace CardShopCoop.Modules.World
             ExecuteWorldCommand(context, message, () =>
             {
                 if (Warehouse == null)
+                {
+
                     return false;
+                }
+
+
                 if (!Warehouse.HostApplyStore(message, context.ConnectionId,
                     response => SendWorldTo(context.ConnectionId, response)))
                 {
@@ -67,7 +72,12 @@ namespace CardShopCoop.Modules.World
             ExecuteWorldCommand(context, message, () =>
             {
                 if (Warehouse == null)
+                {
+
                     return false;
+                }
+
+
                 return Warehouse.HostApplyTake(message, context.ConnectionId,
                     response => SendWorldTo(context.ConnectionId, response));
             });

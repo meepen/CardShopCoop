@@ -24,7 +24,10 @@ namespace CardShopCoop.Modules.StoreAccess
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -47,9 +50,17 @@ namespace CardShopCoop.Modules.StoreAccess
                 _harmony = null;
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 StoreAccessInterop.Reset();
                 _context = null;
                 throw;
@@ -60,7 +71,10 @@ namespace CardShopCoop.Modules.StoreAccess
         private void SendInitialState(PeerConnection connection)
         {
             if (connection == null)
+            {
                 return;
+            }
+
 
             _fullyJoined.Add(connection.Id);
             SendState(connection.Id);
@@ -70,14 +84,20 @@ namespace CardShopCoop.Modules.StoreAccess
         private void ForgetPeer(PeerConnection connection, DisconnectInfo info)
         {
             if (connection != null)
+            {
                 _fullyJoined.Remove(connection.Id);
+            }
+
         }
 
         [MessageHandler(typeof(StoreAccessToggleMessage))]
         private void HandleToggle(MessageContext context, StoreAccessToggleMessage message)
         {
             if (!IsPeerMessage(context) || message == null)
+            {
                 return;
+            }
+
 
             var peer = context.Connection.Id;
             var accepted = false;
@@ -95,7 +115,9 @@ namespace CardShopCoop.Modules.StoreAccess
                 {
                     var sign = StoreAccessInterop.FindOpenSign();
                     if (sign == null)
+                    {
                         Rollback(context, message);
+                    }
                     else
                     {
                         var before = CPlayerData.m_IsShopOpen;
@@ -114,14 +136,20 @@ namespace CardShopCoop.Modules.StoreAccess
 
                         accepted = CPlayerData.m_IsShopOpen != before;
                         if (!accepted)
+                        {
                             Rollback(context, message);
+                        }
+
                     }
                 }
                 else
                 {
                     var sign = StoreAccessInterop.FindWarehouseSign();
                     if (sign == null)
+                    {
                         Rollback(context, message);
+                    }
+
                     else
                     {
                         var before = CPlayerData.m_IsWarehouseDoorClosed;
@@ -137,7 +165,10 @@ namespace CardShopCoop.Modules.StoreAccess
 
                         accepted = CPlayerData.m_IsWarehouseDoorClosed != before;
                         if (!accepted)
+                        {
                             Rollback(context, message);
+                        }
+
                     }
                 }
             }
@@ -148,13 +179,19 @@ namespace CardShopCoop.Modules.StoreAccess
             }
 
             if (accepted)
+            {
                 BroadcastDelta(BuildDelta(message.PredictionId, message.Which == 0, message.Which == 1));
+            }
+
         }
 
         private void BroadcastDelta(StoreAccessDeltaMessage message)
         {
             if (_shutdown || _context == null || !_context.InGame() || message == null)
+            {
                 return;
+            }
+
 
             CoopPlugin.Log.LogInfo("[store-access] host broadcast shop="
                 + (message.HasShopOpen ? (message.IsShopOpen ? "open" : "closed") : "-")
@@ -167,7 +204,10 @@ namespace CardShopCoop.Modules.StoreAccess
         private void SendState(int peer)
         {
             if (_shutdown || _context == null || !_context.InGame())
+            {
                 return;
+            }
+
 
             _context.Send(peer, BuildState(false));
         }
@@ -195,24 +235,36 @@ namespace CardShopCoop.Modules.StoreAccess
         {
             var active = _active;
             if (active == null || context?.Connection == null || message == null)
+            {
                 return;
+            }
+
 
             active.SendRejectionState(context.Connection.Id, message);
 
             if (message.PredictionId != Guid.Empty)
+            {
                 PredictionApi.Rollback(active._context, context.Connection.Id, message.PredictionId);
+            }
+
         }
 
         private void SendRejectionState(int peer, StoreAccessToggleMessage message)
         {
             if (_shutdown || _context == null || !_context.InGame() || message.Which > 1)
+            {
                 return;
+            }
+
 
             StoreAccessDeltaMessage refresh;
             if (message.Which == 0)
             {
                 if (StoreAccessInterop.FindOpenSign() == null)
+                {
                     return;
+                }
+
 
                 refresh = new StoreAccessDeltaMessage
                 {
@@ -226,7 +278,10 @@ namespace CardShopCoop.Modules.StoreAccess
             {
                 if (StoreAccessInterop.FindWarehouseSign() == null
                     && StoreAccessInterop.FindUnlockRoomManager() == null)
+                {
                     return;
+                }
+
 
                 refresh = new StoreAccessDeltaMessage
                 {
@@ -266,14 +321,22 @@ namespace CardShopCoop.Modules.StoreAccess
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _fullyJoined.Clear();
             StoreAccessInterop.Reset();
             _context = null;
@@ -288,7 +351,11 @@ namespace CardShopCoop.Modules.StoreAccess
             private static void Postfix()
             {
                 if (_active == null || _active._applyingIntent)
+                {
                     return;
+                }
+
+
                 _active.BroadcastDelta(BuildDelta(Guid.Empty, true, false));
             }
         }
@@ -300,7 +367,11 @@ namespace CardShopCoop.Modules.StoreAccess
             private static void Postfix()
             {
                 if (_active == null || _active._applyingIntent)
+                {
                     return;
+                }
+
+
                 _active.BroadcastDelta(BuildDelta(Guid.Empty, false, true));
             }
         }
@@ -312,7 +383,11 @@ namespace CardShopCoop.Modules.StoreAccess
             private static void Postfix()
             {
                 if (_active == null || _active._applyingIntent)
+                {
                     return;
+                }
+
+
                 _active.BroadcastDelta(BuildDelta(Guid.Empty, true, true));
             }
         }

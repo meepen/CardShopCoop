@@ -24,7 +24,11 @@ namespace CardShopCoop.Modules.World
             get
             {
                 if (!_world.InGameLevel())
+                {
+
                     return false;
+                }
+
 
                 var inventory = WorldCardInteraction.Inv();
                 var shelves = SceneRef<ShelfManager>.Get();
@@ -39,11 +43,18 @@ namespace CardShopCoop.Modules.World
         {
             total = 0f;
             if (cardCount < 0)
+            {
                 return false;
+            }
+
 
             var service = GetService(serviceLevel);
             if (service == null)
+            {
+
                 return false;
+            }
+
 
             total = DeliveryFee + service.m_CostPerCard * cardCount;
             return !float.IsNaN(total) && !float.IsInfinity(total) && total >= 0f;
@@ -56,7 +67,9 @@ namespace CardShopCoop.Modules.World
         public bool TryAddCard(CardData card, int amount)
         {
             if (card == null || amount <= 0)
+            {
                 return false;
+            }
 
             var before = CountGraded(card);
             using (_world.BeginRemoteCardApply())
@@ -64,12 +77,17 @@ namespace CardShopCoop.Modules.World
                 CPlayerData.AddCard(WorldCardInteraction.SnapshotCard(card), amount);
                 var after = CountGraded(card);
                 if (after == before + amount)
+                {
                     return true;
+                }
 
                 for (var i = 0; i < Math.Max(0, after - before); i++)
                 {
                     if (CPlayerData.HasGradedCardInAlbum(card))
+                    {
                         CPlayerData.RemoveGradedCard(card, ignoreGradedCardIndex: true);
+                    }
+
                 }
             }
             return false;
@@ -86,11 +104,15 @@ namespace CardShopCoop.Modules.World
             var inventory = WorldCardInteraction.Inv();
             var data = inventory?.m_MonsterData_SO;
             if (data == null || serviceLevel < 0)
+            {
+
                 return null;
+            }
 
             // GetGradeCardServiceData is patched by Grading Overhaul for its additional tiers.
             // Calling the game's accessor, rather than indexing the vanilla list, keeps the
             // host-side fee calculation valid on both the vanilla and GO installs.
+
             try
             {
                 return data.GetGradeCardServiceData(serviceLevel);
@@ -107,7 +129,10 @@ namespace CardShopCoop.Modules.World
         {
             var rows = CPlayerData.m_GradedCardInventoryList;
             if (rows == null || card == null)
+            {
                 return 0;
+            }
+
             var encoded = GradingApi.Encoded(card);
             var count = 0;
             for (var i = 0; i < rows.Count; i++)
@@ -120,7 +145,10 @@ namespace CardShopCoop.Modules.World
                     && candidate.isFoil == card.isFoil
                     && candidate.isDestiny == card.isDestiny
                     && GradingApi.Encoded(candidate) == encoded)
+                {
                     count++;
+                }
+
             }
             return count;
         }

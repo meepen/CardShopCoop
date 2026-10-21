@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -216,7 +215,10 @@ namespace CardShopCoop.Modules.World
         {
             var key = message.Entity.Key;
             if (_pendingDeltas.TryGetValue(key, out var previous))
+            {
                 PredictionApi.Ack(previous.PredictionId);
+            }
+
             _pendingDeltas[key] = message;
         }
 
@@ -443,7 +445,10 @@ namespace CardShopCoop.Modules.World
         private void ClearPendingDeltas()
         {
             foreach (var delta in _pendingDeltas.Values)
+            {
                 PredictionApi.Ack(delta.PredictionId);
+            }
+
             _pendingDeltas.Clear();
         }
     }

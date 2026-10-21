@@ -78,7 +78,11 @@ namespace CardShopCoop.Modules.Presence
         internal static void SetPeerName(int connectionId, string name)
         {
             if (connectionId <= 0)
+            {
                 return;
+            }
+
+
             Names[connectionId] = string.IsNullOrWhiteSpace(name) ? "Player " + connectionId : name;
         }
 

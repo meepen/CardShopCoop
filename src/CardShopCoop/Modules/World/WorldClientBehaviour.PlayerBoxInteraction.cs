@@ -2,7 +2,6 @@ using System;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using CardShopCoop.Modules.PlayTable;
 using CardShopCoop.Modules.Presence;
 using HarmonyLib;
 using UnityEngine;
@@ -70,7 +69,10 @@ namespace CardShopCoop.Modules.World
             // A destroyed subject cannot be boxed up again; skip instead of throwing during a
             // reconcile replay (the sibling undo already guards this).
             if (obj == null)
+            {
                 return;
+            }
+
 
             _applyingFurniturePrediction = true;
             try
@@ -86,7 +88,10 @@ namespace CardShopCoop.Modules.World
         private void UndoPredictedFurnitureBoxUp(InteractableObject obj)
         {
             if (obj == null)
+            {
                 return;
+            }
+
 
             _applyingFurniturePrediction = true;
             try
@@ -228,12 +233,16 @@ namespace CardShopCoop.Modules.World
         private bool ApplyPlayerBoxAction(PlayerBoxInteractionMessage message)
         {
             if (_playerBoxInteraction == null)
+            {
+
                 return false;
+            }
 
             // Pickup/placement/throw are only ever echoed back after the host applied the guest's
             // own intent (a rejection comes as a prediction rollback), so this confirms the
             // prediction. Applying it authoritatively would first undo the hold/move/throw and
             // replay it: the box re-lerps into the hand, or the throw is re-applied.
+
             WorldPrediction.AckOrApply(message,
                 () => _playerBoxInteraction.ApplyIncoming(message));
             return true;

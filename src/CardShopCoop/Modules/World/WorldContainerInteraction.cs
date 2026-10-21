@@ -693,14 +693,23 @@ namespace CardShopCoop.Modules.World
             var kind = (int)message.Kind;
             var idx = (int)message.Index;
             if (op == OpWorkerTakeFlag)
+            {
                 kind = KindCardStorage;
+            }
             else if (op == OpPackInsert || op == OpPackTurnOn || op == OpPackClaim
                 || op == OpPackCollect)
+            {
                 kind = KindPackOpener;
+            }
             else if (op == OpCleanserToggle || op == OpCleanserRefill)
+            {
                 kind = KindCleanser;
+            }
             else if (op == OpEmptyBoxTake || op == OpEmptyBoxStore)
+            {
                 kind = KindEmptyBoxStorage;
+            }
+
             _hostPredictionId = message.PredictionId;
             _hostActorConnectionId = connId;
             try
@@ -890,7 +899,9 @@ namespace CardShopCoop.Modules.World
                                 }
                             }
                             if (!accepted)
+                            {
                                 reason = p == null ? "pack opener does not exist" : "pack opener state changed";
+                            }
 
                             break;
                         }
@@ -1251,9 +1262,13 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogInfo("[pack] claim opener=" + idx + ": " + claimCards + " card(s) in "
                 + output.Count + " entr(ies).");
             if (response != null)
+            {
                 response(claim);
+            }
             else
+            {
                 SendToClient?.Invoke(connId, claim);
+            }
             // Register the claim only once the reply was handed to the transport. A throwing
             // send must not leave the opener locked behind a claim the client never received
             // (HostApplyPackClaim refuses any further claim while the key is owned).
@@ -1346,7 +1361,9 @@ namespace CardShopCoop.Modules.World
         public void ClientApplyState(ContainerStateMessage message)
         {
             if (message == null)
+            {
                 throw new InvalidOperationException("Authoritative container state is missing.");
+            }
 
             if (InGame)
             {
@@ -1408,9 +1425,14 @@ namespace CardShopCoop.Modules.World
                 case KindPackOpener:
                     ApplyPackState(Get<InteractableAutoPackOpener>(kind, idx), rec);
                     if (rec.CollectClaimed)
+                    {
                         _claimedPackIndices.Add(idx);
+                    }
                     else
+                    {
                         _claimedPackIndices.Remove(idx);
+                    }
+
                     break;
                 case KindCleanser:
                     var cleanser = Get<InteractableAutoCleanser>(kind, idx);
@@ -1431,7 +1453,9 @@ namespace CardShopCoop.Modules.World
         public void ClientApplyDelta(ContainerDeltaMessage message)
         {
             if (message == null)
+            {
                 throw new InvalidOperationException("Authoritative container delta is missing.");
+            }
 
             // An insert echo reconciles in layers: the record was built before any newer local
             // inserts still in flight, and applying it raw trimmed those newer optimistic entries
@@ -1451,7 +1475,9 @@ namespace CardShopCoop.Modules.World
             {
                 _boxes.ClientApplyCreated(new BoxCreatedMessage { Box = message.Box });
                 if (!_boxes.TryGetBox(message.Box.BoxNetworkId, out var box))
+                {
                     throw new InvalidOperationException("Container delta box was not materialized.");
+                }
 
                 if (message.TakeIntoHand && box is InteractablePackagingBox_Item item)
                 {
@@ -1473,7 +1499,9 @@ namespace CardShopCoop.Modules.World
                 // alone). Observers therefore have nothing to apply here and must not reveal or
                 // bank on the claimant's behalf.
                 if (_pendingPackCollections.ContainsKey(message.PackIndex))
+                {
                     CompletePackCollection(message.PackIndex);
+                }
             }
         }
 
@@ -1605,10 +1633,10 @@ namespace CardShopCoop.Modules.World
                     // TMP sends onEndEdit synchronously while the modal closes. Neutralize that
                     // callback before invalidating the parent index: OnInputTextUpdated("0")
                     // reaches OnPressRemoveAllBtn, whose zero stack count takes no list path.
-                    var previousRemoteCards = CardShopCoop.Modules.World.WorldCardInteraction.ApplyingRemoteCards;
+                    var previousRemoteCards = WorldCardInteraction.ApplyingRemoteCards;
                     try
                     {
-                        CardShopCoop.Modules.World.WorldCardInteraction.ApplyingRemoteCards = true;
+                        WorldCardInteraction.ApplyingRemoteCards = true;
                         FiModalStackCount.SetValue(modal, 0);
                         amountInput.text = "0";
                         if (amountInput.isFocused)
@@ -1641,7 +1669,7 @@ namespace CardShopCoop.Modules.World
                     }
                     finally
                     {
-                        CardShopCoop.Modules.World.WorldCardInteraction.ApplyingRemoteCards = previousRemoteCards;
+                        WorldCardInteraction.ApplyingRemoteCards = previousRemoteCards;
                     }
                 }
                 else
@@ -1805,14 +1833,18 @@ namespace CardShopCoop.Modules.World
         {
             var stored = opener.GetStoredItemList();
             if (stored == null)
+            {
                 throw new InvalidOperationException("Pack opener has no local storage list.");
+            }
 
             while (stored.Count > targetCount)
             {
                 var last = stored[stored.Count - 1];
                 stored.RemoveAt(stored.Count - 1);
                 if (last != null)
+                {
                     last.DisableItem();
+                }
             }
 
             while (stored.Count < targetCount)
@@ -2471,7 +2503,9 @@ namespace CardShopCoop.Modules.World
             // Modded boxes (Furniture Overhaul's Bargain Bin/Scanner) are not synced; the key
             // enumeration would refuse them anyway, so skip before doing any work.
             if (IsSyncedDonationBox(__instance))
+            {
                 Current?.HostChanged(KindDonation, __instance);
+            }
         }
 
         public static void HostWorkerTakePostfix(InteractableCardStorageShelf __instance)
@@ -2487,7 +2521,9 @@ namespace CardShopCoop.Modules.World
         public static void DonationRandomCardPostfix(InteractableBulkDonationBox __instance)
         {
             if (IsSyncedDonationBox(__instance))
+            {
                 Current?.HostChanged(KindDonation, __instance);
+            }
         }
 
         /// <summary>Broadcasts one host-side pack-opener change. Sync code applying a remote intent
@@ -2757,7 +2793,7 @@ namespace CardShopCoop.Modules.World
             };
             // One prediction key per machine: an insert echo's layered reconcile must undo/replay
             // only this opener's own in-flight inserts, never another container's pending action.
-            Guid predictionId = Guid.Empty;
+            var predictionId = Guid.Empty;
             predictionId = WorldPrediction.Predict(PackInsertPredictionKey(idx), command,
                 () =>
                 {

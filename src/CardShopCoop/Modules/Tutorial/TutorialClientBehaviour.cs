@@ -6,7 +6,6 @@ using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
-using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Tutorial
@@ -57,7 +56,10 @@ namespace CardShopCoop.Modules.Tutorial
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -87,9 +89,17 @@ namespace CardShopCoop.Modules.Tutorial
                     SceneManager.sceneLoaded -= OnSceneLoaded;
                 }
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 ResetSessionState();
                 TutorialInterop.Reset();
                 _context = null;
@@ -101,7 +111,10 @@ namespace CardShopCoop.Modules.Tutorial
         private void HandleState(MessageContext context, TutorialStateMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _pendingState = message;
             // A full baseline supersedes any single-condition deltas retained before it.
@@ -113,7 +126,10 @@ namespace CardShopCoop.Modules.Tutorial
         private void HandleDelta(MessageContext context, TutorialDeltaMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             if (message.Values != null)
             {
@@ -134,13 +150,20 @@ namespace CardShopCoop.Modules.Tutorial
         private void TryApplyPending()
         {
             if (_shutdown || _context == null || !_context.InGame())
+            {
                 return;
+            }
+
 
             if (_pendingState != null)
             {
                 var state = _pendingState;
                 if (!TryApply(state))
+                {
                     return;
+                }
+
+
                 CoopPlugin.Log.LogDebug("tutorial baseline applied: index=" + state.TutorialIndex
                     + " values=" + (state.Values == null ? 0 : state.Values.Count));
                 _pendingState = null;
@@ -156,10 +179,17 @@ namespace CardShopCoop.Modules.Tutorial
         private void TryApplyPendingDelta()
         {
             if (_pendingDeltas.Count == 0)
+            {
                 return;
+            }
+
+
             if (!TutorialInterop.IsSceneReady(TutorialInterop.FindManager())
                 || CPlayerData.m_TutorialDataList == null)
+            {
                 return;
+            }
+
 
             var deltas = new List<PendingTutorialDelta>(_pendingDeltas.Values);
             _pendingDeltas.Clear();
@@ -213,11 +243,15 @@ namespace CardShopCoop.Modules.Tutorial
             };
             var values = CPlayerData.m_TutorialDataList;
             for (var i = 0; values != null && i < values.Count; i++)
+            {
                 result.Values.Add(new TutorialValue
                 {
                     Condition = (int)values[i].tutorialTaskCondition,
                     Value = values[i].value,
                 });
+            }
+
+
             return result;
         }
 
@@ -241,7 +275,12 @@ namespace CardShopCoop.Modules.Tutorial
         {
             var manager = TutorialInterop.FindManager();
             if (!TutorialInterop.IsSceneReady(manager) || CPlayerData.m_TutorialDataList == null)
+            {
+
                 return false;
+            }
+
+
             _applyingRemote = true;
             try
             {
@@ -289,7 +328,10 @@ namespace CardShopCoop.Modules.Tutorial
             var leavingIntro = message.TutorialIndex != 0 && CPlayerData.m_TutorialIndex == 0;
             TutorialInterop.SyncMarker(manager, message.TutorialIndex);
             if (leavingIntro)
+            {
                 TutorialInterop.ClearIntroPresentation();
+            }
+
 
             var incomingValues = new List<TutorialData>(count);
             for (var i = 0; i < count; i++)
@@ -314,13 +356,23 @@ namespace CardShopCoop.Modules.Tutorial
             {
                 var group = manager.m_TutorialSubGroupList[groupIndex];
                 if (TutorialInterop.FiSubgroupCurrent != null)
+                {
                     TutorialInterop.FiSubgroupCurrent.SetValue(group, 0f);
+                }
+
+
                 if (TutorialInterop.FiSubgroupFinished != null)
+                {
                     TutorialInterop.FiSubgroupFinished.SetValue(group, false);
+                }
+
+
                 group.m_TutorialData.value = 0f;
                 for (var valueIndex = 0; valueIndex < incomingValues.Count; valueIndex++)
+                {
                     group.AddTaskValue(incomingValues[valueIndex].value,
                         incomingValues[valueIndex].tutorialTaskCondition);
+                }
 
                 // The game's completion flag is sticky, and a task's stored value can drop below
                 // its max when a displayed card is removed. Rebuilding the flag from the value
@@ -329,9 +381,13 @@ namespace CardShopCoop.Modules.Tutorial
                 // Honour the authoritative index: every group before it is complete. The group on
                 // the index keeps its value-derived flag so a genuinely finished last task still
                 // ends the tutorial.
+
                 if (TutorialInterop.FiSubgroupFinished != null
                     && groupIndex < message.TutorialIndex - 1)
+                {
                     TutorialInterop.FiSubgroupFinished.SetValue(group, true);
+                }
+
             }
 
             if (message.TutorialIndex == 0)
@@ -340,7 +396,11 @@ namespace CardShopCoop.Modules.Tutorial
                 // and then marks the whole tutorial finished. Index 0 is the intro, not the end of
                 // the tutorial, so keep it alive with every group closed.
                 for (var groupIndex = 0; groupIndex < manager.m_TutorialSubGroupList.Count; groupIndex++)
+                {
                     manager.m_TutorialSubGroupList[groupIndex].CloseScreen();
+                }
+
+
                 TutorialInterop.SyncMarker(manager, 0);
                 return;
             }
@@ -368,7 +428,10 @@ namespace CardShopCoop.Modules.Tutorial
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
         {
             if (connection?.Id == 1)
+            {
                 ResetSessionState();
+            }
+
         }
 
         private void ResetSessionState()
@@ -381,7 +444,11 @@ namespace CardShopCoop.Modules.Tutorial
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -389,7 +456,11 @@ namespace CardShopCoop.Modules.Tutorial
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             ResetSessionState();
             TutorialInterop.Reset();
             _context = null;
@@ -464,13 +535,22 @@ namespace CardShopCoop.Modules.Tutorial
             {
                 __state = null;
                 if (_applyingRemote || _active == null || !_active._joined)
+                {
                     return;
+                }
+
 
                 if (_active._context == null || !_active._context.InGame())
+                {
                     return;
+                }
+
 
                 if (IsHostDerived(tutorialTaskCondition))
+                {
                     return;
+                }
+
 
                 __state = CaptureState();
             }
@@ -480,7 +560,11 @@ namespace CardShopCoop.Modules.Tutorial
                 TutorialStateMessage __state)
             {
                 if (__state == null)
+                {
                     return;
+                }
+
+
                 ForwardAction(tutorialTaskCondition, valueAdd, __state);
             }
         }

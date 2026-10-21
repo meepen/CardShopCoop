@@ -34,7 +34,10 @@ namespace CardShopCoop.Modules.Pricing
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -52,10 +55,18 @@ namespace CardShopCoop.Modules.Pricing
                 _harmony?.UnpatchSelf();
                 _harmony = null;
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 _context = null;
                 throw;
             }
@@ -68,7 +79,10 @@ namespace CardShopCoop.Modules.Pricing
         private void State(MessageContext context, PricingStateMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _pendingState = message;
             ApplyPendingState();
@@ -77,7 +91,10 @@ namespace CardShopCoop.Modules.Pricing
         internal static void ContentReady()
         {
             if (_active == null)
+            {
                 return;
+            }
+
 
             _active._contentReady = true;
             _active.ApplyPendingState();
@@ -87,7 +104,10 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (_shutdown || !_contentReady || !_context.InGame()
                 || WorldCardInteraction.Inv() == null)
+            {
                 return;
+            }
+
 
             if (_pendingState != null)
             {
@@ -102,7 +122,10 @@ namespace CardShopCoop.Modules.Pricing
                 for (var i = 0; i < deltas.Count; i++)
                 {
                     if (ApplyItemDelta(deltas[i].Value))
+                    {
                         _pendingItemDeltas.Remove(deltas[i].Key);
+                    }
+
                 }
             }
             if (_pendingCardDeltas.Count > 0)
@@ -112,7 +135,10 @@ namespace CardShopCoop.Modules.Pricing
                 for (var i = 0; i < deltas.Count; i++)
                 {
                     if (ApplyCardDelta(deltas[i].Value))
+                    {
                         _pendingCardDeltas.Remove(deltas[i].Key);
+                    }
+
                 }
             }
         }
@@ -123,7 +149,10 @@ namespace CardShopCoop.Modules.Pricing
             try
             {
                 for (var i = 0; i < state.ItemTypes.Count; i++)
+                {
                     CPlayerData.SetItemPrice(state.ItemTypes[i], state.ItemPrices[i]);
+                }
+
 
                 for (var i = 0; i < state.Cards.Count; i++)
                 {
@@ -143,25 +172,37 @@ namespace CardShopCoop.Modules.Pricing
         private void HandleDeltaBatch(MessageContext context, PricingDeltaBatchMessage message)
         {
             if (_shutdown || message == null)
+            {
                 return;
+            }
 
             // Entries are applied (or deferred) in the order the host produced them: the last
             // same-key entry is the newest absolute price, and every entry reconciles exactly the
             // prediction id it carries.
+
             var ready = _contentReady && _context.InGame() && WorldCardInteraction.Inv() != null;
             for (var i = 0; i < message.Items.Count; i++)
             {
                 if (ready)
+                {
                     ApplyItemDelta(message.Items[i]);
+                }
                 else
+                {
                     DeferItemDelta(message.Items[i]);
+                }
             }
             for (var i = 0; i < message.Cards.Count; i++)
             {
                 if (ready)
+                {
                     ApplyCardDelta(message.Cards[i]);
+                }
                 else
+                {
                     DeferCardDelta(message.Cards[i]);
+                }
+
             }
         }
 
@@ -193,7 +234,11 @@ namespace CardShopCoop.Modules.Pricing
             PredictionApi.Confirm(entry.PredictionId, () =>
             {
                 if (entry.Removed)
+                {
                     return;
+                }
+
+
                 var copy = PricingInterop.CopyCard(entry.Card, entry.EncodedGrade);
                 GradingApi.Remember(copy);
                 _applying = true;
@@ -212,7 +257,11 @@ namespace CardShopCoop.Modules.Pricing
         private void DeferItemDelta(PricingItemDeltaEntry entry)
         {
             if (_pendingItemDeltas.TryGetValue(entry.ItemType, out var previous))
+            {
                 PredictionApi.Ack(previous.PredictionId);
+            }
+
+
             _pendingItemDeltas[entry.ItemType] = entry;
         }
 
@@ -220,7 +269,11 @@ namespace CardShopCoop.Modules.Pricing
         {
             var key = PricingInterop.CardKey(entry.Card, entry.EncodedGrade) ?? "null";
             if (_pendingCardDeltas.TryGetValue(key, out var previous))
+            {
                 PredictionApi.Ack(previous.PredictionId);
+            }
+
+
             _pendingCardDeltas[key] = entry;
         }
 
@@ -231,7 +284,12 @@ namespace CardShopCoop.Modules.Pricing
         {
             var active = _active;
             if (active == null || active._applying || !PricingInterop.IsItemTypeValid(type))
+            {
+
                 return float.NaN;
+            }
+
+
             return PricingInterop.ReadItem(type);
         }
 
@@ -244,7 +302,11 @@ namespace CardShopCoop.Modules.Pricing
             if (active == null || active._applying || float.IsNaN(previous)
                 || !active.CanSend() || !PricingInterop.IsItemTypeValid(type)
                 || !PricingInterop.ValidPrice(price))
+            {
                 return;
+            }
+
+
             active.PredictItem(type, price, previous);
         }
 
@@ -253,7 +315,12 @@ namespace CardShopCoop.Modules.Pricing
         {
             var active = _active;
             if (active == null || active._applying || !PricingInterop.ValidCard(card))
+            {
+
                 return float.NaN;
+            }
+
+
             return PricingInterop.ReadCard(card);
         }
 
@@ -264,7 +331,11 @@ namespace CardShopCoop.Modules.Pricing
             if (active == null || active._applying || float.IsNaN(previous) || card == null
                 || !active.CanSend() || !PricingInterop.ValidCard(card)
                 || !PricingInterop.ValidPrice(price))
+            {
                 return;
+            }
+
+
             var compartment = CurrentCardPriceCompartment();
             if (compartment == null
                 || !WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
@@ -302,7 +373,11 @@ namespace CardShopCoop.Modules.Pricing
         private void PredictItem(EItemType type, float price, float previous)
         {
             if (!CanSend())
+            {
                 return;
+            }
+
+
             PredictionApi.Predict(
                 "pricing-item:" + (int)type,
                 predictionId => _context.Send(1, new PricingItemIntentMessage
@@ -319,7 +394,11 @@ namespace CardShopCoop.Modules.Pricing
             int shelfKey, int compartment)
         {
             if (!CanSend())
+            {
                 return;
+            }
+
+
             var copy = PricingInterop.CopyCard(card, grade);
             var key = PricingInterop.CardKey(copy, grade);
             PredictionApi.Predict(
@@ -367,7 +446,11 @@ namespace CardShopCoop.Modules.Pricing
         internal static void InventoryReset()
         {
             if (_active == null)
+            {
                 return;
+            }
+
+
             _active._pendingState = null;
             _active.ClearPendingDeltas();
             _active._contentReady = false;
@@ -376,9 +459,16 @@ namespace CardShopCoop.Modules.Pricing
         private void ClearPendingDeltas()
         {
             foreach (var delta in _pendingItemDeltas.Values)
+            {
                 PredictionApi.Ack(delta.PredictionId);
+            }
+
+
             foreach (var delta in _pendingCardDeltas.Values)
+            {
                 PredictionApi.Ack(delta.PredictionId);
+            }
+
             _pendingItemDeltas.Clear();
             _pendingCardDeltas.Clear();
         }
@@ -389,7 +479,10 @@ namespace CardShopCoop.Modules.Pricing
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
@@ -399,7 +492,11 @@ namespace CardShopCoop.Modules.Pricing
             _pendingState = null;
             ClearPendingDeltas();
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _context = null;
         }
 

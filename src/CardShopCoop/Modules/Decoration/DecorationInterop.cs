@@ -93,8 +93,13 @@ namespace CardShopCoop.Modules.Decoration
         private static readonly MethodInfo MiGetWall = ReflectionSurface.RequiredMethod(
             typeof(InteractableObject), "GetVerticalSnapWallIndex");
 
-        private static readonly FieldInfo FiShopCategory = ReflectionSurface.RequiredField(
+        // The buy and place screens are siblings that each declare their own private
+        // m_CategoryIndex, so one FieldInfo cannot be read from the other screen's instance
+        // (FieldInfo throws ArgumentException when the target is not the declaring type).
+        private static readonly FieldInfo FiBuyCategory = ReflectionSurface.RequiredField(
             typeof(ShopBuyDecoUIScreen), "m_CategoryIndex");
+        private static readonly FieldInfo FiPlaceCategory = ReflectionSurface.RequiredField(
+            typeof(PlaceDecoUIScreen), "m_CategoryIndex");
         private static readonly MethodInfo MiBuyShop = ReflectionSurface.RequiredMethod(
             typeof(ShopBuyDecoUIScreen), "OnPressBuyShopDeco", typeof(int), typeof(float));
         private static readonly MethodInfo MiBuyItem = ReflectionSurface.RequiredMethod(
@@ -122,8 +127,17 @@ namespace CardShopCoop.Modules.Decoration
         private static readonly Dictionary<InteractableObject, long> LocalIds =
             new(new ReferenceComparer());
         private static readonly Dictionary<long, InteractableObject> LocalObjects = new();
+        // Authoritative poses this peer could not materialise yet, keyed by host id. Kept for a
+        // lifecycle retry; a delta/state that supersedes the entry replaces or clears it. This is
+        // recovery for a lagging local scene, not periodic reconciliation.
+        private static readonly Dictionary<long, DecorationPose> DeferredPoses = new();
         private static long _nextHostId = 1;
         private static long _nextLocalId = -1;
+        private static int _generation;
+
+        /// <summary>Bumped whenever the scene-owned id maps are reset, so an undo captured in the
+        /// outgoing world can be recognised and skipped in the new one.</summary>
+        internal static int Generation => _generation;
 
         internal static void Reset()
         {
@@ -131,8 +145,10 @@ namespace CardShopCoop.Modules.Decoration
             ClientObjects.Clear();
             LocalIds.Clear();
             LocalObjects.Clear();
+            DeferredPoses.Clear();
             _nextHostId = 1;
             _nextLocalId = -1;
+            _generation++;
         }
 
         internal static DecorationSnapshot Snapshot(bool authoritative = true)
@@ -144,6 +160,7 @@ namespace CardShopCoop.Modules.Decoration
 
             var result = new DecorationSnapshot
             {
+                Generation = _generation,
                 Wall = GetInt(FiWall),
                 WallB = GetInt(FiWallB),
                 Floor = GetInt(FiFloor),
@@ -226,11 +243,22 @@ namespace CardShopCoop.Modules.Decoration
         private static long EnsureSnapshotId(InteractableObject obj, bool authoritative)
         {
             if (obj == null)
+            {
                 return 0;
+            }
+
+
             if (TryGetHoldId(obj, out var id))
+            {
                 return id;
+            }
+
             if (authoritative)
+            {
                 return EnsureHostId(obj);
+            }
+
+
             if (!LocalIds.TryGetValue(obj, out var local))
             {
                 local = _nextLocalId--;
@@ -254,8 +282,114 @@ namespace CardShopCoop.Modules.Decoration
             SetInt(FiCeiling, message.Ceiling);
             SetInt(FiCeilingB, message.CeilingB);
             ApplyMaterials(message);
+            if (removeUnlisted)
+            {
+                // The host's state is complete: a deferred pose the state no longer lists is gone,
+                // and retrying it would resurrect a piece the host removed.
+                ForgetDeferredNotIn(message.Placed);
+            }
             Reconcile(message.Placed, removeUnlisted, keepUnlisted);
             RefreshUi();
+        }
+
+        internal static bool HasDeferredPoses => DeferredPoses.Count > 0;
+
+        /// <summary>Retries the authoritative poses this peer could not materialise on first
+        /// receipt. Called from the client's lifecycle hooks (world ready, shelf ready, join, and
+        /// after a state apply), never on a timer.</summary>
+        internal static void RetryDeferred()
+        {
+            if (DeferredPoses.Count == 0 || !IsSceneReady())
+            {
+                return;
+            }
+
+
+            var pending = new List<KeyValuePair<long, DecorationPose>>(DeferredPoses);
+            for (var i = 0; i < pending.Count; i++)
+            {
+                var id = pending[i].Key;
+                var pose = pending[i].Value;
+                try
+                {
+                    if (TryResolveHoldId(id, out var mapped) && mapped != null)
+                    {
+                        FinalizePlacement(mapped, pose);
+                        DeferredPoses.Remove(id);
+                        continue;
+                    }
+                    if (!TryPlace(pose, out var created, authoritative: true))
+                    {
+                        continue;
+                    }
+
+
+                    ClientObjects[id] = created;
+                    DeferredPoses.Remove(id);
+                    CoopPlugin.Log.LogInfo("[decoration] deferred place id=" + id + " type="
+                        + pose.DecorationType + " materialised.");
+                }
+                catch (Exception exception)
+                {
+                    CoopPlugin.Log.LogWarning("[decoration] deferred place id=" + id
+                        + " retry failed: " + exception.Message);
+                }
+            }
+        }
+
+        private static void Defer(DecorationPose pose)
+        {
+            if (pose == null || pose.Id <= 0)
+            {
+                return;
+            }
+
+
+            DeferredPoses[pose.Id] = pose;
+            CoopPlugin.Log.LogWarning("[decoration] deferred place id=" + pose.Id + " type="
+                + pose.DecorationType + ".");
+        }
+
+        private static void ForgetDeferred(long id)
+        {
+            if (id > 0)
+            {
+                DeferredPoses.Remove(id);
+            }
+
+        }
+
+        private static void ForgetDeferredNotIn(IList<DecorationPose> poses)
+        {
+            if (DeferredPoses.Count == 0)
+            {
+                return;
+            }
+
+
+            var listed = new HashSet<long>();
+            for (var i = 0; i < poses.Count; i++)
+            {
+                if (poses[i] != null)
+                {
+                    listed.Add(poses[i].Id);
+                }
+
+            }
+
+            var stale = new List<long>();
+            foreach (var id in DeferredPoses.Keys)
+            {
+                if (!listed.Contains(id))
+                {
+                    stale.Add(id);
+                }
+            }
+            for (var i = 0; i < stale.Count; i++)
+            {
+                DeferredPoses.Remove(stale[i]);
+            }
+
         }
 
         internal static bool IsUnlocked(int category, int index)
@@ -305,7 +439,11 @@ namespace CardShopCoop.Modules.Decoration
         internal static int InventoryCount(EDecoObject type)
         {
             if (!IsValidDeco(type))
+            {
                 return 0;
+            }
+
+
             return Convert.ToInt32(MiGetInventory.Invoke(null, new object[] { type }));
         }
 
@@ -342,15 +480,15 @@ namespace CardShopCoop.Modules.Decoration
                 return false;
             }
 
-            var previous = Convert.ToInt32(FiShopCategory.GetValue(screen));
+            var previous = Convert.ToInt32(FiBuyCategory.GetValue(screen));
             try
             {
-                FiShopCategory.SetValue(screen, category);
+                FiBuyCategory.SetValue(screen, category);
                 MiBuyShop.Invoke(screen, new object[] { index, price });
             }
             finally
             {
-                FiShopCategory.SetValue(screen, previous);
+                FiBuyCategory.SetValue(screen, previous);
             }
             return IsUnlocked(category, index);
         }
@@ -377,24 +515,25 @@ namespace CardShopCoop.Modules.Decoration
                 return false;
             }
 
-            var previous = Convert.ToInt32(FiShopCategory.GetValue(screen));
+            var previous = Convert.ToInt32(FiPlaceCategory.GetValue(screen));
             try
             {
-                FiShopCategory.SetValue(screen, category);
+                FiPlaceCategory.SetValue(screen, category);
                 MiSwitchShop.Invoke(screen, new object[] { index, lotB });
             }
             finally
             {
-                FiShopCategory.SetValue(screen, previous);
+                FiPlaceCategory.SetValue(screen, previous);
             }
             return EquippedIndex(category, lotB) == index;
         }
 
-        internal static bool TryPlace(DecorationPose pose, out InteractableObject placed)
-            => TryPlace(pose, 0, out placed);
+        internal static bool TryPlace(DecorationPose pose, out InteractableObject placed,
+            bool authoritative = false)
+            => TryPlace(pose, 0, out placed, authoritative);
 
         internal static bool TryPlace(DecorationPose pose, long existingId,
-            out InteractableObject placed)
+            out InteractableObject placed, bool authoritative = false)
         {
             placed = null;
             if (pose == null || !IsValidDeco(pose.DecorationType)
@@ -415,10 +554,32 @@ namespace CardShopCoop.Modules.Decoration
             }
             if (!isExisting)
             {
-                spawned = MiSpawn.Invoke(null, new object[] { pose.DecorationType }) as InteractableObject;
+                try
+                {
+                    spawned = MiSpawn.Invoke(null, new object[] { pose.DecorationType })
+                        as InteractableObject;
+                }
+                catch (Exception exception)
+                {
+                    // A type with no spawnable prefab is a build/mod-content mismatch. Keep the
+                    // authoritative pose eligible for a retry instead of failing the module.
+                    CoopPlugin.Log.LogWarning("Decoration spawn failed for " + pose.DecorationType
+                        + ": " + exception.Message);
+                    return false;
+                }
             }
             if (spawned == null || (EDecoObject)FiObjectType.GetValue(spawned) != pose.DecorationType
                 || GetVertical(spawned) != pose.Vertical)
+            {
+                return false;
+            }
+
+            // A piece a player is already moving belongs to that hold. Running StartMoveObject a
+            // second time would capture the temporary Ignore Raycast layer as m_OriginalLayer and
+            // leave the piece unpickable, so an intent-driven apply refuses it; an authoritative
+            // apply settles it at the host's pose below without re-entering the move.
+            var wasMoving = spawned.GetIsMovingObject();
+            if (wasMoving && !authoritative)
             {
                 return false;
             }
@@ -436,27 +597,42 @@ namespace CardShopCoop.Modules.Decoration
                 }
                 // PlaceMovedObject only transitions an object that is in the game's move
                 // lifecycle. Calling it on a freshly spawned object used to leave colliders,
-                // layers and ShelfManager bookkeeping in the preview state.
-                MiStartMoveObject.Invoke(spawned, null);
+                // layers and ShelfManager bookkeeping in the preview state. An already-moving
+                // piece keeps the layer its original StartMoveObject captured.
+                if (!wasMoving)
+                {
+                    MiStartMoveObject.Invoke(spawned, null);
+                }
                 spawned.transform.SetPositionAndRotation(pose.Position, pose.Rotation);
                 var normal = pose.Vertical ? pose.Rotation * Vector3.forward : Vector3.up;
                 MiSetTargetMovePosition.Invoke(spawned,
                     new object[] { pose.Position, normal, null });
-                // Run the game's own move-state Update once at the requested pose. This executes
-                // the build-specific Physics.OverlapBox checks, valid-area checks, and vertical
-                // wall collision logic instead of trusting a client-provided bounded position.
-                MiUpdate.Invoke(spawned, null);
-                if (!Convert.ToBoolean(FiValidPlacement.GetValue(spawned)))
+                if (authoritative)
                 {
-                    if (isExisting)
+                    // The host already validated this pose. This peer's local furniture/NPC state
+                    // can lag (the World module defers poses), so running the game's overlap test
+                    // here would silently drop a piece every other peer has. Trust the host and
+                    // finalise at exactly the authoritative pose.
+                    FiValidPlacement.SetValue(spawned, true);
+                }
+                else
+                {
+                    // Host-side intent validation: run the game's own move-state Update once at
+                    // the requested pose so the build-specific Physics.OverlapBox checks, valid
+                    // area checks and vertical wall logic decide.
+                    MiUpdate.Invoke(spawned, null);
+                    if (!Convert.ToBoolean(FiValidPlacement.GetValue(spawned)))
                     {
-                        RestoreMovedObject(spawned, original);
+                        if (isExisting)
+                        {
+                            RestoreMovedObject(spawned, original);
+                        }
+                        else
+                        {
+                            SettleAndDestroy(spawned);
+                        }
+                        return false;
                     }
-                    else
-                    {
-                        MiOnDestroyed.Invoke(spawned, null);
-                    }
-                    return false;
                 }
                 MiPlaceMovedObject.Invoke(spawned, null);
                 RebindWallBlocker(spawned, pose.WarehouseWallSnap, pose.Wall);
@@ -469,23 +645,39 @@ namespace CardShopCoop.Modules.Decoration
                 if (isExisting)
                 {
                     RestoreMovedObject(spawned, original);
+                    FinalizeMovedObject(spawned);
                     return false;
                 }
 
-                try
-                {
-                    MiOnDestroyed.Invoke(spawned, null);
-                }
-                catch (Exception cleanupException)
-                {
-                    CoopPlugin.Log.LogWarning("Decoration placement cleanup failed: "
-                        + cleanupException.Message);
-                }
+                SettleAndDestroy(spawned);
                 return false;
             }
             finally
             {
                 PlacementHoldInteraction.EndSuppressLocalStarts();
+            }
+        }
+
+        /// <summary>Cleans up a freshly spawned placement that cannot be used. Settle the synthetic
+        /// move lifecycle first so the local player controller and preview overlay leave moving
+        /// mode, then destroy the object.</summary>
+        private static void SettleAndDestroy(InteractableObject obj)
+        {
+            if (obj == null)
+            {
+                return;
+            }
+
+
+            FinalizeMovedObject(obj);
+            try
+            {
+                MiOnDestroyed.Invoke(obj, null);
+            }
+            catch (Exception exception)
+            {
+                CoopPlugin.Log.LogWarning("Decoration placement cleanup failed: "
+                    + exception.Message);
             }
         }
 
@@ -506,12 +698,16 @@ namespace CardShopCoop.Modules.Decoration
                 if (Convert.ToBoolean(FiValidPlacement.GetValue(obj)))
                 {
                     MiPlaceMovedObject.Invoke(obj, null);
-                    RebindWallBlocker(obj, original.WarehouseWallSnap, original.Wall);
                 }
                 else
                 {
-                    CoopPlugin.Log.LogError("Decoration move rollback failed legal validation.");
+                    // The original pose should be legal; if local geometry moved under it, still
+                    // leave the move lifecycle so the local player controller is not stranded.
+                    CoopPlugin.Log.LogWarning(
+                        "Decoration move rollback failed legal validation; settling at the original pose.");
+                    FinalizeMovedObject(obj);
                 }
+                RebindWallBlocker(obj, original.WarehouseWallSnap, original.Wall);
             }
             catch (Exception exception)
             {
@@ -574,7 +770,7 @@ namespace CardShopCoop.Modules.Decoration
             {
                 screen = FindFirst(typeof(PlaceDecoUIScreen)) as PlaceDecoUIScreen;
             }
-            return screen == null ? -1 : Convert.ToInt32(FiShopCategory.GetValue(screen));
+            return screen == null ? -1 : Convert.ToInt32(FiPlaceCategory.GetValue(screen));
         }
 
         internal static int CategoryFor(ShopBuyDecoUIScreen screen)
@@ -583,7 +779,7 @@ namespace CardShopCoop.Modules.Decoration
             {
                 screen = FindFirst(typeof(ShopBuyDecoUIScreen)) as ShopBuyDecoUIScreen;
             }
-            return screen == null ? -1 : Convert.ToInt32(FiShopCategory.GetValue(screen));
+            return screen == null ? -1 : Convert.ToInt32(FiBuyCategory.GetValue(screen));
         }
 
         internal static DecorationPose ReadPose(InteractableObject obj)
@@ -614,7 +810,11 @@ namespace CardShopCoop.Modules.Decoration
         internal static long HostIdFor(InteractableObject obj)
         {
             if (obj == null)
+            {
                 return 0;
+            }
+
+
             return HostIds.TryGetValue(obj, out var id) ? id : 0;
         }
 
@@ -624,7 +824,11 @@ namespace CardShopCoop.Modules.Decoration
         internal static long EnsureHostId(InteractableObject obj)
         {
             if (obj == null)
+            {
                 return 0;
+            }
+
+
             if (TryGetHoldId(obj, out var id))
             {
                 return id;
@@ -682,15 +886,22 @@ namespace CardShopCoop.Modules.Decoration
                 case DecorationActions.BuyShopDecoration:
                     if (UnlockField(message.Category)?.GetValue(null) is IList unlocks
                         && message.Index >= 0 && message.Index < unlocks.Count)
+                    {
                         unlocks[message.Index] = true;
+                    }
+
+
                     break;
                 case DecorationActions.BuyItemDecoration:
                     if (IsValidDeco(message.DecorationType))
                     {
                         var current = InventoryCount(message.DecorationType);
                         if (current != message.InventoryCount)
+                        {
                             MiAddInventory.Invoke(null, new object[] { message.DecorationType,
                                 message.InventoryCount - current });
+                        }
+
                     }
                     break;
                 case DecorationActions.Place:
@@ -698,11 +909,16 @@ namespace CardShopCoop.Modules.Decoration
                     {
                         var placed = ResolvePlacement(message.Pose, predictedPreview);
                         if (placed != null)
+                        {
                             ClientObjects[message.Pose.Id] = placed;
+                            ForgetDeferred(message.Pose.Id);
+                        }
                     }
                     ApplyInventoryCount(message.DecorationType, message.InventoryCount);
                     break;
                 case DecorationActions.Remove:
+                    // The host removed this piece; a deferred pose must not resurrect it.
+                    ForgetDeferred(message.ObjectId);
                     TryRemove(message.ObjectId);
                     ApplyInventoryCount(message.DecorationType, message.InventoryCount);
                     break;
@@ -742,9 +958,16 @@ namespace CardShopCoop.Modules.Decoration
                 return predictedPreview;
             }
 
-            var spawned = TryPlace(pose, 0, out var created);
+            var spawned = TryPlace(pose, 0, out var created, authoritative: true);
             CoopPlugin.Log.LogInfo("[decoration] place id=" + pose.Id + " type="
                 + pose.DecorationType + " spawned ok=" + spawned + ".");
+            if (!spawned)
+            {
+                // Keep the authoritative pose for a lifecycle retry instead of dropping it: a
+                // delta can arrive while this peer's scene is not ready, or a prefab can be
+                // missing on this build. A later state supersedes the entry.
+                Defer(pose);
+            }
             return spawned ? created : null;
         }
 
@@ -753,7 +976,11 @@ namespace CardShopCoop.Modules.Decoration
         internal static void DiscardPreview(InteractableObject obj)
         {
             if (obj == null)
+            {
                 return;
+            }
+
+
             CoopPlugin.Log.LogInfo("[decoration] retiring predicted preview without confirmation.");
             FinalizeMovedObject(obj);
             RemoveLocalPlacedObject(obj);
@@ -785,7 +1012,11 @@ namespace CardShopCoop.Modules.Decoration
         internal static void ApplyPredictedPose(InteractableObject obj, DecorationPose pose)
         {
             if (obj == null || pose == null)
+            {
                 return;
+            }
+
+
             obj.transform.SetPositionAndRotation(pose.Position, pose.Rotation);
             RebindWallBlocker(obj, pose.WarehouseWallSnap, pose.Wall);
         }
@@ -798,7 +1029,11 @@ namespace CardShopCoop.Modules.Decoration
         internal static void FinalizePlacement(InteractableObject obj, DecorationPose pose)
         {
             if (obj == null || pose == null)
+            {
                 return;
+            }
+
+
             var moving = obj.GetIsMovingObject();
             obj.transform.SetPositionAndRotation(pose.Position, pose.Rotation);
             if (moving)
@@ -814,7 +1049,11 @@ namespace CardShopCoop.Modules.Decoration
         internal static void FinalizeMovedObject(InteractableObject obj)
         {
             if (obj == null || !obj.GetIsMovingObject())
+            {
                 return;
+            }
+
+
             try
             {
                 MiOnPlacedMovedObject.Invoke(obj, null);
@@ -862,19 +1101,35 @@ namespace CardShopCoop.Modules.Decoration
                 // to the object the maps own, and otherwise recreate the piece from the snapshot
                 // and bind the id to the new object. Never adopt a same-type or nearest local
                 // object: a stale id is not evidence that some other piece is the right one.
-                if (obj == null && TryPlace(pose, pose.Id, out var rebound) && !used.Contains(rebound))
+                if (obj == null && TryPlace(pose, pose.Id, out var rebound, authoritative: true)
+                    && !used.Contains(rebound))
                 {
                     obj = rebound;
                 }
-                if (obj == null && TryPlace(pose, out var spawned))
+                if (obj == null && TryPlace(pose, out var spawned, authoritative: true))
                 {
                     obj = spawned;
                     live.Add(obj);
                 }
                 if (obj == null)
                 {
-                    throw new InvalidOperationException("Decoration reconciliation could not create type "
-                        + pose.DecorationType + " for host object " + pose.Id + ".");
+                    // A peer that cannot materialise one pose (missing prefab, scene not ready yet)
+                    // keeps it for a lifecycle retry instead of aborting the whole baseline before
+                    // the unlisted prune. That abort used to leave the saved copies plus the
+                    // partially spawned ones. The prune below still removes the stale copy, so no
+                    // duplicate remains and the scene stays consistent with the host's list.
+                    if (removeUnlisted)
+                    {
+                        Defer(pose);
+                    }
+                    else
+                    {
+                        // A rollback snapshot can be older than a host-confirmed pose; do not
+                        // overwrite a deferred authoritative pose with it.
+                        CoopPlugin.Log.LogWarning("[decoration] rollback could not restore type="
+                            + pose.DecorationType + " id=" + pose.Id + ".");
+                    }
+                    continue;
                 }
 
                 used.Add(obj);
@@ -912,16 +1167,29 @@ namespace CardShopCoop.Modules.Decoration
             foreach (var pair in next)
             {
                 if (pair.Key > 0)
+                {
                     ClientObjects[pair.Key] = pair.Value;
+                }
+
             }
         }
 
         private static InteractableObject GetMapped(long id)
         {
             if (id > 0)
+            {
+
                 return ClientObjects.TryGetValue(id, out var obj) ? obj : null;
+            }
+
+
             if (id < 0)
+            {
+
                 return LocalObjects.TryGetValue(id, out var obj) ? obj : null;
+            }
+
+
             return null;
         }
 
@@ -1095,13 +1363,26 @@ namespace CardShopCoop.Modules.Decoration
             return found == null || found.Length == 0 ? null : found.GetValue(0);
         }
 
-        private static void RefreshUi()
+        internal static void RefreshUi()
         {
-            InvokePage(typeof(PlaceDecoUIScreen));
-            InvokePage(typeof(ShopBuyDecoUIScreen));
+            // EvaluateDecoPageUI reads the live inventory catalogue, unlike the panel-only
+            // re-render it replaces. A delta can arrive in a load window (the delta path is not
+            // readiness-gated), so leave the refresh to the state apply that follows the load.
+            if (!IsSceneReady())
+            {
+                return;
+            }
+
+
+            RefreshPage(typeof(PlaceDecoUIScreen));
+            RefreshPage(typeof(ShopBuyDecoUIScreen));
         }
 
-        private static void InvokePage(Type type)
+        /// <summary>Re-evaluates a screen through the same entry point its own tab switch and open
+        /// use, which refreshes the cached equipped indices and data list from the current player
+        /// data before rebuilding the panels. Rebuilding the panels alone rendered from the stale
+        /// cache, so a remote equip left the previously equipped style shown as equipped.</summary>
+        private static void RefreshPage(Type type)
         {
             var screen = FindFirst(type);
             if (screen == null)
@@ -1109,14 +1390,26 @@ namespace CardShopCoop.Modules.Decoration
                 return;
             }
 
-            var method = type.GetMethod("EvaluatePanelUIPage",
+            var category = type == typeof(PlaceDecoUIScreen)
+                ? CategoryFor((PlaceDecoUIScreen)screen)
+                : CategoryFor((ShopBuyDecoUIScreen)screen);
+            var method = type.GetMethod("EvaluateDecoPageUI",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            method?.Invoke(screen, new object[] { 0 });
+            if (method != null)
+            {
+                method.Invoke(screen, new object[] { category });
+                return;
+            }
+
+            type.GetMethod("EvaluatePanelUIPage",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?.Invoke(screen, new object[] { 0 });
         }
     }
 
     internal sealed class DecorationSnapshot
     {
+        internal int Generation;
         internal int Wall;
         internal int WallB;
         internal int Floor;

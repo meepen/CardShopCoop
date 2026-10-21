@@ -1,4 +1,3 @@
-using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using HarmonyLib;
 

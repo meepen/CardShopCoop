@@ -14,7 +14,6 @@ using CardShopCoop.Runtime;
 // is the worst possible place for a type-load fault (DrawNone runs every frame on the main
 // menu), so nothing Steam-typed may appear in this file - a lobby id included.
 using UnityEngine;
-using CardShopCoop.Api;
 
 namespace CardShopCoop.UI
 {

@@ -22,7 +22,11 @@ namespace CardShopCoop.Modules.Hud
         internal static void Exit()
         {
             if (_depth > 0)
+            {
+
                 _depth--;
+            }
+
         }
     }
 }

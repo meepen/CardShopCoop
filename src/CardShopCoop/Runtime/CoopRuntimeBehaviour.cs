@@ -86,9 +86,16 @@ namespace CardShopCoop.Runtime
             {
                 var errors = new System.Collections.Generic.List<Exception>();
                 if (stopError != null)
+                {
                     errors.Add(stopError);
+                }
+
                 if (disposeError != null)
+                {
                     errors.Add(disposeError);
+                }
+
+
                 throw new AggregateException("Co-op runtime shutdown failed.", errors);
             }
         }

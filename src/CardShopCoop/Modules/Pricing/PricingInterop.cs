@@ -11,13 +11,13 @@ namespace CardShopCoop.Modules.Pricing
 
         internal const float PriceEpsilon = 0.0075f;
 
-        /// <summary>A named EItemType member whose numeric id the game's price list can actually
-        /// index. The list is indexed directly by <c>(int)type</c> in both GetItemPrice and
-        /// SetItemPrice. CGameData.PropagateLoadData pads the list to only 100 when the save has
-        /// none, while EItemType has named members up to 129, so a named member past the end would
-        /// throw and abort the join baseline. Bounding against the live Count is the fix; EPL's
-        /// CollectionWeaver never refuses an in-range index, so no catch is needed around the
-        /// getter/setter.</summary>
+        /// <summary>A wireable EItemType with a live price store. The raw list is indexed
+        /// directly by <c>(int)type</c> only below EPL's weave boundary
+        /// (<see cref="EItemType.Max"/>); EPL serves every minted id at or above that boundary
+        /// out of its own save data, so those ids must NOT be bounded by the raw list length -
+        /// doing so silently dropped every modded product from the pricing baseline. Normal
+        /// saves carry all named vanilla members, so this guard deliberately does not
+        /// upper-bound the index.</summary>
         internal static bool IsItemTypeValid(EItemType type)
         {
             if (!CatalogApi.IsWireableItemType(type, "pricing item"))
@@ -27,13 +27,17 @@ namespace CardShopCoop.Modules.Pricing
 
             var list = CPlayerData.m_SetItemPriceList;
             var index = (int)type;
-            return list != null && index >= 0 && index < list.Count;
+            return list != null && index >= 0;
         }
 
         internal static float ReadItem(EItemType type)
         {
             if (!IsItemTypeValid(type))
+            {
+
                 throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown item type.");
+            }
+
 
             return CPlayerData.GetItemPrice(type, false);
         }
@@ -42,7 +46,11 @@ namespace CardShopCoop.Modules.Pricing
         {
             actual = 0f;
             if (!IsItemTypeValid(type) || !ValidPrice(price))
+            {
+
                 return false;
+            }
+
 
             CPlayerData.SetItemPrice(type, price);
 
@@ -61,12 +69,18 @@ namespace CardShopCoop.Modules.Pricing
         {
             actual = 0f;
             if (card == null || !ValidPrice(price))
+            {
                 return false;
+            }
+
 
             CPlayerData.SetCardPrice(card, price);
             actual = ReadCard(card);
             if (Math.Abs(actual - price) <= PriceEpsilon)
+            {
                 return true;
+            }
+
 
             CoopPlugin.Log.LogWarning("[pricing] card price store did not hold " + price
                 + " for expansion=" + (int)card.expansionType + " monster=" + (int)card.monsterType
@@ -79,7 +93,11 @@ namespace CardShopCoop.Modules.Pricing
         internal static float ReadCard(CardData card)
         {
             if (card == null)
+            {
+
                 throw new ArgumentNullException(nameof(card));
+            }
+
 
             try
             {
@@ -108,7 +126,12 @@ namespace CardShopCoop.Modules.Pricing
         internal static CardData CopyCard(CardData card, int encodedGrade)
         {
             if (card == null)
+            {
+
                 return null;
+            }
+
+
             var copy = new CardData();
             copy.CopyData(card);
             copy.cardGrade = encodedGrade;
@@ -121,7 +144,11 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (card == null || card.expansionType == ECardExpansionType.None
                 || card.monsterType == EMonsterType.None || card.cardGrade < 0)
+            {
+
                 return false;
+            }
+
 
             try
             {
@@ -158,7 +185,11 @@ namespace CardShopCoop.Modules.Pricing
         internal static string CardKey(CardData card, int encodedGrade = int.MinValue)
         {
             if (card == null)
+            {
+
                 return null;
+            }
+
 
             var grade = encodedGrade == int.MinValue ? GradingApi.Encoded(card) : encodedGrade;
             return (int)card.expansionType + ":" + (int)card.monsterType + ":"

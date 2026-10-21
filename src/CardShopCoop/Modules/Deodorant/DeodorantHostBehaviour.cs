@@ -44,7 +44,10 @@ namespace CardShopCoop.Modules.Deodorant
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             _context = null;
@@ -55,7 +58,10 @@ namespace CardShopCoop.Modules.Deodorant
         private void Handle(MessageContext context, HandheldSprayIntentMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
+            {
                 return;
+            }
+
             if (!IsFinite(message.Position.x) || !IsFinite(message.Position.y)
                 || !IsFinite(message.Position.z) || !IsFinite(message.Content)
                 || message.Content < 0f || message.Content > 1f)
@@ -146,10 +152,18 @@ namespace CardShopCoop.Modules.Deodorant
         private static bool HasDeodorant(System.Collections.Generic.IReadOnlyList<int> holdTypes)
         {
             if (holdTypes == null)
+            {
                 return false;
+            }
+
             for (var i = 0; i < holdTypes.Count; i++)
+            {
                 if (holdTypes[i] == (int)EItemType.Deodorant)
+                {
                     return true;
+                }
+            }
+
             return false;
         }
     }

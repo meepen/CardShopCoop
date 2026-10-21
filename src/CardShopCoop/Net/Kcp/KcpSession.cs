@@ -56,7 +56,11 @@ namespace CardShopCoop.Net.Kcp
             : base(ValidateConfig(config), ValidateCookie(isServer, cookie), initialTime)
         {
             if (rawSend == null)
+            {
+
                 throw new ArgumentNullException(nameof(rawSend));
+            }
+
 
             this.isServer = isServer;
             mtu = config.Mtu;
@@ -70,22 +74,47 @@ namespace CardShopCoop.Net.Kcp
         private static KcpConfig ValidateConfig(KcpConfig config)
         {
             if (config == null)
+            {
+
                 throw new ArgumentNullException(nameof(config));
-            if (config.Mtu < KcpPeer.METADATA_SIZE + KcpCore.MTU_MIN)
+            }
+
+
+            if (config.Mtu < METADATA_SIZE + KcpCore.MTU_MIN)
+            {
+
                 throw new ArgumentOutOfRangeException(nameof(config.Mtu),
                     $"KCP MTU must leave room for channel, cookie, and a KCP MTU of at least {KcpCore.MTU_MIN} bytes.");
+            }
+
+
             if (config.Interval == 0)
+            {
+
                 throw new ArgumentOutOfRangeException(nameof(config.Interval));
+            }
+
+
             if (config.ReceiveWindowSize < 2)
+            {
+
                 throw new ArgumentOutOfRangeException(nameof(config.ReceiveWindowSize));
+            }
+
+
             return config;
         }
 
         private static uint ValidateCookie(bool isServer, uint cookie)
         {
             if (isServer && cookie == 0)
+            {
+
                 throw new ArgumentOutOfRangeException(nameof(cookie),
                     "A server KCP cookie must be non-zero.");
+            }
+
+
             return cookie;
         }
 
@@ -113,7 +142,10 @@ namespace CardShopCoop.Net.Kcp
         public void FlushOutgoing()
         {
             if (!IsDisconnected)
+            {
                 kcp.Flush();
+            }
+
         }
 
         /// <summary>
@@ -124,12 +156,20 @@ namespace CardShopCoop.Net.Kcp
         public bool Start(uint now)
         {
             if (started || IsDisconnected)
+            {
+
                 return false;
+            }
+
 
             SetInitialTime(now);
             started = true;
             if (IsClient)
+            {
                 SendHello();
+            }
+
+
             return true;
         }
 
@@ -154,7 +194,10 @@ namespace CardShopCoop.Net.Kcp
         private void EnsureStarted(uint now)
         {
             if (!started && !IsDisconnected)
+            {
                 Start(now);
+            }
+
         }
 
         /// <summary>
@@ -166,10 +209,14 @@ namespace CardShopCoop.Net.Kcp
         public bool InputDatagram(ArraySegment<byte> datagram)
         {
             if (IsDisconnected || datagram.Array == null || datagram.Count <= METADATA_SIZE)
+            {
+
                 return false;
+            }
 
             // Mtu is the outer transport limit, not the KCP payload limit.  In particular,
             // config.Mtu itself is valid because RawSend emits exactly this many bytes at most.
+
             if (datagram.Count > mtu)
             {
                 ReportError(ErrorCode.InvalidReceive,
@@ -193,7 +240,10 @@ namespace CardShopCoop.Net.Kcp
             if (isServer)
             {
                 if (state == KcpState.Authenticated && messageCookie != cookie)
+                {
                     return false;
+                }
+
             }
             else
             {
@@ -201,7 +251,11 @@ namespace CardShopCoop.Net.Kcp
                 // In particular, never let an arbitrary unreliable, malformed, or zero-cookie
                 // datagram poison the value that will protect the authenticated session.
                 if (cookie == 0 && messageCookie == 0)
+                {
                     return false;
+                }
+
+
                 if (cookie != 0 && messageCookie != cookie)
                 {
                     return false;
@@ -248,13 +302,20 @@ namespace CardShopCoop.Net.Kcp
             while (remaining > 0)
             {
                 if (remaining < KcpCore.OVERHEAD)
+                {
                     return false;
+                }
+
 
                 var command = message.Array[offset + 4];
                 var fragment = message.Array[offset + 5];
                 Utils.Decode32U(message.Array, offset + 20, out var length);
                 if (length > (uint)(remaining - KcpCore.OVERHEAD))
+                {
+
                     return false;
+                }
+
 
                 if (command == KcpCore.CMD_PUSH && fragment == 0 && length == 1 &&
                     message.Array[offset + KcpCore.OVERHEAD] == (byte)KcpHeaderReliable.Hello)
@@ -274,13 +335,31 @@ namespace CardShopCoop.Net.Kcp
         public bool Send(ArraySegment<byte> data, KcpChannel channel)
         {
             if (!IsAuthenticated || data.Array == null)
+            {
                 return false;
+            }
+
+
             if (data.Count == 0)
+            {
                 return SendData(data, channel);
+            }
+
+
             if (channel == KcpChannel.Reliable && data.Count > reliableMax)
+            {
+
                 return RejectOversize(data.Count, reliableMax, true);
+            }
+
+
             if (channel == KcpChannel.Unreliable && data.Count > unreliableMax)
+            {
+
                 return RejectOversize(data.Count, unreliableMax, false);
+            }
+
+
             return SendData(data, channel);
         }
 
@@ -306,7 +385,11 @@ namespace CardShopCoop.Net.Kcp
             // The responder's Hello is the only server-side handshake reply.  It is sent
             // before the callback, matching kcp2k and making the callback observe a ready link.
             if (isServer)
+            {
                 SendHello();
+            }
+
+
             authenticatedCallback?.Invoke();
             Authenticated?.Invoke();
         }
@@ -314,7 +397,10 @@ namespace CardShopCoop.Net.Kcp
         protected override bool OnReliableHelloReceived()
         {
             if (isServer)
+            {
                 return true;
+            }
+
 
             if (pendingCookie == 0)
             {

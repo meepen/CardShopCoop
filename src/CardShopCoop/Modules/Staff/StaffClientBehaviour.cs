@@ -55,13 +55,13 @@ namespace CardShopCoop.Modules.Staff
         private sealed class InteractScreenCache : Cached<WorkerInteractUIScreen>
         {
             protected override WorkerInteractUIScreen GetRawValue()
-                => UnityEngine.Object.FindObjectOfType<WorkerInteractUIScreen>(true);
+                => FindObjectOfType<WorkerInteractUIScreen>(true);
         }
 
         private sealed class HireScreenCache : Cached<HireWorkerScreen>
         {
             protected override HireWorkerScreen GetRawValue()
-                => UnityEngine.Object.FindObjectOfType<HireWorkerScreen>(true);
+                => FindObjectOfType<HireWorkerScreen>(true);
         }
 
         private readonly InteractScreenCache _interactScreenCache = new();
@@ -116,7 +116,11 @@ namespace CardShopCoop.Modules.Staff
             {
                 var key = DeltaKey(message);
                 if (_deferredDeltas.TryGetValue(key, out var previous))
+                {
                     PredictionApi.Ack(previous.PredictionId);
+                }
+
+
                 _deferredDeltas[key] = message;
                 CoopPlugin.Log.LogInfo("[staff] deferred " + message.Kind + " index=" + message.Index
                     + " generation=" + message.Generation + " known="
@@ -1257,7 +1261,11 @@ namespace CardShopCoop.Modules.Staff
         private void ClearDeferredDeltas()
         {
             foreach (var delta in _deferredDeltas.Values)
+            {
                 PredictionApi.Ack(delta.PredictionId);
+            }
+
+
             _deferredDeltas.Clear();
         }
 

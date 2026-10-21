@@ -61,7 +61,11 @@ namespace CardShopCoop.Modules.SaveTransfer
         internal static SaveTransferFileSet CollectWrittenFiles(string root, DateTime sinceUtc)
         {
             if (string.IsNullOrEmpty(root))
+            {
+
                 throw new ArgumentException("A sidecar root is required.", nameof(root));
+            }
+
 
             var result = new SaveTransferFileSet();
             var warningDetails = new List<string>();

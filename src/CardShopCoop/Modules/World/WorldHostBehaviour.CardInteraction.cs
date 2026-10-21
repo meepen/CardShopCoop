@@ -1,7 +1,6 @@
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
 {
@@ -98,7 +97,11 @@ namespace CardShopCoop.Modules.World
         private bool ApplyContainerCommand(MessageContext context, ContainerOpMessage message)
         {
             if (_cardInteraction == null)
+            {
+
                 return false;
+            }
+
 
             return _cardInteraction.Containers.HostApplyOp(message, context.ConnectionId,
                 response => SendWorldTo(context.ConnectionId, response));

@@ -95,7 +95,11 @@ namespace CardShopCoop.Net
                 }
                 _incomingBytes -= ready.Bytes;
                 if (_incomingBytes < 0)
+                {
                     _incomingBytes = 0;
+                }
+
+
                 message = ready.Message;
                 return true;
             }
@@ -321,7 +325,11 @@ namespace CardShopCoop.Net
                         || _incomingBytes > MaxBufferedBytes - bytes))
                 {
                     if (!_incoming.TryDequeue(out var evicted))
+                    {
                         break;
+                    }
+
+
                     _incomingBytes = Math.Max(0, _incomingBytes - evicted.Bytes);
                 }
 

@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
-using CardShopCoop.Modules.Grading;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
@@ -141,7 +140,10 @@ namespace CardShopCoop.Modules.World
             _host = host;
             _broadcast = broadcast ?? throw new ArgumentNullException(nameof(broadcast));
             if (send == null)
+            {
                 throw new ArgumentNullException(nameof(send));
+            }
+
             if (!_host)
             {
                 PlacementApi.StructureChanged += RetryPendingFurniture;
@@ -1096,9 +1098,14 @@ namespace CardShopCoop.Modules.World
         internal void ClientConvertToStoredRecord(Guid id)
         {
             if (_host)
+            {
                 throw new InvalidOperationException("The host cannot apply a client stored-box state.");
+            }
+
             if (id == Guid.Empty)
+            {
                 throw new InvalidOperationException("A client stored-box state requires an ID.");
+            }
 
             if (TryGetBox(id, out var box))
             {

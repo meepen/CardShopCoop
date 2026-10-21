@@ -31,6 +31,12 @@ namespace CardShopCoop.Modules.Catalog
         internal static bool IsDefinedEnumValue(EnumKind kind, int value)
             => CatalogIdMap.IsDefined(kind, value);
 
+        /// <summary>True when this defined value is backed by currently loaded content. EPL's
+        /// prepatcher keeps every id it has ever minted, so membership alone would let baseline
+        /// builders ship stale ids for packs that are no longer installed.</summary>
+        internal static bool IsActiveEnumValue(EnumKind kind, int value)
+            => EplActiveEnums.IsActiveValue(kind, value);
+
         /// <summary>Returns the player-facing borrowed-registry notice, or null when no host
         /// registry is currently installed. The first observed notice is logged once.</summary>
         public static string EnumLendState()
@@ -74,7 +80,11 @@ namespace CardShopCoop.Modules.Catalog
         {
             state = null;
             if (!CatalogInterop.TryCaptureLicenseState(out var value))
+            {
+
                 return false;
+            }
+
 
             state = new PurchaseLicenseState(value);
             return true;

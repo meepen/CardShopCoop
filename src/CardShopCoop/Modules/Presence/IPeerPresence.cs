@@ -35,7 +35,10 @@ namespace CardShopCoop.Modules.Presence
             if (holdTypes != null)
             {
                 for (var i = 0; i < copy.Length; i++)
+                {
                     copy[i] = holdTypes[i];
+                }
+
             }
             HoldTypes = copy;
         }
@@ -63,7 +66,11 @@ namespace CardShopCoop.Modules.Presence
         public PeerPresenceProvider(TimeSpan expiry)
         {
             if (expiry <= TimeSpan.Zero)
+            {
                 throw new ArgumentOutOfRangeException(nameof(expiry));
+            }
+
+
             _expiryTicks = (long)(expiry.TotalSeconds * Stopwatch.Frequency);
         }
         public bool TryGet(int connectionId, out PeerPresence presence)
@@ -86,7 +93,10 @@ namespace CardShopCoop.Modules.Presence
         public void RecordAuthenticatedPosition(PeerConnection connection, Vector3 position)
         {
             if (connection == null || connection.State != ConnectionState.FullyJoined || !Finite(position))
+            {
                 return;
+            }
+
             lock (_gate)
             {
                 if (_entries.TryGetValue(connection.Id, out var entry))
@@ -105,7 +115,10 @@ namespace CardShopCoop.Modules.Presence
         public void RecordAuthenticatedHold(PeerConnection connection, byte hold, IReadOnlyList<int> holdTypes)
         {
             if (connection == null || connection.State != ConnectionState.FullyJoined)
+            {
                 return;
+            }
+
             var copy = CopyHoldTypes(holdTypes);
             lock (_gate)
             {
@@ -139,7 +152,11 @@ namespace CardShopCoop.Modules.Presence
             var count = values == null ? 0 : values.Count;
             var copy = new int[count];
             for (var i = 0; i < count; i++)
+            {
                 copy[i] = values[i];
+            }
+
+
             return copy;
         }
         private static bool Finite(Vector3 p) => !float.IsNaN(p.x) && !float.IsInfinity(p.x)

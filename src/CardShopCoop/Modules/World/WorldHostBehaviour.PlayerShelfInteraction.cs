@@ -686,7 +686,7 @@ namespace CardShopCoop.Modules.World
                     continue;
                 }
 
-                Guid owner = Guid.Empty;
+                var owner = Guid.Empty;
                 foreach (var pair in _pendingClientAddItems)
                 {
                     if (ReferenceEquals(pair.Value, item) && PredictionApi.IsPending(pair.Key))
@@ -1116,7 +1116,9 @@ namespace CardShopCoop.Modules.World
         internal void FlushClientState()
         {
             if (_host || _pendingClientStates.Count == 0)
+            {
                 return;
+            }
 
             var pending = new List<ShelfInteractionMessage>(_pendingClientStates.Values);
             _pendingClientStates.Clear();
@@ -1134,7 +1136,9 @@ namespace CardShopCoop.Modules.World
             }
 
             if (!_host && mutation.Command != null)
+            {
                 return;
+            }
 
             ShelfInteractionMessage message;
             if (isAdd)

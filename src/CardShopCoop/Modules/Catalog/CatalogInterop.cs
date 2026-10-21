@@ -120,7 +120,9 @@ namespace CardShopCoop.Modules.Catalog
         {
             data = null;
             if (index < 0)
+            {
                 return false;
+            }
 
             try
             {
@@ -150,7 +152,10 @@ namespace CardShopCoop.Modules.Catalog
             data = null;
             transient = false;
             if (!IsWireableItemType(itemType, "catalog product resolution"))
+            {
                 return false;
+            }
+
             var count = Count;
 
             var nameSizeCount = 0;

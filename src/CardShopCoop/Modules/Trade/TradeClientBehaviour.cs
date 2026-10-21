@@ -152,7 +152,10 @@ namespace CardShopCoop.Modules.Trade
         private void ClearPendingDeltas()
         {
             foreach (var delta in _pendingDeltas.Values)
+            {
                 PredictionApi.Ack(delta.PredictionId);
+            }
+
             _pendingDeltas.Clear();
         }
 
@@ -266,7 +269,10 @@ namespace CardShopCoop.Modules.Trade
         private void DeferDelta(TradeOfferDeltaMessage message)
         {
             if (_pendingDeltas.TryGetValue(message.Counter, out var previous))
+            {
                 PredictionApi.Ack(previous.PredictionId);
+            }
+
             _pendingDeltas[message.Counter] = message;
         }
 

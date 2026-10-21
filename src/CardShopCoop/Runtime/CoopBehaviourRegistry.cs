@@ -245,7 +245,10 @@ namespace CardShopCoop.Runtime
         public void Dispose()
         {
             if (_disposed)
+            {
                 return;
+            }
+
             _disposed = true;
             List<Exception> errors = null;
             for (var i = _behaviours.Count - 1; i >= 0; i--)

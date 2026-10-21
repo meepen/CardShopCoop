@@ -327,7 +327,10 @@ namespace CardShopCoop.Modules.Expansion
                 // owns that debit and grants the XP when it applies the ExpansionPurchaseMessage,
                 // so suppress the Hud economy observer for the vanilla events this call produces.
                 if (__state != null)
+                {
                     EconomyActionScope.Enter();
+                }
+
             }
 
             [HarmonyPostfix]
@@ -359,7 +362,11 @@ namespace CardShopCoop.Modules.Expansion
             private static void Finalizer(PurchaseCapture __state)
             {
                 if (__state != null)
+                {
+
                     EconomyActionScope.Exit();
+                }
+
             }
         }
 
@@ -374,7 +381,10 @@ namespace CardShopCoop.Modules.Expansion
                 // debit and grants the XP through the ExpansionPurchaseMessage, so suppress the Hud
                 // economy observer for the vanilla events this call produces.
                 if (__state != null)
+                {
                     EconomyActionScope.Enter();
+                }
+
             }
 
             [HarmonyPostfix]
@@ -393,7 +403,11 @@ namespace CardShopCoop.Modules.Expansion
             private static void Finalizer(PurchaseCapture __state)
             {
                 if (__state != null)
+                {
+
                     EconomyActionScope.Exit();
+                }
+
             }
         }
 

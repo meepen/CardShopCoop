@@ -256,7 +256,7 @@ namespace CardShopCoop.Runtime
                 types = exception.Types;
             }
 
-            var wanted = typeof(CardShopCoop.Attributes.PersistentBehaviourAttribute).FullName;
+            var wanted = typeof(Attributes.PersistentBehaviourAttribute).FullName;
             foreach (var type in types)
             {
                 if (!ReflectionSurface.CanLoad(type))

@@ -43,7 +43,10 @@ namespace CardShopCoop.Modules.Grading
         private void OnEnable()
         {
             if (_shutdown || _context != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -62,9 +65,16 @@ namespace CardShopCoop.Modules.Grading
                 _harmony = null;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 throw;
             }
         }
@@ -76,17 +86,28 @@ namespace CardShopCoop.Modules.Grading
         private void SendJoinBaseline(PeerConnection peer)
         {
             if (peer == null)
+            {
                 return;
+            }
+
+
             _joined.Add(peer.Id);
             if (!FullUpdate(peer.Id))
+            {
                 _baselinePending.Add(peer.Id);
+            }
+
         }
 
         [OnClientDisconnected]
         private void ForgetPeer(PeerConnection peer, DisconnectInfo _)
         {
             if (peer == null)
+            {
                 return;
+            }
+
+
             _joined.Remove(peer.Id);
             _baselinePending.Remove(peer.Id);
         }
@@ -95,7 +116,10 @@ namespace CardShopCoop.Modules.Grading
         private void HandleSubmission(MessageContext context, GradingOpMessage message)
         {
             if (context?.Connection != null)
+            {
                 HostApply(message, context.Connection.Id);
+            }
+
         }
 
         internal static void InventoryReset()
@@ -106,7 +130,10 @@ namespace CardShopCoop.Modules.Grading
         private void ResetInventory()
         {
             foreach (var pair in new Dictionary<GradeCardSubmitSet, Guid>(_setIds))
+            {
                 BroadcastJobDelta(Guid.Empty, pair.Value, null, true);
+            }
+
             _setIds.Clear();
             GradingInterop.Reset();
         }
@@ -114,11 +141,19 @@ namespace CardShopCoop.Modules.Grading
         internal bool FullUpdate(int connectionId)
         {
             if (_shutdown || !_context.InGame() || GradingWorldBridge.Current?.SceneReady != true)
+            {
                 return false;
+            }
+
 
             var list = CPlayerData.m_GradeCardInProgressList;
             if (list == null)
+            {
+
                 return false;
+            }
+
+
             _context.Send(connectionId, BuildState(list));
             _baselinePending.Remove(connectionId);
             return true;
@@ -141,7 +176,11 @@ namespace CardShopCoop.Modules.Grading
         internal void PushCurrentSets()
         {
             if (_shutdown || !_context.InGame())
+            {
                 return;
+            }
+
+
             var list = CPlayerData.m_GradeCardInProgressList;
             var live = new HashSet<Guid>();
             if (list != null)
@@ -150,7 +189,11 @@ namespace CardShopCoop.Modules.Grading
                 {
                     var set = list[i];
                     if (set == null)
+                    {
                         continue;
+                    }
+
+
                     var id = GetSetId(set);
                     live.Add(id);
                     BroadcastJobDelta(Guid.Empty, id, set, false);
@@ -167,7 +210,10 @@ namespace CardShopCoop.Modules.Grading
                 }
             }
             for (var i = 0; i < removed.Count; i++)
+            {
                 _setIds.Remove(removed[i]);
+            }
+
         }
 
         private void HostApply(GradingOpMessage message, int senderConnection)
@@ -275,7 +321,11 @@ namespace CardShopCoop.Modules.Grading
             {
                 // The wallet is admitted before any local job/report/GO commit.
                 if (!EconomyAuthority.QueueHostSpend(spend))
+                {
+
                     throw new InvalidOperationException("grading wallet debit could not be admitted");
+                }
+
 
                 PriceChangeManager.AddTransaction(-total, ETransactionType.GradingFee, serviceLevel);
                 transactionRecorded = true;
@@ -290,7 +340,11 @@ namespace CardShopCoop.Modules.Grading
                     m_CardDataList = new List<CardData>(Math.Max(cards.Count, VanillaSlots)),
                 };
                 for (var i = 0; i < cards.Count; i++)
+                {
                     set.m_CardDataList.Add(Clone(cards[i]));
+                }
+
+
                 CPlayerData.m_GradeCardInProgressList.Add(set);
                 // Bind the client-minted job id before any further commit, so a compensation above
                 // removes exactly this binding.
@@ -299,12 +353,19 @@ namespace CardShopCoop.Modules.Grading
                 if (GradingInterop.Present)
                 {
                     if (!TryEnrollGoJob(set, message.CompanyId, serviceLevel, out go))
+                    {
+
                         throw new InvalidOperationException("Grading Overhaul rejected the service/company");
+                    }
+
                 }
                 else
                 {
                     while (set.m_CardDataList.Count < VanillaSlots)
+                    {
                         set.m_CardDataList.Add(new CardData());
+                    }
+
                 }
 
                 reservation.Commit();
@@ -328,9 +389,12 @@ namespace CardShopCoop.Modules.Grading
                     CPlayerData.m_GameReportDataCollect.supplyCost = report;
                     CPlayerData.m_GameReportDataCollectPermanent.supplyCost = permanentReport;
                     if (transactionRecorded)
+                    {
                         PriceChangeManager.AddTransaction(total, ETransactionType.GradingFee, serviceLevel);
+                    }
                     // This is only for an actual local game exception after the admitted debit;
                     // transport outcomes never reverse wallet state.
+
                     CEventManager.QueueEvent(new CEventPlayer_AddCoin(total, true));
                 }
                 catch (Exception compensationError)
@@ -348,7 +412,10 @@ namespace CardShopCoop.Modules.Grading
         {
             snapshot = null;
             if (!GradingInterop.GoCompatible || !GradingInterop.IsAllowedCompany(companyId))
+            {
                 return false;
+            }
+
 
             var useCheats = GradingInterop.HostUseCheatsWebsite;
             var jobId = GradingInterop.NextJobId();
@@ -357,7 +424,10 @@ namespace CardShopCoop.Modules.Grading
                 || !GradingInterop.TryDecodeServiceLevel(encoded, out var decodedCompany,
                     out var decodedTier)
                 || decodedCompany != companyId || decodedTier != serviceLevel)
+            {
                 return false;
+            }
+
 
             snapshot = new GoJobSnapshot
             {
@@ -371,19 +441,31 @@ namespace CardShopCoop.Modules.Grading
 
             };
             if (!GradingInterop.RegisterJobCompany(set, companyId, useCheats))
+            {
                 return false;
+            }
+
 
             set.m_ServiceLevel = encoded;
             snapshot.PreRollAttempted = true;
             if (!GradingInterop.PreRollJob(set, companyId, useCheats, jobId))
+            {
+
                 return false;
+            }
+
+
             return true;
         }
 
         private static void RollbackGoJob(GradeCardSubmitSet set, GoJobSnapshot snapshot)
         {
             if (set == null || snapshot == null)
+            {
                 return;
+            }
+
+
             if (snapshot.PreRollAttempted
                 && !GradingInterop.RollbackPreRoll(set, snapshot.CompanyId, snapshot.UseCheats,
                     snapshot.JobId))
@@ -415,13 +497,19 @@ namespace CardShopCoop.Modules.Grading
                 for (var i = 0; i < cards.Count; i++)
                 {
                     if (cards[i] != null && !bridge.CardSetInstalled(cards[i]))
+                    {
                         bridge.WarnRefused(cards[i], reason);
+                    }
+
                 }
             }
             CoopPlugin.Log.LogWarning("grading submission rejected for connection "
                 + connectionId + ": " + reason);
             if (predictionId != Guid.Empty)
+            {
                 PredictionApi.Rollback(_context, connectionId, predictionId);
+            }
+
         }
 
         private Guid GetSetId(GradeCardSubmitSet set)
@@ -438,13 +526,20 @@ namespace CardShopCoop.Modules.Grading
         {
             var message = new GradingStateMessage();
             if (sets == null)
+            {
                 return message;
+            }
+
 
             for (var i = 0; i < sets.Count; i++)
             {
                 var set = sets[i];
                 if (set == null)
+                {
                     continue;
+                }
+
+
                 var dto = new GradingSetDto
                 {
                     Id = GetSetId(set),
@@ -455,7 +550,11 @@ namespace CardShopCoop.Modules.Grading
                 var cards = set.m_CardDataList;
                 var count = Math.Min(cards?.Count ?? 0, GradingInterop.MaxSubmitSlots);
                 for (var j = 0; j < count; j++)
+                {
                     dto.Cards.Add(Clone(cards[j]));
+                }
+
+
                 message.Sets.Add(dto);
             }
             return message;
@@ -465,7 +564,10 @@ namespace CardShopCoop.Modules.Grading
             bool removed)
         {
             if (_shutdown || !_context.InGame())
+            {
                 return;
+            }
+
 
             var message = new GradingJobDeltaMessage
             {
@@ -481,7 +583,10 @@ namespace CardShopCoop.Modules.Grading
                 var cards = set.m_CardDataList;
                 var count = Math.Min(cards?.Count ?? 0, GradingInterop.MaxSubmitSlots);
                 for (var i = 0; i < count; i++)
+                {
                     message.Cards.Add(Clone(cards[i]));
+                }
+
             }
             _context.Broadcast(message);
         }
@@ -490,9 +595,17 @@ namespace CardShopCoop.Modules.Grading
         {
             var result = new List<CardData>(cards?.Count ?? 0);
             if (cards == null)
+            {
                 return result;
+            }
+
+
             for (var i = 0; i < cards.Count; i++)
+            {
                 result.Add(Clone(cards[i]));
+            }
+
+
             return result;
         }
 
@@ -515,7 +628,11 @@ namespace CardShopCoop.Modules.Grading
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
@@ -526,7 +643,11 @@ namespace CardShopCoop.Modules.Grading
             _baselinePending.Clear();
             GradingInterop.Reset();
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _context = null;
         }
 

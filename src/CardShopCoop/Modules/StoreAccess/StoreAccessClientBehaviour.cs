@@ -26,7 +26,10 @@ namespace CardShopCoop.Modules.StoreAccess
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -59,9 +62,17 @@ namespace CardShopCoop.Modules.StoreAccess
                     SceneManager.sceneLoaded -= OnSceneLoaded;
                 }
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 ResetSessionState();
                 StoreAccessInterop.Reset();
                 _context = null;
@@ -73,9 +84,12 @@ namespace CardShopCoop.Modules.StoreAccess
         private void HandleState(MessageContext context, StoreAccessStateMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
 
             // The join baseline is superseded by any delta that already arrived.
+
             _pendingState = message;
             _pendingDelta = null;
             TryApplyPending();
@@ -107,18 +121,32 @@ namespace CardShopCoop.Modules.StoreAccess
             var warehouseChanged = message.HasWarehouseDoorClosed
                 && CPlayerData.m_IsWarehouseDoorClosed != message.IsWarehouseDoorClosed;
             if (message.HasShopOpen)
+            {
                 CPlayerData.m_IsShopOpen = message.IsShopOpen;
+            }
+
             if (message.HasWarehouseDoorClosed)
+            {
                 CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
+            }
 
             // The join baseline may still be waiting for the scene. A delta only carries one
             // sign, so fold it into that pending state rather than dropping either update.
+
             if (_pendingState != null)
             {
                 if (message.HasShopOpen)
+                {
                     _pendingState.IsShopOpen = message.IsShopOpen;
+                }
+
+
                 if (message.HasWarehouseDoorClosed)
+                {
                     _pendingState.IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
+                }
+
+
                 _pendingState.Animate = false;
                 return;
             }
@@ -157,7 +185,10 @@ namespace CardShopCoop.Modules.StoreAccess
         private void TryApplyPending()
         {
             if (_shutdown || _context == null || !_context.InGame())
+            {
                 return;
+            }
+
 
             if (_pendingState != null && StoreAccessInterop.IsSceneReady())
             {
@@ -172,15 +203,24 @@ namespace CardShopCoop.Modules.StoreAccess
                 // change that happened while the world was loading would replay it at the wrong
                 // moment.
                 if (_pendingDelta.HasShopOpen)
+                {
                     StoreAccessInterop.RefreshOpenMesh(StoreAccessInterop.FindOpenSign());
+                }
+
+
                 if (_pendingDelta.HasWarehouseDoorClosed)
                 {
                     var warehouseSign = StoreAccessInterop.FindWarehouseSign();
                     if (warehouseSign != null)
+                    {
                         StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
+                    }
                     else
+                    {
                         StoreAccessInterop.RefreshWarehouseAccess(
                             SceneRef<UnlockRoomManager>.Get());
+                    }
+
                 }
 
                 LogDelta("painted onto the ready sign", _pendingDelta);
@@ -194,14 +234,21 @@ namespace CardShopCoop.Modules.StoreAccess
             CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
             var openSign = StoreAccessInterop.FindOpenSign();
             if (!message.Animate || !StoreAccessInterop.PlayOpenAnimation(openSign))
+            {
                 StoreAccessInterop.RefreshOpenMesh(openSign);
+            }
 
             var warehouseSign = StoreAccessInterop.FindWarehouseSign();
             if (warehouseSign != null && (!message.Animate
                 || !StoreAccessInterop.PlayWarehouseAnimation(warehouseSign)))
+            {
                 StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
+            }
             else if (warehouseSign == null)
+            {
                 StoreAccessInterop.RefreshWarehouseAccess(SceneRef<UnlockRoomManager>.Get());
+            }
+
         }
 
         private static void ApplyDeltaVisuals(StoreAccessDeltaMessage message, bool shopChanged,
@@ -219,7 +266,10 @@ namespace CardShopCoop.Modules.StoreAccess
                     // swap in progress is the local player's own animation of the same value, so
                     // leave it alone.
                     if (shopChanged || !StoreAccessInterop.IsOpenSwapping(openSign))
+                    {
                         StoreAccessInterop.RefreshOpenMesh(openSign);
+                    }
+
                 }
             }
 
@@ -237,7 +287,10 @@ namespace CardShopCoop.Modules.StoreAccess
                 {
                     if (warehouseChanged
                         || !StoreAccessInterop.IsWarehouseSwapping(warehouseSign))
+                    {
                         StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
+                    }
+
                 }
             }
         }
@@ -254,10 +307,13 @@ namespace CardShopCoop.Modules.StoreAccess
         private void ForwardToggle(byte which, bool before, bool after)
         {
             if (_shutdown || !_joined || _context == null || !_context.InGame() || after == before)
+            {
                 return;
+            }
 
             // One prediction key per sign so an undo of one sign's prediction does not touch the
             // other sign's in-flight toggle.
+
             var predictionKey = which == 0 ? "store-access:shop" : "store-access:warehouse";
             PredictionApi.Predict(
                 predictionKey,
@@ -317,7 +373,10 @@ namespace CardShopCoop.Modules.StoreAccess
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
         {
             if (connection?.Id == 1)
+            {
                 ResetSessionState();
+            }
+
         }
 
         private void ResetSessionState()
@@ -330,7 +389,11 @@ namespace CardShopCoop.Modules.StoreAccess
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -338,7 +401,11 @@ namespace CardShopCoop.Modules.StoreAccess
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             ResetSessionState();
             StoreAccessInterop.Reset();
             _context = null;

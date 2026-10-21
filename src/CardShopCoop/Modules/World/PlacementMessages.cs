@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
-using CardShopCoop.Net.Protocol;
 using Newtonsoft.Json;
 using UnityEngine;
 

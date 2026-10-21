@@ -170,7 +170,10 @@ namespace CardShopCoop.Net.Kcp
                 {
                     var result = new List<PeerConnection>(_connections.Count);
                     foreach (var state in _connections.Values)
+                    {
                         result.Add(state.Connection);
+                    }
+
                     return result;
                 }
             }
@@ -181,7 +184,9 @@ namespace CardShopCoop.Net.Kcp
             get
             {
                 lock (_gate)
+                {
                     return _connections.Count;
+                }
             }
         }
 
@@ -190,8 +195,11 @@ namespace CardShopCoop.Net.Kcp
             get
             {
                 lock (_gate)
+                {
                     return Volatile.Read(ref _started) && !Volatile.Read(ref _stopRequested)
                         && !Volatile.Read(ref _disposed);
+                }
+
             }
         }
 
@@ -226,16 +234,25 @@ namespace CardShopCoop.Net.Kcp
             lock (_gate)
             {
                 if (_pumpThreadId == 0)
+                {
                     _pumpThreadId = Thread.CurrentThread.ManagedThreadId;
+                }
                 else if (_pumpThreadId != Thread.CurrentThread.ManagedThreadId)
+                {
                     throw new InvalidOperationException(
                         "KCP transport lifecycle must run on the pump thread");
+                }
 
                 if (Volatile.Read(ref _disposed) || Volatile.Read(ref _disposeRequested))
+                {
                     throw new ObjectDisposedException(nameof(KcpSessionManager));
+                }
 
                 if (Volatile.Read(ref _started))
+                {
                     return;
+                }
+
 
                 IProtocolSessionLease lease = null;
                 var bearerStartAttempted = false;
@@ -271,7 +288,10 @@ namespace CardShopCoop.Net.Kcp
                     try
                     {
                         if (bearerStartAttempted)
+                        {
                             _datagrams.Stop();
+                        }
+
                     }
                     catch (Exception cleanupError)
                     {
@@ -297,11 +317,18 @@ namespace CardShopCoop.Net.Kcp
         public void PumpNetworkThread()
         {
             if (Interlocked.Exchange(ref _pumpActive, 1) != 0)
+            {
+
                 throw new InvalidOperationException("KCP transport cannot be pumped concurrently");
+            }
+
 
             var threadId = Thread.CurrentThread.ManagedThreadId;
             if (_pumpThreadId == 0)
+            {
                 _pumpThreadId = threadId;
+            }
+
             else if (_pumpThreadId != threadId)
             {
                 Volatile.Write(ref _pumpActive, 0);
@@ -321,31 +348,34 @@ namespace CardShopCoop.Net.Kcp
                 }
 
                 if (!Volatile.Read(ref _started) || Volatile.Read(ref _disposed))
+                {
                     return;
+                }
+
 
                 var now = MonotonicNow();
                 var peerSignalBudget = _options.MaxPeerSignalsPerPump;
                 var disconnectRequestBudget = _options.MaxDisconnectRequestsPerPump;
-                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.signal"))
+                using (Util.PerfProbe.ThreadSample("net.signal"))
                 {
                     DrainPeerSignals(ref peerSignalBudget);
                     DrainDisconnectRequests(ref disconnectRequestBudget);
                 }
                 _datagramsThisPump = 0;
                 _framesThisPump = 0;
-                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.poll"))
+                using (Util.PerfProbe.ThreadSample("net.poll"))
                 {
                     _datagrams.Poll(_options.MaxDatagramsPerPump, OnDatagram);
-                    CardShopCoop.Util.PerfProbe.RecordQueueDepth("net.datagrams",
+                    Util.PerfProbe.RecordQueueDepth("net.datagrams",
                         _datagramsThisPump, _options.MaxDatagramsPerPump);
                 }
-                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.signal"))
+                using (Util.PerfProbe.ThreadSample("net.signal"))
                 {
                     DrainPeerSignals(ref peerSignalBudget);
                     DrainDisconnectRequests(ref disconnectRequestBudget);
                 }
 
-                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.sessions"))
+                using (Util.PerfProbe.ThreadSample("net.sessions"))
                 {
                     SessionState[] snapshot;
                     lock (_gate)
@@ -358,7 +388,10 @@ namespace CardShopCoop.Net.Kcp
                     {
                         var state = snapshot[i];
                         if (state.Terminal)
+                        {
                             continue;
+                        }
+
 
                         if (!state.MessageIdsActivated
                             && unchecked(now - state.HandshakeStarted)
@@ -379,14 +412,20 @@ namespace CardShopCoop.Net.Kcp
 
                         state.Session.TickIncoming(now);
                         if (state.Terminal)
+                        {
                             continue;
+                        }
+
 
                         FlushTransient(state);
                         FlushReliable(state);
                         state.Session.TickOutgoing(now);
 
                         if (state.DisconnectRequested && !state.Terminal)
+                        {
                             DisconnectOnPump(state);
+                        }
+
 
                         if (state.PendingTerminalDisconnect && !state.Terminal)
                         {
@@ -423,12 +462,12 @@ namespace CardShopCoop.Net.Kcp
                     }
                 }
 
-                CardShopCoop.Util.PerfProbe.RecordQueueDepth("net.frames", _framesThisPump,
+                Util.PerfProbe.RecordQueueDepth("net.frames", _framesThisPump,
                     _options.MaxIncomingFrames);
                 var stopping = Volatile.Read(ref _disposeRequested);
                 // Harvest whatever the decode worker finished since the last pump. Runs before the
                 // disconnect drain so a decoded DisconnectMessage is visible to it this frame.
-                using (CardShopCoop.Util.PerfProbe.ThreadSample("net.decode-drain"))
+                using (Util.PerfProbe.ThreadSample("net.decode-drain"))
                 {
                     DrainDecodeResults();
                 }
@@ -436,14 +475,14 @@ namespace CardShopCoop.Net.Kcp
                 {
                     StopOnPump();
                     var shutdownResultBudget = int.MaxValue;
-                    using (CardShopCoop.Util.PerfProbe.ThreadSample("net.disconnect-drain"))
+                    using (Util.PerfProbe.ThreadSample("net.disconnect-drain"))
                     {
                         DrainDisconnectResults(ref shutdownResultBudget);
                     }
                 }
                 else
                 {
-                    using (CardShopCoop.Util.PerfProbe.ThreadSample("net.disconnect-drain"))
+                    using (Util.PerfProbe.ThreadSample("net.disconnect-drain"))
                     {
                         DrainDisconnectResults(ref disconnectResultBudget);
                     }
@@ -536,10 +575,19 @@ namespace CardShopCoop.Net.Kcp
         public void ActivateMessageIds(PeerConnection connection)
         {
             if (connection == null)
+            {
+
                 throw new ArgumentNullException(nameof(connection));
+            }
+
+
             if (!IsPumpThread())
+            {
+
                 throw new InvalidOperationException(
                     "KCP message-id activation must run on the pump thread");
+            }
+
 
             lock (_gate)
             {
@@ -570,7 +618,11 @@ namespace CardShopCoop.Net.Kcp
         public void Broadcast(INetMessage message)
         {
             if (message == null)
+            {
+
                 throw new ArgumentNullException(nameof(message));
+            }
+
 
             FanOut(message, null, "broadcast");
         }
@@ -578,7 +630,11 @@ namespace CardShopCoop.Net.Kcp
         void ICoopRelayTransport.Relay(INetMessage message, int exceptConnectionId)
         {
             if (message == null)
+            {
+
                 throw new ArgumentNullException(nameof(message));
+            }
+
 
             FanOut(message, exceptConnectionId, "relay");
         }
@@ -677,7 +733,7 @@ namespace CardShopCoop.Net.Kcp
                 // An Error PER MESSAGE was the first version, and it buried the real failure under a
                 // flood from the presence and NPC modules. The fix for a flood is one report per
                 // session, not silence - silence is what removed the symptom from the log entirely.
-                if (CardShopCoop.Api.CoopLog.First("kcp.fanout.not-running"))
+                if (Api.CoopLog.First("kcp.fanout.not-running"))
                 {
                     LogError("KCP transport is not running; the " + operation
                         + " was dropped (reported once per session)");
@@ -705,7 +761,11 @@ namespace CardShopCoop.Net.Kcp
         public double SecondsSinceLastRecv(PeerConnection connection)
         {
             if (connection == null)
+            {
+
                 return double.MaxValue;
+            }
+
 
             SessionState state;
             lock (_gate)
@@ -733,7 +793,10 @@ namespace CardShopCoop.Net.Kcp
         public void GracefulDisconnect(PeerConnection connection, DisconnectInfo info = null)
         {
             if (connection == null)
+            {
                 return;
+            }
+
 
             SessionState state;
             lock (_gate)
@@ -767,7 +830,11 @@ namespace CardShopCoop.Net.Kcp
                         // A pending disconnect is replaceable. Retain the newest detail without
                         // allocating another queue entry for the same session.
                         if (!state.Terminal)
+                        {
                             state.DisconnectInfo = disconnect;
+                        }
+
+
                         return;
                     }
 
@@ -795,7 +862,11 @@ namespace CardShopCoop.Net.Kcp
             lock (_gate)
             {
                 if (!Volatile.Read(ref _started) || Volatile.Read(ref _disposed))
+                {
                     return;
+                }
+
+
                 Volatile.Write(ref _stopRequested, true);
             }
             if (IsPumpThread())
@@ -816,7 +887,10 @@ namespace CardShopCoop.Net.Kcp
             lock (_gate)
             {
                 if (Volatile.Read(ref _disposed))
+                {
                     return;
+                }
+
 
                 Volatile.Write(ref _disposeRequested, true);
                 Volatile.Write(ref _stopRequested, true);
@@ -882,13 +956,25 @@ namespace CardShopCoop.Net.Kcp
             frame = null;
             descriptor = null;
             if (message == null)
+            {
+
                 throw new ArgumentNullException(nameof(message));
+            }
+
 
             var snapshot = _messageSnapshot;
             if (snapshot == null)
+            {
                 return false;
+            }
+
+
             if (!snapshot.TryGet(message.GetType(), out descriptor))
+            {
+
                 return false;
+            }
+
 
             frame = NetMessageCodec.Encode(message, snapshot, compactIds);
             if (frame.Length < Msg.MinimumFrameSize
@@ -916,7 +1002,11 @@ namespace CardShopCoop.Net.Kcp
             MessageDescriptor descriptor)
         {
             if (CanQueueFrameLocked(state, frame, descriptor) != FrameAdmission.Admitted)
+            {
+
                 return false;
+            }
+
 
             EnqueueFrameLocked(state, frame, descriptor);
             return true;
@@ -926,10 +1016,16 @@ namespace CardShopCoop.Net.Kcp
             MessageDescriptor descriptor)
         {
             if (frame == null || descriptor == null)
+            {
+
                 return FrameAdmission.FrameTooLarge;
+            }
 
             if (state.Terminal)
+            {
                 return FrameAdmission.PeerCapacity;
+            }
+
 
             if (!state.MessageIdsActivated
                 && frame.Length > _options.MaxHandshakeFrameBytes)
@@ -951,7 +1047,10 @@ namespace CardShopCoop.Net.Kcp
 
                 if (state.ReliableFrameCount >= _options.MaxReliableFrames
                     || state.ReliableBytes > _options.MaxReliableBytes - frame.Length)
+                {
                     return FrameAdmission.PeerCapacity;
+                }
+
 
                 return FrameAdmission.Admitted;
             }
@@ -969,7 +1068,11 @@ namespace CardShopCoop.Net.Kcp
 
             if (state.TransientFrameCount >= _options.MaxTransientFrames
                 || state.TransientBytes > _options.MaxTransientBytes - frame.Length)
+            {
+
                 return FrameAdmission.PeerCapacity;
+            }
+
 
             return FrameAdmission.Admitted;
         }
@@ -995,7 +1098,10 @@ namespace CardShopCoop.Net.Kcp
         private void FlushTransient(SessionState state)
         {
             if (!state.Authenticated || state.Terminal)
+            {
                 return;
+            }
+
 
             while (true)
             {
@@ -1003,7 +1109,11 @@ namespace CardShopCoop.Net.Kcp
                 lock (_gate)
                 {
                     if (state.Transient.Count == 0)
+                    {
                         return;
+                    }
+
+
                     frame = state.Transient.Dequeue();
                     state.TransientFrameCount--;
                     state.TransientBytes -= frame.Frame.Length;
@@ -1023,14 +1133,20 @@ namespace CardShopCoop.Net.Kcp
                     frame.Frame.Length, 0, frame.Frame.Length);
                 Buffer.BlockCopy(frame.Frame, 0, state.Scratch, EnvelopeSize, frame.Frame.Length);
                 if (!state.Session.SendUnreliable(new ArraySegment<byte>(state.Scratch, 0, total)))
+                {
                     return;
+                }
+
             }
         }
 
         private void FlushReliable(SessionState state)
         {
             if (!state.Authenticated || state.Terminal)
+            {
                 return;
+            }
+
 
             var payloadLimit = state.FragmentPayloadLimit;
             while (!state.Terminal
@@ -1041,7 +1157,11 @@ namespace CardShopCoop.Net.Kcp
                     lock (_gate)
                     {
                         if (state.Reliable.Count == 0)
+                        {
                             return;
+                        }
+
+
                         state.ActiveReliable = state.Reliable.Dequeue();
                         state.ActiveReliable.Id = state.NextFrameId;
                         state.NextFrameId = NextFrameId(state.NextFrameId);
@@ -1087,16 +1207,22 @@ namespace CardShopCoop.Net.Kcp
             lock (_gate)
             {
                 if (!_states.TryGetValue(peer, out state) || state.Terminal)
+                {
                     return;
+                }
+
             }
 
             bool consumed;
-            using (CardShopCoop.Util.PerfProbe.ThreadSample("net.dgram"))
+            using (Util.PerfProbe.ThreadSample("net.dgram"))
             {
                 consumed = state.Session.InputDatagram(datagram);
             }
             if (consumed)
+            {
                 state.LastReceiveTime = _lastClock;
+            }
+
         }
 
         private void OnPeerAvailable(DatagramPeer peer)
@@ -1108,9 +1234,14 @@ namespace CardShopCoop.Net.Kcp
             }
 
             if (IsPumpThread() && _pumping)
+            {
                 CreateSessionOnPump(peer);
+            }
             else
+            {
                 EnqueuePeerSignal(new PeerSignal(peer, false, null));
+            }
+
         }
 
         private void OnPeerClosed(DatagramPeer peer, string reason)
@@ -1122,9 +1253,14 @@ namespace CardShopCoop.Net.Kcp
             }
 
             if (IsPumpThread() && _pumping)
+            {
                 CloseSessionOnPump(peer, reason);
+            }
             else
+            {
                 EnqueuePeerSignal(new PeerSignal(peer, true, reason));
+            }
+
         }
 
         private void EnqueuePeerSignal(PeerSignal signal)
@@ -1143,7 +1279,10 @@ namespace CardShopCoop.Net.Kcp
                     // coalesce it, but never discard a close merely to make room for another
                     // peer's signal.
                     if (_peerTerminalSignals.Contains(signal.Peer))
+                    {
                         return;
+                    }
+
 
                     EnsurePeerSignalCapacityLocked("terminal peer signal");
                     _peerTerminalSignals.Add(signal.Peer);
@@ -1154,7 +1293,10 @@ namespace CardShopCoop.Net.Kcp
                 // Once a terminal callback is queued, it is authoritative. A stale availability
                 // callback must not be allowed to overtake it and recreate a closed peer.
                 if (_peerTerminalSignals.Contains(signal.Peer))
+                {
                     return;
+                }
+
 
                 if (_pendingPeerAvailableSignals.TryGetValue(signal.Peer, out var pending))
                 {
@@ -1175,7 +1317,10 @@ namespace CardShopCoop.Net.Kcp
                 lock (_gate)
                 {
                     if (_peerSignals.First == null)
+                    {
                         return;
+                    }
+
 
                     var node = _peerSignals.First;
                     signal = node.Value;
@@ -1198,18 +1343,26 @@ namespace CardShopCoop.Net.Kcp
                     finally
                     {
                         lock (_gate)
+                        {
                             _peerTerminalSignals.Remove(signal.Peer);
+                        }
                     }
                 }
                 else
+                {
                     CreateSessionOnPump(signal.Peer);
+                }
+
             }
         }
 
         private void EnsurePeerSignalCapacityLocked(string kind)
         {
             if (_peerSignals.Count < _options.MaxPendingPeerSignals)
+            {
                 return;
+            }
+
 
             var error = new InvalidOperationException(
                 "KCP peer-signal queue exceeded its " + _options.MaxPendingPeerSignals
@@ -1269,9 +1422,17 @@ namespace CardShopCoop.Net.Kcp
             {
                 request.State.DisconnectRequestQueued = false;
                 if (request.State.Terminal)
+                {
                     return;
+                }
+
+
                 if (request.State.DisconnectInfo == null)
+                {
                     request.State.DisconnectInfo = request.Info;
+                }
+
+
                 request.State.DisconnectRequested = true;
             }
             DisconnectOnPump(request.State);
@@ -1281,19 +1442,28 @@ namespace CardShopCoop.Net.Kcp
         {
             if (!peer.IsValid || !Volatile.Read(ref _started)
                 || Volatile.Read(ref _stopRequested) || Volatile.Read(ref _disposed))
+            {
                 return;
+            }
+
 
             var pendingHandshakeLimitReached = false;
             lock (_gate)
             {
                 if (_states.ContainsKey(peer))
+                {
                     return;
+                }
+
 
                 var pendingHandshakeCount = 0;
                 foreach (var existing in _states.Values)
                 {
                     if (!existing.Terminal && !existing.MessageIdsActivated)
+                    {
                         pendingHandshakeCount++;
+                    }
+
                 }
                 pendingHandshakeLimitReached = pendingHandshakeCount
                     >= _options.MaxPendingHandshakeSessions;
@@ -1304,7 +1474,11 @@ namespace CardShopCoop.Net.Kcp
                 LogWarning("KCP peer " + peer + " rejected: pending application handshake limit "
                     + _options.MaxPendingHandshakeSessions + " reached");
                 if (_datagrams.IsRunning)
+                {
                     _datagrams.Close(peer, "pending application handshake limit reached");
+                }
+
+
                 return;
             }
 
@@ -1324,7 +1498,12 @@ namespace CardShopCoop.Net.Kcp
 
             state.FragmentPayloadLimit = ComputeFragmentPayloadLimit(state.Session);
             if (state.FragmentPayloadLimit <= 0)
+            {
+
                 throw new InvalidOperationException("KCP MTU leaves no room for the private frame envelope");
+            }
+
+
             state.Scratch = new byte[Math.Max(EnvelopeSize + state.FragmentPayloadLimit,
                 EnvelopeSize + state.Session.UnreliableMax)];
 
@@ -1334,11 +1513,17 @@ namespace CardShopCoop.Net.Kcp
                 duplicate = _states.ContainsKey(peer) || Volatile.Read(ref _stopRequested)
                     || Volatile.Read(ref _disposed);
                 if (!duplicate)
+                {
                     _states.Add(peer, state);
+                }
+
             }
 
             if (duplicate)
+            {
                 return;
+            }
+
 
             state.Session.Start(_lastClock);
         }
@@ -1349,7 +1534,10 @@ namespace CardShopCoop.Net.Kcp
             lock (_gate)
             {
                 if (!_states.TryGetValue(peer, out state) || state.Terminal)
+                {
                     return;
+                }
+
             }
 
             // Preserve a reason a graceful disconnect already recorded: a bearer close can win
@@ -1368,13 +1556,20 @@ namespace CardShopCoop.Net.Kcp
         private void OnSessionAuthenticated(SessionState state)
         {
             if (state.Terminal || !state.Session.IsAuthenticated)
+            {
                 return;
+            }
+
 
             state.Authenticated = true;
             lock (_gate)
             {
                 if (state.Terminal)
+                {
                     return;
+                }
+
+
                 _connections[state.Connection.Id] = state;
             }
 
@@ -1385,7 +1580,10 @@ namespace CardShopCoop.Net.Kcp
         private void OnSessionData(SessionState state, ArraySegment<byte> data, KcpChannel channel)
         {
             if (state.Terminal || !state.Authenticated)
+            {
                 return;
+            }
+
 
             if (channel == KcpChannel.Unreliable)
             {
@@ -1635,7 +1833,10 @@ namespace CardShopCoop.Net.Kcp
             }
 
             if (state.Terminal)
+            {
                 ClearPendingCompactLocked(state);
+            }
+
         }
 
         private static bool IsCompactFrame(byte[] frame, int offset, int count)
@@ -1870,7 +2071,10 @@ namespace CardShopCoop.Net.Kcp
         private void OnSessionDisconnected(SessionState state)
         {
             if (state.Terminal)
+            {
                 return;
+            }
+
 
             var info = state.DisconnectInfo;
             if (info == null)
@@ -1913,7 +2117,11 @@ namespace CardShopCoop.Net.Kcp
         private void DisconnectForProtocol(SessionState state, string reason)
         {
             if (state.Terminal)
+            {
                 return;
+            }
+
+
             state.DisconnectInfo ??= new DisconnectInfo(reason, false, "protocol_error", false,
                 state.Connection.State);
             LogWarning("coop: protocol disconnect for peer " + state.Connection.Id + ": " + reason
@@ -1925,7 +2133,10 @@ namespace CardShopCoop.Net.Kcp
         private void DisconnectOnPump(SessionState state)
         {
             if (state.Terminal)
+            {
                 return;
+            }
+
 
             state.DisconnectRequested = false;
             var info = state.DisconnectInfo ?? new DisconnectInfo("connection closed");
@@ -2068,9 +2279,14 @@ namespace CardShopCoop.Net.Kcp
 
             state.DisconnectInfo = state.Connection.DisconnectReason ?? info;
             if (!state.Session.IsDisconnected)
+            {
                 state.Session.Disconnect();
+            }
             else
+            {
                 CompleteDisconnect(state, state.DisconnectInfo);
+            }
+
         }
 
         private void CompleteDisconnect(SessionState state, DisconnectInfo info)
@@ -2082,12 +2298,19 @@ namespace CardShopCoop.Net.Kcp
             lock (_gate)
             {
                 if (state.Terminal)
+                {
                     return;
+                }
+
+
                 state.Terminal = true;
                 state.DisconnectInfo = claimed;
                 _states.Remove(state.DatagramPeer);
                 if (state.Authenticated)
+                {
                     _connections.Remove(state.Connection.Id);
+                }
+
                 state.Reliable.Clear();
                 state.Transient.Clear();
                 state.ActiveReliable = null;
@@ -2119,10 +2342,15 @@ namespace CardShopCoop.Net.Kcp
             // Close is idempotent in the datagram contract.  The state is removed first so a
             // synchronous PeerClosed notification cannot publish a second terminal event.
             if (_datagrams.IsRunning)
+            {
                 _datagrams.Close(state.DatagramPeer, claimed.Reason);
+            }
 
             if (resultFailure != null)
+            {
                 throw resultFailure;
+            }
+
         }
 
         private void EnqueueDisconnectResult(ConnectionEvent result)
@@ -2152,7 +2380,10 @@ namespace CardShopCoop.Net.Kcp
                 lock (_gate)
                 {
                     if (_pendingDisconnectResults.Count == 0)
+                    {
                         return;
+                    }
+
 
                     if (Disconnects.Count >= _options.MaxPendingDisconnectResults)
                     {
@@ -2173,7 +2404,10 @@ namespace CardShopCoop.Net.Kcp
         private void StopOnPump()
         {
             if (!Volatile.Read(ref _started) && !Volatile.Read(ref _disposeRequested))
+            {
                 return;
+            }
+
 
             Volatile.Write(ref _stopRequested, true);
             IProtocolSessionLease lease = null;
@@ -2190,9 +2424,12 @@ namespace CardShopCoop.Net.Kcp
                 {
                     var state = snapshot[i];
                     if (state.Terminal)
+                    {
                         continue;
+                    }
                     // Preserve a reason already queued by a graceful disconnect: Stop is the
                     // normal end of CoopCore.Shutdown, and its detail is what the peer should see.
+
                     if (state.DisconnectInfo == null)
                     {
                         state.DisconnectInfo = new DisconnectInfo("transport stopped", false,
@@ -2208,7 +2445,10 @@ namespace CardShopCoop.Net.Kcp
                 try
                 {
                     if (_datagrams.IsRunning)
+                    {
                         _datagrams.Stop();
+                    }
+
                 }
                 catch (Exception cleanupError)
                 {
@@ -2257,7 +2497,10 @@ namespace CardShopCoop.Net.Kcp
                 finally
                 {
                     if (Volatile.Read(ref _disposeRequested))
+                    {
                         DisposeBearerResources();
+                    }
+
                 }
             }
         }
@@ -2267,7 +2510,10 @@ namespace CardShopCoop.Net.Kcp
             lock (_gate)
             {
                 if (_resourcesDisposed)
+                {
                     return;
+                }
+
 
                 _resourcesDisposed = true;
                 while (_incoming.TryDequeue(out _))
@@ -2291,7 +2537,11 @@ namespace CardShopCoop.Net.Kcp
         private int AllocateConnectionId()
         {
             if (!_isHost)
+            {
+
                 return 1;
+            }
+
 
             lock (_gate)
             {
@@ -2306,7 +2556,11 @@ namespace CardShopCoop.Net.Kcp
                         id = _connectionIdBase;
                     }
                     if (!_connections.ContainsKey(id))
+                    {
+
                         return id;
+                    }
+
                 }
             }
 
@@ -2316,7 +2570,11 @@ namespace CardShopCoop.Net.Kcp
         private void RawSend(SessionState state, ArraySegment<byte> datagram)
         {
             if (state.Terminal || !_datagrams.IsRunning)
+            {
                 return;
+            }
+
+
             try
             {
                 _datagrams.Send(state.DatagramPeer, datagram);
@@ -2339,7 +2597,10 @@ namespace CardShopCoop.Net.Kcp
         private void EnsureScratch(SessionState state, int length)
         {
             if (state.Scratch == null || state.Scratch.Length < length)
+            {
                 state.Scratch = new byte[length];
+            }
+
         }
 
         private static int ComputeFragmentPayloadLimit(KcpSession session)
@@ -2365,7 +2626,11 @@ namespace CardShopCoop.Net.Kcp
         private bool TryReserveReassembly(SessionState state, uint totalLength)
         {
             if (totalLength == 0 || totalLength > int.MaxValue)
+            {
+
                 return false;
+            }
+
 
             var bytes = (int)totalLength;
             lock (_gate)
@@ -2451,7 +2716,10 @@ namespace CardShopCoop.Net.Kcp
         {
             envelope = default(Envelope);
             if (data.Array == null || data.Count < EnvelopeSize)
+            {
                 return false;
+            }
+
 
             var offset = data.Offset;
             var buffer = data.Array;
@@ -2463,7 +2731,11 @@ namespace CardShopCoop.Net.Kcp
 
             var payloadLength = ReadUInt32(buffer, offset + 16);
             if (payloadLength > int.MaxValue || payloadLength != data.Count - EnvelopeSize)
+            {
+
                 return false;
+            }
+
 
             envelope = new Envelope
             {
@@ -2506,7 +2778,11 @@ namespace CardShopCoop.Net.Kcp
         {
             var bytes = new byte[4];
             using (var random = RandomNumberGenerator.Create())
+            {
                 random.GetBytes(bytes);
+            }
+
+
             var cookie = BitConverter.ToUInt32(bytes, 0);
             return cookie == 0 ? 1u : cookie;
         }
@@ -2527,7 +2803,10 @@ namespace CardShopCoop.Net.Kcp
                 {
                     var backwards = unchecked(_lastClock - value);
                     if (backwards != 0 && backwards < 0x80000000u)
+                    {
                         value = _lastClock;
+                    }
+
                 }
                 _lastClock = value;
                 _hasClock = true;
@@ -2544,13 +2823,22 @@ namespace CardShopCoop.Net.Kcp
         private void EnsureNotDisposed()
         {
             if (Volatile.Read(ref _disposed) || Volatile.Read(ref _disposeRequested))
+            {
+
                 throw new ObjectDisposedException(nameof(KcpSessionManager));
+            }
+
         }
 
         private static KcpConfig ValidateConfig(KcpConfig config, int maxDatagramSize)
         {
             if (maxDatagramSize <= 0)
+            {
+
                 throw new ArgumentOutOfRangeException(nameof(maxDatagramSize));
+            }
+
+
             if (config.RecvBufferSize <= 0 || config.SendBufferSize <= 0
                 || config.Mtu < KcpPeer.METADATA_SIZE + kcp2k.Kcp.MTU_MIN
                 || config.Interval == 0 || config.FastResend < 0
@@ -2561,8 +2849,13 @@ namespace CardShopCoop.Net.Kcp
                     "KCP configuration contains an invalid buffer, MTU, window, interval, or timeout");
             }
             if (maxDatagramSize < config.Mtu)
+            {
+
                 throw new ArgumentException("The datagram bearer is smaller than the KCP MTU",
                     nameof(maxDatagramSize));
+            }
+
+
             return config;
         }
 

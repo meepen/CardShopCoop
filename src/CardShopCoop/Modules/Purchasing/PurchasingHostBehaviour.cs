@@ -8,7 +8,6 @@ using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Modules.Report;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
-using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
@@ -108,16 +107,31 @@ namespace CardShopCoop.Modules.Purchasing
                 Capture(RestockManager.GetCardPackagingBoxList());
                 Capture(RestockManager.GetShelfPackagingBoxList());
                 if (CPlayerData.m_AverageItemCostList != null)
+                {
                     AverageCosts.AddRange(CPlayerData.m_AverageItemCostList);
+                }
+
+
                 if (CPlayerData.m_CurrentTotalItemCountList != null)
+                {
                     CurrentItemCounts.AddRange(CPlayerData.m_CurrentTotalItemCountList);
+                }
+
                 CaptureTransactions();
                 Report = CPlayerData.m_GameReportDataCollect;
                 PermanentReport = CPlayerData.m_GameReportDataCollectPermanent;
                 if (CPlayerData.m_GameReportDataCollectPastList != null)
+                {
                     PastReports.AddRange(CPlayerData.m_GameReportDataCollectPastList);
+                }
+
+
                 if (CPlayerData.m_IsAchievementUnlocked != null)
+                {
                     Achievements.AddRange(CPlayerData.m_IsAchievementUnlocked);
+                }
+
+
                 CaptureTutorialData();
                 TutorialIndex = CPlayerData.m_TutorialIndex;
                 var tutorialManager = SceneRef<TutorialManager>.Get();
@@ -142,9 +156,17 @@ namespace CardShopCoop.Modules.Purchasing
                         PendingRestockRows);
                 }
                 if (CPlayerData.m_SpawnBoxRestockIndexWaitingList != null)
+                {
                     PendingRestockIndexes.AddRange(CPlayerData.m_SpawnBoxRestockIndexWaitingList);
+                }
+
+
                 if (CPlayerData.m_SpawnBoxItemCountWaitingList != null)
+                {
                     PendingRestockCounts.AddRange(CPlayerData.m_SpawnBoxItemCountWaitingList);
+                }
+
+
                 ScannerUnlocked = CPlayerData.m_IsScannerRestockUnlocked;
                 EventCount = QueueCount();
                 DeliveryQueue = WorldHostBehaviour.CaptureDeliveryQueueState();
@@ -164,7 +186,11 @@ namespace CardShopCoop.Modules.Purchasing
                 RestoreTutorialData();
                 CPlayerData.m_TutorialIndex = TutorialIndex;
                 if (HasTutorialManager)
+                {
                     TutorialFinished.SetValue(TutorialManagerInstance, TutorialWasFinished);
+                }
+
+
                 CPlayerData.m_ShopExpPoint = ShopExpPoint;
                 CPlayerData.m_ShopLevel = ShopLevel;
                 RestoreTransactions();
@@ -191,18 +217,29 @@ namespace CardShopCoop.Modules.Purchasing
             private void Capture<T>(IList<T> objects) where T : UnityEngine.Object
             {
                 if (objects == null)
+                {
                     return;
+                }
+
+
                 for (var i = 0; i < objects.Count; i++)
                 {
                     if (objects[i] != null)
+                    {
                         Objects.Add(objects[i]);
+                    }
+
                 }
             }
 
             private void DestroyNew<T>(IList<T> objects) where T : UnityEngine.Object
             {
                 if (objects == null)
+                {
                     return;
+                }
+
+
                 for (var i = objects.Count - 1; i >= 0; i--)
                 {
                     if (objects[i] != null && !Objects.Contains(objects[i]))
@@ -217,7 +254,7 @@ namespace CardShopCoop.Modules.Purchasing
                         }
                         else
                         {
-                            UnityEngine.Object.Destroy(objects[i]);
+                            Destroy(objects[i]);
                         }
                     }
                 }
@@ -227,7 +264,11 @@ namespace CardShopCoop.Modules.Purchasing
             {
                 var transactions = CPlayerData.m_TransactionDataList;
                 if (transactions == null)
+                {
                     return;
+                }
+
+
                 for (var i = 0; i < transactions.Count; i++)
                 {
                     var transaction = transactions[i];
@@ -248,7 +289,11 @@ namespace CardShopCoop.Modules.Purchasing
             private void CaptureTutorialData()
             {
                 if (CPlayerData.m_TutorialDataList == null)
+                {
                     return;
+                }
+
+
                 for (var i = 0; i < CPlayerData.m_TutorialDataList.Count; i++)
                 {
                     var item = CPlayerData.m_TutorialDataList[i];
@@ -291,7 +336,11 @@ namespace CardShopCoop.Modules.Purchasing
             private void RestoreTutorialData()
             {
                 if (CPlayerData.m_TutorialDataList == null)
+                {
                     CPlayerData.m_TutorialDataList = new List<TutorialData>();
+                }
+
+
                 CPlayerData.m_TutorialDataList.Clear();
                 for (var i = 0; i < TutorialData.Count; i++)
                 {
@@ -307,15 +356,26 @@ namespace CardShopCoop.Modules.Purchasing
             private static void CopyList<T>(IList source, List<T> target)
             {
                 if (source == null || target == null)
+                {
                     return;
+                }
+
+
                 for (var i = 0; i < source.Count; i++)
+                {
                     target.Add((T)source[i]);
+                }
+
             }
 
             private static void RestoreList<T>(List<T> target, List<T> source)
             {
                 if (target == null || source == null)
+                {
                     return;
+                }
+
+
                 target.Clear();
                 target.AddRange(source);
             }
@@ -325,10 +385,17 @@ namespace CardShopCoop.Modules.Purchasing
             {
                 var list = field?.GetValue(instance) as IList;
                 if (list == null || source == null)
+                {
                     return;
+                }
+
+
                 list.Clear();
                 for (var i = 0; i < source.Count; i++)
+                {
                     list.Add(source[i]);
+                }
+
             }
 
             private static int QueueCount()
@@ -341,17 +408,27 @@ namespace CardShopCoop.Modules.Purchasing
             {
                 var queue = EventQueue?.GetValue(SceneRef<CEventManager>.Get()) as Queue;
                 if (queue == null || queue.Count <= count)
+                {
                     return;
+                }
+
 
                 var retained = new List<object>(count);
                 while (queue.Count > 0)
                 {
                     var item = queue.Dequeue();
                     if (retained.Count < count)
+                    {
+
                         retained.Add(item);
+                    }
+
                 }
                 for (var i = 0; i < retained.Count; i++)
+                {
                     queue.Enqueue(retained[i]);
+                }
+
             }
         }
 
@@ -404,9 +481,14 @@ namespace CardShopCoop.Modules.Purchasing
             var connectionId = context.Connection.Id;
             var outcome = Process(message, connectionId, PeerLabel(connectionId));
             if (outcome.Success)
+            {
                 SendOutcome(connectionId, outcome);
+            }
             else if (message.PredictionId != Guid.Empty)
+            {
                 PredictionApi.Rollback(_context, connectionId, message.PredictionId);
+            }
+
         }
 
         internal void Shutdown()
@@ -1092,7 +1174,10 @@ namespace CardShopCoop.Modules.Purchasing
         private void SendOutcome(int connectionId, PurchaseOutcomeMessage outcome)
         {
             if (!_shutdown)
+            {
                 _context.Send(connectionId, outcome);
+            }
+
         }
 
         private static bool ValidProductLine(PurchaseLine line, int maxCount)

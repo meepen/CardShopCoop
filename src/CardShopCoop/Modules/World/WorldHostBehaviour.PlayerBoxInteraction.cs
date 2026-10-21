@@ -541,11 +541,18 @@ namespace CardShopCoop.Modules.World
                     TakeIntoLocalHand(box);
                 }
                 else if (message is PlayerBoxPlacementMessage)
+                {
                     box.DropBox(true);
+                }
                 else if (message is PlayerBoxThrowMessage)
+                {
                     box.ThrowBox(true);
+                }
                 else
+                {
                     throw new InvalidOperationException("Unsupported predicted player-box action.");
+                }
+
             }
             finally
             {

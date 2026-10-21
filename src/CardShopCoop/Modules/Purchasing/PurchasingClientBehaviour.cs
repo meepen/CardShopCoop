@@ -65,7 +65,10 @@ namespace CardShopCoop.Modules.Purchasing
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -87,10 +90,18 @@ namespace CardShopCoop.Modules.Purchasing
                 _harmony?.UnpatchSelf();
                 _harmony = null;
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 PredictionApi.PredictionRetired -= RetirePendingRequest;
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 _context = null;
                 throw;
             }
@@ -100,7 +111,10 @@ namespace CardShopCoop.Modules.Purchasing
         private void HandleOutcome(MessageContext context, PurchaseOutcomeMessage outcome)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             if (!outcome.Success || !_pendingRequests.TryGetValue(outcome.PredictionId,
                 out var pending))
@@ -131,7 +145,10 @@ namespace CardShopCoop.Modules.Purchasing
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _shutdown = true;
             PredictionApi.PredictionRetired -= RetirePendingRequest;
@@ -140,7 +157,11 @@ namespace CardShopCoop.Modules.Purchasing
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _context = null;
         }
 
@@ -158,30 +179,47 @@ namespace CardShopCoop.Modules.Purchasing
         private static void EnterChargeScope(PendingRequest state)
         {
             if (state != null)
+            {
                 EconomyActionScope.Enter();
+            }
+
         }
 
         private static void ReleaseChargeScope(PendingRequest state)
         {
             if (state != null)
+            {
                 EconomyActionScope.Exit();
+            }
+
         }
 
         private PendingRequest CaptureRestockCheckout(RestockItemCheckoutScreen checkout)
         {
             if (!CanCapture("restock checkout"))
+            {
+
                 return null;
+            }
+
 
             var screen = PurchasingInterop.RestockScreen(checkout);
             if (screen == null)
+            {
+
                 throw new InvalidOperationException("Purchasing could not read the restock checkout screen.");
+            }
+
 
             var cart = PurchasingInterop.RestockCart(screen);
             var lines = new List<PurchaseLine>();
             if (cart != null)
             {
                 foreach (var entry in cart)
+                {
                     lines.Add(PurchasingInterop.RestockLine(entry.Key, entry.Value));
+                }
+
             }
 
             return BuildPending(new PurchaseIntentMessage
@@ -195,7 +233,11 @@ namespace CardShopCoop.Modules.Purchasing
         private PendingRequest CaptureScanner(ScannerRestockScreen screen)
         {
             if (!CanCapture("scanner checkout"))
+            {
+
                 return null;
+            }
+
 
             var indexes = PurchasingInterop.ScannerIndexes(screen);
             var counts = PurchasingInterop.ScannerCounts(screen);
@@ -226,11 +268,18 @@ namespace CardShopCoop.Modules.Purchasing
         private PendingRequest CaptureFurniture(FurnitureShopUIScreen owner, int index)
         {
             if (!CanCapture("furniture checkout"))
+            {
                 return null;
+            }
+
 
             var data = index >= 0 ? InventoryBase.GetFurniturePurchaseData(index) : null;
             if (data == null)
+            {
+
                 return null;
+            }
+
 
             var confirmation = PurchasingInterop.OpenFurnitureConfirmation(owner, index);
             if (confirmation == null)
@@ -253,7 +302,11 @@ namespace CardShopCoop.Modules.Purchasing
         private PendingRequest CaptureProductLicense(RestockItemPanelUI panel)
         {
             if (!CanCapture("product license checkout"))
+            {
+
                 return null;
+            }
+
 
             var index = PurchasingInterop.PanelIndex(panel);
             var line = PurchasingInterop.RestockLine(index, 1);
@@ -267,7 +320,11 @@ namespace CardShopCoop.Modules.Purchasing
         private PendingRequest CaptureScannerLicense(ScannerRestockScreen screen)
         {
             if (!CanCapture("scanner unlock"))
+            {
+
                 return null;
+            }
+
 
             return BuildPending(new PurchaseIntentMessage
             {
@@ -365,10 +422,13 @@ namespace CardShopCoop.Modules.Purchasing
         private void Observe(PendingRequest pending)
         {
             if (pending == null || _context?.InGame() != true)
+            {
                 return;
+            }
 
             // Close the checkout's synchronous enqueue window before anything can drain the
             // delivery queue, so the rejection knows exactly what this checkout appended.
+
             pending.AppendedDeliveries = Math.Max(
                 WorldClientBehaviour.PendingClientDeliveryCount() - pending.StartDeliveries, 0);
 
@@ -432,7 +492,11 @@ namespace CardShopCoop.Modules.Purchasing
         private bool CanCapture(string action)
         {
             if (_context?.InGame() == true)
+            {
+
                 return true;
+            }
+
 
             CoopPlugin.Log.LogWarning("Purchasing skipped " + action + ": the shop is not ready");
             return false;
@@ -444,18 +508,30 @@ namespace CardShopCoop.Modules.Purchasing
             {
                 case PendingSurface.Restock:
                     if (pending.RestockScreen != null)
+                    {
                         PurchasingInterop.RemoveRestockQuantities(pending.RestockScreen,
                             pending.RestockQuantities);
+                    }
+
+
                     break;
                 case PendingSurface.Scanner:
                     if (pending.ScannerScreen != null)
+                    {
                         PurchasingInterop.RemoveScannerQuantities(pending.ScannerScreen,
                             pending.ScannerQuantities);
+                    }
+
+
                     break;
                 case PendingSurface.Furniture:
                     if (PurchasingInterop.IsSameFurniturePurchase(pending.FurnitureScreen,
                         pending.FurnitureOwner, pending.LocalIndex))
+                    {
                         PurchasingInterop.CloseFurnitureConfirmation(pending.FurnitureScreen);
+                    }
+
+
                     break;
                 case PendingSurface.ProductLicense:
                     CatalogApi.ApplyClientProductLicense(pending.LocalIndex, true);
@@ -476,21 +552,33 @@ namespace CardShopCoop.Modules.Purchasing
             {
                 case PendingSurface.Restock:
                     if (pending.RestockScreen != null)
+                    {
                         PurchasingInterop.RestoreRestockCart(pending.RestockScreen,
                             pending.RestockBefore);
+                    }
+
+
                     break;
                 case PendingSurface.Scanner:
                     if (pending.ScannerScreen != null)
+                    {
                         PurchasingInterop.RestoreScannerCart(pending.ScannerScreen,
                             pending.ScannerBefore);
+                    }
+
+
                     break;
                 case PendingSurface.Furniture:
                     // A rejected checkout reopens the game's confirmation screen so the player can
                     // retry; a checkout that bypassed it (a replacement shop UI) has nothing to
                     // reopen.
                     if (pending.FurnitureScreen != null)
+                    {
                         PurchasingInterop.ReopenFurnitureConfirmation(pending.FurnitureOwner,
                             pending.LocalIndex);
+                    }
+
+
                     break;
                 case PendingSurface.ProductLicense:
                     CatalogApi.ApplyClientProductLicense(pending.LocalIndex, false);
@@ -518,7 +606,10 @@ namespace CardShopCoop.Modules.Purchasing
         private static void Charge(double amount)
         {
             if (amount > 0.0001d)
+            {
                 CEventManager.QueueEvent(new CEventPlayer_ReduceCoin((float)amount));
+            }
+
         }
 
         /// <summary>Reverses the wallet debit of a rejected checkout through the game's own coin
@@ -526,7 +617,10 @@ namespace CardShopCoop.Modules.Purchasing
         private static void Refund(double amount)
         {
             if (amount > 0.0001d)
+            {
                 CEventManager.QueueEvent(new CEventPlayer_AddCoin((float)amount, true));
+            }
+
         }
 
         private void ShowStatus(string text)

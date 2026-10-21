@@ -25,7 +25,10 @@ namespace CardShopCoop.Modules.Deodorant
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
             _context = RuntimeContext;
             try
             {
@@ -42,7 +45,10 @@ namespace CardShopCoop.Modules.Deodorant
                 _harmony = null;
                 NpcClientBehaviour.CustomerPoolChanged -= ApplyPendingStates;
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
                 _context = null;
                 throw;
             }
@@ -68,10 +74,16 @@ namespace CardShopCoop.Modules.Deodorant
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
             _shutdown = true;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
             _harmony?.UnpatchSelf();
             _harmony = null;
             NpcClientBehaviour.CustomerPoolChanged -= ApplyPendingStates;
@@ -89,7 +101,9 @@ namespace CardShopCoop.Modules.Deodorant
             float after)
         {
             if (!_joined || _context == null || !_context.InGame())
+            {
                 return;
+            }
 
             PredictionApi.Predict(
                 PredictionScope,
@@ -107,7 +121,9 @@ namespace CardShopCoop.Modules.Deodorant
         private void HandleEvent(MessageContext _, HandheldSprayEventMessage message)
         {
             if (message == null)
+            {
                 return;
+            }
 
             // The spray content is echoed verbatim, but the customer state is host-computed and the
             // client's optimistic spray never produced it. Retire our prediction, then always apply
@@ -130,21 +146,27 @@ namespace CardShopCoop.Modules.Deodorant
         private void ApplyPendingStates()
         {
             if (_pendingCustomerStates.Count == 0 || SceneRef<CustomerManager>.Get() == null)
+            {
                 return;
+            }
 
             var pending = new System.Collections.Generic.List<DeodorantCustomerState>(
                 _pendingCustomerStates.Values);
             for (var i = 0; i < pending.Count; i++)
             {
                 if (ApplyCustomerState(pending[i]))
+                {
                     _pendingCustomerStates.Remove(CustomerKey(pending[i]));
+                }
             }
         }
 
         private void ApplyCustomers(System.Collections.Generic.IList<DeodorantCustomerState> states)
         {
             if (states == null)
+            {
                 return;
+            }
 
             for (var i = 0; i < states.Count; i++)
             {
@@ -207,13 +229,18 @@ namespace CardShopCoop.Modules.Deodorant
                 var active = _active;
                 if (active == null || !active._joined || active._context == null
                     || !active._context.InGame())
+                {
                     return;
+                }
 
                 // Capture the pre-tick content and muzzle position. The game performs the spray
                 // itself; the postfix observes the content drop and records the prediction.
                 if (!DeodorantInterop.TryGetSpray(__instance, out var position)
                     || !DeodorantInterop.TryGetContent(__instance, out var before))
+                {
                     return;
+                }
+
                 __state = new SprayState { Armed = true, Position = position, Before = before };
             }
 
@@ -222,10 +249,16 @@ namespace CardShopCoop.Modules.Deodorant
             {
                 var active = _active;
                 if (active == null || !__state.Armed)
+                {
                     return;
+                }
+
                 if (!DeodorantInterop.TryGetContent(__instance, out var after)
                     || after >= __state.Before)
+                {
                     return;
+                }
+
                 active.Forward(__instance, __state.Position, __state.Before, after);
             }
         }

@@ -7,7 +7,6 @@ using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
-using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Settings
@@ -161,7 +160,11 @@ namespace CardShopCoop.Modules.Settings
         private void HandleState(MessageContext context, SettingsStateMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             if (message.Full)
             {
                 ClearPendingStates();
@@ -171,7 +174,11 @@ namespace CardShopCoop.Modules.Settings
             {
                 var key = StateKey(message);
                 if (_pendingStates.TryGetValue(key, out var previous))
+                {
                     PredictionApi.Ack(previous.PredictionId);
+                }
+
+
                 _pendingStates[key] = message;
             }
             TryApplyPendingState();
@@ -291,10 +298,18 @@ namespace CardShopCoop.Modules.Settings
         private void ClearPendingStates()
         {
             foreach (var state in _pendingStates.Values)
+            {
                 PredictionApi.Ack(state.PredictionId);
+            }
+
+
             _pendingStates.Clear();
             if (_pendingFullState != null)
+            {
                 PredictionApi.Ack(_pendingFullState.PredictionId);
+            }
+
+
             _pendingFullState = null;
         }
 

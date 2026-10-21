@@ -43,7 +43,11 @@ namespace CardShopCoop.Modules.StoreAccess
             for (var i = 0; i < all.Length; i++)
             {
                 if (all[i] != null && all[i].gameObject.scene.IsValid())
+                {
+
                     return all[i];
+                }
+
             }
 
             return null;
@@ -52,28 +56,43 @@ namespace CardShopCoop.Modules.StoreAccess
         internal static InteractableOpenCloseSign FindOpenSign()
         {
             if (_openSign == null)
+            {
                 _openSign = FindSceneObject<InteractableOpenCloseSign>();
+            }
+
+
             return _openSign;
         }
 
         internal static InteractableWarehouseAllowEnterSign FindWarehouseSign()
         {
             if (_warehouseSign == null)
+            {
                 _warehouseSign = FindSceneObject<InteractableWarehouseAllowEnterSign>();
+            }
+
+
             return _warehouseSign;
         }
 
         internal static UnlockRoomManager FindUnlockRoomManager()
         {
             if (_unlockRoomManager == null)
+            {
                 _unlockRoomManager = FindSceneObject<UnlockRoomManager>();
+            }
+
+
             return _unlockRoomManager;
         }
 
         internal static void RefreshOpenMesh(InteractableOpenCloseSign sign)
         {
             if (sign != null)
+            {
                 MiOpenMesh?.Invoke(sign, null);
+            }
+
         }
 
         /// <summary>True while the sign is playing its own swap animation, so an authoritative
@@ -93,14 +112,20 @@ namespace CardShopCoop.Modules.StoreAccess
         internal static void RefreshWarehouseMesh(InteractableWarehouseAllowEnterSign sign)
         {
             if (sign != null)
+            {
                 MiWarehouseMesh?.Invoke(sign, null);
+            }
+
         }
 
         internal static void RefreshWarehouseAccess(UnlockRoomManager manager)
         {
             manager ??= FindUnlockRoomManager();
             if (manager != null)
+            {
                 MiWarehouseEvaluate?.Invoke(manager, null);
+            }
+
         }
 
         internal static bool IsSceneReady()
@@ -111,14 +136,25 @@ namespace CardShopCoop.Modules.StoreAccess
             FieldInfo swappingField, MethodInfo delayMethod)
         {
             if (sign == null || animationField == null || swappingField == null || delayMethod == null)
+            {
                 return false;
+            }
+
 
             var animation = animationField.GetValue(sign) as Animation;
             var delay = delayMethod.Invoke(sign, null) as IEnumerator;
             if (animation == null || delay == null)
+            {
                 return false;
+            }
+
+
             if (swappingField.GetValue(sign) is bool swapping && swapping)
+            {
+
                 return false;
+            }
+
 
             swappingField.SetValue(sign, true);
             animation.Play();

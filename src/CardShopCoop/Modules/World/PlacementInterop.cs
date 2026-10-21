@@ -309,8 +309,8 @@ namespace CardShopCoop.Modules.World
             }
 
             var box = obj.GetPackagingBoxShelf();
-            return CardShopCoop.Modules.World.WorldClientBehaviour.IsKnownPackagingBox(box)
-                || CardShopCoop.Modules.World.WorldHostBehaviour.IsKnownPackagingBox(box);
+            return WorldClientBehaviour.IsKnownPackagingBox(box)
+                || WorldHostBehaviour.IsKnownPackagingBox(box);
         }
 
         /// <summary>Recreates a boxed placement object through the game's factory and returns

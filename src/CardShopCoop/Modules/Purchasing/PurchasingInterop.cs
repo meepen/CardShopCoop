@@ -87,11 +87,18 @@ namespace CardShopCoop.Modules.Purchasing
             FurnitureShopUIScreen owner, int index)
         {
             if (owner == null || index < 0 || FiFurnitureConfirmScreen == null)
+            {
                 return null;
+            }
+
 
             var screen = FiFurnitureConfirmScreen.GetValue(owner) as FurnitureShopConfirmPurchaseScreen;
             if (screen == null || !screen.IsScreenOpened())
+            {
+
                 return null;
+            }
+
 
             return FurnitureIndex(screen) == index ? screen : null;
         }
@@ -124,11 +131,15 @@ namespace CardShopCoop.Modules.Purchasing
         {
             var cart = RestockCart(screen);
             if (cart == null || purchased == null)
+            {
+
                 throw new InvalidOperationException("Purchasing restock cart is not available.");
+            }
 
             // The checkout's optimistic apply already removed the purchased lines, and an accepted
             // outcome retires this same prediction (PredictionApi.Ack) rather than undoing it
             // first. An absent line therefore means "already removed," not a missing cart entry.
+
             foreach (var purchase in purchased)
             {
                 if (!cart.TryGetValue(purchase.Key, out var current))
@@ -155,10 +166,18 @@ namespace CardShopCoop.Modules.Purchasing
         {
             var cart = RestockCart(screen);
             if (cart == null || before == null)
+            {
                 return;
+            }
+
+
             cart.Clear();
             foreach (var item in before)
+            {
                 cart[item.Key] = item.Value;
+            }
+
+
             screen.m_RestockItemCheckoutScreen?.UpdateData(screen, cart, false);
         }
 
@@ -168,7 +187,11 @@ namespace CardShopCoop.Modules.Purchasing
             var indexes = ScannerIndexes(screen);
             var counts = ScannerCounts(screen);
             if (indexes == null || counts == null || purchased == null)
+            {
+
                 throw new InvalidOperationException("Purchasing scanner cart is not available.");
+            }
+
 
             for (var purchaseIndex = 0; purchaseIndex < purchased.Count; purchaseIndex++)
             {
@@ -190,7 +213,10 @@ namespace CardShopCoop.Modules.Purchasing
                         counts.RemoveAt(i);
                     }
                     else
+                    {
                         remaining = 0;
+                    }
+
                 }
             }
 
@@ -205,7 +231,11 @@ namespace CardShopCoop.Modules.Purchasing
             var indexes = ScannerIndexes(screen);
             var counts = ScannerCounts(screen);
             if (indexes == null || counts == null || before == null)
+            {
                 return;
+            }
+
+
             indexes.Clear();
             counts.Clear();
             for (var i = 0; i < before.Count; i++)
@@ -302,7 +332,11 @@ namespace CardShopCoop.Modules.Purchasing
         internal static void ReopenFurnitureConfirmation(FurnitureShopUIScreen owner, int index)
         {
             if (owner != null && index >= 0)
+            {
+
                 owner.OnPressPanelUIButton(index);
+            }
+
         }
 
         internal static Transform RandomPackageSpawn()

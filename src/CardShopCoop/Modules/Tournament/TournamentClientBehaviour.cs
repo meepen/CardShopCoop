@@ -84,7 +84,11 @@ namespace CardShopCoop.Modules.Tournament
         private void HandleDelta(MessageContext context, TournamentDeltaMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             if (message.Kind == 0)
             {
                 _pendingHeader = message;
@@ -217,7 +221,11 @@ namespace CardShopCoop.Modules.Tournament
         {
             var tournament = CPlayerData.m_TournamentData;
             if (tournament == null)
+            {
                 CPlayerData.m_TournamentData = tournament = new TournamentData();
+            }
+
+
             if (message.Kind == 0)
             {
                 ApplyHeader(message.Header, tournament);
@@ -346,7 +354,10 @@ namespace CardShopCoop.Modules.Tournament
             }
 
             while (tournament.m_PrizeDataList.Count > count)
+            {
                 tournament.m_PrizeDataList.RemoveAt(tournament.m_PrizeDataList.Count - 1);
+            }
+
         }
 
         private static void ReplacePrizeSlot(TournamentPrizeDataList target, TournamentPrizeSlot source)
@@ -354,7 +365,10 @@ namespace CardShopCoop.Modules.Tournament
             target.m_PrizeDataList ??= new List<TournamentPrizeData>();
             target.m_PrizeDataList.Clear();
             if (source == null)
+            {
                 return;
+            }
+
 
             for (var i = 0; i < source.Prizes.Count; i++)
             {

@@ -29,7 +29,10 @@ namespace CardShopCoop.Modules.Decoration
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -47,6 +50,7 @@ namespace CardShopCoop.Modules.Decoration
                 _harmony.CreateClassProcessor(typeof(PlaceAttemptPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(PlacedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(RemovePatch)).Patch();
+                _harmony.CreateClassProcessor(typeof(LockedRoomHiddenPatch)).Patch();
             }
             catch (Exception exception)
             {
@@ -55,9 +59,17 @@ namespace CardShopCoop.Modules.Decoration
                 _harmony = null;
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 DecorationInterop.Reset();
                 _context = null;
                 throw;
@@ -68,7 +80,10 @@ namespace CardShopCoop.Modules.Decoration
         private void SendInitialState(PeerConnection connection)
         {
             if (connection == null)
+            {
                 return;
+            }
+
 
             _fullyJoined.Add(connection.Id);
             SendState(connection.Id);
@@ -78,14 +93,20 @@ namespace CardShopCoop.Modules.Decoration
         private void ForgetConnection(PeerConnection connection, DisconnectInfo info)
         {
             if (connection != null)
+            {
                 _fullyJoined.Remove(connection.Id);
+            }
+
         }
 
         [MessageHandler(typeof(DecorationIntentMessage))]
         private void HandleIntent(MessageContext context, DecorationIntentMessage message)
         {
             if (!IsPeerMessage(context) || message == null)
+            {
                 return;
+            }
+
 
             var accepted = false;
             InteractableObject placed = null;
@@ -113,7 +134,14 @@ namespace CardShopCoop.Modules.Decoration
                 // that object's id instead of being searched for by type and position.
                 var delta = BuildDelta(message, placed);
                 if (delta != null)
+                {
                     BroadcastDelta(delta);
+                }
+                // The module drives the local screens with a temporarily selected category, so the
+                // host's open deco screen can be left rendering another category's panels. Refresh
+                // it from the authoritative values the apply just produced.
+
+                DecorationInterop.RefreshUi();
             }
             else if (message.PredictionId != Guid.Empty)
             {
@@ -139,22 +167,43 @@ namespace CardShopCoop.Modules.Decoration
                         && DecorationInterop.IsUnlocked(message.Category, message.Index)
                         && DecorationInterop.TryEquip(message.Category, message.Index, message.LotB);
                 case DecorationActions.BuyShopDecoration:
-                    return DecorationInterop.TryGetCategoryPrice(message.Category, message.Index,
-                        out var shopPrice)
-                        && !DecorationInterop.IsUnlocked(message.Category, message.Index)
-                        && TryApplyReservedPurchase(shopPrice,
-                            "category=" + message.Category + " index=" + message.Index,
-                            () => DecorationInterop.TryBuyCategory(message.Category, message.Index,
-                                shopPrice));
+                    if (!DecorationInterop.TryGetCategoryPrice(message.Category, message.Index,
+                        out var shopPrice))
+                    {
+                        return false;
+                    }
+
+
+                    if (DecorationInterop.IsUnlocked(message.Category, message.Index))
+                    {
+                        return false;
+                    }
+
+
+                    return TryApplyReservedPurchase(shopPrice,
+                        "category=" + message.Category + " index=" + message.Index,
+                        () => DecorationInterop.TryBuyCategory(message.Category, message.Index,
+                            shopPrice),
+                        () => DecorationInterop.IsUnlocked(message.Category, message.Index));
                 case DecorationActions.BuyItemDecoration:
-                    return DecorationInterop.TryGetItemPrice(message.DecorationType, out var itemPrice)
-                        && TryApplyReservedPurchase(itemPrice, "item=" + message.DecorationType,
-                            () => DecorationInterop.TryBuyItem(message.DecorationType, itemPrice));
+                    if (!DecorationInterop.TryGetItemPrice(message.DecorationType, out var itemPrice))
+                    {
+                        return false;
+                    }
+
+                    var inventoryBefore = DecorationInterop.InventoryCount(message.DecorationType);
+                    return TryApplyReservedPurchase(itemPrice, "item=" + message.DecorationType,
+                        () => DecorationInterop.TryBuyItem(message.DecorationType, itemPrice),
+                        () => DecorationInterop.InventoryCount(message.DecorationType)
+                            > inventoryBefore);
                 case DecorationActions.Place:
                     if (!DecorationInterop.ValidPose(message.Position, message.Rotation)
                         || message.WallIndex < -1 || message.WallIndex > 1024
                         || (message.ObjectId <= 0 && !DecorationInterop.HasInventory(message.DecorationType)))
+                    {
                         return false;
+                    }
+
                     var pose = new DecorationPose
                     {
                         DecorationType = message.DecorationType,
@@ -165,15 +214,33 @@ namespace CardShopCoop.Modules.Decoration
                         Wall = message.WallIndex,
                     };
                     var consumesInventory = message.ObjectId <= 0;
-                    if (consumesInventory)
-                        DecorationInterop.AdjustInventory(message.DecorationType, -1);
-                    if (!DecorationInterop.TryPlace(pose, message.ObjectId, out placed))
+                    var taken = false;
+                    try
                     {
                         if (consumesInventory)
-                            DecorationInterop.AdjustInventory(message.DecorationType, 1);
+                        {
+                            DecorationInterop.AdjustInventory(message.DecorationType, -1);
+                            taken = true;
+                        }
+                        if (DecorationInterop.TryPlace(pose, message.ObjectId, out placed))
+                        {
+                            taken = false;
+                            return true;
+                        }
                         return false;
                     }
-                    return true;
+                    finally
+                    {
+                        // TryPlace owns the placement itself, but the inventory take is ours:
+                        // give it back when placement is refused or throws (for example a
+                        // decoration prefab that cannot be instantiated), so a failed placement
+                        // cannot consume an item.
+                        if (taken)
+                        {
+                            DecorationInterop.AdjustInventory(message.DecorationType, 1);
+                        }
+
+                    }
                 case DecorationActions.Remove:
                     return message.ObjectId > 0 && DecorationInterop.TryRemove(message.ObjectId);
                 default:
@@ -181,26 +248,55 @@ namespace CardShopCoop.Modules.Decoration
             }
         }
 
-        private static bool TryApplyReservedPurchase(float price, string context, Func<bool> applyVanilla)
+        private static bool TryApplyReservedPurchase(float price, string context,
+            Func<bool> applyVanilla, Func<bool> applied)
         {
             if (!EconomyAuthority.TryReserveHostSpend(price, out var spend))
+            {
                 return false;
+            }
+
+            var succeeded = false;
             try
             {
-                return EconomyAuthority.RunWithVanillaSpend(spend, applyVanilla);
+                succeeded = EconomyAuthority.RunWithVanillaSpend(spend, applyVanilla);
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Decoration purchase failed (" + context + "): " + exception);
-                spend.Dispose();
-                return false;
             }
+
+            // Judge the purchase by its effect, not only by the return path: the vanilla method
+            // can complete the unlock/inventory change and then throw while refreshing its own UI.
+            // Such a purchase must be accepted and stay charged, not refunded while the effect
+            // remains. A return of false with no effect (missing screen, refused affordability)
+            // gets the debit back below.
+            if (succeeded || applied())
+            {
+                return true;
+            }
+
+            // RunWithVanillaSpend queues the host debit before the vanilla purchase runs. Consumed
+            // tells us the debit was actually admitted; compensate exactly that amount and nothing
+            // when the reservation itself failed.
+
+            if (spend.Consumed)
+            {
+                CoopPlugin.Log.LogWarning("Refunded an unspent decoration purchase debit ("
+                    + context + "): " + spend.Amount + ".");
+                EconomyAuthority.CancelHostSpend(spend);
+            }
+            return false;
         }
 
         private void BroadcastDelta(DecorationDeltaMessage message)
         {
             if (_shutdown || _context == null || !_context.InGame() || message == null)
+            {
                 return;
+            }
+
+
             _context.Broadcast(message);
         }
 
@@ -208,7 +304,10 @@ namespace CardShopCoop.Modules.Decoration
         {
             if (_shutdown || _context == null || !_context.InGame()
                 || !TryBuildState(out var state))
+            {
                 return;
+            }
+
 
             _context.Send(peer, state);
         }
@@ -217,7 +316,11 @@ namespace CardShopCoop.Modules.Decoration
         {
             message = null;
             if (_context == null || !_context.InGame() || !DecorationInterop.IsSceneReady())
+            {
+
                 return false;
+            }
+
 
             var state = DecorationInterop.Snapshot();
             message = new DecorationStateMessage
@@ -267,7 +370,12 @@ namespace CardShopCoop.Modules.Decoration
                 // The applied object is the authoritative piece itself; read its real pose and its
                 // id directly instead of scanning the snapshot for a type/position match.
                 if (placed == null)
+                {
+
                     return null;
+                }
+
+
                 var pose = DecorationInterop.ReadPose(placed);
                 pose.Id = DecorationInterop.EnsureHostId(placed);
                 delta.Pose = pose;
@@ -285,14 +393,22 @@ namespace CardShopCoop.Modules.Decoration
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _fullyJoined.Clear();
             DecorationInterop.Reset();
             _context = null;
@@ -304,14 +420,19 @@ namespace CardShopCoop.Modules.Decoration
         private static class EquipPatch
         {
             [HarmonyPostfix]
-            private static void Postfix(int shopDecoIndex, bool isShopLotB)
+            private static void Postfix(PlaceDecoUIScreen __instance, int shopDecoIndex,
+                bool isShopLotB)
             {
                 if (_active == null || _active._applyingIntent)
+                {
                     return;
+                }
+
+
                 _active.BroadcastDelta(new DecorationDeltaMessage
                 {
                     Action = DecorationActions.Equip,
-                    Category = DecorationInterop.CategoryFor((PlaceDecoUIScreen)null),
+                    Category = DecorationInterop.CategoryFor(__instance),
                     Index = shopDecoIndex,
                     LotB = isShopLotB,
                     PredictionId = Guid.Empty,
@@ -322,15 +443,41 @@ namespace CardShopCoop.Modules.Decoration
         [HarmonyPatch(typeof(ShopBuyDecoUIScreen), "OnPressBuyShopDeco")]
         private static class BuyPatch
         {
-            [HarmonyPostfix]
-            private static void Postfix(int shopDecoIndex)
+            private struct State
             {
-                if (_active == null || _active._applyingIntent)
+                public int Category;
+                public bool WasUnlocked;
+            }
+
+            /// <summary>Captures the category and ownership before the press. A press vanilla
+            /// refuses (not enough money) returns without unlocking; publishing its index anyway
+            /// made every guest believe the host owned a style it did not.</summary>
+            [HarmonyPrefix]
+            private static void Prefix(ShopBuyDecoUIScreen __instance, int shopDecoIndex,
+                out State __state)
+            {
+                var category = DecorationInterop.CategoryFor(__instance);
+                __state = new State
+                {
+                    Category = category,
+                    WasUnlocked = DecorationInterop.IsUnlocked(category, shopDecoIndex),
+                };
+            }
+
+            [HarmonyPostfix]
+            private static void Postfix(int shopDecoIndex, State __state)
+            {
+                if (_active == null || _active._applyingIntent || __state.WasUnlocked
+                    || !DecorationInterop.IsUnlocked(__state.Category, shopDecoIndex))
+                {
                     return;
+                }
+
+
                 _active.BroadcastDelta(new DecorationDeltaMessage
                 {
                     Action = DecorationActions.BuyShopDecoration,
-                    Category = DecorationInterop.CategoryFor((ShopBuyDecoUIScreen)null),
+                    Category = __state.Category,
                     Index = shopDecoIndex,
                     PredictionId = Guid.Empty,
                 });
@@ -344,7 +491,11 @@ namespace CardShopCoop.Modules.Decoration
             private static void Postfix(EDecoObject itemType)
             {
                 if (_active == null || _active._applyingIntent)
+                {
                     return;
+                }
+
+
                 _active.BroadcastDelta(new DecorationDeltaMessage
                 {
                     Action = DecorationActions.BuyItemDecoration,
@@ -367,7 +518,11 @@ namespace CardShopCoop.Modules.Decoration
                 if (_active == null || _active._applyingIntent || __instance == null
                     || __instance.m_DecoObjectType == EDecoObject.None
                     || !__instance.GetIsMovingObject())
+                {
                     return;
+                }
+
+
                 _placingInstance = __instance;
             }
 
@@ -388,7 +543,11 @@ namespace CardShopCoop.Modules.Decoration
                 if (host == null || host._applyingIntent || __instance == null
                     || !ReferenceEquals(_placingInstance, __instance)
                     || __instance.m_DecoObjectType == EDecoObject.None)
+                {
                     return;
+                }
+
+
                 var delta = BuildDelta(new DecorationIntentMessage
                 {
                     Action = DecorationActions.Place,
@@ -422,17 +581,69 @@ namespace CardShopCoop.Modules.Decoration
                 };
 
             [HarmonyPostfix]
-            private static void Postfix(InteractableObject __instance, State __state)
+            private static void Postfix(State __state)
             {
-                if (_active == null || _active._applyingIntent || __instance == null
-                    || __instance.m_DecoObjectType == EDecoObject.None)
+                if (_active == null || _active._applyingIntent || __state.Type == EDecoObject.None)
+                {
                     return;
+                }
+                // A zero id means this piece was never published: a decoration taken from the
+                // inventory and boxed again before it was placed. The object half of the delta is
+                // a no-op for guests, but the count must still go out - a join or rejection
+                // baseline taken while the host was holding the piece carried the reduced count,
+                // so the cancel's +1 has to reach them.
+
                 _active.BroadcastDelta(new DecorationDeltaMessage
                 {
                     Action = DecorationActions.Remove,
                     ObjectId = __state.Id,
                     DecorationType = __state.Type,
                     InventoryCount = DecorationInterop.InventoryCount(__state.Type),
+                    PredictionId = Guid.Empty,
+                });
+            }
+        }
+
+        /// <summary>Room and warehouse expansion hide the blocker and return every vertical
+        /// decoration on it to the inventory through OnLockedRoomHidden, which bypasses
+        /// BoxUpObject. Publish that removal exactly like a box-up so every guest loses the piece
+        /// and gains the item instead of keeping a copy the host no longer has.</summary>
+        [HarmonyPatch(typeof(InteractableObject), "OnLockedRoomHidden")]
+        private static class LockedRoomHiddenPatch
+        {
+            private struct State
+            {
+                public long Id;
+                public EDecoObject Type;
+            }
+
+            [HarmonyPrefix]
+            private static void Prefix(InteractableObject __instance, out State __state)
+                => __state = new State
+                {
+                    Id = DecorationInterop.HostIdFor(__instance),
+                    Type = __instance == null ? EDecoObject.None : __instance.m_DecoObjectType,
+                };
+
+            [HarmonyPostfix]
+            private static void Postfix(State __state)
+            {
+                if (_active == null || _active._applyingIntent
+                    || __state.Type == EDecoObject.None)
+                {
+                    return;
+                }
+
+
+                var count = DecorationInterop.InventoryCount(__state.Type);
+                CoopPlugin.Log.LogInfo("[decoration] host locked-room removed id=" + __state.Id
+                    + " type=" + __state.Type + " count=" + count + ".");
+                _active.BroadcastDelta(new DecorationDeltaMessage
+                {
+                    Action = DecorationActions.Remove,
+                    ObjectId = __state.Id,
+                    DecorationType = __state.Type,
+                    InventoryCount = count,
                     PredictionId = Guid.Empty,
                 });
             }

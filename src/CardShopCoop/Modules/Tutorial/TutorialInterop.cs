@@ -1,4 +1,3 @@
-using System;
 using System.Reflection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -67,8 +66,16 @@ namespace CardShopCoop.Modules.Tutorial
         {
             var values = CPlayerData.m_TutorialDataList;
             for (var i = 0; values != null && i < values.Count; i++)
+            {
+
                 if (values[i] != null && values[i].tutorialTaskCondition == condition)
+                {
+
                     return values[i].value;
+                }
+            }
+
+
             return 0f;
         }
 

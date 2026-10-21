@@ -326,7 +326,10 @@ namespace CardShopCoop.Modules.Register
                     + message.CustomerGeneration + " pred=" + message.PredictionId);
                 var key = DeltaKey(message);
                 if (_deferredDeltas.TryGetValue(key, out var previous))
+                {
                     PredictionApi.Ack(previous.PredictionId);
+                }
+
                 _deferredDeltas[key] = message;
             }
         }
@@ -1748,7 +1751,10 @@ namespace CardShopCoop.Modules.Register
         private void ClearDeferredDeltas()
         {
             foreach (var delta in _deferredDeltas.Values)
+            {
                 PredictionApi.Ack(delta.PredictionId);
+            }
+
             _deferredDeltas.Clear();
         }
 

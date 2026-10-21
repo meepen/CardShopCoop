@@ -52,7 +52,7 @@ namespace CardShopCoop.Modules.DebugTools
                 // The owned menu can be destroyed without another SetMenuOpen transition. Tell
                 // SessionInput first so its walker/timeScale ownership is released coherently.
                 _cheatMenuOpen = false;
-                CardShopCoop.Modules.SessionInput.SessionInputRuntime.CheatMenuChanged(false);
+                SessionInput.SessionInputRuntime.CheatMenuChanged(false);
             }
 
             if (_ownedManager != null)
@@ -73,7 +73,7 @@ namespace CardShopCoop.Modules.DebugTools
             }
 
             _cheatMenuOpen = open;
-            CardShopCoop.Modules.SessionInput.SessionInputRuntime.CheatMenuChanged(open);
+            SessionInput.SessionInputRuntime.CheatMenuChanged(open);
         }
 
         internal static void CloseForSessionStop()
@@ -100,7 +100,7 @@ namespace CardShopCoop.Modules.DebugTools
             finally
             {
                 _cheatMenuOpen = false;
-                CardShopCoop.Modules.SessionInput.SessionInputRuntime.CheatMenuChanged(false);
+                SessionInput.SessionInputRuntime.CheatMenuChanged(false);
             }
         }
 

@@ -118,7 +118,7 @@ namespace CardShopCoop.Modules.World
                 }
                 finally
                 {
-                    _boxNetworkInteraction.HostPredictionId = System.Guid.Empty;
+                    _boxNetworkInteraction.HostPredictionId = Guid.Empty;
                 }
 
                 if (match.GetPackagingBoxShelf() == null)
@@ -232,7 +232,10 @@ namespace CardShopCoop.Modules.World
         {
             var message = BuildItemBoxState(item);
             if (message != null)
+            {
                 BroadcastWorld(message);
+            }
+
         }
 
         /// <summary>Publishes the mirrored state of a client's own item-box mutation to the
@@ -242,7 +245,10 @@ namespace CardShopCoop.Modules.World
         {
             var message = BuildItemBoxState(item);
             if (message != null)
+            {
                 RelayWorldExcept(excludeConnectionId, message);
+            }
+
         }
 
         private BoxStateMessage BuildItemBoxState(InteractablePackagingBox_Item item)

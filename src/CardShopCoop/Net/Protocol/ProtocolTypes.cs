@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using CardShopCoop.Net;
 
 namespace CardShopCoop.Net.Protocol
 {
@@ -189,7 +188,12 @@ namespace CardShopCoop.Net.Protocol
             lock (_lifetimeGate)
             {
                 if (!_active)
+                {
+
                     return false;
+                }
+
+
                 _inFlight++;
                 _inFlightByThread.TryGetValue(threadId, out var threadCount);
                 _inFlightByThread[threadId] = threadCount + 1;
@@ -207,9 +211,15 @@ namespace CardShopCoop.Net.Protocol
                     _inFlight--;
                     _inFlightByThread[threadId] = _inFlightByThread[threadId] - 1;
                     if (_inFlightByThread[threadId] == 0)
+                    {
                         _inFlightByThread.Remove(threadId);
+                    }
+
                     if (_inFlight == 0)
+                    {
                         System.Threading.Monitor.PulseAll(_lifetimeGate);
+                    }
+
                 }
             }
         }
@@ -226,7 +236,11 @@ namespace CardShopCoop.Net.Protocol
                 _active = false;
                 _inFlightByThread.TryGetValue(threadId, out var ownInvocations);
                 while (_inFlight > ownInvocations)
+                {
+
                     System.Threading.Monitor.Wait(_lifetimeGate);
+                }
+
             }
         }
     }

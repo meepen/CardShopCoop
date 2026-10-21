@@ -631,7 +631,7 @@ namespace CardShopCoop.Modules.Presence
 
                 if (matches.Count > 0)
                 {
-                    return ModelFromPreset(matches[UnityEngine.Random.Range(0, matches.Count)]);
+                    return ModelFromPreset(matches[Random.Range(0, matches.Count)]);
                 }
             }
             return ModelFromPreset(custom.StoredCharacterData);
@@ -641,7 +641,7 @@ namespace CardShopCoop.Modules.Presence
         /// is unavailable.</summary>
         public PresenceModelEntry TryCreateRandomModel()
         {
-            return TryCreateRandomPresetModel(UnityEngine.Random.value < 0.5f);
+            return TryCreateRandomPresetModel(Random.value < 0.5f);
         }
 
         /// <summary>Placeholder used before preset data exists: random gender, model 0, no
@@ -650,7 +650,7 @@ namespace CardShopCoop.Modules.Presence
         {
             return new PresenceModelEntry
             {
-                Female = UnityEngine.Random.value < 0.5f,
+                Female = Random.value < 0.5f,
                 ModelIndex = 0,
                 CustomizationJson = null
             };
@@ -1638,7 +1638,7 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            using (CardShopCoop.Util.PerfProbe.Sample("module.presence.avatar-update"))
+            using (Util.PerfProbe.Sample("module.presence.avatar-update"))
             {
                 TickInner(dt);
             }

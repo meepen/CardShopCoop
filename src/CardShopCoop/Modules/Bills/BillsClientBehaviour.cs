@@ -23,7 +23,10 @@ namespace CardShopCoop.Modules.Bills
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var handlersRegistered = false;
@@ -56,9 +59,17 @@ namespace CardShopCoop.Modules.Bills
                     SceneManager.sceneLoaded -= OnSceneLoaded;
                 }
                 if (handlersRegistered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 ResetSessionState();
                 BillsInterop.Reset();
                 _context = null;
@@ -70,7 +81,10 @@ namespace CardShopCoop.Modules.Bills
         private void HandleState(MessageContext context, BillsStateMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _pendingState = message;
             TryApplyPending();
@@ -80,7 +94,9 @@ namespace CardShopCoop.Modules.Bills
         private void HandleDelta(MessageContext context, BillsDeltaMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
 
             // ApplyAuthoritative, not Confirm/AckOrApply: the host always sends absolute values
             // (the zeroed bill on accept, or the current authoritative bills under the rejected
@@ -91,6 +107,7 @@ namespace CardShopCoop.Modules.Bills
             // ApplyAuthoritative undoes that newer payment, applies authority, and replays it, so
             // every in-flight payment keeps owning its bills until its own decision arrives. An
             // accrued bill during the round trip still lands: authority is always applied.
+
             PredictionApi.ApplyAuthoritative(message.PredictionId, () => ApplyDelta(message));
         }
 
@@ -98,7 +115,10 @@ namespace CardShopCoop.Modules.Bills
         private void HandlePopup(MessageContext context, BillPopupMessage message)
         {
             if (_shutdown || !_context.InGame() || !BillsInterop.IsSceneReady())
+            {
                 return;
+            }
+
 
             NotEnoughResourceTextPopup.ShowText((ENotEnoughResourceText)message.Text);
         }
@@ -107,7 +127,10 @@ namespace CardShopCoop.Modules.Bills
         {
             if (_shutdown || _pendingState == null || _context == null || !_context.InGame()
                 || !BillsInterop.IsSceneReady())
+            {
                 return;
+            }
+
 
             Apply(_pendingState);
             BillsInterop.Refresh(BillsInterop.FindScreen());
@@ -164,7 +187,10 @@ namespace CardShopCoop.Modules.Bills
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
         {
             if (connection?.Id == 1)
+            {
                 ResetSessionState();
+            }
+
         }
 
         /// <summary>
@@ -190,7 +216,10 @@ namespace CardShopCoop.Modules.Bills
             // Forced auto-payments belong to the host's day rollover (the guest's accrual is
             // suppressed), so a guest never predicts one.
             if (forcePay)
+            {
                 return true;
+            }
+
 
             var rent = Copy(CPlayerData.GetBill(EBillType.Rent));
             var electric = Copy(CPlayerData.GetBill(EBillType.Electric));
@@ -200,7 +229,11 @@ namespace CardShopCoop.Modules.Bills
             // Nothing due, or the mirror cannot afford it: leave the vanilla path to show its own
             // feedback and queue nothing.
             if (amount <= 0.0001f || CPlayerData.m_CoinAmountDouble < amount)
+            {
+
                 return true;
+            }
+
 
             ApplyPayment(billType, rent, electric, employee, refund: false);
             BillsInterop.Refresh(BillsInterop.FindScreen());
@@ -230,7 +263,12 @@ namespace CardShopCoop.Modules.Bills
             byte billType)
         {
             if (billType == 0)
+            {
+
                 return Positive(rent) + Positive(electric) + Positive(employee);
+            }
+
+
             return Positive(billType == (byte)EBillType.Rent ? rent
                 : billType == (byte)EBillType.Electric ? electric
                 : employee);
@@ -251,11 +289,20 @@ namespace CardShopCoop.Modules.Bills
         {
             var sign = refund ? 1 : -1;
             if (billType == 0 || billType == (byte)EBillType.Rent)
+            {
                 AddBill(EBillType.Rent, rent, sign);
+            }
+
             if (billType == 0 || billType == (byte)EBillType.Electric)
+            {
                 AddBill(EBillType.Electric, electric, sign);
+            }
+
             if (billType == 0 || billType == (byte)EBillType.Employee)
+            {
                 AddBill(EBillType.Employee, employee, sign);
+            }
+
         }
 
         private static void AddBill(EBillType type, BillValue captured, int sign)
@@ -281,7 +328,11 @@ namespace CardShopCoop.Modules.Bills
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -289,7 +340,11 @@ namespace CardShopCoop.Modules.Bills
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             ResetSessionState();
             BillsInterop.Reset();
             _context = null;

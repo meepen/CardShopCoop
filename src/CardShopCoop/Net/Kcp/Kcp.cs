@@ -136,7 +136,10 @@ namespace kcp2k
         internal uint WndUnused()
         {
             if (rcv_queue.Count < rcv_wnd)
+            {
                 return rcv_wnd - (uint)rcv_queue.Count;
+            }
+
             return 0;
         }
 
@@ -155,21 +158,31 @@ namespace kcp2k
             //
             //bool ispeek = len < 0;
             if (len < 0)
+            {
                 throw new NotSupportedException("Receive ispeek for negative len is not supported!");
+            }
 
             if (rcv_queue.Count == 0)
+            {
                 return -1;
+            }
 
             if (len < 0)
+            {
                 len = -len;
+            }
 
             var peeksize = PeekSize();
 
             if (peeksize < 0)
+            {
                 return -2;
+            }
 
             if (peeksize > len)
+            {
                 return -3;
+            }
 
             var recover = rcv_queue.Count >= rcv_wnd;
 
@@ -201,7 +214,9 @@ namespace kcp2k
                 SegmentDelete(seg);
 
                 if (fragment == 0)
+                {
                     break;
+                }
             }
 
             // move available data from rcv_buf -> rcv_queue
@@ -246,7 +261,9 @@ namespace kcp2k
 
             // empty queue?
             if (rcv_queue.Count == 0)
+            {
                 return -1;
+            }
 
             // peek the first segment
             var seq = rcv_queue.Peek();
@@ -254,7 +271,9 @@ namespace kcp2k
             // seg.frg is 0 if the message requires no fragmentation.
             // in that case, the segment's size is the final message size.
             if (seq.frg == 0)
+            {
                 return (int)seq.data.Position;
+            }
 
             // check if all fragment parts were received yet.
             // seg.frg is the n-th fragment, but in reverse.
@@ -264,7 +283,9 @@ namespace kcp2k
             //   second segment: .frg is 1 (index in reverse)
             //   third segment:  .frg is 0 (index in reverse)
             if (rcv_queue.Count < seq.frg + 1)
+            {
                 return -1;
+            }
 
             // recv_queue contains all the fragments necessary to reconstruct the message.
             // sum all fragment's sizes to get the full message size.
@@ -272,7 +293,9 @@ namespace kcp2k
             {
                 length += (int)seg.data.Position;
                 if (seg.frg == 0)
+                {
                     break;
+                }
             }
 
             return length;
@@ -286,23 +309,31 @@ namespace kcp2k
             int count;
 
             if (len < 0)
+            {
                 return -1;
+            }
 
             // streaming mode: removed. we never want to send 'hello' and
             // receive 'he' 'll' 'o'. we want to always receive 'hello'.
 
             // calculate amount of fragments necessary for 'len'
             if (len <= mss)
+            {
                 count = 1;
+            }
             else
+            {
                 count = (int)((len + mss - 1) / mss);
+            }
 
             // IMPORTANT kcp encodes 'frg' as 1 byte.
             // so we can only support up to 255 fragments.
             // (which limits max message size to around 288 KB)
             // this is difficult to debug. let's make this 100% obvious.
             if (count > FRG_MAX)
+            {
                 throw new Exception($"Send len={len} requires {count} fragments, but kcp can only handle up to {FRG_MAX} fragments.");
+            }
 
             // original kcp uses WND_RCV const instead of rcv_wnd runtime:
             // https://github.com/skywind3000/kcp/pull/291/files
@@ -310,10 +341,14 @@ namespace kcp2k
             //if (count >= WND_RCV) return -2;
             // using configured rcv_wnd uncorks max message size to 'any':
             if (count >= rcv_wnd)
+            {
                 return -2;
+            }
 
             if (count == 0)
+            {
                 count = 1;
+            }
 
             // fragment
             for (var i = 0; i < count; i++)
@@ -352,11 +387,16 @@ namespace kcp2k
             {
                 var delta = rtt - rx_srtt;
                 if (delta < 0)
+                {
                     delta = -delta;
+                }
+
                 rx_rttval = (3 * rx_rttval + delta) / 4;
                 rx_srtt = (7 * rx_srtt + rtt) / 8;
                 if (rx_srtt < 1)
+                {
                     rx_srtt = 1;
+                }
             }
             var rto = rx_srtt + Math.Max((int)interval, 4 * rx_rttval);
             rx_rto = Utils.Clamp(rto, rx_minrto, RTO_MAX);
@@ -381,7 +421,9 @@ namespace kcp2k
         internal void ParseAck(uint sn)
         {
             if (Utils.TimeDiff(sn, snd_una) < 0 || Utils.TimeDiff(sn, snd_nxt) >= 0)
+            {
                 return;
+            }
 
             // for-int so we can erase while iterating
             for (var i = 0; i < snd_buf.Count; ++i)
@@ -431,10 +473,14 @@ namespace kcp2k
             // if !(snd_una <= sn && sn < snd_nxt) return;
 
             if (Utils.TimeDiff(sn, snd_una) < 0)
+            {
                 return;
+            }
 
             if (Utils.TimeDiff(sn, snd_nxt) >= 0)
+            {
                 return;
+            }
 
             foreach (var seg in snd_buf)
             {
@@ -559,18 +605,24 @@ namespace kcp2k
             var flag = 0;
 
             if (data == null || size < OVERHEAD)
+            {
                 return -1;
+            }
 
             while (true)
             {
                 // enough data left to decode segment (aka OVERHEAD bytes)?
                 if (size < OVERHEAD)
+                {
                     break;
+                }
 
                 // decode segment
                 offset += Utils.Decode32U(data, offset, out var conv_);
                 if (conv_ != conv)
+                {
                     return -1;
+                }
 
                 offset += Utils.Decode8u(data, offset, out var cmd);
                 // IMPORTANT kcp encodes 'frg' as 1 byte.
@@ -589,12 +641,16 @@ namespace kcp2k
                 // enough remaining to read 'len' bytes of the actual payload?
                 // note: original kcp casts uint len to int for <0 check.
                 if (size < len || (int)len < 0)
+                {
                     return -2;
+                }
 
                 // validate command type
                 if (cmd != CMD_PUSH && cmd != CMD_ACK &&
                     cmd != CMD_WASK && cmd != CMD_WINS)
+                {
                     return -3;
+                }
 
                 // Send() allows fewer than rcv_wnd fragments and at most FRG_MAX fragments.
                 // A received frg is the number of fragments after this one, so 255 (and any
@@ -602,7 +658,9 @@ namespace kcp2k
                 // value. Reject it before queueing a segment that would block PeekSize forever.
                 if (cmd == CMD_PUSH &&
                     (frg >= FRG_MAX || (uint)frg + 1 >= rcv_wnd))
+                {
                     return -4;
+                }
 
                 rmt_wnd = wnd;
                 ParseUna(una);
@@ -699,7 +757,10 @@ namespace kcp2k
                     else
                     {
                         if (incr < mss)
+                        {
                             incr = mss;
+                        }
+
                         incr += (mss * mss) / incr + (mss / 16);
                         if ((cwnd + 1) * mss <= incr)
                         {
@@ -750,7 +811,9 @@ namespace kcp2k
 
             // update needs to be called before flushing
             if (!updated)
+            {
                 return;
+            }
 
             // kcp only stack allocates a segment here for performance, leaving
             // its data buffer null because this segment's data buffer is never
@@ -787,10 +850,16 @@ namespace kcp2k
                     if (Utils.TimeDiff(current, ts_probe) >= 0)
                     {
                         if (probe_wait < PROBE_INIT)
+                        {
                             probe_wait = PROBE_INIT;
+                        }
+
                         probe_wait += probe_wait / 2;
                         if (probe_wait > PROBE_LIMIT)
+                        {
                             probe_wait = PROBE_LIMIT;
+                        }
+
                         ts_probe = current + probe_wait;
                         probe |= ASK_SEND;
                     }
@@ -832,7 +901,9 @@ namespace kcp2k
             // for our max message size test with super large windows of 32k,
             // 'congestion window' limits it down from 32.000 to 2.
             if (!nocwnd)
+            {
                 cwnd_ = Math.Min(cwnd, cwnd_);
+            }
 
             // move cwnd_ 'window size' messages from snd_queue to snd_buf
             //   'snd_nxt' is what we want to send.
@@ -841,7 +912,9 @@ namespace kcp2k
             while (Utils.TimeDiff(snd_nxt, snd_una + cwnd_) < 0)
             {
                 if (snd_queue.Count == 0)
+                {
                     break;
+                }
 
                 var newseg = snd_queue.Dequeue();
 
@@ -949,7 +1022,10 @@ namespace kcp2k
                 var inflight = snd_nxt - snd_una;
                 ssthresh = inflight / 2;
                 if (ssthresh < THRESH_MIN)
+                {
                     ssthresh = THRESH_MIN;
+                }
+
                 cwnd = ssthresh + resent;
                 incr = cwnd * mss;
             }
@@ -960,7 +1036,10 @@ namespace kcp2k
                 // original C uses 'cwnd', not kcp->cwnd!
                 ssthresh = cwnd_ / 2;
                 if (ssthresh < THRESH_MIN)
+                {
                     ssthresh = THRESH_MIN;
+                }
+
                 cwnd = 1;
                 incr = mss;
             }
@@ -1060,12 +1139,16 @@ namespace kcp2k
                     return current_;
                 }
                 if (diff < tm_packet)
+                {
                     tm_packet = diff;
+                }
             }
 
             var minimal = (uint)(tm_packet < tm_flush ? tm_packet : tm_flush);
             if (minimal >= interval)
+            {
                 minimal = interval;
+            }
 
             return current_ + minimal;
         }
@@ -1075,7 +1158,9 @@ namespace kcp2k
         public void SetMtu(uint mtu)
         {
             if (mtu < MTU_MIN || mtu < OVERHEAD)
+            {
                 throw new ArgumentException("MTU must be higher than 50 and higher than OVERHEAD");
+            }
 
             buffer = new byte[(mtu + OVERHEAD) * 3];
             this.mtu = mtu;
@@ -1087,9 +1172,14 @@ namespace kcp2k
         {
             // clamp interval between 10 and 5000
             if (interval > 5000)
+            {
                 interval = 5000;
+            }
             else if (interval < 10)
+            {
                 interval = 10;
+            }
+
             this.interval = interval;
         }
 
@@ -1117,9 +1207,14 @@ namespace kcp2k
             {
                 // clamp interval between 10 and 5000
                 if (interval > 5000)
+                {
                     interval = 5000;
+                }
                 else if (interval < 10)
+                {
                     interval = 10;
+                }
+
                 this.interval = interval;
             }
 

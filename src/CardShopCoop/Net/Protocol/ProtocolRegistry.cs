@@ -86,7 +86,9 @@ namespace CardShopCoop.Net.Protocol
             public void Dispose()
             {
                 if (System.Threading.Interlocked.Exchange(ref _disposed, 1) == 0)
+                {
                     _registry.EndSession();
+                }
             }
         }
 
@@ -228,12 +230,16 @@ namespace CardShopCoop.Net.Protocol
                 foreach (var pair in _handlers)
                 {
                     if (!pair.Value.Retired && sessionDescriptors.ContainsKey(pair.Key))
+                    {
                         nextHandlers.Add(pair.Key, pair.Value);
+                    }
                 }
                 foreach (var pair in _pendingHandlers)
                 {
                     if (!pair.Value.Retired && sessionDescriptors.ContainsKey(pair.Key))
+                    {
                         nextHandlers.Add(pair.Key, pair.Value);
+                    }
                 }
 
                 _activeDescriptors.Clear();
@@ -264,7 +270,9 @@ namespace CardShopCoop.Net.Protocol
             lock (_gate)
             {
                 if (_sessionLeaseCount <= 0)
+                {
                     return;
+                }
 
                 _sessionLeaseCount--;
                 if (_sessionLeaseCount > 0)
@@ -446,12 +454,19 @@ namespace CardShopCoop.Net.Protocol
                 {
                     var token = pending[i].Binding.MessageType.FullName;
                     if (_frozen)
+                    {
                         _pendingHandlers.Add(token, pending[i]);
+                    }
                     else
+                    {
                         _handlers.Add(token, pending[i]);
+                    }
                 }
                 if (!_frozen)
+                {
                     RebuildSnapshotLocked();
+                }
+
                 return CreateHandlerHandle(owner, pending);
             }
         }
@@ -518,9 +533,15 @@ namespace CardShopCoop.Net.Protocol
                 deactivate = new List<ProtocolHandlerBinding>(_handlers.Count
                     + _pendingHandlers.Count);
                 foreach (var registration in _handlers.Values)
+                {
                     deactivate.Add(registration.Binding);
+                }
+
                 foreach (var registration in _pendingHandlers.Values)
+                {
                     deactivate.Add(registration.Binding);
+                }
+
                 _disposed = true;
                 _activeDescriptors.Clear();
                 _pendingDescriptors.Clear();
@@ -536,7 +557,9 @@ namespace CardShopCoop.Net.Protocol
             }
 
             for (var i = 0; i < deactivate.Count; i++)
+            {
                 deactivate[i].DeactivateAndWait();
+            }
         }
 
         private IProtocolRegistration RegisterDescriptors(IList<MessageDescriptor> descriptors,
@@ -607,7 +630,10 @@ namespace CardShopCoop.Net.Protocol
                     }
                 }
                 if (!_frozen)
+                {
                     RebuildSnapshotLocked();
+                }
+
                 return CreateDescriptorHandle(owner, registrations);
             }
         }
@@ -772,7 +798,9 @@ namespace CardShopCoop.Net.Protocol
                             handler.Retired = true;
                             deactivate.Add(handler.Binding);
                             if (!_frozen)
+                            {
                                 _handlers.Remove(registration.Descriptor.WireName);
+                            }
                         }
                         if (_pendingHandlers.TryGetValue(registration.Descriptor.WireName,
                             out var pendingHandler))
@@ -793,10 +821,14 @@ namespace CardShopCoop.Net.Protocol
                         }
                     }
                     if (!_frozen)
+                    {
                         RebuildSnapshotLocked();
+                    }
                 }
                 for (var i = 0; i < deactivate.Count; i++)
+                {
                     deactivate[i].DeactivateAndWait();
+                }
             }, () =>
             {
                 lock (_gate)
@@ -846,7 +878,9 @@ namespace CardShopCoop.Net.Protocol
                         {
                             deactivate.Add(registration.Binding);
                             if (!_frozen)
+                            {
                                 _handlers.Remove(name);
+                            }
                         }
                         if (_pendingHandlers.TryGetValue(name, out var pending)
                             && ReferenceEquals(pending, registration))
@@ -856,10 +890,14 @@ namespace CardShopCoop.Net.Protocol
                         }
                     }
                     if (!_frozen)
+                    {
                         RebuildSnapshotLocked();
+                    }
                 }
                 for (var i = 0; i < deactivate.Count; i++)
+                {
                     deactivate[i].DeactivateAndWait();
+                }
             }, () =>
             {
                 lock (_gate)

@@ -118,7 +118,9 @@ namespace CardShopCoop.Modules.Bills
         internal static bool CommitPayment(SpendToken token, Action payment)
         {
             if (!token.IsValid || payment == null)
+            {
                 return false;
+            }
 
             return EconomyAuthority.RunWithVanillaSpend(token.Reservation, () =>
             {

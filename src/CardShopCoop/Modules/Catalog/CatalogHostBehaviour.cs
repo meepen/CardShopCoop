@@ -5,7 +5,6 @@ using CardShopCoop.Attributes;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
-using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Catalog
@@ -35,7 +34,10 @@ namespace CardShopCoop.Modules.Catalog
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -58,9 +60,17 @@ namespace CardShopCoop.Modules.Catalog
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 _context = null;
                 throw;
             }
@@ -76,18 +86,28 @@ namespace CardShopCoop.Modules.Catalog
         private void SendJoinBaseline(PeerConnection peer)
         {
             if (peer == null)
+            {
                 return;
+            }
+
 
             _joined.Add(peer.Id);
             if (!SendState(peer.Id))
+            {
                 _baselinePending.Add(peer.Id);
+            }
+
         }
 
         [OnClientDisconnected]
         private void ForgetPeer(PeerConnection peer, DisconnectInfo _)
         {
             if (peer == null)
+            {
                 return;
+            }
+
+
             _joined.Remove(peer.Id);
             _baselinePending.Remove(peer.Id);
         }
@@ -100,17 +120,28 @@ namespace CardShopCoop.Modules.Catalog
             if (active == null || !CatalogInterop.TryResolve(itemType, isBigBox, name,
                 out var index, out var data) || data == null || string.IsNullOrEmpty(data.name)
                 || !CatalogInterop.IsWireableItemType(data.itemType, "catalog product"))
+            {
                 return false;
+            }
+
 
             if (!CatalogInterop.TryGetLicense(index, out var unlocked, out _) || unlocked)
+            {
+
                 return unlocked;
+            }
+
 
             active._applying = true;
             try
             {
                 if (!CatalogInterop.SetLicense(index, true)
                     || !CatalogInterop.TryGetLicense(index, out var applied, out _) || !applied)
+                {
+
                     return false;
+                }
+
             }
             finally
             {
@@ -119,16 +150,28 @@ namespace CardShopCoop.Modules.Catalog
 
             changed = true;
             if (applyVanillaEntitlementSideEffects)
+            {
                 ApplyProductEntitlementSideEffects(data);
+            }
+
             if (publish)
+            {
                 active.BroadcastProductDelta(Guid.Empty, data, true);
+            }
+
+
             return true;
         }
 
         internal static bool PublishProductLicense(RestockData data, Guid predictionId)
         {
             if (_active == null || data == null)
+            {
+
                 return false;
+            }
+
+
             _active.BroadcastProductDelta(predictionId, data, true);
             return true;
         }
@@ -137,9 +180,15 @@ namespace CardShopCoop.Modules.Catalog
         {
             changed = false;
             if (_active == null)
+            {
                 return false;
+            }
+
+
             if (CPlayerData.m_IsScannerRestockUnlocked)
+            {
                 return true;
+            }
 
             _active._applying = true;
             try
@@ -152,7 +201,11 @@ namespace CardShopCoop.Modules.Catalog
             }
             changed = true;
             if (publish)
+            {
                 _active.BroadcastScannerDelta(Guid.Empty, true);
+            }
+
+
             return true;
         }
 
@@ -165,13 +218,20 @@ namespace CardShopCoop.Modules.Catalog
                 var screen = screens[i];
                 if (screen == null || !screen.gameObject.scene.IsValid()
                     || !screen.gameObject.activeInHierarchy)
+                {
                     continue;
+                }
+
 
                 var unlocked = CPlayerData.m_IsScannerRestockUnlocked;
                 screen.m_UnlockedGrp?.SetActive(unlocked);
                 screen.m_LockedGrp?.SetActive(!unlocked);
                 if (unlocked && ScannerPage?.GetValue(screen) is int page)
+                {
                     ScannerEvaluatePage?.Invoke(screen, new object[] { page });
+                }
+
+
                 ScannerUpdateTotals?.Invoke(screen, null);
             }
         }
@@ -179,7 +239,12 @@ namespace CardShopCoop.Modules.Catalog
         internal static bool PublishScannerUnlock(Guid predictionId)
         {
             if (_active == null)
+            {
+
                 return false;
+            }
+
+
             _active.BroadcastScannerDelta(predictionId, true);
             return true;
         }
@@ -187,18 +252,30 @@ namespace CardShopCoop.Modules.Catalog
         internal static bool RestoreProductLicenseState(CatalogInterop.LicenseState state)
         {
             if (_active == null || state == null)
+            {
+
                 return false;
+            }
+
 
             _active._applying = true;
             try
             {
                 if (!CatalogInterop.TryRestoreLicenseState(state, out var changed))
+                {
+
                     return false;
+                }
+
+
                 for (var i = 0; i < changed.Count; i++)
                 {
                     var data = CatalogInterop.At(changed[i].Index);
                     if (data != null)
+                    {
                         _active.BroadcastProductDelta(Guid.Empty, data, changed[i].Unlocked);
+                    }
+
                 }
             }
             finally
@@ -211,7 +288,12 @@ namespace CardShopCoop.Modules.Catalog
         internal static bool RestoreScannerUnlock(bool unlocked)
         {
             if (_active == null)
+            {
+
                 return false;
+            }
+
+
             CPlayerData.m_IsScannerRestockUnlocked = unlocked;
             _active.BroadcastScannerDelta(Guid.Empty, unlocked);
             return true;
@@ -220,19 +302,29 @@ namespace CardShopCoop.Modules.Catalog
         internal static void ApplyProductEntitlementSideEffects(RestockData data)
         {
             if (data == null)
+            {
                 return;
+            }
+
 
             AchievementManager.OnItemLicenseUnlocked(data.itemType);
             GameInstance.m_IsItemLicenseUnlocked = true;
             if (data.itemType == EItemType.BasicCardBox)
+            {
                 TutorialManager.AddTaskValue(ETutorialTaskCondition.UnlockBasicCardBox, 1f);
+            }
+
         }
 
         private bool SendState(int connectionId)
         {
             if (_shutdown || !_context.InGame() || !CatalogInterop.IsSceneReady
                 || !CatalogInterop.TryBuildLicenseEntries(out var entries, out var scanner))
+            {
+
                 return false;
+            }
+
 
             _context.Send(connectionId, new CatalogLicenseStateMessage
             {
@@ -246,7 +338,10 @@ namespace CardShopCoop.Modules.Catalog
         private void BroadcastProductDelta(Guid predictionId, RestockData data, bool unlocked)
         {
             if (_shutdown || !_context.InGame() || data == null)
+            {
                 return;
+            }
+
 
             _context.Broadcast(new CatalogLicenseDeltaMessage
             {
@@ -262,7 +357,10 @@ namespace CardShopCoop.Modules.Catalog
         private void BroadcastScannerDelta(Guid predictionId, bool unlocked)
         {
             if (_shutdown || !_context.InGame())
+            {
                 return;
+            }
+
 
             _context.Broadcast(new CatalogLicenseDeltaMessage
             {
@@ -288,7 +386,10 @@ namespace CardShopCoop.Modules.Catalog
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
@@ -299,7 +400,11 @@ namespace CardShopCoop.Modules.Catalog
             _joined.Clear();
             _baselinePending.Clear();
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _context = null;
         }
 
@@ -315,7 +420,11 @@ namespace CardShopCoop.Modules.Catalog
                 {
                     var data = CatalogInterop.At(index);
                     if (data != null)
+                    {
+
                         _active.BroadcastProductDelta(Guid.Empty, data, true);
+                    }
+
                 }
             }
         }
@@ -327,8 +436,12 @@ namespace CardShopCoop.Modules.Catalog
             private static void Postfix()
             {
                 if (_active != null && !_active._applying)
+                {
+
                     _active.BroadcastScannerDelta(Guid.Empty,
                         CPlayerData.m_IsScannerRestockUnlocked);
+                }
+
             }
         }
     }

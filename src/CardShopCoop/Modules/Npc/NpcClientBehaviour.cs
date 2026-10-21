@@ -108,7 +108,7 @@ namespace CardShopCoop.Modules.Npc
 
         private void Update()
         {
-            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.client-update"))
+            using (Util.PerfProbe.Sample("module.npc.client-update"))
             {
                 UpdateInner();
             }
@@ -286,7 +286,7 @@ namespace CardShopCoop.Modules.Npc
             var female = message.Female || HasFemaleNamePrefix(message.CharName);
             if (message.Kind == KindCustomer)
             {
-                using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.capacity"))
+                using (Util.PerfProbe.Sample("module.npc.identity.capacity"))
                 {
                     EnsureCustomerCapacity(message.Index, female);
                 }
@@ -309,7 +309,7 @@ namespace CardShopCoop.Modules.Npc
 
             if (puppet.HasIdentity && puppet.Identity != message.Identity && !reusedIncarnation)
             {
-                using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.destroy"))
+                using (Util.PerfProbe.Sample("module.npc.identity.destroy"))
                 {
                     ClearPendingIdentity(puppet);
                     ParkOrDestroyVisual(puppet);
@@ -332,7 +332,7 @@ namespace CardShopCoop.Modules.Npc
             }
 
             SetPendingIdentity(puppet, message.Identity, female);
-            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.redress"))
+            using (Util.PerfProbe.Sample("module.npc.identity.redress"))
             {
                 Redress(puppet, message.CharName, message.Position, female,
                     message.Kind, message.Index);
@@ -1937,7 +1937,9 @@ namespace CardShopCoop.Modules.Npc
         {
             if (message.Kind == KindCustomer
                 && TryGetCustomerGeneration(message.Index, out var generation))
+            {
                 return generation == message.Identity;
+            }
 
             var key = (message.Kind << 16) | message.Index;
             return _puppets.TryGetValue(key, out var puppet) && puppet.HasIdentity
@@ -2379,7 +2381,7 @@ namespace CardShopCoop.Modules.Npc
             // source mismatch (or any miss) the existing in-place Initialize() path runs.
             var newKey = new VisualKey(kind, female, charName);
             PooledVisual pooled = null;
-            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.pool"))
+            using (Util.PerfProbe.Sample("module.npc.identity.pool"))
             {
                 TryTakeVisual(newKey, p.VisualFromLive, out pooled);
             }
@@ -2700,7 +2702,7 @@ namespace CardShopCoop.Modules.Npc
             CC.CharacterCustomization sourceCustom = null;
             Transform sourceRoot = null;
             var clonedLive = false;
-            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.source"))
+            using (Util.PerfProbe.Sample("module.npc.identity.spawn.source"))
             {
                 if (kind == KindWorker)
                 {
@@ -2762,7 +2764,7 @@ namespace CardShopCoop.Modules.Npc
             PooledVisual pooled = null;
             if (!string.IsNullOrEmpty(charName))
             {
-                using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.pool"))
+                using (Util.PerfProbe.Sample("module.npc.identity.pool"))
                 {
                     TryTakeVisual(new VisualKey(kind, female, charName), clonedLive, out pooled);
                 }
@@ -2781,7 +2783,7 @@ namespace CardShopCoop.Modules.Npc
 
             GameObject clone;
             int cloneInstanceId;
-            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.instantiate"))
+            using (Util.PerfProbe.Sample("module.npc.identity.spawn.instantiate"))
             {
                 var holder = new GameObject("CoopNpcHolder_tmp");
                 holder.SetActive(false);
@@ -2812,7 +2814,7 @@ namespace CardShopCoop.Modules.Npc
                 : worker?.m_CharacterCustom;
             if (p.Custom != null)
             {
-                using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.dress"))
+                using (Util.PerfProbe.Sample("module.npc.identity.spawn.dress"))
                 {
                     if (clonedLive && kind == KindWorker)
                     {
@@ -2880,7 +2882,7 @@ namespace CardShopCoop.Modules.Npc
 
             // CharacterCustomization must survive the strip so wardrobe changes can
             // re-dress in place instead of Destroy+Instantiate churn
-            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.strip"))
+            using (Util.PerfProbe.Sample("module.npc.identity.spawn.strip"))
             {
                 foreach (var mb in clone.GetComponentsInChildren<MonoBehaviour>(true))
                 {
@@ -2928,7 +2930,7 @@ namespace CardShopCoop.Modules.Npc
             // A staff snapshot can arrive before this puppet is spawned. Seed the
             // vanilla UI model from the already-downloaded save immediately; later
             // StaffState packets continue to refresh it authoritatively.
-            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.identity.spawn.finish"))
+            using (Util.PerfProbe.Sample("module.npc.identity.spawn.finish"))
             {
                 clone.name = "CoopNpc_" + charName;
                 p.VisualFromLive = clonedLive;

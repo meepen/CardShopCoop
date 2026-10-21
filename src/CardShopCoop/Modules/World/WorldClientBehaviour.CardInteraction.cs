@@ -1,5 +1,4 @@
-﻿using GradedRemoveMessage = CardShopCoop.Modules.World.GradedRemoveMessage;
-using CardShopCoop.Net;
+﻿using CardShopCoop.Net;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.World

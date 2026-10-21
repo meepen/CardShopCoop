@@ -154,7 +154,10 @@ namespace CardShopCoop.Modules.Grading
             {
                 var failure = CompatibilityFailure();
                 if (failure != null)
+                {
                     LogCompatibilityFailure(failure);
+                }
+
                 return GoDetected && failure == null;
             }
         }
@@ -182,7 +185,9 @@ namespace CardShopCoop.Modules.Grading
         private static string ComputeCompatibilityFailure()
         {
             if (!GoDetected)
+            {
                 return null;
+            }
 
             var failures = new List<string>();
             if (!IsFlexibleMethod(MiRemember, TRegistry, true, BoolOrVoidReturn, typeof(CardData),
@@ -192,21 +197,36 @@ namespace CardShopCoop.Modules.Grading
                     + "static, (CardData, int), and return bool or void");
             }
             if (TCompany == null || !TCompany.IsEnum)
+            {
                 failures.Add("GradingCompany must be an enum");
+            }
+
             if (!IsExactMethod(MiEncoded, TRegistry, true, typeof(int), typeof(CardData)))
+            {
                 failures.Add("GetEncodedOrCurrent must be declared by EncodedGradeRegistry, static, "
                     + "(CardData), and return int");
+            }
+
             if (!IsExactMethod(MiActual, THelper, true, typeof(int), typeof(int)))
+            {
                 failures.Add("GetActualGrade must be declared by Helper, static, (int), and return int");
+            }
+
             if (!IsExactMethod(MiDecodeFull, THelper, true, typeof(void), typeof(int),
                 TCompany?.MakeByRefType(), typeof(int).MakeByRefType(), typeof(int).MakeByRefType()))
             {
                 failures.Add("DecodeGradeFull must have the exact encoded/company/grade/certificate signature");
             }
             if (!IsExactMethod(MiCheat, THelper, true, typeof(bool), typeof(int)))
+            {
                 failures.Add("IsCheatFlagged must be declared by Helper, static, (int), and return bool");
+            }
+
             if (!IsExactMethod(MiHasBinding, TSaveManager, true, typeof(bool), TCompany, typeof(int)))
+            {
                 failures.Add("HasCertBinding must have the exact company/certificate signature");
+            }
+
             if (!IsExactMethod(MiIsBoundTo, TSaveManager, true, typeof(bool), TCompany, typeof(int),
                 typeof(CardData)))
             {
@@ -260,9 +280,15 @@ namespace CardShopCoop.Modules.Grading
                     + "static/instance mode, parameter list, or return type");
             }
             if (!IsExactMethod(MiNextJobId, TPreRoll, true, typeof(int)))
+            {
                 failures.Add("GetNextJobId must be declared by PreRollManager, static, (), and return int");
+            }
+
             if (!IsExactMethod(MiEncode, TCodec, true, typeof(int), TCompany, typeof(int), typeof(int)))
+            {
                 failures.Add("ServiceLevelCodec.Encode has an unexpected exact signature");
+            }
+
             if (!IsExactMethod(MiTryDecode, TCodec, true, typeof(bool), typeof(int),
                 TCompany?.MakeByRefType(), typeof(int).MakeByRefType()))
             {
@@ -281,7 +307,9 @@ namespace CardShopCoop.Modules.Grading
         private static void LogCompatibilityFailure(string failure)
         {
             if (_compatibilityLogged || CoopPlugin.Log == null)
+            {
                 return;
+            }
 
             _compatibilityLogged = true;
             CoopPlugin.Log.LogError("Grading Overhaul grading disabled fail-closed: " + failure);
@@ -291,7 +319,9 @@ namespace CardShopCoop.Modules.Grading
             params Type[] parameterTypes)
         {
             if (declaringType == null)
+            {
                 return null;
+            }
 
             return declaringType.GetMethod(name, BindingFlags.Static | BindingFlags.Instance
                 | BindingFlags.Public | BindingFlags.NonPublic, null, parameterTypes, null);
@@ -308,12 +338,16 @@ namespace CardShopCoop.Modules.Grading
 
             var parameters = method.GetParameters();
             if (parameters.Length != parameterTypes.Length)
+            {
                 return false;
+            }
 
             for (var i = 0; i < parameters.Length; i++)
             {
                 if (parameters[i].ParameterType != parameterTypes[i])
+                {
                     return false;
+                }
             }
 
             return true;
@@ -342,16 +376,22 @@ namespace CardShopCoop.Modules.Grading
                 }
             }
             if (!returnAllowed)
+            {
                 return false;
+            }
 
             var parameters = method.GetParameters();
             if (parameters.Length != parameterTypes.Length)
+            {
                 return false;
+            }
 
             for (var i = 0; i < parameters.Length; i++)
             {
                 if (parameters[i].ParameterType != parameterTypes[i])
+                {
                     return false;
+                }
             }
 
             return true;
@@ -360,7 +400,9 @@ namespace CardShopCoop.Modules.Grading
         private static void LogRollbackUnavailable()
         {
             if (_rollbackUnavailableLogged || CoopPlugin.Log == null)
+            {
                 return;
+            }
 
             _rollbackUnavailableLogged = true;
             CoopPlugin.Log.LogWarning("Grading Overhaul has no post-submit rollback hooks "
@@ -379,7 +421,9 @@ namespace CardShopCoop.Modules.Grading
             get
             {
                 if (PiCurrentCompany == null)
+                {
                     return NoCompany;
+                }
 
                 try
                 {
@@ -442,9 +486,14 @@ namespace CardShopCoop.Modules.Grading
             get
             {
                 if (!Present)
+                {
                     return VanillaSubmitSlots;
+                }
+
                 if (_maxSubmitSlots > 0)
+                {
                     return _maxSubmitSlots;
+                }
 
                 var value = GoSubmitSlotsFallback;
                 try
@@ -455,9 +504,13 @@ namespace CardShopCoop.Modules.Grading
                     {
                         var raw = Convert.ToInt32(field.GetRawConstantValue());
                         if (raw >= VanillaSubmitSlots && raw <= byte.MaxValue)
+                        {
                             value = raw;
+                        }
                         else
+                        {
                             CoopPlugin.Log.LogWarning("GradingInterop: GO submit slot count is outside the wire-safe range; using " + value);
+                        }
                     }
                 }
                 catch (Exception error)
@@ -474,11 +527,19 @@ namespace CardShopCoop.Modules.Grading
         internal static int Encoded(CardData card)
         {
             if (card == null)
+            {
                 return 0;
+            }
+
             if (GoDetected && !GoCompatible)
+            {
                 return card.cardGrade;
+            }
+
             if (MiEncoded == null)
+            {
                 return card.cardGrade;
+            }
 
             try
             {
@@ -494,7 +555,9 @@ namespace CardShopCoop.Modules.Grading
         internal static int Actual(int encoded)
         {
             if (encoded <= 10 || (GoDetected && !GoCompatible) || MiActual == null)
+            {
                 return encoded;
+            }
 
             try
             {
@@ -510,11 +573,15 @@ namespace CardShopCoop.Modules.Grading
         internal static bool Remember(CardData card)
         {
             if (!GoCompatible || card == null || MiRemember == null)
+            {
                 return false;
+            }
 
             var encoded = Encoded(card);
             if (encoded <= 10 || !CertFreeForCard(card, encoded))
+            {
                 return false;
+            }
 
             try
             {
@@ -533,13 +600,17 @@ namespace CardShopCoop.Modules.Grading
         internal static bool IsAllowedCompany(int id)
         {
             if (TCompany == null || !TCompany.IsEnum)
+            {
                 return false;
+            }
 
             try
             {
                 var company = Enum.ToObject(TCompany, id);
                 if (!Enum.IsDefined(TCompany, company))
+                {
                     return false;
+                }
 
                 var allowed = FiAllowedCompanies?.GetValue(null) as Array;
                 if (allowed == null)
@@ -551,7 +622,9 @@ namespace CardShopCoop.Modules.Grading
                 for (var i = 0; i < allowed.Length; i++)
                 {
                     if (Convert.ToInt32(allowed.GetValue(i)) == id)
+                    {
                         return true;
+                    }
                 }
 
                 return false;
@@ -655,7 +728,10 @@ namespace CardShopCoop.Modules.Grading
         internal static string DescribeCard(CardData card)
         {
             if (card == null)
+            {
                 return "(null card)";
+            }
+
             return "exp=" + (int)card.expansionType + " monster=" + (int)card.monsterType
                 + " border=" + (int)card.borderType + (card.isFoil ? " foil" : "")
                 + (card.isDestiny ? " destiny" : "") + (card.isChampionCard ? " champion" : "")
@@ -665,7 +741,9 @@ namespace CardShopCoop.Modules.Grading
         internal static bool RegisterJobCompany(GradeCardSubmitSet set, int companyId, bool useCheats)
         {
             if (set == null || MiOnJobSubmitted == null || TCompany == null)
+            {
                 return false;
+            }
 
             try
             {
@@ -683,7 +761,10 @@ namespace CardShopCoop.Modules.Grading
         internal static int NextJobId()
         {
             if (MiNextJobId == null)
+            {
                 return 0;
+            }
+
             try
             {
                 return Convert.ToInt32(MiNextJobId.Invoke(null, null));
@@ -698,7 +779,10 @@ namespace CardShopCoop.Modules.Grading
         internal static int EncodeServiceLevel(int companyId, int tier, int jobId)
         {
             if (MiEncode == null || TCompany == null)
+            {
                 return 0;
+            }
+
             try
             {
                 return Convert.ToInt32(MiEncode.Invoke(null,
@@ -716,13 +800,18 @@ namespace CardShopCoop.Modules.Grading
             companyId = -1;
             tier = raw;
             if (MiTryDecode == null || TCompany == null)
+            {
                 return false;
+            }
 
             try
             {
                 var args = new object[] { raw, Enum.ToObject(TCompany, 0), 0 };
                 if (!(bool)MiTryDecode.Invoke(null, args))
+                {
                     return false;
+                }
+
                 companyId = Convert.ToInt32(args[1]);
                 tier = Convert.ToInt32(args[2]);
                 return companyId >= 0 && Enum.IsDefined(TCompany, companyId)
@@ -738,7 +827,10 @@ namespace CardShopCoop.Modules.Grading
         internal static bool PreRollJob(GradeCardSubmitSet set, int companyId, bool useCheats, int jobId)
         {
             if (set == null || MiPreRoll == null || TCompany == null)
+            {
                 return false;
+            }
+
             try
             {
                 MiPreRoll.Invoke(null, new object[] { set, Enum.ToObject(TCompany, companyId), useCheats, jobId });
@@ -766,7 +858,9 @@ namespace CardShopCoop.Modules.Grading
             companyId = -1;
             cert = 0;
             if (encoded <= 10 || !GoCompatible || MiDecodeFull == null || TCompany == null)
+            {
                 return false;
+            }
 
             try
             {
@@ -792,7 +886,9 @@ namespace CardShopCoop.Modules.Grading
         internal static string DescribeEncoded(int encoded)
         {
             if (encoded <= 10 || !GoCompatible || MiDecodeFull == null || TCompany == null)
+            {
                 return null;
+            }
 
             try
             {
@@ -827,7 +923,9 @@ namespace CardShopCoop.Modules.Grading
             }
 
             if (!DecodeCert(Encoded(card), out var companyId, out var cert))
+            {
                 return false;
+            }
 
             try
             {
@@ -845,7 +943,10 @@ namespace CardShopCoop.Modules.Grading
         internal static bool CheatFlagged(int encoded)
         {
             if (MiCheat == null)
+            {
                 return false;
+            }
+
             try
             {
                 return (bool)MiCheat.Invoke(null, new object[] { encoded });
@@ -871,18 +972,28 @@ namespace CardShopCoop.Modules.Grading
         private static bool CertFreeForCard(CardData card, int encoded)
         {
             if (CheatFlagged(encoded))
+            {
                 return true;
+            }
+
             if (MiHasBinding == null || MiIsBoundTo == null || TCompany == null)
+            {
                 return false;
+            }
+
             if (!DecodeCert(encoded, out var companyId, out var cert))
+            {
                 return false;
+            }
 
             try
             {
                 var company = Enum.ToObject(TCompany, companyId);
                 if (!(bool)MiHasBinding.Invoke(null, new object[] { company, cert })
                     || (bool)MiIsBoundTo.Invoke(null, new object[] { company, cert, card }))
+                {
                     return true;
+                }
             }
             catch (Exception error)
             {
@@ -906,7 +1017,10 @@ namespace CardShopCoop.Modules.Grading
             int companyId, bool useCheats, int jobId, string operation)
         {
             if (method == null || method.ReturnType != typeof(bool) || set == null || TCompany == null)
+            {
                 return false;
+            }
+
             try
             {
                 var result = method.Invoke(null, new object[]
@@ -928,11 +1042,17 @@ namespace CardShopCoop.Modules.Grading
             try
             {
                 if (TCompany == null || !TCompany.IsEnum)
+                {
                     return;
+                }
+
                 var names = Enum.GetNames(TCompany);
                 var values = new string[names.Length];
                 for (var i = 0; i < names.Length; i++)
+                {
                     values[i] = names[i] + "=" + Convert.ToInt32(Enum.Parse(TCompany, names[i]));
+                }
+
                 CoopPlugin.Log.LogInfo("GradingInterop: GO GradingCompany = " + string.Join(", ", values));
             }
             catch (Exception error)

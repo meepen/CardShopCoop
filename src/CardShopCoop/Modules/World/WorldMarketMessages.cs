@@ -6,6 +6,15 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class MarketStateMessage : WorldMessage
     {
+        /// <summary>True only for the snapshot produced by the host's day roll. The client
+        /// appends that day's price history locally after applying the values; history is
+        /// derived from the current percents, so no history rows travel on the wire.</summary>
+        public bool IsDayRoll;
+
+        /// <summary>The host's current game day for <see cref="IsDayRoll"/>. The client uses it
+        /// to append history at most once per day.</summary>
+        public int Day;
+
         public List<MarketPercentEntry> ItemPricePercentChangeList = new();
         public List<MarketCardEntry> GenCardMarketPriceList = new();
         public List<MarketCardEntry> GenCardMarketPriceListDestiny = new();

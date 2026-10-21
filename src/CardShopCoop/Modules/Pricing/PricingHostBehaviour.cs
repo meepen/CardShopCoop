@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Grading;
 using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Modules.World;
@@ -45,7 +46,10 @@ namespace CardShopCoop.Modules.Pricing
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -64,9 +68,17 @@ namespace CardShopCoop.Modules.Pricing
                 _harmony = null;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 _context = null;
                 throw;
             }
@@ -76,10 +88,17 @@ namespace CardShopCoop.Modules.Pricing
         private void SendJoinState(PeerConnection peer)
         {
             if (peer == null)
+            {
                 return;
+            }
+
+
             _joined.Add(peer.Id);
             if (!SendBaseline(peer.Id))
+            {
                 _baselinePending.Add(peer.Id);
+            }
+
         }
 
         private void OnReady(CEventPlayer_GameDataFinishLoaded _)
@@ -89,7 +108,11 @@ namespace CardShopCoop.Modules.Pricing
         private void ForgetPeer(PeerConnection peer, DisconnectInfo _)
         {
             if (peer == null)
+            {
                 return;
+            }
+
+
             _joined.Remove(peer.Id);
             _baselinePending.Remove(peer.Id);
         }
@@ -190,7 +213,11 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (_shutdown || _applying || !PricingInterop.IsItemTypeValid(type)
                 || !PricingInterop.ValidPrice(requestedPrice))
+            {
                 return;
+            }
+
+
             QueueItemDelta(Guid.Empty, type, PricingInterop.ReadItem(type));
         }
 
@@ -198,13 +225,19 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (_shutdown || _applying || card == null || !PricingInterop.ValidPrice(requestedPrice)
                 || !PricingInterop.ValidCard(card))
+            {
                 return;
+            }
+
 
             var grade = GradingApi.Encoded(card);
             var canonical = PricingInterop.CopyCard(card, grade);
             var key = PricingInterop.CardKey(canonical, grade);
             if (key == null)
+            {
                 return;
+            }
+
 
             _cards[key] = new OwnedCardState
             {
@@ -217,13 +250,19 @@ namespace CardShopCoop.Modules.Pricing
         private void ObserveInventoryMutation(CardData card)
         {
             if (_shutdown || card == null || !PricingInterop.ValidCard(card))
+            {
                 return;
+            }
+
 
             var grade = GradingApi.Encoded(card);
             var canonical = PricingInterop.CopyCard(card, grade);
             var key = PricingInterop.CardKey(canonical, grade);
             if (key == null)
+            {
                 return;
+            }
+
 
             var owned = grade > 0
                 ? CPlayerData.HasGradedCardInAlbum(canonical)
@@ -265,8 +304,16 @@ namespace CardShopCoop.Modules.Pricing
             for (var i = 0; i < itemTypes.Length; i++)
             {
                 var type = itemTypes[i];
-                if (!PricingInterop.IsItemTypeValid(type))
+                // EPL's prepatcher keeps every id it has ever minted. The pricing baseline must
+                // describe the catalog that is actually loaded, or it ships stale ids that the
+                // peer cannot store (and could collide with a different local item id).
+                if (!CatalogApi.IsActiveEnumValue(EnumKind.ItemType, (int)type)
+                    || !PricingInterop.IsItemTypeValid(type))
+                {
                     continue;
+                }
+
+
                 state.ItemTypes.Add(type);
                 state.ItemPrices.Add(PricingInterop.ReadItem(type));
             }
@@ -288,7 +335,12 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (_shutdown || !_context.InGame() || PricingInterop.ItemCount == 0
                 || WorldCardInteraction.Inv() == null)
+            {
+
                 return false;
+            }
+
+
             HydrateOwnedCards();
             _context.Send(connectionId, BuildState());
             _baselinePending.Remove(connectionId);
@@ -313,7 +365,11 @@ namespace CardShopCoop.Modules.Pricing
         private void QueueItemDelta(Guid predictionId, EItemType type, float price)
         {
             if (_shutdown || _context?.InGame() != true)
+            {
                 return;
+            }
+
+
             _pendingItemDeltas.Add(new PricingItemDeltaEntry
             {
                 PredictionId = predictionId,
@@ -327,7 +383,11 @@ namespace CardShopCoop.Modules.Pricing
         private void QueueCardDelta(Guid predictionId, CardData card, float price, bool removed)
         {
             if (_shutdown || _context?.InGame() != true)
+            {
                 return;
+            }
+
+
             _pendingCardDeltas.Add(new PricingCardDeltaEntry
             {
                 PredictionId = predictionId,
@@ -372,13 +432,19 @@ namespace CardShopCoop.Modules.Pricing
         private void Update()
         {
             if (_pendingItemDeltas.Count > 0 || _pendingCardDeltas.Count > 0)
+            {
                 FlushPendingDeltas();
+            }
+
         }
 
         private void Reject(MessageContext context, Guid predictionId)
         {
             if (predictionId != Guid.Empty && context?.Connection != null)
+            {
                 PredictionApi.Rollback(_context, context.Connection.Id, predictionId);
+            }
+
         }
 
         private void HydrateOwnedCards()
@@ -387,7 +453,10 @@ namespace CardShopCoop.Modules.Pricing
                 expansion <= ECardExpansionType.Ascension; expansion++)
             {
                 if (expansion == ECardExpansionType.FoodieGO)
+                {
                     continue;
+                }
+
 
                 var dimensions = expansion == ECardExpansionType.Ghost ? 2 : 1;
                 for (var dimension = 0; dimension < dimensions; dimension++)
@@ -396,36 +465,58 @@ namespace CardShopCoop.Modules.Pricing
                     var shown = InventoryBase.GetShownMonsterList(expansion);
                     var owned = CPlayerData.GetCardCollectedList(expansion, isDestiny);
                     if (shown == null || owned == null)
+                    {
                         continue;
+                    }
+
 
                     var amount = CPlayerData.GetCardAmountPerMonsterType(expansion);
                     for (var i = 0; i < shown.Count * amount && i < owned.Count; i++)
                     {
                         if (owned[i] > 0)
+                        {
+
                             RememberOwnedCard(CPlayerData.GetCardData(i, expansion, isDestiny));
+                        }
+
                     }
                 }
             }
 
             var graded = CPlayerData.m_GradedCardInventoryList;
             if (graded == null)
+            {
                 return;
+            }
+
+
             for (var i = 0; i < graded.Count; i++)
             {
                 if (graded[i] != null && graded[i].amount > 0)
+                {
                     RememberOwnedCard(CPlayerData.GetGradedCardData(graded[i]));
+                }
+
             }
         }
 
         private void RememberOwnedCard(CardData card)
         {
             if (card == null || !PricingInterop.ValidCard(card))
+            {
                 return;
+            }
+
+
             var grade = GradingApi.Encoded(card);
             var canonical = PricingInterop.CopyCard(card, grade);
             var key = PricingInterop.CardKey(canonical, grade);
             if (key == null)
+            {
                 return;
+            }
+
+
             GradingApi.Remember(canonical);
             _cards[key] = new OwnedCardState
             {
@@ -441,7 +532,12 @@ namespace CardShopCoop.Modules.Pricing
         {
             var stored = PricingInterop.ReadCard(card);
             if (stored <= 0f && _cards.TryGetValue(key, out var existing) && existing.Price > 0f)
+            {
+
                 return existing.Price;
+            }
+
+
             return stored;
         }
 
@@ -466,7 +562,11 @@ namespace CardShopCoop.Modules.Pricing
             try
             {
                 if (!PricingInterop.SetItem(type, price, out actual))
+                {
+
                     return false;
+                }
+
             }
             finally
             {
@@ -495,7 +595,10 @@ namespace CardShopCoop.Modules.Pricing
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
@@ -508,7 +611,11 @@ namespace CardShopCoop.Modules.Pricing
             _pendingItemDeltas.Clear();
             _pendingCardDeltas.Clear();
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _context = null;
         }
 

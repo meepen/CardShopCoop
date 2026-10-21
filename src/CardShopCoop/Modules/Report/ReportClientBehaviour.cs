@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
@@ -202,7 +201,10 @@ namespace CardShopCoop.Modules.Report
         private void HandleDelta(MessageContext context, ReportDeltaMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
             PredictionApi.AckOrApply(message.PredictionId,
                 () => ApplyState(ToState(message)));
         }
@@ -359,7 +361,9 @@ namespace CardShopCoop.Modules.Report
             for (var i = 0; i < entries.Count; i++)
             {
                 if (totalCount - entries.Count + i + 1 <= _reviewSeq)
+                {
                     continue;
+                }
 
                 var entry = entries[i];
                 reviews.Add(new CustomerReviewData
@@ -378,7 +382,9 @@ namespace CardShopCoop.Modules.Report
 
             _reviewSeq = Math.Max(_reviewSeq, totalCount);
             while (reviews.Count > 50)
+            {
                 reviews.RemoveAt(0);
+            }
 
             CPlayerData.m_CustomerReviewCount = totalCount;
             CPlayerData.m_CustomerReviewScoreAverage = message.ReviewScoreAverage;
@@ -541,7 +547,9 @@ namespace CardShopCoop.Modules.Report
 
             SoundManager.SetEnableSound_CoinIncrease(false);
             if (active._haveOpenReport)
+            {
                 CPlayerData.m_GameReportDataCollect = active._clientOpenReport;
+            }
 
             active._haveOpenReport = false;
             EndOfDayReportScreen.CloseScreen();

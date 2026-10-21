@@ -229,7 +229,11 @@ namespace CardShopCoop.Net.Datagrams
             get
             {
                 lock (_lifecycleGate)
+                {
+
                     return _pendingStatusChanges.Count;
+                }
+
             }
         }
 
@@ -238,7 +242,11 @@ namespace CardShopCoop.Net.Datagrams
             get
             {
                 lock (_lifecycleGate)
+                {
+
                     return _pendingLifecycleChanges.Count;
+                }
+
             }
         }
 
@@ -1245,10 +1253,17 @@ namespace CardShopCoop.Net.Datagrams
             for (var i = 0; i < connections.Count; i++)
             {
                 if (connections[i].Available && connections[i].Published)
+                {
                     publishedClosures++;
+                }
+
             }
             if (_pendingLifecycleChanges.Count + publishedClosures > _maxPendingLifecycleChanges)
+            {
+
                 throw PendingChangeOverflow("transport-stop peer closures");
+            }
+
 
             var stoppedGeneration = NextGenerationLocked();
             _running = false;

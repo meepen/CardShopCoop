@@ -77,8 +77,8 @@ namespace CardShopCoop
             Log = Logger;
             // Install the public integration contract before anything else can read it. External
             // mods may touch CoopApi from their own Awake, which runs after ours.
-            Api.CoopApi.Binding = Runtime.ExternalCoopMods.Instance;
-            Api.CoopApi.Log = Logger;
+            CoopApi.Binding = Runtime.ExternalCoopMods.Instance;
+            CoopApi.Log = Logger;
             ProtectPluginHost();
             Runtime.SceneRef.Install();
             Util.ScreenSingletonGuard.Install();
@@ -98,7 +98,7 @@ namespace CardShopCoop
                 "UDP port used for LAN/KCP hosting. Both PCs' firewalls must allow the game on this port.");
             LastJoinIP = Config.Bind("Network", "LastJoinIP", "192.168.1.100",
                 "IP address of the host PC (remembered after a successful join).");
-            PlayerName = Config.Bind("Player", "Name", System.Environment.UserName,
+            PlayerName = Config.Bind("Player", "Name", Environment.UserName,
                 "Fallback name shown above your head on the other player's screen. By default the mod uses your platform name instead (your Xbox gamertag on Game Pass, your Steam name on Steam) and this is only the last resort.");
             NameOverride = Config.Bind("Player", "NameOverride", false,
                 "Set automatically by the co-op window: true once you type your own name into the \"Your name\" box, false again the moment you clear it (the box refills with your platform name once you click away). Leave it alone to keep using your platform name whenever one is available.");

@@ -50,7 +50,11 @@ namespace CardShopCoop.Modules.Hud
         private void OnEnable()
         {
             if (_shutdown || _context != null || _harmony != null)
+            {
                 return;
+            }
+
+
             _context = RuntimeContext;
             var handlersRegistered = false;
             try
@@ -79,7 +83,11 @@ namespace CardShopCoop.Modules.Hud
                 }
 
                 if (_active == this)
+                {
                     _active = null;
+                }
+
+
                 _context = null;
                 throw;
             }
@@ -93,7 +101,10 @@ namespace CardShopCoop.Modules.Hud
         private void Update()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             HudPresentationState.Tick(Time.deltaTime);
         }
@@ -138,7 +149,10 @@ namespace CardShopCoop.Modules.Hud
             HudAuthoritativeState previous)
         {
             if (_shutdown || _context == null || !_context.InGame())
+            {
                 return;
+            }
+
 
             var version = VersionFor(kind);
             PredictionApi.Predict(
@@ -187,7 +201,11 @@ namespace CardShopCoop.Modules.Hud
         private void PublishObserved(CEvent evt)
         {
             if (evt == null || !_pendingContributions.TryGetValue(evt, out var pending))
+            {
                 return;
+            }
+
+
             _pendingContributions.Remove(evt);
             ForwardObserved(pending.Kind, pending.Value, pending.Previous);
         }
@@ -196,7 +214,11 @@ namespace CardShopCoop.Modules.Hud
         private void State(MessageContext _, HudAuthoritativeState state)
         {
             if (state == null)
+            {
                 return;
+            }
+
+
             _pending = Clone(state);
             ApplyPendingIfReady();
         }
@@ -205,7 +227,9 @@ namespace CardShopCoop.Modules.Hud
         private void WalletDelta(MessageContext _, HudWalletDeltaMessage message)
         {
             if (message == null)
+            {
                 return;
+            }
 
             // The delta carries the host's ABSOLUTE wallet. Retire our own pending contribution and
             // always fold the absolute in, so a host edit that interleaved with our optimistic
@@ -217,6 +241,7 @@ namespace CardShopCoop.Modules.Hud
             // what produced the double "-$X" for every EconomyActionScope-owned action. The cost is
             // that a remote player's spend now updates the wallet silently (it only reaches the
             // guest as an absolute SetCoin, which the game never pops).
+
             PredictionApi.Confirm(message.PredictionId,
                 () => ApplyWallet(message.Coins, message.CoinDisplay));
         }
@@ -225,10 +250,13 @@ namespace CardShopCoop.Modules.Hud
         private void ProgressDelta(MessageContext _, HudProgressDeltaMessage message)
         {
             if (message == null)
+            {
                 return;
+            }
 
             // Absolute exp/level: retire our own pending contribution and always fold the host's
             // values in (see the wallet handler).
+
             PredictionApi.Confirm(message.PredictionId,
                 () => ApplyProgress(message.Experience, message.Level));
         }
@@ -237,10 +265,13 @@ namespace CardShopCoop.Modules.Hud
         private void FameDelta(MessageContext _, HudFameDeltaMessage message)
         {
             if (message == null)
+            {
                 return;
+            }
 
             // Absolute fame: retire our own pending contribution and always fold the host's
             // value in (see the wallet handler).
+
             PredictionApi.Confirm(message.PredictionId,
                 () => ApplyFame(message.Fame));
         }
@@ -368,15 +399,24 @@ namespace CardShopCoop.Modules.Hud
             }
 
             for (var next = _highestNotifiedLevel + 1; next <= level; next++)
+            {
                 CEventManager.QueueEvent(new CEventPlayer_ShopLeveledUp(next));
+            }
+
             if (level > _highestNotifiedLevel)
+            {
                 _highestNotifiedLevel = level;
+            }
+
         }
 
         private void UpdatePending(Action<HudAuthoritativeState> update)
         {
             if (_pending != null)
+            {
                 update(_pending);
+            }
+
         }
 
         private HudAuthoritativeState Capture()
@@ -428,7 +468,11 @@ namespace CardShopCoop.Modules.Hud
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _pending = null;
             _applyingSnapshot = 0;
@@ -442,7 +486,11 @@ namespace CardShopCoop.Modules.Hud
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (_active == this)
+            {
                 _active = null;
+            }
+
+
             _context = null;
         }
 
@@ -474,7 +522,10 @@ namespace CardShopCoop.Modules.Hud
                 }
 
                 if (!TryGetContribution(evt, out var kind, out var value))
+                {
                     return;
+                }
+
 
                 active._pendingContributions[evt] = new PendingContribution(kind, value,
                     active.Capture());

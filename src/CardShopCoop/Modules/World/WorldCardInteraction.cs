@@ -83,9 +83,13 @@ namespace CardShopCoop.Modules.World
         private void Broadcast(INetMessage message)
         {
             if (BroadcastOverride != null)
+            {
                 BroadcastOverride(message);
+            }
             else
+            {
                 _context.Broadcast(message);
+            }
         }
 
         internal void FlushWorldReady()
@@ -158,11 +162,16 @@ namespace CardShopCoop.Modules.World
         {
             if (_host || ApplyingRemoteCards || card == null || amount <= 0
                 || SaveTransferApi.PreloadHold)
+            {
                 return false;
+            }
 
             var snapshot = SnapshotCard(card);
             if (GradingApi.Present)
+            {
                 snapshot.cardGrade = GradingApi.Encoded(card);
+            }
+
             var intent = new CardDeltaRequestMessage
             {
                 IsAdd = isAdd,
@@ -221,11 +230,16 @@ namespace CardShopCoop.Modules.World
         {
             if (_host || ApplyingRemoteCards || card == null
                 || SaveTransferApi.PreloadHold)
+            {
                 return false;
+            }
 
             var snapshot = SnapshotCard(card);
             if (GradingApi.Present)
+            {
                 snapshot.cardGrade = GradingApi.Encoded(card);
+            }
+
             var intent = new GradedRemoveRequestMessage { Card = snapshot };
             var binding = CreateBinderTakeBinding();
             // A local removal that changed nothing (a stale album slot whose certificate left
@@ -274,13 +288,18 @@ namespace CardShopCoop.Modules.World
                 if (isAdd)
                 {
                     if (card.cardGrade > 10)
+                    {
                         GradingApi.Remember(card);
+                    }
+
                     CPlayerData.AddCard(card, amount);
                 }
                 else if (card.cardGrade > 0)
                 {
                     for (var i = 0; i < amount; i++)
+                    {
                         CPlayerData.RemoveGradedCard(card, ignoreGradedCardIndex: true);
+                    }
                 }
                 else
                 {
@@ -431,7 +450,9 @@ namespace CardShopCoop.Modules.World
         internal bool HandleCardDelta(int connectionId, CardDeltaMessage message)
         {
             if (_host && message == null)
+            {
                 return false;
+            }
 
             var applied = ApplyOrHoldCardDelta(connectionId, message.IsAdd, message.Amount,
                 message.Card, out var relayAnyway, message.PredictionId);
@@ -464,7 +485,9 @@ namespace CardShopCoop.Modules.World
             else if (_host && !relayAnyway)
             {
                 if (!message.IsAdd)
+                {
                     RecordGradingOwnership(connectionId, message.Card, message.Amount);
+                }
             }
 
             if (_host)
@@ -493,14 +516,20 @@ namespace CardShopCoop.Modules.World
             bool requireAllApplied)
         {
             if (_host && message == null)
+            {
                 return false;
+            }
 
             if (message.Deltas == null)
+            {
                 throw new InvalidOperationException("Card delta batch has no delta list.");
+            }
 
             var total = message.Deltas.Count;
             if (_host && total > CardDeltaBatchMax)
+            {
                 throw new InvalidOperationException("Incoming card delta batch is too large.");
+            }
 
             if (!_host)
             {
@@ -643,7 +672,9 @@ namespace CardShopCoop.Modules.World
         internal bool HandleGradedRemove(int connectionId, GradedRemoveMessage message)
         {
             if (_host && message == null)
+            {
                 return false;
+            }
 
             var card = message.Card;
 
@@ -753,9 +784,14 @@ namespace CardShopCoop.Modules.World
         private bool RestoreAllGradingOwnership()
         {
             if (_gradingOwnership.Count == 0)
+            {
                 return true;
+            }
+
             if (!InGameLevel() || Inv() == null)
+            {
                 return false;
+            }
 
             var restored = new List<PendingCard>();
             foreach (var owner in _gradingOwnership)
@@ -769,7 +805,10 @@ namespace CardShopCoop.Modules.World
                 {
                     if (!cards.TryGetValue(claim.Key, out var card) || card == null
                         || claim.Value <= 0 || claim.Value > CardDeltaAmountMax)
+                    {
                         return false;
+                    }
+
                     restored.Add(new PendingCard
                     {
                         IsAdd = true,
@@ -785,17 +824,25 @@ namespace CardShopCoop.Modules.World
         private bool RestoreGradingOwnership(int connectionId)
         {
             if (!_gradingOwnership.ContainsKey(connectionId))
+            {
                 return true;
+            }
+
             if (!InGameLevel() || Inv() == null
                 || !_gradingOwnershipCards.TryGetValue(connectionId, out var cards))
+            {
                 return false;
+            }
 
             var restored = new List<PendingCard>();
             foreach (var claim in _gradingOwnership[connectionId])
             {
                 if (!cards.TryGetValue(claim.Key, out var card) || card == null
                     || claim.Value <= 0 || claim.Value > CardDeltaAmountMax)
+                {
                     return false;
+                }
+
                 restored.Add(new PendingCard
                 {
                     IsAdd = true,
@@ -805,7 +852,9 @@ namespace CardShopCoop.Modules.World
             }
 
             if (!ApplyRestoredCards(restored))
+            {
                 return false;
+            }
 
             _gradingOwnership.Remove(connectionId);
             _gradingOwnershipCards.Remove(connectionId);
@@ -828,7 +877,9 @@ namespace CardShopCoop.Modules.World
                             ? CountGradedCards(item.Card)
                             : CPlayerData.GetCardAmount(item.Card);
                         if (before < 0 || before > int.MaxValue - item.Amount)
+                        {
                             throw new InvalidOperationException("card count overflowed before claim restoration");
+                        }
 
                         GradingApi.Remember(item.Card);
                         CPlayerData.AddCard(SnapshotCard(item.Card), item.Amount);
@@ -837,7 +888,10 @@ namespace CardShopCoop.Modules.World
                             ? CountGradedCards(item.Card)
                             : CPlayerData.GetCardAmount(item.Card);
                         if (after != before + item.Amount)
+                        {
                             throw new InvalidOperationException("claim restoration did not update inventory by the expected amount");
+                        }
+
                         applied.Add(item);
                     }
                 }
@@ -857,9 +911,15 @@ namespace CardShopCoop.Modules.World
             }
 
             for (var i = 0; i < restored.Count; i++)
+            {
                 ForwardCardDelta(restored[i].Card, restored[i].Amount, true);
+            }
+
             if (restored.Count > 0)
+            {
                 NotifyCardsChanged();
+            }
+
             return true;
         }
 
@@ -876,12 +936,16 @@ namespace CardShopCoop.Modules.World
                             ? CountGradedCards(item.Card)
                             : CPlayerData.GetCardAmount(item.Card);
                         if (before < item.Amount)
+                        {
                             return false;
+                        }
 
                         if (item.Card.cardGrade > 0)
                         {
                             for (var j = 0; j < item.Amount; j++)
+                            {
                                 CPlayerData.RemoveGradedCard(item.Card, ignoreGradedCardIndex: true);
+                            }
                         }
                         else
                         {
@@ -892,7 +956,9 @@ namespace CardShopCoop.Modules.World
                             ? CountGradedCards(item.Card)
                             : CPlayerData.GetCardAmount(item.Card);
                         if (after != before - item.Amount)
+                        {
                             return false;
+                        }
                     }
                 }
             }
@@ -1003,27 +1069,39 @@ namespace CardShopCoop.Modules.World
                     {
                         var item = planned[i];
                         if (item.FromTransferredOwnership)
+                        {
                             continue;
+                        }
 
                         if (item.Card.cardGrade > 0)
                         {
                             var before = CountGradedCards(item.Card);
                             if (before <= 0)
+                            {
                                 throw new InvalidOperationException("graded card disappeared before reservation");
+                            }
+
                             CPlayerData.RemoveGradedCard(item.Card, ignoreGradedCardIndex: true);
                             var after = CountGradedCards(item.Card);
                             if (after != before - 1)
+                            {
                                 throw new InvalidOperationException("host graded-card removal did not change inventory");
+                            }
                         }
                         else
                         {
                             var before = CPlayerData.GetCardAmount(item.Card);
                             if (before <= 0)
+                            {
                                 throw new InvalidOperationException("card disappeared before reservation");
+                            }
+
                             CPlayerData.ReduceCard(item.Card, 1);
                             var after = CPlayerData.GetCardAmount(item.Card);
                             if (after != before - 1)
+                            {
                                 throw new InvalidOperationException("host card removal did not change inventory");
+                            }
                         }
                         applied.Add(item);
                     }
@@ -1036,9 +1114,13 @@ namespace CardShopCoop.Modules.World
                 {
                     var card = applied[i].Card;
                     if (card.cardGrade > 0)
+                    {
                         ForwardGradedRemoval(card);
+                    }
                     else
+                    {
                         ForwardCardDelta(card, 1, false);
+                    }
                 }
                 NotifyCardsChanged();
                 reservation = new GradingCardReservation(this, connectionId, planned,
@@ -1084,14 +1166,19 @@ namespace CardShopCoop.Modules.World
                 ForwardCardDelta(card, 1, true);
             }
             if (applied.Count > 0)
+            {
                 NotifyCardsChanged();
+            }
         }
 
         private int GetCachedUngradedCount(CardData card, Dictionary<string, int> cache)
         {
             var key = CardOwnershipKey(card);
             if (cache.TryGetValue(key, out var count))
+            {
                 return count;
+            }
+
             count = CPlayerData.GetCardAmount(card);
             cache[key] = count;
             return count;
@@ -1101,7 +1188,10 @@ namespace CardShopCoop.Modules.World
         {
             var key = CardOwnershipKey(card);
             if (cache.TryGetValue(key, out var count))
+            {
                 return count;
+            }
+
             count = 0;
             var rows = CPlayerData.m_GradedCardInventoryList;
             if (rows != null)
@@ -1110,10 +1200,15 @@ namespace CardShopCoop.Modules.World
                 {
                     var row = rows[i];
                     if (row == null)
+                    {
                         continue;
+                    }
+
                     var candidate = CPlayerData.GetGradedCardData(row);
                     if (CardOwnershipKey(candidate) == key)
+                    {
                         count++;
+                    }
                 }
             }
             cache[key] = count;
@@ -1126,13 +1221,17 @@ namespace CardShopCoop.Modules.World
             var count = 0;
             var rows = CPlayerData.m_GradedCardInventoryList;
             if (key == null || rows == null)
+            {
                 return count;
+            }
 
             for (var i = 0; i < rows.Count; i++)
             {
                 var row = rows[i];
                 if (row != null && CardOwnershipKey(CPlayerData.GetGradedCardData(row)) == key)
+                {
                     count++;
+                }
             }
             return count;
         }
@@ -1173,28 +1272,42 @@ namespace CardShopCoop.Modules.World
             public void Commit()
             {
                 if (_disposed || _committed || _rolledBack)
+                {
                     return;
+                }
 
                 Dictionary<string, int> moved = null;
                 for (var i = 0; i < _cards.Count; i++)
                 {
                     if (!_cards[i].FromTransferredOwnership)
+                    {
                         continue;
+                    }
 
                     if (moved == null)
                     {
                         if (!_owner._gradingOwnership.TryGetValue(_connectionId, out var current))
+                        {
                             throw new InvalidOperationException("grading ownership transfer disappeared before commit");
+                        }
+
                         moved = new Dictionary<string, int>(current, StringComparer.Ordinal);
                     }
 
                     var key = CardOwnershipKey(_cards[i].Card);
                     if (!moved.TryGetValue(key, out var count) || count <= 0)
+                    {
                         throw new InvalidOperationException("grading ownership transfer disappeared before commit");
+                    }
+
                     if (count == 1)
+                    {
                         moved.Remove(key);
+                    }
                     else
+                    {
                         moved[key] = count - 1;
+                    }
                 }
 
                 if (moved != null)
@@ -1202,7 +1315,9 @@ namespace CardShopCoop.Modules.World
                     var current = _owner._gradingOwnership[_connectionId];
                     current.Clear();
                     foreach (var pair in moved)
+                    {
                         current[pair.Key] = pair.Value;
+                    }
                 }
                 _committed = true;
             }
@@ -1210,7 +1325,10 @@ namespace CardShopCoop.Modules.World
             public void Rollback()
             {
                 if (_rolledBack)
+                {
                     return;
+                }
+
                 _rolledBack = true;
                 Exception ownershipError = null;
                 if (_committed)
@@ -1218,7 +1336,9 @@ namespace CardShopCoop.Modules.World
                     try
                     {
                         if (_claimCountsBefore == null || _claimCountsBefore.Count == 0)
+                        {
                             _owner._gradingOwnership.Remove(_connectionId);
+                        }
                         else
                         {
                             _owner._gradingOwnership[_connectionId] =
@@ -1226,9 +1346,13 @@ namespace CardShopCoop.Modules.World
                         }
 
                         if (_claimCardsBefore == null || _claimCardsBefore.Count == 0)
+                        {
                             _owner._gradingOwnershipCards.Remove(_connectionId);
+                        }
                         else
+                        {
                             _owner._gradingOwnershipCards[_connectionId] = CloneClaimCards(_claimCardsBefore);
+                        }
                     }
                     catch (Exception error)
                     {
@@ -1245,20 +1369,29 @@ namespace CardShopCoop.Modules.World
                 {
                     CoopPlugin.Log.LogError("grading card rollback failed: " + error);
                     if (ownershipError == null)
+                    {
                         ownershipError = error;
+                    }
                 }
 
                 if (ownershipError != null)
+                {
                     throw ownershipError;
+                }
             }
 
             public void Dispose()
             {
                 if (_disposed)
+                {
                     return;
+                }
+
                 _disposed = true;
                 if (!_committed)
+                {
                     Rollback();
+                }
             }
         }
 
@@ -1267,9 +1400,15 @@ namespace CardShopCoop.Modules.World
         {
             var result = new Dictionary<string, CardData>(StringComparer.Ordinal);
             if (cards == null)
+            {
                 return result;
+            }
+
             foreach (var pair in cards)
+            {
                 result[pair.Key] = pair.Value == null ? null : SnapshotCard(pair.Value);
+            }
+
             return result;
         }
 
@@ -1286,10 +1425,16 @@ namespace CardShopCoop.Modules.World
         private void RecordGradingOwnership(int connectionId, CardData card, int amount)
         {
             if (!_host || connectionId <= 0 || card == null || amount <= 0)
+            {
                 return;
+            }
+
             var key = CardOwnershipKey(card);
             if (key == null)
+            {
                 return;
+            }
+
             var owned = GetOrCreateOwnership(connectionId);
             owned.TryGetValue(key, out var count);
             owned[key] = Math.Min(1024, count > 1024 - amount ? 1024 : count + amount);
@@ -1317,12 +1462,16 @@ namespace CardShopCoop.Modules.World
 
             count -= amount;
             if (count > 0)
+            {
                 owned[key] = count;
+            }
             else
             {
                 owned.Remove(key);
                 if (_gradingOwnershipCards.TryGetValue(connectionId, out var cards))
+                {
                     cards.Remove(key);
+                }
             }
             if (owned.Count == 0)
             {
@@ -1596,14 +1745,20 @@ namespace CardShopCoop.Modules.World
                 if (isAdd)
                 {
                     if (card.cardGrade > 10)
+                    {
                         GradingApi.Remember(card);
+                    }
+
                     CPlayerData.AddCard(card, amount);
                 }
                 else if (card.cardGrade > 0)
                 {
                     var gradedBefore = CPlayerData.m_GradedCardInventoryList?.Count ?? 0;
                     for (var i = 0; i < amount; i++)
+                    {
                         CPlayerData.RemoveGradedCard(card, ignoreGradedCardIndex: true);
+                    }
+
                     var gradedAfter = CPlayerData.m_GradedCardInventoryList?.Count ?? 0;
                     if (gradedAfter == gradedBefore)
                     {
@@ -1626,12 +1781,15 @@ namespace CardShopCoop.Modules.World
             _deltaAppliedThisFrame++;
             _deltaNetThisFrame += isAdd ? amount : -amount;
             if (_deltaLogBuf.Count < 5)
+            {
                 _deltaLogBuf.Add(new PendingCard
                 {
                     IsAdd = isAdd,
                     Amount = amount,
                     Card = SnapshotCard(card),
                 });
+            }
+
             return true;
         }
 
@@ -1691,7 +1849,10 @@ namespace CardShopCoop.Modules.World
         internal static CardData SnapshotCard(CardData c)
         {
             if (c == null)
+            {
                 return null;
+            }
+
             return new CardData
             {
                 expansionType = c.expansionType,
@@ -1817,7 +1978,10 @@ namespace CardShopCoop.Modules.World
         private static bool CanAddCardAmount(CardData card, int amount)
         {
             if (card == null || amount <= 0)
+            {
                 return false;
+            }
+
             if (card.cardGrade <= 0)
             {
                 var owned = CPlayerData.GetCardAmount(card);
@@ -2095,7 +2259,10 @@ namespace CardShopCoop.Modules.World
         private static string CardFieldDump(CardData c)
         {
             if (c == null)
+            {
                 return "(null card)";
+            }
+
             return CardIdent(c) + "[exp=" + (int)c.expansionType + " monster=" + (int)c.monsterType
                 + " border=" + (int)c.borderType + (c.isFoil ? " foil" : "")
                 + (c.isDestiny ? " destiny" : "") + (c.isChampionCard ? " champion" : "")
@@ -2513,7 +2680,9 @@ namespace CardShopCoop.Modules.World
             foreach (var cid in ConnectionIds())
             {
                 if (cid != senderConn)
+                {
                     Send(cid, relay);
+                }
             }
         }
 

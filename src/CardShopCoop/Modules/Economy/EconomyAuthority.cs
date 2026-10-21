@@ -17,10 +17,18 @@ namespace CardShopCoop.Modules.Economy
         internal static bool Activate(object owner, CoopRuntimeContext context)
         {
             if (owner == null || context == null)
+            {
+
                 return false;
+            }
+
 
             if (_owner != null && !ReferenceEquals(_owner, owner))
+            {
+
                 throw new InvalidOperationException("The economy authority is already active.");
+            }
+
 
             _owner = owner;
             _context = context;
@@ -30,7 +38,10 @@ namespace CardShopCoop.Modules.Economy
         internal static void Deactivate(object owner)
         {
             if (owner == null || !ReferenceEquals(_owner, owner))
+            {
                 return;
+            }
+
 
             _suppressVanillaReduction = false;
             _owner = null;
@@ -42,7 +53,11 @@ namespace CardShopCoop.Modules.Economy
         {
             reservation = null;
             if (_owner == null || !IsValidAmount(amount) || CPlayerData.m_CoinAmountDouble < amount)
+            {
+
                 return false;
+            }
+
 
             reservation = new HostSpendReservation(amount);
             return true;
@@ -56,12 +71,20 @@ namespace CardShopCoop.Modules.Economy
             Action<bool> completion)
         {
             if (!Owns(reservation) || reservation.Consumed)
+            {
+
                 return false;
+            }
+
 
             if (reservation.Amount > 0d)
             {
                 if (SceneRef<CEventManager>.Get() == null)
+                {
+
                     throw new InvalidOperationException("The host wallet event manager is not ready.");
+                }
+
 
                 CEventManager.QueueEvent(new CEventPlayer_ReduceCoin((float)reservation.Amount));
             }
@@ -77,22 +100,40 @@ namespace CardShopCoop.Modules.Economy
         internal static void RefundHostSpend(double amount)
         {
             if (_owner == null || !IsValidAmount(amount) || amount <= 0d)
+            {
                 return;
+            }
+
 
             if (SceneRef<CEventManager>.Get() == null)
+            {
                 return;
+            }
+
 
             CEventManager.QueueEvent(new CEventPlayer_AddCoin((float)amount, true));
         }
 
-        // Kept as a compatibility no-op for callers which abandon a local operation after the
-        // debit was admitted.  A network result can never undo an authoritative wallet event.
+        /// <summary>Release means admission failed, so no debit was queued and there is nothing to
+        /// compensate. An admitted debit is undone through <see cref="CancelHostSpend"/>.</summary>
         public static void ReleaseHostSpend(HostSpendReservation reservation)
         {
         }
 
+        /// <summary>Undoes a debit this authority already queued when the caller's own local work
+        /// failed afterwards (a mutation failure, never a network result). Refunds at most once;
+        /// an admission that never happened has nothing to refund.</summary>
         public static void CancelHostSpend(HostSpendReservation reservation)
         {
+            if (reservation == null || reservation.Owner != typeof(EconomyAuthority)
+                || !reservation.Consumed || reservation.Refunded)
+            {
+                return;
+            }
+
+
+            reservation.Refunded = true;
+            RefundHostSpend(reservation.Amount);
         }
 
         /// <summary>
@@ -103,7 +144,11 @@ namespace CardShopCoop.Modules.Economy
         internal static bool RunWithVanillaSpend(HostSpendReservation reservation, Func<bool> action)
         {
             if (!Owns(reservation) || action == null || !QueueHostSpend(reservation))
+            {
+
                 return false;
+            }
+
 
             _suppressVanillaReduction = true;
             try
@@ -119,7 +164,11 @@ namespace CardShopCoop.Modules.Economy
         internal static bool DeferVanillaEvent(CEvent evt)
         {
             if (!_suppressVanillaReduction || evt is not CEventPlayer_ReduceCoin)
+            {
+
                 return false;
+            }
+
 
             _suppressVanillaReduction = false;
             return true;
@@ -152,6 +201,12 @@ namespace CardShopCoop.Modules.Economy
             internal Type Owner => _owner;
 
             internal bool Consumed
+            {
+                get;
+                set;
+            }
+
+            internal bool Refunded
             {
                 get;
                 set;

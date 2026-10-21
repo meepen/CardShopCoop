@@ -89,15 +89,34 @@ namespace CardShopCoop.Modules.Prediction
             Action rejected)
         {
             if (!_active)
+            {
+
                 throw new InvalidOperationException("Client prediction is not active.");
+            }
+
+
             if (string.IsNullOrEmpty(key))
+            {
+
                 throw new ArgumentException("A prediction key is required.", nameof(key));
+            }
+
+
             if (send == null)
+            {
                 throw new ArgumentNullException(nameof(send));
+            }
+
             if (apply == null)
+            {
                 throw new ArgumentNullException(nameof(apply));
+            }
+
             if (undo == null)
+            {
                 throw new ArgumentNullException(nameof(undo));
+            }
+
 
             var prediction = new Prediction
             {
@@ -153,7 +172,12 @@ namespace CardShopCoop.Modules.Prediction
         public static void AckOrApply(Guid predictionId, Action apply)
         {
             if (apply == null)
+            {
+
                 throw new ArgumentNullException(nameof(apply));
+            }
+
+
             if (predictionId != Guid.Empty && ById.TryGetValue(predictionId, out var prediction))
             {
                 Remove(prediction);
@@ -172,9 +196,17 @@ namespace CardShopCoop.Modules.Prediction
         public static void Confirm(Guid predictionId, Action apply)
         {
             if (apply == null)
+            {
+
                 throw new ArgumentNullException(nameof(apply));
+            }
+
+
             if (predictionId != Guid.Empty && ById.TryGetValue(predictionId, out var prediction))
+            {
                 Remove(prediction);
+            }
+
 
             RunApplying(apply);
         }
@@ -190,7 +222,12 @@ namespace CardShopCoop.Modules.Prediction
         public static void ApplyAuthoritative(Guid predictionId, Action apply)
         {
             if (apply == null)
+            {
+
                 throw new ArgumentNullException(nameof(apply));
+            }
+
+
             if (predictionId != Guid.Empty && ById.TryGetValue(predictionId, out var prediction))
             {
                 Reconcile(prediction, apply);
@@ -221,18 +258,36 @@ namespace CardShopCoop.Modules.Prediction
         public static void Reject(ICoopContext context, int connectionId, Guid predictionId)
         {
             if (predictionId == Guid.Empty)
+            {
                 return;
+            }
+
+
             if (context == null)
+            {
+
                 throw new ArgumentNullException(nameof(context));
+            }
+
+
             context.Send(connectionId, new PredictionRollbackMessage { PredictionId = predictionId });
         }
 
         public static void Rollback(ICoopContext context, int connectionId, Guid predictionId)
         {
             if (predictionId == Guid.Empty)
+            {
                 return;
+            }
+
+
             if (context == null)
+            {
+
                 throw new ArgumentNullException(nameof(context));
+            }
+
+
             CoopPlugin.Log.LogInfo("prediction rollback -> conn " + connectionId + " id=" + predictionId);
             Reject(context, connectionId, predictionId);
         }
@@ -245,7 +300,11 @@ namespace CardShopCoop.Modules.Prediction
         internal static void Rollback(Guid predictionId)
         {
             if (predictionId == Guid.Empty)
+            {
                 return;
+            }
+
+
             if (!ById.TryGetValue(predictionId, out var rejected))
             {
                 CoopPlugin.Log.LogInfo("prediction rollback ignored for already-resolved prediction "
@@ -263,22 +322,34 @@ namespace CardShopCoop.Modules.Prediction
         private static void Reconcile(Prediction prediction, Action authoritative)
         {
             if (!ByKey.TryGetValue(prediction.Key, out var predictions))
+            {
+
                 throw new InvalidOperationException("Prediction key is inconsistent: " + prediction.Id + ".");
+            }
+
+
             var index = predictions.IndexOf(prediction);
             if (index < 0)
+            {
+
                 throw new InvalidOperationException("Prediction key is inconsistent: " + prediction.Id + ".");
+            }
 
             // Snapshot the followers queued after the target before running any undo/apply. A nested
             // Predict() during undo/replay registers a new prediction that was never applied
             // locally; it must not be replayed here as if it were one of the original followers.
+
             var followers = new List<Prediction>(predictions.Count - index - 1);
             for (var i = index + 1; i < predictions.Count; i++)
+            {
                 followers.Add(predictions[i]);
+            }
 
             // Snapshot the whole undo set (the target plus every follower) and remove the target
             // from the live key list BEFORE any undo runs. A hook driven by an undo can append to
             // or remove from the same key list; iterating the snapshot keeps that from shifting an
             // index out of range or undoing an entry twice.
+
             var undo = new List<Prediction>(followers.Count + 1) { prediction };
             undo.AddRange(followers);
 
@@ -290,7 +361,10 @@ namespace CardShopCoop.Modules.Prediction
                 Retired.Raise(prediction.Id);
 
                 for (var i = undo.Count - 1; i >= 0; i--)
+                {
                     undo[i].Undo();
+                }
+
 
                 authoritative?.Invoke();
 
@@ -298,7 +372,10 @@ namespace CardShopCoop.Modules.Prediction
                 {
                     var follower = followers[i];
                     if (!ById.ContainsKey(follower.Id))
+                    {
                         continue;
+                    }
+
 
                     try
                     {
@@ -319,7 +396,11 @@ namespace CardShopCoop.Modules.Prediction
             {
                 _reconciling = false;
                 if (predictions.Count == 0)
+                {
                     ByKey.Remove(prediction.Key);
+                }
+
+
                 FlushDeferred();
             }
         }
@@ -330,13 +411,19 @@ namespace CardShopCoop.Modules.Prediction
         private static void FlushDeferred()
         {
             if (Deferred.Count == 0)
+            {
                 return;
+            }
+
 
             for (var i = 0; i < Deferred.Count; i++)
             {
                 var prediction = Deferred[i];
                 if (ById.ContainsKey(prediction.Id))
+                {
                     GetOrAdd(prediction.Key).Add(prediction);
+                }
+
             }
 
             Deferred.Clear();
@@ -356,15 +443,29 @@ namespace CardShopCoop.Modules.Prediction
         private static void Remove(Prediction prediction)
         {
             if (ById.Remove(prediction.Id))
+            {
                 Retired.Raise(prediction.Id);
+            }
             // A prediction still held back by a reconcile was never appended to a key list.
+
             if (Deferred.Remove(prediction))
+            {
                 return;
+            }
+
+
             if (!ByKey.TryGetValue(prediction.Key, out var predictions))
+            {
                 return;
+            }
+
+
             predictions.Remove(prediction);
             if (predictions.Count == 0)
+            {
                 ByKey.Remove(prediction.Key);
+            }
+
         }
 
         private static void Clear()

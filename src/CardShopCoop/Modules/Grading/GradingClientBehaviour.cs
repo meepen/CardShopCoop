@@ -8,7 +8,6 @@ using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using CardShopCoop.Util;
 using HarmonyLib;
-using UnityEngine;
 
 namespace CardShopCoop.Modules.Grading
 {
@@ -38,7 +37,11 @@ namespace CardShopCoop.Modules.Grading
         private void OnEnable()
         {
             if (_shutdown || _context != null)
+            {
                 return;
+            }
+
+
             _context = RuntimeContext;
             var registered = false;
             try
@@ -61,9 +64,16 @@ namespace CardShopCoop.Modules.Grading
                 PredictionApi.PredictionRetired -= RetireLocalJob;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 throw;
             }
         }
@@ -84,7 +94,11 @@ namespace CardShopCoop.Modules.Grading
         private void HandleState(MessageContext context, GradingStateMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _pendingState = message;
             ApplyPending();
         }
@@ -115,21 +129,32 @@ namespace CardShopCoop.Modules.Grading
         {
             state = default;
             if (_shutdown || _context?.InGame() != true || IsShowingOrHiding(screen))
+            {
                 return;
+            }
+
 
             var submitSet = CPlayerData.m_CurrentGradeCardSubmitSet;
             if (submitSet?.m_CardDataList == null)
+            {
                 return;
+            }
 
             var cards = new List<CardData>();
             for (var i = 0; i < submitSet.m_CardDataList.Count; i++)
             {
                 var card = submitSet.m_CardDataList[i];
                 if (card != null && card.monsterType != EMonsterType.None)
+                {
                     cards.Add(Clone(card));
+                }
+
             }
             if (cards.Count == 0)
+            {
                 return;
+            }
+
 
             state.Armed = true;
             state.Previous = CloneSet(submitSet);
@@ -152,7 +177,10 @@ namespace CardShopCoop.Modules.Grading
         internal void ObserveSubmission(SubmissionCapture state)
         {
             if (!state.Armed || _shutdown || _context?.InGame() != true)
+            {
                 return;
+            }
+
 
             var list = CPlayerData.m_GradeCardInProgressList;
             // Vanilla appends the captured selection object as the new job, so the local job is the
@@ -161,7 +189,10 @@ namespace CardShopCoop.Modules.Grading
             // the game has already shown its popup.
             var jobSet = state.Job;
             if (list == null || jobSet == null || !list.Contains(jobSet))
+            {
                 return;
+            }
+
 
             var spent = state.SupplyCostBefore
                 - CPlayerData.m_GameReportDataCollectPermanent.supplyCost;
@@ -198,17 +229,29 @@ namespace CardShopCoop.Modules.Grading
                     // Undo removed the locally minted job; replay must put it back before the
                     // authoritative delta for this prediction arrives to bind it to its host id.
                     if (jobSet != null && jobs != null && !jobs.Contains(jobSet))
+                    {
                         jobs.Add(jobSet);
+                    }
+
+
                     ApplyLocalSubmission(state.ServiceLevel, state.Cap, state.Screen);
                     if (spent > 0.0001f)
+                    {
+
                         CEventManager.QueueEvent(new CEventPlayer_ReduceCoin(spent));
+                    }
+
                 },
                 () =>
                 {
                     RemoveLocalJob(jobSet);
                     CPlayerData.m_CurrentGradeCardSubmitSet = state.Previous;
                     if (spent > 0.0001f)
+                    {
                         CEventManager.QueueEvent(new CEventPlayer_AddCoin(spent, true));
+                    }
+
+
                     RefreshWebsite();
                 },
                 ReopenSubmissionScreen);
@@ -217,7 +260,11 @@ namespace CardShopCoop.Modules.Grading
         private void RemoveLocalJob(GradeCardSubmitSet set)
         {
             if (set == null)
+            {
                 return;
+            }
+
+
             _jobIds.Remove(set);
             CPlayerData.m_GradeCardInProgressList?.Remove(set);
         }
@@ -226,7 +273,10 @@ namespace CardShopCoop.Modules.Grading
         {
             if (_shutdown || !_contentReady || !_context.InGame()
                 || GradingWorldBridge.Current?.SceneReady != true)
+            {
                 return;
+            }
+
 
             if (_pendingState != null)
             {
@@ -240,7 +290,10 @@ namespace CardShopCoop.Modules.Grading
                 for (var i = 0; i < deltas.Count; i++)
                 {
                     if (ApplyDelta(deltas[i].Value))
+                    {
                         _pendingDeltas.Remove(deltas[i].Key);
+                    }
+
                 }
             }
         }
@@ -249,7 +302,11 @@ namespace CardShopCoop.Modules.Grading
         private void HandleDelta(MessageContext context, GradingJobDeltaMessage message)
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             if (!_contentReady || !_context.InGame()
                 || GradingWorldBridge.Current?.SceneReady != true)
             {
@@ -268,7 +325,10 @@ namespace CardShopCoop.Modules.Grading
             foreach (var pair in _jobIds)
             {
                 if (pair.Key != null)
+                {
                     existing[pair.Value] = pair.Key;
+                }
+
             }
 
             var list = new List<GradeCardSubmitSet>(message.Sets.Count);
@@ -296,7 +356,11 @@ namespace CardShopCoop.Modules.Grading
 
             _jobIds.Clear();
             foreach (var pair in ids)
+            {
                 _jobIds[pair.Key] = pair.Value;
+            }
+
+
             CPlayerData.m_GradeCardInProgressList = list;
             RefreshWebsite();
         }
@@ -309,7 +373,11 @@ namespace CardShopCoop.Modules.Grading
             var cards = set.m_CardDataList ??= new List<CardData>(dto.Cards.Count);
             cards.Clear();
             for (var i = 0; i < dto.Cards.Count; i++)
+            {
                 cards.Add(Clone(dto.Cards[i]));
+            }
+
+
             return set;
         }
 
@@ -323,7 +391,11 @@ namespace CardShopCoop.Modules.Grading
             {
                 _localJobSets.Remove(message.PredictionId);
                 if (localSet != null)
+                {
                     _jobIds[localSet] = message.Id;
+                }
+
+
                 PredictionApi.Ack(message.PredictionId);
                 // Vanilla already reset the selection and closed the screen; only drop the stale
                 // screen reference the rejection path would otherwise reopen.
@@ -354,7 +426,11 @@ namespace CardShopCoop.Modules.Grading
                         list[index] = replacement;
                     }
                     else
+                    {
                         list.Add(replacement);
+                    }
+
+
                     _jobIds[replacement] = message.Id;
                 }
                 CPlayerData.m_GradeCardInProgressList = list;
@@ -384,7 +460,10 @@ namespace CardShopCoop.Modules.Grading
             for (var i = 0; i < list.Count; i++)
             {
                 if (_jobIds.TryGetValue(list[i], out var existing) && existing == id)
+                {
                     return i;
+                }
+
             }
             return -1;
         }
@@ -401,7 +480,11 @@ namespace CardShopCoop.Modules.Grading
                 m_CardDataList = new List<CardData>(cap),
             };
             for (var i = 0; i < cap; i++)
+            {
                 fresh.m_CardDataList.Add(new CardData());
+            }
+
+
             CPlayerData.m_CurrentGradeCardSubmitSet = fresh;
             screen?.CloseScreen();
             RefreshWebsite();
@@ -416,7 +499,11 @@ namespace CardShopCoop.Modules.Grading
         {
             var active = _active;
             if (active == null || card == null || amount <= 0)
+            {
                 return;
+            }
+
+
             active.StripRefusedSelection(card, amount);
         }
 
@@ -424,7 +511,10 @@ namespace CardShopCoop.Modules.Grading
         {
             var set = CPlayerData.m_CurrentGradeCardSubmitSet;
             if (set?.m_CardDataList == null)
+            {
                 return;
+            }
+
 
             var stripped = 0;
             for (var i = 0; i < set.m_CardDataList.Count && stripped < amount; i++)
@@ -442,7 +532,10 @@ namespace CardShopCoop.Modules.Grading
             }
 
             if (stripped == 0)
+            {
                 return;
+            }
+
 
             CoopPlugin.Log.LogWarning("grading: the host refused to reserve " + stripped
                 + " selected card(s) (" + GradingInterop.DescribeCard(card)
@@ -455,7 +548,10 @@ namespace CardShopCoop.Modules.Grading
         {
             var panels = SceneRef<GradedCardSubmitSelectScreen>.Get()?.m_GradeCardPanelUIList;
             if (panels != null && index >= 0 && index < panels.Count)
+            {
                 panels[index].UpdateCardUI(card);
+            }
+
         }
 
         private static bool SameSelectionCard(CardData left, CardData right)
@@ -477,7 +573,10 @@ namespace CardShopCoop.Modules.Grading
         {
             var screen = _submitScreen;
             if (screen == null || screen.IsScreenOpened())
+            {
                 return;
+            }
+
 
             _website ??= SceneRef<GradeCardWebsiteUIScreen>.Get();
             if (_website != null && _website.gameObject.activeInHierarchy
@@ -504,7 +603,10 @@ namespace CardShopCoop.Modules.Grading
             if (source.m_CardDataList != null)
             {
                 for (var i = 0; i < source.m_CardDataList.Count; i++)
+                {
                     clone.m_CardDataList.Add(Clone(source.m_CardDataList[i]));
+                }
+
             }
             return clone;
         }
@@ -522,14 +624,23 @@ namespace CardShopCoop.Modules.Grading
                 m_CardDataList = new List<CardData>(dto.Cards.Count),
             };
             for (var i = 0; i < dto.Cards.Count; i++)
+            {
                 set.m_CardDataList.Add(Clone(dto.Cards[i]));
+            }
+
+
             return set;
         }
 
         private static bool IsShowingOrHiding(GradedCardSubmitSelectScreen screen)
         {
             if (screen == null || FiShowingAlpha == null || FiHidingAlpha == null)
+            {
+
                 return true;
+            }
+
+
             return (bool)FiShowingAlpha.GetValue(screen) || (bool)FiHidingAlpha.GetValue(screen);
         }
 
@@ -537,7 +648,10 @@ namespace CardShopCoop.Modules.Grading
         {
             _website ??= SceneRef<GradeCardWebsiteUIScreen>.Get();
             if (_website != null && _website.gameObject.activeInHierarchy)
+            {
                 _website.UpdateSubmissionProgressPanelUI();
+            }
+
         }
 
         private void SetStatus(string text, float seconds)
@@ -562,7 +676,11 @@ namespace CardShopCoop.Modules.Grading
         internal static void InventoryReset()
         {
             if (_active == null)
+            {
                 return;
+            }
+
+
             _active._pendingState = null;
             _active.RetainPendingLocalJobs();
             _active.ResetPendingDeltas();
@@ -583,10 +701,15 @@ namespace CardShopCoop.Modules.Grading
             foreach (var pair in _localJobSets)
             {
                 if (!PredictionApi.IsPending(pair.Key))
+                {
                     retired.Add(pair.Key);
+                }
             }
             for (var i = 0; i < retired.Count; i++)
+            {
                 _localJobSets.Remove(retired[i]);
+            }
+
         }
 
         /// <summary>Drops deferred authoritative deltas on a reload, except the accept delta of a
@@ -610,20 +733,31 @@ namespace CardShopCoop.Modules.Grading
             }
             _pendingDeltas.Clear();
             for (var i = 0; i < kept.Count; i++)
+            {
                 _pendingDeltas[kept[i].Key] = kept[i].Value;
+            }
+
         }
 
         private void ClearPendingDeltas()
         {
             foreach (var delta in _pendingDeltas.Values)
+            {
                 PredictionApi.Ack(delta.PredictionId);
+            }
+
+
             _pendingDeltas.Clear();
         }
 
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             PredictionApi.PredictionRetired -= RetireLocalJob;
@@ -637,7 +771,11 @@ namespace CardShopCoop.Modules.Grading
             _submitScreen = null;
             GradingInterop.Reset();
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _context = null;
         }
 

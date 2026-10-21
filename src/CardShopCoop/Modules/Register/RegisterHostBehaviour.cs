@@ -7,7 +7,6 @@ using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
-using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Register
@@ -1021,7 +1020,7 @@ namespace CardShopCoop.Modules.Register
             {
                 var active = _active;
                 if (active == null || !active._context.InGame()
-                    || !(__instance is InteractableCashierCounter counter))
+                    || __instance is not InteractableCashierCounter counter)
                 {
                     return true;
                 }

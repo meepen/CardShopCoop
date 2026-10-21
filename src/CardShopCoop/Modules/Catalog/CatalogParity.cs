@@ -225,7 +225,7 @@ namespace CardShopCoop.Modules.Catalog
             catch (Exception e) { CoopLog.Swallow(e); /* a lookup must never throw into a handshake, a probe or OnGUI */ }
             try
             {
-                return HarmonyLib.AccessTools.TypeByName(typeName);
+                return AccessTools.TypeByName(typeName);
             }
             catch (Exception e) { CoopLog.Swallow(e); return null; }
         }

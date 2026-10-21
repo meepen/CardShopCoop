@@ -249,7 +249,7 @@ namespace CardShopCoop
         internal static int LocalConnectionId => Instance == null ? -1 : Instance._localConnectionId;
 
         /// <summary>The live session context, or null when no session is active. Read by the
-        /// public <see cref="Api.CoopApi"/> binding.</summary>
+        /// public <see cref="CoopApi"/> binding.</summary>
         internal CoopRuntimeContext LiveContext => _liveRuntimeContext;
 
         internal static bool IsSessionGeneration(int generation)
@@ -928,7 +928,9 @@ namespace CardShopCoop
                 {
                     var connection = ConnectionFor(connectionId);
                     if (connection != null)
+                    {
                         Net?.GracefulDisconnect(connection, info);
+                    }
                 },
                 Relay);
             _liveRuntimeContext = context;
@@ -1047,7 +1049,7 @@ namespace CardShopCoop
                         + messageCatalog[i]);
                 }
 
-                if (descriptor.Reliability == CardShopCoop.Net.Protocol.Reliability.Transient)
+                if (descriptor.Reliability == Reliability.Transient)
                 {
                     result[i / 8] |= (byte)(1 << (i & 7));
                 }
@@ -1579,9 +1581,9 @@ namespace CardShopCoop
             _peerBuilds.Clear();
             HudApi.Clear();
             CatalogIdMap.Clear();
-            Modules.World.WorldHostBehaviour.ResetCardState();
-            Modules.World.WorldClientBehaviour.ResetCardState();
-            Runtime.SceneRef.ClearAll();
+            WorldHostBehaviour.ResetCardState();
+            WorldClientBehaviour.ResetCardState();
+            SceneRef.ClearAll();
             _dispatchBuffer.Clear();
             _dispatchRejectedConnections.Clear();
             _deferredInviteBackend = null;
@@ -1893,7 +1895,7 @@ namespace CardShopCoop
             if (message.Message is CardDeltaBatchMessage batch)
             {
                 var count = batch.Deltas?.Count ?? 0;
-                return Math.Max(1, Math.Min(count, Modules.World.WorldCardInteraction.CardDeltaBatchMax));
+                return Math.Max(1, Math.Min(count, WorldCardInteraction.CardDeltaBatchMax));
             }
             if (message.Message is Modules.Pricing.PricingDeltaBatchMessage pricing)
             {
@@ -2124,7 +2126,7 @@ namespace CardShopCoop
             // The game can rebuild its event manager between scenes; make sure the co-op
             // subscriptions follow the instance that is dispatching.
             RegisterEventListeners();
-            Runtime.SceneRef.NotifySceneLoaded(scene);
+            SceneRef.NotifySceneLoaded(scene);
 
             if (_gameLoading && scene.name == "Title"
                 && LoadingScreen.m_Instance != null

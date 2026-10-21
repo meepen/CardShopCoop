@@ -39,7 +39,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler(typeof(WarehouseDeltaMessage))]
         private void HandleWarehouseDelta(MessageContext context, WarehouseDeltaMessage message)
         {
-            if (!message.IsStore && !Modules.Prediction.PredictionApi.IsPending(message.PredictionId))
+            if (!message.IsStore && !Prediction.PredictionApi.IsPending(message.PredictionId))
             {
                 // Another player's take. The box leaves our shelf, but only the taker ends up
                 // holding it, so take the remote path and never attach it to our own hand.

@@ -16,10 +16,17 @@ namespace CardShopCoop.Modules.Economy
         private void OnEnable()
         {
             if (_shutdown || _active)
+            {
                 return;
+            }
+
 
             if (!EconomyAuthority.Activate(this, RuntimeContext))
+            {
+
                 throw new InvalidOperationException("Economy host initialization failed.");
+            }
+
 
             try
             {
@@ -39,7 +46,10 @@ namespace CardShopCoop.Modules.Economy
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _shutdown = true;
             _harmony?.UnpatchSelf();

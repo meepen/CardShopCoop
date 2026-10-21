@@ -140,6 +140,31 @@ namespace CardShopCoop.Modules.Catalog
             }
         }
 
+        /// <summary>True when this value is not an EPL mint at all, or is still backed by
+        /// content that is loaded right now. Fail-open when EPL is absent or the filter cannot
+        /// answer; an undefined value is not active.</summary>
+        internal static bool IsActiveValue(EnumKind kind, int value)
+        {
+            var filter = Current();
+            if (filter == null)
+            {
+                return true;
+            }
+
+            var type = CatalogIdMap.WireType(kind);
+            string name;
+            try
+            {
+                name = Enum.IsDefined(type, value) ? Enum.GetName(type, value) : null;
+            }
+            catch (Exception)
+            {
+                return true;
+            }
+
+            return name != null && filter.IsActive(type.Name, name, value);
+        }
+
         /// <summary>The live post-mint enum state of the prepatcher.</summary>
         private sealed class PrepatchState
         {
@@ -170,8 +195,8 @@ namespace CardShopCoop.Modules.Catalog
                 }
 
                 var managerType = manager.GetType();
-                if (!(managerType.GetProperty("SavedData", AnyMember)?.GetValue(manager) is IDictionary savedData)
-                    || !(managerType.GetProperty("UserData", AnyMember)?.GetValue(manager) is IDictionary userData))
+                if (managerType.GetProperty("SavedData", AnyMember)?.GetValue(manager) is not IDictionary savedData
+                    || managerType.GetProperty("UserData", AnyMember)?.GetValue(manager) is not IDictionary userData)
                 {
                     return null;
                 }
@@ -184,7 +209,7 @@ namespace CardShopCoop.Modules.Catalog
 
                 foreach (DictionaryEntry section in savedData)
                 {
-                    if (!(section.Key is string enumName) || !(section.Value is IDictionary entries))
+                    if (section.Key is not string enumName || section.Value is not IDictionary entries)
                     {
                         continue;
                     }
@@ -202,7 +227,7 @@ namespace CardShopCoop.Modules.Catalog
 
                 foreach (DictionaryEntry section in userData)
                 {
-                    if (!(section.Key is string enumName) || !(section.Value is IEnumerable rawNames))
+                    if (section.Key is not string enumName || section.Value is not IEnumerable rawNames)
                     {
                         continue;
                     }
@@ -248,7 +273,7 @@ namespace CardShopCoop.Modules.Catalog
                 {
                     return null;
                 }
-                if (!(runtimeType.GetProperty("IsBundleLoadingComplete", AnyMember)?.GetValue(null) is bool complete)
+                if (runtimeType.GetProperty("IsBundleLoadingComplete", AnyMember)?.GetValue(null) is not bool complete
                     || !complete)
                 {
                     return null;
@@ -331,7 +356,7 @@ namespace CardShopCoop.Modules.Catalog
                 {
                     return null;
                 }
-                if (!(eplType.GetProperty("IsAvailable", AnyMember)?.GetValue(null) is bool available)
+                if (eplType.GetProperty("IsAvailable", AnyMember)?.GetValue(null) is not bool available
                     || !available)
                 {
                     return null;

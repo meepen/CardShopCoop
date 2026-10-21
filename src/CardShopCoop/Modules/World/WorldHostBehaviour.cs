@@ -81,7 +81,10 @@ namespace CardShopCoop.Modules.World
         private void OnEnable()
         {
             if (_context != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             _instance = this;
@@ -120,7 +123,10 @@ namespace CardShopCoop.Modules.World
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
 
             _shutdown = true;
             UninstallPlayerBoxPresenceHook();
@@ -144,7 +150,11 @@ namespace CardShopCoop.Modules.World
             _appliedPredictions.Clear();
             _predictionOwners.Clear();
             if (ReferenceEquals(_instance, this))
+            {
                 _instance = null;
+            }
+
+
             _harmony?.UnpatchSelf();
         }
 
@@ -191,7 +201,7 @@ namespace CardShopCoop.Modules.World
         /// about to enqueue. The game's enqueue hook commits them to that entry, so no id outlives
         /// the entry it belongs to. Returns false when any id is not fresh; the caller must reject
         /// the originating intent rather than remint, which would desync the creator's boxes.</summary>
-        internal static bool StageCreatedBoxIds(System.Collections.Generic.IReadOnlyList<Guid> boxNetworkIds)
+        internal static bool StageCreatedBoxIds(IReadOnlyList<Guid> boxNetworkIds)
             => _instance?._boxNetworkInteraction?.StageHostDeliveryIds(boxNetworkIds) == true;
 
         /// <summary>Host: release a creator id parked for a creation that did not happen, so a
@@ -283,7 +293,7 @@ namespace CardShopCoop.Modules.World
                 if (_context != null && context?.Connection != null)
                 {
                     PredictionHost.Reject(_context, context.ConnectionId,
-                        command?.PredictionId ?? System.Guid.Empty);
+                        command?.PredictionId ?? Guid.Empty);
                 }
 
                 return false;
@@ -355,7 +365,7 @@ namespace CardShopCoop.Modules.World
         internal void RejectWorldIntent(MessageContext context, WorldMessage command)
         {
             if (_context == null || context?.Connection == null
-                || command?.PredictionId == System.Guid.Empty)
+                || command?.PredictionId == Guid.Empty)
             {
                 return;
             }
@@ -379,7 +389,10 @@ namespace CardShopCoop.Modules.World
         private void SendWarehouseBaseline(PeerConnection connection)
         {
             if (connection != null && _context.InGame())
+            {
                 SendWorldBaseline(connection.Id);
+            }
+
         }
 
         /// <summary>A peer allowed to act on the shared world. Transferring counts: the guest's
@@ -396,11 +409,17 @@ namespace CardShopCoop.Modules.World
         private void SendWorldBaseline(int connectionId)
         {
             if (connectionId <= 0)
+            {
                 return;
+            }
+
 
             var baselineId = _nextBaselineId++;
             if (_nextBaselineId <= 0)
+            {
                 _nextBaselineId = 1;
+            }
+
 
             SendWorldTo(connectionId, new WorldBaselineStartMessage
             {
@@ -429,7 +448,11 @@ namespace CardShopCoop.Modules.World
         private void BroadcastWorld(INetMessage message)
         {
             if (message is not WorldMessage worldMessage)
+            {
+
                 throw new InvalidOperationException("World host can only broadcast WorldMessage values.");
+            }
+
 
             PrepareState(worldMessage);
             _context.Broadcast(worldMessage);
@@ -438,7 +461,11 @@ namespace CardShopCoop.Modules.World
         private void SendWorldTo(int connectionId, INetMessage message)
         {
             if (message is not WorldMessage worldMessage)
+            {
+
                 throw new InvalidOperationException("World host can only send WorldMessage values.");
+            }
+
 
             PrepareState(worldMessage);
             _context.Send(connectionId, worldMessage);
@@ -447,10 +474,14 @@ namespace CardShopCoop.Modules.World
         private void RelayWorldExcept(int excludedConnectionId, INetMessage message)
         {
             if (message is not WorldMessage worldMessage)
+            {
+
                 throw new InvalidOperationException("World host can only relay WorldMessage values.");
+            }
 
             // Relay through the transport's broadcast admission so a peer that is still joining
             // is skipped rather than treated as a hard send failure.
+
             PrepareState(worldMessage);
             _context.Relay(excludedConnectionId, worldMessage);
         }

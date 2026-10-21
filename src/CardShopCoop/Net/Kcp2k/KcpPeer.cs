@@ -310,10 +310,14 @@ namespace kcp2k
 
             var msgSize = kcp.PeekSize();
             if (msgSize <= 0)
+            {
+
                 return false;
+            }
 
             // only allow receiving up to buffer sized messages.
             // otherwise we would get BlockCopy ArgumentException anyway.
+
             if (msgSize > kcpMessageBuffer.Length)
             {
                 // we don't allow sending messages > Max, so this must be an
@@ -587,9 +591,12 @@ namespace kcp2k
         {
             // need at least one byte for the KcpHeader enum
             if (message.Count < 1)
+            {
                 return;
+            }
 
             // safely extract header. attackers may send values out of enum range.
+
             var headerByte = message.Array[message.Offset + 0];
             if (!KcpHeader.ParseUnreliable(headerByte, out var header))
             {
@@ -703,9 +710,12 @@ namespace kcp2k
 
             // write data (if any)
             if (content.Count > 0)
+            {
                 Buffer.BlockCopy(content.Array, content.Offset, kcpSendBuffer, 1, content.Count);
+            }
 
             // send to kcp for processing
+
             var sent = kcp.Send(kcpSendBuffer, 0, 1 + content.Count);
             if (sent < 0)
             {
@@ -742,9 +752,12 @@ namespace kcp2k
             // write data (if any)
             // from 6, with N bytes
             if (content.Count > 0)
+            {
                 Buffer.BlockCopy(content.Array, content.Offset, rawSendBuffer, 1 + 4 + 1, content.Count);
+            }
 
             // IO send
+
             var segment = new ArraySegment<byte>(rawSendBuffer, 0, content.Count + 1 + 4 + 1);
             RawSend(segment);
             return true;
@@ -810,7 +823,10 @@ namespace kcp2k
             // this way we don't need to keep the connection alive for a while.
             // (glenn fiedler method)
             for (var i = 0; i < 5; ++i)
+            {
                 SendUnreliable(KcpHeaderUnreliable.Disconnect, default);
+            }
+
         }
 
         bool disconnecting;
@@ -826,10 +842,13 @@ namespace kcp2k
         {
             // only if not disconnected yet
             if (state == KcpState.Disconnected || disconnecting)
+            {
                 return;
+            }
 
             // RawSend is synchronous. Claim ownership before invoking it so a transport
             // callback that closes the session cannot recursively send another goodbye.
+
             disconnecting = true;
 
             // send a disconnect message

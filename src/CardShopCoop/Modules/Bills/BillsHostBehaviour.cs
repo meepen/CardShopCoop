@@ -25,7 +25,9 @@ namespace CardShopCoop.Modules.Bills
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
 
             _context = RuntimeContext;
             var handlersRegistered = false;
@@ -48,9 +50,15 @@ namespace CardShopCoop.Modules.Bills
                 _harmony = null;
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (handlersRegistered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
                 BillsInterop.Reset();
                 _context = null;
                 throw;
@@ -61,7 +69,9 @@ namespace CardShopCoop.Modules.Bills
         private void SendInitialState(PeerConnection connection)
         {
             if (connection == null)
+            {
                 return;
+            }
 
             _fullyJoined.Add(connection.Id);
             SendState(connection.Id);
@@ -71,14 +81,18 @@ namespace CardShopCoop.Modules.Bills
         private void ForgetPeer(PeerConnection connection, DisconnectInfo info)
         {
             if (connection != null)
+            {
                 _fullyJoined.Remove(connection.Id);
+            }
         }
 
         [MessageHandler(typeof(BillPaymentMessage))]
         private void HandlePayment(MessageContext context, BillPaymentMessage message)
         {
             if (!IsPeerMessage(context) || message == null)
+            {
                 return;
+            }
 
             var peer = context.Connection.Id;
             var accepted = false;
@@ -143,9 +157,13 @@ namespace CardShopCoop.Modules.Bills
                         }
                         _forwardedRequester = 0;
                         if (accepted)
+                        {
                             BroadcastDelta(BuildDelta(message.BillType, message.PredictionId));
+                        }
                         else
+                        {
                             Rollback(context, message);
+                        }
                     }
                 }
             }
@@ -160,7 +178,9 @@ namespace CardShopCoop.Modules.Bills
         private void SendState(int peer)
         {
             if (_shutdown || _context == null || !_context.InGame())
+            {
                 return;
+            }
 
             _context.Send(peer, BuildState());
         }
@@ -168,7 +188,9 @@ namespace CardShopCoop.Modules.Bills
         private void BroadcastDelta(BillsDeltaMessage message)
         {
             if (_shutdown || _context == null || !_context.InGame() || message == null)
+            {
                 return;
+            }
 
             _context.Broadcast(message);
         }
@@ -235,18 +257,24 @@ namespace CardShopCoop.Modules.Bills
         {
             var active = _active;
             if (active == null || context?.Connection == null || message == null)
+            {
                 return;
+            }
 
             active.SendRejectionState(context.Connection.Id, message);
 
             if (message.PredictionId != Guid.Empty)
+            {
                 PredictionApi.Rollback(active._context, context.Connection.Id, message.PredictionId);
+            }
         }
 
         private void SendRejectionState(int peer, BillPaymentMessage message)
         {
             if (_shutdown || _context == null || !_context.InGame())
+            {
                 return;
+            }
 
             var refresh = BuildDelta(0, message.PredictionId);
             CoopPlugin.Log.LogInfo("[bills] rejection refresh to conn " + peer
@@ -268,14 +296,20 @@ namespace CardShopCoop.Modules.Bills
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
             _fullyJoined.Clear();
             BillsInterop.Reset();
             _context = null;
@@ -290,7 +324,10 @@ namespace CardShopCoop.Modules.Bills
             private static void Postfix(EBillType billType)
             {
                 if (_active == null || _active._applyingIntent)
+                {
                     return;
+                }
+
                 _active.BroadcastDelta(BuildDelta((byte)billType, Guid.Empty));
             }
         }
@@ -302,7 +339,10 @@ namespace CardShopCoop.Modules.Bills
             private static void Postfix(EBillType billType)
             {
                 if (_active == null || _active._applyingIntent)
+                {
                     return;
+                }
+
                 _active.BroadcastDelta(BuildDelta((byte)billType, Guid.Empty));
             }
         }
@@ -318,7 +358,9 @@ namespace CardShopCoop.Modules.Bills
             {
                 var host = _active;
                 if (host == null || host._forwardedRequester <= 0 || host._context == null)
+                {
                     return;
+                }
 
                 host._context.Send(host._forwardedRequester,
                     new BillPopupMessage { Text = (int)__0 });

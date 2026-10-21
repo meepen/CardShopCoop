@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.World;
-using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -61,7 +60,7 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            using (CardShopCoop.Util.PerfProbe.Sample("module.npc.host-update"))
+            using (Util.PerfProbe.Sample("module.npc.host-update"))
             {
                 UpdateInner();
             }

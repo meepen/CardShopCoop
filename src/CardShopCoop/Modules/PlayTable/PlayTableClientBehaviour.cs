@@ -198,7 +198,11 @@ namespace CardShopCoop.Modules.PlayTable
         {
             var key = VisualKey(message);
             if (_pendingVisuals.TryGetValue(key, out var previous))
+            {
                 PredictionApi.Ack(previous.PredictionId);
+            }
+
+
             _pendingVisuals[key] = message;
         }
 
@@ -215,7 +219,10 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             for (var i = 0; i < superseded.Count; i++)
+            {
                 _pendingVisuals.Remove(superseded[i]);
+            }
+
         }
 
         private static string VisualKey(PlayTableVisualDeltaMessage message)
@@ -1093,7 +1100,11 @@ namespace CardShopCoop.Modules.PlayTable
         private void ClearPendingVisuals()
         {
             foreach (var delta in _pendingVisuals.Values)
+            {
                 PredictionApi.Ack(delta.PredictionId);
+            }
+
+
             _pendingVisuals.Clear();
         }
     }

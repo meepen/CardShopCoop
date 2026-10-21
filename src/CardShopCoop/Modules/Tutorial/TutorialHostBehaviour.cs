@@ -6,7 +6,6 @@ using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
-using UnityEngine;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Tutorial
@@ -27,7 +26,10 @@ namespace CardShopCoop.Modules.Tutorial
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -48,9 +50,17 @@ namespace CardShopCoop.Modules.Tutorial
                 _harmony = null;
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 TutorialInterop.Reset();
                 _context = null;
                 throw;
@@ -61,7 +71,10 @@ namespace CardShopCoop.Modules.Tutorial
         private void SendInitialState(PeerConnection connection)
         {
             if (connection == null)
+            {
                 return;
+            }
+
 
             _fullyJoined.Add(connection.Id);
             SendState(connection.Id);
@@ -71,7 +84,11 @@ namespace CardShopCoop.Modules.Tutorial
         private void ForgetPeer(PeerConnection connection, DisconnectInfo info)
         {
             if (connection == null)
+            {
                 return;
+            }
+
+
             _fullyJoined.Remove(connection.Id);
         }
 
@@ -91,7 +108,11 @@ namespace CardShopCoop.Modules.Tutorial
                         + " increment=" + message.Increment);
                 }
                 if (message != null && message.PredictionId != Guid.Empty)
+                {
                     PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                }
+
+
                 return;
             }
 
@@ -115,7 +136,10 @@ namespace CardShopCoop.Modules.Tutorial
                 CoopPlugin.Log.LogError("Tutorial action failed for peer "
                     + context.Connection.Id + ": " + exception);
                 if (message.PredictionId != Guid.Empty)
+                {
                     PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                }
+
             }
         }
 
@@ -132,19 +156,36 @@ namespace CardShopCoop.Modules.Tutorial
             // delta re-syncs).
             if (!Enum.IsDefined(typeof(ETutorialTaskCondition), message.Action)
                 || message.Action == (int)ETutorialTaskCondition.None)
+            {
                 return false;
+            }
+
+
             if (message.ExpectedCondition != message.Action)
+            {
                 return false;
+            }
+
+
             if (message.Increment <= 0f || float.IsNaN(message.Increment)
                 || float.IsInfinity(message.Increment) || message.Increment > MaxActionIncrement)
+            {
+
                 return false;
+            }
+
+
             return true;
         }
 
         private void BroadcastDelta(TutorialDeltaMessage message)
         {
             if (_shutdown || _context == null || !_context.InGame() || message == null)
+            {
                 return;
+            }
+
+
             _context.Broadcast(message);
         }
 
@@ -152,7 +193,10 @@ namespace CardShopCoop.Modules.Tutorial
         {
             if (_shutdown || _context == null || !_context.InGame()
                 || !TryBuildState(out var state))
+            {
                 return;
+            }
+
 
             _context.Send(peer, state);
         }
@@ -164,7 +208,11 @@ namespace CardShopCoop.Modules.Tutorial
                 || !TutorialInterop.IsSceneReady(TutorialInterop.FindManager())
                 || CPlayerData.m_TutorialDataList == null
                 || CPlayerData.m_TutorialDataList.Count > MaxStateValues)
+            {
+
                 return false;
+            }
+
 
             var list = CPlayerData.m_TutorialDataList;
             message = new TutorialStateMessage
@@ -176,7 +224,12 @@ namespace CardShopCoop.Modules.Tutorial
             {
                 var value = list[i];
                 if (value == null || !TutorialInterop.IsFiniteNonNegative(value.value))
+                {
+
                     return false;
+                }
+
+
                 message.Values.Add(new TutorialValue
                 {
                     Condition = (int)value.tutorialTaskCondition,
@@ -201,11 +254,14 @@ namespace CardShopCoop.Modules.Tutorial
                 message.Values = new List<TutorialValue>();
                 var values = CPlayerData.m_TutorialDataList;
                 for (var i = 0; values != null && i < values.Count; i++)
+                {
                     message.Values.Add(new TutorialValue
                     {
                         Condition = (int)values[i].tutorialTaskCondition,
                         Value = values[i].value,
                     });
+                }
+
             }
             return message;
         }
@@ -222,14 +278,22 @@ namespace CardShopCoop.Modules.Tutorial
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _fullyJoined.Clear();
             TutorialInterop.Reset();
             _context = null;
@@ -251,7 +315,11 @@ namespace CardShopCoop.Modules.Tutorial
                 // prediction id; skip the generic broadcast while it runs so an applied client
                 // intent is never broadcast twice.
                 if (_active == null || _active._applyingIntent)
+                {
                     return;
+                }
+
+
                 _active.BroadcastDelta(BuildDelta(Guid.Empty, tutorialTaskCondition, __state));
             }
         }

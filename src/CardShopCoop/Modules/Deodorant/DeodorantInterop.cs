@@ -35,7 +35,12 @@ namespace CardShopCoop.Modules.Deodorant
         {
             position = default;
             if (!TryGetHeldSpray(controller, out var item))
+            {
+
                 return false;
+            }
+
+
             position = item.transform.position;
             return IsFinite(position);
         }
@@ -44,7 +49,12 @@ namespace CardShopCoop.Modules.Deodorant
         {
             content = 0f;
             if (!TryGetHeldSpray(controller, out var item))
+            {
+
                 return false;
+            }
+
+
             content = item.GetContentFill();
             return IsFinite(content);
         }
@@ -52,7 +62,12 @@ namespace CardShopCoop.Modules.Deodorant
         internal static bool TrySetContent(InteractionPlayerController controller, float content)
         {
             if (!TryGetHeldSpray(controller, out var item) || !IsFinite(content))
+            {
+
                 return false;
+            }
+
+
             item.SetContentFill(content);
             return true;
         }

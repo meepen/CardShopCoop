@@ -23,7 +23,10 @@ namespace CardShopCoop.Modules.Light
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
 
             _context = RuntimeContext;
             var registered = false;
@@ -51,9 +54,17 @@ namespace CardShopCoop.Modules.Light
                     SceneManager.sceneLoaded -= OnSceneLoaded;
                 }
                 if (registered)
+                {
                     _context.Messages.UnregisterAttributedHandlers(this);
+                }
+
+
                 if (ReferenceEquals(_active, this))
+                {
                     _active = null;
+                }
+
+
                 _context = null;
                 throw;
             }
@@ -63,7 +74,10 @@ namespace CardShopCoop.Modules.Light
         private void SendInitialState(PeerConnection connection)
         {
             if (connection == null)
+            {
                 return;
+            }
+
 
             _fullyJoined.Add(connection.Id);
             SendState(connection.Id);
@@ -73,14 +87,20 @@ namespace CardShopCoop.Modules.Light
         private void ForgetConnection(PeerConnection connection, DisconnectInfo info)
         {
             if (connection != null)
+            {
                 _fullyJoined.Remove(connection.Id);
+            }
+
         }
 
         [MessageHandler(typeof(LightSwitchIntentMessage))]
         private void HandleIntent(MessageContext context, LightSwitchIntentMessage message)
         {
             if (!IsPeerMessage(context))
+            {
                 return;
+            }
+
 
             if (!LightInterop.IsSceneReady(LightInterop.FindSceneManager()))
             {
@@ -95,7 +115,10 @@ namespace CardShopCoop.Modules.Light
         {
             if (_shutdown || _context == null || !_context.InGame()
                 || !LightSwitchState.TryGet(out var isActive))
+            {
                 return;
+            }
+
 
             _context.Broadcast(new LightSwitchStateMessage
             {
@@ -108,7 +131,10 @@ namespace CardShopCoop.Modules.Light
         {
             if (_shutdown || _context == null || !_context.InGame()
                 || !LightSwitchState.TryGet(out var isActive))
+            {
                 return;
+            }
+
 
             _context.Send(peer, new LightSwitchStateMessage
             {
@@ -120,7 +146,10 @@ namespace CardShopCoop.Modules.Light
         private void SendStateToJoined()
         {
             foreach (var peer in new List<int>(_fullyJoined))
+            {
                 SendState(peer);
+            }
+
         }
 
         /// <summary>Every live toggle - the physical switch click and mod-driven automation alike -
@@ -153,7 +182,11 @@ namespace CardShopCoop.Modules.Light
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -161,7 +194,11 @@ namespace CardShopCoop.Modules.Light
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
+
             _fullyJoined.Clear();
             _context = null;
         }

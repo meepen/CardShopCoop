@@ -102,7 +102,9 @@ namespace CardShopCoop.Modules.World
         private bool ApplyShelfAction(ShelfInteractionMessage message)
         {
             if (_shelfInteraction == null)
+            {
                 return false;
+            }
 
             // AckOrApply: the actor's optimistic add/take already moved the real item and produced
             // the host's absolute (type, count); the host echoes that same inventory, and applying

@@ -108,8 +108,6 @@ The two builds the plugin must support, and which of the above maps to each:
 
 The installed Steam build is `1.02` (Steam buildid `25381942`), decompiled at `decompiled\1.02`
 (639 files, matches the live install). The installed Game Pass build is `1.00` / Unity 6,
-decompiled at `decompiled\1.00-gamepass`. Cross-build notes: the two installed builds differ in
-`EObjectType` (Steam `FoodBowl` vs Game Pass 7 pre-order/Deluxe members, `MAX` 57 vs 63), which the
-co-op catalog handshake rejects; and the Game Pass build ships a 4 KB **stub**
+decompiled at `decompiled\1.00-gamepass`. The Game Pass build ships a 4 KB **stub**
 `com.rlabrecque.steamworks.net` (no real Steamworks types) — see the Steam isolation in
 `Net/ISteamBridge.cs`.

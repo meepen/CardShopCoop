@@ -9,7 +9,6 @@ using System.Collections.Generic;
 using System.Threading;
 using Steamworks;
 using UnityEngine;
-using CardShopCoop;
 using CardShopCoop.Api;
 
 namespace CardShopCoop.Net
@@ -1055,7 +1054,7 @@ namespace CardShopCoop.Net
 
         private void Update()
         {
-            using (Util.PerfProbe.Sample("steam.callbacks"))
+            using (PerfProbe.Sample("steam.callbacks"))
             {
                 _pump?.Invoke();
             }

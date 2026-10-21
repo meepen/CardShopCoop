@@ -551,17 +551,22 @@ namespace CardShopCoop.Modules.Report
         internal static void NotifyCommittedPurchaseMutation()
         {
             if (IsHostActive())
+            {
                 _active.PublishCounterAndMoney();
+            }
         }
 
         private static ReportStateMessage BuildLatestReview()
         {
             var message = BuildState(CPlayerData.m_GameReportDataCollect, ReviewSlice, false);
             if (message.Reviews.Count > 1)
+            {
                 message.Reviews = new List<ReportReviewEntry>
                 {
                     message.Reviews[message.Reviews.Count - 1],
                 };
+            }
+
             return message;
         }
 
@@ -573,7 +578,10 @@ namespace CardShopCoop.Modules.Report
         private void PublishDelta(ReportStateMessage source, int kind)
         {
             if (_shutdown || source == null || !_context.InGame())
+            {
                 return;
+            }
+
             _context.Broadcast(ToDelta(source, kind));
         }
 
@@ -729,7 +737,10 @@ namespace CardShopCoop.Modules.Report
             private static void Postfix(MethodBase __originalMethod, GameReportDataCollect __state)
             {
                 if (_active == null)
+                {
                     return;
+                }
+
                 if (string.Equals(__originalMethod?.Name, "CloseScreen", StringComparison.Ordinal))
                 {
                     _active.PublishClose();

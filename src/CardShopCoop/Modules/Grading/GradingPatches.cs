@@ -91,7 +91,11 @@ namespace CardShopCoop.Modules.Grading
             __state = default;
             var active = GradingClientBehaviour.Active;
             if (active == null)
+            {
                 return;
+            }
+
+
             active.CaptureSubmission(__instance, out __state);
         }
 
@@ -101,7 +105,10 @@ namespace CardShopCoop.Modules.Grading
         private static void SubmitFinalizer(GradingClientBehaviour.SubmissionCapture __state)
         {
             if (__state.Armed)
+            {
                 EconomyActionScope.Exit();
+            }
+
         }
 
         /// <summary>Guest: wrap Grading Overhaul's day-start prefix. GO's prefix (priority 800,

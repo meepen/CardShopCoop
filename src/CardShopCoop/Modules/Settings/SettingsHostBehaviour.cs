@@ -115,7 +115,11 @@ namespace CardShopCoop.Modules.Settings
                 CoopPlugin.Log.LogWarning("Settings: rejected malformed authenticated operation from "
                     + context.Connection.Id + ": " + reason);
                 if (message.PredictionId != Guid.Empty)
+                {
                     PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                }
+
+
                 return;
             }
 

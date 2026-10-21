@@ -578,7 +578,9 @@ namespace CardShopCoop.Modules.World
         private void ClientUndoTakePrediction(WarehouseDeltaMessage delta)
         {
             if (delta == null)
+            {
                 return;
+            }
 
             if (!_boxes.TryGetBox(delta.BoxNetworkId, out var taken) || taken == null)
             {
@@ -729,7 +731,10 @@ namespace CardShopCoop.Modules.World
             // shelf) is detectable and broadcast. Only a command being applied suppresses the
             // store broadcast, because HostApplyStore already sends that delta.
             if (!TryGetLastLiveBoxState(compartment, out var added))
+            {
                 return;
+            }
+
             if (!_host && !IsApplyingRemote && Available() && IsWarehouse(compartment))
             {
                 // The local player's own store: the game already placed the box. Bind the live
@@ -746,7 +751,9 @@ namespace CardShopCoop.Modules.World
             }
 
             if (!_hostApplyingCommand)
+            {
                 BroadcastWarehouseDelta(compartment, true, added);
+            }
         }
 
         internal void OnBoxRemoved(ShelfCompartment compartment, InteractablePackagingBox_Item box)
@@ -885,7 +892,9 @@ namespace CardShopCoop.Modules.World
             }
 
             if (!accepted)
+            {
                 return false;
+            }
 
             BroadcastDelta(new WarehouseDeltaMessage
             {
@@ -1080,7 +1089,9 @@ namespace CardShopCoop.Modules.World
         internal void ClientApplyState(WarehouseStateMessage message)
         {
             if (message == null)
+            {
                 throw new InvalidOperationException("Authoritative warehouse state is missing.");
+            }
 
             if (!Available())
             {
@@ -1252,17 +1263,24 @@ namespace CardShopCoop.Modules.World
         private void PopClientWarehouseRecord(ShelfCompartment compartment, Guid boxNetworkId)
         {
             if (compartment == null)
+            {
                 return;
+            }
 
             IsApplyingRemote = true;
             try
             {
                 var count = RecordCount(compartment);
                 if (count == 0 || GetRecordId(compartment, count - 1) != boxNetworkId)
+                {
                     return;
+                }
+
                 var args = new object[] { null };
                 if (!(bool)_recordPop.Invoke(compartment, args))
+                {
                     throw new InvalidOperationException("Warehouse record take could not be applied.");
+                }
             }
             finally
             {
@@ -1286,7 +1304,9 @@ namespace CardShopCoop.Modules.World
         private void BroadcastDelta(WarehouseDeltaMessage message)
         {
             if (!_host || message == null)
+            {
                 return;
+            }
 
             _broadcast(message);
         }
@@ -1318,7 +1338,10 @@ namespace CardShopCoop.Modules.World
             state = null;
             var box = GetLastBoxOrNull(compartment);
             if (box?.m_ItemCompartment == null || !_boxes.TryGetId(box, out var id))
+            {
                 return false;
+            }
+
             state = new WarehouseBoxState
             {
                 BoxNetworkId = id,
@@ -1394,7 +1417,9 @@ namespace CardShopCoop.Modules.World
                 {
                     var args = new object[] { null };
                     if (!(bool)_recordPop.Invoke(compartment, args))
+                    {
                         throw new InvalidOperationException("Warehouse record storage could not be cleared.");
+                    }
                 }
 
                 for (var i = 0; i < wanted.Count; i++)
@@ -1667,7 +1692,9 @@ namespace CardShopCoop.Modules.World
             for (var i = 0; i < ids.Count; i++)
             {
                 if (ids[i] == id)
+                {
                     return true;
+                }
             }
 
             return false;
@@ -2017,7 +2044,9 @@ namespace CardShopCoop.Modules.World
         {
             state = null;
             if (compartment == null)
+            {
                 return false;
+            }
 
             if (_usesRecords)
             {
@@ -2029,7 +2058,10 @@ namespace CardShopCoop.Modules.World
             var box = GetLastBoxOrNull(compartment);
             if (box?.m_ItemCompartment == null || !_boxes.TryGetId(box, out var id)
                 || id != expectedId)
+            {
                 return false;
+            }
+
             state = new WarehouseBoxState
             {
                 BoxNetworkId = id,

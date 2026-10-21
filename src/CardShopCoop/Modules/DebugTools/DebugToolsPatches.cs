@@ -1,5 +1,4 @@
 using System;
-using System.Reflection;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.DebugTools
@@ -103,7 +102,7 @@ namespace CardShopCoop.Modules.DebugTools
             {
                 // CheatManager snapshots cursor/time state before opening. Release the co-op
                 // window first so its vanilla restore remains authoritative on close.
-                CardShopCoop.Modules.SessionInput.SessionInputRuntime.PrepareVanillaModalOpen();
+                SessionInput.SessionInputRuntime.PrepareVanillaModalOpen();
             }
 
             return allowed;

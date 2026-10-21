@@ -25,7 +25,9 @@ namespace CardShopCoop.Modules.World
         private void OnEnable()
         {
             if (_context != null)
+            {
                 return;
+            }
 
             _context = RuntimeContext;
             _instance = this;
@@ -68,7 +70,9 @@ namespace CardShopCoop.Modules.World
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
 
             _shutdown = true;
             PlacementApi.StructureChanged -= OnPlacementStructureChanged;
@@ -89,7 +93,10 @@ namespace CardShopCoop.Modules.World
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             _context.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_instance, this))
+            {
                 _instance = null;
+            }
+
             _harmony?.UnpatchSelf();
         }
 
@@ -133,15 +140,19 @@ namespace CardShopCoop.Modules.World
         private void SendWorldCommand(int connectionId, INetMessage message)
         {
             if (message is not WorldMessage worldMessage)
-                throw new System.InvalidOperationException("World client can only send WorldMessage values.");
+            {
+                throw new InvalidOperationException("World client can only send WorldMessage values.");
+            }
 
             // Direct sends from the interaction classes are fire-and-forget intents (a shelf
             // removal, a covered-hold drop, the workbench bundle, a legacy card forward). They
             // still need a real prediction id: the host's intent ledger rejects an empty one.
             // None of them has the id pending on any client, so an echo is applied exactly as a
             // remote change, never consumed as a prediction.
-            if (worldMessage.PredictionId == System.Guid.Empty)
-                worldMessage.PredictionId = System.Guid.NewGuid();
+            if (worldMessage.PredictionId == Guid.Empty)
+            {
+                worldMessage.PredictionId = Guid.NewGuid();
+            }
 
             WorldMessageMetadata.PrepareIntent(worldMessage);
             _context.Send(connectionId, worldMessage);
@@ -153,13 +164,15 @@ namespace CardShopCoop.Modules.World
         // pending - so every valid peer simply applies the echo.
         internal static bool SendClientIntent(WorldMessage command)
             => SendClientIntent(command,
-                command == null || command.PredictionId == System.Guid.Empty
-                    ? System.Guid.NewGuid() : command.PredictionId);
+                command == null || command.PredictionId == Guid.Empty
+                    ? Guid.NewGuid() : command.PredictionId);
 
-        internal static bool SendClientIntent(WorldMessage command, System.Guid predictionId)
+        internal static bool SendClientIntent(WorldMessage command, Guid predictionId)
         {
             if (_instance == null || command == null)
+            {
                 return false;
+            }
 
             command.PredictionId = predictionId;
             WorldMessageMetadata.PrepareIntent(command);
@@ -170,7 +183,9 @@ namespace CardShopCoop.Modules.World
         internal static void BeginWorldBaseline(long baselineId)
         {
             if (_instance == null)
+            {
                 return;
+            }
 
             _instance._playerBoxInteraction?.Reset();
             _instance._shelfInteraction?.Reset();
@@ -186,7 +201,9 @@ namespace CardShopCoop.Modules.World
         internal static void CompleteWorldBaseline(long baselineId)
         {
             if (_instance == null)
+            {
                 return;
+            }
 
             _instance._boxNetworkInteraction?.ClientCompleteBaseline();
         }

@@ -99,7 +99,7 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            using (CardShopCoop.Util.PerfProbe.Sample("module.presence.client-update"))
+            using (Util.PerfProbe.Sample("module.presence.client-update"))
             {
                 UpdateInner();
             }

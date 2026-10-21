@@ -39,7 +39,10 @@ namespace CardShopCoop.Modules.Hud
         private void OnEnable()
         {
             if (_shutdown || _harmony != null)
+            {
                 return;
+            }
+
             _context = RuntimeContext;
             var handlersRegistered = false;
             try
@@ -207,10 +210,15 @@ namespace CardShopCoop.Modules.Hud
 
             _contributionsByEvent.Remove(evt);
             if (_shutdown || !_context.InGame())
+            {
                 return;
+            }
 
             if (contribution.Kind != kind)
+            {
                 throw new InvalidOperationException("HUD contribution event kind is inconsistent.");
+            }
+
 
             var snapshot = Snapshot();
 
@@ -297,13 +305,19 @@ namespace CardShopCoop.Modules.Hud
         internal void Shutdown()
         {
             if (_shutdown)
+            {
                 return;
+            }
+
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
+            {
                 _active = null;
+            }
+
             _pendingPredictionId = Guid.Empty;
             _contributionsByEvent.Clear();
             HudPresentationState.Clear();

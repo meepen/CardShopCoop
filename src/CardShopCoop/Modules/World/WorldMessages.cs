@@ -170,50 +170,113 @@ namespace CardShopCoop.Modules.World
         internal static string StableEntityId(WorldMessage message)
         {
             if (message == null)
+            {
                 return string.Empty;
+            }
+
             if (!string.IsNullOrEmpty(message.StableEntityId))
+            {
                 return message.StableEntityId;
+            }
+
             if (message is BoxCreatedMessage created && created.Box != null)
+            {
                 return "box:" + created.Box.BoxNetworkId;
+            }
+
             if (message is BoxDestroyRequestMessage destroy)
+            {
                 return "box:" + destroy.BoxNetworkId;
+            }
+
             if (message is BoxDestroyedMessage destroyed)
+            {
                 return "box:" + destroyed.BoxNetworkId;
+            }
+
             if (message is BoxStateRequestMessage boxState)
+            {
                 return "box:" + boxState.BoxNetworkId;
+            }
+
             if (message is BoxStateMessage boxStateResult)
+            {
                 return "box:" + boxStateResult.BoxNetworkId;
+            }
+
             if (message is PlayerBoxInteractionMessage player)
+            {
                 return "box:" + player.BoxNetworkId;
+            }
+
             if (message is CardDisplayRequestMessage cardDisplay)
+            {
                 return CardDisplayEntityId(cardDisplay.ShelfKey, cardDisplay.Compartment);
+            }
+
             if (message is CardDisplayMessage cardDisplayState)
+            {
                 return CardDisplayEntityId(cardDisplayState.ShelfKey, cardDisplayState.Compartment);
+            }
+
             if (message is ContainerOpMessage container)
+            {
                 return ContainerEntityId(container.Kind, container.Index);
+            }
+
             if (message is WarehouseStoreMessage store)
+            {
                 return WarehouseEntityId(store.ShelfIndex, store.CompartmentIndex);
+            }
+
             if (message is WarehouseTakeMessage take)
+            {
                 return WarehouseEntityId(take.ShelfIndex, take.CompartmentIndex);
+            }
+
             if (message is ShelfInteractionMessage shelf)
+            {
                 return "shelf:" + shelf.ShelfKey + ":" + shelf.Compartment;
+            }
+
             if (message is FurnitureBoxUpRequestMessage furniture)
+            {
                 return "furniture:" + furniture.ObjectType + ":"
                     + furniture.Position.x.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
                     + ":" + furniture.Position.y.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
                     + ":" + furniture.Position.z.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+            }
+
             if (message is ContainerStateMessage state)
+            {
                 return "container-state";
+            }
+
             if (message is WorkbenchStateMessage workbench)
+            {
                 return WorkbenchEntityId(workbench.Index);
+            }
+
             if (message is WorkbenchOpMessage workbenchOp)
+            {
                 return WorkbenchEntityId(workbenchOp.Index);
+            }
+
             if (message is WorkbenchBundleMessage bundle)
+            {
                 return WorkbenchEntityId(bundle.Index);
+            }
+
             if (message is WarehouseStateMessage)
+            {
                 return "warehouse-state";
+            }
+
             if (message is MarketStateMessage)
+            {
                 return "market";
+            }
+
             return message.GetType().FullName ?? message.GetType().Name;
         }
 
@@ -232,7 +295,10 @@ namespace CardShopCoop.Modules.World
         internal static void PrepareIntent(WorldMessage message)
         {
             if (message == null)
+            {
                 throw new ArgumentNullException(nameof(message));
+            }
+
             message.StableEntityId ??= StableEntityId(message);
             message.OperationKind = OperationFor(message);
         }
@@ -246,37 +312,85 @@ namespace CardShopCoop.Modules.World
         private static WorldOperationKind OperationFor(WorldMessage message)
         {
             if (message is BoxDestroyRequestMessage)
+            {
                 return WorldOperationKind.BoxDestroy;
+            }
+
             if (message is BoxStateRequestMessage)
+            {
                 return WorldOperationKind.BoxState;
+            }
+
             if (message is FurnitureBoxUpRequestMessage)
+            {
                 return WorldOperationKind.FurnitureBoxUp;
+            }
+
             if (message is PlayerBoxPickupRequestMessage)
+            {
                 return WorldOperationKind.PlayerBoxPickup;
+            }
+
             if (message is PlayerBoxPlacementRequestMessage)
+            {
                 return WorldOperationKind.PlayerBoxPlacement;
+            }
+
             if (message is PlayerBoxThrowRequestMessage)
+            {
                 return WorldOperationKind.PlayerBoxThrow;
+            }
+
             if (message is ShelfItemAddRequestMessage)
+            {
                 return WorldOperationKind.ShelfAdd;
+            }
+
             if (message is ShelfItemRemoveRequestMessage)
+            {
                 return WorldOperationKind.ShelfRemove;
+            }
+
             if (message is WarehouseStoreMessage)
+            {
                 return WorldOperationKind.WarehouseStore;
+            }
+
             if (message is WarehouseTakeMessage)
+            {
                 return WorldOperationKind.WarehouseTake;
+            }
+
             if (message is CardDisplayRequestMessage)
+            {
                 return WorldOperationKind.CardDisplay;
+            }
+
             if (message is ContainerOpMessage)
+            {
                 return WorldOperationKind.Container;
+            }
+
             if (message is CardDeltaBatchRequestMessage)
+            {
                 return WorldOperationKind.CardDeltaBatch;
+            }
+
             if (message is CardDeltaRequestMessage)
+            {
                 return WorldOperationKind.CardDelta;
+            }
+
             if (message is GradedRemoveRequestMessage)
+            {
                 return WorldOperationKind.GradedRemove;
+            }
+
             if (message is WorkbenchOpMessage || message is WorkbenchBundleMessage)
+            {
                 return WorldOperationKind.Workbench;
+            }
+
             return WorldOperationKind.Unknown;
         }
     }

@@ -13,17 +13,16 @@ namespace CardShopCoop.Modules.World
     /// One shared market. PriceChangeManager rerolls every item/card percent change with
     /// UnityEngine.Random at each day start, so from day 2 the joiner would price cards
     /// against a market that does not exist (host customers judge his tags against the
-    /// HOST's numbers). The client runs the day roll vanilla like every other game path;
-    /// the host's post-roll table is the authority and is broadcast: item % changes, all
-    /// eight per-expansion card % changes, and the game-event price rows the phone apps read.
-    /// The rolled percents the snapshot ships (GeneratedMarketPrice in FillMarket/ReadMarketInto)
-    /// are fully overwritten, so the client's local roll converges on the next snapshot.
+    /// HOST's numbers). The joiner's day roll is therefore a host-authority boundary: the
+    /// client skips PriceChangeManager.OnDayStarted, and the host's post-roll table is
+    /// broadcast: item % changes, all eight per-expansion card % changes, and the game-event
+    /// price rows the phone apps read. The rolled percents the snapshot ships
+    /// (GeneratedMarketPrice in FillMarket/ReadMarketInto) fully overwrite the client's tables.
     ///
     /// The day roll also appends price HISTORY (UpdateItemPricePercentChange /
-    /// UpdatePastCardPricePercentChange) that is never shipped: m_ItemPricePercentPastChangeList
-    /// and each MarketPrice's pastPricePercentChangeList stay per-peer. The client's own history
-    /// curve is therefore local-only; there is no message that could carry it, so it is left to
-    /// the client's vanilla roll (the host keeps its own).
+    /// UpdatePastCardPricePercentChange). History is derived, not independent state: the host
+    /// appends each table's post-roll value, and the client applies the same values before
+    /// replaying the same append, so both curves stay in step without shipping the history.
     ///
     /// Card BASES: RestockManager.GenerateCardMarketPrice only writes each card's
     /// generatedMarketPrice base, which the snapshot ships and fully overwrites
@@ -48,6 +47,7 @@ namespace CardShopCoop.Modules.World
             ?? WorldClientBehaviour.ActiveCards?.Market;
 
         private static bool IsHost => Current?._host == true;
+        private static bool IsClient => Current != null && !Current._host;
         private static bool InGame => Current != null && Current._context.InGame();
 
         public Action<INetMessage> BroadcastState; // set by WorldCardInteraction: host -> clients
@@ -60,6 +60,16 @@ namespace CardShopCoop.Modules.World
         // cost updates, join) and HostTick broadcasts on the next tick. No polling, no timer:
         // the snapshot is a Reliable message, so a send is a delivery.
         private static bool s_dirty;
+
+        // Host: a day roll just finished and its complete post-roll snapshot still owes the
+        // clients. Kept separate from s_dirty so an unrelated flush cannot consume the marker.
+        private static bool s_dayRollPending;
+
+        // Client: the last host day whose price history this peer has appended. History is
+        // derived from the current percents, so applying the host snapshot and replaying the
+        // vanilla append locally reproduces the host history without sending it.
+        private int _lastHistoryDay;
+        private bool _hasBaseline;
 
         // Cached EPL modded-id list (walking the EPL item dictionary + Convert.ToInt32 per key
         // was happening on every snapshot build). The registry is fixed for a session.
@@ -86,7 +96,10 @@ namespace CardShopCoop.Modules.World
         internal void Reset()
         {
             _pendingState = null;
+            _lastHistoryDay = 0;
+            _hasBaseline = false;
             s_dirty = false;
+            s_dayRollPending = false;
             InvalidateContentCache();
             s_modCardPending.Clear();
             s_rawWriteMissLogged = false;
@@ -102,22 +115,33 @@ namespace CardShopCoop.Modules.World
         internal void Tick()
         {
             if (!InGame)
+            {
                 return;
+            }
+
 
             if (_host)
             {
-                FlushHostMutation();
+                // A pending day-roll marker forces one complete post-roll snapshot even if an
+                // earlier mid-day flush already cleared s_dirty.
+                FlushHostMutation(s_dayRollPending);
             }
         }
 
         internal void FlushClientState()
         {
             if (_host || _pendingState == null)
+            {
                 return;
+            }
+
 
             var pending = _pendingState;
             _pendingState = null;
-            ClientApplyState(pending);
+            // The first buffered snapshot is the join baseline: the sidecar/world save already
+            // carries the host's history through this day, so do not append it again. A later
+            // buffered day-roll snapshot (a reload during play) must append normally.
+            ClientApplyInner(pending, isBaseline: !_hasBaseline);
         }
 
         internal void AppendBaselineMessages(Action<INetMessage> append)
@@ -129,7 +153,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            append(BuildState());
+            append(BuildState(dayRoll: false));
             s_dirty = false;
         }
 
@@ -137,12 +161,14 @@ namespace CardShopCoop.Modules.World
 
         internal static void ApplyPatches(Harmony h)
         {
-            // The client runs PriceChangeManager.OnDayStarted vanilla. Its Random reroll is
-            // overwritten by the host's next snapshot, and the price HISTORY OnDayStarted appends
-            // is per-peer and not shipped, so there is nothing to forward. HostRolledPostfix is a
-            // host-only observer that stamps the dirty flag for the prompt broadcast; off-host it
-            // is a no-op.
+            // The client must never roll its own market: vanilla's Random reroll (including
+            // EPL's modded-expansion roll) would compete with the host's authoritative changes,
+            // and only rows the host happened to reroll would ever be corrected. Blocking the
+            // whole handler also skips the un-shipped history append, which is per-peer.
+            // HostRolledPostfix stamps the dirty flag for the prompt broadcast and is a no-op
+            // on a client (postfixes still run when the prefix skips the original).
             Try(h, typeof(PriceChangeManager), "OnDayStarted",
+                prefix: new HarmonyMethod(typeof(WorldMarketInteraction), nameof(ClientBlockPrefix)),
                 postfix: new HarmonyMethod(typeof(WorldMarketInteraction), nameof(HostRolledPostfix)));
             // Other writers of the synced market tables: a game-event price edit, the
             // initial load, first-seen base generation, and per-purchase cost updates.
@@ -235,7 +261,7 @@ namespace CardShopCoop.Modules.World
             if (IsHost)
             {
                 s_dirty = true;
-                Current?.FlushHostMutation();
+                Current?.FlushHostMutation(dayRoll: false);
             }
         }
 
@@ -258,21 +284,32 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>Host-authority boundary: the host (and singleplayer, where no behaviour is
+        /// active) runs the day roll; the client never does. Its market changes arrive from the
+        /// host's snapshot instead, so the two peers can only drift together.</summary>
+        public static bool ClientBlockPrefix()
+        {
+            return !IsClient;
+        }
+
         public static void HostRolledPostfix()
         {
-            // The day roll runs on every peer; only the host broadcasts the authoritative table.
+            // Postfixes run even when the prefix skipped the original; only the host broadcasts.
             if (IsHost)
             {
-                s_dirty = true; // a day roll changed the market; flush promptly
-                Current?.FlushHostMutation();
+                // Do not build the snapshot here: EPL's own day-start postfixes may still be
+                // adding modded-card changes. Tick sends one complete post-roll snapshot next
+                // frame, after every postfix has run.
+                s_dirty = true;
+                s_dayRollPending = true;
             }
         }
 
         // ---------------- host ----------------
 
-        private void FlushHostMutation()
+        private void FlushHostMutation(bool dayRoll)
         {
-            if (BroadcastState == null || !s_dirty)
+            if (BroadcastState == null || (!s_dirty && !dayRoll))
             {
                 return;
             }
@@ -287,18 +324,26 @@ namespace CardShopCoop.Modules.World
                     return;
                 }
 
-                var msg = BuildState();
+                var msg = BuildState(dayRoll);
                 BroadcastState(msg);
                 s_modCardPending.Clear();
                 s_dirty = false;
+                if (dayRoll)
+                {
+                    s_dayRollPending = false;
+                }
             }
             catch (Exception e) { CoopPlugin.Log.LogWarning("WorldMarketInteraction host: " + e.Message); }
         }
 
-        private static MarketStateMessage BuildState()
+        private static MarketStateMessage BuildState(bool dayRoll)
         {
             var modded = EplModdedItemTypes(); // empty when the bridge is inactive
-            var msg = new MarketStateMessage();
+            var msg = new MarketStateMessage
+            {
+                IsDayRoll = dayRoll,
+                Day = CPlayerData.m_CurrentDay,
+            };
             FillPercents(msg.ItemPricePercentChangeList, CPlayerData.m_ItemPricePercentChangeList, modded);
             FillMarket(msg.GenCardMarketPriceList, CPlayerData.m_GenCardMarketPriceList);
             FillMarket(msg.GenCardMarketPriceListDestiny, CPlayerData.m_GenCardMarketPriceListDestiny);
@@ -325,7 +370,7 @@ namespace CardShopCoop.Modules.World
 
         public void ClientApplyState(MarketStateMessage message)
         {
-            ClientApplyInner(message);
+            ClientApplyInner(message, isBaseline: false);
         }
 
         /// <summary>Client: apply now if in game, otherwise hold the newest snapshot until
@@ -333,7 +378,11 @@ namespace CardShopCoop.Modules.World
         public void ClientApplyOrBuffer(MarketStateMessage message, bool inGame)
         {
             if (message == null)
+            {
+
                 throw new InvalidOperationException("Authoritative market state is missing.");
+            }
+
 
             if (!inGame)
             {
@@ -347,7 +396,7 @@ namespace CardShopCoop.Modules.World
             ClientApplyState(message);
         }
 
-        private void ClientApplyInner(MarketStateMessage message)
+        private void ClientApplyInner(MarketStateMessage message, bool isBaseline)
         {
             ReadPercentsInto(message.ItemPricePercentChangeList, CPlayerData.m_ItemPricePercentChangeList);
             ReadMarketInto(message.GenCardMarketPriceList, CPlayerData.m_GenCardMarketPriceList);
@@ -366,6 +415,31 @@ namespace CardShopCoop.Modules.World
             ReadSparseFloatsInto(message.GeneratedCostPriceList, CPlayerData.m_GeneratedCostPriceList, ModdedGenCost, "generated cost price");
             ReadSparseFloatsInto(message.AverageItemCostList, CPlayerData.m_AverageItemCostList, ModdedAvgCost, "average item cost");
             ApplyModdedCards(message.ModdedCards);
+
+            // History is derived from the current percents, not independent state: the host's
+            // day roll appended each table's post-roll value, so replaying the same vanilla
+            // append after applying the snapshot reproduces the host history exactly. EPL's
+            // own postfix on UpdatePastCardPricePercentChange appends the modded-card rows.
+            if (isBaseline || !_hasBaseline)
+            {
+                // The join transfer already carries history through the host's current day.
+                _lastHistoryDay = message.Day;
+                _hasBaseline = true;
+                return;
+            }
+
+            if (message.IsDayRoll && message.Day > _lastHistoryDay)
+            {
+                CPlayerData.UpdateItemPricePercentChange();
+                CPlayerData.UpdatePastCardPricePercentChange();
+                _lastHistoryDay = message.Day;
+            }
+            else if (_lastHistoryDay == 0 && message.Day > 0)
+            {
+                // A snapshot that arrived without a buffered baseline: anchor the guard so an
+                // older/replayed day-roll snapshot cannot append a duplicate point.
+                _lastHistoryDay = message.Day;
+            }
         }
 
         // ---------------- wire helpers ----------------
@@ -740,7 +814,12 @@ namespace CardShopCoop.Modules.World
         {
             var args = new object[] { (EItemType)itemType, null };
             if (!(bool)s_eplTryGet.Invoke(s_eplSaveMgr, args))
+            {
+
                 throw new InvalidOperationException("EPL has no market row for item " + itemType + ".");
+            }
+
+
             return args[1];
         }
 
