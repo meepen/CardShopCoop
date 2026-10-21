@@ -295,6 +295,12 @@ namespace CardShopCoop.Modules.Shop
                     FiIsTutorial.SetValue(renamers[i], false);
                 }
             }
+            // SetIsTutorial adds movement hints that vanilla only removes in OnTriggerEnter, which
+            // runs for the player who walks in to name the shop. The Tutorial module's intro
+            // cleanup keys off the tutorial index leaving 0, which is set here first. Rebuild the
+            // tooltip bar from the player's current state, as vanilla does after the card album or
+            // pack opening, so the hints go without naming them here.
+            InteractionPlayerController.RestoreHiddenToolTip();
             FiTutorialIndex.SetValue(null, 1);
             MiEvaluateTaskVisibility.Invoke(tutorialManager, null);
             var indicator = FiTutorialIndicator.GetValue(tutorialManager) as GameObject;
