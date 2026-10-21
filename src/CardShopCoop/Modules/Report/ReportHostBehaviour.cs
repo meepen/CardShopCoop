@@ -132,11 +132,17 @@ namespace CardShopCoop.Modules.Report
             if (AllNextDayReady())
             {
                 AdvanceNextDay();
+                return;
             }
-            else
+
+            if (!_nextDayHostReady && _nextDayReadyPeers.Count == 0)
             {
-                BroadcastNextDayWait();
+                // The only players who readied just left. The timer's premise - continue without
+                // the still-pending players - no longer holds, so do not roll the host's day.
+                ResetNextDayGate();
             }
+
+            BroadcastNextDayWait();
         }
 
         /// <summary>A guest is ready for the day to roll. The host records it and advances once
@@ -147,6 +153,16 @@ namespace CardShopCoop.Modules.Report
         {
             if (_shutdown || _nextDayAdvancing || !_context.InGame() || context?.Connection == null)
             {
+                return;
+            }
+
+            if (!DayHasEnded())
+            {
+                // A readiness for a day that is not over (a stale press from a guest whose recap
+                // had not closed yet, or an early one from a skewed clock). Reject it and clear
+                // the sender's local ready latch so it can press again once the day really ends.
+                ResetNextDayGate();
+                BroadcastNextDayWait();
                 return;
             }
 
@@ -193,6 +209,12 @@ namespace CardShopCoop.Modules.Report
             BroadcastNextDayWait();
             return false;
         }
+
+        /// <summary>True while the game's day-end state is live. Vanilla's OnPressGoNextDay has no
+        /// day-end guard (only OnPressGoNextButton does), so the mod must check before every roll.
+        /// The getter dereferences CSingleton&lt;LightManager&gt;.Instance; SceneRef avoids that.</summary>
+        private static bool DayHasEnded()
+            => SceneRef<LightManager>.Get() != null && LightManager.GetHasDayEnded();
 
         private bool AllNextDayReady()
         {
@@ -273,6 +295,16 @@ namespace CardShopCoop.Modules.Report
         private void AdvanceNextDay()
         {
             ResetNextDayGate();
+
+            // Vanilla's OnPressGoNextDay has no day-end guard (only the button path does) and
+            // calls LightManager.GoNextDay unconditionally. Every roll path - host press,
+            // all-ready, timer, disconnect - comes through here, so this is the one authority.
+            if (!DayHasEnded())
+            {
+                BroadcastNextDayWait();
+                return;
+            }
+
             var screen = SceneRef<EndOfDayReportScreen>.Get();
             if (screen == null)
             {

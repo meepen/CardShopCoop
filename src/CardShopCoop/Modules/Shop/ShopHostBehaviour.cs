@@ -72,6 +72,7 @@ namespace CardShopCoop.Modules.Shop
                     PredictionId = Guid.Empty,
                     Name = name,
                     Initial = true,
+                    Unnamed = CPlayerData.m_TutorialIndex == 0,
                 });
             }
         }

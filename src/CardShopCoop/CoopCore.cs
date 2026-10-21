@@ -380,7 +380,7 @@ namespace CardShopCoop
                         return;
                     }
                 }
-                else if (InGameLevel())
+                else if (!CanJoinFromHere())
                 {
                     ErrorLine = "Join from the main menu (Title screen).";
                     NoteBackendError(backend, mode, ErrorLine);
@@ -612,6 +612,19 @@ namespace CardShopCoop
         /// </summary>
         private void HandleInviteOnMainThread(INetworkingBackend backend, FieldValues values)
         {
+            if (!CanJoinFromHere())
+            {
+                // Joining borrows the host's world, which only replaces the world cleanly from the
+                // Title screen. A load in flight (Title -> shop) is equally unsafe, and its
+                // destination is a shop rather than the menu.
+                CoopPlugin.Log.LogInfo("declining an inbound join request - not at the title screen");
+                UI.CoopAlert.Show(
+                    "Join from the main menu to accept this invite.",
+                    "Return to the Title screen (Back to menu), then ask your friend to invite you again.",
+                    header: "CO-OP INVITE");
+                return;
+            }
+
             // A join that is still connecting has no session to protect. Steam has already
             // consumed the invite, so refusing it would make the player ask for another one even
             // though they never got into a game. Tear the pending attempt down the same way the
@@ -631,18 +644,6 @@ namespace CardShopCoop
                         : "You're already in a co-op session.",
                     hosting ? "Stop hosting before accepting a friend's invite."
                         : "Leave the session before accepting a friend's invite.",
-                    header: "CO-OP INVITE");
-                return;
-            }
-
-            if (InGameLevel())
-            {
-                // Joining borrows the host's world, which only replaces the world cleanly from the
-                // Title screen; the game refuses the join from inside a loaded shop for that reason.
-                CoopPlugin.Log.LogInfo("declining an inbound join request - a shop is loaded");
-                UI.CoopAlert.Show(
-                    "Join from the main menu to accept this invite.",
-                    "Return to the Title screen (Back to menu), then ask your friend to invite you again.",
                     header: "CO-OP INVITE");
                 return;
             }
@@ -2162,6 +2163,11 @@ namespace CardShopCoop
             var scene = SceneManager.GetActiveScene();
             return scene.isLoaded && scene.name != "Title";
         }
+
+        /// <summary>Joining replaces the local world with the host's, which is only safe from the
+        /// Title screen with no load in flight. Scene identity is the ground truth for a live
+        /// shop; _gameLoading covers the Title -> shop window before the new scene is active.</summary>
+        private bool CanJoinFromHere() => !InGameplayScene() && !_gameLoading;
 
         private void AutoTick(float deltaTime)
         {

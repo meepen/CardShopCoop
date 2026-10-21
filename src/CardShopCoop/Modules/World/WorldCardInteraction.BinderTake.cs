@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Runtime;
 
 namespace CardShopCoop.Modules.World
 {
@@ -192,6 +193,7 @@ namespace CardShopCoop.Modules.World
             // Restore the album exactly as the client's refused prediction does, behind the
             // remote-apply guard so the correction is not forwarded as a fresh gain.
             ApplyPredictedCardDelta(card, amount, isAdd: true);
+            CancelPrimedDisplayPlacement();
             MarkHostBinderTakeRefused(card);
             CoopPlugin.Log.LogWarning("binder take refused on the host: " + CardIdent(card)
                 + " was already taken by another player; the album was restored and the hand "
@@ -209,11 +211,19 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
+            CancelPrimedDisplayPlacement();
             MarkHostBinderTakeRefused(card);
             CoopPlugin.Log.LogWarning("graded binder take refused on the host: " + CardIdent(card)
                 + " had no album row left; the spawned hand card will be removed.");
             return true;
         }
+
+        /// <summary>Vanilla HideCardAlbum calls ReduceCard/RemoveGradedCard, then AddHoldCard and
+        /// EnterHoldCardMode. With a primed display compartment, EnterHoldCardMode places the
+        /// spawned card and removes it from the held list before EndBinderTake can despawn it.
+        /// Clearing the flag (which also nulls the compartment) keeps the card held.</summary>
+        private static void CancelPrimedDisplayPlacement()
+            => SceneRef<InteractionPlayerController>.Get()?.SetIsPuttingCardOnDisplay(false);
 
         private static void MarkHostBinderTakeRefused(CardData card)
         {

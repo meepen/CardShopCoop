@@ -119,7 +119,17 @@ namespace CardShopCoop.Modules.Shop
             }
             if (renamer.m_SetNameInput != null)
             {
-                renamer.m_SetNameInput.text = name;
+                // TMP_InputField.text invokes onValueChanged; the rename UI wires that to
+                // ShopRenamer.OnInputChanged, which paints m_ShopName. A baseline that must not
+                // paint the sign therefore sets the field without notifying.
+                if (paintSign)
+                {
+                    renamer.m_SetNameInput.text = name;
+                }
+                else
+                {
+                    renamer.m_SetNameInput.SetTextWithoutNotify(name);
+                }
                 applied = true;
             }
             return applied;

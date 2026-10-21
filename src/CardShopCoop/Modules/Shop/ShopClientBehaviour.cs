@@ -16,6 +16,7 @@ namespace CardShopCoop.Modules.Shop
         private bool _shutdown;
         private string _pendingName;
         private bool _pendingInitial;
+        private bool _pendingUnnamed;
         private bool _remoteInitialNamingApplied;
         private const string PredictionScope = "shop.rename";
 
@@ -51,6 +52,7 @@ namespace CardShopCoop.Modules.Shop
                 }
                 _pendingName = null;
                 _pendingInitial = false;
+                _pendingUnnamed = false;
                 _remoteInitialNamingApplied = false;
                 ShopState.Reset();
                 _context = null;
@@ -74,6 +76,7 @@ namespace CardShopCoop.Modules.Shop
                 {
                     _pendingName = message.Name;
                     _pendingInitial = message.Initial;
+                    _pendingUnnamed = message.Unnamed;
                     ApplyPendingNameWhenReady();
                 });
         }
@@ -87,8 +90,9 @@ namespace CardShopCoop.Modules.Shop
 
             // On a new save, ShopRenamer.SetIsTutorial blanks the sign while the shop is unnamed
             // and only sets the "My Card Shop" placeholder as the name; the join baseline carries
-            // that placeholder, so keep it off the sign until the shop is named.
-            var unnamedBaseline = _pendingInitial && CPlayerData.m_TutorialIndex == 0;
+            // that placeholder, so keep it off the sign until the shop is named. The host decides
+            // whether the shop is unnamed; the guest's own tutorial index may be a stale snapshot.
+            var unnamedBaseline = _pendingInitial && _pendingUnnamed;
             if (!ShopState.Apply(_pendingName, paintSign: !unnamedBaseline))
             {
                 return;
@@ -111,6 +115,7 @@ namespace CardShopCoop.Modules.Shop
 
             _pendingName = null;
             _pendingInitial = false;
+            _pendingUnnamed = false;
         }
 
         /// <summary>Records the client's rename proposal the game already performed. Vanilla's
@@ -156,6 +161,7 @@ namespace CardShopCoop.Modules.Shop
             _shutdown = true;
             _pendingName = null;
             _pendingInitial = false;
+            _pendingUnnamed = false;
             _context?.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
                 _active = null;

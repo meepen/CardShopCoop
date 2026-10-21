@@ -655,7 +655,9 @@ namespace CardShopCoop.Modules.Report
         private void ApplyNextDayWaitUi()
         {
             var wait = _nextDayWait;
-            if (wait == null || !wait.Active || !_nextDayLocalReady
+            // Show this to players who have not readied too: the countdown is the only warning
+            // that the day will roll without them. Pending already excludes readied players.
+            if (wait == null || !wait.Active
                 || wait.Pending == null || wait.Pending.Count == 0)
             {
                 HudApi.SetNextDayWait(false, "");
