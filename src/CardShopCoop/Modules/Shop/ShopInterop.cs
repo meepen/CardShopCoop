@@ -99,10 +99,10 @@ namespace CardShopCoop.Modules.Shop
             return renamers.Length == 0 ? null : renamers[0];
         }
 
-        internal static bool ApplyRenamerText(ShopRenamer renamer, string name)
+        internal static bool ApplyRenamerText(ShopRenamer renamer, string name, bool paintSign = true)
         {
             var applied = false;
-            if (renamer.m_ShopName != null)
+            if (paintSign && renamer.m_ShopName != null)
             {
                 renamer.m_ShopName.text = name;
                 applied = true;

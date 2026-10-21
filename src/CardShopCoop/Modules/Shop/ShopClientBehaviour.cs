@@ -85,7 +85,11 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            if (!ShopState.Apply(_pendingName))
+            // On a new save, ShopRenamer.SetIsTutorial blanks the sign while the shop is unnamed
+            // and only sets the "My Card Shop" placeholder as the name; the join baseline carries
+            // that placeholder, so keep it off the sign until the shop is named.
+            var unnamedBaseline = _pendingInitial && CPlayerData.m_TutorialIndex == 0;
+            if (!ShopState.Apply(_pendingName, paintSign: !unnamedBaseline))
             {
                 return;
             }

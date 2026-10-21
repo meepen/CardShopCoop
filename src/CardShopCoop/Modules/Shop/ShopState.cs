@@ -49,7 +49,9 @@ namespace CardShopCoop.Modules.Shop
             return true;
         }
 
-        internal static bool Apply(string name)
+        /// <summary>Applies the canonical name. <paramref name="paintSign"/> false leaves the shop
+        /// sign itself untouched, as vanilla does for an unnamed shop.</summary>
+        internal static bool Apply(string name, bool paintSign = true)
         {
             _canonicalName = name;
             CPlayerData.PlayerName = name;
@@ -66,7 +68,7 @@ namespace CardShopCoop.Modules.Shop
                     continue;
                 }
 
-                appliedUi |= ShopInterop.ApplyRenamerText(renamer, name);
+                appliedUi |= ShopInterop.ApplyRenamerText(renamer, name, paintSign);
             }
 
             // CPlayerData is authoritative even while the scene is rebuilding. The caller uses
