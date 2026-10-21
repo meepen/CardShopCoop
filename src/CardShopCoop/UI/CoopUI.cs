@@ -177,15 +177,22 @@ namespace CardShopCoop.UI
                 DrawHudPill(HudApi.ToastText, "#8ef58a", Screen.height * 0.63f,
                     ref _registerSeen, ref _registerText, ref _registerGc);
             }
+            // The pending-open notice and the ready-gate notice share this anchor. They are not
+            // mutually exclusive: a guest blocked from opening the recap can receive the host's
+            // auto-continue countdown. Combine them into one pill so the countdown and the
+            // "back out" instruction are both visible.
             if (HudApi.NextDayWaitActive && HudApi.NextDayWaitText.Length > 0)
             {
-                DrawHudPill(HudApi.NextDayWaitText, "#ffd54a", Screen.height * 0.70f,
+                var waitText = HudApi.NextDayWaitText;
+                if (HudApi.EndOfDayPendingActive && HudApi.EndOfDayPendingText.Length > 0)
+                {
+                    waitText += "  " + HudApi.EndOfDayPendingText;
+                }
+
+                DrawHudPill(waitText, "#ffd54a", Screen.height * 0.70f,
                     ref _nextDayWaitSeen, ref _nextDayWaitText, ref _nextDayWaitGc);
             }
-            // The pending-open notice and the ready-gate notice share this anchor by design:
-            // a guest whose recap never opened cannot have pressed Next Day, so the two states
-            // are mutually exclusive and only one line can ever be up.
-            if (HudApi.EndOfDayPendingActive && HudApi.EndOfDayPendingText.Length > 0)
+            else if (HudApi.EndOfDayPendingActive && HudApi.EndOfDayPendingText.Length > 0)
             {
                 DrawHudPill(HudApi.EndOfDayPendingText, "#ffd54a", Screen.height * 0.70f,
                     ref _endOfDayPendingSeen, ref _endOfDayPendingText, ref _endOfDayPendingGc);
