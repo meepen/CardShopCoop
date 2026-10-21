@@ -808,6 +808,13 @@ namespace CardShopCoop.Modules.Npc
                 return false;
             }
 
+            // Mod-owned visual clones (a character preview or player avatar) are not vanilla
+            // pool spawns even though they still carry a Customer component while activating.
+            if (root.GetComponent<CoopOwnedVisual>() != null)
+            {
+                return false;
+            }
+
             var id = root.GetInstanceID();
             if (_puppetRoots.Contains(id) || _allowedNativeRoots.Contains(id))
             {

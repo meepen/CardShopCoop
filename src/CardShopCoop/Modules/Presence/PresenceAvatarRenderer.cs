@@ -726,6 +726,7 @@ namespace CardShopCoop.Modules.Presence
             _editorHolder = new GameObject("CoopCharacterEditorTemplate");
             _editorHolder.SetActive(false);
             var clone = Object.Instantiate(source.gameObject, _editorHolder.transform);
+            clone.AddComponent<CoopOwnedVisual>();
             var customer = clone.GetComponent<Customer>();
             var customization = customer != null
                 ? customer.m_CharacterCustom
@@ -1270,6 +1271,9 @@ namespace CardShopCoop.Modules.Presence
             var clone = Object.Instantiate(source.gameObject, holder.transform);
             try
             {
+                // Claim the clone before it is activated: the Npc client's native-activation
+                // guard must not deactivate a mod-owned visual as if it were a vanilla spawn.
+                clone.AddComponent<CoopOwnedVisual>();
                 clone.transform.SetParent(null, false);
                 clone.SetActive(true);
                 Object.Destroy(holder);
@@ -1327,6 +1331,23 @@ namespace CardShopCoop.Modules.Presence
                 }
 
                 clone.name = "CoopCharacterPreview";
+                // DestroyImmediate on the stripped behaviours can run an OnDestroy that switches
+                // the body off, and an old activation guard may have done so before it was
+                // stripped. Re-assert the root exactly like the remote avatar does.
+                clone.SetActive(true);
+                var previewRenderers = clone.GetComponentsInChildren<Renderer>(true);
+                var enabledPreviewRenderers = 0;
+                for (var i = 0; i < previewRenderers.Length; i++)
+                {
+                    if (previewRenderers[i] != null && previewRenderers[i].enabled)
+                    {
+                        enabledPreviewRenderers++;
+                    }
+                }
+
+                CoopPlugin.Log.LogDebug("character preview spawned: active="
+                    + clone.activeInHierarchy + " renderers=" + enabledPreviewRenderers + "/"
+                    + previewRenderers.Length);
                 _previewCustomization = customization;
                 _previewBody = clone;
             }
@@ -1977,6 +1998,9 @@ namespace CardShopCoop.Modules.Presence
             var clone = Object.Instantiate(source.gameObject, holder.transform);
             try
             {
+                // Claim the clone before it is activated: the Npc client's native-activation
+                // guard must not deactivate a mod-owned visual as if it were a vanilla spawn.
+                clone.AddComponent<CoopOwnedVisual>();
                 clone.transform.SetParent(null, worldPositionStays: false);
                 clone.transform.position = av.TargetPos;
                 clone.SetActive(true);
