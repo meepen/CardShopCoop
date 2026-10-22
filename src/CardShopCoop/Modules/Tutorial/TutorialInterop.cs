@@ -113,23 +113,13 @@ namespace CardShopCoop.Modules.Tutorial
                 _controller = FindSceneObject<InteractionPlayerController>();
             }
 
-            var controller = _controller;
-            if (controller != null)
+            // ShopRenamer.SetIsTutorial adds the intro's movement hints and only the naming
+            // player's OnTriggerEnter removes them. Rebuild the tooltip bar from the player's
+            // current state, as vanilla does after the card album or pack opening, so the hints
+            // go through the game's own path without the mod listing them.
+            if (_controller != null)
             {
-                var actions = new[]
-                {
-                    EGameAction.MoveForward,
-                    EGameAction.MoveLeft,
-                    EGameAction.MoveBackward,
-                    EGameAction.MoveRight,
-                    EGameAction.Jump,
-                    EGameAction.Sprint,
-                    EGameAction.Crouch,
-                };
-                for (var i = 0; i < actions.Length; i++)
-                {
-                    InteractionPlayerController.RemoveToolTip(actions[i]);
-                }
+                InteractionPlayerController.RestoreHiddenToolTip();
             }
 
             if (_gameUi == null)
