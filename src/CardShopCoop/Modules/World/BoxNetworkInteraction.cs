@@ -1852,7 +1852,7 @@ namespace CardShopCoop.Modules.World
             _idsByBox[box] = id;
         }
 
-        private void Unbind(Guid id, InteractablePackagingBox box)
+        internal void Unbind(Guid id, InteractablePackagingBox box)
         {
             _boxesById.Remove(id);
             if (box != null)
@@ -2071,6 +2071,11 @@ namespace CardShopCoop.Modules.World
                 DetachStoredBox(box);
 
                 box.OnDestroyed();
+                if (box.gameObject != null)
+                {
+                    box.gameObject.SetActive(false);
+                    UnityEngine.Object.Destroy(box.gameObject);
+                }
             }
             finally
             {

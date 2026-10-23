@@ -140,6 +140,60 @@ namespace CardShopCoop.Modules.SaveTransfer
                 manager.m_CurrentSaveLoadSlotSelectedIndex = previousSlot;
             }
 
+            try
+            {
+                var epl6 = Path.Combine(Application.persistentDataPath,
+                    "EnhancedPrefabLoader_" + TempHostSnapshotSlot + ".json");
+                if (!IsFresh(epl6, timestamp))
+                {
+                    string srcEpl = null;
+                    if (previousSlot >= 0)
+                    {
+                        var candidate = Path.Combine(Application.persistentDataPath,
+                            "EnhancedPrefabLoader_" + previousSlot + ".json");
+                        if (File.Exists(candidate))
+                        {
+                            srcEpl = candidate;
+                        }
+                    }
+
+                    if (srcEpl == null)
+                    {
+                        var latestTime = DateTime.MinValue;
+                        var eplFiles = Directory.GetFiles(Application.persistentDataPath,
+                            "EnhancedPrefabLoader_*.json", SearchOption.TopDirectoryOnly);
+                        for (var i = 0; i < eplFiles.Length; i++)
+                        {
+                            var f = eplFiles[i];
+                            var fn = Path.GetFileName(f);
+                            if (fn.IndexOf("enum_values", StringComparison.OrdinalIgnoreCase) >= 0
+                                || fn.IndexOf("-100", StringComparison.OrdinalIgnoreCase) >= 0
+                                || string.Equals(f, epl6, StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue;
+                            }
+
+                            var wt = File.GetLastWriteTimeUtc(f);
+                            if (wt > latestTime)
+                            {
+                                latestTime = wt;
+                                srcEpl = f;
+                            }
+                        }
+                    }
+
+                    if (srcEpl != null && File.Exists(srcEpl))
+                    {
+                        File.Copy(srcEpl, epl6, true);
+                        File.SetLastWriteTimeUtc(epl6, DateTime.UtcNow);
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                CoopLog.Swallow(error);
+            }
+
             // The world snapshot has now been serialized in live-list order. Freeze the matching
             // per-connection identity manifest immediately, using the game's own save filter, so
             // the baseline can name each box/placement by its snapshot slot deterministically.
