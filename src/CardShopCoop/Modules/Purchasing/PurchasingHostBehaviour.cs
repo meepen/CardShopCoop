@@ -21,9 +21,9 @@ namespace CardShopCoop.Modules.Purchasing
     [ServerBehaviour]
     public sealed class PurchasingHostBehaviour : CoopBehaviour
     {
-        private const int MaxLines = 64;
+        private const int MaxLines = 512;
         private const int MaxBoxesPerLine = 100;
-        private const int MaxTotalBoxes = 1000;
+        private const int MaxTotalBoxes = 2500;
         private const float ScannerUnlockPrice = 12000f;
         private static readonly System.Reflection.FieldInfo PendingRestockBoxes =
             AccessTools.Field(typeof(RestockManager), "m_SpawnBoxItemWaitingList");
@@ -479,16 +479,26 @@ namespace CardShopCoop.Modules.Purchasing
             }
 
             var connectionId = context.Connection.Id;
-            var outcome = Process(message, connectionId, PeerLabel(connectionId));
-            if (outcome.Success)
+            try
             {
-                SendOutcome(connectionId, outcome);
+                var outcome = Process(message, connectionId, PeerLabel(connectionId));
+                if (outcome.Success)
+                {
+                    SendOutcome(connectionId, outcome);
+                }
+                else if (message.PredictionId != Guid.Empty)
+                {
+                    PredictionApi.Rollback(_context, connectionId, message.PredictionId);
+                }
             }
-            else if (message.PredictionId != Guid.Empty)
+            catch (Exception ex)
             {
-                PredictionApi.Rollback(_context, connectionId, message.PredictionId);
+                CoopPlugin.Log.LogError("[purchasing] HandleIntent exception: " + ex);
+                if (message.PredictionId != Guid.Empty)
+                {
+                    PredictionApi.Rollback(_context, connectionId, message.PredictionId);
+                }
             }
-
         }
 
         internal void Shutdown()

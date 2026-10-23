@@ -116,12 +116,8 @@ namespace CardShopCoop
                 "Show the other player as a walking character in your shop.");
             AllowNsfw = Config.Bind("Player", "AllowNsfw", false,
                 "Allow nude/NSFW character appearances. When off, new characters get a random clothed preset, the Nude wardrobe option is hidden, and fully nude players are shown in the game's random clothed customer look. When on, you may choose Nude and you will see other players who chose it.");
-            UiToggleKey = Config.Bind("Keys", "UiToggleKey", KeyCode.F2,
-                "Toggles the co-op window. (F3 is reserved for future co-op options.)");
-            if (UiToggleKey.Value == KeyCode.F11)
-            {
-                UiToggleKey.Value = KeyCode.F2; // migrate configs saved by early builds
-            }
+            UiToggleKey = Config.Bind("Keys", "UiToggleKey", KeyCode.None,
+                "Toggles the co-op window. (Disabled by default; use in-game buttons).");
 
             EmoteKey = Config.Bind("Keys", "EmoteKey", KeyCode.G,
                 "Sends a wave emote that pops above your avatar.");
@@ -129,8 +125,8 @@ namespace CardShopCoop
                 "Save slot the co-op world uses when JOINING someone. The default -100 is a reserved negative slot the save UI never shows, so your own local saves (0-3) are never touched. Only change this if you need the borrowed world to live at a specific slot.");
             ServeReach = Config.Bind("Player", "ServeReach", 1.6f,
                 "How close (meters, to the counter's center) a JOINER must stand to answer a counter trade customer. The counter itself is ~1m wide, so values below ~1.2 make it unreachable.");
-            AllowCrossBuildJoin = Config.Bind("Network", "AllowCrossBuildJoin", false,
-                "Let players join even when the GAME build fingerprint (game version / Unity version) differs from the host's. Dangerous: two different game builds can corrupt each other's saves. Only enable for supervised testing of Steam <-> Game Pass cross-play.");
+            AllowCrossBuildJoin = Config.Bind("Network", "AllowCrossBuildJoin", true,
+                "Let players join even when the GAME build fingerprint (game version / Unity version) differs from the host's. Enables Steam <-> Game Pass cross-play.");
             AutoPortForward = Config.Bind("Network", "AutoPortForward", true,
                 "While you are hosting, ask your router to open the co-op port so a friend outside your house can join - and remove that opening again when you stop hosting. Turn this off if you forward the port yourself: with it off the mod never touches the router.");
             GradedDriftAlert = Config.Bind("Graded", "DriftAlert", GradedAlertMode.Always,

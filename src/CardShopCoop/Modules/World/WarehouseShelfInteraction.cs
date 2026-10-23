@@ -822,13 +822,6 @@ namespace CardShopCoop.Modules.World
                 CoopPlugin.Log.LogWarning("Warehouse store rejected: box ID " + message.BoxNetworkId
                     + " has no item compartment.");
             }
-            else if (storeBox.m_ItemCompartment.GetItemType() != message.ItemType
-                     || storeBox.m_ItemCompartment.GetItemCount() != message.Amount
-                     || storeBox.m_IsBigBox != message.IsBig)
-            {
-                CoopPlugin.Log.LogWarning("Warehouse store rejected: payload disagrees with box ID "
-                    + message.BoxNetworkId + ".");
-            }
             else if (IsAlreadyShelved(compartment, storeBox, message.BoxNetworkId))
             {
                 // The box is already on a warehouse shelf (or already stored by our own model), so
@@ -851,7 +844,8 @@ namespace CardShopCoop.Modules.World
                             message.IsBig);
                         if (accepted)
                         {
-                            storeBox.OnDestroyed();
+                            _boxes.Unbind(message.BoxNetworkId, storeBox);
+                            _boxes.DestroyWithoutNotification(storeBox);
                         }
                     }
                     else
@@ -1190,6 +1184,18 @@ namespace CardShopCoop.Modules.World
                         PrepareAppliedRecordId(compartment, message.BoxNetworkId);
                         AddRecord(compartment, message.ItemType, message.Amount, message.IsBig);
                         _boxes.ClientConvertToStoredRecord(message.BoxNetworkId);
+                    }
+
+                    if (_boxes.TryGetBox(message.BoxNetworkId, out var box2) && box2 != null)
+                    {
+                        if (box2 is InteractablePackagingBox_Item item2)
+                        {
+                            _playerBox?.DetachMirroredHold(item2, message.BoxNetworkId);
+                            _playerBox?.ReleaseHeldObject(item2);
+                        }
+
+                        _boxes.Unbind(message.BoxNetworkId, box2);
+                        _boxes.DestroyWithoutNotification(box2);
                     }
                 }
                 else if (_boxes.TryGetBox(message.BoxNetworkId, out var box)

@@ -291,6 +291,7 @@ namespace CardShopCoop
                         "transfer_failed", true, ConnectionState.Transferring)));
 
             _ui = new UI.CoopUI();
+            UI.CoopMenus.Init();
             _persistentRuntime = gameObject.AddComponent<PersistentRuntimeBehaviour>();
             _persistentRuntime.InitializePersistent(new CoopRuntimeContext(
                 _messageRouter, InGameLevel, Broadcast,
@@ -1668,11 +1669,13 @@ namespace CardShopCoop
 
             CheckJoinAttempts();
 
-            if (Input.GetKeyDown(CoopPlugin.UiToggleKey.Value))
+            if (_ui != null && _ui.Visible && Input.GetKeyDown(KeyCode.Escape))
             {
-                _ui.Visible = !_ui.Visible;
+                _ui.Visible = false;
             }
-            SessionInputRuntime.SetWindowModal(_ui.Visible && InGameplayScene());
+            UI.CoopMenus.Tick();
+            UI.CoopScreen.Tick();
+            SessionInputRuntime.SetWindowModal((_ui.Visible || UI.CoopScreen.IsOpen) && InGameplayScene());
             if (Role != CoopRole.None && Input.GetKeyDown(CoopPlugin.EmoteKey.Value)
                 && !UI.CoopUI.TextFieldFocused && !NativeTextInputFocused())
             {
@@ -2213,7 +2216,7 @@ namespace CardShopCoop
         /// scene identity is the reliable ground truth because CGameManager.m_IsGameLevel stays
         /// false for the rest of the run when the game's level-load handler aborts.
         /// </summary>
-        private static bool InGameplayScene()
+        internal static bool InGameplayScene()
         {
             var scene = SceneManager.GetActiveScene();
             return scene.isLoaded && scene.name != "Title";
@@ -2388,8 +2391,23 @@ namespace CardShopCoop
             }
         }
 
+        public void ToggleLegacyUI()
+        {
+            if (_ui != null)
+            {
+                _ui.Visible = !_ui.Visible;
+            }
+        }
+
+        public void OpenCharacterCustomizer()
+        {
+            _ui?.OpenCharacterTab();
+        }
+
         private void OnDestroy()
         {
+            UI.CoopMenus.Shutdown();
+            UI.CoopScreen.Destroy();
             _messageRouter.HandlerFailed -= OnHandlerFailed;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CEventManager.RemoveListener<CEventPlayer_OnOpenCardPack>(OnLocalPackOpened);

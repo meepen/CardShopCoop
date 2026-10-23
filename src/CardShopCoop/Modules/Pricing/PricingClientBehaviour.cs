@@ -166,6 +166,108 @@ namespace CardShopCoop.Modules.Pricing
             {
                 _applying = false;
             }
+
+            RefreshAllShelfPriceTags();
+        }
+
+        public static void RefreshAllShelfPriceTags()
+        {
+            try
+            {
+                var mgr = CSingleton<ShelfManager>.Instance ?? ShelfManager.m_Instance;
+                if (mgr == null)
+                {
+                    return;
+                }
+
+                if (mgr.m_ShelfList != null)
+                {
+                    for (var i = 0; i < mgr.m_ShelfList.Count; i++)
+                    {
+                        var shelf = mgr.m_ShelfList[i];
+                        if (shelf == null)
+                        {
+                            continue;
+                        }
+
+                        var compartments = shelf.GetItemCompartmentList();
+                        if (compartments == null)
+                        {
+                            continue;
+                        }
+
+                        for (var j = 0; j < compartments.Count; j++)
+                        {
+                            var comp = compartments[j];
+                            if (comp != null && comp.GetItemCount() > 0)
+                            {
+                                comp.SetPriceTagItemPriceText();
+                            }
+                        }
+                    }
+                }
+
+                if (mgr.m_CardItemCombiShelfList != null)
+                {
+                    for (var i = 0; i < mgr.m_CardItemCombiShelfList.Count; i++)
+                    {
+                        var combi = mgr.m_CardItemCombiShelfList[i];
+                        if (combi == null)
+                        {
+                            continue;
+                        }
+
+                        var itemCompartments = combi.GetItemCompartmentList();
+                        if (itemCompartments != null)
+                        {
+                            for (var j = 0; j < itemCompartments.Count; j++)
+                            {
+                                var comp = itemCompartments[j];
+                                if (comp != null && comp.GetItemCount() > 0)
+                                {
+                                    comp.SetPriceTagItemPriceText();
+                                }
+                            }
+                        }
+
+                        var cardCompartments = combi.GetCardCompartmentList();
+                        if (cardCompartments != null)
+                        {
+                            for (var j = 0; j < cardCompartments.Count; j++)
+                            {
+                                cardCompartments[j]?.RefreshPriceTagItemPriceText();
+                            }
+                        }
+                    }
+                }
+
+                if (mgr.m_CardShelfList != null)
+                {
+                    for (var i = 0; i < mgr.m_CardShelfList.Count; i++)
+                    {
+                        var cardShelf = mgr.m_CardShelfList[i];
+                        if (cardShelf == null)
+                        {
+                            continue;
+                        }
+
+                        var cardCompartments = cardShelf.GetCardCompartmentList();
+                        if (cardCompartments == null)
+                        {
+                            continue;
+                        }
+
+                        for (var j = 0; j < cardCompartments.Count; j++)
+                        {
+                            cardCompartments[j]?.RefreshPriceTagItemPriceText();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                CoopLog.Swallow(ex);
+            }
         }
 
         [MessageHandler(typeof(PricingDeltaBatchMessage))]
@@ -203,6 +305,11 @@ namespace CardShopCoop.Modules.Pricing
                     DeferCardDelta(message.Cards[i]);
                 }
 
+            }
+
+            if (ready && (message.Items.Count > 0 || message.Cards.Count > 0))
+            {
+                RefreshAllShelfPriceTags();
             }
         }
 
@@ -337,15 +444,11 @@ namespace CardShopCoop.Modules.Pricing
 
 
             var compartment = CurrentCardPriceCompartment();
-            if (compartment == null
-                || !WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+            var shelfKey = -1;
+            var index = -1;
+            if (compartment != null)
             {
-                // No stable display slot means the host cannot address the priced card. Dropping
-                // the intent is correct: a content search would re-introduce the heuristic this
-                // binding replaces. The display protocol drops the same shelf for the same reason.
-                CoopPlugin.Log.LogWarning("[pricing] card price change had no display slot; "
-                    + "not forwarded.");
-                return;
+                WorldCardDisplay.TryMakeKey(compartment, out shelfKey, out index);
             }
 
             var grade = GradingApi.Encoded(card);
