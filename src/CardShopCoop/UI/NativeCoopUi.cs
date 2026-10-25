@@ -32,8 +32,6 @@ namespace CardShopCoop.UI
 
         internal static readonly Color WellFill = new Color(0.17f, 0.12f, 0.21f);
 
-        internal static readonly Color InputFill = new Color(0.95f, 0.93f, 0.97f);
-
         internal static readonly Color InputText = new Color(0.16f, 0.11f, 0.22f);
 
         internal static readonly Color Dim = new Color(0.8f, 0.76f, 0.86f);
@@ -621,7 +619,11 @@ namespace CardShopCoop.UI
                 bgImg.sprite = White;
             }
             bgImg.color = new Color(1f, 1f, 1f, 0f);
-            Panel(go.transform, 0f, 0f, w, h, InputFill, 2.4f).name = "BG";
+            // Explicit two-layer field: a black outer frame and a white inner fill. The cloned
+            // vanilla border sprite has a transparent centre, so tinting it alone let the dark
+            // panel behind show through and made the field read as dark grey.
+            Flat(go.transform, 0f, 0f, w, h, Color.black).name = "Border";
+            Flat(go.transform, 2f, 2f, w - 4f, h - 4f, Color.white).name = "BG";
             RectTransform textArea = Node(go.transform, "TextArea", 0f, 0f, w, h);
             Stretch(textArea, 18f, 4f, 18f, 4f);
             textArea.gameObject.AddComponent<RectMask2D>();
