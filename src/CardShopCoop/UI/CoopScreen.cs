@@ -1043,6 +1043,7 @@ namespace CardShopCoop.UI
             {
                 _advNameInput.text = "";
             }
+            CoopBackendOptions.ResetValues();
             RefreshAdvanced();
             Hint("Advanced settings reset to default values.");
         }

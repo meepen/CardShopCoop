@@ -17,6 +17,8 @@ namespace CardShopCoop.UI
         private const float ColumnGap = 40f;
         private static readonly Dictionary<string, FieldValues> Values = new();
 
+        internal static void ResetValues() => Values.Clear();
+
         internal static string Signature(ConnectMode mode)
         {
             var core = CoopCore.Instance;
