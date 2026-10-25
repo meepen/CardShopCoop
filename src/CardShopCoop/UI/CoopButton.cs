@@ -37,5 +37,13 @@ namespace CardShopCoop.UI
                 NativeCoopUi.Paint(Rt, tint);
             }
         }
+
+        internal void SetInteractable(bool on)
+        {
+            if (Btn != null)
+            {
+                Btn.interactable = on;
+            }
+        }
     }
 }

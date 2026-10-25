@@ -32,7 +32,7 @@ namespace CardShopCoop.UI
 
         internal static readonly Color WellFill = new Color(0.17f, 0.12f, 0.21f);
 
-        internal static readonly Color InputText = new Color(0.16f, 0.11f, 0.22f);
+        internal static readonly Color InputText = Color.white;
 
         internal static readonly Color Dim = new Color(0.8f, 0.76f, 0.86f);
 
@@ -63,6 +63,8 @@ namespace CardShopCoop.UI
         private static Texture2D _eyeOpen;
 
         private static Texture2D _eyeShut;
+
+        private static Material _inputMaterial;
 
         internal static bool HasTemplate => _buttonTemplate != null;
 
@@ -207,6 +209,11 @@ namespace CardShopCoop.UI
             _holder = null;
             _buttonTemplate = null;
             _textTemplate = null;
+            if (_inputMaterial != null)
+            {
+                UnityEngine.Object.Destroy(_inputMaterial);
+            }
+            _inputMaterial = null;
         }
 
         private static Transform Holder()
@@ -619,20 +626,21 @@ namespace CardShopCoop.UI
                 bgImg.sprite = White;
             }
             bgImg.color = new Color(1f, 1f, 1f, 0f);
-            // Explicit two-layer field: a black outer frame and a white inner fill. The cloned
+            // Explicit two-layer field: a black outer frame and a dark inner fill. The cloned
             // vanilla border sprite has a transparent centre, so tinting it alone let the dark
-            // panel behind show through and made the field read as dark grey.
+            // panel behind show through. The entered text is white with a black outline.
             Flat(go.transform, 0f, 0f, w, h, Color.black).name = "Border";
-            Flat(go.transform, 2f, 2f, w - 4f, h - 4f, Color.white).name = "BG";
+            Flat(go.transform, 2f, 2f, w - 4f, h - 4f, WellFill).name = "BG";
             RectTransform textArea = Node(go.transform, "TextArea", 0f, 0f, w, h);
             Stretch(textArea, 18f, 4f, 18f, 4f);
             textArea.gameObject.AddComponent<RectMask2D>();
-            TextMeshProUGUI phText = Text(textArea, placeholder, size, 0f, 0f, w, h, new Color(0.55f, 0.5f, 0.62f), TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
+            TextMeshProUGUI phText = Text(textArea, placeholder, size, 0f, 0f, w, h, new Color(0.68f, 0.64f, 0.76f), TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
             Stretch(phText.rectTransform, 0f, 0f, 0f, 0f);
             phText.fontStyle = FontStyles.Italic;
             TextMeshProUGUI inputText = Text(textArea, "", size, 0f, 0f, w, h, InputText, TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
             Stretch(inputText.rectTransform, 0f, 0f, 0f, 0f);
             inputText.overflowMode = TextOverflowModes.Overflow;
+            ApplyInputStyle(inputText);
             TMP_InputField field = go.AddComponent<TMP_InputField>();
             field.textViewport = textArea;
             field.textComponent = inputText;
@@ -648,6 +656,49 @@ namespace CardShopCoop.UI
             field.richText = false;
             go.SetActive(true);
             return field;
+        }
+
+        private static void ApplyInputStyle(TextMeshProUGUI text)
+        {
+            if (text == null)
+            {
+                return;
+            }
+
+            text.color = InputText;
+            Material material = InputMaterial(text.fontSharedMaterial);
+            if (material != null)
+            {
+                text.fontSharedMaterial = material;
+            }
+        }
+
+        private static Material InputMaterial(Material source)
+        {
+            if (_inputMaterial != null)
+            {
+                return _inputMaterial;
+            }
+            if (source == null)
+            {
+                return null;
+            }
+
+            _inputMaterial = new Material(source) { name = "NativeCoopUi_InputMaterial" };
+            _inputMaterial.EnableKeyword("OUTLINE_ON");
+            if (_inputMaterial.HasProperty("_FaceColor"))
+            {
+                _inputMaterial.SetColor("_FaceColor", Color.white);
+            }
+            if (_inputMaterial.HasProperty("_OutlineColor"))
+            {
+                _inputMaterial.SetColor("_OutlineColor", Color.black);
+            }
+            if (_inputMaterial.HasProperty("_OutlineWidth"))
+            {
+                _inputMaterial.SetFloat("_OutlineWidth", 0.2f);
+            }
+            return _inputMaterial;
         }
 
         internal static ControllerButton NavFor(GameObject go, Button button, TMP_InputField keyboard)

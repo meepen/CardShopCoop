@@ -186,7 +186,7 @@ namespace CardShopCoop.Net.Networking
             if (mode == ConnectMode.Host)
             {
                 // Last, because the things you type come first: this is a preference, not an input.
-                fields.Add(new BackendField(FieldId.AutoForward, "Open my router's port",
+                fields.Add(new BackendField(FieldId.AutoForward, "Auto Port Forward (UPnP)",
                     FieldKind.Toggle, Flag(FieldId.AutoForward) ? "1" : "0",
                     tooltip: "Ask your router to open the co-op port (UPnP, then NAT-PMP) and close "
                         + "it again when you stop hosting. Turn this off if you forward the port "

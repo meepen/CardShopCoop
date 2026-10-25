@@ -46,7 +46,6 @@ namespace CardShopCoop.UI
         private static bool _navPushed;
 
         private static string _hint = "";
-        private static string _localIp;
         private static int _hintGeneration;
         private static bool _eventsSubscribed;
 
@@ -72,7 +71,17 @@ namespace CardShopCoop.UI
 
         private static GameObject _joinGrp;
 
+        private static GameObject _joinFormRoot;
+
+        private static string _joinFormSignature;
+
         private static GameObject _sessGrp;
+
+        private static GameObject _hostFormRoot;
+
+        private static string _hostFormSignature;
+
+        private static bool _hostFormsLive;
 
         private static GameObject _charGrp;
 
@@ -96,14 +105,6 @@ namespace CardShopCoop.UI
 
         private static bool _previewActive = false;
 
-        private static GameObject _steamJoinGrp;
-
-        private static GameObject _directGrp;
-
-        private static GameObject _hostDirectGrp;
-
-        private static TextMeshProUGUI _idLine;
-
         private static TextMeshProUGUI _playersHead;
 
         private static TextMeshProUGUI _status;
@@ -112,49 +113,13 @@ namespace CardShopCoop.UI
 
         private static readonly PlayerRow[] Players = new PlayerRow[8];
 
-        private static TMP_InputField _ipInput;
-
-        private static TMP_InputField _portInput;
-
-        private static TMP_InputField _steamLobbyInput;
-
-        private static TMP_InputField _hostPort;
-
-        private static CoopButton _paste;
-
-        private static CoopButton _joinDirect;
-
-        private static CoopButton _joinSteam;
-
-        private static CoopButton _browseSteam;
-
-        private static CoopButton _steamInvite;
-
-        private static CoopButton _steamCopyLobby;
-
         private static CoopButton _cancel;
-
-        private static CoopButton _copy;
-
-        private static CoopButton _hostDirect;
-
-        private static CoopButton _hostSteam;
-
-        private static CoopButton _stop;
 
         private static CoopButton _back;
 
         private static CoopButton _crossplayBtn;
 
-        private static CoopButton _upnpBtn;
-
         private static TMP_InputField _advNameInput;
-
-        private static INetworkingBackend SteamBackend => NetworkingBackends.All().FirstOrDefault(b => b.Id == "steam");
-
-        private static INetworkingBackend IpBackend => NetworkingBackends.All().FirstOrDefault(b => b.Id == "ip");
-
-        private static bool HasSteam => SteamBackend != null;
 
         internal static void Toggle()
         {
@@ -424,7 +389,6 @@ namespace CardShopCoop.UI
                 UnityEngine.Object.Destroy(_root);
             }
             _root = null;
-            _localIp = null;
             NativeCoopUi.Shutdown();
         }
 
@@ -481,36 +445,7 @@ namespace CardShopCoop.UI
             }
         }
 
-        private static ControllerButton StartButton()
-        {
-            if (CoopMenus.AtTitle)
-            {
-                if (_joinDirect != null && _joinDirect.Go.activeInHierarchy)
-                {
-                    return _joinDirect.Ctrl;
-                }
-                if (_joinSteam != null && _joinSteam.Go.activeInHierarchy)
-                {
-                    return _joinSteam.Ctrl;
-                }
-            }
-            else
-            {
-                if (_hostSteam != null && _hostSteam.Go.activeInHierarchy)
-                {
-                    return _hostSteam.Ctrl;
-                }
-                if (_hostDirect != null && _hostDirect.Go.activeInHierarchy)
-                {
-                    return _hostDirect.Ctrl;
-                }
-                if (_stop != null && _stop.Go.activeInHierarchy)
-                {
-                    return _stop.Ctrl;
-                }
-            }
-            return _back?.Ctrl;
-        }
+        private static ControllerButton StartButton() => _back?.Ctrl;
 
         private static void Build()
         {
@@ -649,55 +584,27 @@ namespace CardShopCoop.UI
         {
             RectTransform joinRt = NativeCoopUi.Node(p, "Join", 0f, 0f, 1040f, 980f);
             _joinGrp = joinRt.gameObject;
-            RectTransform directRt = NativeCoopUi.Node(joinRt, "Direct", 0f, 0f, 1040f, 980f);
-            _directGrp = directRt.gameObject;
-            NativeCoopUi.Text(directRt, "Direct Connection (IP / LAN / Xbox App)", 26f, 40f, 180f, 960f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
-            NativeCoopUi.Text(directRt, "Enter host IP and Port, or click Paste to paste from clipboard / Game Bar.", 18f, 40f, 216f, 960f, 26f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            _ipInput = NativeCoopUi.Input(directRt, "Host IP address (e.g. 192.168.1.50)", 40f, 250f, 540f, 50f, 22f, 64, TMP_InputField.ContentType.Standard);
-            _ipInput.text = string.IsNullOrEmpty(CoopPlugin.LastJoinIP.Value) ? "127.0.0.1" : CoopPlugin.LastJoinIP.Value;
-            _portInput = NativeCoopUi.Input(directRt, "Port", 600f, 250f, 140f, 50f, 22f, 6, TMP_InputField.ContentType.IntegerNumber);
-            _portInput.text = CoopPlugin.Port.Value.ToString();
-            _paste = NativeCoopUi.Button(directRt, "Paste", NativeCoopUi.Blue, OnPaste, 760f, 250f, 100f, 50f, 22f);
-            _joinDirect = NativeCoopUi.Button(directRt, "Join Direct", NativeCoopUi.Green, OnJoinDirect, 880f, 250f, 120f, 50f, 22f);
-            RectTransform steamRt = NativeCoopUi.Node(joinRt, "SteamJoin", 0f, 0f, 1040f, 980f);
-            _steamJoinGrp = steamRt.gameObject;
-            NativeCoopUi.Text(steamRt, "Steam Lobby Connection", 26f, 40f, 330f, 960f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
-            NativeCoopUi.Text(steamRt, "Enter a Steam Lobby ID or browse public lobbies.", 18f, 40f, 366f, 960f, 26f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            _steamLobbyInput = NativeCoopUi.Input(steamRt, "Steam Lobby ID (e.g. 10977524...)", 40f, 400f, 540f, 50f, 22f, 32, TMP_InputField.ContentType.Standard);
-            _joinSteam = NativeCoopUi.Button(steamRt, "Join Lobby", NativeCoopUi.Green, OnJoinSteam, 600f, 400f, 180f, 50f, 22f);
-            _browseSteam = NativeCoopUi.Button(steamRt, "Browse Lobbies", NativeCoopUi.Blue, OnBrowseSteam, 800f, 400f, 200f, 50f, 22f);
+            _joinFormRoot = NativeCoopUi.Node(joinRt, "BackendForms", 40f, 200f, 960f, 500f)
+                .gameObject;
         }
 
         private static void BuildSession(Transform p)
         {
             RectTransform sessRt = NativeCoopUi.Node(p, "Session", 0f, 0f, 1040f, 980f);
             _sessGrp = sessRt.gameObject;
-            _idLine = NativeCoopUi.Text(sessRt, "", 22f, 40f, 180f, 480f, 42f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _copy = NativeCoopUi.Button(sessRt, "Copy IP:Port", NativeCoopUi.Blue, OnCopy, 540f, 180f, 180f, 44f, 22f);
-            _steamCopyLobby = NativeCoopUi.Button(sessRt, "Copy Lobby ID", NativeCoopUi.Blue, OnSteamCopyLobby, 740f, 180f, 200f, 44f, 22f);
-            RectTransform hostDirectRt = NativeCoopUi.Node(sessRt, "HostDirectGrp", 0f, 0f, 1040f, 980f);
-            _hostDirectGrp = hostDirectRt.gameObject;
-            _hostPort = NativeCoopUi.Input(hostDirectRt, "Port", 40f, 236f, 140f, 50f, 22f, 6, TMP_InputField.ContentType.IntegerNumber);
-            _hostPort.text = CoopPlugin.Port.Value.ToString();
-            _hostDirect = NativeCoopUi.Button(hostDirectRt, "Host Direct (LAN / Xbox)", NativeCoopUi.Green, OnHostDirect, 200f, 236f, 380f, 50f, 22f);
-            _hostSteam = NativeCoopUi.Button(hostDirectRt, "Host on Steam", NativeCoopUi.Green, OnHostSteam, 600f, 236f, 380f, 50f, 22f);
-            _upnpBtn = NativeCoopUi.Button(sessRt,
-                (CoopPlugin.AutoPortForward != null && CoopPlugin.AutoPortForward.Value ? "[x] " : "[ ] ")
-                    + "Auto Port Forward (UPnP)",
-                NativeCoopUi.Blue, OnToggleUpnp, 40f, 296f, 420f, 36f, 20f);
-            _steamInvite = NativeCoopUi.Button(sessRt, "Invite (Steam Overlay)", NativeCoopUi.Purple, OnSteamInvite, 40f, 236f, 400f, 50f, 22f);
-            _stop = NativeCoopUi.Button(sessRt, "Stop hosting", NativeCoopUi.Orange, OnStop, 460f, 236f, 400f, 50f, 22f);
-            _playersHead = NativeCoopUi.Text(sessRt, "Players", 26f, 40f, 340f, 700f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
+            _hostFormRoot = NativeCoopUi.Node(sessRt, "BackendForms", 40f, 200f, 960f, 400f)
+                .gameObject;
+            _playersHead = NativeCoopUi.Text(sessRt, "Players", 26f, 40f, 360f, 700f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
             for (int i = 0; i < 8; i++)
             {
                 int index = i;
                 PlayerRow playerRow = new PlayerRow();
-                RectTransform rowRt = NativeCoopUi.Node(sessRt, "Player" + i, 40f, 380f + (float)i * 44f, 960f, 40f);
+                RectTransform rowRt = NativeCoopUi.Node(sessRt, "Player" + i, 40f, 400f + (float)i * 40f, 960f, 36f);
                 playerRow.Grp = rowRt.gameObject;
-                NativeCoopUi.Panel(rowRt, 0f, 0f, 960f, 40f, NativeCoopUi.RowFill, 4f);
-                playerRow.Name = NativeCoopUi.Text(rowRt, "", 22f, 20f, 0f, 500f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-                playerRow.Info = NativeCoopUi.Text(rowRt, "", 18f, 540f, 0f, 260f, 40f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-                playerRow.Kick = NativeCoopUi.Button(rowRt, "Kick", NativeCoopUi.Orange, () => OnKick(index), 820f, 4f, 120f, 32f, 18f);
+                NativeCoopUi.Panel(rowRt, 0f, 0f, 960f, 36f, NativeCoopUi.RowFill, 4f);
+                playerRow.Name = NativeCoopUi.Text(rowRt, "", 22f, 20f, 0f, 500f, 36f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
+                playerRow.Info = NativeCoopUi.Text(rowRt, "", 18f, 540f, 0f, 260f, 36f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+                playerRow.Kick = NativeCoopUi.Button(rowRt, "Kick", NativeCoopUi.Orange, () => OnKick(index), 820f, 2f, 120f, 32f, 18f);
                 Players[i] = playerRow;
             }
         }
@@ -771,22 +678,6 @@ namespace CardShopCoop.UI
             {
                 Row(_nav, _tabSessionBtn.Ctrl, _tabCharBtn.Ctrl, _tabAdvancedBtn.Ctrl);
             }
-            if (_joinDirect != null && _paste != null)
-            {
-                Row(_nav, _paste.Ctrl, _joinDirect.Ctrl);
-            }
-            if (_joinSteam != null)
-            {
-                Row(_nav, _joinSteam.Ctrl);
-            }
-            if (_hostDirect != null && _hostSteam != null)
-            {
-                Row(_nav, _hostDirect.Ctrl, _hostSteam.Ctrl);
-            }
-            if (_stop != null)
-            {
-                Row(_nav, _stop.Ctrl);
-            }
             if (_back != null)
             {
                 Row(_nav, _back.Ctrl);
@@ -841,111 +732,115 @@ namespace CardShopCoop.UI
 
         private static void RefreshJoin()
         {
-            bool flag = CoopCore.Role != CoopRole.None;
+            bool connecting = CoopCore.Role != CoopRole.None;
             NativeCoopUi.Set(_title, "Join Co-op");
-            NativeCoopUi.Set(_sub, flag ? "Connecting to shop..." : ("Logged in as: " + PlayerName));
-            if (_joinDirect != null)
-            {
-                _joinDirect.Show(!flag);
-            }
-            if (_paste != null)
-            {
-                _paste.Show(!flag);
-            }
-            bool hasSteam = HasSteam;
-            NativeCoopUi.Show(_steamJoinGrp, hasSteam);
-            if (_joinSteam != null)
-            {
-                _joinSteam.Show(hasSteam && !flag);
-            }
-            if (_browseSteam != null)
-            {
-                _browseSteam.Show(hasSteam && !flag);
-            }
-            if (_cancel != null)
-            {
-                _cancel.Show(flag);
-            }
+            NativeCoopUi.Set(_sub, connecting
+                ? "Connecting to shop..."
+                : "Logged in as: " + PlayerName);
+            RefreshBackendForms(_joinFormRoot, ConnectMode.Join, ref _joinFormSignature);
+            _cancel?.Show(connecting);
         }
 
         private static void RefreshSession()
         {
-            bool flag = CoopCore.Role == CoopRole.Host;
-            bool flag2 = CoopCore.Role == CoopRole.Client;
+            bool hosting = CoopCore.Role == CoopRole.Host;
+            bool client = CoopCore.Role == CoopRole.Client;
+            bool none = CoopCore.Role == CoopRole.None;
             bool inShop = CoopMenus.InShop;
-            string text = flag ? "Hosting Co-op" : (flag2 ? "Co-op Session" : "Host Co-op");
-            NativeCoopUi.Set(_title, text);
-            NativeCoopUi.Set(_sub, flag ? "Friends can join using Direct IP, Xbox Game Bar, or Steam." : (flag2 ? "Playing in host's shop." : (inShop ? ("Logged in as: " + PlayerName + " | Host your shop for friends.") : "Load or start your shop first to host.")));
-            int num = ParsePort(_hostPort);
-            string localIP = LocalIP;
-            NativeCoopUi.Set(_idLine, "Your Local IP: " + localIP + ":" + num);
-            bool flag3 = !flag && !flag2 && inShop;
-            NativeCoopUi.Show(_hostDirectGrp, flag3);
-            if (_hostDirect != null)
+            string title = hosting ? "Hosting Co-op" : client ? "Co-op Session" : "Host Co-op";
+            NativeCoopUi.Set(_title, title);
+            NativeCoopUi.Set(_sub, hosting
+                ? "Friends can join using the configured connection options."
+                : client
+                    ? "Playing in host's shop."
+                    : inShop
+                        ? "Logged in as: " + PlayerName + " | Host your shop for friends."
+                        : "Load or start your shop first to host.");
+
+            if (none || !inShop)
             {
-                _hostDirect.Show(flag3);
-            }
-            if (_hostSteam != null)
-            {
-                _hostSteam.Show(flag3 && HasSteam);
-            }
-            if (_upnpBtn != null)
-            {
-                bool upnpAvailable = flag3 && IpBackend != null
-                    && CoopPlugin.AutoPortForward != null;
-                _upnpBtn.Show(upnpAvailable);
-                if (upnpAvailable)
+                if (_hostFormsLive)
                 {
-                    bool autoForward = CoopPlugin.AutoPortForward.Value;
-                    _upnpBtn.SetLabel((autoForward ? "[x] " : "[ ] ")
-                        + "Auto Port Forward (UPnP)");
-                    _upnpBtn.SetStyle(autoForward ? NativeCoopUi.Green : NativeCoopUi.Blue);
+                    _hostFormsLive = false;
+                    _hostFormSignature = null;
                 }
+                RefreshBackendForms(_hostFormRoot, ConnectMode.Host, ref _hostFormSignature);
+                NativeCoopUi.Show(_playersHead, on: false);
+                for (var i = 0; i < Players.Length; i++)
+                {
+                    NativeCoopUi.Show(Players[i].Grp, on: false);
+                    Players[i].Conn = -1;
+                }
+                _cancel?.Show(on: false);
+                return;
             }
-            bool on = flag || flag2;
-            if (_stop != null)
-            {
-                _stop.Show(on);
-                _stop.SetLabel(flag ? "Stop hosting" : "Leave shop");
-            }
-            if (_copy != null)
-            {
-                _copy.Show(flag || flag3);
-            }
-            bool on2 = flag && HasSteam;
-            if (_steamInvite != null)
-            {
-                _steamInvite.Show(on2);
-            }
-            if (_steamCopyLobby != null)
-            {
-                _steamCopyLobby.Show(on2);
-            }
+
+            _hostFormsLive = true;
+            _hostFormSignature = null;
+            _hostFormRoot?.SetActive(true);
+            ClearChildren(_hostFormRoot);
+            CoopBackendOptions.BuildLive(_hostFormRoot.transform, Hint);
+            NativeCoopUi.Show(_playersHead, on: true);
+
             IReadOnlyList<PresencePlayer> sessionPlayers = PresenceApi.SessionPlayers;
-            int num2 = 0;
+            int count = 0;
             if (sessionPlayers != null)
             {
                 for (int i = 0; i < sessionPlayers.Count; i++)
                 {
-                    if (num2 >= 8)
+                    if (count >= 8)
                     {
                         break;
                     }
                     PresencePlayer presencePlayer = sessionPlayers[i];
                     string name = presencePlayer.Name + (presencePlayer.IsSelf ? " (you)" : "");
                     string info = presencePlayer.IsHost ? "Host" : ("Player #" + presencePlayer.Id);
-                    SetPlayer(num2++, name, info, (flag && !presencePlayer.IsSelf) ? presencePlayer.Id : (-1));
+                    SetPlayer(count++, name, info, (hosting && !presencePlayer.IsSelf)
+                        ? presencePlayer.Id : (-1));
                 }
             }
-            for (int j = num2; j < 8; j++)
+            for (int j = count; j < 8; j++)
             {
                 NativeCoopUi.Show(Players[j].Grp, on: false);
                 Players[j].Conn = -1;
             }
-            NativeCoopUi.Set(_playersHead, num2 > 0 ? ("Players (" + num2 + ")") : "Players");
-            if (_cancel != null)
+            NativeCoopUi.Set(_playersHead, count > 0 ? ("Players (" + count + ")") : "Players");
+            _cancel?.Show(on: false);
+        }
+
+        private static void RefreshBackendForms(GameObject root, ConnectMode mode,
+            ref string signature)
+        {
+            if (root == null)
             {
-                _cancel.Show(on: false);
+                return;
+            }
+
+            var next = CoopBackendOptions.Signature(mode);
+            if (next == signature && root.transform.childCount > 0)
+            {
+                root.SetActive(true);
+                return;
+            }
+
+            signature = next;
+            ClearChildren(root);
+            root.SetActive(true);
+            CoopBackendOptions.Build(root.transform, mode, Hint, Refresh);
+        }
+
+        private static void ClearChildren(GameObject root)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            for (var i = root.transform.childCount - 1; i >= 0; i--)
+            {
+                var child = root.transform.GetChild(i).gameObject;
+                child.SetActive(false);
+                UnityEngine.Object.Destroy(child);
             }
         }
 
@@ -967,6 +862,27 @@ namespace CardShopCoop.UI
             NativeCoopUi.Set(obj.Info, info);
             obj.Conn = conn;
             obj.Kick.Show(conn >= 0);
+        }
+
+        private static string PlayerName
+        {
+            get
+            {
+                var name = CoopCore.Instance?.EffectivePlayerName;
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    name = CoopPlugin.PlayerName?.Value;
+                }
+
+                return string.IsNullOrWhiteSpace(name) ? "Player" : name;
+            }
+        }
+
+        private static void OnCancel()
+        {
+            CoopCore.Instance?.Disconnect();
+            Hint("Cancelled connection.");
+            Refresh();
         }
 
         private static void RefreshStatus()
@@ -1006,230 +922,6 @@ namespace CardShopCoop.UI
             }
         }
 
-        private static int ParsePort(TMP_InputField f)
-        {
-            if (f != null && int.TryParse(f.text.Trim(), out var result) && result > 0 && result <= 65535)
-            {
-                return result;
-            }
-            if (CoopPlugin.Port == null)
-            {
-                return 27886;
-            }
-            return CoopPlugin.Port.Value;
-        }
-
-        private static string PlayerName
-        {
-            get
-            {
-                var name = CoopCore.Instance?.EffectivePlayerName;
-                if (string.IsNullOrWhiteSpace(name))
-                {
-                    name = CoopPlugin.PlayerName?.Value;
-                }
-
-                return string.IsNullOrWhiteSpace(name) ? "Player" : name;
-            }
-        }
-
-        private static string LocalIP
-        {
-            get
-            {
-                if (!string.IsNullOrEmpty(_localIp))
-                {
-                    return _localIp;
-                }
-
-                var ip = NetHelpers.LocalIPv4ForGateway() ?? NetHelpers.LocalIPv4();
-                _localIp = string.IsNullOrEmpty(ip) ? "127.0.0.1" : ip;
-                return _localIp;
-            }
-        }
-
-        private static void OnPaste()
-        {
-            string text = (GUIUtility.systemCopyBuffer ?? "").Trim();
-            if (text.Contains(":"))
-            {
-                string[] array = text.Split(':');
-                if (_ipInput != null)
-                {
-                    _ipInput.text = array[0].Trim();
-                }
-                if (array.Length > 1 && _portInput != null && int.TryParse(array[1].Trim(), out var result))
-                {
-                    _portInput.text = result.ToString();
-                }
-                Hint("Host IP:Port pasted: " + text);
-            }
-            else if (text.Length > 0)
-            {
-                if (_ipInput != null)
-                {
-                    _ipInput.text = text;
-                }
-                Hint("Host IP pasted: " + text);
-            }
-            else
-            {
-                Hint("Clipboard is empty.");
-            }
-        }
-
-        private static void OnCopy()
-        {
-            int num = ParsePort(_hostPort);
-            GUIUtility.systemCopyBuffer = LocalIP + ":" + num;
-            Hint("Host IP:Port (" + GUIUtility.systemCopyBuffer + ") copied to clipboard! Share it in Xbox App / Game Bar.");
-        }
-
-        private static void OnJoinDirect()
-        {
-            string text = _ipInput != null ? _ipInput.text.Trim() : "127.0.0.1";
-            int num = ParsePort(_portInput);
-            if (string.IsNullOrEmpty(text))
-            {
-                Hint("Please enter a valid IP address.");
-                return;
-            }
-            if (CoopPlugin.LastJoinIP != null)
-            {
-                CoopPlugin.LastJoinIP.Value = text;
-            }
-            INetworkingBackend ipBackend = IpBackend;
-            if (ipBackend == null)
-            {
-                Hint("IP networking backend not available.");
-                return;
-            }
-            FieldValues fieldValues = new FieldValues();
-            fieldValues[FieldId.IpAddress] = text;
-            fieldValues[FieldId.Port] = num.ToString();
-            CoopCore.Instance?.ConnectBackend(ipBackend, ConnectMode.Join, fieldValues);
-            Hint("Connecting to " + text + ":" + num + "...");
-            Refresh();
-        }
-
-        private static void OnJoinSteam()
-        {
-            string text = _steamLobbyInput != null ? _steamLobbyInput.text.Trim() : "";
-            if (string.IsNullOrEmpty(text))
-            {
-                Hint("Please enter a Steam Lobby ID.");
-                return;
-            }
-            INetworkingBackend steamBackend = SteamBackend;
-            if (steamBackend == null)
-            {
-                Hint("Steam networking backend not available.");
-                return;
-            }
-            FieldValues fieldValues = new FieldValues();
-            fieldValues[FieldId.Lobby] = text;
-            steamBackend.Configure(fieldValues);
-            CoopCore.Instance?.ConnectBackend(steamBackend, ConnectMode.Join, fieldValues);
-            Hint("Joining Steam Lobby " + text + "...");
-            Refresh();
-        }
-
-        private static void OnBrowseSteam()
-        {
-            INetworkingBackend steamBackend = SteamBackend;
-            if (steamBackend != null)
-            {
-                BackendAction backendAction = steamBackend.Actions.FirstOrDefault(a => a.Id == "servers");
-                if (backendAction != null)
-                {
-                    backendAction.Invoke();
-                    return;
-                }
-            }
-            Hint("Steam server browser not available.");
-        }
-
-        private static void OnSteamInvite()
-        {
-            INetworkingBackend steamBackend = SteamBackend;
-            if (steamBackend != null)
-            {
-                BackendAction backendAction = steamBackend.Actions.FirstOrDefault(a => a.Id == "invite");
-                if (backendAction != null)
-                {
-                    backendAction.Invoke();
-                    return;
-                }
-            }
-            Hint("Steam invite overlay not available.");
-        }
-
-        private static void OnSteamCopyLobby()
-        {
-            INetworkingBackend steamBackend = SteamBackend;
-            if (steamBackend != null)
-            {
-                BackendAction backendAction = steamBackend.Actions.FirstOrDefault(a => a.Id == "copyLobbyId");
-                if (backendAction != null)
-                {
-                    backendAction.Invoke();
-                    Hint("Steam Lobby ID copied to clipboard!");
-                    return;
-                }
-            }
-            Hint("Steam lobby id not available.");
-        }
-
-        private static void OnCancel()
-        {
-            CoopCore.Instance?.Disconnect();
-            Hint("Cancelled connection.");
-            Refresh();
-        }
-
-        private static void OnHostDirect()
-        {
-            int value = ParsePort(_hostPort);
-            if (CoopPlugin.Port != null)
-            {
-                CoopPlugin.Port.Value = value;
-            }
-            INetworkingBackend ipBackend = IpBackend;
-            if (ipBackend == null)
-            {
-                Hint("IP networking backend not available.");
-                return;
-            }
-            FieldValues fieldValues = new FieldValues();
-            fieldValues[FieldId.Port] = value.ToString();
-            fieldValues[FieldId.AutoForward] = (CoopPlugin.AutoPortForward != null && CoopPlugin.AutoPortForward.Value) ? "1" : "0";
-            CoopCore.Instance?.ConnectBackend(ipBackend, ConnectMode.Host, fieldValues);
-            Hint("Hosting Direct on port " + value + "...");
-            Refresh();
-        }
-
-        private static void OnHostSteam()
-        {
-            INetworkingBackend steamBackend = SteamBackend;
-            if (steamBackend == null)
-            {
-                Hint("Steam networking backend not available.");
-                return;
-            }
-            FieldValues values = new FieldValues();
-            steamBackend.Configure(values);
-            CoopCore.Instance?.ConnectBackend(steamBackend, ConnectMode.Host, values);
-            Hint("Hosting on Steam...");
-            Refresh();
-        }
-
-        private static void OnStop()
-        {
-            CoopCore.Instance?.Disconnect();
-            Hint("Disconnected.");
-            Refresh();
-        }
-
         private static void OnKick(int index)
         {
             if (index >= 0 && index < Players.Length)
@@ -1263,16 +955,6 @@ namespace CardShopCoop.UI
                 CoopPlugin.AllowCrossBuildJoin.Value = !CoopPlugin.AllowCrossBuildJoin.Value;
                 RefreshAdvanced();
                 Hint("Crossplay (Steam <-> Xbox): " + (CoopPlugin.AllowCrossBuildJoin.Value ? "ENABLED" : "DISABLED"));
-            }
-        }
-
-        private static void OnToggleUpnp()
-        {
-            if (CoopPlugin.AutoPortForward != null)
-            {
-                CoopPlugin.AutoPortForward.Value = !CoopPlugin.AutoPortForward.Value;
-                RefreshSession();
-                Hint("Auto Port Forward (UPnP): " + (CoopPlugin.AutoPortForward.Value ? "ENABLED" : "DISABLED"));
             }
         }
 
