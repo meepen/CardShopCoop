@@ -88,6 +88,58 @@ namespace CardShopCoop.Diagnostics
             }
         }
 
+        /// <summary>Copies one paste that carries both the Markdown report and this process's
+        /// per-instance log as file attachments.</summary>
+        internal static bool TryCopyBundle(out string message)
+        {
+            var core = CoopCore.Instance;
+            if (core == null)
+            {
+                message = "Co-op is not running.";
+                return false;
+            }
+
+            var logPath = FindLogFile();
+            string reportPath;
+            try
+            {
+                var report = Build(core, logPath);
+                reportPath = Path.Combine(Path.GetTempPath(),
+                    "CardShopCoop_Diagnostics_"
+                    + System.Diagnostics.Process.GetCurrentProcess().Id + ".md");
+                File.WriteAllText(reportPath, report, new UTF8Encoding(false));
+            }
+            catch (Exception error)
+            {
+                message = "Could not build diagnostics: " + error.Message;
+                CoopPlugin.Log?.LogError("diagnostics bundle failed to build: " + error);
+                return false;
+            }
+
+            var files = new List<string> { reportPath };
+            if (!string.IsNullOrEmpty(logPath))
+            {
+                files.Add(logPath);
+            }
+
+            try
+            {
+                ClipboardWriter.SetTextAndFiles(null, files);
+                message = "Diagnostics copied: " + Path.GetFileName(reportPath)
+                    + (string.IsNullOrEmpty(logPath)
+                        ? " (log file not found)."
+                        : " and " + Path.GetFileName(logPath) + ".");
+                CoopPlugin.Log?.LogInfo("diagnostics bundle copied: " + files.Count + " files");
+                return true;
+            }
+            catch (Exception error)
+            {
+                message = "Could not copy diagnostics: " + error.Message;
+                CoopPlugin.Log?.LogError("diagnostics bundle copy failed: " + error);
+                return false;
+            }
+        }
+
         private static string FindLogFile()
         {
             try
@@ -586,7 +638,7 @@ namespace CardShopCoop.Diagnostics
                 return;
             }
 
-            text.Append("_Use Copy Log File and paste again to attach `")
+            text.Append("_The co-op log file is `")
                 .Append(Inline(Path.GetFileName(logPath))).Append("`._\n");
         }
 

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using BepInEx.Logging;
 using CardShopCoop.Api;
+using CardShopCoop.Diagnostics;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Networking;
@@ -79,6 +80,8 @@ namespace CardShopCoop.UI
 
         private static GameObject _statusGrp;
 
+        private static GameObject _confirmGrp;
+
         private static CoopButton _charGenderBtn;
 
         private static TextMeshProUGUI _charPresetText;
@@ -144,14 +147,6 @@ namespace CardShopCoop.UI
         private static CoopButton _crossplayBtn;
 
         private static CoopButton _upnpBtn;
-
-        private static CoopButton _avatarsBtn;
-
-        private static TextMeshProUGUI _sendRateText;
-
-        private static CoopButton _rateDownBtn;
-
-        private static CoopButton _rateUpBtn;
 
         private static TMP_InputField _advNameInput;
 
@@ -303,6 +298,8 @@ namespace CardShopCoop.UI
             {
                 return;
             }
+            CommitName();
+            CancelResetDefaults();
             IsOpen = false;
             _currentTab = ScreenTab.Session;
             Unsubscribe();
@@ -345,8 +342,10 @@ namespace CardShopCoop.UI
 
         private static void ForceClose()
         {
+            CommitName();
             _openedPause = false;
             _navPushed = false;
+            CancelResetDefaults();
             IsOpen = false;
             _currentTab = ScreenTab.Session;
             Unsubscribe();
@@ -377,6 +376,14 @@ namespace CardShopCoop.UI
             {
                 return;
             }
+            if (_confirmGrp != null && _confirmGrp.activeSelf)
+            {
+                if (Input.GetKeyDown(KeyCode.Escape) || ControllerBack())
+                {
+                    CancelResetDefaults();
+                }
+                return;
+            }
             if (Input.GetKeyDown(KeyCode.Escape) || ControllerBack())
             {
                 if (_currentTab != ScreenTab.Session)
@@ -402,6 +409,7 @@ namespace CardShopCoop.UI
 
         internal static void Destroy()
         {
+            CancelResetDefaults();
             Unsubscribe();
             try
             {
@@ -551,7 +559,35 @@ namespace CardShopCoop.UI
             BuildStatus(panelRt);
             _back = NativeCoopUi.Button(panelRt, "Back", NativeCoopUi.Grey, OnBackClicked, 700f, 900f, 300f, 56f, 28f);
             _cancel = NativeCoopUi.Button(panelRt, "Cancel joining", NativeCoopUi.Orange, OnCancel, 40f, 900f, 300f, 56f, 26f);
+            BuildResetConfirmation(panelRt);
             BuildNav();
+        }
+
+        private static void BuildResetConfirmation(Transform parent)
+        {
+            RectTransform grp = NativeCoopUi.Node(parent, "ConfirmReset", 0f, 0f, 1040f, 980f);
+            _confirmGrp = grp.gameObject;
+            Image blocker = grp.gameObject.AddComponent<Image>();
+            if (NativeCoopUi.White != null)
+            {
+                blocker.sprite = NativeCoopUi.White;
+            }
+            blocker.color = new Color(0f, 0f, 0f, 0.55f);
+            blocker.raycastTarget = true;
+
+            RectTransform box = NativeCoopUi.Node(grp, "Box", 170f, 350f, 700f, 280f);
+            NativeCoopUi.Panel(box, 0f, 0f, 700f, 280f, NativeCoopUi.PanelFill, 2.2f);
+            NativeCoopUi.Text(box, "Reset all options?", 28f, 30f, 28f, 640f, 40f,
+                NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
+            NativeCoopUi.Text(box,
+                "This resets the co-op options and your display name to their defaults.",
+                18f, 30f, 84f, 640f, 60f, Color.white, TextAlignmentOptions.Left,
+                wrap: true, title: false);
+            NativeCoopUi.Button(box, "Reset", NativeCoopUi.Orange, ConfirmResetDefaults,
+                30f, 190f, 220f, 50f, 22f);
+            NativeCoopUi.Button(box, "Cancel", NativeCoopUi.Grey, CancelResetDefaults,
+                270f, 190f, 220f, 50f, 22f);
+            _confirmGrp.SetActive(false);
         }
 
         private static void ShowTab(ScreenTab tab)
@@ -645,14 +681,18 @@ namespace CardShopCoop.UI
             _hostPort.text = CoopPlugin.Port.Value.ToString();
             _hostDirect = NativeCoopUi.Button(hostDirectRt, "Host Direct (LAN / Xbox)", NativeCoopUi.Green, OnHostDirect, 200f, 236f, 380f, 50f, 22f);
             _hostSteam = NativeCoopUi.Button(hostDirectRt, "Host on Steam", NativeCoopUi.Green, OnHostSteam, 600f, 236f, 380f, 50f, 22f);
+            _upnpBtn = NativeCoopUi.Button(sessRt,
+                (CoopPlugin.AutoPortForward != null && CoopPlugin.AutoPortForward.Value ? "[x] " : "[ ] ")
+                    + "Auto Port Forward (UPnP)",
+                NativeCoopUi.Blue, OnToggleUpnp, 40f, 296f, 420f, 36f, 20f);
             _steamInvite = NativeCoopUi.Button(sessRt, "Invite (Steam Overlay)", NativeCoopUi.Purple, OnSteamInvite, 40f, 236f, 400f, 50f, 22f);
             _stop = NativeCoopUi.Button(sessRt, "Stop hosting", NativeCoopUi.Orange, OnStop, 460f, 236f, 400f, 50f, 22f);
-            _playersHead = NativeCoopUi.Text(sessRt, "Players", 26f, 40f, 305f, 700f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
+            _playersHead = NativeCoopUi.Text(sessRt, "Players", 26f, 40f, 340f, 700f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
             for (int i = 0; i < 8; i++)
             {
                 int index = i;
                 PlayerRow playerRow = new PlayerRow();
-                RectTransform rowRt = NativeCoopUi.Node(sessRt, "Player" + i, 40f, 348f + (float)i * 44f, 960f, 40f);
+                RectTransform rowRt = NativeCoopUi.Node(sessRt, "Player" + i, 40f, 380f + (float)i * 44f, 960f, 40f);
                 playerRow.Grp = rowRt.gameObject;
                 NativeCoopUi.Panel(rowRt, 0f, 0f, 960f, 40f, NativeCoopUi.RowFill, 4f);
                 playerRow.Name = NativeCoopUi.Text(rowRt, "", 22f, 20f, 0f, 500f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
@@ -671,27 +711,17 @@ namespace CardShopCoop.UI
             NativeCoopUi.Text(advRt, "Crossplay (Steam <-> Xbox Game Pass):", 22f, 40f, 230f, 540f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
             _crossplayBtn = NativeCoopUi.Button(advRt, CoopPlugin.AllowCrossBuildJoin.Value ? "ENABLED" : "DISABLED", CoopPlugin.AllowCrossBuildJoin.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleCrossplay, 620f, 230f, 220f, 40f, 20f);
             NativeCoopUi.Text(advRt, "Enables connection between Steam (Unity 2021) and Xbox App (Unity 6).", 17f, 40f, 272f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Text(advRt, "Auto Port Forward (UPnP):", 22f, 40f, 310f, 540f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _upnpBtn = NativeCoopUi.Button(advRt, CoopPlugin.AutoPortForward.Value ? "ENABLED" : "DISABLED", CoopPlugin.AutoPortForward.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleUpnp, 620f, 310f, 220f, 40f, 20f);
-            NativeCoopUi.Text(advRt, "Automatically forwards the host port on your home router when hosting.", 17f, 40f, 352f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Text(advRt, "Show Walking Avatars:", 22f, 40f, 390f, 540f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _avatarsBtn = NativeCoopUi.Button(advRt, CoopPlugin.AvatarsEnabled.Value ? "ENABLED" : "DISABLED", CoopPlugin.AvatarsEnabled.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleAvatars, 620f, 390f, 220f, 40f, 20f);
-            NativeCoopUi.Text(advRt, "Displays friends as 3D walking character models inside your shop.", 17f, 40f, 432f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            _sendRateText = NativeCoopUi.Text(advRt, $"Network Send Rate: {CoopPlugin.SendRateHz.Value:F0} Hz", 22f, 40f, 470f, 540f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _rateDownBtn = NativeCoopUi.Button(advRt, "- 5 Hz", NativeCoopUi.Blue, OnRateDown, 620f, 470f, 105f, 40f, 20f);
-            _rateUpBtn = NativeCoopUi.Button(advRt, "+ 5 Hz", NativeCoopUi.Blue, OnRateUp, 735f, 470f, 105f, 40f, 20f);
-            NativeCoopUi.Text(advRt, "Position update frequency per second (15 Hz is standard).", 17f, 40f, 512f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Text(advRt, "Custom Display Name:", 22f, 40f, 550f, 320f, 42f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _advNameInput = NativeCoopUi.Input(advRt, "Name", 370f, 550f, 280f, 42f, 20f, 24, TMP_InputField.ContentType.Standard);
+            NativeCoopUi.Text(advRt, "Custom Display Name:", 22f, 40f, 320f, 320f, 42f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
+            _advNameInput = NativeCoopUi.Input(advRt, "Name", 370f, 320f, 280f, 42f, 20f, 24, TMP_InputField.ContentType.Standard);
             _advNameInput.text = CoopPlugin.NameOverride.Value ? CoopPlugin.PlayerName.Value : "";
-            NativeCoopUi.Button(advRt, "Save Name", NativeCoopUi.Green, OnSaveName, 665f, 550f, 175f, 42f, 20f);
-            NativeCoopUi.Text(advRt, "Leave empty to use your platform name (Xbox Gamertag / Steam).", 17f, 40f, 594f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            RectTransform diagRt = NativeCoopUi.Node(advRt, "DiagWell", 40f, 640f, 960f, 140f);
+            _advNameInput.onEndEdit.AddListener(OnNameCommitted);
+            NativeCoopUi.Text(advRt, "Leave empty to use your platform name (Xbox Gamertag / Steam). Saved when you leave the field.", 17f, 40f, 362f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            RectTransform diagRt = NativeCoopUi.Node(advRt, "DiagWell", 40f, 430f, 960f, 140f);
             NativeCoopUi.Panel(diagRt, 0f, 0f, 960f, 140f, NativeCoopUi.WellFill, 2.6f);
-            NativeCoopUi.Text(diagRt, "Diagnostic Tools & Full Console", 20f, 20f, 12f, 920f, 32f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Button(diagRt, "Open Full Debug Window (IMGUI)", NativeCoopUi.Grey, OnToggleAdvanced, 20f, 50f, 440f, 48f, 20f);
-            NativeCoopUi.Button(diagRt, "Reset Defaults", NativeCoopUi.Orange, OnResetDefaults, 480f, 50f, 220f, 48f, 20f);
-            NativeCoopUi.Text(diagRt, "Full debug window contains raw packet counters and network logs.", 16f, 20f, 104f, 920f, 26f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            NativeCoopUi.Text(diagRt, "Diagnostic Tools", 20f, 20f, 12f, 920f, 32f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            NativeCoopUi.Button(diagRt, "Copy Diagnostics", NativeCoopUi.Grey, OnCopyDiagnostics, 20f, 50f, 300f, 48f, 20f);
+            NativeCoopUi.Button(diagRt, "Reset Defaults", NativeCoopUi.Orange, OnResetDefaults, 340f, 50f, 220f, 48f, 20f);
+            NativeCoopUi.Text(diagRt, "Copies the diagnostic report (.md) and this process's log (.log) to the clipboard.", 16f, 20f, 104f, 920f, 26f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
         }
 
         private static void BuildCharacter(Transform p)
@@ -859,6 +889,19 @@ namespace CardShopCoop.UI
             {
                 _hostSteam.Show(flag3 && HasSteam);
             }
+            if (_upnpBtn != null)
+            {
+                bool upnpAvailable = flag3 && IpBackend != null
+                    && CoopPlugin.AutoPortForward != null;
+                _upnpBtn.Show(upnpAvailable);
+                if (upnpAvailable)
+                {
+                    bool autoForward = CoopPlugin.AutoPortForward.Value;
+                    _upnpBtn.SetLabel((autoForward ? "[x] " : "[ ] ")
+                        + "Auto Port Forward (UPnP)");
+                    _upnpBtn.SetStyle(autoForward ? NativeCoopUi.Green : NativeCoopUi.Blue);
+                }
+            }
             bool on = flag || flag2;
             if (_stop != null)
             {
@@ -913,22 +956,6 @@ namespace CardShopCoop.UI
                 bool value = CoopPlugin.AllowCrossBuildJoin.Value;
                 _crossplayBtn.SetLabel(value ? "ENABLED" : "DISABLED");
                 _crossplayBtn.SetStyle(value ? NativeCoopUi.Green : NativeCoopUi.Orange);
-            }
-            if (_upnpBtn != null && CoopPlugin.AutoPortForward != null)
-            {
-                bool value2 = CoopPlugin.AutoPortForward.Value;
-                _upnpBtn.SetLabel(value2 ? "ENABLED" : "DISABLED");
-                _upnpBtn.SetStyle(value2 ? NativeCoopUi.Green : NativeCoopUi.Orange);
-            }
-            if (_avatarsBtn != null && CoopPlugin.AvatarsEnabled != null)
-            {
-                bool value3 = CoopPlugin.AvatarsEnabled.Value;
-                _avatarsBtn.SetLabel(value3 ? "ENABLED" : "DISABLED");
-                _avatarsBtn.SetStyle(value3 ? NativeCoopUi.Green : NativeCoopUi.Orange);
-            }
-            if (_sendRateText != null && CoopPlugin.SendRateHz != null)
-            {
-                NativeCoopUi.Set(_sendRateText, $"Network Send Rate: {CoopPlugin.SendRateHz.Value:F0} Hz");
             }
         }
 
@@ -1244,62 +1271,68 @@ namespace CardShopCoop.UI
             if (CoopPlugin.AutoPortForward != null)
             {
                 CoopPlugin.AutoPortForward.Value = !CoopPlugin.AutoPortForward.Value;
-                RefreshAdvanced();
+                RefreshSession();
                 Hint("Auto Port Forward (UPnP): " + (CoopPlugin.AutoPortForward.Value ? "ENABLED" : "DISABLED"));
             }
         }
 
-        private static void OnToggleAvatars()
-        {
-            if (CoopPlugin.AvatarsEnabled != null)
-            {
-                CoopPlugin.AvatarsEnabled.Value = !CoopPlugin.AvatarsEnabled.Value;
-                RefreshAdvanced();
-                Hint("Walking Avatars: " + (CoopPlugin.AvatarsEnabled.Value ? "ENABLED" : "DISABLED"));
-            }
-        }
+        private static void OnNameCommitted(string _) => CommitName();
 
-        private static void OnRateDown()
+        private static void CommitName()
         {
-            if (CoopPlugin.SendRateHz != null)
+            if (_advNameInput == null)
             {
-                float value = Mathf.Max(5f, CoopPlugin.SendRateHz.Value - 5f);
-                CoopPlugin.SendRateHz.Value = value;
-                RefreshAdvanced();
-                Hint("Send Rate: " + value + " Hz");
+                return;
             }
-        }
 
-        private static void OnRateUp()
-        {
-            if (CoopPlugin.SendRateHz != null)
+            string text = _advNameInput.text.Trim();
+            bool overrideName = !string.IsNullOrEmpty(text);
+            bool wasOverride = CoopPlugin.NameOverride != null && CoopPlugin.NameOverride.Value;
+            string previous = CoopPlugin.PlayerName?.Value ?? "";
+            if (previous == text && wasOverride == overrideName)
             {
-                float value = Mathf.Min(60f, CoopPlugin.SendRateHz.Value + 5f);
-                CoopPlugin.SendRateHz.Value = value;
-                RefreshAdvanced();
-                Hint("Send Rate: " + value + " Hz");
+                return;
             }
-        }
 
-        private static void OnSaveName()
-        {
-            if (_advNameInput != null)
+            if (CoopPlugin.PlayerName != null)
             {
-                string text = _advNameInput.text.Trim();
-                if (CoopPlugin.PlayerName != null)
-                {
-                    CoopPlugin.PlayerName.Value = text;
-                }
-                if (CoopPlugin.NameOverride != null)
-                {
-                    CoopPlugin.NameOverride.Value = !string.IsNullOrEmpty(text);
-                }
-                Hint(string.IsNullOrEmpty(text) ? "Display name reset to platform default." : ("Display name saved: " + text));
+                CoopPlugin.PlayerName.Value = text;
             }
+            if (CoopPlugin.NameOverride != null)
+            {
+                CoopPlugin.NameOverride.Value = overrideName;
+            }
+            Hint(overrideName
+                ? "Display name saved: " + text
+                : "Display name reset to platform default.");
         }
 
         private static void OnResetDefaults()
         {
+            if (_confirmGrp == null)
+            {
+                return;
+            }
+
+            _confirmGrp.SetActive(true);
+            _confirmGrp.transform.SetAsLastSibling();
+        }
+
+        private static void CancelResetDefaults()
+        {
+            if (_confirmGrp != null)
+            {
+                _confirmGrp.SetActive(false);
+            }
+        }
+
+        private static void ConfirmResetDefaults()
+        {
+            if (_confirmGrp != null)
+            {
+                _confirmGrp.SetActive(false);
+            }
+
             if (CoopPlugin.AllowCrossBuildJoin != null)
             {
                 CoopPlugin.AllowCrossBuildJoin.Value = true;
@@ -1332,17 +1365,25 @@ namespace CardShopCoop.UI
             Hint("Advanced settings reset to default values.");
         }
 
-        private static void OnToggleAdvanced()
+        private static void OnCopyDiagnostics()
         {
-            if (CoopCore.Instance != null)
-            {
-                CoopCore.Instance.ToggleLegacyUI();
-            }
+            DiagnosticsReport.TryCopyBundle(out var message);
+            Hint(message);
         }
+
+        private const string CharacterUnavailable =
+            "Start or join a co-op session to edit your avatar.";
 
         private static void OnToggleCharGender()
         {
-            bool female = PresenceApi.GetLocalPlayerModel().Female;
+            var model = PresenceApi.GetLocalPlayerModel();
+            if (model == null)
+            {
+                Hint(CharacterUnavailable);
+                return;
+            }
+
+            bool female = model.Female;
             PresenceApi.SetLocalPlayerModel(!female, 0);
             RefreshCharacter();
             Hint("Avatar model: " + (!female ? "Female" : "Male"));
@@ -1350,6 +1391,12 @@ namespace CardShopCoop.UI
 
         private static void OnCharPrevPreset()
         {
+            if (PresenceApi.GetLocalPlayerModel() == null)
+            {
+                Hint(CharacterUnavailable);
+                return;
+            }
+
             List<string> localPresetNames = PresenceApi.GetLocalPresetNames();
             if (localPresetNames.Count != 0)
             {
@@ -1363,6 +1410,12 @@ namespace CardShopCoop.UI
 
         private static void OnCharNextPreset()
         {
+            if (PresenceApi.GetLocalPlayerModel() == null)
+            {
+                Hint(CharacterUnavailable);
+                return;
+            }
+
             List<string> localPresetNames = PresenceApi.GetLocalPresetNames();
             if (localPresetNames.Count != 0)
             {
@@ -1376,6 +1429,12 @@ namespace CardShopCoop.UI
 
         private static void OnCharApplyPreset()
         {
+            if (PresenceApi.GetLocalPlayerModel() == null)
+            {
+                Hint(CharacterUnavailable);
+                return;
+            }
+
             List<string> localPresetNames = PresenceApi.GetLocalPresetNames();
             if (localPresetNames.Count != 0 && _presetIndex >= 0 && _presetIndex < localPresetNames.Count)
             {
@@ -1387,6 +1446,12 @@ namespace CardShopCoop.UI
 
         private static void OnToggleCharPreview()
         {
+            if (PresenceApi.GetLocalPlayerModel() == null)
+            {
+                Hint(CharacterUnavailable);
+                return;
+            }
+
             _previewActive = !_previewActive;
             PresenceApi.SetCharacterPreview(_previewActive);
             if (_charPreviewBtn != null)
@@ -1399,6 +1464,12 @@ namespace CardShopCoop.UI
 
         private static void OnCharUndo()
         {
+            if (PresenceApi.GetLocalPlayerModel() == null)
+            {
+                Hint(CharacterUnavailable);
+                return;
+            }
+
             if (PresenceApi.UndoPlayerModel())
             {
                 RefreshCharacter();
@@ -1412,6 +1483,12 @@ namespace CardShopCoop.UI
 
         private static void OnCharRedo()
         {
+            if (PresenceApi.GetLocalPlayerModel() == null)
+            {
+                Hint(CharacterUnavailable);
+                return;
+            }
+
             if (PresenceApi.RedoPlayerModel())
             {
                 RefreshCharacter();
@@ -1425,6 +1502,12 @@ namespace CardShopCoop.UI
 
         private static void OnOpenFullCustomizer()
         {
+            if (PresenceApi.GetLocalPlayerModel() == null)
+            {
+                Hint(CharacterUnavailable);
+                return;
+            }
+
             PresenceApi.SetCharacterPreview(active: true);
             _previewActive = true;
             CoopCore.Instance?.OpenCharacterCustomizer();
@@ -1433,11 +1516,32 @@ namespace CardShopCoop.UI
         private static void RefreshCharacter()
         {
             PresenceModelEntry localPlayerModel = PresenceApi.GetLocalPlayerModel();
+            if (localPlayerModel == null)
+            {
+                if (_charGenderBtn != null)
+                {
+                    _charGenderBtn.SetLabel("Unavailable");
+                    _charGenderBtn.SetStyle(NativeCoopUi.Grey);
+                }
+                _charPreviewBtn?.Show(false);
+                _charUndoBtn?.Show(false);
+                _charRedoBtn?.Show(false);
+                if (_charPresetText != null)
+                {
+                    _charPresetText.text = "—";
+                }
+                return;
+            }
+
             if (_charGenderBtn != null)
             {
+                _charGenderBtn.Show(true);
                 _charGenderBtn.SetLabel(localPlayerModel.Female ? "Female" : "Male");
                 _charGenderBtn.SetStyle(localPlayerModel.Female ? NativeCoopUi.Purple : NativeCoopUi.Blue);
             }
+            _charPreviewBtn?.Show(true);
+            _charUndoBtn?.Show(true);
+            _charRedoBtn?.Show(true);
             List<string> localPresetNames = PresenceApi.GetLocalPresetNames();
             if (localPresetNames.Count > 0)
             {
