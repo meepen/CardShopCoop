@@ -22,7 +22,8 @@ namespace CardShopCoop.Steam
     /// callbacks), so <see cref="Connect"/> returns its handle immediately and the outcome arrives
     /// through the bridge callbacks, addressed to that handle.
     /// </summary>
-    public sealed class SteamNetworkingBackend : INetworkingBackend, INetworkingBackendDiagnostics
+    public sealed class SteamNetworkingBackend
+        : INetworkingBackend, INetworkingBackendDiagnostics, INetworkingBackendNotifications
     {
         private const string Section = "Steam";
 
@@ -58,6 +59,9 @@ namespace CardShopCoop.Steam
                 _hostedLobby = lobby;
                 _live = true;
                 _busy = false;
+                // The lobby id and busy state are what the host panel draws its copy/invite
+                // controls from; they changed before Connected() reports the session.
+                NotifyStateChanged();
                 Connected();
             };
             _bridge.OnConnectedToHost = transport =>
@@ -66,6 +70,7 @@ namespace CardShopCoop.Steam
                 {
                     _live = true;
                     _busy = false;
+                    NotifyStateChanged();
                     Connected();
                 }
             };
@@ -119,6 +124,13 @@ namespace CardShopCoop.Steam
         public string LocalUserName => _bridge.LocalPersonaName ?? "";
 
         public event Action<INetworkingBackend, FieldValues> JoinRequested;
+
+        /// <summary>Raised when the lobby/connection state the panel draws changes outside a
+        /// session event: lobby creation started, the lobby went live, or the lobby was left.
+        /// <see cref="ConnectionInfo.Busy"/> and the host's "Copy lobby id" depend on it.</summary>
+        public event Action<INetworkingBackend> StateChanged;
+
+        private void NotifyStateChanged() => StateChanged?.Invoke(this);
 
         public Task<BackendAvailability> GetAvailabilityAsync()
         {
@@ -268,6 +280,9 @@ namespace CardShopCoop.Steam
 
             _step = _isHost ? "Creating Steam lobby\u2026" : "Entering Steam lobby\u2026";
             _busy = true;
+            // The session is not live yet, but the panel now reads "creating/entering lobby" and
+            // the start button must be blocked until this goes false again.
+            NotifyStateChanged();
 
             try
             {
@@ -344,6 +359,10 @@ namespace CardShopCoop.Steam
                 _bridge.Leave();
             }
             catch (Exception e) { CoopLog.Swallow(e); }
+
+            // Leaving is backend-owned state: a multi-backend host can close Steam while still
+            // hosting on IP, and no session event fires for that.
+            NotifyStateChanged();
 
             // Do NOT stop or dispose the bearer here. The runtime owns it and tears it down on the
             // pump thread; this method only releases the backend-owned Steam lobby.

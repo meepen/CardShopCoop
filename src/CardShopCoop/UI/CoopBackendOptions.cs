@@ -13,8 +13,20 @@ namespace CardShopCoop.UI
     /// come from <see cref="INetworkingBackend"/>.</summary>
     internal static class CoopBackendOptions
     {
-        private const float ColumnWidth = 460f;
-        private const float ColumnGap = 40f;
+        private const float LiveHeaderWidth = 460f;
+        private const float SectionPadding = 20f;
+        private const float SectionGap = 12f;
+        private const float SectionTitleHeight = 36f;
+        private const float FieldLabelWidth = 220f;
+        private const float FieldLabelGap = 12f;
+        private const float PasteWidth = 64f;
+        private const float AfterInputWidth = 6f + PasteWidth + 6f;
+        private const float ActionWidth = 130f;
+        private const float ActionStep = 140f;
+        private const float FieldRowStep = 52f;
+        private const float ToggleRowStep = 48f;
+        private const float StartRowStep = 54f;
+        private const float ActionRowStep = 44f;
         private static readonly Dictionary<string, FieldValues> Values = new();
 
         internal static void ResetValues() => Values.Clear();
@@ -35,10 +47,20 @@ namespace CardShopCoop.UI
                 text.Append('|').Append(backend.Id).Append(':').Append(backend.DisplayName)
                     .Append(':').Append(info.Active).Append(':').Append(info.IsHost)
                     .Append(':').Append(info.Busy);
-                foreach (var field in backend.GetFields(mode))
+                var fields = backend.GetFields(mode);
+                var values = ValuesFor(backend, mode, fields);
+                foreach (var field in fields)
                 {
                     text.Append('|').Append((int)field.Id).Append(':').Append(field.Kind)
                         .Append(':').Append(field.Label).Append(':').Append(field.Required);
+                    // A toggle draws its own value ("[x] On"), so flipping one changes what the
+                    // window must show and has to invalidate the form. TEXT values are
+                    // deliberately excluded: they draw from the live TMP_InputField, and including
+                    // them would rebuild (and destroy the focused field) while the player types.
+                    if (field.Kind == FieldKind.Toggle)
+                    {
+                        text.Append(':').Append(values.GetBool(field.Id) ? '1' : '0');
+                    }
                 }
 
                 foreach (var action in backend.Actions)
@@ -57,8 +79,8 @@ namespace CardShopCoop.UI
             return text.ToString();
         }
 
-        internal static float Build(Transform parent, ConnectMode mode, Action<string> hint,
-            Action rebuild)
+        internal static float Build(Transform parent, ConnectMode mode, float width,
+            Action<string> hint, Action rebuild)
         {
             var core = CoopCore.Instance;
             if (core == null)
@@ -70,21 +92,25 @@ namespace CardShopCoop.UI
             if (backends.Count == 0)
             {
                 NativeCoopUi.Text(parent, "No transports are available.", 18f, 0f, 0f,
-                    ColumnWidth, 30f, NativeCoopUi.Dim, TextAlignmentOptions.Left,
+                    width, 30f, NativeCoopUi.Dim, TextAlignmentOptions.Left,
                     wrap: false, title: false);
                 return 30f;
             }
 
-            var height = 0f;
+            // One full-width section per backend, top to bottom. Each section reports the height
+            // its own fields actually need, so a backend with a conditional field (Steam's lobby
+            // name) grows instead of leaving the layout at a fixed column height.
+            var y = 0f;
             for (var i = 0; i < backends.Count; i++)
             {
-                var x = (i % 2) * (ColumnWidth + ColumnGap);
-                var y = (i / 2) * 380f;
-                var built = BuildBackend(parent, backends[i], mode, x, y, hint, rebuild);
-                height = Mathf.Max(height, y + built);
+                y += BuildBackend(parent, backends[i], mode, width, y, hint, rebuild);
+                if (i < backends.Count - 1)
+                {
+                    y += SectionGap;
+                }
             }
 
-            return height;
+            return y;
         }
 
         internal static float BuildLive(Transform parent, Action<string> hint)
@@ -118,7 +144,7 @@ namespace CardShopCoop.UI
             }
 
             var mode = info.IsHost ? ConnectMode.Host : ConnectMode.Join;
-            NativeCoopUi.Text(parent, active.DisplayName, 24f, 0f, 0f, ColumnWidth, 32f,
+            NativeCoopUi.Text(parent, active.DisplayName, 24f, 0f, 0f, LiveHeaderWidth, 32f,
                 NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
             NativeCoopUi.Text(parent, info.Summary ?? "", 18f, 0f, 36f, 900f, 26f,
                 Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
@@ -149,41 +175,60 @@ namespace CardShopCoop.UI
         }
 
         private static float BuildBackend(Transform parent, INetworkingBackend backend,
-            ConnectMode mode, float x, float y, Action<string> hint, Action rebuild)
+            ConnectMode mode, float width, float top, Action<string> hint, Action rebuild)
         {
             var fields = backend.GetFields(mode);
             var values = ValuesFor(backend, mode, fields);
             var info = backend.ConnectionInfo;
-            NativeCoopUi.Text(parent, backend.DisplayName, 24f, x, y, ColumnWidth, 32f,
+            var panelActions = PanelActions(backend, mode).ToList();
+
+            // The section's height is its own content's height, computed the same way the rows
+            // below advance. Nothing is padded to a fixed column size, so adding a backend stacks
+            // under the previous one and adding a field grows that section only.
+            var height = SectionPadding * 2f + SectionTitleHeight;
+            for (var i = 0; i < fields.Count; i++)
+            {
+                height += fields[i].Kind == FieldKind.Toggle ? ToggleRowStep : FieldRowStep;
+            }
+            height += StartRowStep + panelActions.Count * ActionRowStep;
+
+            // An outlined panel rather than a filled block: the buttons and inputs inside keep
+            // their own contrast, and consecutive sections stay visually separate in the scroll.
+            NativeCoopUi.Flat(parent, 0f, top, width, height, NativeCoopUi.PanelEdge);
+            NativeCoopUi.Flat(parent, 2f, top + 2f, width - 4f, height - 4f,
+                NativeCoopUi.PanelFill);
+
+            var x = SectionPadding;
+            var innerWidth = width - SectionPadding * 2f;
+            var y = top + SectionPadding;
+            NativeCoopUi.Text(parent, backend.DisplayName, 24f, x, y, innerWidth, 32f,
                 NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
-            y += 36f;
+            y += SectionTitleHeight;
 
             foreach (var field in fields)
             {
                 if (field.Kind == FieldKind.Toggle)
                 {
-                    var isOn = values.GetBool(field.Id);
-                    var button = NativeCoopUi.Button(parent,
-                        (isOn ? "[x] " : "[ ] ") + field.Label, NativeCoopUi.Blue,
-                        () =>
+                    NativeCoopUi.Checkbox(parent, values.GetBool(field.Id), field.Label, x, y,
+                        innerWidth, ToggleRowStep, 18f, () =>
                         {
                             values.SetBool(field.Id, !values.GetBool(field.Id));
                             backend.Configure(values);
                             rebuild();
-                        }, x, y, ColumnWidth, 38f, 18f);
-                    y += 44f;
+                        });
+                    y += ToggleRowStep;
                     continue;
                 }
 
-                NativeCoopUi.Text(parent, field.Label, 16f, x, y, ColumnWidth, 22f,
-                    Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-                y += 22f;
-
                 var fieldActions = FieldActions(backend, mode, field.Id).ToList();
-                var inputWidth = Mathf.Max(160f, ColumnWidth
-                    - 70f
-                    - (fieldActions.Count > 0 ? fieldActions.Count * 140f + 10f : 0f));
-                var input = NativeCoopUi.Input(parent, field.Label, x, y, inputWidth, 40f,
+                NativeCoopUi.Text(parent, field.Label, 18f, x, y, FieldLabelWidth, 40f,
+                    Color.white, TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
+
+                var inputX = x + FieldLabelWidth + FieldLabelGap;
+                var reserved = AfterInputWidth + fieldActions.Count * ActionStep;
+                var inputWidth = Mathf.Max(160f, innerWidth - FieldLabelWidth - FieldLabelGap
+                    - reserved);
+                var input = NativeCoopUi.Input(parent, field.Label, inputX, y, inputWidth, 40f,
                     18f, Limit(field), ContentType(field));
                 input.text = values[field.Id] ?? "";
                 var fieldId = field.Id;
@@ -193,21 +238,22 @@ namespace CardShopCoop.UI
                     backend.Configure(values);
                 });
 
-                var actionX = x + inputWidth + 6f;
+                var actionX = inputX + inputWidth + 6f;
                 NativeCoopUi.Button(parent, "Paste", NativeCoopUi.Grey,
-                    () => Paste(input, field, values, backend, hint), actionX, y, 64f, 40f, 15f);
+                    () => Paste(input, field, values, backend, hint), actionX, y, PasteWidth, 40f,
+                    15f);
                 actionX += 70f;
                 for (var i = 0; i < fieldActions.Count; i++)
                 {
                     var action = fieldActions[i];
                     var button = NativeCoopUi.Button(parent, action.Label,
                         action.Enabled ? NativeCoopUi.Blue : NativeCoopUi.Grey,
-                        () => action.Invoke(), actionX, y, 130f, 40f, 15f);
+                        () => action.Invoke(), actionX, y, ActionWidth, 40f, 15f);
                     button.SetInteractable(action.Enabled);
-                    actionX += 140f;
+                    actionX += ActionStep;
                 }
 
-                y += 48f;
+                y += FieldRowStep;
             }
 
             var startLabel = (mode == ConnectMode.Host ? "Host via " : "Join via ")
@@ -215,18 +261,18 @@ namespace CardShopCoop.UI
             var start = NativeCoopUi.Button(parent, startLabel, NativeCoopUi.Green,
                 () => Start(backend, mode, values, hint), x, y, 320f, 46f, 18f);
             start.SetInteractable(!info.Busy);
-            y += 54f;
+            y += StartRowStep;
 
-            foreach (var action in PanelActions(backend, mode))
+            foreach (var action in panelActions)
             {
                 var button = NativeCoopUi.Button(parent, action.Label,
                     action.Enabled ? NativeCoopUi.Blue : NativeCoopUi.Grey,
                     () => action.Invoke(), x, y, 320f, 40f, 16f);
                 button.SetInteractable(action.Enabled);
-                y += 44f;
+                y += ActionRowStep;
             }
 
-            return y;
+            return height;
         }
 
         private static void Start(INetworkingBackend backend, ConnectMode mode, FieldValues values,

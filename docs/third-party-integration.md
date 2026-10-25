@@ -640,6 +640,13 @@ when you deliberately remove the transport for the rest of the run.
 The co-op window falls back to `GetFields()`; implement `INetworkingBackendDiagnostics` if you want
 extra hosting details in a support report.
 
+The co-op window is event-driven: it re-reads `ConnectionInfo` and `Actions` when the session
+changes. If your backend resolves presentation state later - a public address arriving, a lobby
+becoming live, a busy step finishing - implement `INetworkingBackendNotifications` and raise its
+`StateChanged` event whenever those values would now read differently. Raise it on any thread; the
+runtime marshals it to the Unity thread. Without it, a button whose enabled state comes from that
+late state can stay grey until some unrelated session event happens.
+
 ## 10. Compatibility and safety
 
 - **Both players need CardShopCoopCommunity and your mod at the same versions.** The join refuses a

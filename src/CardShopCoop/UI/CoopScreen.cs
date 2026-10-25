@@ -39,6 +39,30 @@ namespace CardShopCoop.UI
             Advanced
         }
 
+        /// <summary>The connection forms' scrolling viewport. The backend sections are stacked top
+        /// to bottom inside <see cref="Content"/>; their height comes from what each section
+        /// actually draws, and <see cref="Bar"/> appears only when that exceeds the viewport.</summary>
+        private sealed class FormArea
+        {
+            internal GameObject Root;
+
+            internal RectTransform Content;
+
+            internal ScrollRect Scroll;
+
+            internal Scrollbar Bar;
+
+            internal string Signature;
+        }
+
+        private const float FormX = 40f;
+        private const float FormY = 200f;
+        private const float FormWidth = 960f;
+        private const float FormHeight = 500f;
+        private const float ScrollbarWidth = 12f;
+        private const float ScrollbarGap = 6f;
+        private const float FormContentWidth = FormWidth - ScrollbarWidth - ScrollbarGap;
+
         internal static bool IsOpen;
 
         private static bool _openedPause;
@@ -71,15 +95,13 @@ namespace CardShopCoop.UI
 
         private static GameObject _joinGrp;
 
-        private static GameObject _joinFormRoot;
-
-        private static string _joinFormSignature;
+        private static FormArea _joinForm;
 
         private static GameObject _sessGrp;
 
-        private static GameObject _hostFormRoot;
+        private static FormArea _hostForm;
 
-        private static string _hostFormSignature;
+        private static GameObject _hostLiveRoot;
 
         private static bool _hostFormsLive;
 
@@ -558,16 +580,17 @@ namespace CardShopCoop.UI
         {
             RectTransform joinRt = NativeCoopUi.Node(p, "Join", 0f, 0f, 1040f, 980f);
             _joinGrp = joinRt.gameObject;
-            _joinFormRoot = NativeCoopUi.Node(joinRt, "BackendForms", 40f, 200f, 960f, 500f)
-                .gameObject;
+            _joinForm = BuildFormArea(joinRt, "BackendForms");
         }
 
         private static void BuildSession(Transform p)
         {
             RectTransform sessRt = NativeCoopUi.Node(p, "Session", 0f, 0f, 1040f, 980f);
             _sessGrp = sessRt.gameObject;
-            _hostFormRoot = NativeCoopUi.Node(sessRt, "BackendForms", 40f, 200f, 960f, 400f)
-                .gameObject;
+            _hostForm = BuildFormArea(sessRt, "BackendForms");
+            _hostLiveRoot = NativeCoopUi.Node(sessRt, "LiveBackend", FormX, FormY,
+                FormWidth, 200f).gameObject;
+            _hostLiveRoot.SetActive(false);
             _playersHead = NativeCoopUi.Text(sessRt, "Players", 26f, 40f, 360f, 700f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
             for (int i = 0; i < 8; i++)
             {
@@ -694,7 +717,7 @@ namespace CardShopCoop.UI
             NativeCoopUi.Set(_sub, connecting
                 ? "Connecting to shop..."
                 : "Logged in as: " + PlayerName);
-            RefreshBackendForms(_joinFormRoot, ConnectMode.Join, ref _joinFormSignature);
+            RefreshBackendForms(_joinForm, ConnectMode.Join);
             _cancel?.Show(connecting);
         }
 
@@ -719,9 +742,10 @@ namespace CardShopCoop.UI
                 if (_hostFormsLive)
                 {
                     _hostFormsLive = false;
-                    _hostFormSignature = null;
+                    _hostForm.Signature = null;
                 }
-                RefreshBackendForms(_hostFormRoot, ConnectMode.Host, ref _hostFormSignature);
+                NativeCoopUi.Show(_hostLiveRoot, on: false);
+                RefreshBackendForms(_hostForm, ConnectMode.Host);
                 NativeCoopUi.Show(_playersHead, on: false);
                 for (var i = 0; i < Players.Length; i++)
                 {
@@ -733,10 +757,11 @@ namespace CardShopCoop.UI
             }
 
             _hostFormsLive = true;
-            _hostFormSignature = null;
-            _hostFormRoot?.SetActive(true);
-            ClearChildren(_hostFormRoot);
-            CoopBackendOptions.BuildLive(_hostFormRoot.transform, Hint);
+            _hostForm.Signature = null;
+            NativeCoopUi.Show(_hostForm.Root, on: false);
+            NativeCoopUi.Show(_hostLiveRoot, on: true);
+            ClearChildren(_hostLiveRoot);
+            CoopBackendOptions.BuildLive(_hostLiveRoot.transform, Hint);
             NativeCoopUi.Show(_playersHead, on: true);
 
             IReadOnlyList<PresencePlayer> sessionPlayers = PresenceApi.SessionPlayers;
@@ -765,25 +790,115 @@ namespace CardShopCoop.UI
             _cancel?.Show(on: false);
         }
 
-        private static void RefreshBackendForms(GameObject root, ConnectMode mode,
-            ref string signature)
+        private static void RefreshBackendForms(FormArea area, ConnectMode mode)
         {
-            if (root == null)
+            if (area == null)
             {
                 return;
             }
 
             var next = CoopBackendOptions.Signature(mode);
-            if (next == signature && root.transform.childCount > 0)
+            if (next == area.Signature && area.Content.childCount > 0)
             {
-                root.SetActive(true);
+                NativeCoopUi.Show(area.Root, on: true);
                 return;
             }
 
-            signature = next;
-            ClearChildren(root);
-            root.SetActive(true);
-            CoopBackendOptions.Build(root.transform, mode, Hint, Refresh);
+            // Keep the player where they were when only a toggle/field changed; a section can grow
+            // or shrink, and clamping is handled by ScrollRect.
+            var scroll = area.Content.childCount > 0 ? area.Scroll.verticalNormalizedPosition : 1f;
+            area.Signature = next;
+            ClearChildren(area.Content.gameObject);
+            NativeCoopUi.Show(area.Root, on: true);
+            var height = CoopBackendOptions.Build(area.Content, mode, FormContentWidth, Hint,
+                Refresh);
+            var contentHeight = Mathf.Max(FormHeight, height + 8f);
+            area.Content.sizeDelta = new Vector2(0f, contentHeight);
+            Canvas.ForceUpdateCanvases();
+            if (area.Bar != null)
+            {
+                area.Bar.size = Mathf.Clamp01(FormHeight / contentHeight);
+            }
+            area.Scroll.verticalNormalizedPosition = scroll;
+        }
+
+        /// <summary>Builds a vertical scroll area: a masked viewport, the backend sections as its
+        /// content, and an auto-hiding scrollbar on the right. The content is anchored to the top
+        /// and stretched to the viewport's width, so every backend section spans the full panel.</summary>
+        private static FormArea BuildFormArea(Transform parent, string name)
+        {
+            RectTransform root = NativeCoopUi.Node(parent, name, FormX, FormY, FormWidth, FormHeight);
+            var area = new FormArea { Root = root.gameObject };
+
+            var scroll = root.gameObject.AddComponent<ScrollRect>();
+            scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.scrollSensitivity = 40f;
+            scroll.inertia = true;
+            scroll.decelerationRate = 0.135f;
+            area.Scroll = scroll;
+
+            RectTransform viewport = NativeCoopUi.Node(root, "Viewport", 0f, 0f,
+                FormContentWidth, FormHeight);
+            NativeCoopUi.Stretch(viewport, 0f, 0f, ScrollbarWidth + ScrollbarGap, 0f);
+            Image hitArea = viewport.gameObject.AddComponent<Image>();
+            if (NativeCoopUi.White != null)
+            {
+                hitArea.sprite = NativeCoopUi.White;
+            }
+            hitArea.color = new Color(0f, 0f, 0f, 0.001f);
+            hitArea.raycastTarget = true;
+            viewport.gameObject.AddComponent<RectMask2D>();
+            scroll.viewport = viewport;
+
+            var content = (RectTransform)new GameObject("Content", typeof(RectTransform)).transform;
+            content.SetParent(viewport, false);
+            content.anchorMin = new Vector2(0f, 1f);
+            content.anchorMax = new Vector2(1f, 1f);
+            content.pivot = new Vector2(0.5f, 1f);
+            content.anchoredPosition = Vector2.zero;
+            content.sizeDelta = new Vector2(0f, FormHeight);
+            area.Content = content;
+            scroll.content = content;
+
+            RectTransform bar = NativeCoopUi.Node(root, "Scrollbar",
+                FormWidth - ScrollbarWidth, 0f, ScrollbarWidth, FormHeight);
+            Image track = bar.gameObject.AddComponent<Image>();
+            if (NativeCoopUi.White != null)
+            {
+                track.sprite = NativeCoopUi.White;
+            }
+            track.color = new Color(0.14f, 0.09f, 0.18f);
+            track.raycastTarget = true;
+            bar.gameObject.AddComponent<RectMask2D>();
+
+            RectTransform sliding = NativeCoopUi.Node(bar, "SlidingArea", 0f, 0f,
+                ScrollbarWidth, FormHeight);
+            NativeCoopUi.Stretch(sliding, 0f, 0f, 0f, 0f);
+            RectTransform handle = NativeCoopUi.Node(sliding, "Handle", 0f, 0f,
+                ScrollbarWidth, FormHeight);
+            NativeCoopUi.Stretch(handle, 0f, 0f, 0f, 0f);
+            Image handleImage = handle.gameObject.AddComponent<Image>();
+            if (NativeCoopUi.White != null)
+            {
+                handleImage.sprite = NativeCoopUi.White;
+            }
+            handleImage.color = new Color(0.62f, 0.38f, 0.96f);
+            handleImage.raycastTarget = true;
+
+            var scrollbar = bar.gameObject.AddComponent<Scrollbar>();
+            scrollbar.handleRect = handle;
+            scrollbar.targetGraphic = handleImage;
+            scrollbar.direction = Scrollbar.Direction.BottomToTop;
+            scrollbar.size = 1f;
+            scrollbar.value = 1f;
+            area.Bar = scrollbar;
+            scroll.verticalScrollbar = scrollbar;
+            scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.AutoHide;
+            scroll.verticalScrollbarSpacing = 0f;
+
+            return area;
         }
 
         private static void ClearChildren(GameObject root)

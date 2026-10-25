@@ -449,6 +449,45 @@ namespace CardShopCoop.UI
             return coopButton;
         }
 
+        /// <summary>A classic checkbox row: a square box with a tick, the field label beside it, and
+        /// the whole row as the click target. Kept separate from <see cref="Button"/> because a
+        /// toggle is not an action - it owns a boolean, and drawing it as a button invited the
+        /// enabled/disabled colouring that made it look like "Copy password" next to it.</summary>
+        internal static Button Checkbox(Transform parent, bool isOn, string label, float x, float y,
+            float width, float height, float textPx, UnityAction onClick)
+        {
+            const float BoxSize = 26f;
+
+            // The transparent row image is the hit area, so clicking the label toggles as well.
+            Image hit = Flat(parent, x, y, width, height, new Color(0f, 0f, 0f, 0f));
+            hit.raycastTarget = true;
+            var button = hit.gameObject.AddComponent<Button>();
+            button.transition = Selectable.Transition.None;
+            button.targetGraphic = hit;
+            button.navigation = new Navigation { mode = Navigation.Mode.None };
+            button.onClick.AddListener(Tap);
+            if (onClick != null)
+            {
+                button.onClick.AddListener(onClick);
+            }
+
+            float boxY = y + (height - BoxSize) * 0.5f;
+            Flat(parent, x, boxY, BoxSize, BoxSize, isOn ? Purple.Highlight : Dim);
+            Flat(parent, x + 2f, boxY + 2f, BoxSize - 4f, BoxSize - 4f,
+                isOn ? Purple.Border : PanelFill);
+            if (isOn)
+            {
+                // Prefer a real tick; fall back to the font's X only when it has no tick glyph.
+                string mark = Font != null && Font.HasCharacter('\u2713') ? "\u2713" : "X";
+                Text(parent, mark, 18f, x, boxY, BoxSize, BoxSize, Color.white,
+                    TextAlignmentOptions.Center, wrap: false, title: false);
+            }
+
+            Text(parent, label, textPx, x + BoxSize + 12f, y, width - BoxSize - 12f, height,
+                Color.white, TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
+            return button;
+        }
+
         internal static RectTransform Node(Transform parent, string name, float x, float y, float w, float h)
         {
             RectTransform rt = (RectTransform)new GameObject(name, typeof(RectTransform)).transform;

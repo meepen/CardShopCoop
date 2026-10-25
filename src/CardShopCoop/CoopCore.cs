@@ -600,9 +600,11 @@ namespace CardShopCoop
 
         // ------------------------------------------------------------------ backend wiring
 
-        /// <summary>Subscribes to a backend's out-of-band join requests once. The connect attempt
-        /// itself is delivered through the per-attempt <see cref="IBackendConnectCallbacks"/>, so
-        /// there is no long-lived transport event to wire here.</summary>
+        /// <summary>Subscribes to a backend's long-lived events once: an out-of-band join request,
+        /// and - when the backend implements the optional notification companion - presentation
+        /// state that changes outside a session event. The connect attempt itself is delivered
+        /// through the per-attempt <see cref="IBackendConnectCallbacks"/>, so there is no
+        /// long-lived transport event to wire here.</summary>
         private void EnsureBackendWired(INetworkingBackend backend)
         {
             lock (_sessionLock)
@@ -614,6 +616,27 @@ namespace CardShopCoop
             }
 
             backend.JoinRequested += (requesting, values) => OnBackendJoinRequested(requesting, values);
+            if (backend is INetworkingBackendNotifications notifications)
+            {
+                notifications.StateChanged += OnBackendStateChanged;
+            }
+        }
+
+        /// <summary>A backend resolved presentation state on its own (the IP host's public address
+        /// arriving, a Steam lobby going live). The window re-reads ConnectionInfo/Actions from the
+        /// StateChanged event, and a backend may raise this on a worker thread, so queue it.
+        ///
+        /// ALWAYS QUEUE, even when the caller is already on the Unity thread: a subscriber that
+        /// throws must not propagate back into the backend's Connect/Disconnect (which would abort
+        /// a mid-start transport and leak its bearer). The dispatcher is the boundary that logs and
+        /// contains such a failure.</summary>
+        private void OnBackendStateChanged(INetworkingBackend backend)
+        {
+            if (!TryEnqueueMainThread(() => StateChanged?.Invoke()))
+            {
+                CoopPlugin.Log?.LogWarning("coop: could not queue a state change from '"
+                    + backend.Id + "' on the Unity thread");
+            }
         }
 
         /// <summary>
@@ -1039,6 +1062,9 @@ namespace CardShopCoop
             // releases its own lobby/mapping state. Remove this backend's child while the others stay.
             backend.Disconnect(connection);
             RemoveBackendChild(backend);
+            // The backend may not implement the optional notification interface, and no session
+            // event fires for "one of several hosts stopped", so invalidate the window here too.
+            StateChanged?.Invoke();
         }
 
         /// <summary>HOST ONLY: remove one client from the session, telling it why. The host and every
@@ -1130,6 +1156,9 @@ namespace CardShopCoop
             {
                 CoopPlugin.Log.LogWarning("transport '" + backend.Id + "' dropped: " + reason
                     + (retryable ? " (retryable)" : ""));
+                // The session lives on through another backend, so there is no Shutdown event to
+                // refresh the failed backend's panel with its now-inactive state.
+                StateChanged?.Invoke();
             }
         }
 

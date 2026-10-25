@@ -227,6 +227,30 @@ namespace CardShopCoop.Net.Networking
         IReadOnlyList<BackendDiagnosticField> GetDiagnosticFields(ConnectMode mode);
     }
 
+    /// <summary>
+    /// Optional companion to <see cref="INetworkingBackend"/> for state a backend resolves on its
+    /// own AFTER the session event that started it: the host's public address lookup finishing, a
+    /// lobby becoming live, an availability probe completing.
+    ///
+    /// The co-op window is event driven and re-reads <see cref="INetworkingBackend.ConnectionInfo"/>
+    /// and <see cref="INetworkingBackend.Actions"/> when it redraws, so a button whose enabled state
+    /// comes from either would otherwise stay grey until some unrelated session event happened. The
+    /// IP backend's "Copy public address" is the canonical case: the address arrives seconds after
+    /// hosting starts, on a worker thread.
+    ///
+    /// A backend that has no such state needs no implementation; the runtime treats this interface
+    /// as optional, exactly like <see cref="INetworkingBackendDiagnostics"/>.
+    /// </summary>
+    public interface INetworkingBackendNotifications
+    {
+        /// <summary>Raised when <see cref="INetworkingBackend.ConnectionInfo"/> or
+        /// <see cref="INetworkingBackend.Actions"/> would now read differently. May be raised from
+        /// any thread; the runtime marshals it to the Unity thread before notifying the window.
+        /// Implementations must not raise it for ordinary configuration edits - the window already
+        /// holds those values - and must be safe to raise after the session has ended.</summary>
+        event Action<INetworkingBackend> StateChanged;
+    }
+
     /// <summary>A backend-specific button (invite dialog, refresh lobbies, copy code...).</summary>
     public sealed class BackendAction
     {

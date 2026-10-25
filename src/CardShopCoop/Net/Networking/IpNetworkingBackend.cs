@@ -29,7 +29,8 @@ namespace CardShopCoop.Net.Networking
     /// home connection, so it is NEVER logged and NEVER drawn in the window - it lives only on the
     /// clipboard.
     /// </summary>
-    internal sealed class IpNetworkingBackend : INetworkingBackend, INetworkingBackendDiagnostics
+    internal sealed class IpNetworkingBackend
+        : INetworkingBackend, INetworkingBackendDiagnostics, INetworkingBackendNotifications
     {
         public const string BackendId = "ip";
 
@@ -72,6 +73,12 @@ namespace CardShopCoop.Net.Networking
 #pragma warning disable 0067 // never raised here; a UDP bearer has no out-of-band join request
         public event Action<INetworkingBackend, FieldValues> JoinRequested;
 #pragma warning restore 0067
+
+        /// <summary>Raised when the host's address/forward setup finishes. The lookup runs on a
+        /// worker thread seconds after hosting starts, and it is what enables "Copy public address"
+        /// and reveals the "forward the port yourself" warning - neither of which produces a
+        /// session event of its own.</summary>
+        public event Action<INetworkingBackend> StateChanged;
 
         public Task<BackendAvailability> GetAvailabilityAsync() => Task.FromResult(BackendAvailability.Yes);
 
@@ -388,6 +395,10 @@ namespace CardShopCoop.Net.Networking
             // from any endpoint, so one listening port serves every friend who dials it.
             var datagrams = UdpDatagramTransport.CreateHost(socket);
             Interlocked.Exchange(ref _active, attempt.Value);
+            // ConnectionInfo.Active just changed. In a multi-backend host the session status line
+            // may not change when ANOTHER transport starts, so this is what makes its live panel
+            // replace the "Not connected." placeholder.
+            StateChanged?.Invoke(this);
             callbacks.BearerReady(attempt, datagrams);
             callbacks.Connected(attempt);
 
@@ -417,6 +428,7 @@ namespace CardShopCoop.Net.Networking
             // single peer and the runtime's peer id is always 1.
             var datagrams = new UdpDatagramTransport(new IPEndPoint(IPAddress.Any, 0), remote);
             Interlocked.Exchange(ref _active, attempt.Value);
+            StateChanged?.Invoke(this);
             callbacks.BearerReady(attempt, datagrams);
             callbacks.Connected(attempt);
         }
@@ -486,6 +498,7 @@ namespace CardShopCoop.Net.Networking
                 var externalPort = port;
                 long epoch = 0;
                 var externalIp = (string)null;
+                var publicEndpoint = (string)null;
                 try
                 {
                     if (openRouter)
@@ -551,7 +564,7 @@ namespace CardShopCoop.Net.Networking
                         : NetHelpers.IsPublicIPv4(externalIp) ? externalIp : null;
                     if (publicIp != null)
                     {
-                        _publicEndpoint = publicIp + ":"
+                        publicEndpoint = publicIp + ":"
                             + (forwardState == ForwardState.Mapped
                                 ? externalPort : port).ToString(CultureInfo.InvariantCulture);
                     }
@@ -570,6 +583,11 @@ namespace CardShopCoop.Net.Networking
                         current = Volatile.Read(ref _generation) == generation;
                         if (current)
                         {
+                            // Publish the endpoint only under the same generation check: writing it
+                            // before this lock let a Disconnect clear it and then have this thread
+                            // put a dead session's home address back.
+                            _publicEndpoint = publicEndpoint;
+                            _addressLookupDone = true;
                             _forwardState = forwardState;
                             _forwardReason = forwardReason;
                             _mappingEpoch = epoch;
@@ -578,7 +596,11 @@ namespace CardShopCoop.Net.Networking
 
                     if (current)
                     {
-                        _addressLookupDone = true;
+                        // ConnectionInfo/Actions changed: the public address (or the reason there
+                        // is none) is now final. Nothing else will fire for this, so tell the
+                        // window to re-read the live panel. Safe off the Unity thread - the
+                        // runtime marshals it.
+                        StateChanged?.Invoke(this);
                     }
                     else if (epoch != 0)
                     {
@@ -642,6 +664,12 @@ namespace CardShopCoop.Net.Networking
                     Name = "CoopUnmap",
                 }.Start();
             }
+
+            // The backend-owned presentation state (active, address, forward warning) is gone, so
+            // the session panel must stop offering this backend's copy/stop controls. A multi-
+            // backend host stops one transport at a time and does not raise a session event for
+            // it, so this notification is the only invalidation the panel gets.
+            StateChanged?.Invoke(this);
         }
     }
 }
