@@ -2448,6 +2448,14 @@ namespace CardShopCoop
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
+            if (scene.name == "Title")
+            {
+                // The character tab needs the game's full body, and on the public build that is
+                // a Resources asset. Warm it on the title screen instead of making the first
+                // Character-tab open incur the load (and instead of falling back to CC_Dummy).
+                UI.CoopCharacterPrefabPreloader.EnsureStarted();
+            }
+
             _worldReady = false;
             GameObjectIdentityApi.Reset();
             // The game can rebuild its event manager between scenes; make sure the co-op

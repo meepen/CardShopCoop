@@ -608,6 +608,7 @@ namespace CardShopCoop.UI
             RectTransform charRt = NativeCoopUi.Node(p, "Character", 0f, 0f, 1040f, 980f);
             _charGrp = charRt.gameObject;
             _charGrp.SetActive(false);
+            CoopCharacterPrefabPreloader.EnsureStarted();
             CoopCharacterEditor.Build(charRt, Hint);
         }
 

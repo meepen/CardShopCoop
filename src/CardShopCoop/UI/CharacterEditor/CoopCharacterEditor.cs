@@ -273,6 +273,7 @@ namespace CardShopCoop.UI
                 return;
             }
 
+            CoopCharacterPrefabPreloader.EnsureStarted();
             Subscribe();
             _preview?.Show(true);
             var scene = SceneManager.GetActiveScene().handle;
@@ -332,6 +333,7 @@ namespace CardShopCoop.UI
 
             _subscribed = true;
             CoopCore.StateChanged += OnSessionChanged;
+            CoopCharacterPrefabPreloader.Completed += OnPrefabsReady;
             if (CoopPlugin.AllowNsfw != null)
             {
                 CoopPlugin.AllowNsfw.SettingChanged += OnNsfwSettingChanged;
@@ -349,6 +351,7 @@ namespace CardShopCoop.UI
             {
                 _subscribed = false;
                 CoopCore.StateChanged -= OnSessionChanged;
+                CoopCharacterPrefabPreloader.Completed -= OnPrefabsReady;
                 if (CoopPlugin.AllowNsfw != null)
                 {
                     CoopPlugin.AllowNsfw.SettingChanged -= OnNsfwSettingChanged;
@@ -376,6 +379,17 @@ namespace CardShopCoop.UI
                 return;
             }
             _sessionKey = key;
+            RefreshAll();
+        }
+
+        private void OnPrefabsReady()
+        {
+            if (!_built || !isActiveAndEnabled)
+            {
+                return;
+            }
+
+            _lastPreviewSignature = null;
             RefreshAll();
         }
 

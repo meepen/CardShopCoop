@@ -182,6 +182,7 @@ namespace CardShopCoop.UI
             }
 
             _title = title;
+            CoopCharacterPrefabPreloader.EnsureStarted();
             try
             {
                 InjectTitle(title);

@@ -23,21 +23,6 @@ namespace CardShopCoop.UI
         private const int TextureWidth = 512;
         private const int TextureHeight = 640;
 
-        private static readonly string[] FemalePrefabNames =
-        {
-            "Female_Combined_HP Variant",
-            "Female_Combined_HP",
-            "Female_Combined_HPOptimized",
-        };
-
-        private static readonly string[] MalePrefabNames =
-        {
-            "Male_Combined_HP Variant",
-            "Male_Combined_HP VariantA",
-            "Male_Combined_HP",
-            "Male_Combined_HPOptimized",
-        };
-
         private const string DummyPrefabName = "CC_Dummy";
 
         private GameObject _stage;
@@ -338,14 +323,12 @@ namespace CardShopCoop.UI
         private void CreateBody(bool female, int modelIndex, PresenceModelEntry model)
         {
             DestroyBody();
+            CoopCharacterPrefabPreloader.EnsureStarted();
 
-            var prefabName = FindPrefabName(female);
-            if (prefabName != null)
+            if (CoopCharacterPrefabPreloader.TryGet(female, out var preloaded)
+                && CreateFromPrefab(preloaded, "preloaded", isDummy: false, female, modelIndex))
             {
-                if (CreateFromPrefab(prefabName, female, modelIndex))
-                {
-                    return;
-                }
+                return;
             }
 
             if (CreateFromCustomer(female, modelIndex))
@@ -353,7 +336,9 @@ namespace CardShopCoop.UI
                 return;
             }
 
-            if (CreateFromPrefab(DummyPrefabName, female, modelIndex))
+            var dummy = Resources.Load<GameObject>(DummyPrefabName);
+            if (dummy != null
+                && CreateFromPrefab(dummy, DummyPrefabName, isDummy: true, female, modelIndex))
             {
                 CoopPlugin.Log?.LogWarning("co-op character editor: using the limited CC_Dummy "
                     + "preview body; the full character prefab is not available on this screen.");
@@ -364,9 +349,9 @@ namespace CardShopCoop.UI
                 + "for the " + (female ? "female" : "male") + " preview.");
         }
 
-        private bool CreateFromPrefab(string prefabName, bool female, int modelIndex)
+        private bool CreateFromPrefab(GameObject prefab, string label, bool isDummy, bool female,
+            int modelIndex)
         {
-            var prefab = Resources.Load<GameObject>(prefabName);
             if (prefab == null)
             {
                 return false;
@@ -386,7 +371,7 @@ namespace CardShopCoop.UI
                     || customization.Presets.Presets == null
                     || customization.Presets.Presets.Count == 0)
                 {
-                    CoopPlugin.Log?.LogWarning("co-op character editor: prefab '" + prefabName
+                    CoopPlugin.Log?.LogWarning("co-op character editor: prefab '" + label
                         + "' has no usable CharacterCustomization.");
                     return false;
                 }
@@ -410,15 +395,14 @@ namespace CardShopCoop.UI
                 _bodyFromCustomer = false;
                 _customerSourceCustom = null;
                 _customerSourceRoot = null;
-                _limited = prefabName == DummyPrefabName
-                    || !HasGenderPresets(customization, female);
+                _limited = isDummy || !HasGenderPresets(customization, female);
                 ConfigureAnimator();
                 RefreshLayers();
                 return true;
             }
             catch (Exception error)
             {
-                CoopPlugin.Log?.LogError("co-op character editor: preview body from '" + prefabName
+                CoopPlugin.Log?.LogError("co-op character editor: preview body from '" + label
                     + "' failed: " + error);
                 if (clone != null)
                 {
@@ -631,22 +615,10 @@ namespace CardShopCoop.UI
             return (female ? "Female" : "Male") + Mathf.Max(0, modelIndex);
         }
 
-        private static string FindPrefabName(bool female)
-        {
-            var names = female ? FemalePrefabNames : MalePrefabNames;
-            for (var i = 0; i < names.Length; i++)
-            {
-                if (Resources.Load<GameObject>(names[i]) != null)
-                {
-                    return names[i];
-                }
-            }
-            return null;
-        }
-
         private static bool HasBetterSource(bool female)
         {
-            return FindPrefabName(female) != null || SceneRef<CustomerManager>.Get() != null;
+            return CoopCharacterPrefabPreloader.TryGet(female, out _)
+                || SceneRef<CustomerManager>.Get() != null;
         }
 
         private void DestroyBody()
