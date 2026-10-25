@@ -247,6 +247,14 @@ namespace CardShopCoop.Modules.Presence
         internal static void ApplyCharacterData(CC.CharacterCustomization custom,
             CC.CC_CharacterData data)
         {
+            if (!CoopPlugin.AllowNsfw.Value)
+            {
+                // Every body application goes through here (local editor, remote avatar, and
+                // customer preview). Censor at this boundary so no preview can render a nude
+                // selection while the setting is off, even if the selection arrived from a
+                // preset, history, or another player.
+                ClotheNudeSlots(custom, data);
+            }
             AlignWardrobeToTables(custom, data);
             var savedApparelTints = data.ColorProperties != null
                 ? data.ColorProperties.FindAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal))
@@ -528,6 +536,50 @@ namespace CardShopCoop.Modules.Presence
             return string.IsNullOrEmpty(name)
                 || name.Equals("None", System.StringComparison.OrdinalIgnoreCase)
                 || name.Equals("Nude", System.StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>Returns a clothed version of a model when NSFW is off. Null means the caller
+        /// should fall back to a clothed random preset (no usable wardrobe tables).</summary>
+        internal static PresenceModelEntry CensorModel(PresenceModelEntry model,
+            CC.CharacterCustomization custom)
+        {
+            if (model == null || CoopPlugin.AllowNsfw.Value || !IsNude(model))
+            {
+                return model;
+            }
+
+            if (custom?.ApparelTables == null || string.IsNullOrEmpty(model.CustomizationJson))
+            {
+                return null;
+            }
+
+            CC.CC_CharacterData data;
+            try
+            {
+                data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(model.CustomizationJson);
+            }
+            catch (System.Exception)
+            {
+                return null;
+            }
+            if (data == null)
+            {
+                return null;
+            }
+
+            ClotheNudeSlots(custom, data);
+            if (IsNude(data))
+            {
+                return null;
+            }
+
+            return new PresenceModelEntry
+            {
+                Id = model.Id,
+                Female = model.Female,
+                ModelIndex = model.ModelIndex,
+                CustomizationJson = JsonConvert.SerializeObject(data),
+            };
         }
 
         /// <summary>NSFW is off: replace each nude apparel slot ("None"/empty/"Nude") with the

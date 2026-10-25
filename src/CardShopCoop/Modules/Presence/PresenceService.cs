@@ -271,6 +271,7 @@ namespace CardShopCoop.Modules.Presence
             _autoRepair = false;
             _lastCommittedModel = Clone(model);
             _appliedModelRoot = null;
+            CensorLocalModelIfNeeded();
         }
 
         internal void ApplyPredictionLocalModel(PresenceModelEntry model)
@@ -285,6 +286,7 @@ namespace CardShopCoop.Modules.Presence
             _autoRepair = false;
             _lastCommittedModel = Clone(model);
             _appliedModelRoot = null;
+            CensorLocalModelIfNeeded();
 
             var custom = _renderer.GetEditorCustomization(_localModel.Female);
             if (custom != null)
@@ -400,6 +402,7 @@ namespace CardShopCoop.Modules.Presence
                 _autoRepair = NeedsAutoRepair(_localModel);
             }
 
+            CensorLocalModelIfNeeded();
             if (_autoRepair)
             {
                 TryUpgradeAutoModel();
@@ -420,6 +423,34 @@ namespace CardShopCoop.Modules.Presence
 
             _lastCommittedModel ??= Clone(_localModel);
             return _localModel;
+        }
+
+        /// <summary>Replaces a stored nude local model with the same appearance wearing the first
+        /// real item in every nude slot. If no wardrobe template is available, the normal
+        /// auto-repair path chooses a fully clothed random preset.</summary>
+        private void CensorLocalModelIfNeeded()
+        {
+            if (CoopPlugin.AllowNsfw.Value || _localModel == null
+                || !PresenceAvatarRenderer.IsNude(_localModel))
+            {
+                return;
+            }
+
+            var custom = _renderer.GetEditorCustomization(_localModel.Female);
+            var censored = PresenceAvatarRenderer.CensorModel(_localModel, custom);
+            if (censored == null)
+            {
+                _autoRepair = true;
+                return;
+            }
+
+            _localModel = censored;
+            _autoRepair = false;
+            _appliedModelRoot = null;
+            _lastCommittedModel = Clone(_localModel);
+            QueueModelSave();
+            ModelChanged?.Invoke(Clone(_localModel));
+            _modelGeneration++;
         }
 
         internal PresenceModelEntry GetLocalModel() => Clone(EnsureLocalModel());

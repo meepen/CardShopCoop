@@ -619,12 +619,6 @@ namespace CardShopCoop.UI
             }
 
             var json = _model?.CustomizationJson;
-            if (!CoopPlugin.AllowNsfw.Value && PresenceLocalEditorApi.IsNude(json))
-            {
-                // NSFW off: keep the game's initialized, clothed preset instead of stripping the
-                // body. This is the same guard the old world-space preview used.
-                json = null;
-            }
 
             try
             {
