@@ -203,6 +203,8 @@ namespace CardShopCoop.Modules.Presence
                 _pendingModelState = null;
                 ApplyModelState(pending);
             }
+
+            PresenceApi.NotifyRosterChanged();
         }
 
         [MessageHandler]
@@ -219,6 +221,7 @@ namespace CardShopCoop.Modules.Presence
                 _rosterIds.Remove(message.Id);
                 _rosterNames.Remove(message.Id);
                 _service.Remove(avatarId);
+                PresenceApi.NotifyRosterChanged();
                 return;
             }
 
@@ -230,6 +233,7 @@ namespace CardShopCoop.Modules.Presence
             _rosterIds.Add(message.Id);
             _rosterNames[message.Id] = message.Entry.Name;
             _service.SetName(avatarId, message.Entry.Name);
+            PresenceApi.NotifyRosterChanged();
         }
 
         [MessageHandler]
@@ -464,6 +468,7 @@ namespace CardShopCoop.Modules.Presence
             _pendingModelState = null;
             _lastSentModel = null;
             _context = null;
+            PresenceApi.NotifyRosterChanged();
         }
 
         private void OnDestroy() => Shutdown();

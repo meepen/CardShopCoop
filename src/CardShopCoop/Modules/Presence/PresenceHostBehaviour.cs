@@ -97,6 +97,7 @@ namespace CardShopCoop.Modules.Presence
                 Id = connection.Id,
                 Entry = BuildRosterEntry(connection.Id),
             }, connection.Id);
+            PresenceApi.NotifyRosterChanged();
         }
 
         [OnClientDisconnected]
@@ -124,6 +125,7 @@ namespace CardShopCoop.Modules.Presence
                 Id = connection.Id,
                 ActionId = Guid.Empty,
             });
+            PresenceApi.NotifyRosterChanged();
         }
 
         [MessageHandler]

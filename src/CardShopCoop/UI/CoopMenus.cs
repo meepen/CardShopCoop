@@ -36,8 +36,6 @@ namespace CardShopCoop.UI
 
         private static CoopButton _pauseBtn;
 
-        private static float _nextTitleLook;
-
         private static readonly List<Moved> Restore = new List<Moved>();
 
         private static readonly List<KeyValuePair<ControllerScreenUIExtension, ControllerBtnList>> AddedRows = new List<KeyValuePair<ControllerScreenUIExtension, ControllerBtnList>>();
@@ -114,7 +112,10 @@ namespace CardShopCoop.UI
             if (_harmony == null)
             {
                 _harmony = new Harmony("dev.meepen.cardshopcoop.menus");
-                Patch(_harmony, typeof(TitleScreen), "Start", null, "TitleStartPostfix");
+                Patch(_harmony, typeof(TitleScreen), "Start", "TitleStartPrefix",
+                    "TitleStartPostfix");
+                Patch(_harmony, typeof(ControllerScreenUIExtManager), "OnOpenScreen", null,
+                    "ControllerScreenOpenPostfix");
                 Patch(_harmony, typeof(PauseScreen), "OpenScreen", null, "PauseOpenPostfix");
                 Patch(_harmony, typeof(PauseScreen), "CloseScreen", "PauseClosePrefix", null);
             }
@@ -148,19 +149,47 @@ namespace CardShopCoop.UI
             }
         }
 
+        private static void TitleStartPrefix(TitleScreen __instance) => _title = __instance;
+
         private static void TitleStartPostfix(TitleScreen __instance)
+            => InjectTitleGuarded(__instance);
+
+        /// <summary>The title screen opens its controller screen at the end of Start. That is the
+        /// event that makes its buttons addressable, so this is where the co-op button is injected
+        /// on builds where Start's postfix runs before the controller layout is ready.</summary>
+        private static void ControllerScreenOpenPostfix(ControllerScreenUIExtension extension)
         {
+            if (extension == null)
+            {
+                return;
+            }
+
+            var title = extension.GetComponentInParent<TitleScreen>() ?? _title;
+            if (title == null)
+            {
+                return;
+            }
+
+            _title = title;
+            InjectTitleGuarded(title);
+        }
+
+        private static void InjectTitleGuarded(TitleScreen title)
+        {
+            if (title == null)
+            {
+                return;
+            }
+
+            _title = title;
             try
             {
-                InjectTitle(__instance);
+                InjectTitle(title);
             }
             catch (Exception ex)
             {
-                ManualLogSource log = CoopPlugin.Log;
-                if (log != null)
-                {
-                    log.LogWarning("coop: title button: " + ex);
-                }
+                CoopLog.WarnOnce("coop.menus.title-button",
+                    "coop: could not add the title-screen co-op button: " + ex);
             }
         }
 
@@ -198,19 +227,6 @@ namespace CardShopCoop.UI
                 CoopScreen.Close();
             }
             return true;
-        }
-
-        internal static void Tick()
-        {
-            if ((_titleBtn == null || _titleBtn.Go == null) && AtTitle && Time.unscaledTime >= _nextTitleLook)
-            {
-                _nextTitleLook = Time.unscaledTime + 1f;
-                TitleScreen val = UnityEngine.Object.FindObjectOfType<TitleScreen>();
-                if (val != null)
-                {
-                    InjectTitle(val);
-                }
-            }
         }
 
         internal static void Shutdown()

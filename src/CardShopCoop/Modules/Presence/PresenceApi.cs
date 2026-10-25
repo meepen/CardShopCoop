@@ -86,6 +86,7 @@ namespace CardShopCoop.Modules.Presence
 
 
             Names[connectionId] = string.IsNullOrWhiteSpace(name) ? "Player " + connectionId : name;
+            NotifyRosterChanged();
         }
 
         /// <summary>Copies the session's normalized name onto the public connection object.</summary>
@@ -115,9 +116,19 @@ namespace CardShopCoop.Modules.Presence
             return null;
         }
 
-        internal static void RemovePeer(int connectionId) => Names.Remove(connectionId);
+        internal static void RemovePeer(int connectionId)
+        {
+            if (Names.Remove(connectionId))
+            {
+                NotifyRosterChanged();
+            }
+        }
 
-        internal static void ClearPeerNames() => Names.Clear();
+        internal static void ClearPeerNames()
+        {
+            Names.Clear();
+            NotifyRosterChanged();
+        }
 
         /// <summary>A copy of one session member's appearance, keyed by the roster connection id
         /// (0 is the host on its own screen; 1 is the host as a client sees it). False when no
@@ -201,6 +212,12 @@ namespace CardShopCoop.Modules.Presence
         public static event Action RemoteAvatarsChanged;
 
         internal static void NotifyRemoteAvatarsChanged() => RemoteAvatarsChanged?.Invoke();
+
+        /// <summary>Raised when the session roster (who is in the shop) changes. The co-op window
+        /// uses it instead of re-reading the roster on a timer.</summary>
+        public static event Action RosterChanged;
+
+        internal static void NotifyRosterChanged() => RosterChanged?.Invoke();
 
         public static bool TryGetLocalPlayerPosition(out Vector3 position)
         {

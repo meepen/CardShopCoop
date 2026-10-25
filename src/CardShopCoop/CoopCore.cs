@@ -73,8 +73,44 @@ namespace CardShopCoop
 
         public static CoopRole Role { get; private set; } = CoopRole.None;
 
-        public string StatusLine = "Not connected";
-        public string ErrorLine = "";
+        /// <summary>Raised when the session's role, status text, error text or backend set
+        /// changes. UI listens instead of polling the fields.</summary>
+        public static event Action StateChanged;
+
+        private string _statusLine = "Not connected";
+        private string _errorLine = "";
+
+        public string StatusLine
+        {
+            get => _statusLine;
+            private set
+            {
+                var next = value ?? "";
+                if (string.Equals(_statusLine, next, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                _statusLine = next;
+                StateChanged?.Invoke();
+            }
+        }
+
+        public string ErrorLine
+        {
+            get => _errorLine;
+            set
+            {
+                var next = value ?? "";
+                if (string.Equals(_errorLine, next, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                _errorLine = next;
+                StateChanged?.Invoke();
+            }
+        }
 
         /// <summary>Why starting or joining on this backend last failed, for the section the player
         /// actually pressed. Keyed by backend AND mode, because the window draws the two modes as
@@ -500,6 +536,7 @@ namespace CardShopCoop
             _dispatcher.Start();
             Interlocked.Increment(ref _sessionGeneration);
             Role = role;
+            StateChanged?.Invoke();
             _localConnectionId = role == CoopRole.Host ? 0 : -1;
             _joinAttempt = 0;
             _joinAttemptAt = Time.unscaledTime + JoinAttemptSeconds;
@@ -606,6 +643,7 @@ namespace CardShopCoop
             // threw leaves the version stale and the remaining backends are retried next frame
             // rather than being skipped for the rest of the run.
             _wiredBackendsVersion = _backendsVersion;
+            StateChanged?.Invoke();
         }
 
         /// <summary>
@@ -1851,6 +1889,7 @@ namespace CardShopCoop
             // and a load that is still in progress when the session ends (a world reload) must keep
             // the game running until the loading screen is gone.
             Role = CoopRole.None;
+            StateChanged?.Invoke();
             SetStatus(reason == null ? "Not connected" : "Not connected (" + reason + ")");
         }
 
@@ -1924,7 +1963,6 @@ namespace CardShopCoop
             {
                 _ui.Visible = false;
             }
-            UI.CoopMenus.Tick();
             UI.CoopScreen.Tick();
             SessionInputRuntime.SetWindowModal((_ui.Visible || UI.CoopScreen.IsOpen) && InGameplayScene());
             if (Role != CoopRole.None && Input.GetKeyDown(CoopPlugin.EmoteKey.Value)

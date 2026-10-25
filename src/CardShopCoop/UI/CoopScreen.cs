@@ -1,7 +1,9 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using BepInEx.Logging;
+using CardShopCoop.Api;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Networking;
@@ -42,12 +44,10 @@ namespace CardShopCoop.UI
 
         private static bool _navPushed;
 
-        private static float _nextRefresh;
-
-        private static float _hintUntil;
-
         private static string _hint = "";
         private static string _localIp;
+        private static int _hintGeneration;
+        private static bool _eventsSubscribed;
 
         private static int _scene = -1;
 
@@ -248,10 +248,53 @@ namespace CardShopCoop.UI
             IsOpen = true;
             _currentTab = ScreenTab.Session;
             _root.SetActive(true);
+            Subscribe();
             ShowTab(ScreenTab.Session);
             Refresh();
             PushNav();
             return true;
+        }
+
+        private static void Subscribe()
+        {
+            if (_eventsSubscribed)
+            {
+                return;
+            }
+
+            _eventsSubscribed = true;
+            CoopCore.StateChanged += OnSessionChanged;
+            PresenceApi.RosterChanged += OnSessionChanged;
+        }
+
+        private static void Unsubscribe()
+        {
+            if (!_eventsSubscribed)
+            {
+                return;
+            }
+
+            _eventsSubscribed = false;
+            CoopCore.StateChanged -= OnSessionChanged;
+            PresenceApi.RosterChanged -= OnSessionChanged;
+        }
+
+        private static void OnSessionChanged()
+        {
+            if (!IsOpen)
+            {
+                return;
+            }
+
+            try
+            {
+                Refresh();
+            }
+            catch (Exception ex)
+            {
+                CoopLog.WarnOnce("coop.screen.refresh",
+                    "coop: could not refresh the co-op screen: " + ex);
+            }
         }
 
         internal static void Close()
@@ -262,6 +305,7 @@ namespace CardShopCoop.UI
             }
             IsOpen = false;
             _currentTab = ScreenTab.Session;
+            Unsubscribe();
             if (_previewActive)
             {
                 _previewActive = false;
@@ -305,6 +349,7 @@ namespace CardShopCoop.UI
             _navPushed = false;
             IsOpen = false;
             _currentTab = ScreenTab.Session;
+            Unsubscribe();
             if (_previewActive)
             {
                 _previewActive = false;
@@ -343,10 +388,6 @@ namespace CardShopCoop.UI
                     Close();
                 }
             }
-            else if (Time.unscaledTime >= _nextRefresh)
-            {
-                Refresh();
-            }
         }
 
         private static bool ControllerBack()
@@ -361,6 +402,7 @@ namespace CardShopCoop.UI
 
         internal static void Destroy()
         {
+            Unsubscribe();
             try
             {
                 PopNav();
@@ -743,7 +785,6 @@ namespace CardShopCoop.UI
 
         private static void Refresh()
         {
-            _nextRefresh = Time.unscaledTime + 0.35f;
             if (_currentTab == ScreenTab.Advanced)
             {
                 RefreshAdvanced();
@@ -903,7 +944,9 @@ namespace CardShopCoop.UI
 
         private static void RefreshStatus()
         {
-            string text = Time.unscaledTime < _hintUntil ? _hint : (CoopCore.Instance != null ? CoopCore.Instance.StatusLine : "");
+            string text = string.IsNullOrEmpty(_hint)
+                ? (CoopCore.Instance != null ? CoopCore.Instance.StatusLine : "")
+                : _hint;
             NativeCoopUi.Set(_status, text ?? "");
             string text2 = CoopCore.Instance != null ? CoopCore.Instance.ErrorLine : "";
             NativeCoopUi.Set(_problem, text2 ?? "");
@@ -912,8 +955,28 @@ namespace CardShopCoop.UI
         private static void Hint(string text)
         {
             _hint = text;
-            _hintUntil = Time.unscaledTime + 5f;
+            var generation = ++_hintGeneration;
             RefreshStatus();
+            var core = CoopCore.Instance;
+            if (core != null)
+            {
+                core.StartCoroutine(ClearHint(generation));
+            }
+        }
+
+        private static IEnumerator ClearHint(int generation)
+        {
+            yield return new WaitForSecondsRealtime(5f);
+            if (generation != _hintGeneration)
+            {
+                yield break;
+            }
+
+            _hint = "";
+            if (IsOpen)
+            {
+                RefreshStatus();
+            }
         }
 
         private static int ParsePort(TMP_InputField f)
