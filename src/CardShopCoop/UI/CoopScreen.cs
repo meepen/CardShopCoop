@@ -78,6 +78,7 @@ namespace CardShopCoop.UI
         private const float FormContentWidth = FormWidth - ScrollbarWidth - ScrollbarGap;
         private const float PlayersPaneHeight = 520f;
         private const float ClientPlayersY = 360f;
+        private const string DiscordUrl = "https://discord.gg/UQwXwV5Qrg";
 
         internal static bool IsOpen;
 
@@ -137,6 +138,8 @@ namespace CardShopCoop.UI
 
         private static GameObject _confirmGrp;
 
+        private static GameObject _creditsGrp;
+
         private static TextMeshProUGUI _playersHead;
 
         private static TextMeshProUGUI _status;
@@ -148,6 +151,8 @@ namespace CardShopCoop.UI
         private static CoopButton _cancel;
 
         private static CoopButton _back;
+
+        private static CoopButton _creditsBtn;
 
         private static CoopButton _crossplayBtn;
 
@@ -299,6 +304,7 @@ namespace CardShopCoop.UI
             }
             CommitName();
             CancelResetDefaults();
+            CloseCredits();
             IsOpen = false;
             _currentTab = ScreenTab.Session;
             _sessionPane = SessionPane.Hosting;
@@ -342,6 +348,7 @@ namespace CardShopCoop.UI
             _openedPause = false;
             _navPushed = false;
             CancelResetDefaults();
+            CloseCredits();
             IsOpen = false;
             _currentTab = ScreenTab.Session;
             _sessionPane = SessionPane.Hosting;
@@ -367,6 +374,14 @@ namespace CardShopCoop.UI
             }
             if (!IsOpen)
             {
+                return;
+            }
+            if (_creditsGrp != null && _creditsGrp.activeSelf)
+            {
+                if (Input.GetKeyDown(KeyCode.Escape) || ControllerBack())
+                {
+                    CloseCredits();
+                }
                 return;
             }
             if (_confirmGrp != null && _confirmGrp.activeSelf)
@@ -525,7 +540,11 @@ namespace CardShopCoop.UI
             BuildStatus(panelRt);
             _back = NativeCoopUi.Button(panelRt, "Back", NativeCoopUi.Grey, OnBackClicked, 700f, 900f, 300f, 56f, 28f);
             _cancel = NativeCoopUi.Button(panelRt, "Cancel joining", NativeCoopUi.Orange, OnCancel, 40f, 900f, 300f, 56f, 26f);
+            _creditsBtn = NativeCoopUi.Button(panelRt, "Credits", NativeCoopUi.Blue,
+                ShowCredits, 40f, 900f, 300f, 56f, 26f);
+            _creditsBtn?.Show(false);
             BuildResetConfirmation(panelRt);
+            BuildCredits(panelRt);
             BuildNav();
         }
 
@@ -556,9 +575,58 @@ namespace CardShopCoop.UI
             _confirmGrp.SetActive(false);
         }
 
+        private static void BuildCredits(Transform parent)
+        {
+            RectTransform grp = NativeCoopUi.Node(parent, "Credits", 0f, 0f, 1040f, 980f);
+            _creditsGrp = grp.gameObject;
+            Image blocker = grp.gameObject.AddComponent<Image>();
+            if (NativeCoopUi.White != null)
+            {
+                blocker.sprite = NativeCoopUi.White;
+            }
+            blocker.color = new Color(0f, 0f, 0f, 0.62f);
+            blocker.raycastTarget = true;
+
+            RectTransform box = NativeCoopUi.Node(grp, "Box", 140f, 180f, 760f, 620f);
+            NativeCoopUi.Panel(box, 0f, 0f, 760f, 620f, NativeCoopUi.PanelFill, 2.2f);
+            NativeCoopUi.Text(box, "Credits", 34f, 32f, 24f, 696f, 44f,
+                NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
+            NativeCoopUi.Text(box, "CardShopCoopCommunity", 20f, 32f, 74f, 696f, 30f,
+                NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+
+            var y = 132f;
+            CreditRow(box, "Creator", "DeliriumPulse", ref y);
+            CreditRow(box, "Current maintainer", "Meepen (since 1.2.0)", ref y);
+            CreditRow(box, "Native UI update", "ilvincio_tv", ref y);
+            CreditRow(box, "Bug reports & testing", "Various Discord community members", ref y);
+            NativeCoopUi.Text(box,
+                "Thanks to everyone in the Discord who tested builds and reported bugs.",
+                18f, 32f, y + 6f, 696f, 56f, NativeCoopUi.Dim, TextAlignmentOptions.TopLeft,
+                wrap: true, title: false);
+            NativeCoopUi.Text(box, DiscordUrl, 16f, 32f, 466f, 696f, 24f,
+                NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            NativeCoopUi.Button(box, "Discord", NativeCoopUi.Blue, OpenDiscord,
+                32f, 516f, 240f, 52f, 20f);
+            NativeCoopUi.Button(box, "Close", NativeCoopUi.Grey, CloseCredits,
+                286f, 516f, 240f, 52f, 20f);
+            _creditsGrp.SetActive(false);
+        }
+
+        private static void CreditRow(Transform parent, string role, string name, ref float y)
+        {
+            NativeCoopUi.Text(parent, role, 18f, 32f, y, 220f, 32f,
+                NativeCoopUi.Dim, TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
+            NativeCoopUi.Text(parent, name, 20f, 260f, y, 468f, 32f,
+                Color.white, TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
+            y += 56f;
+        }
+
         private static void ShowTab(ScreenTab tab)
         {
             _currentTab = tab;
+            CloseCredits();
+            _cancel?.Show(on: false);
+            _creditsBtn?.Show(tab == ScreenTab.Advanced);
             if (_tabSessionBtn != null)
             {
                 _tabSessionBtn.SetStyle(tab == ScreenTab.Session ? NativeCoopUi.Purple : NativeCoopUi.Grey);
@@ -1287,6 +1355,40 @@ namespace CardShopCoop.UI
             CoopBackendOptions.ResetValues();
             RefreshAdvanced();
             Hint("Advanced settings reset to default values.");
+        }
+
+        private static void ShowCredits()
+        {
+            if (_creditsGrp == null)
+            {
+                return;
+            }
+
+            _creditsGrp.SetActive(true);
+            _creditsGrp.transform.SetAsLastSibling();
+        }
+
+        private static void CloseCredits()
+        {
+            if (_creditsGrp != null)
+            {
+                _creditsGrp.SetActive(false);
+            }
+        }
+
+        private static void OpenDiscord()
+        {
+            try
+            {
+                Application.OpenURL(DiscordUrl);
+            }
+            catch (Exception error)
+            {
+                CoopPlugin.Log?.LogWarning(
+                    "coop: could not open the Discord invite in a browser: " + error.Message);
+                GUIUtility.systemCopyBuffer = DiscordUrl;
+                Hint("Could not open the browser; the Discord invite was copied to the clipboard.");
+            }
         }
 
         private static void OnCopyDiagnostics()
