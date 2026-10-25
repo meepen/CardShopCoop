@@ -505,7 +505,7 @@ namespace CardShopCoop.UI
             TextFieldFocused = focused != null && focused.StartsWith("coop_");
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
-            if (GUILayout.Button("CHIUDI FINESTRA DEBUG (ESC)", CoopTheme.ButtonSecondary, GUILayout.Height(26f), GUILayout.Width(220f)))
+            if (GUILayout.Button("CLOSE DEBUG WINDOW (ESC)", CoopTheme.ButtonSecondary, GUILayout.Height(26f), GUILayout.Width(220f)))
             {
                 Visible = false;
             }
