@@ -208,8 +208,23 @@ namespace CardShopCoop.UI
 
         private void BuildViewport()
         {
-            var viewport = NativeCoopUi.Node(_root, "Viewport", PageX, ViewportY, ViewportWidth,
+            // ScrollRect belongs on the outer scroll area; the masked viewport is its child.
+            // Putting ScrollRect and the viewport on the same object makes the scrollbar's
+            // handle use the content transform instead of the visible viewport, so the handle
+            // can extend below the panel.
+            var scrollArea = NativeCoopUi.Node(_root, "ScrollArea", PageX, ViewportY,
+                ViewportWidth, ViewportHeight);
+            _scroll = scrollArea.gameObject.AddComponent<ScrollRect>();
+            _scroll.horizontal = false;
+            _scroll.vertical = true;
+            _scroll.movementType = ScrollRect.MovementType.Clamped;
+            _scroll.scrollSensitivity = 30f;
+            _scroll.inertia = true;
+            _scroll.decelerationRate = 0.135f;
+
+            var viewport = NativeCoopUi.Node(scrollArea, "Viewport", 0f, 0f, ViewportWidth,
                 ViewportHeight);
+            NativeCoopUi.Stretch(viewport, 0f, 0f, 0f, 0f);
             _viewport = viewport;
             var hitArea = viewport.gameObject.AddComponent<Image>();
             if (NativeCoopUi.White != null)
@@ -220,16 +235,9 @@ namespace CardShopCoop.UI
             hitArea.raycastTarget = true;
             viewport.gameObject.AddComponent<RectMask2D>();
 
-            _scroll = viewport.gameObject.AddComponent<ScrollRect>();
-            _scroll.horizontal = false;
-            _scroll.vertical = true;
-            _scroll.movementType = ScrollRect.MovementType.Clamped;
-            _scroll.scrollSensitivity = 30f;
-            _scroll.inertia = true;
-            _scroll.decelerationRate = 0.135f;
             _scroll.viewport = viewport;
-
             _content = CreateContent();
+            _scroll.content = _content;
         }
 
         private void BuildScrollbar()
@@ -243,9 +251,12 @@ namespace CardShopCoop.UI
             }
             track.color = new Color(0.14f, 0.09f, 0.18f);
             track.raycastTarget = true;
+            bar.gameObject.AddComponent<RectMask2D>();
 
             var sliding = NativeCoopUi.Node(bar, "SlidingArea", 0f, 0f, 12f, ViewportHeight);
+            NativeCoopUi.Stretch(sliding, 0f, 0f, 0f, 0f);
             var handle = NativeCoopUi.Node(sliding, "Handle", 0f, 0f, 12f, ViewportHeight);
+            NativeCoopUi.Stretch(handle, 0f, 0f, 0f, 0f);
             var handleImage = handle.gameObject.AddComponent<Image>();
             if (NativeCoopUi.White != null)
             {
@@ -521,10 +532,6 @@ namespace CardShopCoop.UI
             }
 
             RefreshPageTabs();
-            if (_scroll != null)
-            {
-                _scrollPositions[_page] = _scroll.verticalNormalizedPosition;
-            }
             BuildPage();
         }
 
@@ -651,6 +658,14 @@ namespace CardShopCoop.UI
             }
 
             _content.sizeDelta = new Vector2(0f, Mathf.Max(ViewportHeight, y + 8f));
+            Canvas.ForceUpdateCanvases();
+            if (_scroll.verticalScrollbar != null)
+            {
+                var contentHeight = _content.rect.height;
+                _scroll.verticalScrollbar.size = contentHeight > 0f
+                    ? Mathf.Clamp01(_viewport.rect.height / contentHeight)
+                    : 1f;
+            }
             var normalized = 1f;
             if (_scrollPositions.TryGetValue(_page, out var saved))
             {
