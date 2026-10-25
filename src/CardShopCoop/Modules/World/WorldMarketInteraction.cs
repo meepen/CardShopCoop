@@ -442,7 +442,7 @@ namespace CardShopCoop.Modules.World
             {
             }
 
-            Pricing.PricingClientBehaviour.RefreshAllShelfPriceTags();
+            Pricing.PriceTagRegistry.RefreshAll();
 
             try
             {

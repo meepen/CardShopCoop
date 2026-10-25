@@ -17,6 +17,7 @@ namespace CardShopCoop.Modules.Pricing
             harmony.CreateClassProcessor(typeof(CardInventoryDefaultReset)).Patch();
             harmony.CreateClassProcessor(typeof(CardInventoryLoad)).Patch();
             harmony.CreateClassProcessor(typeof(GradedInventoryDayStarted)).Patch();
+            PriceTagPatches.Apply(harmony);
         }
 
         [HarmonyPatch(typeof(CPlayerData), "SetItemPrice")]
@@ -123,6 +124,7 @@ namespace CardShopCoop.Modules.Pricing
             harmony.CreateClassProcessor(typeof(CardInventoryReset)).Patch();
             harmony.CreateClassProcessor(typeof(CardInventoryDefaultReset)).Patch();
             harmony.CreateClassProcessor(typeof(CardInventoryLoad)).Patch();
+            PriceTagPatches.Apply(harmony);
         }
 
         [HarmonyPatch(typeof(CPlayerData), "SetItemPrice")]
@@ -175,6 +177,65 @@ namespace CardShopCoop.Modules.Pricing
             [HarmonyPostfix]
             private static void Postfix()
                 => PricingClientBehaviour.InventoryReset();
+        }
+    }
+
+    /// <summary>
+    /// Price tags are views of the authoritative price. The game's price events keep an enabled
+    /// tag current; these lifecycle hooks cover tags created or re-enabled after the event fired.
+    /// </summary>
+    internal static class PriceTagPatches
+    {
+        internal static void Apply(Harmony harmony)
+        {
+            harmony.CreateClassProcessor(typeof(PriceTagEnabled)).Patch();
+            harmony.CreateClassProcessor(typeof(PriceTagDisabled)).Patch();
+            harmony.CreateClassProcessor(typeof(PriceTagInit)).Patch();
+            harmony.CreateClassProcessor(typeof(PriceTagInitCard)).Patch();
+            harmony.CreateClassProcessor(typeof(PriceTagItemImage)).Patch();
+            harmony.CreateClassProcessor(typeof(PriceTagCardData)).Patch();
+        }
+
+        [HarmonyPatch(typeof(UI_PriceTag), "OnEnable")]
+        private static class PriceTagEnabled
+        {
+            [HarmonyPostfix]
+            private static void Postfix(UI_PriceTag __instance) => PriceTagRegistry.Add(__instance);
+        }
+
+        [HarmonyPatch(typeof(UI_PriceTag), "OnDisable")]
+        private static class PriceTagDisabled
+        {
+            [HarmonyPostfix]
+            private static void Postfix(UI_PriceTag __instance) => PriceTagRegistry.Remove(__instance);
+        }
+
+        [HarmonyPatch(typeof(UI_PriceTag), "Init")]
+        private static class PriceTagInit
+        {
+            [HarmonyPostfix]
+            private static void Postfix(UI_PriceTag __instance) => PriceTagRegistry.Add(__instance);
+        }
+
+        [HarmonyPatch(typeof(UI_PriceTag), "InitCard")]
+        private static class PriceTagInitCard
+        {
+            [HarmonyPostfix]
+            private static void Postfix(UI_PriceTag __instance) => PriceTagRegistry.Add(__instance);
+        }
+
+        [HarmonyPatch(typeof(UI_PriceTag), "SetItemImage")]
+        private static class PriceTagItemImage
+        {
+            [HarmonyPostfix]
+            private static void Postfix(UI_PriceTag __instance) => PriceTagRegistry.Reindex(__instance);
+        }
+
+        [HarmonyPatch(typeof(UI_PriceTag), "SetCardData")]
+        private static class PriceTagCardData
+        {
+            [HarmonyPostfix]
+            private static void Postfix(UI_PriceTag __instance) => PriceTagRegistry.Reindex(__instance);
         }
     }
 }

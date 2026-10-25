@@ -51,6 +51,10 @@ namespace CardShopCoop.Modules.Pricing
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.pricing.client");
                 PricingClientPatches.Apply(_harmony);
+                if (_context.InGame())
+                {
+                    PriceTagRegistry.Bootstrap();
+                }
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }
             catch
@@ -76,7 +80,10 @@ namespace CardShopCoop.Modules.Pricing
         }
 
         private void OnReady(CEventPlayer_GameDataFinishLoaded _)
-            => ContentReady();
+        {
+            PriceTagRegistry.Bootstrap();
+            ContentReady();
+        }
 
         [MessageHandler]
         private void State(MessageContext context, PricingStateMessage message)
@@ -148,12 +155,14 @@ namespace CardShopCoop.Modules.Pricing
 
         private void ApplyState(PricingStateMessage state)
         {
+            PricingDisplay.Clear();
             _applying = true;
             try
             {
                 for (var i = 0; i < state.ItemTypes.Count; i++)
                 {
                     CPlayerData.SetItemPrice(state.ItemTypes[i], state.ItemPrices[i]);
+                    PricingDisplay.SetItem(state.ItemTypes[i], state.ItemPrices[i]);
                 }
 
 
@@ -163,6 +172,7 @@ namespace CardShopCoop.Modules.Pricing
                     var copy = PricingInterop.CopyCard(card, state.CardGrades[i]);
                     GradingApi.Remember(copy);
                     CPlayerData.SetCardPrice(copy, state.CardPrices[i]);
+                    PricingDisplay.SetCard(copy, state.CardGrades[i], state.CardPrices[i]);
                 }
             }
             finally
@@ -170,107 +180,9 @@ namespace CardShopCoop.Modules.Pricing
                 _applying = false;
             }
 
-            RefreshAllShelfPriceTags();
-        }
-
-        public static void RefreshAllShelfPriceTags()
-        {
-            try
-            {
-                var mgr = CSingleton<ShelfManager>.Instance ?? ShelfManager.m_Instance;
-                if (mgr == null)
-                {
-                    return;
-                }
-
-                if (mgr.m_ShelfList != null)
-                {
-                    for (var i = 0; i < mgr.m_ShelfList.Count; i++)
-                    {
-                        var shelf = mgr.m_ShelfList[i];
-                        if (shelf == null)
-                        {
-                            continue;
-                        }
-
-                        var compartments = shelf.GetItemCompartmentList();
-                        if (compartments == null)
-                        {
-                            continue;
-                        }
-
-                        for (var j = 0; j < compartments.Count; j++)
-                        {
-                            var comp = compartments[j];
-                            if (comp != null && comp.GetItemCount() > 0)
-                            {
-                                comp.SetPriceTagItemPriceText();
-                            }
-                        }
-                    }
-                }
-
-                if (mgr.m_CardItemCombiShelfList != null)
-                {
-                    for (var i = 0; i < mgr.m_CardItemCombiShelfList.Count; i++)
-                    {
-                        var combi = mgr.m_CardItemCombiShelfList[i];
-                        if (combi == null)
-                        {
-                            continue;
-                        }
-
-                        var itemCompartments = combi.GetItemCompartmentList();
-                        if (itemCompartments != null)
-                        {
-                            for (var j = 0; j < itemCompartments.Count; j++)
-                            {
-                                var comp = itemCompartments[j];
-                                if (comp != null && comp.GetItemCount() > 0)
-                                {
-                                    comp.SetPriceTagItemPriceText();
-                                }
-                            }
-                        }
-
-                        var cardCompartments = combi.GetCardCompartmentList();
-                        if (cardCompartments != null)
-                        {
-                            for (var j = 0; j < cardCompartments.Count; j++)
-                            {
-                                cardCompartments[j]?.RefreshPriceTagItemPriceText();
-                            }
-                        }
-                    }
-                }
-
-                if (mgr.m_CardShelfList != null)
-                {
-                    for (var i = 0; i < mgr.m_CardShelfList.Count; i++)
-                    {
-                        var cardShelf = mgr.m_CardShelfList[i];
-                        if (cardShelf == null)
-                        {
-                            continue;
-                        }
-
-                        var cardCompartments = cardShelf.GetCardCompartmentList();
-                        if (cardCompartments == null)
-                        {
-                            continue;
-                        }
-
-                        for (var j = 0; j < cardCompartments.Count; j++)
-                        {
-                            cardCompartments[j]?.RefreshPriceTagItemPriceText();
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                CoopLog.Swallow(ex);
-            }
+            // The baseline is the full owned-card set; a tag whose card is no longer in it must
+            // fall back to the game's store instead of keeping an earlier override.
+            PriceTagRegistry.RefreshAll();
         }
 
         [MessageHandler]
@@ -310,10 +222,6 @@ namespace CardShopCoop.Modules.Pricing
 
             }
 
-            if (ready && (message.Items.Count > 0 || message.Cards.Count > 0))
-            {
-                RefreshAllShelfPriceTags();
-            }
         }
 
         private bool ApplyItemDelta(PricingItemDeltaEntry entry)
@@ -328,6 +236,7 @@ namespace CardShopCoop.Modules.Pricing
                 try
                 {
                     CPlayerData.SetItemPrice(entry.ItemType, entry.Price);
+                    PricingDisplay.SetItem(entry.ItemType, entry.Price);
                 }
                 finally
                 {
@@ -345,6 +254,7 @@ namespace CardShopCoop.Modules.Pricing
             {
                 if (entry.Removed)
                 {
+                    PricingDisplay.RemoveCard(entry.Card, entry.EncodedGrade);
                     return;
                 }
 
@@ -355,6 +265,7 @@ namespace CardShopCoop.Modules.Pricing
                 try
                 {
                     CPlayerData.SetCardPrice(copy, entry.Price);
+                    PricingDisplay.SetCard(copy, entry.EncodedGrade, entry.Price);
                 }
                 finally
                 {
@@ -564,6 +475,8 @@ namespace CardShopCoop.Modules.Pricing
             _active._pendingState = null;
             _active.ClearPendingDeltas();
             _active._contentReady = false;
+            PricingDisplay.Clear();
+            PriceTagRegistry.RefreshAll();
         }
 
         private void ClearPendingDeltas()
@@ -606,6 +519,8 @@ namespace CardShopCoop.Modules.Pricing
                 _active = null;
             }
 
+            PricingDisplay.Clear();
+            PriceTagRegistry.RefreshAll();
 
             _context = null;
         }

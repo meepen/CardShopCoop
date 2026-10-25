@@ -62,6 +62,10 @@ namespace CardShopCoop.Modules.Pricing
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.pricing.host");
                 PricingHostPatches.Apply(_harmony);
+                if (_context.InGame())
+                {
+                    PriceTagRegistry.Bootstrap();
+                }
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }
             catch
@@ -104,7 +108,10 @@ namespace CardShopCoop.Modules.Pricing
         }
 
         private void OnReady(CEventPlayer_GameDataFinishLoaded _)
-            => SendPendingBaselines();
+        {
+            PriceTagRegistry.Bootstrap();
+            SendPendingBaselines();
+        }
 
         [OnClientDisconnected]
         private void ForgetPeer(PeerConnection peer, DisconnectInfo _)
@@ -125,15 +132,13 @@ namespace CardShopCoop.Modules.Pricing
             if (_shutdown || context?.Connection == null || message == null
                 || !PricingInterop.IsItemTypeValid(message.ItemType)
                 || !PricingInterop.ValidPrice(message.Price)
-                || !TrySetItem(message.ItemType, message.Price, out _))
+                || !TrySetItem(message.ItemType, message.Price, out var actual))
             {
                 Reject(context, message?.ActionId ?? Guid.Empty);
                 return;
             }
 
-            QueueItemDelta(message.ActionId, message.ItemType,
-                PricingInterop.ReadItem(message.ItemType));
-            PricingClientBehaviour.RefreshAllShelfPriceTags();
+            QueueItemDelta(message.ActionId, message.ItemType, actual);
         }
 
         [MessageHandler]
@@ -191,7 +196,6 @@ namespace CardShopCoop.Modules.Pricing
             GradingApi.Remember(canonical);
             _cards[key] = new OwnedCardState { Card = canonical, Price = actual };
             QueueCardDelta(message.ActionId, canonical, actual, false);
-            PricingClientBehaviour.RefreshAllShelfPriceTags();
         }
 
         private static string Describe(CardData card)
@@ -229,8 +233,9 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            QueueItemDelta(Guid.Empty, type, PricingInterop.ReadItem(type));
-            PricingClientBehaviour.RefreshAllShelfPriceTags();
+            var actual = PricingInterop.ReadItem(type);
+            PricingDisplay.SetItem(type, actual);
+            QueueItemDelta(Guid.Empty, type, actual);
         }
 
         private void CaptureCardSetterLocal(CardData card, float requestedPrice)
@@ -251,13 +256,14 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
+            var price = ResolveCardPrice(canonical, requestedPrice);
             _cards[key] = new OwnedCardState
             {
                 Card = canonical,
-                Price = ResolveCardPrice(canonical, requestedPrice),
+                Price = price,
             };
-            QueueCardDelta(Guid.Empty, canonical, _cards[key].Price, false);
-            PricingClientBehaviour.RefreshAllShelfPriceTags();
+            PricingDisplay.SetCard(canonical, grade, price);
+            QueueCardDelta(Guid.Empty, canonical, price, false);
         }
 
         private void ObserveInventoryMutation(CardData card)
@@ -283,6 +289,7 @@ namespace CardShopCoop.Modules.Pricing
             if (!owned)
             {
                 _cards.Remove(key);
+                PricingDisplay.RemoveCard(canonical, grade);
                 QueueCardDelta(Guid.Empty, canonical, 0f, true);
             }
             else
@@ -293,6 +300,7 @@ namespace CardShopCoop.Modules.Pricing
                     Card = canonical,
                     Price = price,
                 };
+                PricingDisplay.SetCard(canonical, grade, price);
                 QueueCardDelta(Guid.Empty, canonical, price, false);
             }
         }
@@ -304,6 +312,8 @@ namespace CardShopCoop.Modules.Pricing
             // pre-reset absolute price and must not be replayed after the reload.
             _pendingItemDeltas.Clear();
             _pendingCardDeltas.Clear();
+            PricingDisplay.Clear();
+            PriceTagRegistry.RefreshAll();
         }
 
         private PricingStateMessage BuildState()
@@ -327,8 +337,10 @@ namespace CardShopCoop.Modules.Pricing
                 }
 
 
+                var price = PricingInterop.ReadItem(type);
                 state.ItemTypes.Add(type);
-                state.ItemPrices.Add(PricingInterop.ReadItem(type));
+                state.ItemPrices.Add(price);
+                PricingDisplay.SetItem(type, price);
             }
 
             var keys = new List<string>(_cards.Keys);
@@ -604,11 +616,13 @@ namespace CardShopCoop.Modules.Pricing
 
 
             GradingApi.Remember(canonical);
+            var price = EffectiveCardPrice(key, canonical);
             _cards[key] = new OwnedCardState
             {
                 Card = canonical,
-                Price = EffectiveCardPrice(key, canonical),
+                Price = price,
             };
+            PricingDisplay.SetCard(canonical, grade, price);
         }
 
         /// <summary>Returns the price to cache for an owned card. The game's price store returns 0
@@ -659,6 +673,7 @@ namespace CardShopCoop.Modules.Pricing
                 _applying = false;
             }
 
+            PricingDisplay.SetItem(type, actual);
             // The vanilla OnPressConfirm now runs unsuppressed on the host, so its own
             // TutorialManager.AddTaskValue(SetItemPrice) call already covers the local confirm.
             // Applying a remote intent must not advance the host's tutorial.
@@ -667,15 +682,23 @@ namespace CardShopCoop.Modules.Pricing
 
         private bool TrySetCard(CardData card, float price, out float actual)
         {
+            bool accepted;
             _applying = true;
             try
             {
-                return PricingInterop.SetCard(card, price, out actual);
+                accepted = PricingInterop.SetCard(card, price, out actual);
             }
             finally
             {
                 _applying = false;
             }
+
+            if (accepted)
+            {
+                PricingDisplay.SetCard(card, GradingApi.Encoded(card), actual);
+            }
+
+            return accepted;
         }
 
         internal void Shutdown()
@@ -696,6 +719,8 @@ namespace CardShopCoop.Modules.Pricing
             _baselinePending.Clear();
             _pendingItemDeltas.Clear();
             _pendingCardDeltas.Clear();
+            PricingDisplay.Clear();
+            PriceTagRegistry.RefreshAll();
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
