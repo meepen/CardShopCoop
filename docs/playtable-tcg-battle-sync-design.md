@@ -72,7 +72,7 @@ ordered action stream, with the duel's randomness replicated instead of rolled:
   decision" and applies actions one at a time; two players can never legally act concurrently.
 - Divergence insurance, not replication: the host piggybacks a zone-count + hash checkpoint on
   each turn-switch action. On mismatch the guest reconciles from an authoritative full-state
-  message (the normal "host sends authoritative state with empty prediction id" pattern, not a
+  message (the normal "host sends authoritative state with empty action id" pattern, not a
   new rejection type).
 
 Why replay instead of result-streaming: vanilla's state transitions are coroutine- and
@@ -108,12 +108,12 @@ more wire per duel.
 | `PlayTableDuelOpenIntentMessage` | client → host | Open/cancel an open duel at a table (the "I'll take a challenger" state). Host validates the table is free, marks it, publishes a seat/visual delta with the new waiting flag; suppresses customer booking on that table while open. |
 | `PlayTableDuelStartMessage` | host → duel participants | Mode B handshake: duel id, table key, canonical side per connection, both deck lists (compact card refs), coin-flip first-turn result. |
 | `PlayTableDuelActionIntentMessage` | actor → host | One player decision: mulligan keep/mulligan, play card instance id → element area, end turn, confirm action-resolve / element-area / search selection (index lists), concede. |
-| `PlayTableDuelActionMessage` | host → participants | The validated action, applied on both machines in order; carries the actor's canonical side. Doubles as the intent's echo for prediction reconciliation. |
+| `PlayTableDuelActionMessage` | host → participants | The validated action, applied on both machines in order; carries the actor's canonical side. Doubles as the intent's echo for action reconciliation. |
 | `PlayTableDuelCheckpointMessage` | host → participants | Piggybacked on turn-switch actions: per-side zone counts + state hash. On mismatch the receiver requests repair by sending nothing — the host detects nothing; the *client* detects and the host's next authoritative state message repairs (below). |
-| `PlayTableDuelStateMessage` | host → participant (empty prediction id) | Authoritative full duel zones (ordered card identity lists per zone, HP, shield, freeze, boosts, turn flags). Used for join-mid-duel (not supported — late joiner waits outside), checkpoint-mismatch repair, and post-rollback reconciliation. |
+| `PlayTableDuelStateMessage` | host → participant (empty action id) | Authoritative full duel zones (ordered card identity lists per zone, HP, shield, freeze, boosts, turn flags). Used for join-mid-duel (not supported — late joiner waits outside), checkpoint-mismatch repair, and post-rollback reconciliation. |
 | `PlayTableDuelResultIntentMessage` | dueling client → host | Mode A result: duel id, outcome, conceded, play time. Host applies payout/tournament/report/gift; client has already suppressed its local copies. |
 
-Rejection uses the one generic `PredictionRollbackMessage` plus an immediate authoritative
+Rejection uses the one generic `ActionRollbackMessage` plus an immediate authoritative
 `PlayTableDuelStateMessage` — no new rejection types, per house rules.
 
 ## 5. Vanilla seams (hook map)
@@ -130,7 +130,7 @@ postfix). New or changed:
 | `PlayCardSet.ResetBoard` | prefix/postfix | Mode B: build the non-local set's deck from the replicated deck list instead of `CPlayerData`/AI recipe; Mode A untouched. |
 | `PlayCardSet.ShuffleDeck` | prefix | Mode B mirror: apply the replicated deck order instead of the local Fisher-Yates. |
 | `PlayTableGame.OnPressTurnSelectCard` | prefix | Mode B mirror: force the replicated first-turn result instead of the local `Random.Range(0,100)`. |
-| `PlayTableGame.SelectionMulliganOrKeep`, `OnPressConfirm*`, `PlayCardSet.OnPressEndTurn`, `ReleaseDraggingCard`, `OnClickElementButtonArea` | prefix (actor, send intent + predict) / apply-from-network (mirror) | The action stream. Actor-side sends one intent before local mutation; mirror-side suppresses direct input routing when it is not the local player's decision and applies the networked action through the same public method. |
+| `PlayTableGame.SelectionMulliganOrKeep`, `OnPressConfirm*`, `PlayCardSet.OnPressEndTurn`, `ReleaseDraggingCard`, `OnClickElementButtonArea` | prefix (actor, send intent + local apply) / apply-from-network (mirror) | The action stream. Actor-side sends one intent before local mutation; mirror-side suppresses direct input routing when it is not the local player's decision and applies the networked action through the same public method. |
 | `PlayTableGame.ReportWinner` | postfix | Mode A: emit the result intent. Mode B: host emits the end packet; client suppresses local win-counter mutation (`CPlayerData.m_GameReportDataCollect.duelWinCount`, `AchievementManager.OnDuelWin`) — host applies. |
 | `PlayTableGame.EvaluateEndGameGift` | prefix (extend existing) | Mode A client + Mode B client: always suppress the local gift roll/spawn; the host rolls and grants. Host: unchanged. |
 | `InteractablePlayTable.StopTableGame` | postfix (extend existing) | Suppress the client-side customer payout (`Customer.PlayTableGameEnded` — economy mutation on a mirrored customer) and the customer win/lose flavor roll; Mode A host applies the payout from the result intent; Mode B has no customer. |

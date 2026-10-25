@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -22,8 +22,7 @@ namespace CardShopCoop.Modules.Trade
 
         private sealed class Offer
         {
-            public byte Counter;
-            public ushort CustomerIndex;
+            public InteractableCashierCounter Counter;
             public int CustomerGeneration;
             public Customer Customer;
             public CustomerTradeData Data;
@@ -32,9 +31,8 @@ namespace CardShopCoop.Modules.Trade
         }
 
         private static TradeHostBehaviour _active;
-        private readonly Dictionary<byte, Offer> _offers = new();
+        private readonly Dictionary<InteractableCashierCounter, Offer> _offers = new();
         private readonly Dictionary<Customer, Offer> _offersByCustomer = new();
-        private readonly Dictionary<Customer, int> _customerIndices = new();
         private readonly Dictionary<int, PeerConnection> _joinedConnections = new();
         private CoopRuntimeContext _context;
         private Harmony _harmony;
@@ -128,7 +126,6 @@ namespace CardShopCoop.Modules.Trade
                 var customer = customers[i];
                 if (customer != null)
                 {
-                    _customerIndices[customer] = i;
                     ReconcileCustomer(customer);
                 }
             }
@@ -202,7 +199,7 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
-        [MessageHandler(typeof(TradeIntentMessage))]
+        [MessageHandler]
         private void HandleIntent(MessageContext messageContext, TradeIntentMessage message)
         {
             if (!IsValidSender(messageContext, message))
@@ -213,15 +210,23 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
+            if (message.Counter == null || message.Customer == null)
+            {
+                CoopPlugin.Log.LogWarning("[trade] host dropped intent with no live "
+                    + (message.Counter == null ? "counter" : "customer") + ".");
+                Reject(messageContext.Connection.Id, message, "intent entity is not live");
+                return;
+            }
+
             if (!_offers.TryGetValue(message.Counter, out var offer)
                 || !Matches(offer, message))
             {
                 Reject(messageContext.Connection.Id, message,
                     offer == null
-                        ? "no live offer for counter " + message.Counter
-                        : "offer identity mismatch (offer index=" + offer.CustomerIndex + " gen="
-                            + offer.CustomerGeneration + " nonce=" + offer.Nonce + ", intent index="
-                            + message.CustomerIndex + " gen=" + message.CustomerGeneration
+                        ? "no live offer for counter " + message.Counter.name
+                        : "offer identity mismatch (offer customer=" + offer.Customer.name + " gen="
+                            + offer.CustomerGeneration + " nonce=" + offer.Nonce + ", intent customer="
+                            + message.Customer.name + " gen=" + message.CustomerGeneration
                             + " nonce=" + message.OfferNonce + ")");
                 return;
             }
@@ -289,14 +294,14 @@ namespace CardShopCoop.Modules.Trade
             }
 
             offer.Owner = connectionId;
-            CoopPlugin.Log.LogInfo("[trade] host accepted open counter=" + offer.Counter + " index="
-                + offer.CustomerIndex + " gen=" + offer.CustomerGeneration + " nonce=" + offer.Nonce
-                + " owner=" + connectionId + ".");
+            CoopPlugin.Log.LogInfo("[trade] host accepted open counter=" + offer.Counter.name
+                + " customer=" + offer.Customer.name + " gen=" + offer.CustomerGeneration
+                + " nonce=" + offer.Nonce + " owner=" + connectionId + ".");
             _context.Send(connectionId, new TradeSessionMessage
             {
-                PredictionId = message.PredictionId,
+                ActionId = message.ActionId,
                 Counter = offer.Counter,
-                CustomerIndex = offer.CustomerIndex,
+                Customer = offer.Customer,
                 CustomerGeneration = offer.CustomerGeneration,
                 OfferNonce = offer.Nonce,
                 Accepted = true,
@@ -331,14 +336,14 @@ namespace CardShopCoop.Modules.Trade
                     }
 
                     RemoveOffer(offer);
-                    SendOfferDelta(offer, removed: true, message.PredictionId, message.Result,
+                    SendOfferDelta(offer, removed: true, message.ActionId, message.Result,
                         connectionId);
                     FinishCustomerReservation(offer);
                     return;
                 case TradeOutcome.WalkedAway:
                     // The declines ran out, so vanilla minted/took nothing; only the offer ends.
                     RemoveOffer(offer);
-                    SendOfferDelta(offer, removed: true, message.PredictionId, message.Result,
+                    SendOfferDelta(offer, removed: true, message.ActionId, message.Result,
                         connectionId);
                     FinishCustomerReservation(offer);
                     return;
@@ -354,7 +359,7 @@ namespace CardShopCoop.Modules.Trade
                         var updated = TradeInterop.DataFromState(message.ResultState);
                         TradeInterop.SetStoredData(offer.Customer, updated);
                         offer.Data = updated;
-                        SendOfferDelta(offer, removed: false, message.PredictionId, message.Result,
+                        SendOfferDelta(offer, removed: false, message.ActionId, message.Result,
                             connectionId);
                         return;
                     }
@@ -377,14 +382,14 @@ namespace CardShopCoop.Modules.Trade
             var trading = data.m_IsTrading;
             if (trading && message.CoinSpent != 0f)
             {
-                CoopPlugin.Log.LogWarning("[trade] accept for card-for-card offer " + offer.Counter
-                    + " carried a coin spend; refusing.");
+                CoopPlugin.Log.LogWarning("[trade] accept for card-for-card offer "
+                    + offer.Counter.name + " carried a coin spend; refusing.");
                 return false;
             }
 
             if (!trading && Mathf.Abs(message.CoinSpent - bid) > 0.001f)
             {
-                CoopPlugin.Log.LogWarning("[trade] accept for purchase offer " + offer.Counter
+                CoopPlugin.Log.LogWarning("[trade] accept for purchase offer " + offer.Counter.name
                     + " spent " + message.CoinSpent + " but the validated bid is " + bid
                     + "; refusing.");
                 return false;
@@ -398,7 +403,7 @@ namespace CardShopCoop.Modules.Trade
             var given = trading ? data.m_CardData_R : null;
             if (!SameCard(received, message.CardReceived) || !SameCard(given, message.CardRemoved))
             {
-                CoopPlugin.Log.LogWarning("[trade] accept for offer " + offer.Counter
+                CoopPlugin.Log.LogWarning("[trade] accept for offer " + offer.Counter.name
                     + " carried cards that do not match the offer (received="
                     + DescribeCard(message.CardReceived) + " expected=" + DescribeCard(received)
                     + ", given=" + DescribeCard(message.CardRemoved) + " expected="
@@ -411,14 +416,15 @@ namespace CardShopCoop.Modules.Trade
                 && !EconomyAuthority.TryReserveHostSpend(message.CoinSpent, out spend))
             {
                 CoopPlugin.Log.LogInfo("[trade] host cannot fund guest purchase of "
-                    + message.CoinSpent + " on offer " + offer.Counter + "; refusing the accept.");
+                    + message.CoinSpent + " on offer " + offer.Counter.name
+                    + "; refusing the accept.");
                 return false;
             }
 
             if (received != null || given != null)
             {
                 var cards = WorldHostBehaviour.ActiveCards;
-                var batch = new CardDeltaBatchMessage { PredictionId = message.PredictionId };
+                var batch = new CardDeltaBatchMessage { ActionId = message.ActionId };
                 // Give first. The strict batch only commits the received card once the card the
                 // player hands over has actually left this host; a delta that was merely relayed
                 // (this host lacks the content) or refused aborts the whole movement, so the host
@@ -446,7 +452,7 @@ namespace CardShopCoop.Modules.Trade
                 if (cards == null || !cards.HandleCardDeltaBatch(connectionId, batch, true))
                 {
                     CoopPlugin.Log.LogWarning("[trade] host could not apply the card movement for "
-                        + "offer " + offer.Counter + "; refusing the accept.");
+                        + "offer " + offer.Counter.name + "; refusing the accept.");
                     return false;
                 }
             }
@@ -462,7 +468,7 @@ namespace CardShopCoop.Modules.Trade
         private void ResolveDecline(int connectionId, TradeIntentMessage message, Offer offer)
         {
             RemoveOffer(offer);
-            SendOfferDelta(offer, removed: true, message.PredictionId, TradeOutcome.Declined,
+            SendOfferDelta(offer, removed: true, message.ActionId, TradeOutcome.Declined,
                 connectionId);
             FinishCustomerReservation(offer);
         }
@@ -505,7 +511,7 @@ namespace CardShopCoop.Modules.Trade
             }
 
             offer.Data = TradeInterop.CopyData(stored);
-            SendOfferDelta(offer, removed: false, message.PredictionId, TradeOutcome.Thinking,
+            SendOfferDelta(offer, removed: false, message.ActionId, TradeOutcome.Thinking,
                 connectionId);
             offer.Owner = 0;
         }
@@ -527,20 +533,20 @@ namespace CardShopCoop.Modules.Trade
                 return false;
             }
 
-            if (!TradeInterop.SameCustomer(offer.Customer, offer.CustomerIndex,
-                offer.CustomerGeneration))
+            if (offer.Customer == null
+                || TradeInterop.CustomerGeneration(offer.Customer) != offer.CustomerGeneration)
             {
-                reason = "customer identity changed (offer index=" + offer.CustomerIndex
-                    + " gen=" + offer.CustomerGeneration + ", live index="
-                    + TradeInterop.CustomerIdentity(offer.Customer) + " gen="
-                    + TradeInterop.CustomerGeneration(offer.Customer) + ")";
+                reason = "customer identity changed (offer gen=" + offer.CustomerGeneration
+                    + ", live gen=" + TradeInterop.CustomerGeneration(offer.Customer) + ")";
                 return false;
             }
 
-            var liveCounter = TradeInterop.CounterIndex(offer.Customer);
-            if (liveCounter != offer.Counter)
+            var liveCounter = TradeInterop.TradeCounter(offer.Customer);
+            if (!ReferenceEquals(liveCounter, offer.Counter))
             {
-                reason = "counter changed (offer=" + offer.Counter + ", live=" + liveCounter + ")";
+                reason = "counter changed (offer=" + (offer.Counter == null ? "null"
+                    : offer.Counter.name) + ", live="
+                    + (liveCounter == null ? "null" : liveCounter.name) + ")";
                 return false;
             }
 
@@ -579,14 +585,13 @@ namespace CardShopCoop.Modules.Trade
         {
             return context?.Connection != null
                 && context.Connection.State == ConnectionState.FullyJoined
-                && message != null && message.Counter < 250
-                && message.CustomerIndex != ushort.MaxValue
-                && message.PredictionId != Guid.Empty;
+                && message != null && message.Counter != null && message.Customer != null
+                && message.ActionId != Guid.Empty;
         }
 
         private static bool Matches(Offer offer, TradeIntentMessage message)
         {
-            return offer.CustomerIndex == message.CustomerIndex
+            return ReferenceEquals(offer.Customer, message.Customer)
                 && offer.CustomerGeneration == message.CustomerGeneration
                 && offer.Nonce == message.OfferNonce;
         }
@@ -596,13 +601,6 @@ namespace CardShopCoop.Modules.Trade
             if (customer == null)
             {
                 return;
-            }
-
-            var customerIndex = _customerIndices.TryGetValue(customer, out var knownIndex)
-                ? knownIndex : TradeInterop.CustomerListIndex(customer);
-            if (customerIndex >= 0)
-            {
-                _customerIndices[customer] = customerIndex;
             }
 
             _offersByCustomer.TryGetValue(customer, out var customerOffer);
@@ -616,23 +614,21 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            var counter = TradeInterop.CounterIndex(customer);
+            var counter = TradeInterop.TradeCounter(customer);
             var generation = TradeInterop.CustomerGeneration(customer);
-            if (customerIndex < 0 || customerIndex > ushort.MaxValue || counter < 0
-                || counter >= 250 || generation <= 0)
+            if (counter == null || generation <= 0)
             {
-                CoopPlugin.Log.LogDebug("Trade host: waiting customer has no stable trade identity");
+                CoopPlugin.Log.LogDebug("Trade host: waiting customer has no live trade counter");
                 return;
             }
 
-            if (_offers.TryGetValue((byte)counter, out var counterOffer)
+            if (_offers.TryGetValue(counter, out var counterOffer)
                 && !ReferenceEquals(counterOffer.Customer, customer))
             {
                 ExpireOffer(counterOffer);
             }
 
-            if (customerOffer != null && (customerOffer.Counter != counter
-                || customerOffer.CustomerIndex != customerIndex
+            if (customerOffer != null && (!ReferenceEquals(customerOffer.Counter, counter)
                 || customerOffer.CustomerGeneration != generation))
             {
                 ExpireOffer(customerOffer);
@@ -641,7 +637,7 @@ namespace CardShopCoop.Modules.Trade
 
             if (customerOffer == null)
             {
-                TryCreateOffer(customer, (ushort)customerIndex, (byte)counter);
+                TryCreateOffer(customer, counter);
             }
             else
             {
@@ -649,11 +645,11 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
-        private void TryCreateOffer(Customer customer, ushort customerIndex, byte counter)
+        private void TryCreateOffer(Customer customer, InteractableCashierCounter counter)
         {
             if (HostIsBusy() || TradeInterop.Screen == null)
             {
-                CoopPlugin.Log.LogDebug("[trade] host offer index=" + customerIndex
+                CoopPlugin.Log.LogDebug("[trade] host offer customer=" + customer.name
                     + " deferred: busy=" + HostIsBusy() + " screen=" + (TradeInterop.Screen != null) + ".");
                 return;
             }
@@ -671,7 +667,7 @@ namespace CardShopCoop.Modules.Trade
 
             if (data.m_CardData_L == null || (data.m_IsTrading && data.m_CardData_R == null))
             {
-                CoopPlugin.Log.LogDebug("[trade] host offer index=" + customerIndex
+                CoopPlugin.Log.LogDebug("[trade] host offer customer=" + customer.name
                     + " has no tradeable card: L=" + (data.m_CardData_L != null)
                     + " R=" + (data.m_CardData_R != null) + " trading=" + data.m_IsTrading + ".");
                 return;
@@ -693,16 +689,15 @@ namespace CardShopCoop.Modules.Trade
             _offers[counter] = new Offer
             {
                 Counter = counter,
-                CustomerIndex = customerIndex,
                 CustomerGeneration = generation,
                 Customer = customer,
                 Data = data,
                 Nonce = _nextNonce,
             };
             _offersByCustomer[customer] = _offers[counter];
-            CoopPlugin.Log.LogInfo("[trade] host created offer counter=" + counter + " index="
-                + customerIndex + " gen=" + generation + " nonce=" + _nextNonce + " ask="
-                + data.m_SellCardAskPrice.ToString("F2") + " priceSet="
+            CoopPlugin.Log.LogInfo("[trade] host created offer counter=" + counter.name
+                + " customer=" + customer.name + " gen=" + generation + " nonce=" + _nextNonce
+                + " ask=" + data.m_SellCardAskPrice.ToString("F2") + " priceSet="
                 + data.m_PriceSet.ToString("F2") + " trading=" + data.m_IsTrading + ".");
             SendOfferDelta(_offers[counter], removed: false, Guid.Empty, TradeOutcome.None, 0);
         }
@@ -712,7 +707,7 @@ namespace CardShopCoop.Modules.Trade
             var stored = TradeInterop.StoredData(offer.Customer);
             if (stored != null && !SameData(offer.Data, stored))
             {
-                CoopPlugin.Log.LogInfo("[trade] host refreshed offer counter=" + offer.Counter
+                CoopPlugin.Log.LogInfo("[trade] host refreshed offer counter=" + offer.Counter.name
                     + " nonce=" + offer.Nonce + " ask=" + stored.m_SellCardAskPrice.ToString("F2")
                     + " priceSet=" + stored.m_PriceSet.ToString("F2") + " trading="
                     + stored.m_IsTrading + " (was ask="
@@ -782,11 +777,9 @@ namespace CardShopCoop.Modules.Trade
         private TradeOfferBaselineMessage BuildBaseline()
         {
             var state = new TradeOfferBaselineMessage();
-            var counters = new List<byte>(_offers.Keys);
-            counters.Sort();
-            for (var i = 0; i < counters.Count; i++)
+            foreach (var offer in _offers.Values)
             {
-                state.Offers.Add(ToState(_offers[counters[i]]));
+                state.Offers.Add(ToState(offer));
             }
 
             return state;
@@ -807,7 +800,7 @@ namespace CardShopCoop.Modules.Trade
                 MaxDeclineCount = offer.Data.m_MaxDeclineCount,
                 DeclineCount = offer.Data.m_DeclineCount,
                 Remaining = TradeInterop.WaitRemaining(offer.Customer),
-                CustomerIndex = offer.CustomerIndex,
+                Customer = offer.Customer,
                 CustomerGeneration = offer.CustomerGeneration,
                 OfferNonce = offer.Nonce,
                 CustomerFemale = offer.Customer.m_IsFemale,
@@ -819,12 +812,12 @@ namespace CardShopCoop.Modules.Trade
         private void Reject(int connectionId, TradeIntentMessage message, string reason)
         {
             CoopPlugin.Log.LogInfo("[trade] host rejected " + message.Operation + " counter="
-                + message.Counter + " id=" + message.PredictionId + " nonce=" + message.OfferNonce
-                + ": " + reason + ".");
-            PredictionApi.Rollback(_context, connectionId, message.PredictionId);
+                + (message.Counter == null ? "null" : message.Counter.name) + " id="
+                + message.ActionId + " nonce=" + message.OfferNonce + ": " + reason + ".");
+            ActionLedger.Rollback(_context, connectionId, message.ActionId);
         }
 
-        private void SendOfferDelta(Offer offer, bool removed, Guid predictionId,
+        private void SendOfferDelta(Offer offer, bool removed, Guid actionId,
             TradeOutcome outcome, int predictionPeer)
         {
             if (_shutdown || !_context.InGame() || offer == null)
@@ -832,13 +825,13 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            CoopPlugin.Log.LogInfo("[trade] host sending offer counter=" + offer.Counter + " index="
-                + offer.CustomerIndex + " gen=" + offer.CustomerGeneration + " removed=" + removed
-                + " nonce=" + offer.Nonce + " ask="
+            CoopPlugin.Log.LogInfo("[trade] host sending offer counter=" + offer.Counter.name
+                + " customer=" + offer.Customer.name + " gen=" + offer.CustomerGeneration
+                + " removed=" + removed + " nonce=" + offer.Nonce + " ask="
                 + (offer.Data == null ? "n/a" : offer.Data.m_SellCardAskPrice.ToString("F2"))
                 + " priceSet="
                 + (offer.Data == null ? "n/a" : offer.Data.m_PriceSet.ToString("F2"))
-                + " pred=" + predictionId + " peers=" + _joinedConnections.Count + ".");
+                + " pred=" + actionId + " peers=" + _joinedConnections.Count + ".");
 
             var state = removed ? null : ToState(offer);
             foreach (var pair in _joinedConnections)
@@ -850,7 +843,7 @@ namespace CardShopCoop.Modules.Trade
 
                 _context.Send(pair.Key, new TradeOfferDeltaMessage
                 {
-                    PredictionId = pair.Key == predictionPeer ? predictionId : Guid.Empty,
+                    ActionId = pair.Key == predictionPeer ? actionId : Guid.Empty,
                     Counter = offer.Counter,
                     Outcome = outcome,
                     Removed = removed,
@@ -966,7 +959,6 @@ namespace CardShopCoop.Modules.Trade
             _tradeScreenReady = false;
             _offers.Clear();
             _offersByCustomer.Clear();
-            _customerIndices.Clear();
             _hasObservedDay = false;
         }
 

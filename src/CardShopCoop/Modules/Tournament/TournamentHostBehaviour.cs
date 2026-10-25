@@ -220,8 +220,7 @@ namespace CardShopCoop.Modules.Tournament
                 state.PlayerIsTournamentCustomer = state.PlayerState.IsTournamentCustomer;
                 state.PlayerIsTournamentWin = state.PlayerState.IsTournamentWin;
                 state.PlayerHasRegisteredResult = state.PlayerState.HasRegisteredTournamentResult;
-                state.PlayerTournamentCustomerPlayTableIndex =
-                    state.PlayerState.TournamentCustomerPlayTableIndex;
+                state.PlayerTournamentPlayTable = state.PlayerState.PlayTable;
                 state.PlayerTournamentWinCount = state.PlayerState.TournamentWinCount;
                 state.PlayerTournamentWinPoints = state.PlayerState.TournamentWinPoints;
                 state.PlayerTournamentPlacementIndex = state.PlayerState.TournamentPlacementIndex;

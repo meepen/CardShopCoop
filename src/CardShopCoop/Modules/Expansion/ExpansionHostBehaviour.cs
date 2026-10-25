@@ -1,6 +1,6 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -69,7 +69,7 @@ namespace CardShopCoop.Modules.Expansion
             _context.Send(connection.Id, BuildBaseline());
         }
 
-        [MessageHandler(typeof(ExpansionPurchaseMessage))]
+        [MessageHandler]
         private void HandlePurchase(MessageContext context, ExpansionPurchaseMessage message)
         {
             // Every joined client, including the first connection (which the host numbers 1),
@@ -85,7 +85,7 @@ namespace CardShopCoop.Modules.Expansion
                 CoopPlugin.Log.LogWarning("Expansion purchase rejected peer="
                     + context.Connection.Id + " kind=" + message.Kind
                     + " reason=unsupported purchase kind");
-                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
                 return;
             }
 
@@ -98,17 +98,17 @@ namespace CardShopCoop.Modules.Expansion
             {
                 CoopPlugin.Log.LogError("Expansion purchase failed for peer "
                     + context.Connection.Id + ": " + exception);
-                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
                 return;
             }
 
             if (!accepted)
             {
-                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
                 return;
             }
 
-            BroadcastDelta(message.Kind, message.PredictionId);
+            BroadcastDelta(message.Kind, message.ActionId);
         }
 
         internal void Shutdown()
@@ -255,7 +255,7 @@ namespace CardShopCoop.Modules.Expansion
                 + CPlayerData.m_CoinAmountDouble);
         }
 
-        private void BroadcastDelta(byte kind, Guid predictionId)
+        private void BroadcastDelta(byte kind, Guid actionId)
         {
             if (_shutdown || _context == null || !_context.InGame())
             {
@@ -264,7 +264,7 @@ namespace CardShopCoop.Modules.Expansion
 
             var message = new ExpansionDeltaMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Area = kind,
             };
             switch (kind)

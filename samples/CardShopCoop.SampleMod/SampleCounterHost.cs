@@ -20,13 +20,11 @@ namespace CardShopCoop.SampleMod
         private void OnEnable()
         {
             _context = Context;
-            _context.Messages.RegisterAttributedHandlers(this);
             CoopLog.Info("[sample] host counter online");
         }
 
         private void OnDisable()
         {
-            _context?.Messages.UnregisterAttributedHandlers(this);
             _context = null;
         }
 
@@ -49,7 +47,7 @@ namespace CardShopCoop.SampleMod
             }
         }
 
-        [MessageHandler(typeof(SampleIncrementIntent))]
+        [MessageHandler]
         private void HandleIncrement(CoopMessageContext context, SampleIncrementIntent message)
         {
             _value++;

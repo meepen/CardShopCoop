@@ -1,7 +1,7 @@
 using System;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -76,7 +76,7 @@ namespace CardShopCoop.Modules.Expansion
             ApplyLatestState();
         }
 
-        [MessageHandler(typeof(ExpansionBaselineMessage))]
+        [MessageHandler]
         private void HandleBaseline(MessageContext context, ExpansionBaselineMessage message)
         {
             if (_shutdown)
@@ -88,7 +88,7 @@ namespace CardShopCoop.Modules.Expansion
             ApplyLatestState();
         }
 
-        [MessageHandler(typeof(ExpansionDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext context, ExpansionDeltaMessage message)
         {
             if (_shutdown || message == null)
@@ -211,7 +211,7 @@ namespace CardShopCoop.Modules.Expansion
             // The game already applied a client purchase locally; the host echoes the absolute
             // counts, so Confirm retires the actor's prediction AND applies them. A concurrent
             // purchase committed elsewhere can leave the host count ahead of the local run.
-            PredictionApi.Confirm(delta.PredictionId, () =>
+            ActionLedger.Confirm(delta.ActionId, () =>
             {
                 ExpansionInterop.ApplyDelta(manager, delta);
                 ExpansionInterop.RefreshOpenScreen(ExpansionInterop.FindExpansionScreen());
@@ -225,7 +225,7 @@ namespace CardShopCoop.Modules.Expansion
             // absolute counts make the earlier message redundant.
             if (pending != null && !ReferenceEquals(pending, replacement))
             {
-                PredictionApi.Ack(pending.PredictionId);
+                ActionLedger.Ack(pending.ActionId);
             }
 
             pending = replacement;
@@ -291,10 +291,10 @@ namespace CardShopCoop.Modules.Expansion
                 + CPlayerData.m_UnlockRoomCount + " warehouseRooms="
                 + CPlayerData.m_UnlockWarehouseRoomCount + " unlocked="
                 + CPlayerData.m_IsWarehouseRoomUnlocked + ".");
-            PredictionApi.Predict("expansion:" + kind,
+            ActionLedger.Submit("expansion:" + kind,
                 id => client._context.Send(1, new ExpansionPurchaseMessage
                 {
-                    PredictionId = id,
+                    ActionId = id,
                     Kind = kind,
                 }),
                 () => WithPrediction(replay),

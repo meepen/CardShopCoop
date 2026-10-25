@@ -1,0 +1,95 @@
+using System;
+using CardShopCoop.Api;
+
+namespace CardShopCoop.CustomTv
+{
+    /// <summary>Operation that produced the current <see cref="TvState"/> snapshot.</summary>
+    public static class TvStateOperations
+    {
+        public const byte None = 0;
+        public const byte Open = 1;
+        public const byte Playlist = 2;
+        public const byte Next = 3;
+        public const byte Previous = 4;
+        public const byte Pause = 5;
+        public const byte Power = 6;
+        public const byte Shuffle = 7;
+        public const byte Seek = 8;
+        public const byte Barrier = 9;
+        public const byte Error = 10;
+    }
+
+    /// <summary>
+    /// One immutable snapshot of the shared TV. The host publishes it through
+    /// <see cref="Global{T}"/>; the operation and action id identify which client action (if
+    /// any) produced this snapshot so the client can confirm or roll back its action.
+    /// </summary>
+    [GlobalInformation]
+    public sealed class TvState
+    {
+        public string SourceUrl
+        {
+            get; init;
+        }
+        public string StreamUrl
+        {
+            get; init;
+        }
+        public string StreamTitle
+        {
+            get; init;
+        }
+        public string PlaylistUrl
+        {
+            get; init;
+        }
+        public bool IsLive
+        {
+            get; init;
+        }
+        public bool IsSegmentedVod
+        {
+            get; init;
+        }
+        public int PlaylistIndex
+        {
+            get; init;
+        }
+        public double Position
+        {
+            get; init;
+        }
+        public bool Paused
+        {
+            get; init;
+        }
+        public bool PoweredOff
+        {
+            get; init;
+        }
+        public bool Shuffle
+        {
+            get; init;
+        }
+        public bool Barrier
+        {
+            get; init;
+        }
+        public bool Resume
+        {
+            get; init;
+        }
+        public int Generation
+        {
+            get; init;
+        }
+        public byte Operation
+        {
+            get; init;
+        }
+        public Guid ActionId
+        {
+            get; init;
+        }
+    }
+}

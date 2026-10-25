@@ -1,29 +1,21 @@
 using CardShopCoop.Net;
 using CardShopCoop.Net.Protocol;
-using System;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.Npc
 {
-    /// <summary>Reliable authoritative NPC baseline sent once when a peer joins.</summary>
-    [NetworkMessage]
-    public sealed class NpcBaselineMessage : INetMessage
-    {
-        public float HostTime;
-        public int CustomerCapacity = -1;
-        public System.Collections.Generic.List<bool> CustomerFemales;
-        public System.Collections.Generic.List<NpcEntry> Entries = new();
-    }
-
-    /// <summary>One transient interpolated state update for one NPC incarnation.</summary>
+    /// <summary>One transient interpolated state update for one NPC incarnation. Creation and
+    /// removal are identity lifecycle messages; this stream only moves and poses an NPC that the
+    /// identity module already created. The live object is the only identity on the wire: the
+    /// client derives kind, pool index and incarnation from it through the identity module and
+    /// drops the delta when the object cannot be resolved.</summary>
     [NetworkMessage(Reliability = Reliability.Transient)]
     public sealed class NpcStateDeltaMessage : INetMessage
     {
         public float HostTime;
-        public byte Kind;
-        public ushort Index;
-        public int Identity;
-        public bool Active;
+        // Exactly one of these is set to the live NPC the delta describes.
+        public Customer Customer;
+        public Worker Worker;
         public Vector3 Position;
         public float Yaw;
         public float Speed;
@@ -32,34 +24,20 @@ namespace CardShopCoop.Modules.Npc
         public byte ActionKind;
         public bool HoldBig;
         public EItemType HoldItemType;
-        /// <summary>Stable world box network id the worker is carrying, or <see cref="Guid.Empty"/>.
-        /// Lets the client remove the real warehouse box object the worker took and drive the held
-        /// box prop.</summary>
-        public Guid HoldBoxNetworkId;
+        /// <summary>The live world box the worker is carrying, or null when the worker holds no
+        /// box. The client drives the real warehouse box and the held box prop from this object;
+        /// there is no box-id fallback on the wire.</summary>
+        public InteractablePackagingBox HoldBox;
         /// <summary>Open/closed state of the carried box.</summary>
         public bool HoldBoxOpened;
     }
 
-    /// <summary>Reliable identity update for one pooled NPC incarnation.</summary>
-    [NetworkMessage]
-    public sealed class NpcIdentityDeltaMessage : INetMessage
-    {
-        public byte Kind;
-        public ushort Index;
-        public int Identity;
-        public bool Female;
-        public string CharName;
-        public Vector3 Position;
-    }
-
-    // Host -> client (reliable / one-shot). The identity binds the bubble to the
-    // current pooled customer incarnation, rather than a recycled list slot.
+    // Host -> client (reliable / one-shot). The live customer is the only identity on the wire;
+    // the client drops the popup when it cannot resolve that object.
     [NetworkMessage]
     public sealed class NpcSpeechMessage : INetMessage
     {
-        public byte Kind;
-        public ushort Index;
-        public int Identity;
+        public Customer Customer;
         public string Text;
         public float OffsetUp;
     }
@@ -67,35 +45,8 @@ namespace CardShopCoop.Modules.Npc
     [NetworkMessage]
     public sealed class NpcMoneyPopupMessage : INetMessage
     {
-        public ushort Index;
-        public int Identity;
+        public Customer Customer;
         public float Amount;
         public float OffsetUp;
-    }
-
-    /// <summary>One NPC in the join baseline. Flags is the raw wire ushort (the game's NpcFlags
-    /// is a private nested enum in NpcClientBehaviour).</summary>
-    public sealed class NpcEntry
-    {
-        public byte Kind;
-        public ushort Index;
-        public int Identity;
-        public bool Female;
-        public bool HasName;
-        public string CharName;   // only present when HasName
-        public Vector3 Position;
-        public float Yaw;
-        public float Speed;
-        public ushort Flags;
-        public int ActionSequence;
-        public byte ActionKind;
-        public bool HoldBig;
-        public EItemType HoldItemType;
-        /// <summary>Stable world box network id the worker is carrying, or <see cref="Guid.Empty"/>.
-        /// Lets the client remove the real warehouse box object the worker took and drive the held
-        /// box prop.</summary>
-        public Guid HoldBoxNetworkId;
-        /// <summary>Open/closed state of the carried box.</summary>
-        public bool HoldBoxOpened;
     }
 }

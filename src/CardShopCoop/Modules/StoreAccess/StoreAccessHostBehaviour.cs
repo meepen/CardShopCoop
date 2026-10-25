@@ -1,21 +1,25 @@
 using System;
-using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
+using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.StoreAccess
 {
-    /// <summary>Host authority for the two access signs and their late-join state.</summary>
+    /// <summary>Host authority for the two access signs and the session-wide state they drive.</summary>
     [ServerBehaviour]
     public sealed class StoreAccessHostBehaviour : CoopBehaviour
     {
+        private const byte ShopSign = 0;
+        private const byte WarehouseSign = 1;
+
         private static StoreAccessHostBehaviour _active;
-        private readonly HashSet<int> _fullyJoined = new();
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
@@ -28,295 +32,202 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-
             _context = RuntimeContext;
-            var registered = false;
+            _active = this;
+            StoreAccessInterop.Reset();
+            SceneManager.sceneLoaded += OnSceneLoaded;
+            _harmony = new Harmony("dev.meepen.cardshopcoop.store-access.host");
             try
             {
-                StoreAccessInterop.Reset();
-                _context.Messages.RegisterAttributedHandlers(this);
-                registered = true;
-                _active = this;
-                SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.store-access.host");
                 _harmony.CreateClassProcessor(typeof(SignChangedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(WarehouseSignChangedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(StoreOpenedPatch)).Patch();
             }
-            catch (Exception exception)
+            catch
             {
-                CoopPlugin.Log.LogError("Store access host initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
-                SceneManager.sceneLoaded -= OnSceneLoaded;
-                if (registered)
-                {
-                    _context.Messages.UnregisterAttributedHandlers(this);
-                }
-
-
-                if (ReferenceEquals(_active, this))
-                {
-                    _active = null;
-                }
-
-
-                StoreAccessInterop.Reset();
-                _context = null;
+                Shutdown();
                 throw;
             }
         }
 
-        [OnFullyJoined]
-        private void SendInitialState(PeerConnection connection)
+        /// <summary>Seeds the session value before the transport starts. The generic
+        /// extended-information baseline delivers it to every joiner, so there is deliberately no
+        /// per-peer join message. The guest gates its sign click on this value (an optimistic
+        /// toggle needs an authoritative baseline to replay over); without the seed the host only
+        /// had a value after its own first sign change or day roll-over, so a guest could not be
+        /// the one to open the shop during the tutorial.</summary>
+        [OnSessionStarted]
+        private void SeedState()
         {
-            if (connection == null)
+            if (_shutdown || _context == null)
             {
                 return;
             }
 
-
-            _fullyJoined.Add(connection.Id);
-            SendState(connection.Id);
-        }
-
-        [OnClientDisconnected]
-        private void ForgetPeer(PeerConnection connection, DisconnectInfo info)
-        {
-            if (connection != null)
+            if (!_context.InGame())
             {
-                _fullyJoined.Remove(connection.Id);
+                CoopPlugin.Log.LogWarning("[store-access] host has no loaded shop at session start; "
+                    + "the first sign change or day roll-over will publish the access state.");
+                return;
             }
 
+            ExtendedInformationModule.SeedGlobal(typeof(StoreAccessState),
+                BuildState(Guid.Empty, rejected: false));
+            CoopPlugin.Log.LogInfo("[store-access] seeded shop="
+                + (CPlayerData.m_IsShopOpen ? "open" : "closed") + " warehouse="
+                + (CPlayerData.m_IsWarehouseDoorClosed ? "closed" : "open") + ".");
         }
 
-        [MessageHandler(typeof(StoreAccessToggleMessage))]
-        private void HandleToggle(MessageContext context, StoreAccessToggleMessage message)
+        /// <summary>True while a client intent is driving the host's vanilla click, so the local
+        /// sign hook does not publish a second, uncorrelated state.</summary>
+        internal bool ApplyingIntent => _applyingIntent;
+
+        [IntentValidator]
+        private IntentValidation ValidateToggle(CoopMessageContext context,
+            StoreAccessToggleIntent message)
         {
-            if (!IsPeerMessage(context) || message == null)
+            if (_shutdown || context?.Connection == null || message == null)
+            {
+                return IntentValidation.Deny("session is not active");
+            }
+
+            if (!context.IsAuthenticated || !context.InGame)
+            {
+                return IntentValidation.Deny("player is not in the game");
+            }
+
+            if (context.Connection.State != ConnectionState.FullyJoined)
+            {
+                return IntentValidation.Deny("player is still joining");
+            }
+
+            if (message.Which > WarehouseSign)
+            {
+                return IntentValidation.Deny("unknown access sign");
+            }
+
+            return FindSign(message.Which) == null
+                ? IntentValidation.Deny("the access sign is not available")
+                : IntentValidation.Allow();
+        }
+
+        [IntentRejected]
+        private void ToggleRejected(CoopMessageContext context, StoreAccessToggleIntent message,
+            string reason)
+        {
+            if (_shutdown || context?.Connection == null || message == null)
             {
                 return;
             }
 
+            CoopPlugin.Log.LogWarning("[store-access] rejected toggle sign=" + message.Which
+                + ": " + reason);
+            PublishState(message.ActionId, rejected: true);
+        }
 
-            var peer = context.Connection.Id;
-            var accepted = false;
+        [MessageHandler]
+        private void HandleToggle(CoopMessageContext context, StoreAccessToggleIntent message)
+        {
+            if (_shutdown || context?.Connection == null || message == null)
+            {
+                return;
+            }
+
+            if (message.Which > WarehouseSign)
+            {
+                CoopPlugin.Log.LogWarning("[store-access] unknown sign " + message.Which
+                    + " for toggle " + message.ActionId + ".");
+                PublishState(message.ActionId, rejected: true);
+                Rollback(context.ConnectionId, message.ActionId);
+                return;
+            }
+
+            var sign = FindSign(message.Which);
+            if (sign == null)
+            {
+                CoopPlugin.Log.LogWarning("[store-access] sign=" + message.Which
+                    + " disappeared before toggle " + message.ActionId + ".");
+                PublishState(message.ActionId, rejected: true);
+                Rollback(context.ConnectionId, message.ActionId);
+                return;
+            }
+
+            var before = ReadFlag(message.Which);
+            _applyingIntent = true;
             try
             {
-                if (message.Which > 1)
-                {
-                    Rollback(context, message);
-                }
-                else if (!StoreAccessInterop.IsSceneReady())
-                {
-                    Rollback(context, message);
-                }
-                else if (message.Which == 0)
-                {
-                    var sign = StoreAccessInterop.FindOpenSign();
-                    if (sign == null)
-                    {
-                        Rollback(context, message);
-                    }
-                    else
-                    {
-                        var before = CPlayerData.m_IsShopOpen;
-                        _applyingIntent = true;
-                        try
-                        {
-                            // Run the vanilla click so the host sign animates exactly like a local
-                            // click. It is a no-op while the previous swap is still playing or the
-                            // tutorial gate blocks, in which case there is nothing to confirm.
-                            sign.OnMouseButtonUp();
-                        }
-                        finally
-                        {
-                            _applyingIntent = false;
-                        }
-
-                        accepted = CPlayerData.m_IsShopOpen != before;
-                        if (!accepted)
-                        {
-                            Rollback(context, message);
-                        }
-
-                    }
-                }
-                else
-                {
-                    var sign = StoreAccessInterop.FindWarehouseSign();
-                    if (sign == null)
-                    {
-                        Rollback(context, message);
-                    }
-
-                    else
-                    {
-                        var before = CPlayerData.m_IsWarehouseDoorClosed;
-                        _applyingIntent = true;
-                        try
-                        {
-                            sign.OnMouseButtonUp();
-                        }
-                        finally
-                        {
-                            _applyingIntent = false;
-                        }
-
-                        accepted = CPlayerData.m_IsWarehouseDoorClosed != before;
-                        if (!accepted)
-                        {
-                            Rollback(context, message);
-                        }
-
-                    }
-                }
+                // The vanilla click applies the flag, plays the host sign, and enforces the
+                // game's own tutorial/swap gates. It is the same path a local host click uses.
+                sign.OnMouseButtonUp();
             }
-            catch (Exception exception)
+            finally
             {
-                CoopPlugin.Log.LogError("Store access toggle failed for peer " + peer + ": " + exception);
-                Rollback(context, message);
+                _applyingIntent = false;
             }
 
-            if (accepted)
+            if (ReadFlag(message.Which) == before)
             {
-                BroadcastDelta(BuildDelta(message.PredictionId, message.Which == 0, message.Which == 1));
+                // The vanilla gate refused the click (for example the shop cannot be opened yet
+                // or the sign is still swapping). Publish the unchanged authority under the
+                // action id so the requester retires its optimistic toggle, then roll it back.
+                CoopPlugin.Log.LogWarning("[store-access] toggle sign=" + message.Which
+                    + " made no change; rolling back " + message.ActionId + ".");
+                PublishState(message.ActionId, rejected: true);
+                Rollback(context.ConnectionId, message.ActionId);
+                return;
             }
 
+            PublishState(message.ActionId, rejected: false);
         }
 
-        private void BroadcastDelta(StoreAccessDeltaMessage message)
+        private static InteractableObject FindSign(byte which)
+            => which == ShopSign
+                ? StoreAccessInterop.FindOpenSign()
+                : StoreAccessInterop.FindWarehouseSign();
+
+        private static bool ReadFlag(byte which)
+            => which == ShopSign
+                ? CPlayerData.m_IsShopOpen
+                : CPlayerData.m_IsWarehouseDoorClosed;
+
+        private void Rollback(int connectionId, Guid actionId)
         {
-            if (_shutdown || _context == null || !_context.InGame() || message == null)
+            if (actionId == Guid.Empty)
             {
                 return;
             }
 
-
-            CoopPlugin.Log.LogInfo("[store-access] host broadcast shop="
-                + (message.HasShopOpen ? (message.IsShopOpen ? "open" : "closed") : "-")
-                + " warehouse=" + (message.HasWarehouseDoorClosed
-                    ? (message.IsWarehouseDoorClosed ? "closed" : "open") : "-")
-                + " pred=" + message.PredictionId + ".");
-            _context.Broadcast(message);
+            ActionLedger.Rollback(_context, connectionId, actionId);
         }
 
-        private void SendState(int peer)
+        /// <summary>Publishes the host's current access flags as the one session-wide value. The
+        /// store owns the broadcast, baseline and client apply; the host has no handler, exactly
+        /// like the register's authoritative snapshot.</summary>
+        private void PublishState(Guid actionId, bool rejected)
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || _context == null || !_context.InGame()
+                || CoopCore.Instance?.Net == null)
             {
                 return;
             }
 
-
-            _context.Send(peer, BuildState(false));
+            Global<StoreAccessState>.Value = BuildState(actionId, rejected);
+            CoopPlugin.Log.LogInfo("[store-access] state shop="
+                + (CPlayerData.m_IsShopOpen ? "open" : "closed") + " warehouse="
+                + (CPlayerData.m_IsWarehouseDoorClosed ? "closed" : "open")
+                + " action=" + actionId + (rejected ? " (rejection)" : "") + ".");
         }
 
-        private static StoreAccessDeltaMessage BuildDelta(Guid predictionId,
-            bool shopOpen, bool warehouseClosed)
-        {
-            return new StoreAccessDeltaMessage
+        private static StoreAccessState BuildState(Guid actionId, bool rejected)
+            => new()
             {
-                PredictionId = predictionId,
-                HasShopOpen = shopOpen,
-                IsShopOpen = CPlayerData.m_IsShopOpen,
-                HasWarehouseDoorClosed = warehouseClosed,
-                IsWarehouseDoorClosed = CPlayerData.m_IsWarehouseDoorClosed,
-                Animate = true,
-            };
-        }
-
-        /// <summary>Answers a rejected intent with the affected sign's authoritative value under
-        /// the rejected prediction id, then sends the generic rollback. The requester's
-        /// <c>HandleDelta</c> Confirm retires the prediction and applies that authority, so the
-        /// trailing rollback is ignored as already-resolved instead of undoing to a pre-click
-        /// snapshot that an intervening host or other-guest toggle has moved past.</summary>
-        private static void Rollback(MessageContext context, StoreAccessToggleMessage message)
-        {
-            var active = _active;
-            if (active == null || context?.Connection == null || message == null)
-            {
-                return;
-            }
-
-
-            active.SendRejectionState(context.Connection.Id, message);
-
-            if (message.PredictionId != Guid.Empty)
-            {
-                PredictionApi.Rollback(active._context, context.Connection.Id, message.PredictionId);
-            }
-
-        }
-
-        private void SendRejectionState(int peer, StoreAccessToggleMessage message)
-        {
-            if (_shutdown || _context == null || !_context.InGame() || message.Which > 1)
-            {
-                return;
-            }
-
-
-            StoreAccessDeltaMessage refresh;
-            if (message.Which == 0)
-            {
-                if (StoreAccessInterop.FindOpenSign() == null)
-                {
-                    return;
-                }
-
-
-                refresh = new StoreAccessDeltaMessage
-                {
-                    PredictionId = message.PredictionId,
-                    HasShopOpen = true,
-                    IsShopOpen = CPlayerData.m_IsShopOpen,
-                    Animate = false,
-                };
-            }
-            else
-            {
-                if (StoreAccessInterop.FindWarehouseSign() == null
-                    && StoreAccessInterop.FindUnlockRoomManager() == null)
-                {
-                    return;
-                }
-
-
-                refresh = new StoreAccessDeltaMessage
-                {
-                    PredictionId = message.PredictionId,
-                    HasWarehouseDoorClosed = true,
-                    IsWarehouseDoorClosed = CPlayerData.m_IsWarehouseDoorClosed,
-                    Animate = false,
-                };
-            }
-
-            CoopPlugin.Log.LogInfo("[store-access] rejection refresh to conn " + peer
-                + " shop=" + (refresh.HasShopOpen
-                    ? (refresh.IsShopOpen ? "open" : "closed") : "-")
-                + " warehouse=" + (refresh.HasWarehouseDoorClosed
-                    ? (refresh.IsWarehouseDoorClosed ? "closed" : "open") : "-")
-                + " pred=" + message.PredictionId + ".");
-            _context.Send(peer, refresh);
-        }
-
-        private static StoreAccessStateMessage BuildState(bool animate)
-            => new StoreAccessStateMessage
-            {
-                Animate = animate,
                 IsShopOpen = CPlayerData.m_IsShopOpen,
                 IsWarehouseDoorClosed = CPlayerData.m_IsWarehouseDoorClosed,
+                ActionId = actionId,
+                Rejected = rejected,
             };
 
-        private bool IsPeerMessage(MessageContext context)
-            => !_shutdown && context?.Connection != null
-                && _fullyJoined.Contains(context.Connection.Id);
-
-        private void OnSceneLoaded(Scene _, LoadSceneMode __)
-        {
-            StoreAccessInterop.Reset();
-        }
+        private void OnSceneLoaded(Scene _, LoadSceneMode __) => StoreAccessInterop.Reset();
 
         internal void Shutdown()
         {
@@ -325,9 +236,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
             _harmony = null;
@@ -336,8 +245,6 @@ namespace CardShopCoop.Modules.StoreAccess
                 _active = null;
             }
 
-
-            _fullyJoined.Clear();
             StoreAccessInterop.Reset();
             _context = null;
         }
@@ -347,38 +254,48 @@ namespace CardShopCoop.Modules.StoreAccess
         [HarmonyPatch(typeof(InteractableOpenCloseSign), "OnMouseButtonUp")]
         private static class SignChangedPatch
         {
+            [HarmonyPrefix]
+            private static void Prefix(out bool __state) => __state = CPlayerData.m_IsShopOpen;
+
             [HarmonyPostfix]
-            private static void Postfix()
+            private static void Postfix(bool __state)
             {
-                if (_active == null || _active._applyingIntent)
+                if (_active == null || _active._applyingIntent
+                    || CPlayerData.m_IsShopOpen == __state)
                 {
                     return;
                 }
 
-
-                _active.BroadcastDelta(BuildDelta(Guid.Empty, true, false));
+                _active.PublishState(Guid.Empty, rejected: false);
             }
         }
 
         [HarmonyPatch(typeof(InteractableWarehouseAllowEnterSign), "OnMouseButtonUp")]
         private static class WarehouseSignChangedPatch
         {
+            [HarmonyPrefix]
+            private static void Prefix(out bool __state)
+                => __state = CPlayerData.m_IsWarehouseDoorClosed;
+
             [HarmonyPostfix]
-            private static void Postfix()
+            private static void Postfix(bool __state)
             {
-                if (_active == null || _active._applyingIntent)
+                if (_active == null || _active._applyingIntent
+                    || CPlayerData.m_IsWarehouseDoorClosed == __state)
                 {
                     return;
                 }
 
-
-                _active.BroadcastDelta(BuildDelta(Guid.Empty, false, true));
+                _active.PublishState(Guid.Empty, rejected: false);
             }
         }
 
         [HarmonyPatch(typeof(InteractableOpenCloseSign), "OnDayStarted")]
         private static class StoreOpenedPatch
         {
+            // Vanilla resets m_IsShopOpen at the roll-over. Publish both access flags so the guest
+            // does not run its own reset (it blocks OnDayStarted) and every late joiner gets the
+            // closed state in the extended-information baseline.
             [HarmonyPostfix]
             private static void Postfix()
             {
@@ -387,8 +304,7 @@ namespace CardShopCoop.Modules.StoreAccess
                     return;
                 }
 
-
-                _active.BroadcastDelta(BuildDelta(Guid.Empty, true, true));
+                _active.PublishState(Guid.Empty, rejected: false);
             }
         }
     }

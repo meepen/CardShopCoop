@@ -31,6 +31,10 @@
       <HintPath>$(BepInExPath)\BepInEx.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedPath)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine">
       <HintPath>$(ManagedPath)\UnityEngine.dll</HintPath>
       <Private>false</Private>

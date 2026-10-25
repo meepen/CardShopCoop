@@ -4,7 +4,7 @@ using System.Reflection;
 using CardShopCoop.Api;
 using UnityEngine;
 
-namespace CardShopCoop.Modules.Tv
+namespace CardShopCoop.CustomTv
 {
     /// <summary>
     /// Optional reflection bridge to RTCGO Custom TV. The TV assembly is supplied by an optional
@@ -215,7 +215,7 @@ namespace CardShopCoop.Modules.Tv
 
         private static object Get(FieldInfo field)
         {
-            return field == null ? null : field.GetValue(field.IsStatic ? null : Master());
+            return field?.GetValue(field.IsStatic ? null : Master());
         }
 
         private static T Get<T>(FieldInfo field, T fallback = default)

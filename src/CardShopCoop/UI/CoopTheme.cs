@@ -755,19 +755,14 @@ namespace CardShopCoop.UI
                 return null;
             }
 
-            switch (icon)
+            return icon switch
             {
-                case "refresh":
-                    return GlyphRefresh;
-                case "copy":
-                    return GlyphCopy;
-                case "play":
-                    return GlyphPlay;
-                case "stop":
-                    return GlyphStop;
-                default:
-                    return null;
-            }
+                "refresh" => GlyphRefresh,
+                "copy" => GlyphCopy,
+                "play" => GlyphPlay,
+                "stop" => GlyphStop,
+                _ => null,
+            };
         }
 
         /// <summary>The baked crown used to mark the host in the roster. Null only before the theme

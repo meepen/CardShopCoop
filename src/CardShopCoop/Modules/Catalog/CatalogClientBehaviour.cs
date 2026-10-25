@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -96,7 +96,7 @@ namespace CardShopCoop.Modules.Catalog
             _active.ApplyPendingState();
         }
 
-        [MessageHandler(typeof(CatalogLicenseStateMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, CatalogLicenseStateMessage message)
         {
             if (_shutdown)
@@ -201,7 +201,7 @@ namespace CardShopCoop.Modules.Catalog
             RefreshOpenScannerScreens();
         }
 
-        [MessageHandler(typeof(CatalogLicenseDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext context, CatalogLicenseDeltaMessage message)
         {
             if (_shutdown)
@@ -223,7 +223,7 @@ namespace CardShopCoop.Modules.Catalog
         {
             var sideEffectIndex = -1;
             RestockData sideEffectData = null;
-            PredictionApi.AckOrApply(message.PredictionId, () =>
+            ActionLedger.AckOrApply(message.ActionId, () =>
             {
                 if (message.Scanner)
                 {
@@ -287,7 +287,7 @@ namespace CardShopCoop.Modules.Catalog
             var key = DeltaKey(message);
             if (_pendingDeltas.TryGetValue(key, out var previous))
             {
-                PredictionApi.Ack(previous.PredictionId);
+                ActionLedger.Ack(previous.ActionId);
             }
 
 
@@ -368,7 +368,7 @@ namespace CardShopCoop.Modules.Catalog
         {
             foreach (var delta in _pendingDeltas.Values)
             {
-                PredictionApi.Ack(delta.PredictionId);
+                ActionLedger.Ack(delta.ActionId);
             }
 
 

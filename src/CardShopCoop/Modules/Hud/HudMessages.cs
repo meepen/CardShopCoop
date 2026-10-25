@@ -1,4 +1,3 @@
-using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
@@ -13,12 +12,8 @@ namespace CardShopCoop.Modules.Hud
     }
 
     [NetworkMessage]
-    public sealed class HudContributionIntent : IPredictedMessage
+    public sealed class HudContributionIntent : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public HudContributionKind Kind;
         public float Value;
     }
@@ -34,34 +29,22 @@ namespace CardShopCoop.Modules.Hud
     }
 
     [NetworkMessage]
-    public sealed class HudWalletDeltaMessage : IPredictedMessage
+    public sealed class HudWalletDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public double Coins;
         public float CoinDisplay;
     }
 
     [NetworkMessage]
-    public sealed class HudProgressDeltaMessage : IPredictedMessage
+    public sealed class HudProgressDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public int Experience;
         public int Level;
     }
 
     [NetworkMessage]
-    public sealed class HudFameDeltaMessage : IPredictedMessage
+    public sealed class HudFameDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public int Fame;
     }
 }

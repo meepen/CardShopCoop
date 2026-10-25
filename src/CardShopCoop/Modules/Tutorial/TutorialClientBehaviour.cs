@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
-using CardShopCoop.Net;
-using CardShopCoop.Net.Connection;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Tutorial
 {
@@ -15,43 +15,9 @@ namespace CardShopCoop.Modules.Tutorial
     public sealed class TutorialClientBehaviour : CoopBehaviour
     {
         private static TutorialClientBehaviour _active;
-        private static bool _applyingRemote;
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
-        private bool _joined;
-        private TutorialStateMessage _pendingState;
-        // Retained single-condition deltas keyed by condition, in a stable (condition-ordered)
-        // order. A later delta for the same condition supersedes the earlier one; distinct
-        // conditions all survive so one cannot overwrite another while the scene is not ready.
-        private readonly SortedDictionary<int, PendingTutorialDelta> _pendingDeltas = new();
-
-        /// <summary>A single-condition authoritative delta retained while the tutorial scene is
-        /// not ready. It records the absolute host value and index so it can be applied from the
-        /// same lifecycle hooks as the full-state baseline. Applying it is idempotent: the value
-        /// is re-set to the absolute host value and the index to the host index.</summary>
-        private readonly struct PendingTutorialDelta
-        {
-            internal PendingTutorialDelta(int condition, float value, int tutorialIndex)
-            {
-                Condition = condition;
-                Value = value;
-                TutorialIndex = tutorialIndex;
-            }
-
-            internal int Condition
-            {
-                get;
-            }
-            internal float Value
-            {
-                get;
-            }
-            internal int TutorialIndex
-            {
-                get;
-            }
-        }
 
         private void OnEnable()
         {
@@ -60,16 +26,11 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
             }
 
-
             _context = RuntimeContext;
-            var registered = false;
             var lifecycle = false;
             try
             {
-                ResetSessionState();
                 TutorialInterop.Reset();
-                _context.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
@@ -88,264 +49,157 @@ namespace CardShopCoop.Modules.Tutorial
                     CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                     SceneManager.sceneLoaded -= OnSceneLoaded;
                 }
-                if (registered)
-                {
-                    _context.Messages.UnregisterAttributedHandlers(this);
-                }
-
 
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
                 }
 
-
-                ResetSessionState();
                 TutorialInterop.Reset();
                 _context = null;
                 throw;
             }
         }
 
-        [MessageHandler(typeof(TutorialStateMessage))]
-        private void HandleState(MessageContext context, TutorialStateMessage message)
+        /// <summary>The host's authoritative progression changed. The store owns the value, so the
+        /// handler only projects it; an action value is applied through the ledger, which retires
+        /// this client's action on an accepted echo and undoes it before a rejected re-anchor.</summary>
+        [GlobalInformationHandler]
+        private void HandleState(TutorialState state)
         {
-            if (_shutdown)
+            if (_shutdown || state == null)
             {
                 return;
             }
 
-
-            _pendingState = message;
-            // A full baseline supersedes any single-condition deltas retained before it.
-            _pendingDeltas.Clear();
-            TryApplyPending();
+            TryApplyStored();
         }
 
-        [MessageHandler(typeof(TutorialDeltaMessage))]
-        private void HandleDelta(MessageContext context, TutorialDeltaMessage message)
-        {
-            if (_shutdown)
-            {
-                return;
-            }
-
-
-            if (message.Values != null)
-            {
-                // The host sends the WHOLE TutorialDataList when the index advances. That snapshot
-                // supersedes the actor's optimistic run (the host may have continued past what the
-                // local AddTaskValue produced), so AckOrApply would retire the actor's prediction
-                // and drop the snapshot, leaving the guest behind and stalling its next intent.
-                // Confirm retires the prediction and still folds the authoritative state-set.
-                PredictionApi.Confirm(message.PredictionId, () => ApplyDelta(message));
-                return;
-            }
-
-            // Single-condition deltas carry the host's absolute value too (another peer or the
-            // host may have advanced the same condition), so retire and apply like a full state.
-            PredictionApi.Confirm(message.PredictionId, () => ApplyDelta(message));
-        }
-
-        private void TryApplyPending()
+        /// <summary>Applies the stored authoritative state once the tutorial surface exists. The
+        /// store is the deferred queue: a value that arrives while the scene is not ready stays
+        /// there and is applied from the lifecycle hooks, so no per-message copy is retained.</summary>
+        private void TryApplyStored()
         {
             if (_shutdown || _context == null || !_context.InGame())
             {
                 return;
             }
 
-
-            if (_pendingState != null)
-            {
-                var state = _pendingState;
-                if (!TryApply(state))
-                {
-                    return;
-                }
-
-
-                CoopPlugin.Log.LogDebug("tutorial baseline applied: index=" + state.TutorialIndex
-                    + " values=" + (state.Values == null ? 0 : state.Values.Count));
-                _pendingState = null;
-            }
-
-            TryApplyPendingDelta();
-        }
-
-        /// <summary>Applies the retained single-condition deltas once the tutorial scene is ready.
-        /// The full-state baseline, if any, is applied first so the deltas land on top of it. The
-        /// whole set is snapshotted and cleared before applying so a re-entrant apply cannot
-        /// observe a partially-consumed queue.</summary>
-        private void TryApplyPendingDelta()
-        {
-            if (_pendingDeltas.Count == 0)
+            var state = Global<TutorialState>.Value;
+            if (state == null || !TryApply(state))
             {
                 return;
             }
 
-
-            if (!TutorialInterop.IsSceneReady(TutorialInterop.FindManager())
-                || CPlayerData.m_TutorialDataList == null)
-            {
-                return;
-            }
-
-
-            var deltas = new List<PendingTutorialDelta>(_pendingDeltas.Values);
-            _pendingDeltas.Clear();
-            for (var i = 0; i < deltas.Count; i++)
-            {
-                var delta = deltas[i];
-                var condition = (ETutorialTaskCondition)delta.Condition;
-                ApplyLocalAction(condition, delta.Value - TutorialInterop.ValueFor(condition));
-                CPlayerData.m_TutorialIndex = delta.TutorialIndex;
-            }
+            CoopPlugin.Log.LogDebug("tutorial state applied: index=" + state.TutorialIndex
+                + " values=" + (state.Values == null ? 0 : state.Values.Length));
         }
 
         /// <summary>The game already applied this tutorial change through its own
-        /// <c>AddTaskValue</c>; register one post-hoc prediction whose apply is only used to
-        /// replay after an earlier rollback, and whose undo reverts to the captured state. The
-        /// host validates and echoes the action, and a rejection rolls it back. A local decrement
-        /// (a displayed card taken back off a shelf) is observed the same way even though the host
-        /// accepts progress only: the host rejects it and the rollback restores the pre-decrement
-        /// state, after which the host's own authoritative value arrives through the normal delta.</summary>
+        /// <c>AddTaskValue</c>; register one post-hoc action whose apply is only used to replay
+        /// after an earlier rollback, and whose undo restores the captured state. The host validates
+        /// and echoes the action, and a rejection rolls it back. A local decrement (a displayed card
+        /// taken back off a shelf) is observed the same way even though the host accepts progress
+        /// only: the host rejects it and the rollback restores the pre-decrement state, after which
+        /// the host's own authoritative value arrives through the normal state path.</summary>
         private static void ForwardAction(ETutorialTaskCondition condition, float increment,
-            TutorialStateMessage previous)
+            TutorialState previous)
         {
             var client = _active;
-            if (client == null || client._shutdown || !client._joined || client._context == null
+            if (client == null || client._shutdown || client._context == null
                 || !client._context.InGame())
             {
                 return;
             }
 
-            PredictionApi.Predict(
+            var actionId = ActionLedger.Submit(
                 "tutorial",
-                predictionId => client._context.Send(1, new TutorialActionDeltaMessage
-                {
-                    PredictionId = predictionId,
-                    // The host validates against the index it held before the increment, so send
-                    // the pre-apply capture rather than the already-advanced local index.
-                    ExpectedTutorialIndex = previous.TutorialIndex,
-                    ExpectedCondition = (int)condition,
-                    Action = (int)condition,
-                    Increment = increment,
-                }),
+                new TutorialActionIntent { Condition = condition, Increment = increment },
                 () => ApplyLocalAction(condition, increment),
                 () => TryApply(previous));
+            if (actionId == Guid.Empty)
+            {
+                CoopPlugin.Log.LogError("Tutorial increment was not forwarded to the host: there is "
+                    + "no live host connection, so the guest's progress is now local only.");
+            }
         }
 
-        private static TutorialStateMessage CaptureState()
+        private static TutorialState CaptureState()
         {
-            var result = new TutorialStateMessage
-            {
-                TutorialIndex = CPlayerData.m_TutorialIndex,
-            };
             var values = CPlayerData.m_TutorialDataList;
-            for (var i = 0; values != null && i < values.Count; i++)
+            var snapshot = new TutorialValue[values?.Count ?? 0];
+            for (var i = 0; i < snapshot.Length; i++)
             {
-                result.Values.Add(new TutorialValue
+                snapshot[i] = new TutorialValue
                 {
-                    Condition = (int)values[i].tutorialTaskCondition,
+                    Condition = values[i].tutorialTaskCondition,
                     Value = values[i].value,
-                });
+                };
             }
 
-
-            return result;
+            return new TutorialState
+            {
+                TutorialIndex = CPlayerData.m_TutorialIndex,
+                Values = snapshot,
+            };
         }
 
         private static void ApplyLocalAction(ETutorialTaskCondition condition, float increment)
         {
-            _applyingRemote = true;
-            try
-            {
-                TutorialManager.AddTaskValue(condition, increment);
-            }
-            finally
-            {
-                _applyingRemote = false;
-            }
+            TutorialManager.AddTaskValue(condition, increment);
         }
 
         /// <summary>Applies an authoritative tutorial state. Returns false while the scene's
-        /// tutorial surface is not ready; the caller retains the state and retries from its
+        /// tutorial surface is not ready; the caller retains the store value and retries from its
         /// lifecycle hooks instead of failing the reliable message (which would drop the guest).</summary>
-        private static bool TryApply(TutorialStateMessage message)
+        private static bool TryApply(TutorialState state)
         {
+            if (state == null)
+            {
+                return true;
+            }
+
             var manager = TutorialInterop.FindManager();
             if (!TutorialInterop.IsSceneReady(manager) || CPlayerData.m_TutorialDataList == null)
             {
-
                 return false;
             }
 
-
-            _applyingRemote = true;
-            try
-            {
-                ApplyInner(manager, message);
-            }
-            finally
-            {
-                _applyingRemote = false;
-            }
-
+            ApplyInner(manager, state);
             return true;
         }
 
-        private void ApplyDelta(TutorialDeltaMessage message)
+        private static void ApplyInner(TutorialManager manager, TutorialState state)
         {
-            if (message.Values != null)
-            {
-                // A full-state delta is a snapshot. Retain it exactly like the baseline so a
-                // scene that is momentarily not ready cannot silently drop the host's state. It
-                // supersedes any single-condition delta queued before it.
-                _pendingState = new TutorialStateMessage
-                {
-                    TutorialIndex = message.TutorialIndex,
-                    Values = message.Values,
-                };
-                _pendingDeltas.Clear();
-                TryApplyPending();
-                return;
-            }
-
-            // A single-condition delta is host-authoritative absolute state too. Retaining it (and
-            // applying it from the lifecycle hooks once the scene is ready) keeps a momentarily
-            // unavailable tutorial surface from dropping the host's progress instead of leaving the
-            // guest behind. Keying by condition keeps distinct conditions from evicting one another;
-            // a later value for the same condition supersedes the earlier one.
-            _pendingDeltas[message.Condition] = new PendingTutorialDelta(message.Condition,
-                message.Value, message.TutorialIndex);
-            TryApplyPending();
-        }
-
-        private static void ApplyInner(TutorialManager manager, TutorialStateMessage message)
-        {
-            var count = message.Values.Count;
+            var values = state.Values ?? Array.Empty<TutorialValue>();
+            var count = values.Length;
             var current = CPlayerData.m_TutorialDataList;
-            var leavingIntro = message.TutorialIndex != 0 && CPlayerData.m_TutorialIndex == 0;
-            TutorialInterop.SyncMarker(manager, message.TutorialIndex);
-            if (leavingIntro)
+            // The intro is shared progression: whichever player named the shop ends it for every
+            // peer. Clear this peer's key hints before SyncMarker hides the intro marker. This
+            // must not depend on the local index still being 0 - the shop module's naming replay
+            // can have advanced it first - and it is a no-op when the trigger already ended the
+            // intro locally.
+            if (state.TutorialIndex != 0)
             {
                 TutorialInterop.ClearIntroPresentation();
             }
 
+            TutorialInterop.SyncMarker(manager, state.TutorialIndex);
 
             var incomingValues = new List<TutorialData>(count);
             for (var i = 0; i < count; i++)
             {
-                var value = message.Values[i];
+                var value = values[i];
                 incomingValues.Add(new TutorialData
                 {
-                    tutorialTaskCondition = (ETutorialTaskCondition)value.Condition,
+                    tutorialTaskCondition = value.Condition,
                     value = value.Value,
                 });
             }
+
             current.Clear();
             current.AddRange(incomingValues);
-            CPlayerData.m_TutorialIndex = message.TutorialIndex;
+            CPlayerData.m_TutorialIndex = state.TutorialIndex;
 
             // m_FinishedTutorial is sticky in the game: once set, AddTaskValue becomes a no-op
             // forever. Rebuild it from the authoritative state instead of inheriting whatever the
@@ -355,18 +209,8 @@ namespace CardShopCoop.Modules.Tutorial
             for (var groupIndex = 0; groupIndex < manager.m_TutorialSubGroupList.Count; groupIndex++)
             {
                 var group = manager.m_TutorialSubGroupList[groupIndex];
-                if (TutorialInterop.FiSubgroupCurrent != null)
-                {
-                    TutorialInterop.FiSubgroupCurrent.SetValue(group, 0f);
-                }
-
-
-                if (TutorialInterop.FiSubgroupFinished != null)
-                {
-                    TutorialInterop.FiSubgroupFinished.SetValue(group, false);
-                }
-
-
+                TutorialInterop.FiSubgroupCurrent?.SetValue(group, 0f);
+                TutorialInterop.FiSubgroupFinished?.SetValue(group, false);
                 group.m_TutorialData.value = 0f;
                 for (var valueIndex = 0; valueIndex < incomingValues.Count; valueIndex++)
                 {
@@ -381,16 +225,14 @@ namespace CardShopCoop.Modules.Tutorial
                 // Honour the authoritative index: every group before it is complete. The group on
                 // the index keeps its value-derived flag so a genuinely finished last task still
                 // ends the tutorial.
-
                 if (TutorialInterop.FiSubgroupFinished != null
-                    && groupIndex < message.TutorialIndex - 1)
+                    && groupIndex < state.TutorialIndex - 1)
                 {
                     TutorialInterop.FiSubgroupFinished.SetValue(group, true);
                 }
-
             }
 
-            if (message.TutorialIndex == 0)
+            if (state.TutorialIndex == 0)
             {
                 // EvaluateTaskVisibility treats index 0 as "no task open": it closes every group
                 // and then marks the whole tutorial finished. Index 0 is the intro, not the end of
@@ -400,7 +242,6 @@ namespace CardShopCoop.Modules.Tutorial
                     manager.m_TutorialSubGroupList[groupIndex].CloseScreen();
                 }
 
-
                 TutorialInterop.SyncMarker(manager, 0);
                 return;
             }
@@ -408,37 +249,12 @@ namespace CardShopCoop.Modules.Tutorial
             manager.EvaluateTaskVisibility();
         }
 
-        private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _)
-            => TryApplyPending();
+        private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _) => TryApplyStored();
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
             TutorialInterop.Reset();
-            TryApplyPending();
-        }
-
-        [OnFullyJoined]
-        private void MarkJoined(PeerConnection _)
-        {
-            _joined = true;
-            TryApplyPending();
-        }
-
-        [OnClientDisconnected]
-        private void ForgetHost(PeerConnection connection, DisconnectInfo info)
-        {
-            if (connection?.Id == 1)
-            {
-                ResetSessionState();
-            }
-
-        }
-
-        private void ResetSessionState()
-        {
-            _joined = false;
-            _pendingState = null;
-            _pendingDeltas.Clear();
+            TryApplyStored();
         }
 
         internal void Shutdown()
@@ -448,9 +264,7 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
             }
 
-
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
@@ -460,8 +274,6 @@ namespace CardShopCoop.Modules.Tutorial
                 _active = null;
             }
 
-
-            ResetSessionState();
             TutorialInterop.Reset();
             _context = null;
         }
@@ -474,7 +286,7 @@ namespace CardShopCoop.Modules.Tutorial
         /// advances immediately), but it must NOT forward a tutorial intent for these: the host's
         /// apply path already calls <c>TutorialManager.AddTaskValue</c> for the same condition, so
         /// forwarding would advance authoritative progress twice. The guest's local value is then
-        /// overwritten by the host's authoritative delta.
+        /// overwritten by the host's authoritative state.
         ///
         /// Host-derived conditions and their call sites:
         /// <list type="bullet">
@@ -506,64 +318,56 @@ namespace CardShopCoop.Modules.Tutorial
         /// the play table, cashier entry), so the guest keeps forwarding those.
         /// </summary>
         private static bool IsHostDerived(ETutorialTaskCondition condition)
-        {
-            switch (condition)
+            => condition switch
             {
-                case ETutorialTaskCondition.ShopLevel:
-                case ETutorialTaskCondition.CheckoutCustomer:
-                case ETutorialTaskCondition.RestockItem:
-                case ETutorialTaskCondition.UnlockBasicCardBox:
-                case ETutorialTaskCondition.SellCard:
-                case ETutorialTaskCondition.CustomerPlay:
-                    return true;
-                default:
-                    return false;
-            }
-        }
+                ETutorialTaskCondition.ShopLevel
+                    or ETutorialTaskCondition.CheckoutCustomer
+                    or ETutorialTaskCondition.RestockItem
+                    or ETutorialTaskCondition.UnlockBasicCardBox
+                    or ETutorialTaskCondition.SellCard
+                    or ETutorialTaskCondition.CustomerPlay => true,
+                _ => false,
+            };
 
         [HarmonyPatch(typeof(TutorialManager), "AddTaskValue")]
         private static class CreditPatch
         {
             // Capture-only: vanilla always applies the change, then the postfix forwards one
-            // post-hoc prediction for the action the game just performed. A local decrement runs
+            // post-hoc action for the change the game just performed. A local decrement runs
             // vanilla too; the host rejects it against its own progress and the rollback restores
             // the captured state. Host-derived conditions are not forwarded at all - the host's
             // apply path already credits the same condition, so forwarding would double it.
             [HarmonyPrefix]
             private static void Prefix(ETutorialTaskCondition tutorialTaskCondition, float valueAdd,
-                out TutorialStateMessage __state)
+                out TutorialState __state)
             {
                 __state = null;
-                if (_applyingRemote || _active == null || !_active._joined)
+                if (ReentrancyGuard.Suppressed(_active))
                 {
                     return;
                 }
-
 
                 if (_active._context == null || !_active._context.InGame())
                 {
                     return;
                 }
 
-
                 if (IsHostDerived(tutorialTaskCondition))
                 {
                     return;
                 }
-
 
                 __state = CaptureState();
             }
 
             [HarmonyPostfix]
             private static void Postfix(ETutorialTaskCondition tutorialTaskCondition, float valueAdd,
-                TutorialStateMessage __state)
+                TutorialState __state)
             {
                 if (__state == null)
                 {
                     return;
                 }
-
 
                 ForwardAction(tutorialTaskCondition, valueAdd, __state);
             }
@@ -573,7 +377,7 @@ namespace CardShopCoop.Modules.Tutorial
         private static class TutorialReadyPatch
         {
             [HarmonyPostfix]
-            private static void Postfix() => _active?.TryApplyPending();
+            private static void Postfix() => _active?.TryApplyStored();
         }
     }
 }

@@ -1,6 +1,6 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -73,7 +73,7 @@ namespace CardShopCoop.Modules.Light
             }
         }
 
-        [MessageHandler(typeof(LightSwitchStateMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, LightSwitchStateMessage message)
         {
             if (_shutdown)
@@ -84,7 +84,7 @@ namespace CardShopCoop.Modules.Light
 
             if (_pendingState != null)
             {
-                PredictionApi.Ack(_pendingState.PredictionId);
+                ActionLedger.Ack(_pendingState.ActionId);
             }
 
 
@@ -114,7 +114,7 @@ namespace CardShopCoop.Modules.Light
             // layers instead of retiring and skipping: the host's value always lands, and a newer
             // local toggle the host has not processed yet is undone and replayed rather than
             // stranded under the crossed value. An empty or already-retired id just applies.
-            PredictionApi.ApplyAuthoritative(pending.PredictionId,
+            ActionLedger.ApplyAuthoritative(pending.ActionId,
                 () => LightSwitchState.Apply(pending.IsActive));
             _pendingState = null;
         }
@@ -138,11 +138,11 @@ namespace CardShopCoop.Modules.Light
             }
 
 
-            PredictionApi.Predict(
+            ActionLedger.Submit(
                 PredictionScope,
-                predictionId => _context.Send(1, new LightSwitchIntentMessage
+                actionId => _context.Send(1, new LightSwitchIntentMessage
                 {
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     IsActive = after,
                 }),
                 () => LightSwitchState.Apply(after),

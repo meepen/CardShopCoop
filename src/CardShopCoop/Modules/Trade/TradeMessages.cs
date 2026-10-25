@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -29,15 +28,13 @@ namespace CardShopCoop.Modules.Trade
 
     /// <summary>Client intent for one host-owned customer offer.</summary>
     [NetworkMessage]
-    public sealed class TradeIntentMessage : IPredictedMessage
+    public sealed class TradeIntentMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public TradeIntentOperation Operation;
-        public byte Counter;
-        public ushort CustomerIndex;
+        /// <summary>The live counter the customer trades at.</summary>
+        public InteractableCashierCounter Counter;
+        /// <summary>The live customer the offer belongs to.</summary>
+        public Customer Customer;
         public int CustomerGeneration;
         public uint OfferNonce;
         public float Price;
@@ -71,29 +68,21 @@ namespace CardShopCoop.Modules.Trade
 
     /// <summary>Accepted claim for a predicted guest trade session.</summary>
     [NetworkMessage]
-    public sealed class TradeSessionMessage : IPredictedMessage
+    public sealed class TradeSessionMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
-        public byte Counter;
-        public ushort CustomerIndex;
+        public InteractableCashierCounter Counter;
+        public Customer Customer;
         public int CustomerGeneration;
         public uint OfferNonce;
         public bool Accepted;
     }
 
     /// <summary>One authoritative offer upsert or removal. A host-local delta has an empty
-    /// PredictionId; an accepted guest action carries that action's prediction id.</summary>
+    /// ActionId; an accepted guest action carries that action's prediction id.</summary>
     [NetworkMessage]
-    public sealed class TradeOfferDeltaMessage : IPredictedMessage
+    public sealed class TradeOfferDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
-        public byte Counter;
+        public InteractableCashierCounter Counter;
         public TradeOutcome Outcome;
         public bool Removed;
         public TradeOfferState Offer;
@@ -101,7 +90,7 @@ namespace CardShopCoop.Modules.Trade
 
     public sealed class TradeOfferState
     {
-        public byte Counter;
+        public InteractableCashierCounter Counter;
         public bool Trading;
         public CardData CardL;
         public CardData CardR;
@@ -112,7 +101,7 @@ namespace CardShopCoop.Modules.Trade
         public int MaxDeclineCount;
         public int DeclineCount;
         public float Remaining;
-        public ushort CustomerIndex;
+        public Customer Customer;
         public int CustomerGeneration;
         public uint OfferNonce;
         public bool CustomerFemale;

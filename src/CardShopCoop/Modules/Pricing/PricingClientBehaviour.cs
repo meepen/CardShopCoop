@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Grading;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
@@ -24,8 +24,8 @@ namespace CardShopCoop.Modules.Pricing
         private bool _shutdown;
 
         // The game's price screen records the exact display compartment whose price tag was
-        // clicked. Carry that slot's stable ShelfKey+compartment in the price intent so the host
-        // resolves the addressed slot directly instead of searching every shelf for a content match.
+        // clicked. Carry that slot's live shelf + compartment in the price intent so the host
+        // addresses the exact slot instead of searching every shelf for a content match.
         private static readonly System.Reflection.FieldInfo FiPriceScreenIsCard =
             AccessTools.Field(typeof(SetItemPriceScreen), "m_IsSetCardPrice");
         private static readonly System.Reflection.FieldInfo FiPriceScreenCardCompartment =
@@ -75,7 +75,7 @@ namespace CardShopCoop.Modules.Pricing
         private void OnReady(CEventPlayer_GameDataFinishLoaded _)
             => ContentReady();
 
-        [MessageHandler(typeof(PricingStateMessage))]
+        [MessageHandler]
         private void State(MessageContext context, PricingStateMessage message)
         {
             if (_shutdown)
@@ -168,7 +168,7 @@ namespace CardShopCoop.Modules.Pricing
             }
         }
 
-        [MessageHandler(typeof(PricingDeltaBatchMessage))]
+        [MessageHandler]
         private void HandleDeltaBatch(MessageContext context, PricingDeltaBatchMessage message)
         {
             if (_shutdown || message == null)
@@ -212,7 +212,7 @@ namespace CardShopCoop.Modules.Pricing
             // always apply the authoritative value). AckOrApply would retire our own echo without
             // applying it, so a remote same-key entry earlier in the batch could leave us showing
             // the older price while the host holds ours.
-            PredictionApi.Confirm(entry.PredictionId, () =>
+            ActionLedger.Confirm(entry.ActionId, () =>
             {
                 _applying = true;
                 try
@@ -231,7 +231,7 @@ namespace CardShopCoop.Modules.Pricing
         {
             // Same as the item path: an absolute authoritative price that must be written even
             // when it retires one of this client's own predictions.
-            PredictionApi.Confirm(entry.PredictionId, () =>
+            ActionLedger.Confirm(entry.ActionId, () =>
             {
                 if (entry.Removed)
                 {
@@ -258,7 +258,7 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (_pendingItemDeltas.TryGetValue(entry.ItemType, out var previous))
             {
-                PredictionApi.Ack(previous.PredictionId);
+                ActionLedger.Ack(previous.ActionId);
             }
 
 
@@ -270,7 +270,7 @@ namespace CardShopCoop.Modules.Pricing
             var key = PricingInterop.CardKey(entry.Card, entry.EncodedGrade) ?? "null";
             if (_pendingCardDeltas.TryGetValue(key, out var previous))
             {
-                PredictionApi.Ack(previous.PredictionId);
+                ActionLedger.Ack(previous.ActionId);
             }
 
 
@@ -338,19 +338,19 @@ namespace CardShopCoop.Modules.Pricing
 
             var compartment = CurrentCardPriceCompartment();
             if (compartment == null
-                || !WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+                || !WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
             {
-                // No stable display slot means the host cannot address the priced card. Dropping
+                // No live display shelf means there is no entity the host can address. Dropping
                 // the intent is correct: a content search would re-introduce the heuristic this
                 // binding replaces. The display protocol drops the same shelf for the same reason.
-                CoopPlugin.Log.LogWarning("[pricing] card price change had no display slot; "
+                CoopPlugin.Log.LogWarning("[pricing] card price change had no live display shelf; "
                     + "not forwarded.");
                 return;
             }
 
             var grade = GradingApi.Encoded(card);
             GradingApi.Remember(card);
-            active.PredictCard(card, price, grade, previous, shelfKey, index);
+            active.PredictCard(card, price, grade, previous, shelf, index);
         }
 
         /// <summary>The display compartment the local player is editing a CARD price for, or null
@@ -378,11 +378,11 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            PredictionApi.Predict(
+            ActionLedger.Submit(
                 "pricing-item:" + (int)type,
-                predictionId => _context.Send(1, new PricingItemIntentMessage
+                actionId => _context.Send(1, new PricingItemIntentMessage
                 {
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     ItemType = type,
                     Price = price,
                 }),
@@ -391,9 +391,9 @@ namespace CardShopCoop.Modules.Pricing
         }
 
         private void PredictCard(CardData card, float price, int grade, float previous,
-            int shelfKey, int compartment)
+            CardShelf shelf, int compartment)
         {
-            if (!CanSend())
+            if (!CanSend() || shelf == null)
             {
                 return;
             }
@@ -401,15 +401,15 @@ namespace CardShopCoop.Modules.Pricing
 
             var copy = PricingInterop.CopyCard(card, grade);
             var key = PricingInterop.CardKey(copy, grade);
-            PredictionApi.Predict(
+            ActionLedger.Submit(
                 "pricing-card:" + key,
-                predictionId => _context.Send(1, new PricingCardIntentMessage
+                actionId => _context.Send(1, new PricingCardIntentMessage
                 {
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     Card = PricingInterop.CopyCard(copy, grade),
                     Price = price,
                     EncodedGrade = grade,
-                    ShelfKey = shelfKey,
+                    Shelf = shelf,
                     Compartment = compartment,
                 }),
                 () => ApplyLocalCard(copy, price),
@@ -460,13 +460,13 @@ namespace CardShopCoop.Modules.Pricing
         {
             foreach (var delta in _pendingItemDeltas.Values)
             {
-                PredictionApi.Ack(delta.PredictionId);
+                ActionLedger.Ack(delta.ActionId);
             }
 
 
             foreach (var delta in _pendingCardDeltas.Values)
             {
-                PredictionApi.Ack(delta.PredictionId);
+                ActionLedger.Ack(delta.ActionId);
             }
 
             _pendingItemDeltas.Clear();

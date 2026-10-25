@@ -96,6 +96,11 @@ namespace CardShopCoop.Modules.Staff
             => IsAddressable(manager, index) && TryGetWorker(manager, index, out var worker)
                 && IsHired(index);
 
+        /// <summary>True when the live worker is a hired worker in this peer's manager list.</summary>
+        internal static bool IsValidWorker(Worker worker)
+            => worker != null && worker.m_IsActive
+                && IsValidWorker(FindWorkerManager(), worker.m_WorkerIndex);
+
         internal static bool IsValidIntentTask(byte value)
         {
             var task = (EWorkerTask)value;
@@ -118,6 +123,7 @@ namespace CardShopCoop.Modules.Staff
             var workers = GetWorkers(manager);
             var worker = workers != null && index >= 0 && index < workers.Count
                 ? workers[index] : null;
+            entry.Worker = worker;
             if (worker != null && worker.m_IsActive)
             {
                 try
@@ -166,6 +172,7 @@ namespace CardShopCoop.Modules.Staff
         {
             var entry = new StaffModuleEntry
             {
+                Worker = worker,
                 Hired = IsHired(index),
             };
             if (worker == null)
@@ -248,10 +255,7 @@ namespace CardShopCoop.Modules.Staff
             // ActivateWorker. The client puppet never runs that path, so a re-hired worker would
             // stay unclickable unless the hired state restores the interaction surface here.
             worker.m_IsActive = entry.Hired;
-            if (worker.m_WorkerCollider != null)
-            {
-                worker.m_WorkerCollider.gameObject.SetActive(entry.Hired);
-            }
+            worker.m_WorkerCollider?.gameObject.SetActive(entry.Hired);
 
             worker.m_PrimaryTask = (EWorkerTask)entry.PrimaryTask;
             worker.m_SecondaryTask = (EWorkerTask)entry.SecondaryTask;

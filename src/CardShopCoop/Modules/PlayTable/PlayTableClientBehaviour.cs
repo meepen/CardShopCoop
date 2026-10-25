@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.World;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -16,22 +19,25 @@ namespace CardShopCoop.Modules.PlayTable
     public sealed class PlayTableClientBehaviour : CoopBehaviour
     {
         private const string PredictionScope = "play-table";
+
+        /// <summary>One action lane per live table. A rollback/replay of one table's kick must not
+        /// undo and replay another table's pending action.</summary>
+        private static string ScopeFor(InteractablePlayTable table)
+            => table == null ? PredictionScope : PredictionScope + ":" + table.GetInstanceID();
+        private const int TableLevelSeat = -1;
         private static PlayTableClientBehaviour _active;
         private static int _nextMatchNonce;
-        private readonly Dictionary<int, PlayTableEntry> _visualEntries = new();
-        private readonly Dictionary<int, bool> _occupied = new();
+        private readonly Dictionary<InteractablePlayTable, PlayTableEntry> _visualEntries = new();
         private readonly Dictionary<string, PlayTableMatchEntry> _matchesById = new();
-        private readonly Dictionary<int, string> _matchByTable = new();
-        private readonly Dictionary<long, AppliedVisual> _applied = new();
-        private readonly Dictionary<int, LaunchState> _launches = new();
-        private readonly Dictionary<string, PlayTableVisualDeltaMessage> _pendingVisuals = new();
+        private readonly Dictionary<InteractablePlayTable, string> _matchByTable = new();
+        private readonly Dictionary<SeatVisualKey, AppliedVisual> _applied = new();
+        private readonly Dictionary<InteractablePlayTable, LaunchState> _launches = new();
+        private readonly Dictionary<SeatVisualKey, PlayTableVisualDeltaMessage> _pendingVisuals = new();
 
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private PlayTableBaselineMessage _latestBaseline;
         private bool _shutdown;
-        private int _applyingState;
-        private int _applyingPrediction;
         private bool _suppressEndGameGift;
 
         private sealed class AppliedVisual
@@ -39,6 +45,29 @@ namespace CardShopCoop.Modules.PlayTable
             internal InteractablePlayTable Table;
             internal TableGameItemSet Set;
             internal SeatState State;
+        }
+
+        /// <summary>Reference-keyed (table, seat) pair for per-table visual bookkeeping. A list
+        /// position or placement key would shift or go stale when furniture moves.</summary>
+        private readonly struct SeatVisualKey : IEquatable<SeatVisualKey>
+        {
+            internal readonly InteractablePlayTable Table;
+            internal readonly int Seat;
+
+            internal SeatVisualKey(InteractablePlayTable table, int seat)
+            {
+                Table = table;
+                Seat = seat;
+            }
+
+            public bool Equals(SeatVisualKey other)
+                => ReferenceEquals(Table, other.Table) && Seat == other.Seat;
+
+            public override bool Equals(object obj)
+                => obj is SeatVisualKey other && Equals(other);
+
+            public override int GetHashCode()
+                => ((Table == null ? 0 : RuntimeHelpers.GetHashCode(Table)) * 397) ^ Seat;
         }
 
         private struct SeatState
@@ -59,7 +88,6 @@ namespace CardShopCoop.Modules.PlayTable
         private sealed class TableActionCapture
         {
             internal InteractablePlayTable Table;
-            internal int Key;
             internal bool WasOccupied;
             internal bool WasBoxed;
             internal PlayTableEntry Before;
@@ -94,14 +122,14 @@ namespace CardShopCoop.Modules.PlayTable
             ApplyPatches();
         }
 
-        [MessageHandler(typeof(PlayTableBaselineMessage))]
+        [MessageHandler]
         private void HandleBaseline(MessageContext _, PlayTableBaselineMessage message)
         {
             _latestBaseline = message;
             ApplyLatestBaseline();
         }
 
-        [MessageHandler(typeof(PlayTableVisualDeltaMessage))]
+        [MessageHandler]
         private void HandleVisualDelta(MessageContext _, PlayTableVisualDeltaMessage message)
         {
             if (_shutdown || message == null)
@@ -109,9 +137,16 @@ namespace CardShopCoop.Modules.PlayTable
                 return;
             }
 
+            if (message.Table == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "play-table: dropped visual delta with no live table object.");
+                return;
+            }
+
             if (message.Operation != PlayTableVisualDeltaMessage.SeatUpdate)
             {
-                SupersedePendingVisuals(message.TableKey);
+                SupersedePendingVisuals(message.Table);
             }
 
             if (!TryApplyVisualDelta(message))
@@ -120,11 +155,18 @@ namespace CardShopCoop.Modules.PlayTable
             }
         }
 
-        [MessageHandler(typeof(PlayTableMatchDeltaMessage))]
+        [MessageHandler]
         private void HandleMatchDelta(MessageContext _, PlayTableMatchDeltaMessage message)
         {
             if (_shutdown || message == null)
             {
+                return;
+            }
+
+            if (message.Table == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "play-table: dropped match delta with no live table object.");
                 return;
             }
 
@@ -140,14 +182,19 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _visualEntries.Clear();
-            _occupied.Clear();
             _matchesById.Clear();
             _matchByTable.Clear();
             for (var i = 0; i < _latestBaseline.Tables.Count; i++)
             {
                 var entry = CopyEntry(_latestBaseline.Tables[i]);
-                _visualEntries[entry.TableKey] = entry;
-                _occupied[entry.TableKey] = entry.Occupied;
+                if (entry?.Table == null)
+                {
+                    CoopPlugin.Log.LogWarning(
+                        "play-table: dropped baseline entry with no live table object.");
+                    continue;
+                }
+
+                _visualEntries[entry.Table] = entry;
             }
 
             for (var i = 0; i < _latestBaseline.Matches.Count; i++)
@@ -179,7 +226,7 @@ namespace CardShopCoop.Modules.PlayTable
                 if (pending[i].Operation != PlayTableVisualDeltaMessage.SeatUpdate
                     && TryApplyVisualDelta(pending[i]))
                 {
-                    _pendingVisuals.Remove(VisualKey(pending[i]));
+                    _pendingVisuals.Remove(PendingKey(pending[i]));
                 }
             }
 
@@ -189,31 +236,31 @@ namespace CardShopCoop.Modules.PlayTable
                 if (pending[i].Operation == PlayTableVisualDeltaMessage.SeatUpdate
                     && TryApplyVisualDelta(pending[i]))
                 {
-                    _pendingVisuals.Remove(VisualKey(pending[i]));
+                    _pendingVisuals.Remove(PendingKey(pending[i]));
                 }
             }
         }
 
         private void DeferVisualDelta(PlayTableVisualDeltaMessage message)
         {
-            var key = VisualKey(message);
+            var key = PendingKey(message);
             if (_pendingVisuals.TryGetValue(key, out var previous))
             {
-                PredictionApi.Ack(previous.PredictionId);
+                ActionLedger.Ack(previous.ActionId);
             }
 
 
             _pendingVisuals[key] = message;
         }
 
-        private void SupersedePendingVisuals(int tableKey)
+        private void SupersedePendingVisuals(InteractablePlayTable table)
         {
-            var superseded = new List<string>();
+            var superseded = new List<SeatVisualKey>();
             foreach (var pair in _pendingVisuals)
             {
-                if (pair.Value.TableKey == tableKey)
+                if (ReferenceEquals(pair.Key.Table, table))
                 {
-                    PredictionApi.Ack(pair.Value.PredictionId);
+                    ActionLedger.Ack(pair.Value.ActionId);
                     superseded.Add(pair.Key);
                 }
             }
@@ -225,39 +272,34 @@ namespace CardShopCoop.Modules.PlayTable
 
         }
 
-        private static string VisualKey(PlayTableVisualDeltaMessage message)
-            => message.Operation == PlayTableVisualDeltaMessage.SeatUpdate
-                ? message.TableKey + ":seat:" + message.Seat
-                : message.TableKey + ":table";
+        private static SeatVisualKey PendingKey(PlayTableVisualDeltaMessage message)
+            => new(message.Table,
+                message.Operation == PlayTableVisualDeltaMessage.SeatUpdate
+                    ? message.Seat : TableLevelSeat);
 
         private bool TryApplyVisualDelta(PlayTableVisualDeltaMessage message)
         {
-            var table = PlacementApi.ResolveObjectByKey(message.TableKey) as InteractablePlayTable;
-            if (message.Operation != PlayTableVisualDeltaMessage.TableRemove && table == null)
+            var table = message.Table;
+            if (table == null)
             {
                 return false;
             }
 
             if (message.Operation == PlayTableVisualDeltaMessage.SeatUpdate
-                && !_visualEntries.ContainsKey(message.TableKey))
+                && !_visualEntries.ContainsKey(table))
             {
                 return false;
             }
 
-            _applyingState++;
-            try
+            using (Writes.Enter())
             {
                 // The visual delta carries the host's resulting PlayTableEntry (occupied/boxed and
                 // per-seat state) built from the host's table. The actor's optimistic game path
                 // (kick/box/seat reserve) does not fold that into the _visualEntries mirror, so
                 // AckOrApply retired the actor's own prediction and returned, leaving the mirror
                 // stale and ApplyVisualMirrors re-rendering the old seats. Confirm applies it.
-                PredictionApi.Confirm(message.PredictionId,
+                ActionLedger.Confirm(message.ActionId,
                     () => ApplyVisualDelta(message, table));
-            }
-            finally
-            {
-                _applyingState--;
             }
 
             ApplyVisualMirrors();
@@ -270,22 +312,20 @@ namespace CardShopCoop.Modules.PlayTable
             switch (message.Operation)
             {
                 case PlayTableVisualDeltaMessage.TableRemove:
-                    _visualEntries.Remove(message.TableKey);
-                    _occupied.Remove(message.TableKey);
-                    ClearAppliedTable(message.TableKey);
+                    _visualEntries.Remove(table);
+                    ClearAppliedTable(table);
                     return;
                 case PlayTableVisualDeltaMessage.TableUpsert:
-                    _visualEntries[message.TableKey] = new PlayTableEntry
+                    _visualEntries[table] = new PlayTableEntry
                     {
-                        TableKey = message.TableKey,
+                        Table = table,
                         Occupied = message.Occupied,
                         Boxed = message.Boxed,
                         Seats = CopySeats(message.Seats),
                     };
-                    _occupied[message.TableKey] = message.Occupied;
                     return;
                 case PlayTableVisualDeltaMessage.SeatUpdate:
-                    if (!_visualEntries.TryGetValue(message.TableKey, out var entry))
+                    if (!_visualEntries.TryGetValue(table, out var entry))
                     {
                         return;
                     }
@@ -310,7 +350,7 @@ namespace CardShopCoop.Modules.PlayTable
             // actor's own prediction, skipped AddMatch and left the match unregistered on its own
             // table forever. Confirm retires the prediction and always folds the host state; both
             // operations are idempotent for a remote or host-local delta.
-            PredictionApi.Confirm(message.PredictionId, () =>
+            ActionLedger.Confirm(message.ActionId, () =>
             {
                 if (message.Operation == PlayTableMatchDeltaMessage.Upsert)
                 {
@@ -321,8 +361,8 @@ namespace CardShopCoop.Modules.PlayTable
                     if (_matchesById.TryGetValue(message.MatchId, out var prior))
                     {
                         _matchesById.Remove(message.MatchId);
-                        _matchByTable.Remove(prior.TableKey);
-                        RemoveLaunchLocal(prior.TableKey);
+                        _matchByTable.Remove(prior.Table);
+                        RemoveLaunchLocal(prior.Table);
                     }
                 }
                 else
@@ -334,23 +374,20 @@ namespace CardShopCoop.Modules.PlayTable
             });
         }
 
-        internal bool HasActiveMatch(int tableKey) => _matchByTable.ContainsKey(tableKey);
+        internal bool HasActiveMatch(InteractablePlayTable table)
+            => table != null && _matchByTable.ContainsKey(table);
 
-        internal bool TryGetMatch(int tableKey, out PlayTableMatchEntry entry)
+        internal bool TryGetMatch(InteractablePlayTable table, out PlayTableMatchEntry entry)
         {
-            if (_matchByTable.TryGetValue(tableKey, out var matchId)
-                && _matchesById.TryGetValue(matchId, out entry))
-            {
-                return true;
-            }
-
             entry = null;
-            return false;
+            return table != null
+                && _matchByTable.TryGetValue(table, out var matchId)
+                && _matchesById.TryGetValue(matchId, out entry);
         }
 
         private void ReconcileLaunches()
         {
-            foreach (var pair in new List<int>(_launches.Keys))
+            foreach (var pair in new List<InteractablePlayTable>(_launches.Keys))
             {
                 var launch = _launches[pair];
                 if (!TryGetMatch(pair, out var live))
@@ -390,15 +427,21 @@ namespace CardShopCoop.Modules.PlayTable
 
             // Vanilla already finished leaving the table; drop the local lease now and record the
             // one release it performed.
-            var tableKey = launch.Match.TableKey;
-            PredictionApi.Predict(
-                PredictionScope,
-                predictionId => SendMatchIntent(PlayTableMatchIntentMessage.OpRelease,
-                    launch.Match, predictionId),
+            var table = launch.Match.Table;
+            if (table == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "play-table: dropped release for a match with no live table object.");
+                return;
+            }
+
+            ActionLedger.Submit(
+                ScopeFor(table),
+                actionId => SendReleaseMatch(launch.Match, actionId),
                 () =>
                 {
                     RemoveMatchLocal(launch.Match);
-                    _launches.Remove(tableKey);
+                    _launches.Remove(table);
                 },
                 () =>
                 {
@@ -406,21 +449,49 @@ namespace CardShopCoop.Modules.PlayTable
                     RestoreLaunch(launch);
                 });
             RemoveMatchLocal(launch.Match);
-            _launches.Remove(tableKey);
+            _launches.Remove(table);
         }
 
-        private void SendMatchIntent(byte op, PlayTableMatchEntry match, Guid predictionId,
-            int deckCardCount = 0)
+        private void SendStartMatch(PlayTableMatchEntry match, Guid actionId)
         {
-            _context.Send(1, new PlayTableMatchIntentMessage
+            _context.Send(1, new StartTableMatchIntent
             {
-                PredictionId = predictionId,
-                Op = op,
+                ActionId = actionId,
                 MatchId = match.MatchId,
-                TableKey = match.TableKey,
+                Table = match.Table,
                 Seat = match.Seat,
                 SideA = match.SideA,
-                DeckCardCount = deckCardCount,
+                DeckCardCount = PlayTableInterop.DeckCardCount(),
+            });
+        }
+
+        private void SendCancelMatch(PlayTableMatchEntry match, Guid actionId)
+        {
+            _context.Send(1, new CancelTableMatchIntent
+            {
+                ActionId = actionId,
+                MatchId = match.MatchId,
+                Table = match.Table,
+            });
+        }
+
+        private void SendMatchStarted(PlayTableMatchEntry match, Guid actionId)
+        {
+            _context.Send(1, new MarkTableMatchStartedIntent
+            {
+                ActionId = actionId,
+                MatchId = match.MatchId,
+                Table = match.Table,
+            });
+        }
+
+        private void SendReleaseMatch(PlayTableMatchEntry match, Guid actionId)
+        {
+            _context.Send(1, new ReleaseTableMatchIntent
+            {
+                ActionId = actionId,
+                MatchId = match.MatchId,
+                Table = match.Table,
             });
         }
 
@@ -428,14 +499,12 @@ namespace CardShopCoop.Modules.PlayTable
         {
             launch = null;
             var table = PlayTableInterop.CurrentTable(game);
-            return PlayTablePlacementInterop.TryGetTableKey(table, out var tableKey)
-                && _launches.TryGetValue(tableKey, out launch);
+            return table != null && _launches.TryGetValue(table, out launch);
         }
 
         private void RequestMatchObserved(InteractablePlayTable table, BeforeClickSnapshot before)
         {
-            if (table == null || before == null
-                || !PlayTablePlacementInterop.TryGetTableKey(table, out var tableKey))
+            if (table == null || before == null)
             {
                 PlayTableInterop.RestoreSeat(table, before?.Values, before?.Seat ?? 0);
                 return;
@@ -445,7 +514,7 @@ namespace CardShopCoop.Modules.PlayTable
             {
                 MatchId = "playtable-" + CoopCore.LocalConnectionId + "-" + NextMatchNonce(),
                 OwnerConn = CoopCore.LocalConnectionId,
-                TableKey = tableKey,
+                Table = table,
                 Seat = before.Seat,
                 SideA = before.Seat == 0,
                 Phase = PlayTableMatchEntry.StateStarted,
@@ -458,20 +527,19 @@ namespace CardShopCoop.Modules.PlayTable
                 Entered = true,
                 StartedAt = Time.realtimeSinceStartup,
             };
-            _launches[tableKey] = launch;
+            _launches[table] = launch;
 
             // Vanilla seated this player and entered the game; record the one match start it
             // performed. A host rejection rolls the entry back, a host accept retires it.
-            PredictionApi.Predict(
-                PredictionScope,
-                predictionId => SendMatchIntent(PlayTableMatchIntentMessage.OpStart, match,
-                    predictionId, PlayTableInterop.DeckCardCount()),
+            ActionLedger.Submit(
+                ScopeFor(table),
+                actionId => SendStartMatch(match, actionId),
                 () => ReplayLaunch(table, before.Seat, launch),
-                () => UndoLaunch(tableKey, launch));
+                () => UndoLaunch(table, launch));
 
             // Vanilla already entered the game, so notify the host the lease is live and refresh
             // its reservation TTL. A notification needs no rollback and is not a second action.
-            SendMatchIntent(PlayTableMatchIntentMessage.OpStarted, match, Guid.Empty);
+            SendMatchStarted(match, Guid.Empty);
         }
 
         private static void ReplayLaunch(InteractablePlayTable table, byte seat, LaunchState launch)
@@ -485,10 +553,10 @@ namespace CardShopCoop.Modules.PlayTable
             PlayCardGameManager.SetPlayTable(table, launch.Match.SideA);
         }
 
-        private void UndoLaunch(int tableKey, LaunchState launch)
+        private void UndoLaunch(InteractablePlayTable table, LaunchState launch)
         {
             RemoveMatchLocal(launch.Match);
-            _launches.Remove(tableKey);
+            _launches.Remove(table);
             // Vanilla's own leave path is the only thing that unwinds a play-table entry (camera,
             // UI, table state). The host's authoritative release republishes the table afterwards.
             var manager = SceneRef<PlayCardGameManager>.Get();
@@ -514,13 +582,12 @@ namespace CardShopCoop.Modules.PlayTable
             PlayTableInterop.RestoreReservedSeat(launch.Table, launch.Before, launch.Match.Seat);
         }
 
-        private void SendKickIntent(InteractablePlayTable table, int key, PlayTableEntry before)
+        private void SendKickIntent(InteractablePlayTable table, PlayTableEntry before)
         {
             // Vanilla already ran StopTableGame on the occupied table; record the one kick it made.
-            PredictionApi.Predict(
-                PredictionScope,
-                predictionId => SendTableIntent(PlayTableIntentMessage.IntentKickTable, key,
-                    predictionId),
+            ActionLedger.Submit(
+                ScopeFor(table),
+                actionId => SendKick(table, actionId),
                 () => ApplyLocalKick(table),
                 () => RestoreEntry(table, before));
         }
@@ -528,63 +595,59 @@ namespace CardShopCoop.Modules.PlayTable
         private void SendBoxIntent(InteractablePlayTable table, bool wasBoxed, Vector3 position,
             Quaternion rotation)
         {
-            if (table == null || !PlayTablePlacementInterop.TryGetTableKey(table, out var key))
+            if (table == null)
             {
                 return;
             }
 
-            // The client is the creator: the package the vanilla box-up made already has its
-            // stable id, carried to the host so it binds its counterpart to the same id.
-            var package = table.GetPackagingBoxShelf();
-            var boxId = package != null && WorldClientBehaviour.TryGetBoxId(package, out var known)
-                ? known
-                : Guid.Empty;
-            // Vanilla already boxed the table; record the one box action it performed.
-            PredictionApi.Predict(
-                PredictionScope,
-                predictionId => SendTableIntent(PlayTableIntentMessage.IntentBoxTable,
-                    key, predictionId, boxId),
+            // Vanilla already boxed the table. The package it created is a view of this table and
+            // shares its session Guid, so the intent names only the live table: the host boxes its
+            // own copy under the same identity and hands the hold to the requester.
+            ActionLedger.Submit(
+                ScopeFor(table),
+                actionId => _context.Send(1, new FurnitureBoxUpRequestMessage
+                {
+                    ActionId = actionId,
+                    ObjectType = table.m_ObjectType,
+                    Position = table.transform.position,
+                    Entity = table,
+                }),
                 () =>
                 {
-                    _applyingPrediction++;
-                    try
+                    using (Writes.Enter())
                     {
                         table.BoxUpObject(true);
-                    }
-                    finally
-                    {
-                        _applyingPrediction--;
                     }
                 },
                 () =>
                 {
                     if (!wasBoxed && table.GetIsBoxedUp())
                     {
-                        PlacementInterop.PlaceBoxedObject(table, position, rotation);
+                        using (Writes.Enter())
+                        {
+                            PlacementInterop.PlaceBoxedObject(table, position, rotation);
+                        }
                     }
                 });
         }
 
-        private void SendTableIntent(byte action, int key, Guid predictionId,
-            Guid boxNetworkId = default)
+        private void SendKick(InteractablePlayTable table, Guid actionId)
         {
-            _context.Send(1, new PlayTableIntentMessage
+            _context.Send(1, new KickTableIntent
             {
-                PredictionId = predictionId,
-                Action = action,
-                ObjectKey = key,
-                BoxNetworkId = boxNetworkId,
+                ActionId = actionId,
+                Table = table,
             });
         }
 
-        private void RemoveLaunchLocal(int tableKey)
+        private void RemoveLaunchLocal(InteractablePlayTable table)
         {
-            if (!_launches.TryGetValue(tableKey, out var launch))
+            if (table == null || !_launches.TryGetValue(table, out var launch))
             {
                 return;
             }
 
-            _launches.Remove(tableKey);
+            _launches.Remove(table);
             if (!launch.Entered)
             {
                 PlayTableInterop.RestoreSeat(launch.Table, launch.Before, launch.Match.Seat);
@@ -593,12 +656,12 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void RestoreLaunch(LaunchState launch)
         {
-            if (launch == null)
+            if (launch == null || launch.Match.Table == null)
             {
                 return;
             }
 
-            _launches[launch.Match.TableKey] = launch;
+            _launches[launch.Match.Table] = launch;
             if (!launch.Entered)
             {
                 PlayTableInterop.ReserveSeat(launch.Table, launch.Match.Seat, out _);
@@ -607,16 +670,16 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void RemoveMatchLocal(PlayTableMatchEntry match)
         {
-            if (match == null)
+            if (match == null || match.Table == null)
             {
                 return;
             }
 
             _matchesById.Remove(match.MatchId);
-            if (_matchByTable.TryGetValue(match.TableKey, out var matchId)
+            if (_matchByTable.TryGetValue(match.Table, out var matchId)
                 && matchId == match.MatchId)
             {
-                _matchByTable.Remove(match.TableKey);
+                _matchByTable.Remove(match.Table);
             }
         }
 
@@ -631,7 +694,7 @@ namespace CardShopCoop.Modules.PlayTable
             ClearMirrors();
             foreach (var pair in _visualEntries)
             {
-                var table = PlacementApi.ResolveObjectByKey(pair.Key) as InteractablePlayTable;
+                var table = pair.Key;
                 if (table == null || PlayTableInterop.IsLocalGameplayTable(table, HasLocalLaunch))
                 {
                     continue;
@@ -641,7 +704,7 @@ namespace CardShopCoop.Modules.PlayTable
                 var seats = pair.Value.Seats;
                 for (var seat = 0; seat < seats.Count && seat < sets.Count; seat++)
                 {
-                    ApplySeat(pair.Key, seat, table, sets[seat], new SeatState
+                    ApplySeat(seat, table, sets[seat], new SeatState
                     {
                         Active = seats[seat].Active,
                         PlayerSeat = seats[seat].PlayerSeat,
@@ -653,10 +716,10 @@ namespace CardShopCoop.Modules.PlayTable
             }
         }
 
-        private void ApplySeat(int tableKey, int seat, InteractablePlayTable table,
+        private void ApplySeat(int seat, InteractablePlayTable table,
             TableGameItemSet set, SeatState want)
         {
-            var visualKey = ((long)tableKey << 8) | (byte)seat;
+            var visualKey = new SeatVisualKey(table, seat);
             _applied.TryGetValue(visualKey, out var applied);
             if (applied?.Set != null && (!ReferenceEquals(applied.Set, set)
                 || !ReferenceEquals(applied.Table, table))
@@ -708,17 +771,14 @@ namespace CardShopCoop.Modules.PlayTable
             _applied.Clear();
         }
 
-        private void ClearAppliedTable(int tableKey)
+        private void ClearAppliedTable(InteractablePlayTable table)
         {
-            var remove = new List<long>();
+            var remove = new List<SeatVisualKey>();
             foreach (var pair in _applied)
             {
-                if ((int)(pair.Key >> 8) == tableKey)
+                if (ReferenceEquals(pair.Key.Table, table))
                 {
-                    if (pair.Value.Set != null)
-                    {
-                        pair.Value.Set.gameObject.SetActive(false);
-                    }
+                    pair.Value.Set?.gameObject.SetActive(false);
 
                     remove.Add(pair.Key);
                 }
@@ -730,7 +790,8 @@ namespace CardShopCoop.Modules.PlayTable
             }
         }
 
-        private bool HasLocalLaunch(int tableKey) => _launches.ContainsKey(tableKey);
+        private bool HasLocalLaunch(InteractablePlayTable table)
+            => table != null && _launches.ContainsKey(table);
 
         private static int NextMatchNonce()
         {
@@ -746,25 +807,60 @@ namespace CardShopCoop.Modules.PlayTable
         {
             _latestBaseline = null;
             _visualEntries.Clear();
-            _occupied.Clear();
             _matchesById.Clear();
             _matchByTable.Clear();
             ClearPendingVisuals();
-            foreach (var pair in new List<int>(_launches.Keys))
+            foreach (var table in new List<InteractablePlayTable>(_launches.Keys))
             {
-                RemoveLaunchLocal(pair);
+                RemoveLaunchLocal(table);
             }
 
             ClearMirrors();
         }
 
-        private static PlayTableEntry CaptureEntry(InteractablePlayTable table, int key)
+        /// <summary>The host owns every NPC seated at a table, so this peer's own
+        /// <c>GetCurrentPlayerCount</c> never rises for a host-simulated customer. The host's
+        /// object-attached game state is the authority; the visual entry is only a bootstrap
+        /// fallback for the short window before that value is bound.</summary>
+        private bool IsHostOccupied(InteractablePlayTable table)
+        {
+            if (table == null)
+            {
+                return false;
+            }
+
+            var state = table.GetExtendedInformation<PlayTableGameState>();
+            if (state != null)
+            {
+                return state.PlayerCount > 0;
+            }
+
+            return _visualEntries.TryGetValue(table, out var entry) && entry.Occupied;
+        }
+
+        private static bool IsOccupied(InteractablePlayTable table)
+        {
+            if (table == null)
+            {
+                return false;
+            }
+
+            if (table.GetCurrentPlayerCount() > 0)
+            {
+                return true;
+            }
+
+            var client = _active;
+            return client != null && client.IsHostOccupied(table);
+        }
+
+        private static PlayTableEntry CaptureEntry(InteractablePlayTable table)
         {
             var sets = table?.m_TableGameItemSetList;
             var entry = new PlayTableEntry
             {
-                TableKey = key,
-                Occupied = table != null && table.GetCurrentPlayerCount() > 0,
+                Table = table,
+                Occupied = IsOccupied(table),
                 Boxed = table != null && table.GetIsBoxedUp(),
             };
             for (var i = 0; sets != null && i < sets.Count; i++)
@@ -787,20 +883,17 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void ApplyLocalKick(InteractablePlayTable table)
         {
-            _applyingPrediction++;
-            try
+            using (Writes.Enter())
             {
                 PlayTableInterop.InvokeStopTableGame(table);
-            }
-            finally
-            {
-                _applyingPrediction--;
             }
         }
 
         private void RestoreEntry(InteractablePlayTable table, PlayTableEntry entry)
         {
-            if (table == null || entry == null)
+            // A table the visual stream already removed must not be resurrected by an action
+            // rollback; there is no mirror left to render.
+            if (table == null || entry == null || !_visualEntries.ContainsKey(table))
             {
                 return;
             }
@@ -827,26 +920,27 @@ namespace CardShopCoop.Modules.PlayTable
                 }
             }
 
-            _visualEntries[entry.TableKey] = CopyEntry(entry);
-            _occupied[entry.TableKey] = entry.Occupied;
+            _visualEntries[table] = CopyEntry(entry);
         }
 
         private void AddMatch(PlayTableMatchEntry match)
         {
-            if (match == null)
+            if (match?.Table == null)
             {
+                CoopPlugin.Log.LogWarning(
+                    "play-table: dropped match entry with no live table object.");
                 return;
             }
 
             var copy = CopyMatch(match);
             _matchesById[copy.MatchId] = copy;
-            _matchByTable[copy.TableKey] = copy.MatchId;
+            _matchByTable[copy.Table] = copy.MatchId;
         }
 
         private static PlayTableEntry CopyEntry(PlayTableEntry source)
             => source == null ? null : new PlayTableEntry
             {
-                TableKey = source.TableKey,
+                Table = source.Table,
                 Occupied = source.Occupied,
                 Boxed = source.Boxed,
                 Seats = CopySeats(source.Seats),
@@ -878,7 +972,7 @@ namespace CardShopCoop.Modules.PlayTable
             {
                 MatchId = source.MatchId,
                 OwnerConn = source.OwnerConn,
-                TableKey = source.TableKey,
+                Table = source.Table,
                 Seat = source.Seat,
                 SideA = source.SideA,
                 Phase = source.Phase,
@@ -920,31 +1014,76 @@ namespace CardShopCoop.Modules.PlayTable
 
         private static class MovePatch
         {
-            // Capture-only: vanilla performs the pickup, whose occupied-table branch stops the
-            // game. The postfix observes the one kick it performed and forwards the intent.
-            internal static void Prefix(InteractablePlayTable __instance, out TableActionCapture __state)
+            // Vanilla's InteractablePlayTable.StartMoveObject stops an occupied (non-tournament)
+            // game instead of picking the table up, so the player needs a second attempt once the
+            // table is empty. A client cannot see the host's customers in m_CurrentPlayerCount.
+            // The host publishes those two gate fields as object-attached game state, so this
+            // prefix predicts from the same values vanilla would have read: it asks the host to
+            // end the game and skips the pickup. Once that authority says the table is empty, the
+            // next attempt moves the table, exactly like vanilla.
+            //
+            // A locally occupied table keeps vanilla's own stop; the postfix observes the one kick
+            // it performed and forwards the intent.
+            internal static bool Prefix(InteractablePlayTable __instance,
+                out TableActionCapture __state)
             {
                 __state = null;
                 var client = _active;
-                if (client == null || __instance == null
-                    || __instance.GetIsTournamentPlayTable()
-                    || __instance.GetCurrentPlayerCount() <= 0)
+                if (client == null || __instance == null)
                 {
-                    return;
+                    return true;
                 }
 
-                if (!PlayTablePlacementInterop.TryGetTableKey(__instance, out var key))
+                // A rostered player (or a launch still awaiting the host) owns the table: the host
+                // refuses to move or kick it, so leave the pickup untouched. Vanilla cannot enter
+                // move mode while this player is seated anyway.
+                if (PlayTableInterop.IsRosterManaged(__instance, client.HasActiveMatch,
+                        table => client._launches.ContainsKey(table)))
                 {
-                    return;
+                    return false;
+                }
+
+                var state = __instance.GetExtendedInformation<PlayTableGameState>();
+                var localOccupied = __instance.GetCurrentPlayerCount() > 0;
+                var hostOccupied = localOccupied || client.IsHostOccupied(__instance);
+
+                // A human player seat owns the table even in a transient state where its player
+                // count has already been cleared; never let vanilla pick it up.
+                if (state is { PlayerOccupied: true })
+                {
+                    return false;
+                }
+
+                if (!hostOccupied)
+                {
+                    return true;
+                }
+
+                // A locally occupied table may only be moved (after the kick) when the host agrees
+                // the table is free. The host's state is the same truth vanilla's own gate used.
+                var tournament = state != null
+                    ? state.IsTournament : __instance.GetIsTournamentPlayTable();
+                if (tournament)
+                {
+                    return false;
+                }
+
+                if (!localOccupied)
+                {
+                    CoopPlugin.Log.LogInfo(
+                        "play-table: first move on a host-occupied table requested a kick, table="
+                        + __instance.name + ".");
+                    client.SendKickIntent(__instance, CaptureEntry(__instance));
+                    return false;
                 }
 
                 __state = new TableActionCapture
                 {
                     Table = __instance,
-                    Key = key,
                     WasOccupied = true,
-                    Before = CaptureEntry(__instance, key),
+                    Before = CaptureEntry(__instance),
                 };
+                return true;
             }
 
             internal static void Postfix(TableActionCapture __state)
@@ -956,7 +1095,7 @@ namespace CardShopCoop.Modules.PlayTable
                     return;
                 }
 
-                client.SendKickIntent(__state.Table, __state.Key, __state.Before);
+                client.SendKickIntent(__state.Table, __state.Before);
             }
         }
 
@@ -969,13 +1108,8 @@ namespace CardShopCoop.Modules.PlayTable
             {
                 __state = null;
                 var client = _active;
-                if (client == null || __instance == null || client._applyingPrediction != 0
-                    || !holdBox)
-                {
-                    return;
-                }
-
-                if (!PlayTablePlacementInterop.TryGetTableKey(__instance, out var key))
+                if (client == null || __instance == null
+                    || ReentrancyGuard.SuppressedForLocalObservation(client) || !holdBox)
                 {
                     return;
                 }
@@ -983,7 +1117,6 @@ namespace CardShopCoop.Modules.PlayTable
                 __state = new TableActionCapture
                 {
                     Table = __instance,
-                    Key = key,
                     WasBoxed = __instance.GetIsBoxedUp(),
                     Position = __instance.transform.position,
                     Rotation = __instance.transform.rotation,
@@ -1029,8 +1162,7 @@ namespace CardShopCoop.Modules.PlayTable
                 __state = null;
                 var client = _active;
                 if (client == null || __instance == null
-                    || !PlayTableInterop.TryGetClickedSeat(__instance, out var seat)
-                    || !PlayTablePlacementInterop.TryGetTableKey(__instance, out _))
+                    || !PlayTableInterop.TryGetClickedSeat(__instance, out var seat))
                 {
                     return;
                 }
@@ -1082,7 +1214,6 @@ namespace CardShopCoop.Modules.PlayTable
             _harmony?.UnpatchSelf();
             _launches.Clear();
             _visualEntries.Clear();
-            _occupied.Clear();
             _matchesById.Clear();
             _matchByTable.Clear();
             ClearPendingVisuals();
@@ -1101,7 +1232,7 @@ namespace CardShopCoop.Modules.PlayTable
         {
             foreach (var delta in _pendingVisuals.Values)
             {
-                PredictionApi.Ack(delta.PredictionId);
+                ActionLedger.Ack(delta.ActionId);
             }
 
 

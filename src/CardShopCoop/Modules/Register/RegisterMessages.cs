@@ -1,135 +1,93 @@
-using System;
-using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.Register
 {
-    [NetworkMessage]
-    public sealed class RegisterIntentMessage : IPredictedMessage
+    /// <summary>The one register command shape. An <see cref="ActionMessage"/> is recorded on the
+    /// client and applied on the host; the concrete type is the action, so a handler only receives
+    /// fields that apply to it.</summary>
+    public abstract class RegisterIntent : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
+        /// <summary>The live cashier counter the intent targets.</summary>
+        public InteractableCashierCounter Counter;
+    }
 
-        public int CounterKey;
-        public RegisterIntentKind Kind;
-        public int Slot = -1;
+    [NetworkMessage]
+    public sealed class RegisterClaimIntent : RegisterIntent
+    {
+        public override void OnApply() => RegisterActions.Claim(Counter);
+
+        public override void OnUndo() => RegisterClientBehaviour.Active?.UndoClaim(this);
+    }
+
+    [NetworkMessage]
+    public sealed class RegisterReleaseIntent : RegisterIntent
+    {
+        public override void OnApply() => RegisterActions.Release(Counter);
+
+        public override void OnUndo() => RegisterClientBehaviour.Active?.UndoRelease(this);
+    }
+
+    [NetworkMessage]
+    public sealed class RegisterScanItemIntent : RegisterIntent
+    {
+        public int Slot;
+
+        public override void OnApply() => RegisterActions.ScanItem(Counter, Slot);
+    }
+
+    [NetworkMessage]
+    public sealed class RegisterScanCardIntent : RegisterIntent
+    {
+        public int Slot;
+
+        public override void OnApply() => RegisterActions.ScanCard(Counter, Slot);
+    }
+
+    [NetworkMessage]
+    public sealed class RegisterTakePaymentIntent : RegisterIntent
+    {
         public bool IsCard;
-        public bool IsCoin;
-        public bool TakeBack;
+
+        public override void OnApply() => RegisterActions.TakePayment(Counter, IsCard);
+    }
+
+    [NetworkMessage]
+    public sealed class RegisterCardPaymentIntent : RegisterIntent
+    {
         public double Value;
+
+        /// <summary>True when the local card payment zeroed the checkout total and queued the
+        /// card income. A mismatched card amount leaves the total untouched and queues nothing.</summary>
+        public bool WalletApplied;
+
+        public override void OnApply() => RegisterActions.CardPayment(Counter, Value);
+
+        public override void OnUndo() => RegisterClientBehaviour.Active?.UndoCardPayment(this);
     }
 
-    public enum RegisterIntentKind : byte
-    {
-        Claim = 1,
-        Release = 2,
-        ScanItem = 3,
-        ScanCard = 4,
-        TakePayment = 5,
-        CardPayment = 6,
-        Change = 7,
-        Complete = 8,
-    }
-
-    public enum RegisterDeltaKind : byte
-    {
-        Ownership = 1,
-        CustomerLifecycle = 2,
-        Scan = 3,
-        PhasePayment = 4,
-        Change = 5,
-        CounterLifecycle = 6,
-        // Host-authoritative customer paid amount and cash/card kind (wire addition). Unlike
-        // PhasePayment, this delta is never tied to a client prediction, so the client always
-        // applies it even when the scan that produced it confirmed the guest's own prediction.
-        PaidAmount = 7,
-    }
-
-    /// <summary>Complete register state sent only as a join baseline.</summary>
     [NetworkMessage]
-    public sealed class RegisterBaselineMessage : INetMessage
-    {
-        public List<RegisterBaselineCounter> Counters = new();
-    }
-
-    /// <summary>One keyed register operation. CustomerLifecycle carries the one-customer
-    /// bootstrap needed when a new checkout carrier is constructed.</summary>
-    [NetworkMessage]
-    public sealed class RegisterDeltaMessage : IPredictedMessage
-    {
-        public Guid PredictionId
-        {
-            get; set;
-        }
-
-        public RegisterDeltaKind Kind;
-        public int CounterKey;
-        public uint CounterGeneration;
-        public bool Exists;
-        public int Owner;
-
-        public bool HasCustomer;
-        public int CustomerIndex = -1;
-        public int CustomerGeneration;
-        public List<RegisterLine> Lines = new();
-
-        public byte State;
-        public bool UsingCard;
-        public double Paid;
-        public double Total;
-        public double CustomerTotal;
-        public double Change;
-        public bool ChangeReady;
-        public bool ChangeStarted;
-        public bool TooMuchChange;
-
-        public int Slot = -1;
-        public bool IsCard;
-        public bool IsCoin;
-        public bool TakeBack;
-        public double Value;
-        public int ChangeCount;
-    }
-
-    public sealed class RegisterBaselineCounter
-    {
-        public int CounterKey;
-        public uint CounterGeneration;
-        public bool Exists;
-        public int Owner;
-        public bool HasCustomer;
-        public int CustomerIndex = -1;
-        public int CustomerGeneration;
-        public byte State;
-        public bool UsingCard;
-        public double Paid;
-        public double Total;
-        public double CustomerTotal;
-        public double Change;
-        public bool ChangeReady;
-        public bool ChangeStarted;
-        public bool TooMuchChange;
-        public List<RegisterLine> Lines = new();
-        public List<RegisterChange> ChangeItems = new();
-    }
-
-    public sealed class RegisterLine
-    {
-        public bool IsCard;
-        public EItemType ItemType;
-        public CardData Card;
-        public float Price;
-        public bool Scanned;
-    }
-
-    public sealed class RegisterChange
+    public sealed class RegisterChangeIntent : RegisterIntent
     {
         public int Slot;
         public bool IsCoin;
-        public double Value;
-        public int Count;
+        public bool TakeBack;
+
+        public override void OnApply() =>
+            RegisterActions.Change(Counter, Slot, IsCoin, TakeBack);
+    }
+
+    [NetworkMessage]
+    public sealed class RegisterCompleteIntent : RegisterIntent
+    {
+        /// <summary>The paid and change amounts at the moment the client completed. They are the
+        /// exact income/change the game queued, so a rejection can reverse the wallet without
+        /// carrying the checkout snapshot.</summary>
+        public double Paid;
+        public double Change;
+
+        public override void OnApply() => RegisterActions.Complete(Counter);
+
+        public override void OnUndo() => RegisterClientBehaviour.Active?.UndoComplete(this);
     }
 }

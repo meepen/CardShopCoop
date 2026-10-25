@@ -1,16 +1,18 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.Report;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Purchasing
 {
@@ -61,6 +63,7 @@ namespace CardShopCoop.Modules.Purchasing
             internal int RestockItems;
             internal bool Success;
             internal string Failure;
+            internal readonly List<Guid> RejectedBoxIds = new();
         }
 
         private sealed class MutationSnapshot
@@ -87,6 +90,8 @@ namespace CardShopCoop.Modules.Purchasing
             internal readonly List<RestockData> PendingRestockRows = new();
             internal readonly List<int> PendingRestockIndexes = new();
             internal readonly List<int> PendingRestockCounts = new();
+            internal readonly CardShopCoop.Modules.World.BoxNetworkInteraction.DeliveryQueueState
+                DeliveryQueue;
             internal readonly GameReportDataCollect Report;
             internal readonly GameReportDataCollect PermanentReport;
             internal readonly int TutorialIndex;
@@ -99,13 +104,13 @@ namespace CardShopCoop.Modules.Purchasing
             internal readonly CatalogApi.PurchaseLicenseState CatalogLicenses;
             internal readonly bool ScannerUnlocked;
             internal readonly int EventCount;
-            internal readonly BoxNetworkInteraction.DeliveryQueueState DeliveryQueue;
 
             internal MutationSnapshot(PurchasePlan plan)
             {
-                Capture(RestockManager.GetItemPackagingBoxList());
-                Capture(RestockManager.GetCardPackagingBoxList());
-                Capture(RestockManager.GetShelfPackagingBoxList());
+                Capture(RestockInterop.ItemBoxes);
+                Capture(RestockInterop.CardBoxes);
+                Capture(RestockInterop.ShelfBoxes);
+                DeliveryQueue = WorldHostBehaviour.CaptureHostDeliveryQueueState();
                 if (CPlayerData.m_AverageItemCostList != null)
                 {
                     AverageCosts.AddRange(CPlayerData.m_AverageItemCostList);
@@ -169,14 +174,13 @@ namespace CardShopCoop.Modules.Purchasing
 
                 ScannerUnlocked = CPlayerData.m_IsScannerRestockUnlocked;
                 EventCount = QueueCount();
-                DeliveryQueue = WorldHostBehaviour.CaptureDeliveryQueueState();
             }
 
             internal void Rollback()
             {
-                DestroyNew(RestockManager.GetItemPackagingBoxList());
-                DestroyNew(RestockManager.GetCardPackagingBoxList());
-                DestroyNew(RestockManager.GetShelfPackagingBoxList());
+                DestroyNew(RestockInterop.ItemBoxes);
+                DestroyNew(RestockInterop.CardBoxes);
+                DestroyNew(RestockInterop.ShelfBoxes);
                 RestoreList(CPlayerData.m_AverageItemCostList, AverageCosts);
                 RestoreList(CPlayerData.m_CurrentTotalItemCountList, CurrentItemCounts);
                 CPlayerData.m_GameReportDataCollect = Report;
@@ -197,9 +201,7 @@ namespace CardShopCoop.Modules.Purchasing
                 RestoreList(PendingRestockBoxes, SceneRef<RestockManager>.Get(), PendingRestockRows);
                 RestoreList(CPlayerData.m_SpawnBoxRestockIndexWaitingList, PendingRestockIndexes);
                 RestoreList(CPlayerData.m_SpawnBoxItemCountWaitingList, PendingRestockCounts);
-                // The game waiting list is back to its pre-purchase shape; restore the ids that
-                // were bound to those entries so a failed delivery strands nothing.
-                WorldHostBehaviour.RestoreDeliveryQueueState(DeliveryQueue);
+                WorldHostBehaviour.RestoreHostDeliveryQueueState(DeliveryQueue);
                 TrimEvents(EventCount);
                 GameInstance.m_IsItemLicenseUnlocked = GameInstanceLicenseUnlocked;
                 if (CatalogLicenses != null
@@ -433,6 +435,8 @@ namespace CardShopCoop.Modules.Purchasing
         }
 
         private static PurchasingHostBehaviour _active;
+
+        internal static PurchasingHostBehaviour Active => _active;
         private bool _shutdown;
         private CoopRuntimeContext _context;
 
@@ -469,26 +473,98 @@ namespace CardShopCoop.Modules.Purchasing
             }
         }
 
-        [MessageHandler(typeof(PurchaseIntentMessage))]
-        private void HandleIntent(MessageContext context, PurchaseIntentMessage message)
+        /// <summary>Runs from the concrete restock intent's <c>OnApply</c> on the host, with the
+        /// authenticated sender already filled in by the router.</summary>
+        internal PurchaseOutcomeMessage ApplyRestockPurchase(RestockPurchaseIntent intent)
         {
-            if (_shutdown || !_context.InGame()
-                || context?.Connection == null || message == null)
+            var lines = intent?.Lines;
+            var scannerCheckout = intent?.ScannerCheckout ?? false;
+            return ApplyPurchase(intent, PurchaseKind.Restock, lines,
+                plan => TryBuildRestockPlan(scannerCheckout, lines, plan));
+        }
+
+        internal PurchaseOutcomeMessage ApplyFurniturePurchase(FurniturePurchaseIntent intent)
+        {
+            var lines = intent?.Lines;
+            return ApplyPurchase(intent, PurchaseKind.Furniture, lines,
+                plan => TryBuildFurniturePlan(lines, plan));
+        }
+
+        internal PurchaseOutcomeMessage ApplyProductLicensePurchase(
+            ProductLicensePurchaseIntent intent)
+        {
+            var lines = intent?.Lines;
+            return ApplyPurchase(intent, PurchaseKind.ProductLicense, lines,
+                plan => TryBuildProductLicensePlan(lines, plan));
+        }
+
+        internal PurchaseOutcomeMessage ApplyScannerLicensePurchase(
+            ScannerLicensePurchaseIntent intent)
+        {
+            var lines = intent?.Lines;
+            return ApplyPurchase(intent, PurchaseKind.ScannerLicense, lines,
+                plan => TryBuildScannerLicensePlan(lines, plan));
+        }
+
+        /// <summary>Shared admission for every concrete purchase intent: one authenticated sender,
+        /// one line-count bound, and a kind-specific plan builder. Everything after the plan is
+        /// built is the same for all purchase kinds.</summary>
+        private PurchaseOutcomeMessage ApplyPurchase(ActionMessage intent, PurchaseKind kind,
+            List<PurchaseLine> lines, Func<PurchasePlan, string> build)
+        {
+            if (_shutdown || _context == null || !_context.InGame() || intent == null)
+            {
+                return null;
+            }
+
+            var connectionId = intent.Connection?.Id ?? intent.Sender?.Id ?? 0;
+            if (connectionId <= 0)
+            {
+                CoopPlugin.Log.LogWarning("Purchasing dropped a shipment without an authenticated "
+                    + "sender.");
+                return null;
+            }
+
+            return Process(intent, kind, lines, build, PeerLabel(connectionId));
+        }
+
+        [MessageHandler]
+        private void HandleRestockPurchase(MessageContext context, RestockPurchaseIntent message)
+            => PublishIntentResult(context, message, message?.Result);
+
+        [MessageHandler]
+        private void HandleFurniturePurchase(MessageContext context, FurniturePurchaseIntent message)
+            => PublishIntentResult(context, message, message?.Result);
+
+        [MessageHandler]
+        private void HandleProductLicensePurchase(MessageContext context,
+            ProductLicensePurchaseIntent message)
+            => PublishIntentResult(context, message, message?.Result);
+
+        [MessageHandler]
+        private void HandleScannerLicensePurchase(MessageContext context,
+            ScannerLicensePurchaseIntent message)
+            => PublishIntentResult(context, message, message?.Result);
+
+        /// <summary>The intent's <c>OnApply</c> has already run and stored the host's answer. Publish
+        /// an acceptance, or roll the client's optimistic checkout back on a rejection.</summary>
+        private void PublishIntentResult(MessageContext context, ActionMessage intent,
+            PurchaseOutcomeMessage result)
+        {
+            if (_shutdown || result == null || context?.Connection == null)
             {
                 return;
             }
 
             var connectionId = context.Connection.Id;
-            var outcome = Process(message, connectionId, PeerLabel(connectionId));
-            if (outcome.Success)
+            if (result.Success)
             {
-                SendOutcome(connectionId, outcome);
+                SendOutcome(connectionId, result);
             }
-            else if (message.PredictionId != Guid.Empty)
+            else if (intent.ActionId != Guid.Empty)
             {
-                PredictionApi.Rollback(_context, connectionId, message.PredictionId);
+                ActionLedger.Rollback(_context, connectionId, intent.ActionId);
             }
-
         }
 
         internal void Shutdown()
@@ -510,14 +586,9 @@ namespace CardShopCoop.Modules.Purchasing
 
         private void OnDestroy() => Shutdown();
 
-        private PurchaseOutcomeMessage Process(PurchaseIntentMessage message, int connectionId,
-            string peer)
+        private PurchaseOutcomeMessage Process(ActionMessage intent, PurchaseKind kind,
+            List<PurchaseLine> lines, Func<PurchasePlan, string> build, string peer)
         {
-            if (!Enum.IsDefined(typeof(PurchaseKind), message.Kind))
-            {
-                return Failure(message, peer, "purchase kind is invalid");
-            }
-
             EconomyAuthority.HostSpendReservation spend = null;
             MutationSnapshot mutation = null;
             PurchasePlan plan = null;
@@ -527,19 +598,29 @@ namespace CardShopCoop.Modules.Purchasing
             var committedDebit = 0d;
             try
             {
-                if (!TryBuildPlan(message, out plan, out var error))
+                if (lines == null || lines.Count == 0 || lines.Count > MaxLines)
                 {
-                    return Failure(message, peer, error);
+                    return Failure(kind, peer, "purchase has an invalid line count");
+                }
+
+                plan = new PurchasePlan
+                {
+                    Kind = kind,
+                };
+                var error = build(plan);
+                if (error != null)
+                {
+                    return Failure(kind, peer, error);
                 }
 
                 if (plan.IdempotentNoOp)
                 {
-                    return Accepted(message, 0d);
+                    return Accepted(intent, kind, 0d);
                 }
 
                 if (!EconomyAuthority.TryReserveHostSpend(plan.Total, out spend))
                 {
-                    return Failure(message, peer,
+                    return Failure(kind, peer,
                         "not enough money - the purchase was cancelled");
                 }
 
@@ -548,7 +629,8 @@ namespace CardShopCoop.Modules.Purchasing
                 // result; only local game mutations are compensated below.
                 if (!EconomyAuthority.QueueHostSpend(spend))
                 {
-                    return Failure(message, peer, "purchase failed while admitting the debit");
+                    return Failure(kind, peer,
+                        "purchase failed while admitting the debit");
                 }
 
                 spend = null;
@@ -566,14 +648,16 @@ namespace CardShopCoop.Modules.Purchasing
                     mutation.Rollback();
                     RefundFailedPurchase(ref committedDebit);
                     CoopPlugin.Log.LogError($"Purchasing delivery crashed for {peer}: {exception}");
-                    return Failure(message, peer, "purchase failed while delivering the order");
+                    return Failure(kind, peer,
+                        "purchase failed while delivering the order");
                 }
 
                 if (!delivery.Success)
                 {
                     mutation.Rollback();
                     RefundFailedPurchase(ref committedDebit);
-                    return Failure(message, peer, delivery.Failure ?? "purchase delivery failed");
+                    return Failure(kind, peer,
+                        delivery.Failure ?? "purchase delivery failed");
                 }
 
                 // Delivery recomputes the canonical amount again. In the normal path this is
@@ -586,7 +670,8 @@ namespace CardShopCoop.Modules.Purchasing
                     CoopPlugin.Log.LogError($"Purchasing canonical amount changed for "
                         + $"{peer}: "
                         + $"preflight={plan.Total}, delivered={delivery.Charged}");
-                    return Failure(message, peer, "purchase failed while charging the order");
+                    return Failure(kind, peer,
+                        "purchase failed while charging the order");
                 }
 
                 ApplyCommittedSideEffects(plan, delivery);
@@ -612,7 +697,8 @@ namespace CardShopCoop.Modules.Purchasing
                     throw new InvalidOperationException("catalog scanner license publication failed");
                 }
 
-                var outcome = Accepted(message, delivery.Charged);
+                var outcome = Accepted(intent, kind, delivery.Charged,
+                    delivery.RejectedBoxIds);
                 committedDebit = 0d;
                 // A delayed shelf save is itself an irreversible side effect. Schedule it only
                 // after the outcome and every rollback-capable mutation have succeeded; there is
@@ -639,7 +725,7 @@ namespace CardShopCoop.Modules.Purchasing
                     RefundFailedPurchase(ref committedDebit);
                 }
                 CoopPlugin.Log.LogError($"Purchasing preflight crashed for {peer}: {exception}");
-                return Failure(message, peer, "purchase could not be validated");
+                return Failure(kind, peer, "purchase could not be validated");
             }
         }
 
@@ -655,75 +741,35 @@ namespace CardShopCoop.Modules.Purchasing
             }
         }
 
-        private bool TryBuildPlan(PurchaseIntentMessage message, out PurchasePlan plan,
-            out string error)
+        /// <summary>Builds a purchase plan from the shipped lines. Returns the rejection reason, or
+        /// null when the plan is valid and priced. The concrete intent already fixes the kind, so
+        /// there is no incoming-kind dispatch left here.</summary>
+        private static string TryBuildRestockPlan(bool scannerCheckout, List<PurchaseLine> lines,
+            PurchasePlan plan)
         {
-            plan = new PurchasePlan
+            if (scannerCheckout && !CPlayerData.m_IsScannerRestockUnlocked)
             {
-                Kind = message.Kind,
-            };
-            error = null;
-
-            if (message.Lines == null || message.Lines.Count == 0
-                || message.Lines.Count > MaxLines)
-            {
-                error = "purchase has an invalid line count";
-                return false;
-            }
-
-            if (message.Kind != PurchaseKind.Restock && message.ScannerCheckout)
-            {
-                error = "scanner cart flag is invalid for this purchase";
-                return false;
-            }
-
-            switch (message.Kind)
-            {
-                case PurchaseKind.Restock:
-                    return TryBuildRestockPlan(message, plan, out error);
-                case PurchaseKind.Furniture:
-                    return TryBuildFurniturePlan(message, plan, out error);
-                case PurchaseKind.ProductLicense:
-                    return TryBuildProductLicensePlan(message, plan, out error);
-                case PurchaseKind.ScannerLicense:
-                    return TryBuildScannerLicensePlan(message, plan, out error);
-                default:
-                    error = "purchase kind is invalid";
-                    return false;
-            }
-        }
-
-        private bool TryBuildRestockPlan(PurchaseIntentMessage message, PurchasePlan plan,
-            out string error)
-        {
-            error = null;
-            if (message.ScannerCheckout && !CPlayerData.m_IsScannerRestockUnlocked)
-            {
-                error = "scanner restock is locked on the host";
-                return false;
+                return "scanner restock is locked on the host";
             }
 
             var totalBoxes = 0;
-            for (var i = 0; i < message.Lines.Count; i++)
+            for (var i = 0; i < lines.Count; i++)
             {
-                var request = message.Lines[i];
+                var request = lines[i];
                 if (!ValidProductLine(request, MaxBoxesPerLine))
                 {
-                    error = $"restock line {i} is invalid";
-                    return false;
+                    return $"restock line {i} is invalid";
                 }
 
                 if (!CatalogApi.TryResolveProduct(request.ItemType, request.IsBigBox,
                     request.Name ?? "", out var index, out var row) || row == null)
                 {
-                    error = $"restock line {i} is not in the host catalog";
-                    return false;
+                    return $"restock line {i} is not in the host catalog";
                 }
 
                 if (!CatalogApi.TryGetLicense(index, out var licensed) || !licensed)
                 {
-                    error = $"restock line {i} is not licensed on the host";
-                    return false;
+                    return $"restock line {i} is not licensed on the host";
                 }
 
                 var maxCount = RestockManager.GetMaxItemCountInBox(row.itemType, row.isBigBox);
@@ -732,15 +778,13 @@ namespace CardShopCoop.Modules.Purchasing
                 if (maxCount <= 0 || !IsFinite(itemCost) || itemCost < 0f
                     || !IsFinite(linePrice))
                 {
-                    error = $"restock line {i} has an invalid host price";
-                    return false;
+                    return $"restock line {i} has an invalid host price";
                 }
 
                 totalBoxes += request.Count;
                 if (totalBoxes > MaxTotalBoxes)
                 {
-                    error = "restock order is too large";
-                    return false;
+                    return "restock order is too large";
                 }
 
                 plan.Lines.Add(new PlannedLine
@@ -756,44 +800,37 @@ namespace CardShopCoop.Modules.Purchasing
             plan.TotalBoxes = totalBoxes;
             plan.Total += ScannerDeliveryFee(totalBoxes);
 
-            return IsValidTotal(plan.Total, out error);
+            return IsValidTotal(plan.Total, out var error) ? null : error;
         }
 
-        private static bool TryBuildFurniturePlan(PurchaseIntentMessage message,
-            PurchasePlan plan, out string error)
+        private static string TryBuildFurniturePlan(List<PurchaseLine> lines, PurchasePlan plan)
         {
-            error = null;
-            if (message.Lines.Count != 1 || !ValidFurnitureLine(message.Lines[0]))
+            if (lines.Count != 1 || !ValidFurnitureLine(lines[0]))
             {
-                error = "furniture purchase must contain one valid item";
-                return false;
+                return "furniture purchase must contain one valid item";
             }
 
-            var request = message.Lines[0];
+            var request = lines[0];
             var furniture = InventoryBase.GetFurniturePurchaseData(request.ObjectType);
             if (furniture == null || InventoryBase.GetSpawnInteractableObjectPrefab(
                 request.ObjectType) == null)
             {
-                error = "furniture is not available in the host catalog";
-                return false;
+                return "furniture is not available in the host catalog";
             }
 
             if (!PurchasingInterop.IsFurnitureAvailable(request.ObjectType))
             {
-                error = "furniture is not available for this platform entitlement";
-                return false;
+                return "furniture is not available for this platform entitlement";
             }
 
             if (CPlayerData.m_ShopLevel + 1 < furniture.levelRequirement)
             {
-                error = "shop level is too low for this furniture";
-                return false;
+                return "shop level is too low for this furniture";
             }
 
             if (!IsFinite(furniture.price) || furniture.price <= 0f)
             {
-                error = "furniture has an invalid host price";
-                return false;
+                return "furniture has an invalid host price";
             }
 
             plan.Lines.Add(new PlannedLine
@@ -803,31 +840,27 @@ namespace CardShopCoop.Modules.Purchasing
                 Price = furniture.price,
             });
             plan.Total = furniture.price;
-            return IsValidTotal(plan.Total, out error);
+            return IsValidTotal(plan.Total, out var error) ? null : error;
         }
 
-        private static bool TryBuildProductLicensePlan(PurchaseIntentMessage message,
-            PurchasePlan plan, out string error)
+        private static string TryBuildProductLicensePlan(List<PurchaseLine> lines,
+            PurchasePlan plan)
         {
-            error = null;
-            if (message.Lines.Count != 1 || !ValidProductLine(message.Lines[0], 1))
+            if (lines.Count != 1 || !ValidProductLine(lines[0], 1))
             {
-                error = "product license purchase must contain one valid item";
-                return false;
+                return "product license purchase must contain one valid item";
             }
 
-            var request = message.Lines[0];
+            var request = lines[0];
             if (!CatalogApi.TryResolveProduct(request.ItemType, request.IsBigBox,
                 request.Name ?? "", out var index, out var row) || row == null)
             {
-                error = "product license is not in the host catalog";
-                return false;
+                return "product license is not in the host catalog";
             }
 
             if (!CatalogApi.TryGetLicense(index, out var alreadyUnlocked))
             {
-                error = "product license state is unavailable on the host";
-                return false;
+                return "product license state is unavailable on the host";
             }
 
             if (alreadyUnlocked)
@@ -840,19 +873,17 @@ namespace CardShopCoop.Modules.Purchasing
                     Restock = row,
                     Price = 0d,
                 });
-                return true;
+                return null;
             }
 
             if (CPlayerData.m_ShopLevel + 1 < row.licenseShopLevelRequired)
             {
-                error = "shop level is too low for this product license";
-                return false;
+                return "shop level is too low for this product license";
             }
 
             if (!IsFinite(row.licensePrice) || row.licensePrice < 0f)
             {
-                error = "product license has an invalid host price";
-                return false;
+                return "product license has an invalid host price";
             }
 
             plan.Lines.Add(new PlannedLine
@@ -863,21 +894,19 @@ namespace CardShopCoop.Modules.Purchasing
                 Price = row.licensePrice,
             });
             plan.Total = row.licensePrice;
-            return IsValidTotal(plan.Total, out error);
+            return IsValidTotal(plan.Total, out var error) ? null : error;
         }
 
-        private static bool TryBuildScannerLicensePlan(PurchaseIntentMessage message,
-            PurchasePlan plan, out string error)
+        private static string TryBuildScannerLicensePlan(List<PurchaseLine> lines,
+            PurchasePlan plan)
         {
-            error = null;
-            if (message.Lines.Count != 1 || message.Lines[0] == null
-                || message.Lines[0].Count != 1 || message.Lines[0].ItemType != EItemType.None
-                || message.Lines[0].ObjectType != EObjectType.None
-                || message.Lines[0].IsBigBox || message.Lines[0].Name == null
-                || message.Lines[0].Name.Length != 0)
+            if (lines.Count != 1 || lines[0] == null
+                || lines[0].Count != 1 || lines[0].ItemType != EItemType.None
+                || lines[0].ObjectType != EObjectType.None
+                || lines[0].IsBigBox || lines[0].Name == null
+                || lines[0].Name.Length != 0)
             {
-                error = "scanner license purchase must contain one valid item";
-                return false;
+                return "scanner license purchase must contain one valid item";
             }
 
             if (CPlayerData.m_IsScannerRestockUnlocked)
@@ -885,19 +914,19 @@ namespace CardShopCoop.Modules.Purchasing
                 plan.IdempotentNoOp = true;
                 plan.Lines.Add(new PlannedLine
                 {
-                    Request = message.Lines[0],
+                    Request = lines[0],
                     Price = 0d,
                 });
-                return true;
+                return null;
             }
 
             plan.Lines.Add(new PlannedLine
             {
-                Request = message.Lines[0],
+                Request = lines[0],
                 Price = ScannerUnlockPrice,
             });
             plan.Total = ScannerUnlockPrice;
-            return true;
+            return null;
         }
 
         private DeliveryResult Deliver(PurchasePlan plan, string peer)
@@ -930,19 +959,22 @@ namespace CardShopCoop.Modules.Purchasing
                 var line = plan.Lines[i];
                 try
                 {
-                    // The purchasing client is the creator and carried the box ids in the intent.
-                    // Stage them for the game's deliver entry; the enqueue hook commits them to
-                    // that entry so the host binds each spawned box to them in order. Staging is
-                    // all-or-nothing: a non-fresh id means the client already bound a live box to
-                    // it, so the whole order is rejected rather than reminting and desyncing it.
+                    // The shipment carried the ids this peer minted for its boxes. Stage them for
+                    // the game's deliver entry; the enqueue hook commits them to that entry so the
+                    // host binds each spawned box to the same id. Staging is all-or-nothing: a
+                    // non-fresh id means the client already bound a live box to it, so the order is
+                    // rejected rather than reminted and desynced.
                     if (!WorldHostBehaviour.StageCreatedBoxIds(line.Request.BoxNetworkIds))
                     {
                         throw new InvalidOperationException(
                             "delivery box ids are not fresh; rejecting the order");
                     }
 
-                    // This is the vanilla package factory. World owns the resulting physical
-                    // boxes through its normal spawn/mirror patches; Purchasing owns no shelf.
+                    CoopPlugin.Log.LogInfo("[purchasing] delivering restock '" + line.Restock.name
+                        + "' index=" + line.RestockIndex + " boxes=" + line.Request.Count
+                        + " ids=" + (line.Request.BoxNetworkIds?.Count ?? 0)
+                        + "; the game's delivery queue spawns them over its next frames.");
+
                     RestockManager.SpawnPackageBoxItemMultipleFrame(line.RestockIndex,
                         line.Request.Count);
                     deliveredAmount += line.Price;
@@ -951,9 +983,17 @@ namespace CardShopCoop.Modules.Purchasing
                 }
                 catch (Exception exception)
                 {
-                    // The enqueue hook clears the staged ids on success; a throw before it leaves
+                    // The enqueue hook consumes the staged ids on success; a throw before it leaves
                     // them staged for the next unrelated enqueue, so drop them here.
                     WorldHostBehaviour.CancelStagedDeliveryIds();
+                    // The host did not create this line's boxes; tell the minting client exactly
+                    // which ones to destroy. Other lines still deliver (partial approval).
+                    var rejected = line.Request.BoxNetworkIds;
+                    if (rejected != null)
+                    {
+                        result.RejectedBoxIds.AddRange(rejected);
+                    }
+
                     result.Success = false;
                     result.Failure = $"restock delivery failed for '{line.Restock.name}': "
                         + exception.Message;
@@ -978,20 +1018,24 @@ namespace CardShopCoop.Modules.Purchasing
         private void DeliverFurniture(PurchasePlan plan, DeliveryResult result, string peer)
         {
             var line = plan.Lines[0];
+            var creatorId = line.Request.BoxNetworkIds != null
+                && line.Request.BoxNetworkIds.Count > 0
+                    ? line.Request.BoxNetworkIds[0]
+                    : Guid.Empty;
             try
             {
-                // The client is the creator and carried the box id; the host binds its spawned
-                // counterpart to that exact id. A non-fresh id means the client already bound a
-                // live box to it; adopting it would rebind that box and minting a different id
-                // would desync the client's package, so reject the order.
-                if (line.Request.BoxNetworkIds != null && line.Request.BoxNetworkIds.Count > 0
-                    && !WorldHostBehaviour.PushCreatedBoxId(line.Request.BoxNetworkIds[0]))
+                // The shipment carried the furniture Guid this peer minted. The host's spawned
+                // furniture is bound to that exact id (the package is a view), so the buyer's
+                // already-spawned furniture is adopted instead of duplicated.
+                if (!CardShopCoop.Modules.GameObjectIdentity.PlacementObjectIdentity
+                    .PushHostFurnitureId(creatorId))
                 {
                     throw new InvalidOperationException(
-                        "furniture package id is not fresh; rejecting the order");
+                        "furniture id is not fresh; rejecting the order");
                 }
 
-                // The host intentionally chooses the pose. A client never supplies a transform.
+                // The host intentionally chooses the pose. A client never supplies a transform,
+                // and the identity module binds/announces the furniture it spawns here.
                 var spawn = PurchasingInterop.RandomPackageSpawn();
                 if (spawn == null)
                 {
@@ -1000,17 +1044,18 @@ namespace CardShopCoop.Modules.Purchasing
 
                 ShelfManager.SpawnInteractableObjectInPackageBox(line.Request.ObjectType,
                     spawn.position, spawn.rotation);
+                // The spawn consumed the one-shot. If the game produced no placement object,
+                // release it so it cannot bind an unrelated creation later.
+                CardShopCoop.Modules.GameObjectIdentity.PlacementObjectIdentity
+                    .CancelHostFurnitureId(creatorId);
                 result.Charged = line.Price;
             }
             catch (Exception exception)
             {
-                // A throw after the id was parked but before the game consumed it would otherwise
-                // strand it on a later, unrelated creation. No-op once consumed.
-                if (line.Request.BoxNetworkIds != null && line.Request.BoxNetworkIds.Count > 0)
-                {
-                    WorldHostBehaviour.CancelCreatedBoxId(line.Request.BoxNetworkIds[0]);
-                }
-
+                // A throw after the id was parked but before the game consumed it would strand it
+                // on a later, unrelated creation. No-op once consumed.
+                CardShopCoop.Modules.GameObjectIdentity.PlacementObjectIdentity
+                    .CancelHostFurnitureId(creatorId);
                 result.Success = false;
                 result.Failure = "furniture delivery failed: " + exception.Message;
                 CoopPlugin.Log.LogError($"Purchasing furniture delivery failed for {peer}: "
@@ -1150,22 +1195,29 @@ namespace CardShopCoop.Modules.Purchasing
             shelf.SaveInteractableObjectData();
         }
 
-        private static PurchaseOutcomeMessage Accepted(PurchaseIntentMessage message, double charged)
+        private static PurchaseOutcomeMessage Accepted(ActionMessage intent, PurchaseKind kind,
+            double charged)
+            => Accepted(intent, kind, charged, null);
+
+        private static PurchaseOutcomeMessage Accepted(ActionMessage intent, PurchaseKind kind,
+            double charged, IReadOnlyList<Guid> rejectedBoxIds)
             => new PurchaseOutcomeMessage
             {
-                PredictionId = message.PredictionId,
-                Kind = message.Kind,
+                ActionId = intent.ActionId,
+                Kind = kind,
                 Success = true,
                 Text = $"purchase accepted (${charged:F2})",
+                RejectedBoxIds = rejectedBoxIds == null
+                    ? new List<Guid>()
+                    : new List<Guid>(rejectedBoxIds),
             };
 
-        private PurchaseOutcomeMessage Failure(PurchaseIntentMessage message, string peer,
-            string reason)
+        private PurchaseOutcomeMessage Failure(PurchaseKind kind, string peer, string reason)
         {
             CoopPlugin.Log.LogWarning("Purchasing rejected " + peer + ": " + reason);
             return new PurchaseOutcomeMessage
             {
-                Kind = message.Kind,
+                Kind = kind,
                 Success = false,
                 Text = "purchase rejected - " + reason,
             };

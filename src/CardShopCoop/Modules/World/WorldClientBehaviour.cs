@@ -1,6 +1,6 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -38,7 +38,8 @@ namespace CardShopCoop.Modules.World
                 SendWorldCommand);
             _shelfInteraction = new ShelfInteraction(SendWorldCommand);
             _warehouseShelfInteraction = new WarehouseShelfInteraction(false, _ => { },
-                SendWorldCommand, _boxNetworkInteraction, _playerBoxInteraction);
+                SendWorldCommand, _boxNetworkInteraction, _playerBoxInteraction,
+                () => _context.InGame());
             _cardInteraction = new WorldCardInteraction(_context, false, _boxNetworkInteraction,
                 _playerBoxInteraction)
             {
@@ -46,7 +47,7 @@ namespace CardShopCoop.Modules.World
             };
             // Guards for in-flight graded binder removals live as long as their prediction; the
             // tracker's retirement event is the one deterministic cleanup point.
-            PredictionApi.PredictionRetired += WorldCardInteraction.OnPredictionRetired;
+            ActionLedger.ActionSettled += WorldCardInteraction.OnActionSettled;
             _cardInteraction.Containers.SendOp = message => SendWorldCommand(1, message);
             _cardInteraction.Containers.InGameProvider = _context.InGame;
             _cardInteraction.Containers.ReloadingProvider = _context.PreloadHold;
@@ -87,9 +88,10 @@ namespace CardShopCoop.Modules.World
             _boxNetworkInteraction = null;
             _warehouseShelfInteraction?.Reset();
             _warehouseShelfInteraction = null;
-            PredictionApi.PredictionRetired -= WorldCardInteraction.OnPredictionRetired;
+            ActionLedger.ActionSettled -= WorldCardInteraction.OnActionSettled;
             _cardInteraction?.Shutdown();
             _cardInteraction = null;
+            HostUsesRecordWarehouse = false;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             _context.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_instance, this))
@@ -120,9 +122,13 @@ namespace CardShopCoop.Modules.World
         }
 
         /// <summary>The placement layer rebuilt or re-posed an object. Records the container
-        /// module deferred because their target did not exist yet can now be applied.</summary>
+        /// module deferred because their target did not exist yet can now be applied, and warehouse
+        /// deltas whose shelf arrived late are retried.</summary>
         private void OnPlacementStructureChanged(int _)
-            => _cardInteraction?.Containers.FlushClientState();
+        {
+            _cardInteraction?.Containers.FlushClientState();
+            _warehouseShelfInteraction?.FlushClientState();
+        }
 
         [OnFullyJoined]
         private void SendWorldReady(PeerConnection connection)
@@ -149,12 +155,11 @@ namespace CardShopCoop.Modules.World
             // still need a real prediction id: the host's intent ledger rejects an empty one.
             // None of them has the id pending on any client, so an echo is applied exactly as a
             // remote change, never consumed as a prediction.
-            if (worldMessage.PredictionId == Guid.Empty)
+            if (worldMessage.ActionId == Guid.Empty)
             {
-                worldMessage.PredictionId = Guid.NewGuid();
+                worldMessage.ActionId = Guid.NewGuid();
             }
 
-            WorldMessageMetadata.PrepareIntent(worldMessage);
             _context.Send(connectionId, worldMessage);
         }
 
@@ -164,18 +169,17 @@ namespace CardShopCoop.Modules.World
         // pending - so every valid peer simply applies the echo.
         internal static bool SendClientIntent(WorldMessage command)
             => SendClientIntent(command,
-                command == null || command.PredictionId == Guid.Empty
-                    ? Guid.NewGuid() : command.PredictionId);
+                command == null || command.ActionId == Guid.Empty
+                    ? Guid.NewGuid() : command.ActionId);
 
-        internal static bool SendClientIntent(WorldMessage command, Guid predictionId)
+        internal static bool SendClientIntent(WorldMessage command, Guid actionId)
         {
             if (_instance == null || command == null)
             {
                 return false;
             }
 
-            command.PredictionId = predictionId;
-            WorldMessageMetadata.PrepareIntent(command);
+            command.ActionId = actionId;
             _instance._context.Send(1, command);
             return true;
         }
@@ -191,25 +195,25 @@ namespace CardShopCoop.Modules.World
             _instance._shelfInteraction?.Reset();
             _instance._warehouseShelfInteraction?.Reset();
             _instance._workbenchInteraction?.Reset();
-            _instance._boxNetworkInteraction?.ClientBeginBaseline();
             _instance.ResetCardDisplayState();
             // The new baseline re-sends every container it knows, so any record that never found its
             // target under the old baseline must not linger and later bind to a reused index.
             _instance._cardInteraction?.Containers.ClearPendingRecords();
         }
 
-        internal static void CompleteWorldBaseline(long baselineId)
-        {
-            if (_instance == null)
-            {
-                return;
-            }
-
-            _instance._boxNetworkInteraction?.ClientCompleteBaseline();
-        }
-
         internal static bool IsKnownPackagingBox(InteractablePackagingBox box)
             => _instance?._boxNetworkInteraction?.IsKnownBox(box) == true;
+
+        /// <summary>Host warehouse backend as announced by the identity baseline. A guest must
+        /// interpret the transferred save's stored boxes with the host's backend, not its own
+        /// local capability probe.</summary>
+        internal static bool HostUsesRecordWarehouse
+        {
+            get; private set;
+        }
+
+        internal static void SetHostWarehouseBackend(bool usesRecords)
+            => HostUsesRecordWarehouse = usesRecords;
 
         /// <summary>Client: a worker is carrying this world box. Retire the real object from its
         /// warehouse slot; the Npc worker prop draws the carried box.</summary>

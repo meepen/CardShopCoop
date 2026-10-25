@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using HarmonyLib;
 
@@ -16,12 +16,13 @@ namespace CardShopCoop.Modules.World
             }
 
             _harmony.CreateClassProcessor(typeof(WarehouseTakeObservePatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(WarehouseShelfOpenVisualPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(WarehouseShelfPlacedVisualPatch)).Patch();
             if (WarehouseShelfInteraction.UsesRecords)
             {
                 _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(StoredBoxRecordArrangePatch)).Patch();
             }
             else
             {
@@ -30,36 +31,53 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [MessageHandler(typeof(WarehouseStateMessage))]
+        [MessageHandler]
         private void HandleWarehouseState(MessageContext context, WarehouseStateMessage message)
         {
+            if (message == null || Warehouse == null)
+            {
+                return;
+            }
+
             Warehouse.ClientApplyState(message);
         }
 
-        [MessageHandler(typeof(WarehouseDeltaMessage))]
+        [MessageHandler]
         private void HandleWarehouseDelta(MessageContext context, WarehouseDeltaMessage message)
         {
-            if (!message.IsStore && !Prediction.PredictionApi.IsPending(message.PredictionId))
+            if (message == null || Warehouse == null)
             {
-                // Another player's take. The box leaves our shelf, but only the taker ends up
-                // holding it, so take the remote path and never attach it to our own hand.
-                Warehouse.ClientApplyDelta(message);
                 return;
             }
 
+            var pending = ActionLedger.IsPending(message.ActionId);
             if (message.IsStore)
             {
-                // Our own accepted store, or a remote store. The host delta is the authoritative
-                // result, so retire our matching prediction and always apply it - retiring without
-                // applying (what AckOrApply did when pending) dropped the host's edit.
-                WorldPrediction.Confirm(message, () => Warehouse.ClientApplyDelta(message));
+                if (pending)
+                {
+                    // Our own accepted store. Apply it idempotently: the game already added the
+                    // record/live box, and the host may have canonicalised its order.
+                    WorldAction.Confirm(message, () => Warehouse.ClientApplyDelta(message));
+                    Warehouse.CompleteMutation(message.ActionId);
+                }
+                else
+                {
+                    Warehouse.ClientApplyDelta(message);
+                }
+
                 return;
             }
 
-            // Our own accepted take. Retire the prediction and apply the authoritative result
-            // through the own-take path, which puts the box in our hand; the remote path would
-            // leave it on the shelf with nobody holding it.
-            WorldPrediction.Confirm(message, () => Warehouse.ClientTakeOwnConfirmed(message));
+            if (pending)
+            {
+                // Our own take already moved the box into the hand. The authoritative echo only
+                // retires the prediction; applying it again would pop/remove/attach twice.
+                WorldAction.Ack(message);
+                Warehouse.CompleteMutation(message.ActionId);
+                return;
+            }
+
+            Warehouse.ClientApplyDelta(message);
         }
 
         private void NotifyStoredBoxRecordAdded(ShelfCompartment compartment)
@@ -68,7 +86,7 @@ namespace CardShopCoop.Modules.World
         }
 
         private void NotifyStoredBoxRecordPopped(ShelfCompartment compartment, bool didPop,
-            WarehouseBoxState removed)
+            WarehouseShelfInteraction.WarehouseBoxFacts removed)
         {
             Warehouse?.OnStoredBoxRecordPopped(compartment, didPop, removed);
         }
@@ -85,11 +103,8 @@ namespace CardShopCoop.Modules.World
         }
 
         /// <summary>Records backend: the box adds its own stored record from inside
-        /// <c>OnFinishLerp</c>. Mark it for the span of that method so the AddStoredBoxRecord hook
-        /// binds the new record to exactly this box's network id - the store has already passed
-        /// every game gate by the time this runs, so a refused store can no longer strand an id.
-        /// The box instance is the hook argument; this method exists on both builds, but only the
-        /// records build actually adds a record here.</summary>
+        /// <c>OnFinishLerp</c>. Mark it for the span of that method so the store is observed only
+        /// when a real box owns the add (save-load adds are gated by the snapshot/baseline).</summary>
         [HarmonyPatch(typeof(InteractablePackagingBox_Item), "OnFinishLerp")]
         private static class BoxRecordStoreCompletePatch
         {
@@ -105,8 +120,6 @@ namespace CardShopCoop.Modules.World
                 _instance?.Warehouse?.EndLocalRecordStore();
             }
 
-            /// <summary>A throw out of the game's own OnFinishLerp would otherwise leave
-            /// <c>_currentStoreBox</c> set and bind the following record to the wrong box.</summary>
             [HarmonyFinalizer]
             private static void Finalizer()
             {
@@ -144,14 +157,41 @@ namespace CardShopCoop.Modules.World
                 }
             }
 
-            /// <summary>Even when the game's own take throws, the covered hold armed in the prefix
-            /// must be released or prediction stays disabled for every later box action. The
-            /// release is idempotent through the capture's Covered flag, so it is safe beside the
-            /// postfix.</summary>
             [HarmonyFinalizer]
             private static void Finalizer(WarehouseShelfInteraction.WarehouseTakeCapture __state)
             {
                 _instance?.Warehouse?.EndCoveredTake(__state);
+            }
+        }
+
+        /// <summary>Opening a boxed warehouse shelf re-enables the shelf but not the batched
+        /// stored-box matrices. Rebuild them at the moment the package exposes the furniture.</summary>
+        [HarmonyPatch(typeof(InteractablePackagingBox_Shelf), "OnPressOpenBox")]
+        private static class WarehouseShelfOpenVisualPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(InteractablePackagingBox_Shelf __instance)
+            {
+                if (__instance != null
+                    && BoxNetworkInteraction.TryGetBoxedFurniture(__instance, out var furniture))
+                {
+                    WarehouseShelfInteraction.SetStoredBoxVisuals(furniture, true);
+                }
+            }
+        }
+
+        /// <summary>The local player's own place path does not go through PlacementInterop, so
+        /// the actor must restore the shelf's batched stored-box matrices here.</summary>
+        [HarmonyPatch(typeof(InteractableObject), "PlaceMovedObject")]
+        private static class WarehouseShelfPlacedVisualPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(InteractableObject __instance)
+            {
+                if (__instance != null && !__instance.GetIsBoxedUp())
+                {
+                    WarehouseShelfInteraction.SetStoredBoxVisuals(__instance, true);
+                }
             }
         }
 
@@ -165,39 +205,19 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        /// <summary>The game re-sorts a compartment's stored records by amount; the positional id
-        /// list must follow the very same permutation or it drifts. The prefix snapshots the
-        /// records' values and the postfix replays the multiset permutation onto the id list.</summary>
-        [HarmonyPatch(typeof(ShelfCompartment), "ArrangeBoxItemBasedOnItemCount")]
-        private static class StoredBoxRecordArrangePatch
-        {
-            [HarmonyPrefix]
-            private static void Prefix(ShelfCompartment __instance,
-                out List<WarehouseShelfInteraction.StoredRecordKey> __state)
-            {
-                __state = _instance?.Warehouse?.CaptureRecordOrder(__instance);
-            }
-
-            [HarmonyPostfix]
-            private static void Postfix(ShelfCompartment __instance,
-                List<WarehouseShelfInteraction.StoredRecordKey> __state)
-            {
-                _instance?.Warehouse?.ApplyRecordOrder(__instance, __state);
-            }
-        }
-
         [HarmonyPatch(typeof(ShelfCompartment), "TryPopLastStoredBoxRecord")]
         private static class StoredBoxRecordPoppedPatch
         {
             [HarmonyPrefix]
-            private static void Prefix(ShelfCompartment __instance, out WarehouseBoxState __state)
+            private static void Prefix(ShelfCompartment __instance,
+                out WarehouseShelfInteraction.WarehouseBoxFacts __state)
             {
-                __state = _instance?.Warehouse?.CapturePoppedRecord(__instance);
+                __state = _instance?.Warehouse?.CapturePoppedRecord(__instance) ?? default;
             }
 
             [HarmonyPostfix]
             private static void Postfix(ShelfCompartment __instance, bool __result,
-                WarehouseBoxState __state)
+                WarehouseShelfInteraction.WarehouseBoxFacts __state)
             {
                 _instance?.NotifyStoredBoxRecordPopped(__instance, __result, __state);
             }
@@ -222,6 +242,5 @@ namespace CardShopCoop.Modules.World
                 _instance?.NotifyWarehouseBoxRemoved(__instance, __0);
             }
         }
-
     }
 }

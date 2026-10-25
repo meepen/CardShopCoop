@@ -29,7 +29,9 @@ namespace CardShopCoop.Net.Networking
         private static readonly object Gate = new();
         private static readonly IpNetworkingBackend Ip = new IpNetworkingBackend();
         private static readonly List<INetworkingBackend> Registered = new();
+        private static readonly Dictionary<INetworkingBackend, int> Bands = new();
         private static int _version;
+        private static int _nextBand = NetworkingBands.Size;
 
         /// <summary>Changes whenever the offered set changes. Compare it against a cached snapshot
         /// rather than rebuilding (and allocating) the list on every read.</summary>
@@ -44,6 +46,30 @@ namespace CardShopCoop.Net.Networking
                 var all = new List<INetworkingBackend>(Registered.Count + 1) { Ip };
                 all.AddRange(Registered);
                 return all;
+            }
+        }
+
+        /// <summary>The disjoint PeerConnection.Id band assigned to a backend for this process.
+        /// The runtime allocates the band; a backend never chooses one, so two backends cannot
+        /// collide. The band is stable for the backend's registration lifetime.</summary>
+        public static int BandOf(INetworkingBackend backend)
+        {
+            if (backend == null)
+            {
+                throw new ArgumentNullException(nameof(backend));
+            }
+
+            lock (Gate)
+            {
+                if (Bands.TryGetValue(backend, out var band))
+                {
+                    return band;
+                }
+
+                band = _nextBand;
+                _nextBand += NetworkingBands.Size;
+                Bands[backend] = band;
+                return band;
             }
         }
 

@@ -38,7 +38,7 @@ namespace CardShopCoop.Modules.GameTime
             _context.Messages.RegisterAttributedHandlers(this);
         }
 
-        [MessageHandler(typeof(DayTimeMessage))]
+        [MessageHandler]
         private void HandleDayTime(MessageContext context, DayTimeMessage message)
         {
             if (_shutdown)

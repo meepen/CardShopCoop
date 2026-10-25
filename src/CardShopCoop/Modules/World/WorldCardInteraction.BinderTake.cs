@@ -80,7 +80,7 @@ namespace CardShopCoop.Modules.World
         /// row - so neither the rollback nor a follower replay may touch the row again.</summary>
         private sealed class GradedRemovalGuard
         {
-            internal Guid PredictionId;
+            internal Guid ActionId;
             internal bool Superseded;
         }
 
@@ -356,7 +356,7 @@ namespace CardShopCoop.Modules.World
         /// <summary>Client: tracks one in-flight graded removal so a competing accepted removal of
         /// the same certificate can mark its rollback. The prediction id only exists after the
         /// send succeeded, so the guard is registered here.</summary>
-        private static void RegisterGradedRemovalGuard(Guid predictionId, GradedRemovalGuard guard,
+        private static void RegisterGradedRemovalGuard(Guid actionId, GradedRemovalGuard guard,
             CardData card)
         {
             var key = CardPriceKey(card);
@@ -365,7 +365,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            guard.PredictionId = predictionId;
+            guard.ActionId = actionId;
             if (!_gradedRemovalGuards.TryGetValue(key, out var guards))
             {
                 guards = new List<GradedRemovalGuard>();
@@ -404,9 +404,9 @@ namespace CardShopCoop.Modules.World
 
         /// <summary>Drops the guards of a prediction that left the tracker (accepted echo,
         /// refusal, or teardown), keeping the registry bounded by in-flight removals.</summary>
-        internal static void OnPredictionRetired(Guid predictionId)
+        internal static void OnActionSettled(Guid actionId)
         {
-            if (predictionId == Guid.Empty || _gradedRemovalGuards.Count == 0)
+            if (actionId == Guid.Empty || _gradedRemovalGuards.Count == 0)
             {
                 return;
             }
@@ -417,7 +417,7 @@ namespace CardShopCoop.Modules.World
                 var guards = entry.Value;
                 for (var i = guards.Count - 1; i >= 0; i--)
                 {
-                    if (guards[i].PredictionId == predictionId)
+                    if (guards[i].ActionId == actionId)
                     {
                         guards.RemoveAt(i);
                     }

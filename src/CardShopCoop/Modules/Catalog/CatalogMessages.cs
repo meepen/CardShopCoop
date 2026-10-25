@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -14,12 +13,8 @@ namespace CardShopCoop.Modules.Catalog
     }
 
     [NetworkMessage]
-    public sealed class CatalogLicenseDeltaMessage : IPredictedMessage
+    public sealed class CatalogLicenseDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
 
         public bool Scanner;
         public bool Unlocked;

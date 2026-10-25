@@ -4,6 +4,9 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using CardShopCoop.Modules.Catalog;
+using CardShopCoop.Modules.ExtendedInformation;
+using CardShopCoop.Modules.GameObjectIdentity;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Modules.SaveTransfer;
@@ -11,6 +14,8 @@ using CardShopCoop.Modules.SessionInput;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
+using CardShopCoop.Net.Datagrams;
+using CardShopCoop.Net.Kcp;
 using CardShopCoop.Net.Messages;
 using CardShopCoop.Net.Networking;
 using CardShopCoop.Net.Protocol;
@@ -184,8 +189,9 @@ namespace CardShopCoop
         private const float JoinAttemptSeconds = 5f;
         private int _joinAttempt;
         private float _joinAttemptAt;
-        private readonly Dictionary<INetworkingBackend, ConnectionId> _connections = new();
+        private readonly Dictionary<INetworkingBackend, ConnectionId> _attempts = new();
         private readonly Dictionary<INetworkingBackend, ICoopTransport> _children = new();
+        private long _nextAttempt;
 
         /// <summary>Those two are per session; this one deliberately outlives it. A failed start ends
         /// the session and resets the view to baseline, and the reason has to still be there to read
@@ -234,7 +240,6 @@ namespace CardShopCoop
         private bool _dispatchBacklogWarned;
         private const int DispatchBudget = 256;
         private const int DispatchBacklogCap = DispatchBudget * 8;
-        private const int MaxIncomingAdmissionPerFrame = DispatchBudget * 2;
         private const int MaxDisconnectResultsPerFrame = 64;
 
         internal static int SessionGeneration
@@ -263,6 +268,7 @@ namespace CardShopCoop
         {
             Instance = this;
             _unityThreadId = Thread.CurrentThread.ManagedThreadId;
+            MainThreadGuard.Capture();
             _messageRouter.RegisterCoreAttributedHandlers(this);
             _messageRouter.HandlerFailed += OnHandlerFailed;
             _dispatcher.Start();
@@ -296,7 +302,7 @@ namespace CardShopCoop
                 _messageRouter, InGameLevel, Broadcast,
                 Send, ConnectionIds, PresenceApi.PeerName,
                 (text, seconds) => SetStatus(text), () => SaveTransferApi.PreloadHold,
-                null));
+                null, null, Connections));
             SceneManager.sceneLoaded += OnSceneLoaded;
             Util.GameLoadingGuard.Install();
 
@@ -403,6 +409,29 @@ namespace CardShopCoop
             }
 
             EnsureBackendWired(backend);
+
+            // A backend carries exactly one attempt. Release a superseded attempt before starting
+            // a new one; otherwise its bearer/lobby would be orphaned because the new handle
+            // replaces it in _attempts.
+            ConnectionId previous;
+            lock (_sessionLock)
+            {
+                _attempts.TryGetValue(backend, out previous);
+            }
+            if (previous.IsValid)
+            {
+                try
+                {
+                    backend.Disconnect(previous);
+                }
+                catch (Exception error) { CoopLog.Swallow(error); }
+                RemoveBackendChild(backend);
+                lock (_sessionLock)
+                {
+                    _attempts.Remove(backend);
+                }
+            }
+
             if (hosting)
             {
                 if (values != null && values.TryGetValue(FieldId.Password, out var hostPassword))
@@ -418,62 +447,39 @@ namespace CardShopCoop
                 _joinPassword = FieldValue(backend, ConnectMode.Join, FieldId.Password);
             }
 
+            var attempt = new ConnectionId(Interlocked.Increment(ref _nextAttempt));
+            lock (_sessionLock)
+            {
+                _attempts[backend] = attempt;
+            }
+
+            if (!hosting || _activeBackend == null)
+            {
+                _activeBackend = backend;
+            }
+
+            SetStatus(hosting ? "Hosting..." : "Connecting...");
+
+            // Capture the generation NOW: a backend whose connect is asynchronous (Steam's lobby
+            // entry) can report back after this session has ended and a new one has started, and
+            // that late result must not touch the new session. The attempt handle is stored before
+            // Connect, so a synchronous BearerReady/Failed is correlated correctly.
+            var generation = SessionGeneration;
+            var callbacks = new BackendCallbacks(this, backend, attempt, generation);
             try
             {
-                // Capture the generation NOW: a backend whose connect is asynchronous (Steam's lobby
-                // entry) can report back after this session has ended and a new one has started, and
-                // that late result must not touch the new session.
-                var generation = SessionGeneration;
-
-                // A backend may settle Connect SYNCHRONOUSLY (IP rejects a malformed address before it
-                // returns; Steam's catch settles a failed lobby entry). Running the result callback
-                // then would race the bookkeeping below: OnBackendFailed would find no _connections
-                // entry, skip the backend's own teardown (so Steam's transport stayed "active" and the
-                // next attempt failed), tear the session down, and then this method would re-add the
-                // dead connection and flip the status back to "Connecting...". Defer a synchronous
-                // result until the handle is recorded, so the failure path sees the connection and
-                // disconnects the backend it belongs to.
-                var connectReturned = false;
-                var hasPendingResult = false;
-                ConnectionId pendingHandle = default;
-                ConnectResult pendingResult = default;
-
-                var id = backend.Connect(mode, values, (handle, result) =>
-                {
-                    if (!connectReturned)
-                    {
-                        pendingHandle = handle;
-                        pendingResult = result;
-                        hasPendingResult = true;
-                        return;
-                    }
-
-                    OnBackendConnectResult(backend, handle, result, generation);
-                });
-
-                lock (_sessionLock)
-                {
-                    _connections[backend] = id;
-                }
-
-                if (!hosting || _activeBackend == null)
-                {
-                    _activeBackend = backend;
-                }
-
-                SetStatus(hosting ? "Hosting..." : "Connecting...");
-
-                connectReturned = true;
-                if (hasPendingResult)
-                {
-                    OnBackendConnectResult(backend, pendingHandle, pendingResult, generation);
-                }
+                backend.Connect(attempt, mode, values, callbacks);
+                callbacks.ConnectReturned();
             }
             catch (Exception error)
             {
-                // A backend that threw while connecting is a failed ADDITION, not necessarily the end
-                // of the session - see OnBackendFailed, which ends it only when nothing is left.
-                OnBackendFailed(backend, "Could not connect: " + error.Message);
+                // A backend that threw while connecting is a failed ADDITION, not necessarily the
+                // end of the session - see OnBackendFailed, which ends it only when nothing is left.
+                callbacks.ConnectReturned();
+                if (IsCurrentAttempt(backend, attempt))
+                {
+                    OnBackendFailed(backend, attempt, "Could not connect: " + error.Message, false);
+                }
             }
         }
 
@@ -512,6 +518,12 @@ namespace CardShopCoop
             // and waiting is precisely the ordering that broke. Behaviours bind handlers on activation
             // and only send from their own ticks, by which time the transport is there.
             ActivateLiveModuleHooks();
+            ExtendedInformationCatalog.BeginSession();
+
+            // Persistent behaviours (SessionInput, debug hooks, external UI/input) outlive a
+            // session, so the live runtime above cannot deliver their start event. The persistent
+            // registry gets it here, and Shutdown sends the matching stop.
+            _persistentRuntime?.SessionStarted();
         }
 
         /// <summary>
@@ -550,8 +562,9 @@ namespace CardShopCoop
 
         // ------------------------------------------------------------------ backend wiring
 
-        /// <summary>Subscribes to a backend once. Every callback carries the backend's own handle,
-        /// which is how a late callback from a superseded connection is dropped.</summary>
+        /// <summary>Subscribes to a backend's out-of-band join requests once. The connect attempt
+        /// itself is delivered through the per-attempt <see cref="IBackendConnectCallbacks"/>, so
+        /// there is no long-lived transport event to wire here.</summary>
         private void EnsureBackendWired(INetworkingBackend backend)
         {
             lock (_sessionLock)
@@ -562,10 +575,6 @@ namespace CardShopCoop
                 }
             }
 
-            backend.TransportChanged += (handle, transport) =>
-                OnBackendTransportChanged(backend, transport);
-            backend.PeerConnected += (handle, connection) => OnBackendPeerConnected(connection);
-            backend.Failed += (handle, reason) => OnBackendFailed(backend, reason);
             backend.JoinRequested += (requesting, values) => OnBackendJoinRequested(requesting, values);
         }
 
@@ -670,28 +679,8 @@ namespace CardShopCoop
             ConnectBackend(backend, ConnectMode.Join, values);
         }
 
-        private void OnBackendConnectResult(INetworkingBackend backend, ConnectionId handle,
-            ConnectResult result, int generation)
+        private void OnBackendConnected(INetworkingBackend backend)
         {
-            if (!IsSessionGeneration(generation))
-            {
-                return;
-            }
-
-            if (!result.Success)
-            {
-                // Same treatment as any other backend failure, for the same reason: the BACKEND owns
-                // its transport, so tearing it down here is also what clears a failed attempt's
-                // "active" state. Without that the group kept offering a Stop button for an attempt
-                // that was already over, and pressing it could only do nothing.
-                //
-                // And the session ends ONLY if nothing is left. Aborting it outright - which is what
-                // this path used to do - is why a failed Steam host took working direct-IP hosting
-                // down with it: the two backends are independent on purpose.
-                OnBackendFailed(backend, result.Error ?? "connection failed");
-                return;
-            }
-
             ClearBackendError(backend, _activeMode);
 
             // A LAN host generates its session password inside the backend; adopt it here so the
@@ -706,7 +695,8 @@ namespace CardShopCoop
             SetStatus(Role == CoopRole.Host ? "Hosting - waiting for a player..." : "Connected");
         }
 
-        private void OnBackendTransportChanged(INetworkingBackend backend, ICoopTransport transport)
+        private void OnBackendTransportReady(INetworkingBackend backend, ConnectionId attempt,
+            ICoopTransport transport, int band)
         {
             if (transport == null)
             {
@@ -714,10 +704,20 @@ namespace CardShopCoop
                 return;
             }
 
-            // A backend that starts a SECOND transport without having torn the first one down (an
-            // IP re-connect that overwrote its own _transport) would otherwise leave the old child
-            // in the pump forever, because nothing else references it. Drop any superseded child
-            // first: RemoveBackendChild queues its Stop/Dispose on the pump thread.
+            if (!IsCurrentAttempt(backend, attempt))
+            {
+                // The attempt was replaced before its bearer reached the pump. Dispose the
+                // unstarted transport rather than leaving it alive with no owner.
+                try
+                {
+                    transport.Dispose();
+                }
+                catch (Exception error) { CoopLog.Swallow(error); }
+                return;
+            }
+
+            // A second bearer for the same backend replaces the old child. Remove any superseded
+            // child first: its Stop/Dispose is queued on the pump thread.
             RemoveBackendChild(backend);
 
             lock (_sessionLock)
@@ -730,7 +730,7 @@ namespace CardShopCoop
                 _group = new CoopTransportGroup();
             }
 
-            _group.Add(transport, backend.ConnectionIdBase);
+            _group.Add(transport, band);
             if (_pump == null)
             {
                 _pump = NetworkPump.Wrap(_group);
@@ -740,6 +740,192 @@ namespace CardShopCoop
                 {
                     ActivateLiveModuleHooks();
                 }
+            }
+        }
+
+        private bool IsCurrentAttempt(INetworkingBackend backend, ConnectionId attempt)
+        {
+            lock (_sessionLock)
+            {
+                return _attempts.TryGetValue(backend, out var current) && current == attempt;
+            }
+        }
+
+        private void HandleBearerReady(INetworkingBackend backend, ConnectionId attempt,
+            IDatagramTransport bearer, int generation)
+        {
+            if (!IsSessionGeneration(generation) || !IsCurrentAttempt(backend, attempt))
+            {
+                try
+                {
+                    bearer?.Dispose();
+                }
+                catch (Exception error) { CoopLog.Swallow(error); }
+                return;
+            }
+
+            if (bearer == null)
+            {
+                OnBackendFailed(backend, attempt, "the backend produced no bearer", false);
+                return;
+            }
+
+            var isHost = Role == CoopRole.Host;
+            var band = isHost ? NetworkingBackends.BandOf(backend) : 1;
+            KcpSessionManager kcp;
+            try
+            {
+                kcp = new KcpSessionManager(bearer, isHost);
+                kcp.SetConnectionIdBand(band, band + (isHost ? NetworkingBands.Size : 1));
+                kcp.PeerConnected += OnBackendPeerConnected;
+            }
+            catch (Exception error)
+            {
+                try
+                {
+                    bearer.Dispose();
+                }
+                catch (Exception disposeError) { CoopLog.Swallow(disposeError); }
+                OnBackendFailed(backend, attempt, "transport startup failed: " + error.Message, false);
+                return;
+            }
+
+            OnBackendTransportReady(backend, attempt, LagTransport.Wrap(kcp), band);
+        }
+
+        private void HandleBackendConnected(INetworkingBackend backend, ConnectionId attempt,
+            int generation)
+        {
+            if (!IsSessionGeneration(generation) || !IsCurrentAttempt(backend, attempt))
+            {
+                return;
+            }
+
+            OnBackendConnected(backend);
+        }
+
+        private void HandleBackendFailed(INetworkingBackend backend, ConnectionId attempt,
+            string reason, bool retryable, int generation)
+        {
+            if (!IsSessionGeneration(generation) || !IsCurrentAttempt(backend, attempt))
+            {
+                return;
+            }
+
+            OnBackendFailed(backend, attempt, reason, retryable);
+        }
+
+        /// <summary>Marshals a backend callback to the Unity thread. Callbacks may arrive on a
+        /// platform thread (Steam), and the session/Unity objects must only be touched here.</summary>
+        private void RunOnMainThread(Action action)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            if (Thread.CurrentThread.ManagedThreadId == _unityThreadId)
+            {
+                action();
+                return;
+            }
+
+            if (!TryEnqueueMainThread(action))
+            {
+                CoopPlugin.Log?.LogError(
+                    "coop: could not queue a backend callback on the Unity thread");
+            }
+        }
+
+        /// <summary>Per-attempt callbacks. Synchronous callbacks from Connect are queued until
+        /// Connect returns, then marshalled to the Unity thread and checked against the current
+        /// attempt and session generation.</summary>
+        private sealed class BackendCallbacks : IBackendConnectCallbacks
+        {
+            private readonly CoopCore _core;
+            private readonly INetworkingBackend _backend;
+            private readonly ConnectionId _attempt;
+            private readonly int _generation;
+            private readonly object _gate = new();
+            private readonly Queue<Action> _pending = new();
+            private bool _connectReturned;
+
+            public BackendCallbacks(CoopCore core, INetworkingBackend backend,
+                ConnectionId attempt, int generation)
+            {
+                _core = core;
+                _backend = backend;
+                _attempt = attempt;
+                _generation = generation;
+            }
+
+            public void BearerReady(ConnectionId attempt, IDatagramTransport bearer)
+            {
+                if (attempt != _attempt)
+                {
+                    return;
+                }
+
+                Dispatch(() => _core.HandleBearerReady(_backend, _attempt, bearer, _generation));
+            }
+
+            public void Connected(ConnectionId attempt)
+            {
+                if (attempt != _attempt)
+                {
+                    return;
+                }
+
+                Dispatch(() => _core.HandleBackendConnected(_backend, _attempt, _generation));
+            }
+
+            public void Failed(ConnectionId attempt, string reason, bool retryable = false)
+            {
+                if (attempt != _attempt)
+                {
+                    return;
+                }
+
+                Dispatch(() => _core.HandleBackendFailed(
+                    _backend, _attempt, reason, retryable, _generation));
+            }
+
+            public void ConnectReturned()
+            {
+                Action[] pending;
+                lock (_gate)
+                {
+                    _connectReturned = true;
+                    if (_pending.Count == 0)
+                    {
+                        return;
+                    }
+
+                    pending = _pending.ToArray();
+                    _pending.Clear();
+                }
+
+                _core.RunOnMainThread(() =>
+                {
+                    for (var i = 0; i < pending.Length; i++)
+                    {
+                        pending[i]();
+                    }
+                });
+            }
+
+            private void Dispatch(Action action)
+            {
+                lock (_gate)
+                {
+                    if (!_connectReturned)
+                    {
+                        _pending.Enqueue(action);
+                        return;
+                    }
+                }
+
+                _core.RunOnMainThread(action);
             }
         }
 
@@ -786,21 +972,21 @@ namespace CardShopCoop
             ConnectionId connection;
             lock (_sessionLock)
             {
-                if (!_connections.TryGetValue(backend, out connection))
+                if (!_attempts.TryGetValue(backend, out connection))
                 {
                     // The backend says it is hosting - that is why the button is there - but this
                     // session has no connection recorded for it. Log the disagreement: it is the only
                     // way to tell a stale backend flag from a Stop press that did nothing.
                     CoopPlugin.Log.LogInfo("stop ignored for " + backend.Id
-                        + ": it is not carrying this session (" + _connections.Count
+                        + ": it is not carrying this session (" + _attempts.Count
                         + " backend(s) are)");
                     return;
                 }
 
-                last = _connections.Count <= 1;
+                last = _attempts.Count <= 1;
                 if (!last)
                 {
-                    _connections.Remove(backend);
+                    _attempts.Remove(backend);
                 }
             }
 
@@ -810,9 +996,10 @@ namespace CardShopCoop
                 return;
             }
 
-            // The backend tears its own transport down and reports that through
-            // OnBackendTransportChanged, which removes it from the group; the other children stay.
+            // The runtime owns the transport and tears it down through the group; the backend only
+            // releases its own lobby/mapping state. Remove this backend's child while the others stay.
             backend.Disconnect(connection);
+            RemoveBackendChild(backend);
         }
 
         /// <summary>HOST ONLY: remove one client from the session, telling it why. The host and every
@@ -861,9 +1048,22 @@ namespace CardShopCoop
             }
         }
 
-        private void OnBackendFailed(INetworkingBackend backend, string reason)
+        private void OnBackendFailed(INetworkingBackend backend, ConnectionId attempt,
+            string reason, bool retryable)
         {
             var text = reason ?? "connection failed";
+
+            var remaining = 0;
+            lock (_sessionLock)
+            {
+                if (!_attempts.TryGetValue(backend, out var current) || current != attempt)
+                {
+                    return;
+                }
+
+                _attempts.Remove(backend);
+                remaining = _attempts.Count;
+            }
 
             // File it against the backend that produced it, in the mode it was started in, so it lands
             // in that backend's own section instead of reading as a session-wide problem.
@@ -871,25 +1071,13 @@ namespace CardShopCoop
             NoteBackendError(backend, _activeMode, text);
             CoopPlugin.Log.LogError("coop: " + (backend?.Id ?? "session") + " failed: " + text);
 
-            ConnectionId handle;
-            var remaining = 0;
-            lock (_sessionLock)
+            // The backend owns only its lobby/backend state now; the runtime owns the bearer and
+            // disposes it through the pump. Disconnect releases the backend-owned state.
+            try
             {
-                handle = _connections.TryGetValue(backend, out var current) ? current : default;
-                _connections.Remove(backend);
-                remaining = _connections.Count;
+                backend.Disconnect(attempt);
             }
-
-            // The BACKEND owns its transport, so it is the one that must tear it down. Removing the
-            // child from the group alone leaves its socket and receive thread alive.
-            if (handle.IsValid)
-            {
-                try
-                {
-                    backend.Disconnect(handle);
-                }
-                catch (Exception error) { CoopLog.Swallow(error); }
-            }
+            catch (Exception error) { CoopLog.Swallow(error); }
 
             RemoveBackendChild(backend);
 
@@ -901,7 +1089,8 @@ namespace CardShopCoop
             }
             else
             {
-                CoopPlugin.Log.LogWarning("transport '" + backend.Id + "' dropped: " + reason);
+                CoopPlugin.Log.LogWarning("transport '" + backend.Id + "' dropped: " + reason
+                    + (retryable ? " (retryable)" : ""));
             }
         }
 
@@ -932,7 +1121,7 @@ namespace CardShopCoop
                         Net?.GracefulDisconnect(connection, info);
                     }
                 },
-                Relay);
+                Relay, Connections);
             _liveRuntimeContext = context;
             _runtime = Role == CoopRole.Host
                 ? gameObject.AddComponent<ServerRuntimeBehaviour>()
@@ -1004,6 +1193,7 @@ namespace CardShopCoop
                 UnityVersion = Application.unityVersion ?? "",
                 MessageCatalog = messageCatalog,
                 MessageReliability = GetFrozenMessageReliability(messageCatalog),
+                ExtendedInformationCatalog = GetFrozenExtendedInformationCatalog(),
             };
             var connection = ConnectionFor(1);
             if (connection == null || Net is not ICoopHandshakeTransport handshake)
@@ -1031,6 +1221,9 @@ namespace CardShopCoop
 
             return names;
         }
+
+        private static List<string> GetFrozenExtendedInformationCatalog()
+            => new(ExtendedInformationCatalog.Keys);
 
         private static byte[] GetFrozenMessageReliability(IReadOnlyList<string> messageCatalog)
         {
@@ -1110,16 +1303,25 @@ namespace CardShopCoop
 
         private static bool TryValidateMessageCatalog(IList<string> peerCatalog,
             IReadOnlyList<string> expectedCatalog, out string reason)
+            => TryValidateCatalog(peerCatalog, expectedCatalog, "message", out reason);
+
+        /// <summary>
+        /// Exact, ordinal, order-sensitive comparison shared by the message catalog and the
+        /// extended-information catalog. Both are identities, so a peer that is missing, has an
+        /// extra, or ordered a key differently is refused rather than silently diverging.
+        /// </summary>
+        private static bool TryValidateCatalog(IList<string> peerCatalog,
+            IReadOnlyList<string> expectedCatalog, string label, out string reason)
         {
             if (peerCatalog == null)
             {
-                reason = "message catalog is missing";
+                reason = label + " catalog is missing";
                 return false;
             }
 
             if (peerCatalog.Count != expectedCatalog.Count)
             {
-                reason = "message catalog count differs (peer " + peerCatalog.Count
+                reason = label + " catalog count differs (peer " + peerCatalog.Count
                     + ", local " + expectedCatalog.Count + ")";
                 return false;
             }
@@ -1130,12 +1332,12 @@ namespace CardShopCoop
                 var peerName = peerCatalog[i];
                 if (peerName == null)
                 {
-                    reason = "message catalog contains a null name at index " + i;
+                    reason = label + " catalog contains a null name at index " + i;
                     return false;
                 }
                 if (!seen.Add(peerName))
                 {
-                    reason = "message catalog contains a duplicate name at index " + i;
+                    reason = label + " catalog contains a duplicate name at index " + i;
                     return false;
                 }
             }
@@ -1144,7 +1346,7 @@ namespace CardShopCoop
             {
                 if (!string.Equals(peerCatalog[i], expectedCatalog[i], StringComparison.Ordinal))
                 {
-                    reason = "message catalog differs at index " + i + " (peer '"
+                    reason = label + " catalog differs at index " + i + " (peer '"
                         + BoundedMessageName(peerCatalog[i]) + "', local '"
                         + BoundedMessageName(expectedCatalog[i]) + "')";
                     return false;
@@ -1181,7 +1383,7 @@ namespace CardShopCoop
             transport.ActivateMessageIds(connection);
         }
 
-        [MessageHandler(typeof(HelloMessage))]
+        [MessageHandler]
         private void HandleHello(MessageContext context, HelloMessage hello)
         {
             var connection = context?.Connection;
@@ -1246,6 +1448,17 @@ namespace CardShopCoop
                 return;
             }
 
+            var extendedInformationCatalog = GetFrozenExtendedInformationCatalog();
+            if (!TryValidateCatalog(hello.ExtendedInformationCatalog, extendedInformationCatalog,
+                "extended-information", out var extendedInformationReason))
+            {
+                CoopPlugin.Log.LogWarning("extended-information catalog handshake rejected for "
+                    + "connection " + connection.Id + ": " + extendedInformationReason);
+                RejectConn(connection, "extended-information catalog mismatch: "
+                    + extendedInformationReason);
+                return;
+            }
+
             if (!CatalogHandshake.IsIdentityUsable(hello.EnumIdentity))
             {
                 CoopPlugin.Log.LogWarning("catalog handshake rejected connection " + connection.Id
@@ -1282,6 +1495,7 @@ namespace CardShopCoop
 
             var peerName = ResolvePeerName(hello.SteamId, name);
             PresenceApi.SetPeerName(connection.Id, peerName);
+            PresenceApi.ApplyName(connection);
             // Remember the client's enum identity for the cross-build pre-send gate: it is the
             // only place the host learns which object types this peer can represent.
             CatalogIdMap.SetPeerIdentity(hello.EnumIdentity);
@@ -1340,6 +1554,7 @@ namespace CardShopCoop
                     HostCardsBlob = blobs.CardsBlob,
                     MessageCatalog = new List<string>(messageCatalog),
                     MessageReliability = (byte[])messageReliability.Clone(),
+                    ExtendedInformationCatalog = GetFrozenExtendedInformationCatalog(),
                 });
                 return true;
             }, () =>
@@ -1351,7 +1566,7 @@ namespace CardShopCoop
             }
         }
 
-        [MessageHandler(typeof(WelcomeMessage))]
+        [MessageHandler]
         private void HandleWelcome(MessageContext context, WelcomeMessage welcome)
         {
             var connection = context?.Connection;
@@ -1385,6 +1600,17 @@ namespace CardShopCoop
                 Shutdown("message reliability mismatch: " + messageReliabilityReason);
                 return;
             }
+
+            var localExtendedInformationCatalog = GetFrozenExtendedInformationCatalog();
+            if (!TryValidateCatalog(welcome.ExtendedInformationCatalog,
+                localExtendedInformationCatalog, "extended-information",
+                out var extendedInformationReason))
+            {
+                CoopPlugin.Log.LogWarning("extended-information catalog handshake rejected from "
+                    + "host: " + extendedInformationReason);
+                Shutdown("extended-information catalog mismatch: " + extendedInformationReason);
+                return;
+            }
             Net.ActivateMessageIds(connection);
 
             var hostIdentityValid = CatalogHandshake.IsIdentityUsable(welcome.HostEnumIdentity);
@@ -1404,7 +1630,9 @@ namespace CardShopCoop
             _hostVersion = welcome.Version ?? "";
             _hostGameVersion = welcome.GameVersion ?? "";
             _hostUnityVersion = welcome.UnityVersion ?? "";
-            PresenceApi.SetPeerName(1, ResolvePeerName(welcome.SteamId, welcome.HostName));
+            var hostName = ResolvePeerName(welcome.SteamId, welcome.HostName);
+            PresenceApi.SetPeerName(1, hostName);
+            PresenceApi.ApplyName(ConnectionFor(1));
             if (!SaveTransferApi.TryBeginClientTransfer(welcome.SaveLength,
                 welcome.BundleLength, welcome.SidecarsComplete, welcome.SidecarWarning))
             {
@@ -1430,7 +1658,7 @@ namespace CardShopCoop
             SetStatus("Downloading " + (PresenceApi.PeerName(1) ?? "host") + "'s shop...");
         }
 
-        [MessageHandler(typeof(ByeMessage))]
+        [MessageHandler]
         private void HandleBye(MessageContext context, ByeMessage message)
         {
             var connection = context?.Connection;
@@ -1455,6 +1683,15 @@ namespace CardShopCoop
 
         private void Send(int connectionId, INetMessage message)
         {
+            if (Role == CoopRole.Client && ActionLedger.IsActive && message is ActionMessage action
+                && action.ActionId == Guid.Empty && ActionLedger.IsAction(action))
+            {
+                // The action id is allocated and recorded before the message leaves, so a plain
+                // module only has to send the command.
+                ActionLedger.Submit(action);
+                return;
+            }
+
             var connection = ConnectionFor(connectionId);
             if (connection == null || Net == null)
             {
@@ -1469,6 +1706,13 @@ namespace CardShopCoop
 
         private void Broadcast(INetMessage message)
         {
+            if (Role == CoopRole.Client && ActionLedger.IsActive && message is ActionMessage action
+                && action.ActionId == Guid.Empty && ActionLedger.IsAction(action))
+            {
+                ActionLedger.Submit(action);
+                return;
+            }
+
             if (Net == null)
             {
                 CoopPlugin.Log.LogError("application broadcast failed: no live transport for message "
@@ -1520,6 +1764,9 @@ namespace CardShopCoop
             return Net == null ? Array.Empty<int>() : Net.Connections.Select(c => c.Id).ToArray();
         }
 
+        private IReadOnlyList<PeerConnection> Connections()
+            => Net == null ? Array.Empty<PeerConnection>() : Net.Connections;
+
         private void RejectConn(PeerConnection connection, string reason, bool retryable = false)
         {
             if (connection == null)
@@ -1564,8 +1811,10 @@ namespace CardShopCoop
                 try
                 {
                     // SessionInput and debug hooks are persistent by design, so the live runtime
-                    // shutdown above cannot deliver their session-stop event. Do that explicitly
-                    // before Role is reset, while retaining the process-lifetime runtime.
+                    // shutdown above cannot deliver their session-stop event. BeginSession sent the
+                    // matching start; send the stop here before Role is reset, while retaining the
+                    // process-lifetime runtime. The registry is idempotent, so the later
+                    // runtime.Shutdown at plugin unload does not fire it a second time.
                     _persistentRuntime?.SessionStopped();
                 }
                 finally
@@ -1581,6 +1830,8 @@ namespace CardShopCoop
             _peerBuilds.Clear();
             HudApi.Clear();
             CatalogIdMap.Clear();
+            ExtendedInformationCatalog.EndSession();
+            ExtendedInformationModule.ResetAll();
             WorldHostBehaviour.ResetCardState();
             WorldClientBehaviour.ResetCardState();
             SceneRef.ClearAll();
@@ -1702,13 +1953,24 @@ namespace CardShopCoop
             {
                 return;
             }
-            using (Util.PerfProbe.Sample("core.admit-incoming"))
+            // Decode and dispatch one message at a time. Entity-bearing DTO converters resolve
+            // live scene objects during decode, so a spawn handler must run before the next
+            // message that references the spawned object is decoded.
+            using (Util.PerfProbe.Sample("core.pump-incoming"))
             {
-                AdmitIncoming();
-            }
-            using (Util.PerfProbe.Sample("core.dispatch-incoming"))
-            {
-                DispatchIncoming();
+                for (var i = 0; i < DispatchBudget && Net != null; i++)
+                {
+                    if (_dispatchBuffer.Count == 0)
+                    {
+                        AdmitIncoming(1);
+                    }
+                    if (_dispatchBuffer.Count == 0)
+                    {
+                        break;
+                    }
+
+                    DispatchIncoming(1);
+                }
             }
             if (Net == null)
             {
@@ -1752,11 +2014,29 @@ namespace CardShopCoop
             }
         }
 
-        private void AdmitIncoming()
+        private bool TryDequeueNext(out InMsg message)
+        {
+            if (Net is IWireFrameTransport wire && wire.TryDequeueWireFrame(out var frame))
+            {
+                if (!Msg.TryDecodeFrame(frame, out message))
+                {
+                    Net.GracefulDisconnect(frame.Connection, new DisconnectInfo(
+                        "invalid application frame", false, "protocol_error", false,
+                        frame.Connection?.State ?? ConnectionState.Disconnected));
+                    return false;
+                }
+
+                return true;
+            }
+
+            return Net.TryDequeueIncoming(out message);
+        }
+
+        private void AdmitIncoming(int max)
         {
             var admitted = 0;
-            while (admitted++ < MaxIncomingAdmissionPerFrame
-                && Net != null && Net.TryDequeueIncoming(out var message))
+            while (admitted++ < max
+                && Net != null && TryDequeueNext(out var message))
             {
                 if (message.Connection != null
                     && _dispatchRejectedConnections.Contains(message.Connection.Id))
@@ -1799,13 +2079,18 @@ namespace CardShopCoop
             Util.PerfProbe.RecordQueueDepth("core.dispatch", _dispatchBuffer.Count, DispatchBacklogCap);
         }
 
-        private void DispatchIncoming()
+        private void DispatchIncoming(int max)
         {
             var consumed = 0;
             var units = 0;
             var dispatched = 0;
             for (var i = 0; i < _dispatchBuffer.Count; i++)
             {
+                if (dispatched >= max)
+                {
+                    break;
+                }
+
                 var message = _dispatchBuffer[i];
                 if (message.Message == null)
                 {
@@ -2123,6 +2408,7 @@ namespace CardShopCoop
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
             _worldReady = false;
+            GameObjectIdentityApi.Reset();
             // The game can rebuild its event manager between scenes; make sure the co-op
             // subscriptions follow the instance that is dispatching.
             RegisterEventListeners();
@@ -2344,8 +2630,8 @@ namespace CardShopCoop
             List<KeyValuePair<INetworkingBackend, ConnectionId>> connections;
             lock (_sessionLock)
             {
-                connections = new List<KeyValuePair<INetworkingBackend, ConnectionId>>(_connections);
-                _connections.Clear();
+                connections = new List<KeyValuePair<INetworkingBackend, ConnectionId>>(_attempts);
+                _attempts.Clear();
                 _children.Clear();
                 // _wired is deliberately NOT cleared. The backends are process-lifetime singletons
                 // and these are process-lifetime subscriptions, so re-subscribing every session

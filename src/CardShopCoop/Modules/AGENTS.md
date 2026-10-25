@@ -11,13 +11,33 @@ needed; not every feature needs every file.
   `[ClientBehaviour]`; use `[OnFullyJoined]` for late-join initialization where appropriate.
   These attributes and the message contract come from the `CardShopCoop.Api` assembly.
 - Behaviours are discovered automatically by `CoopBehaviourRegistry`; do not add manual catalog
-  registration. Keep handler registration, Harmony patches, subscriptions, and network resources
-  owned by the module, and make unpatch/shutdown idempotent.
+  registration. The registry binds every attributed handler before `OnEnable`, so a discovered
+  behaviour does not need to call `RegisterAttributedHandlers`/`UnregisterAttributedHandlers`
+  itself; do not add new calls. Use those only for a component you create directly. Keep Harmony
+  patches, subscriptions, and network resources owned by the module, and make unpatch/shutdown
+  idempotent.
 - Built-in modules are keyed by their `CardShopCoop.Modules.*` namespace for the enable/disable
   checkbox; an external mod is keyed by its assembly name (`ModuleCatalog.BindExternal`). Keep
   feature DTOs, hooks, and state inside the module. Put only generic infrastructure outside
   it, and expose narrow, intentional cross-module APIs rather than reaching into another module's
   internals.
+- **Replicated object lifecycle belongs to `Modules/GameObjectIdentity`.** Host creation/removal
+  hooks, entity identity allocation/binding, spawn/despawn messages, join lifecycle baselines, and
+  per-kind object↔identity maps must not be added to a feature module. Feature modules keep only
+  state, animation, action replay, holds, contents, inventory, UI, and gameplay updates. A feature
+  module that needs to create/remove a replicated object calls the identity adapter/lifecycle API;
+  it does not broadcast its own spawn/despawn message.
+- **Feature messages carry live Unity object references, not entity IDs.** A message outside
+  `Modules/GameObjectIdentity` must use `Customer`, `Worker`, `InteractableObject`, or the concrete
+  live type. If the reference resolves to null, log and drop the message. Correlation IDs, data
+  indices, UI indices, and enums are not entity references and may remain.
+- **Warehouse entries are not all entities.** A live warehouse box is a Unity
+  `InteractablePackagingBox`; a stored stack entry is a value in a `ShelfCompartment` and has no
+  live object. Address one with `WarehouseShelfBoxRef` (live `WarehouseShelf` + compartment index +
+  slot hint), never a fake GameObject, a POCO entity, or a raw Guid field. `ItemType`/`IsBig` travel
+  once per `WarehouseCompartmentState` header and `Amount` is the mutable per-entry value.
+  `Modules/GameObjectIdentity` owns the Guid/location registry and the wire converter; feature code
+  must not keep its own warehouse identity map.
 
 ## Synchronization and compatibility
 
@@ -37,26 +57,37 @@ needed; not every feature needs every file.
   authoritative state and apply it from that object's lifecycle hook; do not poll or add a network
   readiness handshake.
 - Normal play uses the smallest useful authoritative delta; full snapshots are join baselines only.
-- Clients predict interactions immediately. Record the local apply/undo actions with one generic
-  `PredictionId`, send the intent before applying the prediction, and reconcile when the accepted
-  host delta returns. A rejected intent uses the one generic prediction-rollback message, and the
-  host may send the affected entity's authoritative state to the requester immediately before that
-  rollback, through the module's normal state messages with an empty prediction id, so the client
-  reconciles to authority instead of inverting a snapshot authority has already moved past. Do not
-  add new rejection message types, revisions, or per-module recovery protocols. Rejections that
-  bypass a module's apply validation (world not in game, sender not yet admitted, an invalid intent
-  identity) carry only the generic rollback, so undo closures must stay correct without a refresh.
+- Clients act immediately through the game's own path. A client command derives from
+  `ActionMessage` and overrides `OnApply`/`OnUndo`; `context.Send` fills the one generic
+  `ActionId` and records the local replay/reverse. The host runs `OnApply` and then the module's
+  `[MessageHandler]` publishes authority. A rejected command uses the one generic
+  action-rollback message, and the host may send the affected entity's authoritative state to the
+  requester immediately before that rollback, through the module's normal state messages with the
+  rejected action id, so the client reconciles to authority instead of inverting a snapshot
+  authority has already moved past. Do not add new rejection message types, revisions, or
+  per-module recovery protocols. Rejections that bypass a module's apply validation (world not in
+  game, sender not yet admitted, an invalid intent identity) carry only the generic rollback, so
+  undo methods must stay correct without a refresh.
 - A client action that is still awaiting its host decision owns the entity until it resolves. An
   authoritative hold, descriptor, or pose that reaches the client before that decision crossed the
   local action on the wire and describes its older state, so it must not be applied over the
   pending action (for example, a granted box hold must not pull a box the player has already thrown
   back into their hand, and a box descriptor must not re-pose it). Track in-flight local moves by
-  their prediction id and let the action's own echo or rollback settle the state.
+  their action id and let the action's own echo or rollback settle the state.
 - Authoritative host messages are trusted. Client handlers apply them directly without caps,
   normalization, duplicate filtering, sender checks, or malformed-host validation. Authentication
   and resource limits belong to central routing and transport.
 - Modules must not introduce central DTO allowlists or module-specific exceptions into generic
   network code.
+- Entity-bearing DTO fields are main-thread only. A message that references an entity that already
+  exists may carry a raw `Customer`/`Worker`/`InteractableObject` field; the global wire converter
+  maps it to the identity module's stable id. A message that creates or removes an entity belongs to
+  `GameObjectIdentity` and carries a polymorphic `EntityDescriptor`, never a live object and never a
+  second identity. A reference handler treats a null object as the normal unknown-entity drop.
+- Extended-information types must be concrete `ExtendGameObjectInformation<T>` subclasses whose
+  owner is an NPC, packaging box, decoration, or placed `InteractableObject`. Global values are
+  classes marked `[GlobalInformation]` and use the same catalog. They join the session handshake
+  catalog; never add a string type name to the wire.
 - Verify game interactions against both required baselines: legacy `decompiled\1.0-25315983`
   and beta `decompiled\1.00` (regenerating or diffing baselines is covered by the
   `decompile` skill). Anything present in only one build must be accessed by reflection

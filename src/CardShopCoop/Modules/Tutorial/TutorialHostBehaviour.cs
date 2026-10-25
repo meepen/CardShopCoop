@@ -1,27 +1,34 @@
 using System;
-using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Tutorial
 {
-    /// <summary>Host authority for tutorial progress and bounded action validation.</summary>
+    /// <summary>
+    /// Host authority for tutorial progress. The published <see cref="TutorialState"/> is the one
+    /// truth: a guest's increment is validated, applied through the game's own
+    /// <c>AddTaskValue</c>, and answered with the resulting state under the action id. A host-side
+    /// change publishes the same value directly, so the join baseline and live changes share one
+    /// path.
+    /// </summary>
     [ServerBehaviour]
     public sealed class TutorialHostBehaviour : CoopBehaviour
     {
         private const float MaxActionIncrement = 100f;
         private const int MaxStateValues = 4096;
+
         private static TutorialHostBehaviour _active;
-        private readonly HashSet<int> _fullyJoined = new();
+
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
-        private bool _applyingIntent;
 
         private void OnEnable()
         {
@@ -30,250 +37,183 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
             }
 
-
             _context = RuntimeContext;
-            var registered = false;
-            try
-            {
-                TutorialInterop.Reset();
-                _context.Messages.RegisterAttributedHandlers(this);
-                registered = true;
-                _active = this;
-                SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.tutorial.host");
-                _harmony.CreateClassProcessor(typeof(TutorialVisibilityPatch)).Patch();
-            }
-            catch (Exception exception)
-            {
-                CoopPlugin.Log.LogError("Tutorial host initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
-                SceneManager.sceneLoaded -= OnSceneLoaded;
-                if (registered)
-                {
-                    _context.Messages.UnregisterAttributedHandlers(this);
-                }
-
-
-                if (ReferenceEquals(_active, this))
-                {
-                    _active = null;
-                }
-
-
-                TutorialInterop.Reset();
-                _context = null;
-                throw;
-            }
+            TutorialInterop.Reset();
+            _active = this;
+            SceneManager.sceneLoaded += OnSceneLoaded;
+            _harmony = new Harmony("dev.meepen.cardshopcoop.tutorial.host");
+            _harmony.CreateClassProcessor(typeof(TutorialProgressPatch)).Patch();
         }
 
-        [OnFullyJoined]
-        private void SendInitialState(PeerConnection connection)
+        /// <summary>Seeds the session value before the transport starts. The generic
+        /// extended-information baseline delivers it to a late joiner; there is deliberately no
+        /// module join message or per-peer send.</summary>
+        [OnSessionStarted]
+        private void SeedState()
         {
-            if (connection == null)
+            if (_shutdown || _context == null || !_context.InGame())
             {
+                // Hosting before the shop data is loaded has no progression to seed; the first
+                // in-game change publishes it and the join baseline carries it from then on.
                 return;
             }
 
-
-            _fullyJoined.Add(connection.Id);
-            SendState(connection.Id);
-        }
-
-        [OnClientDisconnected]
-        private void ForgetPeer(PeerConnection connection, DisconnectInfo info)
-        {
-            if (connection == null)
+            var state = BuildState(Guid.Empty, rejected: false);
+            if (state == null)
             {
+                CoopPlugin.Log.LogWarning(
+                    "Tutorial host could not seed the session state; the local progression is not "
+                    + "a valid snapshot.");
                 return;
             }
 
-
-            _fullyJoined.Remove(connection.Id);
+            ExtendedInformationModule.SeedGlobal(typeof(TutorialState), state);
         }
 
-        [MessageHandler(typeof(TutorialActionDeltaMessage))]
-        private void HandleAction(MessageContext context, TutorialActionDeltaMessage message)
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, TutorialActionIntent message)
         {
-            if (!IsPeerMessage(context) || message == null
-                || !ValidateAction(message))
+            if (_shutdown || context?.Connection == null || message == null)
             {
-                if (message != null)
-                {
-                    CoopPlugin.Log.LogDebug("tutorial intent rejected from peer "
-                        + (context?.ConnectionId ?? 0)
-                        + ": expected index=" + message.ExpectedTutorialIndex
-                        + " condition=" + message.ExpectedCondition
-                        + " action=" + message.Action
-                        + " increment=" + message.Increment);
-                }
-                if (message != null && message.PredictionId != Guid.Empty)
-                {
-                    PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
-                }
-
-
-                return;
+                return IntentValidation.Deny("session is not active");
             }
 
-            try
+            if (!context.IsAuthenticated)
             {
-                _applyingIntent = true;
-                try
-                {
-                    TutorialManager.AddTaskValue((ETutorialTaskCondition)message.Action,
-                        message.Increment);
-                }
-                finally
-                {
-                    _applyingIntent = false;
-                }
-                BroadcastDelta(BuildDelta(message.PredictionId,
-                    (ETutorialTaskCondition)message.Action, message.ExpectedTutorialIndex));
+                return IntentValidation.Deny("player is not authenticated");
             }
-            catch (Exception exception)
+
+            // Progress is gameplay traffic: it waits for the peer's fully-joined acknowledgement,
+            // exactly as the old per-peer gate did.
+            if (context.Connection.State != ConnectionState.FullyJoined)
             {
-                CoopPlugin.Log.LogError("Tutorial action failed for peer "
-                    + context.Connection.Id + ": " + exception);
-                if (message.PredictionId != Guid.Empty)
-                {
-                    PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
-                }
-
+                return IntentValidation.Deny("player is still joining");
             }
-        }
 
-        private bool ValidateAction(TutorialActionDeltaMessage message)
-        {
             // Mirror vanilla: any defined condition may accumulate progress whenever its action
-            // genuinely happens. The game's own TutorialData list records out-of-order progress and
-            // the active subgroup consumes it when that task becomes current, so requiring the
+            // genuinely happens. The game's own TutorialData list records out-of-order progress
+            // and the active subgroup consumes it when that task becomes current, so requiring the
             // client's captured action to equal the host's CURRENT task rejected legitimate
-            // off-task progress and rolled the guest back on every pickup/placement. It was not a
-            // real guard either: a forged message can simply name the host's expected task. The
-            // host still applies the increment and broadcasts the resulting values, so it stays
-            // authoritative; only decrements stay refused (the rollback restores, then the host
-            // delta re-syncs).
-            if (!Enum.IsDefined(typeof(ETutorialTaskCondition), message.Action)
-                || message.Action == (int)ETutorialTaskCondition.None)
+            // off-task progress. The host applies the increment and publishes the resulting
+            // values, so it stays authoritative; only non-progress is refused.
+            if (!Enum.IsDefined(typeof(ETutorialTaskCondition), message.Condition)
+                || message.Condition == ETutorialTaskCondition.None)
             {
-                return false;
+                return IntentValidation.Deny("unknown tutorial condition");
             }
-
-
-            if (message.ExpectedCondition != message.Action)
-            {
-                return false;
-            }
-
 
             if (message.Increment <= 0f || float.IsNaN(message.Increment)
                 || float.IsInfinity(message.Increment) || message.Increment > MaxActionIncrement)
             {
-
-                return false;
+                return IntentValidation.Deny("increment is not progress");
             }
 
-
-            return true;
+            return IntentValidation.Allow();
         }
 
-        private void BroadcastDelta(TutorialDeltaMessage message)
+        /// <summary>Answers a refused action with the pre-intent state under its own id, so the
+        /// requester undoes its optimistic run before applying this authority. The generic
+        /// rollback that follows then resolves an action that is already retired.</summary>
+        [IntentRejected]
+        private void Rejected(CoopMessageContext context, TutorialActionIntent message, string reason)
         {
-            if (_shutdown || _context == null || !_context.InGame() || message == null)
+            if (_shutdown || context?.Connection == null || message == null)
             {
                 return;
             }
 
-
-            _context.Broadcast(message);
+            CoopPlugin.Log.LogDebug("tutorial intent rejected from peer "
+                + context.ConnectionId + ": " + reason);
+            Publish(message.ActionId, rejected: true);
         }
 
-        private void SendState(int peer)
+        /// <summary>Runs after <see cref="ActionMessage.OnApply"/> applied the validated increment,
+        /// so the state read here is the authoritative post-action progression.</summary>
+        [MessageHandler]
+        private void Handle(CoopMessageContext context, TutorialActionIntent message)
         {
-            if (_shutdown || _context == null || !_context.InGame()
-                || !TryBuildState(out var state))
+            if (_shutdown || context?.Connection == null || message == null)
             {
                 return;
             }
 
-
-            _context.Send(peer, state);
+            Publish(message.ActionId, rejected: false);
         }
 
-        private bool TryBuildState(out TutorialStateMessage message)
+        /// <summary>Publishes a host-originated change. While this behaviour is applying a client's
+        /// intent (its <c>OnApply</c> or its handler) the guard suppresses this observer, so the
+        /// intent's handler owns the one authoritative publish and the change is never broadcast
+        /// twice.</summary>
+        internal void PublishHostChange()
         {
-            message = null;
-            if (_context == null || !_context.InGame()
-                || !TutorialInterop.IsSceneReady(TutorialInterop.FindManager())
-                || CPlayerData.m_TutorialDataList == null
-                || CPlayerData.m_TutorialDataList.Count > MaxStateValues)
+            if (ReentrancyGuard.Suppressed(this))
             {
-
-                return false;
+                return;
             }
 
+            Publish(Guid.Empty, rejected: false);
+        }
 
-            var list = CPlayerData.m_TutorialDataList;
-            message = new TutorialStateMessage
+        private void Publish(Guid actionId, bool rejected)
+        {
+            if (_shutdown || _context == null || CoopCore.Instance?.Net == null)
             {
-                Full = true,
-                TutorialIndex = CPlayerData.m_TutorialIndex,
-            };
-            for (var i = 0; i < list.Count; i++)
+                return;
+            }
+
+            var state = BuildState(actionId, rejected);
+            if (state == null)
             {
-                var value = list[i];
+                CoopPlugin.Log.LogWarning("Tutorial state was not published: the local progression "
+                    + "is not a valid snapshot.");
+                return;
+            }
+
+            // The intro's key hints belong to index 0. A guest can name the shop here on the
+            // host, so the host must end its own intro presentation too; the marker is still up
+            // at this point and ClearIntroPresentation is a no-op once it is gone.
+            if (state.TutorialIndex != 0)
+            {
+                TutorialInterop.ClearIntroPresentation();
+            }
+
+            Global<TutorialState>.Value = state;
+        }
+
+        private static TutorialState BuildState(Guid actionId, bool rejected)
+        {
+            var values = CPlayerData.m_TutorialDataList;
+            if (values == null || values.Count > MaxStateValues)
+            {
+                return null;
+            }
+
+            var snapshot = new TutorialValue[values.Count];
+            for (var i = 0; i < values.Count; i++)
+            {
+                var value = values[i];
                 if (value == null || !TutorialInterop.IsFiniteNonNegative(value.value))
                 {
-
-                    return false;
+                    return null;
                 }
 
-
-                message.Values.Add(new TutorialValue
+                snapshot[i] = new TutorialValue
                 {
-                    Condition = (int)value.tutorialTaskCondition,
+                    Condition = value.tutorialTaskCondition,
                     Value = value.value,
-                });
+                };
             }
-            return true;
-        }
 
-        private static TutorialDeltaMessage BuildDelta(Guid predictionId,
-            ETutorialTaskCondition condition, int previousIndex)
-        {
-            var message = new TutorialDeltaMessage
+            return new TutorialState
             {
-                PredictionId = predictionId,
                 TutorialIndex = CPlayerData.m_TutorialIndex,
-                Condition = (int)condition,
-                Value = TutorialInterop.ValueFor(condition),
+                Values = snapshot,
+                ActionId = actionId,
+                Rejected = rejected,
             };
-            if (previousIndex != message.TutorialIndex)
-            {
-                message.Values = new List<TutorialValue>();
-                var values = CPlayerData.m_TutorialDataList;
-                for (var i = 0; values != null && i < values.Count; i++)
-                {
-                    message.Values.Add(new TutorialValue
-                    {
-                        Condition = (int)values[i].tutorialTaskCondition,
-                        Value = values[i].value,
-                    });
-                }
-
-            }
-            return message;
         }
 
-        private bool IsPeerMessage(MessageContext context)
-            => !_shutdown && context?.Connection != null
-                && _fullyJoined.Contains(context.Connection.Id);
-
-        private void OnSceneLoaded(Scene _, LoadSceneMode __)
-        {
-            TutorialInterop.Reset();
-        }
+        private void OnSceneLoaded(Scene _, LoadSceneMode __) => TutorialInterop.Reset();
 
         internal void Shutdown()
         {
@@ -282,9 +222,7 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
             }
 
-
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
             _harmony = null;
@@ -293,36 +231,22 @@ namespace CardShopCoop.Modules.Tutorial
                 _active = null;
             }
 
-
-            _fullyJoined.Clear();
             TutorialInterop.Reset();
             _context = null;
         }
 
         private void OnDestroy() => Shutdown();
 
-        [HarmonyPatch(typeof(TutorialManager), "AddTaskValue")]
-        private static class TutorialVisibilityPatch
+        /// <summary><c>EvaluateTaskVisibility</c> is the one path that advances the tutorial
+        /// index (it runs from <c>AddTaskValue</c> and from the shop-naming confirm), so it is the
+        /// single point where host progression can change. Publishing from
+        /// <c>AddTaskValue</c> alone left the session value on the intro index after the shop was
+        /// named, which also gave a late joiner a stale baseline.</summary>
+        [HarmonyPatch(typeof(TutorialManager), nameof(TutorialManager.EvaluateTaskVisibility))]
+        private static class TutorialProgressPatch
         {
-            [HarmonyPrefix]
-            private static void Prefix(out int __state)
-                => __state = CPlayerData.m_TutorialIndex;
-
             [HarmonyPostfix]
-            private static void Postfix(ETutorialTaskCondition tutorialTaskCondition, int __state)
-            {
-                // HandleAction already applies the change and broadcasts its own delta with the
-                // prediction id; skip the generic broadcast while it runs so an applied client
-                // intent is never broadcast twice.
-                if (_active == null || _active._applyingIntent)
-                {
-                    return;
-                }
-
-
-                _active.BroadcastDelta(BuildDelta(Guid.Empty, tutorialTaskCondition, __state));
-            }
+            private static void Postfix() => _active?.PublishHostChange();
         }
-
     }
 }

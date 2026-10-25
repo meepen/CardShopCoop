@@ -15,6 +15,9 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(PlacementHoldBoxUpPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlacementHoldRotatePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlacementHoldFlipPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PlacementHoldInputPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PlacementHoldRemoteValidityPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PlacementHoldGlobalPreviewPatch)).Patch();
         }
 
         internal void ShutdownPlacementHold()
@@ -25,17 +28,29 @@ namespace CardShopCoop.Modules.World
 
         internal void TickPlacementHold() => _placementHold?.Tick();
 
-        [MessageHandler(typeof(PlacementHoldBeginMessage))]
+        [MessageHandler]
         private void HandlePlacementHoldBegin(MessageContext _, PlacementHoldBeginMessage message)
             => _placementHold?.ApplyBegin(message);
 
-        [MessageHandler(typeof(PlacementHoldEndMessage))]
+        [MessageHandler]
         private void HandlePlacementHoldEnd(MessageContext _, PlacementHoldEndMessage message)
-            => _placementHold?.ApplyEnd(message.HoldKey);
+        {
+            if (message == null || message.Entity == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped end with no live entity.");
+                return;
+            }
 
-        [MessageHandler(typeof(PlacementHoldRotationMessage))]
+            _placementHold?.ApplyEnd(message.Entity);
+        }
+
+        [MessageHandler]
         private void HandlePlacementHoldRotation(MessageContext _, PlacementHoldRotationMessage message)
             => _placementHold?.ApplyRotation(message);
+
+        [MessageHandler]
+        private void HandlePlacementHoldState(MessageContext _, PlacementHoldStateMessage message)
+            => _placementHold?.ApplyState(message);
 
         [HarmonyPatch(typeof(InteractableObject), "BoxUpObject")]
         private static class PlacementHoldBoxUpPatch
@@ -58,7 +73,48 @@ namespace CardShopCoop.Modules.World
         {
             [HarmonyPostfix]
             private static void Postfix(InteractableObject __instance)
-                => _instance?._placementHold?.LocalRotated(__instance);
+                => _instance?._placementHold?.LocalFlipped(__instance);
+        }
+
+        [HarmonyPatch(typeof(InteractionPlayerController), "Update")]
+        private static class PlacementHoldInputPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix()
+                => _instance?._placementHold?.LocalInputChanged();
+        }
+
+        /// <summary>A remote ghost's real object still runs the game's UpdateMoveState on this
+        /// peer. That method writes the one global preview material color, so a remote invalid
+        /// ghost would turn the local player's green placement preview red. Mark the remote
+        /// update and ignore its global write.</summary>
+        [HarmonyPatch(typeof(InteractableObject), "Update")]
+        private static class PlacementHoldRemoteValidityPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractableObject __instance, out bool __state)
+                => __state = _instance?._placementHold?.BeginRemoteUpdate(__instance) == true;
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractableObject __instance)
+                => _instance?._placementHold?.ApplyRemoteUpdate(__instance);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
+            {
+                if (__state)
+                {
+                    _instance?._placementHold?.EndRemoteUpdate();
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(ShelfManager), "SetMoveObjectPreviewModelValidState")]
+        private static class PlacementHoldGlobalPreviewPatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix()
+                => !PlacementHoldInteraction.SuppressGlobalPreview;
         }
     }
 }

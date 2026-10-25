@@ -19,6 +19,7 @@ namespace CardShopCoop.Runtime
         private readonly GameObject _parent;
         private readonly CoopRuntimeContext _context;
         private bool _disposed;
+        private bool _sessionStarted;
 
         private CoopBehaviourRegistry(GameObject parent, CoopRuntimeContext context)
         {
@@ -151,12 +152,13 @@ namespace CardShopCoop.Runtime
             }
 
             GameObject child = null;
+            MonoBehaviour behaviour = null;
             try
             {
                 child = new GameObject(type.Name);
                 child.transform.SetParent(_parent.transform, false);
                 child.SetActive(false);
-                var behaviour = (child.AddComponent(type)) as MonoBehaviour;
+                behaviour = (child.AddComponent(type)) as MonoBehaviour;
                 if (behaviour == null)
                 {
                     throw new InvalidOperationException(type.FullName + " is not a MonoBehaviour.");
@@ -175,19 +177,43 @@ namespace CardShopCoop.Runtime
                 }
 
                 // Register events before adding to the dispatch list so a signature failure cannot
-                // leave a half-added target behind.
+                // leave a half-added target behind. Attributed handlers are part of the same
+                // lifecycle: the registry binds them before OnEnable, so a behaviour never has to
+                // call RegisterAttributedHandlers itself.
                 RegisterBehaviourEvents(behaviour);
+                _context.Messages.RegisterAttributedHandlers(behaviour);
                 _behaviours.Add(behaviour);
 
-                // Activation last, so the context and event map are complete before OnEnable runs.
+                // Activation last, so the context, event map and handlers are complete before
+                // OnEnable runs.
                 if (activate)
                 {
                     behaviour.gameObject.SetActive(true);
+
+                    // A persistent behaviour added after the session started (the first-frame
+                    // external scan) still gets the start event. The registry-wide SessionStarted
+                    // call already fired for the behaviours that existed then.
+                    if (_sessionStarted)
+                    {
+                        InvokeFor<OnSessionStartedAttribute>(behaviour);
+                    }
                 }
             }
             catch
             {
                 _createdTypes.Remove(type);
+                if (behaviour != null)
+                {
+                    try
+                    {
+                        _context.Messages.UnregisterAttributedHandlers(behaviour);
+                    }
+                    catch (Exception cleanupError)
+                    {
+                        CoopPlugin.Log?.LogWarning("[api] could not roll back handlers for "
+                            + type.FullName + ": " + cleanupError.Message);
+                    }
+                }
                 if (child != null)
                 {
                     UnityEngine.Object.Destroy(child);
@@ -239,8 +265,33 @@ namespace CardShopCoop.Runtime
         public void ClientDisconnected(PeerConnection connection, DisconnectInfo info)
             => Invoke<OnClientDisconnectedAttribute>(connection, info);
         public void FullyJoined(PeerConnection connection) => Invoke<OnFullyJoinedAttribute>(connection);
-        public void SessionStarted() => Invoke<OnSessionStartedAttribute>();
-        public void SessionStopped() => Invoke<OnSessionStoppedAttribute>();
+
+        /// <summary>Starts the session once. Live and persistent runtimes each own a registry;
+        /// the persistent registry is created before any session, so it receives this when a
+        /// session actually starts.</summary>
+        public void SessionStarted()
+        {
+            if (_sessionStarted)
+            {
+                return;
+            }
+
+            _sessionStarted = true;
+            Invoke<OnSessionStartedAttribute>();
+        }
+
+        /// <summary>Stops the session once. This makes the persistent runtime's session-stop
+        /// event idempotent even though the same registry is later disposed at plugin unload.</summary>
+        public void SessionStopped()
+        {
+            if (!_sessionStarted)
+            {
+                return;
+            }
+
+            _sessionStarted = false;
+            Invoke<OnSessionStoppedAttribute>();
+        }
 
         public void Dispose()
         {
@@ -286,9 +337,40 @@ namespace CardShopCoop.Runtime
             _behaviours.Clear();
             _events.Clear();
             _createdTypes.Clear();
+            _sessionStarted = false;
             if (errors != null)
             {
                 throw new AggregateException("One or more co-op behaviours failed to shut down.", errors);
+            }
+        }
+
+        /// <summary>Invokes one lifecycle event on one behaviour. Used for a behaviour added after
+        /// the session already started; a handler failure is logged, not allowed to abort the
+        /// late-add scan.</summary>
+        private void InvokeFor<TAttribute>(MonoBehaviour target) where TAttribute : Attribute
+        {
+            if (target == null || !_events.TryGetValue(typeof(TAttribute), out var methods))
+            {
+                return;
+            }
+
+            foreach (var method in methods.ToArray())
+            {
+                if (method.DeclaringType == null
+                    || !method.DeclaringType.IsAssignableFrom(target.GetType()))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    method.Invoke(target, Array.Empty<object>());
+                }
+                catch (Exception error)
+                {
+                    CoopPlugin.Log?.LogError("[api] " + typeof(TAttribute).Name + " failed for "
+                        + target.GetType().FullName + ": " + error);
+                }
             }
         }
 
@@ -299,12 +381,13 @@ namespace CardShopCoop.Runtime
                 return;
             }
             List<Exception> errors = null;
+            var targets = _behaviours.ToArray();
             foreach (var method in methods)
             {
                 // One invocation per matching instance. Deduplicating methods keeps a shared base
                 // method from firing twice on the same instance, and iterating all instances (not
                 // FirstOrDefault) means siblings that inherit it each get their turn.
-                foreach (var target in _behaviours)
+                foreach (var target in targets)
                 {
                     if (target == null || method.DeclaringType == null
                         || !method.DeclaringType.IsAssignableFrom(target.GetType()))

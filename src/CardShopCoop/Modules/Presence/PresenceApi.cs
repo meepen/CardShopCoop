@@ -1,5 +1,7 @@
 using System.Collections.Generic;
 using System;
+using CardShopCoop.Api;
+using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using UnityEngine;
 
@@ -86,9 +88,57 @@ namespace CardShopCoop.Modules.Presence
             Names[connectionId] = string.IsNullOrWhiteSpace(name) ? "Player " + connectionId : name;
         }
 
+        /// <summary>Copies the session's normalized name onto the public connection object.</summary>
+        internal static void ApplyName(PeerConnection connection)
+        {
+            if (connection != null)
+            {
+                connection.Name = PeerName(connection.Id);
+            }
+        }
+
+        /// <summary>Resolves a host-canonical player id (0 = host, 1..N = clients) from the
+        /// current roster. Null when the roster does not know it.</summary>
+        internal static PlayerRef ResolvePlayerRef(int canonicalId)
+        {
+            var players = SessionPlayers;
+            for (var i = 0; i < players.Count; i++)
+            {
+                var player = players[i];
+                var id = player.IsHost ? 0 : player.Id;
+                if (id == canonicalId)
+                {
+                    return new PlayerRef(id, player.Name, player.IsHost, player.IsSelf);
+                }
+            }
+
+            return null;
+        }
+
         internal static void RemovePeer(int connectionId) => Names.Remove(connectionId);
 
         internal static void ClearPeerNames() => Names.Clear();
+
+        /// <summary>A copy of one session member's appearance, keyed by the roster connection id
+        /// (0 is the host on its own screen; 1 is the host as a client sees it). False when no
+        /// model has arrived yet. Intended for reporting, not for rendering.</summary>
+        public static bool TryGetSessionModel(int connectionId, out PresenceModelEntry model)
+        {
+            var host = PresenceHostBehaviour.Active;
+            if (host != null)
+            {
+                return host.TryGetModel(connectionId, out model);
+            }
+
+            var client = PresenceClientBehaviour.Active;
+            if (client != null)
+            {
+                return client.TryGetModel(connectionId, out model);
+            }
+
+            model = null;
+            return false;
+        }
 
         public static bool TryGetPeerPresence(int connectionId, out PeerPresence presence)
         {
@@ -120,6 +170,20 @@ namespace CardShopCoop.Modules.Presence
             var service = PresenceService.Active;
             return service != null
                 && service.TryGetPeerCameraForHolder(holderConnectionId, out position, out rotation);
+        }
+
+        /// <summary>Latest received camera pose for a holder, without the avatar interpolation
+        /// delay. Placement targets are re-evaluated every game frame, so using the newest sample
+        /// keeps the ghost closer to the mover's actual aim.</summary>
+        public static bool TryGetLatestPeerCameraForHolder(int holderConnectionId,
+            out Vector3 position, out Quaternion rotation)
+        {
+            position = default(Vector3);
+            rotation = Quaternion.identity;
+            var service = PresenceService.Active;
+            return service != null
+                && service.TryGetLatestPeerCameraForHolder(holderConnectionId, out position,
+                    out rotation);
         }
 
         /// <summary>Chest-bone anchor of the avatar holding a box (holder id in the sender's

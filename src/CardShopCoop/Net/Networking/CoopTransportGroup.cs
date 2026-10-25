@@ -19,7 +19,7 @@ namespace CardShopCoop.Net.Networking
     /// child that owns an id without any per-child bookkeeping.
     /// </summary>
     internal sealed class CoopTransportGroup : ICoopTransport, ICoopStartable,
-        ICoopHandshakeTransport, ICoopRelayTransport
+        ICoopHandshakeTransport, ICoopRelayTransport, IWireFrameTransport
     {
         /// <summary>Width of one backend's id band. Wide enough that no realistic session fills
         /// it, small enough that plenty of backends fit in the int range.</summary>
@@ -214,6 +214,21 @@ namespace CardShopCoop.Net.Networking
             }
 
             message = default;
+            return false;
+        }
+
+        public bool TryDequeueWireFrame(out WireFrame frame)
+        {
+            foreach (var child in Snapshot())
+            {
+                if (child.Transport is IWireFrameTransport wire
+                    && wire.TryDequeueWireFrame(out frame))
+                {
+                    return true;
+                }
+            }
+
+            frame = null;
             return false;
         }
 

@@ -66,7 +66,8 @@ namespace CardShopCoop.Net.Connection
         }
     }
 
-    /// <summary>Transport identity. The object is stable for the lifetime of a peer.</summary>
+    /// <summary>One connected peer: a stable id for the session, its connection state, and the
+    /// display name once the peer has identified itself.</summary>
     public class PeerConnection
     {
         private readonly object _stateLock = new();
@@ -82,6 +83,13 @@ namespace CardShopCoop.Net.Connection
         public int Id
         {
             get;
+        }
+
+        /// <summary>The peer's display name, or null before the handshake has supplied it.</summary>
+        public string Name
+        {
+            get;
+            internal set;
         }
 
         public ConnectionState State
@@ -210,24 +218,5 @@ namespace CardShopCoop.Net.Connection
         }
 
         public override string ToString() => "PeerConnection(" + Id + ")";
-    }
-
-    public sealed class ConnectionEvent
-    {
-        public PeerConnection Connection
-        {
-            get;
-        }
-
-        public DisconnectInfo Disconnect
-        {
-            get;
-        }
-
-        public ConnectionEvent(PeerConnection connection, DisconnectInfo disconnect = null)
-        {
-            Connection = connection ?? throw new ArgumentNullException(nameof(connection));
-            Disconnect = disconnect;
-        }
     }
 }

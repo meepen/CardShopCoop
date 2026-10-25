@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Modules.World;
-using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
@@ -11,7 +11,17 @@ using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Npc
 {
-    /// <summary>Unity-owned host NPC collection and host-only Harmony hooks.</summary>
+    /// <summary>How one live NPC changed at a game lifecycle boundary. Identity binding and
+    /// publication are owned by the identity module; this is bookkeeping only.</summary>
+    internal enum NpcLifecycleChange : byte
+    {
+        None = 0,
+        Added = 1,
+        Removed = 2,
+    }
+
+    /// <summary>Unity-owned host NPC state collection and host-only feature hooks. NPC identity,
+    /// spawn, despawn and baselines belong to the GameObjectIdentity module.</summary>
     [ServerBehaviour]
     public sealed class NpcHostBehaviour : CoopBehaviour
     {
@@ -19,12 +29,10 @@ namespace CardShopCoop.Modules.Npc
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
-        private bool _customerManagerReady;
-        private bool _workerManagerReady;
         private readonly Dictionary<int, Customer> _customers = new();
-        private readonly Dictionary<Customer, int> _customerIndices = new();
         private readonly Dictionary<int, Worker> _workers = new();
-        private readonly Dictionary<int, PeerConnection> _joinedConnections = new();
+
+        internal static NpcHostBehaviour Active => _active;
 
         private void OnEnable()
         {
@@ -34,23 +42,15 @@ namespace CardShopCoop.Modules.Npc
             }
             _context = RuntimeContext;
             _active = this;
-            _context.Messages.RegisterAttributedHandlers(this);
             _harmony = new Harmony("dev.meepen.cardshopcoop.npc.host");
-            _harmony.CreateClassProcessor(typeof(CustomerManagerStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerPopulationPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerUpdatePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WorkerManagerStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WorkerPopulationPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WorkerUpdatePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(WorkerActionPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(SpeechPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(MoneyPatch)).Patch();
             SceneManager.sceneLoaded += OnSceneLoaded;
-            CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
-            RegisterInitialPopulation(NpcInterop.CustomerManager);
-            RegisterInitialWorkers(NpcInterop.WorkerManager);
-            SignalCustomerManagerReady();
-            SignalWorkerManagerReady();
+
+            // The identity module owns the NPC lifecycle hooks; it binds the live population as
+            // soon as both behaviours are online.
+            NpcHostLifecycle.NpcTrackingReady();
         }
 
         private void Update()
@@ -86,167 +86,18 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
             _shutdown = true;
-            _joinedConnections.Clear();
-            CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
             }
             _harmony?.UnpatchSelf();
+            _customers.Clear();
+            _workers.Clear();
+            _npcStates.Clear();
         }
 
         private void OnDestroy() => Shutdown();
-
-        [OnFullyJoined]
-        private void SendJoinBaseline(PeerConnection connection)
-        {
-            if (_shutdown || connection == null
-                || !IsJoinPhase(connection.State))
-            {
-                return;
-            }
-
-            _joinedConnections[connection.Id] = connection;
-            SendBaselineWhenReady(connection.Id);
-        }
-
-        [OnClientDisconnected]
-        private void ForgetConnection(PeerConnection connection, DisconnectInfo info)
-        {
-            if (connection == null)
-            {
-                return;
-            }
-
-            _joinedConnections.Remove(connection.Id);
-        }
-
-        private void SendBaselineWhenReady(int connectionId)
-        {
-            if (!_context.InGame() || !_customerManagerReady || !_workerManagerReady
-                || !_joinedConnections.TryGetValue(connectionId, out var connection)
-                || connection == null || !IsJoinPhase(connection.State))
-            {
-                return;
-            }
-
-            SendBaseline(connectionId);
-        }
-
-        private void SendBaselinesToJoined()
-        {
-            if (!_context.InGame() || !_customerManagerReady || !_workerManagerReady)
-            {
-                return;
-            }
-
-            foreach (var pair in _joinedConnections)
-            {
-                if (pair.Value != null && IsJoinPhase(pair.Value.State))
-                {
-                    SendBaseline(pair.Key);
-                }
-            }
-        }
-
-        private void SendBaseline(int connectionId)
-        {
-            if (!_customerManagerReady || !_workerManagerReady)
-            {
-                return;
-            }
-
-            var baseline = BuildBaseline();
-            if (baseline == null)
-            {
-                return;
-            }
-
-            _context.Send(connectionId, baseline);
-        }
-
-        private NpcBaselineMessage BuildBaseline()
-        {
-            var customers = GetCustomerManager()?.GetCustomerList();
-            if (!_customerManagerReady || !_workerManagerReady || customers == null
-                || NpcInterop.WorkerManager == null || NpcInterop.Workers == null)
-            {
-                return null;
-            }
-
-            var hostTime = Time.unscaledTime;
-            var result = new NpcBaselineMessage
-            {
-                HostTime = hostTime,
-                CustomerCapacity = customers.Count,
-                CustomerFemales = new List<bool>(customers.Count),
-            };
-            for (var i = 0; i < customers.Count; i++)
-            {
-                result.CustomerFemales.Add(customers[i] != null && customers[i].m_IsFemale);
-            }
-
-            var customerIndices = new List<int>(_customers.Keys);
-            customerIndices.Sort();
-            for (var i = 0; i < customerIndices.Count; i++)
-            {
-                var index = customerIndices[i];
-                if (_customers.TryGetValue(index, out var customer) && IsCustomerActive(customer))
-                {
-                    var entry = BuildCustomerEntry(customer, index, hostTime);
-                    if (entry != null)
-                    {
-                        result.Entries.Add(entry);
-                    }
-                }
-            }
-
-            var workerIndices = new List<int>(_workers.Keys);
-            workerIndices.Sort();
-            for (var i = 0; i < workerIndices.Count; i++)
-            {
-                var index = workerIndices[i];
-                if (_workers.TryGetValue(index, out var worker) && IsWorkerActive(worker))
-                {
-                    var entry = BuildWorkerEntry(worker, index, hostTime);
-                    if (entry != null)
-                    {
-                        result.Entries.Add(entry);
-                    }
-                }
-            }
-
-            CoopPlugin.Log.LogInfo("[npc] host baseline entries=" + result.Entries.Count
-                + " capacity=" + result.CustomerCapacity
-                + " customersTracked=" + _customers.Count + " workersTracked=" + _workers.Count);
-
-            return result;
-        }
-
-        private static bool IsJoinPhase(ConnectionState state)
-        {
-            return state == ConnectionState.Transferring || state == ConnectionState.FullyJoined;
-        }
-
-        private void SignalCustomerManagerReady()
-        {
-            _customerManagerReady = NpcInterop.CustomerManager?.GetCustomerList() != null;
-            SendBaselinesToJoined();
-        }
-
-        private void SignalWorkerManagerReady()
-        {
-            _workerManagerReady = NpcInterop.WorkerManager != null && NpcInterop.Workers != null;
-            SendBaselinesToJoined();
-        }
-
-        private void OnGameDataFinishLoaded(CEventPlayer_GameDataFinishLoaded _)
-        {
-            SignalCustomerManagerReady();
-            SignalWorkerManagerReady();
-        }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
@@ -260,25 +111,11 @@ namespace CardShopCoop.Modules.Npc
 
         private void ResetSceneState()
         {
-            _customerManagerReady = false;
-            _workerManagerReady = false;
             _sendTimer = 0f;
             _missingHoldFieldLogged = false;
             _npcStates.Clear();
             _customers.Clear();
-            _customerIndices.Clear();
             _workers.Clear();
-        }
-
-        internal void ResetState()
-        {
-            _missingHoldFieldLogged = false;
-            _sendTimer = 0f;
-            _npcStates.Clear();
-            _customers.Clear();
-            _customerIndices.Clear();
-            _workers.Clear();
-            _joinedConnections.Clear();
         }
 
         public CustomerManager GetCustomerManager()
@@ -288,8 +125,7 @@ namespace CardShopCoop.Modules.Npc
         private const byte KindWorker = 1;
 
         private const float SendInterval = 0.125f;
-        /// <summary>Render this far in the past (~1.2x send interval) so two bracketing
-        /// snapshots almost always exist.</summary>
+
         // string-keyed animator calls hash the name on every call; cache the ids once
         private static readonly int HashMoveSpeed = Animator.StringToHash("MoveSpeed");
         private static readonly int HashHoldingBag = Animator.StringToHash("HoldingBag");
@@ -356,9 +192,6 @@ namespace CardShopCoop.Modules.Npc
             public int WorkerActionSequence;
             public byte WorkerActionKind;
             public Guid LastHeldBoxId;
-            public string IdentityName;
-            public bool IdentityFemale;
-            public int IdentityGeneration;
         }
 
         private NpcData GetNpcData(byte kind, int index)
@@ -373,12 +206,149 @@ namespace CardShopCoop.Modules.Npc
             return data;
         }
 
+        /// <summary>
+        /// Host-side bookkeeping at a game lifecycle boundary. Registers the live object and
+        /// advances the incarnation when it becomes active. The caller (the identity module) binds
+        /// and publishes the resulting identity; this method never touches the identity cache.
+        /// </summary>
+        internal static NpcLifecycleChange TrackNpc(object entity, string source, out int index,
+            out int identity)
+        {
+            index = -1;
+            identity = 0;
+            var host = _active;
+            if (host == null || entity == null)
+            {
+                return NpcLifecycleChange.None;
+            }
+
+            if (entity is Customer customer)
+            {
+                if (!NpcInterop.TryGetCustomerIndex(customer, out index))
+                {
+                    LogUnresolved(KindCustomer, customer, source);
+                    return NpcLifecycleChange.None;
+                }
+
+                var replaced = host._customers.TryGetValue(index, out var previous)
+                    && !ReferenceEquals(previous, customer);
+                host._customers[index] = customer;
+                return host.TrackState(host.GetNpcData(KindCustomer, index), customer.m_IsActive,
+                    replaced, out identity);
+            }
+
+            if (entity is Worker worker)
+            {
+                if (!NpcInterop.TryGetWorkerIndex(worker, out index))
+                {
+                    LogUnresolved(KindWorker, worker, source);
+                    return NpcLifecycleChange.None;
+                }
+
+                var replaced = host._workers.TryGetValue(index, out var previous)
+                    && !ReferenceEquals(previous, worker);
+                host._workers[index] = worker;
+                var state = host.GetNpcData(KindWorker, index);
+                var change = host.TrackState(state, worker.m_IsActive, replaced, out identity);
+                if (change == NpcLifecycleChange.Removed)
+                {
+                    ReleaseTrackedWorkerBox(state);
+                }
+
+                return change;
+            }
+
+            return NpcLifecycleChange.None;
+        }
+
+        private NpcLifecycleChange TrackState(NpcData state, bool active, bool replaced,
+            out int identity)
+        {
+            identity = state.Generation;
+            if (active)
+            {
+                var appeared = !state.Active || replaced;
+                if (appeared)
+                {
+                    state.Generation++;
+                }
+
+                state.Active = true;
+                identity = state.Generation;
+                return appeared ? NpcLifecycleChange.Added : NpcLifecycleChange.None;
+            }
+
+            var wasActive = state.Active;
+            state.Active = false;
+            return wasActive ? NpcLifecycleChange.Removed : NpcLifecycleChange.None;
+        }
+
+        internal static bool IsNpcActive(object entity)
+        {
+            return entity switch
+            {
+                Customer customer => customer != null && customer.m_IsActive,
+                Worker worker => worker != null && worker.m_IsActive,
+                _ => false,
+            };
+        }
+
+        /// <summary>True when the entity already has host state for an active incarnation.</summary>
+        internal static bool IsNpcTracked(object entity)
+        {
+            var host = _active;
+            if (host == null || entity == null)
+            {
+                return false;
+            }
+
+            if (entity is Customer customer
+                && NpcInterop.TryGetCustomerIndex(customer, out var customerIndex))
+            {
+                return host.GetNpcData(KindCustomer, customerIndex).Active;
+            }
+
+            if (entity is Worker worker
+                && NpcInterop.TryGetWorkerIndex(worker, out var workerIndex))
+            {
+                return host.GetNpcData(KindWorker, workerIndex).Active;
+            }
+
+            return false;
+        }
+
+        /// <summary>Describes the NPC's current authoritative state for the identity descriptor
+        /// and join baseline. State collection stays in this module; the descriptor shape stays in
+        /// the identity module.</summary>
+        internal static bool TryGetSnapshot(object entity, out NpcSnapshot snapshot)
+        {
+            snapshot = default;
+            var host = _active;
+            if (host == null || entity == null)
+            {
+                return false;
+            }
+
+            if (entity is Customer customer)
+            {
+                return NpcInterop.TryGetCustomerIndex(customer, out var index)
+                    && host.BuildCustomerSnapshot(customer, index, out snapshot);
+            }
+
+            if (entity is Worker worker)
+            {
+                return NpcInterop.TryGetWorkerIndex(worker, out var index)
+                    && host.BuildWorkerSnapshot(worker, index, out snapshot);
+            }
+
+            return false;
+        }
+
         /// <summary>Host only. Samples the live NPCs at the interpolation cadence and emits one
-        /// transient delta per entity. Reliable lifecycle hooks carry identity and removal
-        /// changes; this stream only carries the latest movement and animation state.</summary>
+        /// transient delta per active NPC. Reliable identity lifecycle hooks carry appearance
+        /// and removal; this stream only carries the latest movement and animation state.</summary>
         public List<NpcStateDeltaMessage> HostCollect(float dt)
         {
-            _active = this;
             _sendTimer += dt;
             var manager = GetCustomerManager();
             var customers = manager?.GetCustomerList();
@@ -437,164 +407,6 @@ namespace CardShopCoop.Modules.Npc
             return result;
         }
 
-        private void RegisterInitialPopulation(CustomerManager manager)
-        {
-            var customers = manager?.GetCustomerList();
-            for (var i = 0; customers != null && i < customers.Count; i++)
-            {
-                RegisterCustomer(customers[i], "CustomerManager.Start");
-            }
-        }
-
-        private void RegisterInitialWorkers(WorkerManager manager)
-        {
-            var workers = NpcInterop.Workers;
-            for (var i = 0; workers != null && i < workers.Count; i++)
-            {
-                RegisterWorker(workers[i], "WorkerManager.Start");
-            }
-        }
-
-        private void RegisterCustomer(Customer customer, string source)
-        {
-            if (customer == null || !NpcInterop.TryGetCustomerIndex(customer, out var index))
-            {
-                LogUnresolved(KindCustomer, customer, source);
-                return;
-            }
-
-            var replaced = _customers.TryGetValue(index, out var previous)
-                && !ReferenceEquals(previous, customer);
-            _customers[index] = customer;
-            _customerIndices[customer] = index;
-            var state = GetNpcData(KindCustomer, index);
-            var active = IsCustomerActive(customer);
-            if (active && (!state.Active || replaced))
-            {
-                state.Generation++;
-            }
-
-            var wasActive = state.Active;
-            state.Active = active;
-            if (wasActive && !active)
-            {
-                SendStateDelta(KindCustomer, (ushort)index, state.Generation, active: false,
-                    Time.unscaledTime);
-            }
-            if (active)
-            {
-                SendCurrentIdentity(KindCustomer, index, customer, state);
-            }
-        }
-
-        private void RegisterWorker(Worker worker, string source)
-        {
-            if (worker == null || !NpcInterop.TryGetWorkerIndex(worker, out var index))
-            {
-                LogUnresolved(KindWorker, worker, source);
-                return;
-            }
-
-            var replaced = _workers.TryGetValue(index, out var previous)
-                && !ReferenceEquals(previous, worker);
-            _workers[index] = worker;
-            var state = GetNpcData(KindWorker, index);
-            var active = IsWorkerActive(worker);
-            if (active && (!state.Active || replaced))
-            {
-                state.Generation++;
-            }
-
-            var wasActive = state.Active;
-            state.Active = active;
-            if (wasActive && !active)
-            {
-                SendStateDelta(KindWorker, (ushort)index, state.Generation, active: false,
-                    Time.unscaledTime);
-            }
-            if (active)
-            {
-                SendCurrentIdentity(KindWorker, index, worker, state);
-            }
-        }
-
-        private void ObserveCustomer(Customer customer, string source)
-        {
-            if (customer == null)
-            {
-                LogUnresolved(KindCustomer, customer, source);
-                return;
-            }
-
-            if (!_customerIndices.TryGetValue(customer, out var index)
-                && !NpcInterop.TryGetCustomerIndex(customer, out index))
-            {
-                LogUnresolved(KindCustomer, customer, source);
-                return;
-            }
-
-            if (!_customers.TryGetValue(index, out var registered)
-                || !ReferenceEquals(registered, customer))
-            {
-                RegisterCustomer(customer, source);
-                return;
-            }
-
-            var state = GetNpcData(KindCustomer, index);
-            var active = IsCustomerActive(customer);
-            if (active && !state.Active)
-            {
-                state.Generation++;
-            }
-
-            var wasActive = state.Active;
-            state.Active = active;
-            if (wasActive && !active)
-            {
-                SendStateDelta(KindCustomer, (ushort)index, state.Generation, active: false,
-                    Time.unscaledTime);
-            }
-            if (active)
-            {
-                SendCurrentIdentity(KindCustomer, index, customer, state);
-            }
-        }
-
-        private void ObserveWorker(Worker worker, string source)
-        {
-            if (worker == null || !NpcInterop.TryGetWorkerIndex(worker, out var index))
-            {
-                LogUnresolved(KindWorker, worker, source);
-                return;
-            }
-
-            if (!_workers.TryGetValue(index, out var registered)
-                || !ReferenceEquals(registered, worker))
-            {
-                RegisterWorker(worker, source);
-                return;
-            }
-
-            var state = GetNpcData(KindWorker, index);
-            var active = IsWorkerActive(worker);
-            if (active && !state.Active)
-            {
-                state.Generation++;
-            }
-
-            var wasActive = state.Active;
-            state.Active = active;
-            if (wasActive && !active)
-            {
-                SendStateDelta(KindWorker, (ushort)index, state.Generation, active: false,
-                    Time.unscaledTime);
-            }
-            if (active)
-            {
-                SendCurrentIdentity(KindWorker, index, worker, state);
-            }
-        }
-
         private static void LogUnresolved(byte kind, UnityEngine.Object instance, string source)
         {
             CoopPlugin.Log.LogWarning("Npc host: " + (kind == KindCustomer ? "customer" : "worker")
@@ -602,50 +414,19 @@ namespace CardShopCoop.Modules.Npc
                 + (instance == null ? "<destroyed>" : instance.name) + ")");
         }
 
-        private void CustomerActivated(Customer customer)
-            => RegisterCustomer(customer, "Customer.ActivateCustomer");
-
-        private void CustomerDeactivated(Customer customer)
+        private bool BuildCustomerSnapshot(Customer customer, int index, out NpcSnapshot snapshot)
         {
-            ObserveCustomer(customer, "Customer.DeactivateCustomer");
-        }
-
-        private void WorkerActivated(Worker worker)
-            => RegisterWorker(worker, "Worker.ActivateWorker");
-
-        private void WorkerDeactivated(Worker worker)
-        {
-            ObserveWorker(worker, "Worker.DeactivateWorker");
-        }
-
-        private NpcStateDeltaMessage CollectCustomerState(Customer customer, int index, float hostTime)
-        {
+            snapshot = default;
             var state = GetNpcData(KindCustomer, index);
-            var active = IsCustomerActive(customer);
-            if (active && !state.Active)
+            var custom = customer.m_CharacterCustom;
+            if (state.Generation <= 0 || custom == null
+                || string.IsNullOrEmpty(custom.CharacterName))
             {
-                state.Generation++;
-                SendCurrentIdentity(KindCustomer, index, customer, state);
-            }
-
-            var wasActive = state.Active;
-            state.Active = active;
-            if (!active)
-            {
-                return wasActive ? NewInactiveDelta(KindCustomer, index, state.Generation, hostTime) : null;
-            }
-
-            var cc = customer.m_CharacterCustom;
-            if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
-            {
-                return null;
+                return false;
             }
 
             var flags = CollectFlags(customer.m_Anim);
             flags = AddCustomerReactionFlags(customer, flags);
-            var grabSequence = GetGrabSequence(index, customer.m_CurrentState);
-            var actionKind = customer.m_CurrentState == ECustomerState.TournamentTakePrize
-                ? (byte)2 : (byte)1;
             if (customer.IsSmelly())
             {
                 flags |= NpcFlags.Smelly;
@@ -655,68 +436,50 @@ namespace CardShopCoop.Modules.Npc
                 flags |= NpcFlags.Exclaim;
             }
 
-            return NewStateDelta(KindCustomer, index, state.Generation, hostTime,
-                customer.transform, customer.m_CurrentMoveSpeed, flags, grabSequence, actionKind,
-                false, (EItemType)0, Guid.Empty, false);
+            snapshot = new NpcSnapshot
+            {
+                Kind = KindCustomer,
+                Index = (ushort)index,
+                Identity = state.Generation,
+                Female = customer.m_IsFemale,
+                CharName = custom.CharacterName,
+                Position = customer.transform.position,
+                Yaw = customer.transform.eulerAngles.y,
+                Speed = customer.m_CurrentMoveSpeed,
+                Flags = (ushort)flags,
+                ActionSequence = GetGrabSequence(index, customer.m_CurrentState),
+                ActionKind = customer.m_CurrentState == ECustomerState.TournamentTakePrize
+                    ? (byte)2 : (byte)1,
+                HoldBig = false,
+                HoldItemType = (EItemType)0,
+                HoldBox = null,
+                HoldBoxNetworkId = Guid.Empty,
+                HoldBoxOpened = false,
+                HostTime = Time.unscaledTime,
+            };
+            return true;
         }
 
-        private NpcStateDeltaMessage CollectWorkerState(Worker worker, int index, float hostTime)
+        private bool BuildWorkerSnapshot(Worker worker, int index, out NpcSnapshot snapshot)
         {
+            snapshot = default;
             var state = GetNpcData(KindWorker, index);
-            var active = IsWorkerActive(worker);
-            if (active && !state.Active)
+            var custom = worker.m_CharacterCustom;
+            if (state.Generation <= 0 || custom == null
+                || string.IsNullOrEmpty(custom.CharacterName))
             {
-                state.Generation++;
-                SendCurrentIdentity(KindWorker, index, worker, state);
-            }
-
-            var wasActive = state.Active;
-            state.Active = active;
-            if (!active)
-            {
-                ReleaseTrackedWorkerBox(state);
-                return wasActive ? NewInactiveDelta(KindWorker, index, state.Generation, hostTime) : null;
-            }
-
-            var cc = worker.m_CharacterCustom;
-            if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
-            {
-                return null;
+                return false;
             }
 
             var flags = CollectFlags(worker.m_Anim);
             var moveSpeed = worker.m_Anim == null ? 0f : worker.m_Anim.GetFloat(HashMoveSpeed);
-            if (FiCurrentHoldItemBox == null && !_missingHoldFieldLogged)
-            {
-                _missingHoldFieldLogged = true;
-                CoopPlugin.Log.LogError("NpcHostBehaviour: Worker hold-item field is missing; holding-box visuals disabled");
-            }
-
-            var holdBox = FiCurrentHoldItemBox == null
-                ? null : FiCurrentHoldItemBox.GetValue(worker) as InteractablePackagingBox_Item;
-            var holdBig = holdBox != null && holdBox.m_IsBigBox;
-            var holdItemType = holdBox == null ? (EItemType)0 : holdBox.GetItemType();
+            var holdBox = GetHeldBox(worker);
             var holdBoxNetworkId = Guid.Empty;
             var holdBoxOpened = false;
             if (holdBox != null)
             {
                 WorldHostBehaviour.TryGetHeldBoxId(holdBox, out holdBoxNetworkId);
                 holdBoxOpened = WorldHostBehaviour.IsHeldBoxOpen(holdBox);
-            }
-
-            // A released box must be re-announced with its dropped pose, or the guest leaves its
-            // local copy parked off-map (the vanished-on-drop bug). The refresh is broadcast here,
-            // before the state delta that tells the guest to release the prop, so the ordered link
-            // applies the pose first and the release only re-enables its physics.
-            if (state.LastHeldBoxId != Guid.Empty && state.LastHeldBoxId != holdBoxNetworkId)
-            {
-                WorldHostBehaviour.NotifyWorkerReleasedBox(state.LastHeldBoxId);
-            }
-
-            state.LastHeldBoxId = holdBoxNetworkId;
-
-            if (holdBox != null)
-            {
                 flags |= NpcFlags.IsHoldingBox;
             }
             if (worker.m_ExclaimationMesh != null && worker.m_ExclaimationMesh.activeSelf)
@@ -728,9 +491,88 @@ namespace CardShopCoop.Modules.Npc
                 flags |= NpcFlags.Female;
             }
 
-            return NewStateDelta(KindWorker, index, state.Generation, hostTime, worker.transform,
-                moveSpeed, flags, state.WorkerActionSequence, state.WorkerActionKind, holdBig,
-                holdItemType, holdBoxNetworkId, holdBoxOpened);
+            snapshot = new NpcSnapshot
+            {
+                Kind = KindWorker,
+                Index = (ushort)index,
+                Identity = state.Generation,
+                Female = worker.m_IsFemale,
+                CharName = custom.CharacterName,
+                Position = worker.transform.position,
+                Yaw = worker.transform.eulerAngles.y,
+                Speed = moveSpeed,
+                Flags = (ushort)flags,
+                ActionSequence = state.WorkerActionSequence,
+                ActionKind = state.WorkerActionKind,
+                HoldBig = holdBox != null && holdBox.m_IsBigBox,
+                HoldItemType = holdBox == null ? (EItemType)0 : holdBox.GetItemType(),
+                HoldBox = holdBox,
+                HoldBoxNetworkId = holdBoxNetworkId,
+                HoldBoxOpened = holdBoxOpened,
+                HostTime = Time.unscaledTime,
+            };
+            return true;
+        }
+
+        private NpcStateDeltaMessage CollectCustomerState(Customer customer, int index,
+            float hostTime)
+        {
+            if (!IsCustomerActive(customer) || !BuildCustomerSnapshot(customer, index, out var state))
+            {
+                return null;
+            }
+
+            var delta = NewStateDelta(state, hostTime);
+            delta.Customer = customer;
+            return delta;
+        }
+
+        private NpcStateDeltaMessage CollectWorkerState(Worker worker, int index, float hostTime)
+        {
+            var tracked = GetNpcData(KindWorker, index);
+            if (!IsWorkerActive(worker))
+            {
+                ReleaseTrackedWorkerBox(tracked);
+                return null;
+            }
+
+            if (!BuildWorkerSnapshot(worker, index, out var state))
+            {
+                return null;
+            }
+
+            // A released box must be re-announced with its dropped pose, or the guest leaves its
+            // local copy parked off-map (the vanished-on-drop bug). The refresh is broadcast here,
+            // before the state delta that tells the guest to release the prop, so the ordered link
+            // applies the pose first and the release only re-enables its physics.
+            if (tracked.LastHeldBoxId != Guid.Empty
+                && tracked.LastHeldBoxId != state.HoldBoxNetworkId)
+            {
+                WorldHostBehaviour.NotifyWorkerReleasedBox(tracked.LastHeldBoxId);
+            }
+
+            tracked.LastHeldBoxId = state.HoldBoxNetworkId;
+
+            var delta = NewStateDelta(state, hostTime);
+            delta.Worker = worker;
+            return delta;
+        }
+
+        private InteractablePackagingBox_Item GetHeldBox(Worker worker)
+        {
+            if (FiCurrentHoldItemBox == null)
+            {
+                if (!_missingHoldFieldLogged)
+                {
+                    _missingHoldFieldLogged = true;
+                    CoopPlugin.Log.LogError(
+                        "NpcHostBehaviour: Worker hold-item field is missing; holding-box visuals disabled");
+                }
+
+                return null;
+            }
+
+            return FiCurrentHoldItemBox.GetValue(worker) as InteractablePackagingBox_Item;
         }
 
         private static bool IsCustomerActive(Customer customer)
@@ -752,123 +594,20 @@ namespace CardShopCoop.Modules.Npc
             state.LastHeldBoxId = Guid.Empty;
         }
 
-        private static NpcStateDeltaMessage NewInactiveDelta(byte kind, int index, int identity,
-            float hostTime)
+        private static NpcStateDeltaMessage NewStateDelta(in NpcSnapshot state, float hostTime)
             => new NpcStateDeltaMessage
             {
                 HostTime = hostTime,
-                Kind = kind,
-                Index = (ushort)index,
-                Identity = identity,
-                Active = false,
-            };
-
-        private static NpcStateDeltaMessage NewStateDelta(byte kind, int index, int identity,
-            float hostTime, Transform transform, float speed, NpcFlags flags, int actionSequence,
-            byte actionKind, bool holdBig, EItemType holdItemType, Guid holdBoxNetworkId, bool holdBoxOpened)
-            => new NpcStateDeltaMessage
-            {
-                HostTime = hostTime,
-                Kind = kind,
-                Index = (ushort)index,
-                Identity = identity,
-                Active = true,
-                Position = transform.position,
-                Yaw = transform.eulerAngles.y,
-                Speed = speed,
-                Flags = (ushort)flags,
-                ActionSequence = actionSequence,
-                ActionKind = actionKind,
-                HoldBig = holdBig,
-                HoldItemType = holdItemType,
-                HoldBoxNetworkId = holdBoxNetworkId,
-                HoldBoxOpened = holdBoxOpened,
-            };
-
-        private NpcEntry BuildCustomerEntry(Customer customer, int index, float hostTime)
-        {
-            var state = GetNpcData(KindCustomer, index);
-            var cc = customer.m_CharacterCustom;
-            if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
-            {
-                return null;
-            }
-
-            var flags = CollectFlags(customer.m_Anim);
-            flags = AddCustomerReactionFlags(customer, flags);
-            if (customer.IsSmelly())
-            {
-                flags |= NpcFlags.Smelly;
-            }
-            if (customer.m_ExclaimationMesh != null && customer.m_ExclaimationMesh.activeSelf)
-            {
-                flags |= NpcFlags.Exclaim;
-            }
-
-            return NewEntry(KindCustomer, index, state.Generation, cc.CharacterName,
-                customer.m_IsFemale, customer.transform, customer.m_CurrentMoveSpeed, flags,
-                GetGrabSequence(index, customer.m_CurrentState),
-                customer.m_CurrentState == ECustomerState.TournamentTakePrize ? (byte)2 : (byte)1,
-                false, (EItemType)0, Guid.Empty, false);
-        }
-
-        private NpcEntry BuildWorkerEntry(Worker worker, int index, float hostTime)
-        {
-            var state = GetNpcData(KindWorker, index);
-            var cc = worker.m_CharacterCustom;
-            if (cc == null || string.IsNullOrEmpty(cc.CharacterName))
-            {
-                return null;
-            }
-
-            var flags = CollectFlags(worker.m_Anim);
-            var moveSpeed = worker.m_Anim == null ? 0f : worker.m_Anim.GetFloat(HashMoveSpeed);
-            var holdBox = FiCurrentHoldItemBox == null
-                ? null : FiCurrentHoldItemBox.GetValue(worker) as InteractablePackagingBox_Item;
-            var holdBoxNetworkId = Guid.Empty;
-            var holdBoxOpened = false;
-            if (holdBox != null)
-            {
-                WorldHostBehaviour.TryGetHeldBoxId(holdBox, out holdBoxNetworkId);
-                holdBoxOpened = WorldHostBehaviour.IsHeldBoxOpen(holdBox);
-                flags |= NpcFlags.IsHoldingBox;
-            }
-            if (worker.m_ExclaimationMesh != null && worker.m_ExclaimationMesh.activeSelf)
-            {
-                flags |= NpcFlags.Exclaim;
-            }
-            if (worker.m_IsFemale)
-            {
-                flags |= NpcFlags.Female;
-            }
-
-            return NewEntry(KindWorker, index, state.Generation, cc.CharacterName,
-                worker.m_IsFemale, worker.transform, moveSpeed, flags, state.WorkerActionSequence,
-                state.WorkerActionKind, holdBox != null && holdBox.m_IsBigBox,
-                holdBox == null ? (EItemType)0 : holdBox.GetItemType(), holdBoxNetworkId, holdBoxOpened);
-        }
-
-        private static NpcEntry NewEntry(byte kind, int index, int identity, string name,
-            bool female, Transform transform, float speed, NpcFlags flags, int actionSequence,
-            byte actionKind, bool holdBig, EItemType holdItemType, Guid holdBoxNetworkId, bool holdBoxOpened)
-            => new NpcEntry
-            {
-                Kind = kind,
-                Index = (ushort)index,
-                Identity = identity,
-                Female = female,
-                HasName = true,
-                CharName = name,
-                Position = transform.position,
-                Yaw = transform.eulerAngles.y,
-                Speed = speed,
-                Flags = (ushort)flags,
-                ActionSequence = actionSequence,
-                ActionKind = actionKind,
-                HoldBig = holdBig,
-                HoldItemType = holdItemType,
-                HoldBoxNetworkId = holdBoxNetworkId,
-                HoldBoxOpened = holdBoxOpened,
+                Position = state.Position,
+                Yaw = state.Yaw,
+                Speed = state.Speed,
+                Flags = state.Flags,
+                ActionSequence = state.ActionSequence,
+                ActionKind = state.ActionKind,
+                HoldBig = state.HoldBig,
+                HoldItemType = state.HoldItemType,
+                HoldBox = state.HoldBox,
+                HoldBoxOpened = state.HoldBoxOpened,
             };
 
         private int GetGrabSequence(int index, ECustomerState state)
@@ -887,98 +626,6 @@ namespace CardShopCoop.Modules.Npc
             }
             data.CustomerState = state;
             return data.CustomerGrabSequence;
-        }
-
-        private void SendIdentityToPeers(byte kind, ushort index, int identity, bool female,
-            string name, Vector3 position)
-        {
-            if (string.IsNullOrEmpty(name))
-            {
-                return;
-            }
-
-            foreach (var pair in _joinedConnections)
-            {
-                var connection = pair.Value;
-                if (connection == null || !IsJoinPhase(connection.State))
-                {
-                    continue;
-                }
-
-                _context.Send(pair.Key, new NpcIdentityDeltaMessage
-                {
-                    Kind = kind,
-                    Index = index,
-                    Identity = identity,
-                    Female = female,
-                    CharName = name,
-                    Position = position,
-                });
-            }
-        }
-
-        private void SendCurrentIdentity(byte kind, int index, Customer customer, NpcData state)
-        {
-            if (customer == null || state == null || !state.Active || state.Generation <= 0
-                || customer.m_CharacterCustom == null
-                || string.IsNullOrEmpty(customer.m_CharacterCustom.CharacterName))
-            {
-                return;
-            }
-
-            SendCurrentIdentity(kind, index, customer.m_CharacterCustom.CharacterName,
-                customer.m_IsFemale, state.Generation, customer.transform.position, state);
-        }
-
-        private void SendCurrentIdentity(byte kind, int index, Worker worker, NpcData state)
-        {
-            if (worker == null || state == null || !state.Active || state.Generation <= 0
-                || worker.m_CharacterCustom == null
-                || string.IsNullOrEmpty(worker.m_CharacterCustom.CharacterName))
-            {
-                return;
-            }
-
-            SendCurrentIdentity(kind, index, worker.m_CharacterCustom.CharacterName,
-                worker.m_IsFemale, state.Generation, worker.transform.position, state);
-        }
-
-        private void SendCurrentIdentity(byte kind, int index, string name, bool female, int identity,
-            Vector3 position, NpcData state)
-        {
-            if (string.IsNullOrEmpty(name) || identity <= 0 || index < 0 || index >= 256)
-            {
-                return;
-            }
-
-            if (state.IdentityGeneration == identity && state.IdentityName == name
-                && state.IdentityFemale == female)
-            {
-                return;
-            }
-
-            state.IdentityName = name;
-            state.IdentityFemale = female;
-            state.IdentityGeneration = identity;
-            SendIdentityToPeers(kind, (ushort)index, identity, female, name, position);
-        }
-
-        private void SendStateDelta(byte kind, ushort index, int identity, bool active,
-            float hostTime)
-        {
-            if (_shutdown || !_context.InGame() || identity <= 0)
-            {
-                return;
-            }
-
-            _context.Broadcast(new NpcStateDeltaMessage
-            {
-                HostTime = hostTime,
-                Kind = kind,
-                Index = index,
-                Identity = identity,
-                Active = active,
-            });
         }
 
         private static NpcFlags CollectFlags(Animator anim)
@@ -1084,41 +731,79 @@ namespace CardShopCoop.Modules.Npc
             return n;
         }
 
+        /// <summary>Host incarnation of a customer. The identity lifecycle hook owns generation
+        /// advances; this read never mutates the identity.</summary>
         public static int GetCustomerGeneration(Customer customer)
         {
-            if (_active == null || customer == null)
+            if (_active == null || customer == null
+                || !NpcInterop.TryGetCustomerIndex(customer, out var index))
             {
                 return 0;
             }
 
-            if (!_active._customerIndices.TryGetValue(customer, out var index)
-                && !NpcInterop.TryGetCustomerIndex(customer, out index))
-            {
-                return 0;
-            }
-
-            var state = _active.GetNpcData(KindCustomer, index);
-            if (state.Generation == 0)
-            {
-                state.Generation = 1;
-            }
-            var active = customer.m_IsActive && customer.gameObject.activeSelf;
-            var wasActive = state.Active;
-            if (active && !wasActive)
-            {
-                state.Generation++;
-            }
-
-            state.Active = active;
-            return state.Generation;
+            return _active.GetNpcData(KindCustomer, index).Generation;
         }
 
-        /// <summary>Maps a host customer transform to its list index plus generation
-        /// identity.</summary>
-        public static bool TryGetCustomerIdentity(Transform transform, out ushort index, out int identity)
+        internal static bool TryGetWireIdentity(Customer customer, out int index, out int identity)
         {
-            index = 0;
+            index = -1;
             identity = 0;
+            if (_active == null || customer == null
+                || !NpcInterop.TryGetCustomerIndex(customer, out index))
+            {
+                return false;
+            }
+
+            identity = GetCustomerGeneration(customer);
+            return identity > 0;
+        }
+
+        internal static bool TryGetWireIdentity(Worker worker, out int index, out int identity)
+        {
+            index = worker == null ? -1 : worker.m_WorkerIndex;
+            identity = 0;
+            if (_active == null || worker == null || index < 0
+                || !_active._workers.TryGetValue(index, out var mapped)
+                || !ReferenceEquals(mapped, worker))
+            {
+                return false;
+            }
+
+            identity = _active.GetNpcData(KindWorker, index).Generation;
+            return identity > 0;
+        }
+
+        internal static bool TryResolveCustomer(int index, int identity, out Customer customer)
+        {
+            customer = null;
+            if (_active == null || index < 0 || identity <= 0
+                || !_active._customers.TryGetValue(index, out customer) || customer == null)
+            {
+                return false;
+            }
+
+            return _active.GetNpcData(KindCustomer, index).Generation == identity
+                && IsCustomerActive(customer);
+        }
+
+        internal static bool TryResolveWorker(int index, int identity, out Worker worker)
+        {
+            worker = null;
+            if (_active == null || index < 0 || identity <= 0
+                || !_active._workers.TryGetValue(index, out worker) || worker == null)
+            {
+                return false;
+            }
+
+            return _active.GetNpcData(KindWorker, index).Generation == identity
+                && IsWorkerActive(worker);
+        }
+
+        /// <summary>Maps a host popup follow transform to the live tracked customer it belongs
+        /// to. Only the object crosses the wire; the popup carries no separate identity.</summary>
+        private static bool TryGetTrackedCustomer(Transform transform, out Customer customer)
+        {
+            customer = null;
             if (_active == null || transform == null)
             {
                 return false;
@@ -1126,102 +811,16 @@ namespace CardShopCoop.Modules.Npc
 
             foreach (var pair in _active._customers)
             {
-                var customer = pair.Value;
-                if (customer != null && customer.transform == transform)
+                var candidate = pair.Value;
+                if (candidate != null && candidate.transform == transform)
                 {
-                    index = (ushort)pair.Key;
-                    identity = GetCustomerGeneration(customer);
+                    customer = candidate;
                     return true;
                 }
             }
 
-            CoopPlugin.Log.LogWarning("Npc host: customer transform has no stable identity");
+            CoopPlugin.Log.LogWarning("Npc host: popup transform has no tracked customer");
             return false;
-        }
-
-
-        [HarmonyPatch(typeof(CustomerManager), "Start")]
-        private static class CustomerManagerStartPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(CustomerManager __instance)
-            {
-                _active?.RegisterInitialPopulation(__instance);
-                _active?.SignalCustomerManagerReady();
-            }
-        }
-
-        [HarmonyPatch(typeof(Customer), "ActivateCustomer")]
-        [HarmonyPatch(typeof(Customer), "DeactivateCustomer")]
-        private static class CustomerPopulationPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(Customer __instance)
-            {
-                if (_active == null || __instance == null)
-                {
-                    return;
-                }
-
-                if (__instance.m_IsActive && __instance.gameObject.activeSelf)
-                {
-                    _active.CustomerActivated(__instance);
-                }
-                else
-                {
-                    _active.CustomerDeactivated(__instance);
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(Customer), "Update")]
-        private static class CustomerUpdatePatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(Customer __instance)
-                => _active?.ObserveCustomer(__instance, "Customer.Update");
-        }
-
-        [HarmonyPatch(typeof(WorkerManager), "Start")]
-        private static class WorkerManagerStartPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(WorkerManager __instance)
-            {
-                _active?.RegisterInitialWorkers(__instance);
-                _active?.SignalWorkerManagerReady();
-            }
-        }
-
-        [HarmonyPatch(typeof(Worker), "ActivateWorker")]
-        [HarmonyPatch(typeof(Worker), "DeactivateWorker")]
-        private static class WorkerPopulationPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(Worker __instance)
-            {
-                if (_active == null || __instance == null)
-                {
-                    return;
-                }
-
-                if (__instance.m_IsActive && __instance.gameObject.activeSelf)
-                {
-                    _active.WorkerActivated(__instance);
-                }
-                else
-                {
-                    _active.WorkerDeactivated(__instance);
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(Worker), "Update")]
-        private static class WorkerUpdatePatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(Worker __instance)
-                => _active?.ObserveWorker(__instance, "Worker.Update");
         }
 
         [HarmonyPatch(typeof(Worker), "PlayWorkerActionAnim")]
@@ -1254,13 +853,11 @@ namespace CardShopCoop.Modules.Npc
                     if (popup != null && popup.gameObject.activeSelf
                         && popup.m_FollowTransform == followTransform && popup.m_Text != null
                         && popup.m_Text.text == text
-                        && TryGetCustomerIdentity(followTransform, out var index, out var identity))
+                        && TryGetTrackedCustomer(followTransform, out var customer))
                     {
                         _active._context.Broadcast(new NpcSpeechMessage
                         {
-                            Kind = 0,
-                            Index = index,
-                            Identity = identity,
+                            Customer = customer,
                             Text = text,
                             OffsetUp = offsetUp
                         });
@@ -1278,14 +875,13 @@ namespace CardShopCoop.Modules.Npc
                 Transform followTransform)
             {
                 if (_active == null || __instance == null || price <= 0f || followTransform == null
-                    || !TryGetCustomerIdentity(followTransform, out var index, out var identity))
+                    || !TryGetTrackedCustomer(followTransform, out var customer))
                 {
                     return;
                 }
                 _active._context.Broadcast(new NpcMoneyPopupMessage
                 {
-                    Index = index,
-                    Identity = identity,
+                    Customer = customer,
                     Amount = price,
                     OffsetUp = offsetUp
                 });

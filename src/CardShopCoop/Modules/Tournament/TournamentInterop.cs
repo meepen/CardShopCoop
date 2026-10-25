@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Reflection;
+using CardShopCoop.Runtime;
 using CardShopCoop.Util;
 using HarmonyLib;
 
@@ -57,7 +58,9 @@ namespace CardShopCoop.Modules.Tournament
             state.HasRegisteredTournamentResult = (bool)HasRegisteredTournamentResult.GetValue(source);
             state.TournamentCustomerIndex = (int)TournamentCustomerIndex.GetValue(source);
             state.TournamentCustomerSortedIndex = (int)TournamentCustomerSortedIndex.GetValue(source);
-            state.TournamentCustomerPlayTableIndex = (int)TournamentCustomerPlayTableIndex.GetValue(source);
+            var manager = SceneRef<ShelfManager>.Get();
+            state.PlayTable = manager == null ? null : ShelfManager.GetTournamentPlayTableWithNumber(
+                (int)TournamentCustomerPlayTableIndex.GetValue(source));
             state.TournamentWinCount = (int)TournamentWinCount.GetValue(source);
             state.TournamentWinPoints = (int)TournamentWinPoints.GetValue(source);
             state.TournamentOMW = (int)TournamentOMW.GetValue(source);
@@ -111,7 +114,8 @@ namespace CardShopCoop.Modules.Tournament
             HasRegisteredTournamentResult.SetValue(target, state.HasRegisteredTournamentResult);
             TournamentCustomerIndex.SetValue(target, state.TournamentCustomerIndex);
             TournamentCustomerSortedIndex.SetValue(target, state.TournamentCustomerSortedIndex);
-            TournamentCustomerPlayTableIndex.SetValue(target, state.TournamentCustomerPlayTableIndex);
+            TournamentCustomerPlayTableIndex.SetValue(target,
+                state.PlayTable == null ? 0 : state.PlayTable.GetTournamentPlayTableNumber());
             TournamentWinCount.SetValue(target, state.TournamentWinCount);
             TournamentWinPoints.SetValue(target, state.TournamentWinPoints);
             TournamentOMW.SetValue(target, state.TournamentOMW);

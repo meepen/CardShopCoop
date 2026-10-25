@@ -152,6 +152,70 @@ namespace CardShopCoop.Net
             return true;
         }
 
+        /// <summary>
+        /// Validates one complete frame and returns its envelope plus the exact payload slice,
+        /// without deserializing the JSON body. Transports use this off the Unity thread; the
+        /// caller deserializes the returned <see cref="WireFrame"/> on the main thread.
+        /// </summary>
+        internal static bool TryReadFrame(byte[] frame, int offset, int count,
+            PeerConnection connection, int maxFrame, ProtocolSnapshot snapshot, bool compactIds,
+            out WireFrame wireFrame)
+        {
+            wireFrame = null;
+            if (!TryResolveFrame(frame, offset, count, maxFrame, out var descriptor,
+                out _, out var payloadOffset, out var payloadLength, snapshot, compactIds))
+            {
+                return false;
+            }
+
+            wireFrame = new WireFrame
+            {
+                Connection = connection,
+                Descriptor = descriptor,
+                Frame = frame,
+                PayloadOffset = payloadOffset,
+                PayloadLength = payloadLength,
+                EncodedBytes = count,
+            };
+            return true;
+        }
+
+        /// <summary>Deserializes a validated frame. This must run on the Unity thread because
+        /// entity-bearing DTO converters resolve live scene objects.</summary>
+        internal static bool TryDecodeFrame(WireFrame wireFrame, out InMsg message)
+        {
+            message = default(InMsg);
+            if (wireFrame == null || wireFrame.Descriptor == null || wireFrame.Frame == null)
+            {
+                return false;
+            }
+
+            message = new InMsg
+            {
+                Connection = wireFrame.Connection,
+                ReceivedBeforeMessageIdActivation = wireFrame.BeforeActivation,
+            };
+            var perfStart = PerfProbe.StartThreadMetric();
+            try
+            {
+                message.Message = MessageRegistry.Deserialize(wireFrame.Descriptor, wireFrame.Frame,
+                    wireFrame.PayloadOffset, wireFrame.PayloadLength);
+            }
+            catch (Exception e)
+            {
+                LogDecodeWarning(wireFrame.Descriptor.WireName,
+                    $"discarding malformed {wireFrame.Descriptor.WireName} frame: "
+                    + $"{e.GetType().Name}: {e.Message}");
+                return false;
+            }
+            finally
+            {
+                PerfProbe.EndThreadMetric("net.decode.", wireFrame.Descriptor.MessageType, perfStart);
+            }
+
+            return true;
+        }
+
         /// <summary>Returns the type from a complete outbound frame without making
         /// callers depend on the wire offset. Used only for transport scheduling.</summary>
         public static bool TryGetMessageType(byte[] frame, out Type type)

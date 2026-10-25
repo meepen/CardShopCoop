@@ -1,6 +1,5 @@
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Npc;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -19,8 +18,6 @@ namespace CardShopCoop.Modules.Deodorant
         private Harmony _harmony;
         private bool _shutdown;
         private bool _joined;
-        private readonly System.Collections.Generic.Dictionary<string, DeodorantCustomerState>
-            _pendingCustomerStates = new();
 
         private void OnEnable()
         {
@@ -35,15 +32,12 @@ namespace CardShopCoop.Modules.Deodorant
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.deodorant.client");
                 _harmony.CreateClassProcessor(typeof(SprayPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(CustomerManagerReadyPatch)).Patch();
-                NpcClientBehaviour.CustomerPoolChanged += ApplyPendingStates;
             }
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError($"Deodorant client initialization failed: {error}");
                 _harmony?.UnpatchSelf();
                 _harmony = null;
-                NpcClientBehaviour.CustomerPoolChanged -= ApplyPendingStates;
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
@@ -58,7 +52,6 @@ namespace CardShopCoop.Modules.Deodorant
         private void Joined(PeerConnection _)
         {
             _joined = true;
-            _pendingCustomerStates.Clear();
         }
 
         [OnClientDisconnected]
@@ -67,7 +60,6 @@ namespace CardShopCoop.Modules.Deodorant
             if (connection?.Id == 1)
             {
                 _joined = false;
-                _pendingCustomerStates.Clear();
             }
         }
 
@@ -86,9 +78,7 @@ namespace CardShopCoop.Modules.Deodorant
 
             _harmony?.UnpatchSelf();
             _harmony = null;
-            NpcClientBehaviour.CustomerPoolChanged -= ApplyPendingStates;
             _joined = false;
-            _pendingCustomerStates.Clear();
             _context = null;
         }
 
@@ -105,11 +95,11 @@ namespace CardShopCoop.Modules.Deodorant
                 return;
             }
 
-            PredictionApi.Predict(
+            ActionLedger.Submit(
                 PredictionScope,
-                predictionId => _context.Send(1, new HandheldSprayIntentMessage
+                actionId => _context.Send(1, new HandheldSprayIntentMessage
                 {
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     Position = position,
                     Content = after,
                 }),
@@ -117,7 +107,7 @@ namespace CardShopCoop.Modules.Deodorant
                 () => DeodorantInterop.TrySetContent(controller, before));
         }
 
-        [MessageHandler(typeof(HandheldSprayEventMessage))]
+        [MessageHandler]
         private void HandleEvent(MessageContext _, HandheldSprayEventMessage message)
         {
             if (message == null)
@@ -128,37 +118,19 @@ namespace CardShopCoop.Modules.Deodorant
             // The spray content is echoed verbatim, but the customer state is host-computed and the
             // client's optimistic spray never produced it. Retire our prediction, then always apply
             // the host state so the host-computed customers overwrite the local spray.
-            PredictionApi.Confirm(message.PredictionId,
+            ActionLedger.Confirm(message.ActionId,
                 () => ApplyEvent(message));
         }
 
         private void ApplyEvent(HandheldSprayEventMessage message)
         {
-            if (PredictionApi.IsReconciling)
+            if (ActionLedger.IsReconciling)
             {
                 DeodorantInterop.TrySetContent(SceneRef<InteractionPlayerController>.Get(),
                     message.Content);
             }
 
             ApplyCustomers(message.Customers);
-        }
-
-        private void ApplyPendingStates()
-        {
-            if (_pendingCustomerStates.Count == 0 || SceneRef<CustomerManager>.Get() == null)
-            {
-                return;
-            }
-
-            var pending = new System.Collections.Generic.List<DeodorantCustomerState>(
-                _pendingCustomerStates.Values);
-            for (var i = 0; i < pending.Count; i++)
-            {
-                if (ApplyCustomerState(pending[i]))
-                {
-                    _pendingCustomerStates.Remove(CustomerKey(pending[i]));
-                }
-            }
         }
 
         private void ApplyCustomers(System.Collections.Generic.IList<DeodorantCustomerState> states)
@@ -170,47 +142,23 @@ namespace CardShopCoop.Modules.Deodorant
 
             for (var i = 0; i < states.Count; i++)
             {
-                var state = states[i];
-                if (!ApplyCustomerState(state))
-                {
-                    if (state != null)
-                    {
-                        var key = CustomerKey(state);
-                        _pendingCustomerStates[key] = state;
-                    }
-                }
+                ApplyCustomerState(states[i]);
             }
         }
 
-        private bool ApplyCustomerState(DeodorantCustomerState state)
+        /// <summary>Applies one host-computed smell result to the live customer the wire named.
+        /// The converter already resolved the exact pooled incarnation, so a null customer means
+        /// the entity is not live here and the entry is logged and dropped.</summary>
+        private static void ApplyCustomerState(DeodorantCustomerState state)
         {
-            var customers = SceneRef<CustomerManager>.Get()?.GetCustomerList();
-            if (state == null || customers == null || state.Index < 0 || state.Index >= customers.Count
-                || customers[state.Index] == null)
+            if (state?.Customer == null)
             {
-                return false;
+                CoopPlugin.Log.LogWarning("[deodorant] dropped smell state with no live customer.");
+                return;
             }
 
-            if (!NpcClientBehaviour.TryGetCustomerGeneration(state.Index, out var generation))
-            {
-                return false;
-            }
-
-            // A pooled customer index can be reused. Drop an older result instead of applying
-            // its smell state to the newer incarnation, but retain a future result until the
-            // NPC identity reaches the client.
-            if (generation != state.Generation)
-            {
-                return generation > state.Generation;
-            }
-
-            DeodorantInterop.ApplyCustomerState(customers[state.Index], state.IsSmelly,
-                state.SmellyMeter);
-            return true;
+            DeodorantInterop.ApplyCustomerState(state.Customer, state.IsSmelly, state.SmellyMeter);
         }
-
-        private static string CustomerKey(DeodorantCustomerState state)
-            => state.Index + ":" + state.Generation;
 
         [HarmonyPatch(typeof(InteractionPlayerController), "RaycastHoldSprayState")]
         private static class SprayPatch
@@ -263,11 +211,5 @@ namespace CardShopCoop.Modules.Deodorant
             }
         }
 
-        [HarmonyPatch(typeof(CustomerManager), "OnEnable")]
-        private static class CustomerManagerReadyPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix() => _active?.ApplyPendingStates();
-        }
     }
 }

@@ -23,7 +23,7 @@ namespace CardShopCoop.Api
 
         public static FieldInfo OptionalField(Type type, string name)
         {
-            var field = type == null ? null : type.GetField(name, Flags);
+            var field = type?.GetField(name, Flags);
             if (field == null)
             {
                 Report("field", Describe(type, name), false);
@@ -45,7 +45,7 @@ namespace CardShopCoop.Api
 
         public static PropertyInfo OptionalProperty(Type type, string name)
         {
-            var property = type == null ? null : type.GetProperty(name, Flags);
+            var property = type?.GetProperty(name, Flags);
             if (property == null)
             {
                 Report("property", Describe(type, name), false);
@@ -56,7 +56,7 @@ namespace CardShopCoop.Api
 
         public static FieldInfo RequiredField(Type type, string name)
         {
-            var field = type == null ? null : type.GetField(name, Flags);
+            var field = type?.GetField(name, Flags);
             if (field == null)
             {
                 Report("field", Describe(type, name), true);

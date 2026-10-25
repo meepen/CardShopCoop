@@ -6,32 +6,23 @@ using CardShopCoop.Net;
 namespace CardShopCoop.Modules.Pricing
 {
     [NetworkMessage]
-    public sealed class PricingItemIntentMessage : IPredictedMessage
+    public sealed class PricingItemIntentMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
 
         public EItemType ItemType;
         public float Price;
     }
 
     [NetworkMessage]
-    public sealed class PricingCardIntentMessage : IPredictedMessage
+    public sealed class PricingCardIntentMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
 
         public CardData Card;
         public float Price;
         public int EncodedGrade;
 
-        /// <summary>Placement identity of the display shelf holding the priced card:
-        /// kind&lt;&lt;24 | object id, the same key the card-display protocol uses.</summary>
-        public int ShelfKey;
+        /// <summary>The live display shelf holding the priced card.</summary>
+        public CardShelf Shelf;
 
         /// <summary>Index of the compartment in the shelf's GetCardCompartmentList().</summary>
         public int Compartment;
@@ -51,7 +42,7 @@ namespace CardShopCoop.Modules.Pricing
     /// <summary>One item price change inside a <see cref="PricingDeltaBatchMessage"/>.</summary>
     public struct PricingItemDeltaEntry
     {
-        public Guid PredictionId;
+        public Guid ActionId;
         public EItemType ItemType;
         public float Price;
     }
@@ -60,7 +51,7 @@ namespace CardShopCoop.Modules.Pricing
     /// snapshotted when the entry is queued, never when the batch is flushed.</summary>
     public struct PricingCardDeltaEntry
     {
-        public Guid PredictionId;
+        public Guid ActionId;
         public CardData Card;
         public float Price;
         public int EncodedGrade;

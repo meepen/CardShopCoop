@@ -1,7 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using CardShopCoop.Modules.Prediction;
+using System.Runtime.CompilerServices;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -24,7 +25,7 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(RemoveLabelPatch)).Patch();
         }
 
-        [MessageHandler(typeof(ShelfItemAddRequestMessage))]
+        [MessageHandler]
         private void HandleShelfItemAdd(MessageContext context, ShelfItemAddRequestMessage message)
         {
             if (_context == null || !_context.InGame() || !IsJoinPhaseSender(context))
@@ -43,8 +44,8 @@ namespace CardShopCoop.Modules.World
 
                 BroadcastWorld(new ShelfItemAddMessage
                 {
-                    PredictionId = message.PredictionId,
-                    ShelfKey = message.ShelfKey,
+                    ActionId = message.ActionId,
+                    Shelf = message.Shelf,
                     Compartment = message.Compartment,
                     ItemType = message.ItemType,
                     ItemCount = message.ItemCount,
@@ -53,7 +54,7 @@ namespace CardShopCoop.Modules.World
             });
         }
 
-        [MessageHandler(typeof(ShelfItemRemoveRequestMessage))]
+        [MessageHandler]
         private void HandleShelfItemRemove(MessageContext context, ShelfItemRemoveRequestMessage message)
         {
             if (_context == null || !_context.InGame() || !IsJoinPhaseSender(context))
@@ -72,8 +73,8 @@ namespace CardShopCoop.Modules.World
 
                 BroadcastWorld(new ShelfItemRemoveMessage
                 {
-                    PredictionId = message.PredictionId,
-                    ShelfKey = message.ShelfKey,
+                    ActionId = message.ActionId,
+                    Shelf = message.Shelf,
                     Compartment = message.Compartment,
                     ItemType = message.ItemType,
                     ItemCount = message.ItemCount,
@@ -405,12 +406,11 @@ namespace CardShopCoop.Modules.World
     {
     }
 
-    /// <summary>Wire state for one player-induced shelf stock mutation. The shelf is addressed by
-    /// its host-assigned placement identity (the same furniture key card displays and placement
-    /// moves already use) plus the compartment index, never by scene name or hierarchy path.</summary>
+    /// <summary>Wire state for one player-induced shelf stock mutation. The shelf is the live
+    /// placed object plus the compartment index, never a scene name, hierarchy path or key.</summary>
     public abstract class ShelfInteractionMessage : WorldMessage
     {
-        public int ShelfKey;
+        public InteractableObject Shelf;
         public int Compartment;
         public EItemType ItemType;
         public int ItemCount;
@@ -427,21 +427,45 @@ namespace CardShopCoop.Modules.World
         private const int MaxItemCount = 4096;
         private const int MaxCompartments = 256;
 
-        private readonly Dictionary<string, ShelfInteractionMessage> _pendingClientStates = new();
+        private readonly Dictionary<ShelfSlot, ShelfInteractionMessage> _pendingClientStates = new();
 
         // Client only: prediction ids of this peer's outstanding optimistic placements per
         // shelf/compartment key. An incoming delta carries the host's absolute count, which does not
         // include these, so the merge target is host count + the still-pending adds (otherwise a
         // delta for a shelf with a pending placement walks the count backwards: client 31 vs host
-        // 32). Liveness is derived from PredictionApi, so retiring a prediction (ack or rollback)
+        // 32). Liveness is derived from ActionLedger, so retiring a prediction (ack or rollback)
         // needs no parallel count.
-        private readonly Dictionary<string, List<Guid>> _pendingClientAddIds = new();
+        private readonly Dictionary<ShelfSlot, List<Guid>> _pendingClientAddIds = new();
 
         // Client only: prediction ids of this peer's outstanding optimistic take-to-hand removals
         // per shelf/compartment key, the mirror of _pendingClientAddIds. An incoming absolute host
         // delta does not include them, so the merge target must subtract the still-outstanding ones
         // or it backfills a replacement item onto the shelf while the real one is still in the hand.
-        private readonly Dictionary<string, List<Guid>> _pendingClientRemoveIds = new();
+        private readonly Dictionary<ShelfSlot, List<Guid>> _pendingClientRemoveIds = new();
+
+        /// <summary>Reference identity for one live shelf compartment. A Unity object's overloaded
+        /// equality is never used for a key; the live reference is.</summary>
+        private readonly struct ShelfSlot : IEquatable<ShelfSlot>
+        {
+            private readonly InteractableObject _shelf;
+            private readonly int _compartment;
+
+            internal ShelfSlot(InteractableObject shelf, int compartment)
+            {
+                _shelf = shelf;
+                _compartment = compartment;
+            }
+
+            internal bool IsValid => _shelf != null;
+
+            public bool Equals(ShelfSlot other)
+                => ReferenceEquals(_shelf, other._shelf) && _compartment == other._compartment;
+
+            public override bool Equals(object obj) => obj is ShelfSlot other && Equals(other);
+
+            public override int GetHashCode()
+                => unchecked((RuntimeHelpers.GetHashCode(_shelf) * 397) ^ _compartment);
+        }
 
         // Client only: the exact item each live optimistic placement owns. An authoritative type
         // change clears (pools) the compartment before a rejected placement's undo can return its
@@ -474,7 +498,7 @@ namespace CardShopCoop.Modules.World
         {
             public bool Send;
             public ShelfInteractionMessage Command;
-            public int ShelfKey;
+            public InteractableObject Shelf;
             public int Compartment;
 
             // The exact item a take-to-hand removal moved into the acting hand. Set only by the
@@ -544,9 +568,9 @@ namespace CardShopCoop.Modules.World
                 return default;
             }
 
-            if (!TryMakeKey(compartment, out var shelfKey, out var compartmentIndex))
+            if (!TryGetShelf(compartment, out var shelf, out var compartmentIndex))
             {
-                CoopPlugin.Log.LogWarning("[shelf] no furniture id for " + compartment.name
+                CoopPlugin.Log.LogWarning("[shelf] no live owning shelf for " + compartment.name
                     + "; " + (isAdd ? "placement" : "removal") + " not synced.");
                 return default;
             }
@@ -558,7 +582,7 @@ namespace CardShopCoop.Modules.World
             var targetCount = isAdd ? beforeCount + 1 : Math.Max(0, beforeCount - 1);
             var message = isAdd ? new ShelfItemAddRequestMessage() as ShelfInteractionMessage
                 : new ShelfItemRemoveRequestMessage();
-            message.ShelfKey = shelfKey;
+            message.Shelf = shelf;
             message.Compartment = compartmentIndex;
             message.ItemType = targetType;
             message.ItemCount = targetCount;
@@ -573,14 +597,14 @@ namespace CardShopCoop.Modules.World
             {
                 // The game's own AddItem already placed the item. Register the prediction (which
                 // sends the intent) and remember its id as an outstanding optimistic placement;
-                // the pending count is derived from PredictionApi, not a parallel counter.
-                var predictionId = WorldPrediction.Predict(WorldPrediction.ShelvesScope, message,
+                // the pending count is derived from ActionLedger, not a parallel counter.
+                var actionId = WorldAction.Submit(WorldAction.ShelvesScope, message,
                     () => AddCapturedItem(compartment, item),
                     () => ReturnCapturedItem(compartment, item));
-                RecordPendingAdd(ShelfKey(message), predictionId);
+                RecordPendingAdd(new ShelfSlot(shelf, compartmentIndex), actionId);
                 if (item != null)
                 {
-                    _pendingClientAddItems[predictionId] = item;
+                    _pendingClientAddItems[actionId] = item;
                 }
             }
 
@@ -590,7 +614,7 @@ namespace CardShopCoop.Modules.World
                 // The client add's prediction owns its send; every removal (and the host) publishes
                 // its intent through Publish/PublishRemove instead.
                 Command = _host || !isAdd ? null : message,
-                ShelfKey = shelfKey,
+                Shelf = shelf,
                 Compartment = compartmentIndex,
             };
         }
@@ -646,10 +670,7 @@ namespace CardShopCoop.Modules.World
 
                 compartment.RemoveItem(item);
                 var controller = SceneRef<InteractionPlayerController>.Get();
-                if (controller != null)
-                {
-                    controller.AddHoldItemToFront(item);
-                }
+                controller?.AddHoldItemToFront(item);
 
                 PositionStored(compartment);
                 CoopPlugin.Log.LogInfo("[shelf] rolled a rejected placement back to hand on "
@@ -689,7 +710,7 @@ namespace CardShopCoop.Modules.World
                 var owner = Guid.Empty;
                 foreach (var pair in _pendingClientAddItems)
                 {
-                    if (ReferenceEquals(pair.Value, item) && PredictionApi.IsPending(pair.Key))
+                    if (ReferenceEquals(pair.Value, item) && ActionLedger.IsPending(pair.Key))
                     {
                         owner = pair.Key;
                         break;
@@ -703,10 +724,7 @@ namespace CardShopCoop.Modules.World
 
                 _pendingClientAddItems.Remove(owner);
                 compartment.RemoveItem(item);
-                if (controller != null)
-                {
-                    controller.AddHoldItemToFront(item);
-                }
+                controller?.AddHoldItemToFront(item);
 
                 CoopPlugin.Log.LogInfo("[shelf] returned a pending placement item on "
                     + compartment.name + " before an authoritative clear.");
@@ -727,7 +745,7 @@ namespace CardShopCoop.Modules.World
             var stale = new List<Guid>();
             foreach (var pair in _pendingClientAddItems)
             {
-                if (!PredictionApi.IsPending(pair.Key))
+                if (!ActionLedger.IsPending(pair.Key))
                 {
                     stale.Add(pair.Key);
                 }
@@ -771,16 +789,16 @@ namespace CardShopCoop.Modules.World
             var removed = mutation.Removed;
             var request = new ShelfItemRemoveRequestMessage
             {
-                ShelfKey = mutation.ShelfKey,
+                Shelf = mutation.Shelf,
                 Compartment = mutation.Compartment,
                 ItemType = compartment.GetItemType(),
                 ItemCount = compartment.GetItemCount(),
             };
-            var key = ShelfKey(request);
-            var predictionId = WorldPrediction.Predict(WorldPrediction.ShelvesScope, request,
+            var key = new ShelfSlot(mutation.Shelf, mutation.Compartment);
+            var actionId = WorldAction.Submit(WorldAction.ShelvesScope, request,
                 () => RemoveCapturedItem(compartment, removed),
                 () => RestoreCapturedItem(compartment, removed));
-            RecordPendingRemove(key, predictionId);
+            RecordPendingRemove(key, actionId);
         }
 
         /// <summary>Re-applies a predicted shelf removal: take the item off the shelf and return it
@@ -880,9 +898,9 @@ namespace CardShopCoop.Modules.World
                 return default;
             }
 
-            if (!TryMakeKey(compartment, out var shelfKey, out var compartmentIndex))
+            if (!TryGetShelf(compartment, out var shelf, out var compartmentIndex))
             {
-                CoopPlugin.Log.LogWarning("[shelf] no furniture id for " + compartment.name
+                CoopPlugin.Log.LogWarning("[shelf] no live owning shelf for " + compartment.name
                     + "; label removal not synced.");
                 return default;
             }
@@ -891,27 +909,30 @@ namespace CardShopCoop.Modules.World
             {
                 Send = true,
                 Command = null,
-                ShelfKey = shelfKey,
+                Shelf = shelf,
                 Compartment = compartmentIndex,
             };
         }
 
         internal bool ApplyIncoming(ShelfInteractionMessage message)
         {
+            if (message == null || message.Shelf == null)
+            {
+                CoopPlugin.Log.LogWarning("[shelf] dropped shelf state: the shelf did not resolve "
+                    + "to a live object.");
+                return false;
+            }
+
             if (_host && !Validate(message))
             {
                 return false;
             }
 
-            var compartment = ResolveCompartment(message.ShelfKey, message.Compartment);
+            var compartment = ResolveCompartment(message.Shelf, message.Compartment);
             if (compartment == null)
             {
-                if (!_host)
-                {
-                    _pendingClientStates[ShelfKey(message)] = message;
-                    return true;
-                }
-
+                CoopPlugin.Log.LogWarning("[shelf] dropped state: shelf=" + message.Shelf.name
+                    + " has no compartment " + message.Compartment + ".");
                 return false;
             }
 
@@ -933,7 +954,7 @@ namespace CardShopCoop.Modules.World
                     var localType = compartment.GetItemType();
                     if (localType == message.ItemType || localType == EItemType.None)
                     {
-                        var key = ShelfKey(message);
+                        var key = new ShelfSlot(message.Shelf, message.Compartment);
                         if (message.ItemType != EItemType.None)
                         {
                             target += PendingAddCount(key);
@@ -972,7 +993,7 @@ namespace CardShopCoop.Modules.World
                 return null;
             }
 
-            var compartment = ResolveCompartment(failed.ShelfKey, failed.Compartment);
+            var compartment = ResolveCompartment(failed.Shelf, failed.Compartment);
             if (compartment == null)
             {
                 return null;
@@ -980,7 +1001,7 @@ namespace CardShopCoop.Modules.World
 
             return new ShelfItemAddMessage
             {
-                ShelfKey = failed.ShelfKey,
+                Shelf = failed.Shelf,
                 Compartment = failed.Compartment,
                 ItemType = compartment.GetItemType(),
                 ItemCount = compartment.GetItemCount(),
@@ -989,29 +1010,29 @@ namespace CardShopCoop.Modules.World
 
         /// <summary>Client: remembers one of this peer's optimistic placements by its shelf key,
         /// so an incoming absolute host delta can add the still-outstanding ones back.</summary>
-        private void RecordPendingAdd(string key, Guid predictionId)
+        private void RecordPendingAdd(ShelfSlot key, Guid actionId)
         {
             if (!_host)
             {
-                RecordPending(_pendingClientAddIds, key, predictionId);
+                RecordPending(_pendingClientAddIds, key, actionId);
             }
         }
 
         /// <summary>Client: remembers one of this peer's optimistic take-to-hand removals by its
         /// shelf key, so an incoming absolute host delta can subtract the still-outstanding ones
         /// instead of backfilling items that are still in the player's hand.</summary>
-        private void RecordPendingRemove(string key, Guid predictionId)
+        private void RecordPendingRemove(ShelfSlot key, Guid actionId)
         {
             if (!_host)
             {
-                RecordPending(_pendingClientRemoveIds, key, predictionId);
+                RecordPending(_pendingClientRemoveIds, key, actionId);
             }
         }
 
-        private static void RecordPending(Dictionary<string, List<Guid>> pending, string key,
-            Guid predictionId)
+        private static void RecordPending(Dictionary<ShelfSlot, List<Guid>> pending, ShelfSlot key,
+            Guid actionId)
         {
-            if (string.IsNullOrEmpty(key) || predictionId == Guid.Empty)
+            if (!key.IsValid || actionId == Guid.Empty)
             {
                 return;
             }
@@ -1022,17 +1043,17 @@ namespace CardShopCoop.Modules.World
                 pending[key] = ids;
             }
 
-            ids.Add(predictionId);
+            ids.Add(actionId);
         }
 
         /// <summary>Client: how many of this peer's optimistic actions of one kind for the key are
-        /// still outstanding. Liveness comes from <see cref="PredictionApi.IsPending"/>, so an ack
+        /// still outstanding. Liveness comes from <see cref="ActionLedger.IsPending"/>, so an ack
         /// or a rollback drops the action with no separate bookkeeping; retired ids are pruned here.</summary>
-        private int PendingAddCount(string key) => PendingCount(_pendingClientAddIds, key);
+        private int PendingAddCount(ShelfSlot key) => PendingCount(_pendingClientAddIds, key);
 
-        private int PendingRemoveCount(string key) => PendingCount(_pendingClientRemoveIds, key);
+        private int PendingRemoveCount(ShelfSlot key) => PendingCount(_pendingClientRemoveIds, key);
 
-        private int PendingCount(Dictionary<string, List<Guid>> pending, string key)
+        private int PendingCount(Dictionary<ShelfSlot, List<Guid>> pending, ShelfSlot key)
         {
             if (_host || !pending.TryGetValue(key, out var ids))
             {
@@ -1042,7 +1063,7 @@ namespace CardShopCoop.Modules.World
             var live = 0;
             for (var i = ids.Count - 1; i >= 0; i--)
             {
-                if (PredictionApi.IsPending(ids[i]))
+                if (ActionLedger.IsPending(ids[i]))
                 {
                     live++;
                 }
@@ -1120,12 +1141,9 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var pending = new List<ShelfInteractionMessage>(_pendingClientStates.Values);
+            CoopPlugin.Log.LogWarning("[shelf] dropping " + _pendingClientStates.Count
+                + " deferred shelf state(s): a live shelf no longer resolves to them.");
             _pendingClientStates.Clear();
-            for (var i = 0; i < pending.Count; i++)
-            {
-                ApplyIncoming(pending[i]);
-            }
         }
 
         private void Publish(ShelfCompartment compartment, LocalMutation mutation, bool isAdd)
@@ -1149,7 +1167,7 @@ namespace CardShopCoop.Modules.World
             {
                 message = _host ? new ShelfItemRemoveMessage() : new ShelfItemRemoveRequestMessage();
             }
-            message.ShelfKey = mutation.ShelfKey;
+            message.Shelf = mutation.Shelf;
             message.Compartment = mutation.Compartment;
             message.ItemType = compartment.GetItemType();
             message.ItemCount = compartment.GetItemCount();
@@ -1175,17 +1193,13 @@ namespace CardShopCoop.Modules.World
         private static bool IsPlayerShelf(ShelfCompartment compartment)
             => IsSyncableShelf(compartment) && compartment.GetWarehouseShelf() == null;
 
-        private static string ShelfKey(ShelfInteractionMessage message)
-            => WorldMessageMetadata.StableEntityId(message);
-
-        /// <summary>Builds the host-assigned furniture identity for a compartment's owning shelf
-        /// plus the compartment's index in that shelf's compartment list. Fails for a compartment
-        /// that is not owned by a placed shelf (for example one inside a packaging box) or whose
-        /// shelf has no host identity yet.</summary>
-        private static bool TryMakeKey(ShelfCompartment compartment, out int shelfKey,
+        /// <summary>Resolves the live shelf that owns a compartment and the compartment's index in
+        /// that shelf's compartment list. Fails for a compartment that is not owned by a placed
+        /// shelf (for example one inside a packaging box).</summary>
+        private static bool TryGetShelf(ShelfCompartment compartment, out InteractableObject shelf,
             out int compartmentIndex)
         {
-            shelfKey = 0;
+            shelf = null;
             compartmentIndex = -1;
             if (compartment == null)
             {
@@ -1208,12 +1222,9 @@ namespace CardShopCoop.Modules.World
                     var index = compartments.IndexOf(compartment);
                     if (index >= 0 && index < MaxCompartments)
                     {
-                        var kind = PlacementInterop.FindKind(owner);
-                        if (kind >= 0 && PlacementApi.TryMakeObjectKey(kind, owner, out shelfKey))
-                        {
-                            compartmentIndex = index;
-                            return true;
-                        }
+                        shelf = owner;
+                        compartmentIndex = index;
+                        return true;
                     }
                 }
 
@@ -1223,13 +1234,12 @@ namespace CardShopCoop.Modules.World
             return false;
         }
 
-        /// <summary>Resolves the shelf the host assigned an identity to, then picks the addressed
-        /// compartment. Exact, unlike the name/path/position search it replaces.</summary>
-        private static ShelfCompartment ResolveCompartment(int shelfKey, int compartmentIndex)
+        /// <summary>Picks the addressed compartment out of an already-live shelf object.</summary>
+        private static ShelfCompartment ResolveCompartment(InteractableObject shelf,
+            int compartmentIndex)
         {
-            if (compartmentIndex < 0 || compartmentIndex >= MaxCompartments
-                || PlacementApi.ResolveObjectByKey(shelfKey) is not InteractableObject owner
-                || CompartmentListField?.GetValue(owner) is not List<ShelfCompartment> compartments
+            if (shelf == null || compartmentIndex < 0 || compartmentIndex >= MaxCompartments
+                || CompartmentListField?.GetValue(shelf) is not List<ShelfCompartment> compartments
                 || compartmentIndex >= compartments.Count)
             {
                 return null;
@@ -1316,10 +1326,7 @@ namespace CardShopCoop.Modules.World
 
             var item = items[items.Count - 1];
             compartment.RemoveItem(item);
-            if (item != null)
-            {
-                item.DisableItem();
-            }
+            item?.DisableItem();
         }
 
         private static void PositionStored(ShelfCompartment compartment)
@@ -1352,10 +1359,7 @@ namespace CardShopCoop.Modules.World
             {
                 for (var i = 0; i < items.Count; i++)
                 {
-                    if (items[i] != null)
-                    {
-                        items[i].DisableItem();
-                    }
+                    items[i]?.DisableItem();
                 }
 
                 items.Clear();
@@ -1380,17 +1384,14 @@ namespace CardShopCoop.Modules.World
 
         private bool Validate(ShelfInteractionMessage message)
         {
-            if (message == null || message.Compartment < 0 || message.Compartment >= MaxCompartments
+            if (message == null || message.Shelf == null || message.Compartment < 0
+                || message.Compartment >= MaxCompartments
                 || message.ItemCount < 0 || message.ItemCount > MaxItemCount)
             {
                 return false;
             }
 
-            var kind = message.ShelfKey >> 24;
-            return kind >= 0 && kind < PlacementApi.KindCount
-                && PlacementApi.ObjectIdFromObjectKey(message.ShelfKey)
-                    != PlacementIdentity.Invalid
-                && CanResolveItemType(message.ItemType, message.ItemCount);
+            return CanResolveItemType(message.ItemType, message.ItemCount);
         }
 
         private bool CanResolveItemType(EItemType itemType, int itemCount)

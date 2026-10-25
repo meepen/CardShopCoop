@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Modules.Npc;
@@ -22,6 +22,9 @@ namespace CardShopCoop.Modules.Trade
         {
             public TradeOfferState State;
             public Customer Carrier;
+            /// <summary>The local Npc mirror index of <see cref="State"/>'s customer. This is a
+            /// local correlation for the Npc module's carrier APIs, never a wire field.</summary>
+            public int CustomerIndex = -1;
             public Renderer[] MaskedRenderers;
             public bool[] RendererStates;
             public bool RemovedByHost;
@@ -78,14 +81,14 @@ namespace CardShopCoop.Modules.Trade
         private const string PredictionScope = "trade";
 
         private static TradeClientBehaviour _active;
-        private readonly Dictionary<byte, LocalOffer> _offers = new();
-        private readonly Dictionary<ushort, byte> _carrierKeysByCustomer = new();
+        private readonly Dictionary<InteractableCashierCounter, LocalOffer> _offers = new();
+        private readonly Dictionary<int, LocalOffer> _offersByCustomerIndex = new();
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private TradeOfferBaselineMessage _pendingBaseline;
-        private readonly Dictionary<byte, TradeOfferDeltaMessage> _pendingDeltas = new();
+        private readonly Dictionary<InteractableCashierCounter, TradeOfferDeltaMessage> _pendingDeltas = new();
         private bool _applyingPending;
-        private int _pendingCounter = -1;
+        private InteractableCashierCounter _pendingCounter;
         private bool _claimAccepted;
         private bool _awaitingPrediction;
         private bool _terminalSent;
@@ -114,6 +117,7 @@ namespace CardShopCoop.Modules.Trade
             _harmony.CreateClassProcessor(typeof(ScreenClosePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerLifecyclePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(TradeScreenStartPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(TradeScreenSetCustomerPatch)).Patch();
             NpcClientBehaviour.ExistingCustomerPuppetReady += OnExistingCustomerPuppetReady;
             NpcClientBehaviour.CustomerManagerReady += OnReadinessSignal;
             NpcClientBehaviour.CustomerPoolChanged += OnReadinessSignal;
@@ -153,7 +157,7 @@ namespace CardShopCoop.Modules.Trade
         {
             foreach (var delta in _pendingDeltas.Values)
             {
-                PredictionApi.Ack(delta.PredictionId);
+                ActionLedger.Ack(delta.ActionId);
             }
 
             _pendingDeltas.Clear();
@@ -162,7 +166,7 @@ namespace CardShopCoop.Modules.Trade
         private void ClearForSceneChange()
         {
             var screen = TradeInterop.Screen;
-            if (_pendingCounter >= 0 && screen != null && TradeInterop.IsScreenOpen(screen))
+            if (_pendingCounter != null && screen != null && TradeInterop.IsScreenOpen(screen))
             {
                 CloseRemoteScreen();
             }
@@ -173,7 +177,7 @@ namespace CardShopCoop.Modules.Trade
             }
 
             _offers.Clear();
-            _carrierKeysByCustomer.Clear();
+            _offersByCustomerIndex.Clear();
             _pendingBaseline = null;
             ClearPendingDeltas();
             ResetSession();
@@ -188,17 +192,31 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
-        [MessageHandler(typeof(TradeOfferBaselineMessage))]
+        [MessageHandler]
         private void HandleBaseline(MessageContext context, TradeOfferBaselineMessage message)
         {
             _pendingBaseline = message;
             ApplyPendingMessages();
         }
 
-        [MessageHandler(typeof(TradeOfferDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext context, TradeOfferDeltaMessage message)
         {
-            CoopPlugin.Log.LogInfo("[trade] client offer delta counter=" + message.Counter
+            if (message == null || message.Counter == null)
+            {
+                CoopPlugin.Log.LogWarning("[trade] client dropped offer delta with no live counter.");
+                ActionLedger.Ack(message?.ActionId ?? Guid.Empty);
+                return;
+            }
+
+            if (!message.Removed && message.Offer == null)
+            {
+                CoopPlugin.Log.LogWarning("[trade] client dropped kept offer delta with no state.");
+                ActionLedger.Ack(message.ActionId);
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[trade] client offer delta counter=" + message.Counter.name
                 + " removed=" + message.Removed + " ready=" + IsTradeSceneReady() + ".");
             if (!_context.InGame() || !IsTradeSceneReady())
             {
@@ -270,7 +288,7 @@ namespace CardShopCoop.Modules.Trade
         {
             if (_pendingDeltas.TryGetValue(message.Counter, out var previous))
             {
-                PredictionApi.Ack(previous.PredictionId);
+                ActionLedger.Ack(previous.ActionId);
             }
 
             _pendingDeltas[message.Counter] = message;
@@ -278,15 +296,22 @@ namespace CardShopCoop.Modules.Trade
 
         private void ApplyBaseline(TradeOfferBaselineMessage message)
         {
-            var seen = new HashSet<byte>();
+            var seen = new HashSet<InteractableCashierCounter>();
             for (var i = 0; i < message.Offers.Count; i++)
             {
                 var snapshot = message.Offers[i];
+                if (snapshot?.Counter == null || snapshot.Customer == null)
+                {
+                    CoopPlugin.Log.LogWarning("[trade] client dropped baseline offer with no live "
+                        + (snapshot?.Counter == null ? "counter" : "customer") + ".");
+                    continue;
+                }
+
                 seen.Add(snapshot.Counter);
                 ApplyOfferState(snapshot);
             }
 
-            var stale = new List<byte>();
+            var stale = new List<InteractableCashierCounter>();
             foreach (var pair in _offers)
             {
                 if (seen.Contains(pair.Key))
@@ -294,19 +319,20 @@ namespace CardShopCoop.Modules.Trade
                     continue;
                 }
 
-                if (_pendingCounter == pair.Key && (_awaitingPrediction || _acceptedShown))
+                if (ReferenceEquals(_pendingCounter, pair.Key)
+                    && (_awaitingPrediction || _acceptedShown))
                 {
                     pair.Value.RemovedByHost = true;
-                    RemoveCarrierKey(pair.Value.State, pair.Key);
+                    RemoveCarrierKey(pair.Value);
                     continue;
                 }
 
-                if (_pendingCounter == pair.Key)
+                if (ReferenceEquals(_pendingCounter, pair.Key))
                 {
                     CloseRemoteScreen();
                 }
 
-                RemoveCarrierKey(pair.Value.State, pair.Key);
+                RemoveCarrierKey(pair.Value);
                 ReleaseCarrier(pair.Value);
                 stale.Add(pair.Key);
             }
@@ -319,8 +345,15 @@ namespace CardShopCoop.Modules.Trade
 
         private void ApplyOfferState(TradeOfferState snapshot)
         {
-            CoopPlugin.Log.LogInfo("[trade] client apply offer counter=" + snapshot.Counter
-                + " index=" + snapshot.CustomerIndex + " gen=" + snapshot.CustomerGeneration
+            if (snapshot?.Counter == null || snapshot.Customer == null)
+            {
+                CoopPlugin.Log.LogWarning("[trade] client dropped offer state with no live "
+                    + (snapshot?.Counter == null ? "counter" : "customer") + ".");
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[trade] client apply offer counter=" + snapshot.Counter.name
+                + " customer=" + snapshot.Customer.name + " gen=" + snapshot.CustomerGeneration
                 + " nonce=" + snapshot.OfferNonce + " ask=" + snapshot.Price.ToString("F2")
                 + " priceSet=" + snapshot.PriceSet.ToString("F2") + " trading=" + snapshot.Trading
                 + ".");
@@ -332,10 +365,10 @@ namespace CardShopCoop.Modules.Trade
 
             if (offer.State != null && (offer.State.OfferNonce != snapshot.OfferNonce
                 || offer.State.CustomerGeneration != snapshot.CustomerGeneration
-                || offer.State.CustomerIndex != snapshot.CustomerIndex))
+                || !ReferenceEquals(offer.State.Customer, snapshot.Customer)))
             {
-                RemoveCarrierKey(offer.State, snapshot.Counter);
-                if (_pendingCounter == snapshot.Counter)
+                RemoveCarrierKey(offer);
+                if (ReferenceEquals(_pendingCounter, snapshot.Counter))
                 {
                     CloseRemoteScreen();
                 }
@@ -345,7 +378,12 @@ namespace CardShopCoop.Modules.Trade
 
             offer.State = snapshot;
             offer.RemovedByHost = false;
-            _carrierKeysByCustomer[snapshot.CustomerIndex] = snapshot.Counter;
+            offer.CustomerIndex = TradeInterop.LocalCustomerIndex(snapshot.Customer);
+            if (offer.CustomerIndex >= 0)
+            {
+                _offersByCustomerIndex[offer.CustomerIndex] = offer;
+            }
+
             RefreshCarrierData(offer);
             PrepareCarrier(offer);
         }
@@ -357,7 +395,7 @@ namespace CardShopCoop.Modules.Trade
             // _awaitingPrediction (and the terminal flags) would stay set for a kept outcome and
             // refuse the next Accept/Decline/Think locally. A remote or host-local delta takes the
             // same apply path.
-            PredictionApi.Confirm(message.PredictionId,
+            ActionLedger.Confirm(message.ActionId,
                 () => ApplyOfferDeltaAuthoritative(message));
         }
 
@@ -371,7 +409,7 @@ namespace CardShopCoop.Modules.Trade
                 }
 
                 removedOffer.RemovedByHost = true;
-                if (_pendingCounter == message.Counter)
+                if (ReferenceEquals(_pendingCounter, message.Counter))
                 {
                     _awaitingPrediction = false;
                     _claimAccepted = false;
@@ -388,7 +426,7 @@ namespace CardShopCoop.Modules.Trade
                 }
                 else
                 {
-                    RemoveCarrierKey(removedOffer.State, message.Counter);
+                    RemoveCarrierKey(removedOffer);
                     ReleaseCarrier(removedOffer);
                     _offers.Remove(message.Counter);
                 }
@@ -403,7 +441,7 @@ namespace CardShopCoop.Modules.Trade
 
             ApplyOfferState(message.Offer);
             if (!_offers.TryGetValue(message.Counter, out var offer)
-                || _pendingCounter != message.Counter)
+                || !ReferenceEquals(_pendingCounter, message.Counter))
             {
                 return;
             }
@@ -440,27 +478,27 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            var customers = TradeInterop.Customers;
-            if (customers == null || offer.State.CustomerIndex >= customers.Count)
+            if (offer.CustomerIndex < 0)
             {
-                CoopPlugin.Log.LogWarning("[trade] carrier slot missing for offer id="
-                    + offer.State.Counter + " index=" + offer.State.CustomerIndex + " count="
-                    + (customers == null ? -1 : customers.Count) + ".");
+                CoopPlugin.Log.LogWarning("[trade] carrier slot missing for offer counter="
+                    + (offer.State.Counter == null ? "null" : offer.State.Counter.name) + ".");
                 return;
             }
 
-            var carrier = customers[offer.State.CustomerIndex];
+            var carrier = FindCarrier(offer.State.Customer);
             if (carrier == null)
             {
-                CoopPlugin.Log.LogWarning("[trade] carrier is null for offer id="
-                    + offer.State.Counter + " index=" + offer.State.CustomerIndex + ".");
+                CoopPlugin.Log.LogWarning("[trade] carrier is null for offer counter="
+                    + (offer.State.Counter == null ? "null" : offer.State.Counter.name)
+                    + " index=" + offer.CustomerIndex + ".");
                 return;
             }
 
             if (NpcClientBehaviour.IsExistingCustomer(carrier))
             {
-                CoopPlugin.Log.LogWarning("[trade] carrier index=" + offer.State.CustomerIndex
-                    + " offer id=" + offer.State.Counter
+                CoopPlugin.Log.LogWarning("[trade] carrier index=" + offer.CustomerIndex
+                    + " offer counter=" + (offer.State.Counter == null ? "null"
+                        : offer.State.Counter.name)
                     + " is already an existing customer; not preparing a trade carrier for it.");
                 return;
             }
@@ -477,8 +515,8 @@ namespace CardShopCoop.Modules.Trade
             carrier.transform.position = offer.State.Position;
             carrier.transform.rotation = Quaternion.Euler(0f, offer.State.Yaw, 0f);
             TradeInterop.SetStoredData(carrier, data);
-            NpcClientBehaviour.SuppressedCustomer.Add(offer.State.CustomerIndex);
-            NpcClientBehaviour.AttachExistingCustomer(offer.State.CustomerIndex,
+            NpcClientBehaviour.SuppressedCustomer.Add(offer.CustomerIndex);
+            NpcClientBehaviour.AttachExistingCustomer(offer.CustomerIndex,
                 offer.State.CustomerGeneration, carrier, keepPuppetVisible: true);
             carrier.gameObject.SetActive(true);
 
@@ -488,11 +526,37 @@ namespace CardShopCoop.Modules.Trade
             offer.MaskedRenderers = renderers;
             offer.RendererStates = states;
             UpdateCarrierVisibility(offer);
-            CoopPlugin.Log.LogInfo("[trade] prepared carrier id=" + offer.State.Counter + " index="
-                + offer.State.CustomerIndex + " name=" + carrier.name + " active="
+            CoopPlugin.Log.LogInfo("[trade] prepared carrier counter="
+                + (offer.State.Counter == null ? "null" : offer.State.Counter.name) + " index="
+                + offer.CustomerIndex + " name=" + carrier.name + " active="
                 + carrier.gameObject.activeSelf + " collider="
                 + (carrier.m_InteractCollider != null && carrier.m_InteractCollider.activeSelf)
                 + ".");
+        }
+
+        /// <summary>The local pool body for the authoritative customer. A customer that is
+        /// already the attached mirror is used directly; otherwise the Npc module's local mirror
+        /// index resolves the pool slot. Never a wire index.</summary>
+        private static Customer FindCarrier(Customer authoritative)
+        {
+            if (authoritative == null)
+            {
+                return null;
+            }
+
+            if (NpcClientBehaviour.IsExistingCustomer(authoritative))
+            {
+                return authoritative;
+            }
+
+            if (!NpcClientBehaviour.TryGetWireIdentity(authoritative, out var index, out _))
+            {
+                return null;
+            }
+
+            var customers = TradeInterop.Customers;
+            return customers != null && index >= 0 && index < customers.Count
+                ? customers[index] : null;
         }
 
         private static void RestoreRenderers(Renderer[] renderers, bool[] states)
@@ -522,7 +586,7 @@ namespace CardShopCoop.Modules.Trade
             }
 
             var puppetReady = NpcClientBehaviour.IsExistingCustomerPuppetReady(
-                offer.State.CustomerIndex, offer.State.CustomerGeneration);
+                offer.CustomerIndex, offer.State.CustomerGeneration);
             for (var i = 0; i < offer.MaskedRenderers.Length; i++)
             {
                 if (offer.MaskedRenderers[i] != null)
@@ -552,22 +616,18 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            if (offer.State != null)
+            if (offer.CustomerIndex >= 0)
             {
-                NpcClientBehaviour.DetachExistingCustomer(offer.State.CustomerIndex, carrier);
+                NpcClientBehaviour.DetachExistingCustomer(offer.CustomerIndex, carrier);
             }
 
             TradeInterop.SetStoredData(carrier, null);
-            if (carrier.gameObject != null)
-            {
-                carrier.gameObject.SetActive(false);
-            }
+            carrier.gameObject?.SetActive(false);
         }
 
         private void OnExistingCustomerPuppetReady(int index, int generation, Customer customer)
         {
-            if (_carrierKeysByCustomer.TryGetValue((ushort)index, out var counter)
-                && _offers.TryGetValue(counter, out var offer))
+            if (_offersByCustomerIndex.TryGetValue(index, out var offer))
             {
                 UpdateCarrierVisibility(offer);
             }
@@ -587,19 +647,19 @@ namespace CardShopCoop.Modules.Trade
 
         private void PrepareOfferForCustomer(int index)
         {
-            if (_carrierKeysByCustomer.TryGetValue((ushort)index, out var counter)
-                && _offers.TryGetValue(counter, out var offer))
+            if (_offersByCustomerIndex.TryGetValue(index, out var offer))
             {
                 PrepareCarrier(offer);
             }
         }
 
-        private void RemoveCarrierKey(TradeOfferState snapshot, byte counter)
+        private void RemoveCarrierKey(LocalOffer offer)
         {
-            if (snapshot != null && _carrierKeysByCustomer.TryGetValue(snapshot.CustomerIndex,
-                out var mappedCounter) && mappedCounter == counter)
+            if (offer != null && offer.CustomerIndex >= 0
+                && _offersByCustomerIndex.TryGetValue(offer.CustomerIndex, out var mapped)
+                && ReferenceEquals(mapped, offer))
             {
-                _carrierKeysByCustomer.Remove(snapshot.CustomerIndex);
+                _offersByCustomerIndex.Remove(offer.CustomerIndex);
             }
         }
 
@@ -617,18 +677,19 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
-        [MessageHandler(typeof(TradeSessionMessage))]
+        [MessageHandler]
         private void HandleSession(MessageContext context, TradeSessionMessage message)
         {
-            CoopPlugin.Log.LogInfo("[trade] client session counter=" + message.Counter + " index="
-                + message.CustomerIndex + " gen=" + message.CustomerGeneration + " nonce="
-                + message.OfferNonce + " accepted=" + message.Accepted + " id=" + message.PredictionId
-                + ".");
+            CoopPlugin.Log.LogInfo("[trade] client session counter="
+                + (message.Counter == null ? "null" : message.Counter.name) + " customer="
+                + (message.Customer == null ? "null" : message.Customer.name) + " gen="
+                + message.CustomerGeneration + " nonce=" + message.OfferNonce + " accepted="
+                + message.Accepted + " id=" + message.ActionId + ".");
             // AckOrApply: the only state this folds is _claimAccepted, which BeginSession already
             // set optimistically for the actor (and the host only ever sends Accepted=true, with
             // refusals arriving as a separate rollback), so retiring without replaying is correct.
             // A remote peer's session has no pending id and still applies the claim.
-            PredictionApi.AckOrApply(message.PredictionId, () =>
+            ActionLedger.AckOrApply(message.ActionId, () =>
             {
                 if (message.Accepted)
                 {
@@ -639,7 +700,8 @@ namespace CardShopCoop.Modules.Trade
 
         private LocalOffer PendingOffer()
         {
-            return _pendingCounter >= 0 && _offers.TryGetValue((byte)_pendingCounter, out var offer)
+            return _pendingCounter != null
+                && _offers.TryGetValue(_pendingCounter, out var offer)
                 && offer.Carrier != null ? offer : null;
         }
 
@@ -679,13 +741,13 @@ namespace CardShopCoop.Modules.Trade
         /// <summary>Records one trade intent the game already performed (Open), so the prediction
         /// only stores the replay/undo closures and never mutates anything now.</summary>
         private bool PredictIntentObserved(TradeIntentOperation operation, float price)
-            => RegisterIntent(operation, price, PredictionApi.Predict);
+            => RegisterIntent(operation, price, ActionLedger.Submit);
 
         private bool RegisterIntent(TradeIntentOperation operation, float price,
             Func<string, Action<Guid>, Action, Action, Guid> register)
         {
             var offer = PendingOffer();
-            if (!_context.InGame() || offer?.State == null || _pendingCounter < 0)
+            if (!_context.InGame() || offer?.State == null || _pendingCounter == null)
             {
                 return false;
             }
@@ -698,7 +760,7 @@ namespace CardShopCoop.Modules.Trade
 
             var frame = CapturePredictionFrame(offer, operation);
             register(PredictionScope,
-                predictionId => SendIntent(predictionId, operation, price, offer.State),
+                actionId => SendIntent(actionId, operation, price, offer.State),
                 () => ApplyPrediction(operation),
                 () => UndoPrediction(frame));
             return true;
@@ -713,7 +775,7 @@ namespace CardShopCoop.Modules.Trade
             CustomerTradeData acceptBefore = null)
         {
             var offer = PendingOffer();
-            if (!_context.InGame() || offer?.State == null || _pendingCounter < 0)
+            if (!_context.InGame() || offer?.State == null || _pendingCounter == null)
             {
                 return null;
             }
@@ -758,16 +820,16 @@ namespace CardShopCoop.Modules.Trade
                 capture.Frame.Effect = result.Outcome == TradeOutcome.Accepted
                     ? BuildAcceptEffect(capture)
                     : null;
-                PredictionApi.Predict(PredictionScope,
-                    predictionId => SendIntent(predictionId, capture.Operation, capture.Price,
+                ActionLedger.Submit(PredictionScope,
+                    actionId => SendIntent(actionId, capture.Operation, capture.Price,
                         capture.State, result.Outcome, result.State, capture.Frame.Effect),
                     () => ApplyPrediction(capture.Operation, capture.Frame.Effect),
                     () => UndoPrediction(capture.Frame));
                 return;
             }
 
-            PredictionApi.Predict(PredictionScope,
-                predictionId => SendIntent(predictionId, capture.Operation, capture.Price,
+            ActionLedger.Submit(PredictionScope,
+                actionId => SendIntent(actionId, capture.Operation, capture.Price,
                     capture.State),
                 () => ApplyPrediction(capture.Operation),
                 () => UndoPrediction(capture.Frame));
@@ -873,20 +935,21 @@ namespace CardShopCoop.Modules.Trade
             }
         }
 
-        private void SendIntent(Guid predictionId, TradeIntentOperation operation, float price,
+        private void SendIntent(Guid actionId, TradeIntentOperation operation, float price,
             TradeOfferState state, TradeOutcome result = TradeOutcome.None,
             TradeOfferState resultState = null, AcceptEffect effect = null)
         {
-            CoopPlugin.Log.LogInfo("[trade] client intent " + operation + " counter=" + state.Counter
-                + " index=" + state.CustomerIndex + " gen=" + state.CustomerGeneration + " nonce="
-                + state.OfferNonce + " price=" + price.ToString("F2") + " result=" + result + " id="
-                + predictionId + ".");
+            CoopPlugin.Log.LogInfo("[trade] client intent " + operation + " counter="
+                + (state.Counter == null ? "null" : state.Counter.name) + " customer="
+                + (state.Customer == null ? "null" : state.Customer.name) + " gen="
+                + state.CustomerGeneration + " nonce=" + state.OfferNonce + " price="
+                + price.ToString("F2") + " result=" + result + " id=" + actionId + ".");
             _context.Send(1, new TradeIntentMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Operation = operation,
                 Counter = state.Counter,
-                CustomerIndex = state.CustomerIndex,
+                Customer = state.Customer,
                 CustomerGeneration = state.CustomerGeneration,
                 OfferNonce = state.OfferNonce,
                 Price = price,
@@ -1084,7 +1147,7 @@ namespace CardShopCoop.Modules.Trade
                 MaxDeclineCount = state.MaxDeclineCount,
                 DeclineCount = state.DeclineCount,
                 Remaining = state.Remaining,
-                CustomerIndex = state.CustomerIndex,
+                Customer = state.Customer,
                 CustomerGeneration = state.CustomerGeneration,
                 OfferNonce = state.OfferNonce,
                 CustomerFemale = state.CustomerFemale,
@@ -1107,7 +1170,7 @@ namespace CardShopCoop.Modules.Trade
 
         private void ResetSession()
         {
-            _pendingCounter = -1;
+            _pendingCounter = null;
             _claimAccepted = false;
             _awaitingPrediction = false;
             _terminalSent = false;
@@ -1117,7 +1180,7 @@ namespace CardShopCoop.Modules.Trade
 
         private void EndLocalSession(bool sendClose)
         {
-            if (_pendingCounter < 0)
+            if (_pendingCounter == null)
             {
                 return;
             }
@@ -1147,7 +1210,8 @@ namespace CardShopCoop.Modules.Trade
                     ReleaseCarrier(offer);
                 }
 
-                _offers.Remove((byte)counter);
+                RemoveCarrierKey(offer);
+                _offers.Remove(counter);
             }
         }
 
@@ -1191,23 +1255,24 @@ namespace CardShopCoop.Modules.Trade
 
                 if (!client.IsCarrier(__instance, out var offer))
                 {
-                    if (client._carrierKeysByCustomer.Count > 0)
+                    if (client._offers.Count > 0)
                     {
                         CoopPlugin.Log.LogInfo("[trade] click on customer "
                             + (__instance == null ? "<null>" : __instance.name)
-                            + " that is not a trade carrier (carriers="
-                            + client._carrierKeysByCustomer.Count + ").");
+                            + " that is not a trade carrier (offers="
+                            + client._offers.Count + ").");
                     }
 
                     return;
                 }
 
-                if (offer.State == null || client._pendingCounter >= 0)
+                if (offer.State == null || client._pendingCounter != null)
                 {
                     return;
                 }
 
-                CoopPlugin.Log.LogInfo("[trade] carrier clicked id=" + offer.State.Counter
+                CoopPlugin.Log.LogInfo("[trade] carrier clicked counter="
+                    + (offer.State.Counter == null ? "null" : offer.State.Counter.name)
                     + "; starting session.");
                 client.BeginSession(offer);
             }
@@ -1225,7 +1290,7 @@ namespace CardShopCoop.Modules.Trade
             {
                 var client = _active;
                 if (client == null || !client.IsCarrier(__instance, out _)
-                    || client._pendingCounter < 0)
+                    || client._pendingCounter == null)
                 {
                     return;
                 }
@@ -1234,6 +1299,36 @@ namespace CardShopCoop.Modules.Trade
                 TradeInterop.RestorePlayerUi();
                 client.EndLocalSession(!client._terminalSent && !client._thinkingSent
                     && !client._awaitingPrediction);
+            }
+        }
+
+        /// <summary>The authoritative offer path passes a non-null CustomerTradeData. Vanilla's
+        /// SetCustomer fills the display label but never calls OnInputTextUpdated, so the price
+        /// input field is left blank/stale. The normal host flow passes null data, which takes the
+        /// OnInputTextUpdated("0") branch. Mirror that initialization for the client's cash-for-card
+        /// screen so its input is populated, formatted and editable exactly like the host's.</summary>
+        [HarmonyPatch(typeof(CustomerTradeCardScreen), "SetCustomer")]
+        private static class TradeScreenSetCustomerPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(CustomerTradeCardScreen __instance,
+                CustomerTradeData customerTradeData)
+            {
+                if (__instance == null || customerTradeData == null
+                    || __instance.m_SetPriceInput == null
+                    || TradeInterop.IsTrading(__instance))
+                {
+                    return;
+                }
+
+                var price = TradeInterop.PriceSet(__instance);
+                var manager = CSingleton<CGameManager>.Instance;
+                var yen = manager != null
+                    && manager.m_CurrencyType == EMoneyCurrencyType.Yen;
+                var text = yen
+                    ? GameInstance.GetPriceString(price, false, false, false, "F0")
+                    : GameInstance.GetPriceString(price, false, false, false);
+                __instance.OnInputTextUpdated(text);
             }
         }
 
@@ -1382,7 +1477,8 @@ namespace CardShopCoop.Modules.Trade
             private static void Postfix(CustomerTradeCardScreen __instance)
             {
                 var client = _active;
-                if (client == null || client._ignoreScreenClose || client._pendingCounter < 0
+                if (client == null || client._ignoreScreenClose
+                    || client._pendingCounter == null
                     || TradeInterop.IsScreenOpen(__instance))
                 {
                     return;
@@ -1430,7 +1526,7 @@ namespace CardShopCoop.Modules.Trade
                     return;
                 }
 
-                var index = TradeInterop.CustomerListIndex(__instance);
+                var index = TradeInterop.LocalCustomerIndex(__instance);
                 _active.PrepareOfferForCustomer(index);
                 _active.ApplyPendingMessages();
             }

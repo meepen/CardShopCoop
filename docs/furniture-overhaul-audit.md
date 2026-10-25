@@ -251,7 +251,7 @@ sync conflict; FO's version shapes the host's customer volume, which CardShopCoo
    (`ClawMachineBuild.ForceOneProduct`) mutates machine bays that CardShopCoop's shelf capture may
    mirror as label/item deltas. Test filling/moving machines on both peers.
 4. **Boxing a claw machine mid-game:** FO refuses (`BoxGuard`) and CardShopCoop's host rejection
-   path rolls the client back — correct, but the client may briefly show a predicted box.
+   path rolls the client back — correct, but the client may briefly show a locally applied box.
 5. **Move-preview coexistence:** FO repaints `ShelfManager` move-preview objects while
    CardShopCoop drives remote holds through the same preview. Test two simultaneous holds.
 6. **Enum-identity parity** holds only while FO keeps raw int casts. If a future FO mints named
@@ -317,7 +317,7 @@ register.
 
 **Symptom:** the guest deleted the shop's normal register, then could not man the Diamond
 Checkout register; every claim was silently rejected and register deltas for the shifted counter
-were deferred forever (`prediction rollback client key=register:1`, `[register] deferring delta
+were deferred forever (`action rollback client key=register:1`, `[register] deferring delta
 counter=0 counterGen=2`).
 
 **Root cause (two layers):**
@@ -340,7 +340,7 @@ counter=0 counterGen=2`).
   `InteractableObject.OnDestroyed()` (list removal, UI teardown, GameObject destroy) instead of
   only forgetting its identity. Unbox/warehouse flows are unaffected — the host publishes a
   placement remove only for entities it genuinely destroyed.
-- `RegisterHostBehaviour.ObservePublishing` publishes a prediction-free `CounterLifecycle`
+- `RegisterHostBehaviour.ObservePublishing` publishes an action-free `CounterLifecycle`
   whenever a live observe rebinds an index to a different counter (a list shift or object
   replacement), so clients adopt the new generation and re-apply their deferred deltas. Used by
   `NewDelta`, `HandleIntent` and `PublishPaidAmount`; join baselines and the add/remove

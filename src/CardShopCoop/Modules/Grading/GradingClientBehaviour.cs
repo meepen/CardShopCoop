@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using CardShopCoop.Util;
@@ -52,7 +52,7 @@ namespace CardShopCoop.Modules.Grading
                 // A rejected prediction leaves its locally minted job behind until the next
                 // authoritative state; retiring the prediction must also drop the job binding so a
                 // later delta cannot adopt a job the host never accepted.
-                PredictionApi.PredictionRetired += RetireLocalJob;
+                ActionLedger.ActionSettled += RetireLocalJob;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.grading.client");
                 GradingPatches.ApplyClient(_harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
@@ -61,7 +61,7 @@ namespace CardShopCoop.Modules.Grading
             {
                 _harmony?.UnpatchSelf();
                 _harmony = null;
-                PredictionApi.PredictionRetired -= RetireLocalJob;
+                ActionLedger.ActionSettled -= RetireLocalJob;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
                 {
@@ -87,10 +87,10 @@ namespace CardShopCoop.Modules.Grading
         /// <summary>Drops the local-job binding for a prediction that left the tracker (accepted
         /// and bound, or rejected and removed). Prevents a stale binding from adopting a later
         /// authoritative delta onto a job the host never accepted.</summary>
-        private void RetireLocalJob(Guid predictionId)
-            => _localJobSets.Remove(predictionId);
+        private void RetireLocalJob(Guid actionId)
+            => _localJobSets.Remove(actionId);
 
-        [MessageHandler(typeof(GradingStateMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, GradingStateMessage message)
         {
             if (_shutdown)
@@ -196,20 +196,20 @@ namespace CardShopCoop.Modules.Grading
 
             var spent = state.SupplyCostBefore
                 - CPlayerData.m_GameReportDataCollectPermanent.supplyCost;
-            PredictionApi.Predict(
+            ActionLedger.Submit(
                 "grading",
-                predictionId =>
+                actionId =>
                 {
                     // Bind the local job to the prediction and its stable id before sending. The
                     // host adopts this same id, so the accepted delta finds the job by id rather
                     // than appending a duplicate.
-                    _localJobSets[predictionId] = jobSet;
+                    _localJobSets[actionId] = jobSet;
                     _jobIds[jobSet] = state.JobId;
                     try
                     {
                         _context.Send(1, new GradingOpMessage
                         {
-                            PredictionId = predictionId,
+                            ActionId = actionId,
                             JobId = state.JobId,
                             ServiceLevel = (byte)state.ServiceLevel,
                             CompanyId = (byte)GradingInterop.CurrentCompanyId,
@@ -218,7 +218,7 @@ namespace CardShopCoop.Modules.Grading
                     }
                     catch
                     {
-                        _localJobSets.Remove(predictionId);
+                        _localJobSets.Remove(actionId);
                         _jobIds.Remove(jobSet);
                         throw;
                     }
@@ -298,7 +298,7 @@ namespace CardShopCoop.Modules.Grading
             }
         }
 
-        [MessageHandler(typeof(GradingJobDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext context, GradingJobDeltaMessage message)
         {
             if (_shutdown)
@@ -386,17 +386,17 @@ namespace CardShopCoop.Modules.Grading
             // A submission we observed locally: the vanilla call already minted the job, so the
             // authoritative delta only needs to bind that local job to the host id before the
             // prediction retires. Applying it as a remote change would add a duplicate job.
-            if (message.PredictionId != Guid.Empty
-                && _localJobSets.TryGetValue(message.PredictionId, out var localSet))
+            if (message.ActionId != Guid.Empty
+                && _localJobSets.TryGetValue(message.ActionId, out var localSet))
             {
-                _localJobSets.Remove(message.PredictionId);
+                _localJobSets.Remove(message.ActionId);
                 if (localSet != null)
                 {
                     _jobIds[localSet] = message.Id;
                 }
 
 
-                PredictionApi.Ack(message.PredictionId);
+                ActionLedger.Ack(message.ActionId);
                 // Vanilla already reset the selection and closed the screen; only drop the stale
                 // screen reference the rejection path would otherwise reopen.
                 _submitScreen = null;
@@ -404,7 +404,7 @@ namespace CardShopCoop.Modules.Grading
                 return true;
             }
 
-            PredictionApi.AckOrApply(message.PredictionId, () =>
+            ActionLedger.AckOrApply(message.ActionId, () =>
             {
                 var list = CPlayerData.m_GradeCardInProgressList
                     ?? new List<GradeCardSubmitSet>();
@@ -447,8 +447,8 @@ namespace CardShopCoop.Modules.Grading
         {
             if (_pendingDeltas.TryGetValue(message.Id, out var previous))
             {
-                _localJobSets.Remove(previous.PredictionId);
-                PredictionApi.Ack(previous.PredictionId);
+                _localJobSets.Remove(previous.ActionId);
+                ActionLedger.Ack(previous.ActionId);
             }
             _pendingDeltas[message.Id] = message;
         }
@@ -700,7 +700,7 @@ namespace CardShopCoop.Modules.Grading
             var retired = new List<Guid>();
             foreach (var pair in _localJobSets)
             {
-                if (!PredictionApi.IsPending(pair.Key))
+                if (!ActionLedger.IsPending(pair.Key))
                 {
                     retired.Add(pair.Key);
                 }
@@ -721,14 +721,14 @@ namespace CardShopCoop.Modules.Grading
             var kept = new List<KeyValuePair<Guid, GradingJobDeltaMessage>>();
             foreach (var delta in _pendingDeltas)
             {
-                if (delta.Value.PredictionId != Guid.Empty
-                    && _localJobSets.ContainsKey(delta.Value.PredictionId))
+                if (delta.Value.ActionId != Guid.Empty
+                    && _localJobSets.ContainsKey(delta.Value.ActionId))
                 {
                     kept.Add(delta);
                 }
                 else
                 {
-                    PredictionApi.Ack(delta.Value.PredictionId);
+                    ActionLedger.Ack(delta.Value.ActionId);
                 }
             }
             _pendingDeltas.Clear();
@@ -743,7 +743,7 @@ namespace CardShopCoop.Modules.Grading
         {
             foreach (var delta in _pendingDeltas.Values)
             {
-                PredictionApi.Ack(delta.PredictionId);
+                ActionLedger.Ack(delta.ActionId);
             }
 
 
@@ -760,7 +760,7 @@ namespace CardShopCoop.Modules.Grading
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
-            PredictionApi.PredictionRetired -= RetireLocalJob;
+            ActionLedger.ActionSettled -= RetireLocalJob;
             _harmony?.UnpatchSelf();
             _harmony = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);

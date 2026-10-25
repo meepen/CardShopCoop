@@ -1,9 +1,9 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
@@ -28,57 +28,46 @@ namespace CardShopCoop.Modules.World
 
         public static bool TryMakeCompartmentKey(int kind, InteractableObject obj,
             int compartment, out int key)
-            => PlacementIdentity.TryMakeCompartmentKey(kind, obj, compartment, out key,
+            => PlacementObjectIdentity.TryMakeCompartmentKey(kind, obj, compartment, out key,
                 WorldHostBehaviour.Active != null);
 
         public static bool TryMakeObjectKey(int kind, InteractableObject obj, out int key)
-            => PlacementIdentity.TryMakeObjectKey(kind, obj, out key,
+            => PlacementObjectIdentity.TryMakeObjectKey(kind, obj, out key,
                 WorldHostBehaviour.Active != null);
-
-        public static bool TryMakeBoxableFurnitureEntityId(InteractableObject obj, long worldEpoch,
-            out string entityId)
-            => PlacementIdentity.TryMakeBoxableFurnitureEntityId(obj, worldEpoch, out entityId,
-                WorldHostBehaviour.Active != null);
-
-        /// <summary>Resolves the exact furniture a stable entity id names. <paramref name="requireTypeMatch"/>
-        /// is true when the caller's type is authoritative (a peer materializing a host descriptor); it
-        /// is FALSE for a client→host request, whose carried type is only the SENDER's local value and
-        /// may be a coalesced equivalent, so the stable id alone identifies the object.</summary>
-        public static bool TryResolveBoxableFurnitureEntityId(string entityId, long worldEpoch,
-            EObjectType expectedType, out InteractableObject result, bool requireUnboxed = false,
-            bool requireTypeMatch = true)
-            => PlacementIdentity.TryResolveBoxableFurnitureEntityId(entityId, worldEpoch,
-                expectedType, out result, requireUnboxed, requireTypeMatch);
-
-        /// <summary>Creates the exact boxed furniture a host entity id names, through the game's
-        /// factory, and binds that identity to it. Used when an authoritative box descriptor
-        /// arrives for a host-spawned object this peer never saw a placement delta for.</summary>
-        public static bool TryCreateBoxableFurnitureForIdentity(string entityId, long worldEpoch,
-            EObjectType expectedType, Vector3 position, Quaternion rotation,
-            out InteractableObject created)
-            => PlacementIdentity.TryCreateBoxableFurnitureForIdentity(entityId, worldEpoch,
-                expectedType, position, rotation, out created);
-
         public static bool IsPlacementIdentityReady
             => WorldClientBehaviour.IsPlacementIdentityReady;
 
         public static bool TryResolve(ShelfManager shelfManager, int kind, ushort id,
             out InteractableObject result)
-            => PlacementIdentity.TryResolve(shelfManager, kind, id, out result);
+            => PlacementObjectIdentity.TryResolveInKind(shelfManager, kind, id, out result);
 
         public static ushort ObjectIdFromCompartmentKey(int key)
-            => PlacementIdentity.ObjectIdFromCompartmentKey(key);
+            => PlacementObjectIdentity.ObjectIdFromCompartmentKey(key);
 
         public static ushort ObjectIdFromObjectKey(int key)
-            => PlacementIdentity.ObjectIdFromObjectKey(key);
+            => PlacementObjectIdentity.ObjectIdFromObjectKey(key);
 
         public static Component ResolveObjectByKey(int key)
             => PlacementMoveState.ResolveObjectByKey(key);
     }
 
+    /// <summary>Reference identity for placement objects. Unity's overloaded equality treats a
+    /// destroyed object as null, which makes the object unsuitable as a dictionary key once it is
+    /// being torn down; every dictionary using this comparer removes its entry in the destroy hook
+    /// before the component becomes fake-null.</summary>
+    internal sealed class PlacementObjectComparer : IEqualityComparer<InteractableObject>
+    {
+        internal static readonly PlacementObjectComparer Instance = new();
+
+        public bool Equals(InteractableObject left, InteractableObject right)
+            => ReferenceEquals(left, right);
+
+        public int GetHashCode(InteractableObject value)
+            => ReferenceEquals(value, null) ? 0 : RuntimeHelpers.GetHashCode(value);
+    }
+
     internal static class PlacementInterop
     {
-        internal const int NoType = int.MinValue;
         // Raised from inside the placement/box apply paths that its own subscribers drive, so it is
         // coalesced: a nested change is delivered after the current delivery instead of recursing
         // back into the subscriber that caused it. See CoalescedEvent.
@@ -92,6 +81,28 @@ namespace CardShopCoop.Modules.World
 
         private static readonly FieldInfo FiMoveValid = AccessTools.Field(
             typeof(InteractableObject), "m_IsMovingObjectValidState");
+        private static readonly FieldInfo FiMovingObject = AccessTools.Field(
+            typeof(InteractableObject), "m_IsMovingObject");
+        private static readonly FieldInfo FiSnappingPos = AccessTools.Field(
+            typeof(InteractableObject), "m_IsSnappingPos");
+        private static readonly FieldInfo FiLastHitTransform = AccessTools.Field(
+            typeof(InteractableObject), "m_LastHitTransform");
+        private static readonly FieldInfo FiHitNormal = AccessTools.Field(
+            typeof(InteractableObject), "m_HitNormal");
+        private static readonly FieldInfo FiIsFlipped = AccessTools.Field(
+            typeof(InteractableObject), "m_IsFlipped");
+        private static readonly FieldInfo FiOriginalLayer = AccessTools.Field(
+            typeof(InteractableObject), "m_OriginalLayer");
+        private static readonly FieldInfo FiItemCompartments = AccessTools.Field(
+            typeof(InteractableObject), "m_ItemCompartmentList");
+        private static readonly FieldInfo FiPlacedBlocker = AccessTools.Field(
+            typeof(InteractableObject), "m_DecoPlaccedLockedRoomBlocker");
+        private static readonly FieldInfo FiVerticalSnapWarehouse = AccessTools.Field(
+            typeof(InteractableObject), "m_IsVerticalSnapToWarehouseWall");
+        private static readonly FieldInfo FiVerticalSnapIndex = AccessTools.Field(
+            typeof(InteractableObject), "m_VerticalSnapWallIndex");
+        private static readonly FieldInfo FiStopSnap = AccessTools.Field(
+            typeof(InteractionPlayerController), "m_IsStopSnapWhenMoving");
         private static readonly FieldInfo FiTagGroup = AccessTools.Field(
             typeof(InteractableObject), "m_Shelf_WorldUIGrp");
         private static readonly FieldInfo FiPackagingBoxShelf = AccessTools.Field(
@@ -110,6 +121,12 @@ namespace CardShopCoop.Modules.World
         private static bool _betaProbed;
         private static Type _storedBoxRecordType;
         private static Type _packageBoxCandidateType;
+
+        private static bool _storedBoxMoveProbed;
+        private static MethodInfo _setShelfMoving;
+        private static object _storedBoxBatcher;
+        private static bool _wakeSettledProbed;
+        private static MethodInfo _wakeSettledBoxesAbove;
 
         internal static void ProbeBetaSurface()
         {
@@ -172,8 +189,24 @@ namespace CardShopCoop.Modules.World
 
         internal static ShelfManager FindShelfManager() => SceneRef<ShelfManager>.Get();
 
-        internal static int TypeIdOf(Component component)
-            => component is InteractableObject obj ? (int)obj.m_ObjectType : NoType;
+        /// <summary>Stable, null-safe label for placement diagnostics.</summary>
+        internal static string Describe(InteractableObject obj)
+            => obj == null ? "<null>" : obj.name + "#" + obj.GetInstanceID();
+
+        /// <summary>True when the identity module has bound this object, so the global wire
+        /// converter can name it. An in-flight decoration has no placed object and stays unbound
+        /// until its placement is accepted.</summary>
+        internal static bool HasSharedIdentity(InteractableObject obj)
+            => obj != null && GameObjectIdentityApi.TryGetId(obj, out _);
+
+        /// <summary>True when the object is bound to the placement identity of
+        /// <paramref name="kind"/>. This is the identity module's own kind/value, not a local
+        /// fallback id; it keeps a box or decoration that happens to sit in a generic list out of
+        /// the placement state channel.</summary>
+        internal static bool HasPlacementIdentity(InteractableObject obj, int kind)
+            => obj != null && kind >= 0
+                && GameObjectIdentityApi.TryGetId(obj, out var id)
+                && id.Kind == GameObjectKind.Furniture && id.IsValid;
 
         internal static bool IsBoxed(InteractableObject obj)
             => obj != null && obj.GetIsBoxedUp();
@@ -188,6 +221,16 @@ namespace CardShopCoop.Modules.World
             {
                 CoopPlugin.Log.LogWarning("placement structure subscriber failed: " + error.Message);
             }
+        }
+
+        /// <summary>The identity module is about to destroy a placement entity. Both world roles
+        /// release the pose/hold state they keep for that object while the component is still
+        /// readable. The key remains on this boundary because the identity module supplies it; the
+        /// placement module itself keys its state by the live object.</summary>
+        internal static void NotifyPlacementObjectDestroyed(int key, InteractableObject obj)
+        {
+            WorldHostBehaviour.OnPlacementObjectDestroyed(obj);
+            WorldClientBehaviour.OnPlacementObjectDestroyed(obj);
         }
 
         internal static void SyncTagGroup(Transform objectTransform)
@@ -235,6 +278,7 @@ namespace CardShopCoop.Modules.World
             // it until Unity's deferred destroy runs at end of frame. Drop the reference now so a
             // later re-box spawns a clean package instead of adopting the doomed one.
             DetachPackagingBox(obj);
+            WarehouseShelfInteraction.SetStoredBoxVisuals(obj, true);
         }
 
         internal static void BoxUpPlacedObject(InteractableObject obj)
@@ -243,6 +287,8 @@ namespace CardShopCoop.Modules.World
             {
                 obj.BoxUpObject(false);
             }
+
+            WarehouseShelfInteraction.SetStoredBoxVisuals(obj, false);
         }
 
         /// <summary>Drops an object's packaging-box reference without touching the package itself.
@@ -261,6 +307,200 @@ namespace CardShopCoop.Modules.World
 
         internal static bool ReadMoveValidity(InteractableObject obj)
             => obj != null && FiMoveValid?.GetValue(obj) is bool valid && valid;
+
+        internal static void SetMoveValidity(InteractableObject obj, bool valid)
+        {
+            if (obj != null)
+            {
+                FiMoveValid?.SetValue(obj, valid);
+            }
+        }
+
+        internal static void SetMovingObject(InteractableObject obj, bool moving)
+        {
+            if (obj != null)
+            {
+                FiMovingObject?.SetValue(obj, moving);
+            }
+        }
+
+        internal static void SetSnappingPos(InteractableObject obj, bool snapping)
+        {
+            if (obj != null)
+            {
+                FiSnappingPos?.SetValue(obj, snapping);
+            }
+        }
+
+        internal static void ClearLastHitTransform(InteractableObject obj)
+        {
+            if (obj != null)
+            {
+                FiLastHitTransform?.SetValue(obj, null);
+            }
+        }
+
+        internal static Vector3 ReadHitNormal(InteractableObject obj)
+            => obj != null && FiHitNormal?.GetValue(obj) is Vector3 normal ? normal : Vector3.up;
+
+        internal static bool ReadIsFlipped(InteractableObject obj)
+            => obj != null && FiIsFlipped?.GetValue(obj) is bool flipped && flipped;
+
+        internal static void SetIsFlipped(InteractableObject obj, bool flipped)
+        {
+            if (obj != null)
+            {
+                FiIsFlipped?.SetValue(obj, flipped);
+            }
+        }
+
+        internal static void SetOriginalLayer(InteractableObject obj, int layer)
+        {
+            if (obj != null)
+            {
+                FiOriginalLayer?.SetValue(obj, layer);
+            }
+        }
+
+        internal static bool ReadStopSnap()
+        {
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            return controller != null && FiStopSnap?.GetValue(controller) is bool stop && stop;
+        }
+
+        internal static void SetStopSnap(bool stop)
+        {
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            if (controller != null)
+            {
+                FiStopSnap?.SetValue(controller, stop);
+            }
+        }
+
+        internal static float ReadLocalRayDistance()
+        {
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            return controller?.m_RayDistance ?? 0f;
+        }
+
+        internal static bool TryGetLocalCamera(out Vector3 position, out Quaternion rotation)
+        {
+            var camera = SceneRef<InteractionPlayerController>.Get()?.m_Cam;
+            if (camera != null)
+            {
+                position = camera.transform.position;
+                rotation = camera.transform.rotation;
+                return true;
+            }
+
+            position = default(Vector3);
+            rotation = Quaternion.identity;
+            return false;
+        }
+
+        /// <summary>Clears the vertical-decoration registration vanilla clears in
+        /// <c>StartMoveObject</c>. The block type exists in both supported builds.</summary>
+        internal static void ClearVerticalPlacementState(InteractableObject obj)
+        {
+            if (obj == null)
+            {
+                return;
+            }
+
+            if (FiPlacedBlocker?.GetValue(obj) is LockedRoomBlocker blocker)
+            {
+                blocker.RemoveFromVerticalDecoObjectList(obj);
+                FiPlacedBlocker.SetValue(obj, null);
+            }
+
+            FiVerticalSnapWarehouse?.SetValue(obj, false);
+            FiVerticalSnapIndex?.SetValue(obj, -1);
+        }
+
+        /// <summary>Beta only: the warehouse's stored-box batcher must know the shelf is moving so
+        /// it rebuilds its batched matrices against the moving transform. No-op on the live-box
+        /// backend, where the type does not exist.</summary>
+        internal static void SetStoredBoxShelfMoving(InteractableObject obj, bool moving)
+        {
+            if (obj == null)
+            {
+                return;
+            }
+
+            ProbeStoredBoxMove();
+            if (_setShelfMoving == null || FiItemCompartments?.GetValue(obj) is not IList list)
+            {
+                return;
+            }
+
+            var target = _setShelfMoving.IsStatic ? null : _storedBoxBatcher;
+            if (!_setShelfMoving.IsStatic && target == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < list.Count; i++)
+            {
+                if (list[i] != null)
+                {
+                    _setShelfMoving.Invoke(target, new object[] { list[i], moving });
+                }
+            }
+        }
+
+        /// <summary>Beta only: wake boxes resting above the collider before it is disabled.</summary>
+        internal static void WakeSettledBoxesAbove(InteractableObject obj)
+        {
+            if (obj?.m_BoxCollider == null || !obj.m_BoxCollider.enabled)
+            {
+                return;
+            }
+
+            ProbeWakeSettled();
+            _wakeSettledBoxesAbove?.Invoke(null, new object[] { obj.m_BoxCollider.bounds });
+        }
+
+        private static void ProbeStoredBoxMove()
+        {
+            if (_storedBoxMoveProbed)
+            {
+                return;
+            }
+
+            _storedBoxMoveProbed = true;
+            var type = typeof(ShelfCompartment).Assembly.GetType("StoredBoxVisualBatcher", false);
+            if (type == null)
+            {
+                return;
+            }
+
+            _setShelfMoving = type.GetMethod("SetShelfMoving",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                null, new[] { typeof(ShelfCompartment), typeof(bool) }, null);
+            if (_setShelfMoving != null)
+            {
+                return;
+            }
+
+            _setShelfMoving = type.GetMethod("SetShelfMoving",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                null, new[] { typeof(ShelfCompartment), typeof(bool) }, null);
+            var instance = type.GetProperty("Instance",
+                BindingFlags.Public | BindingFlags.Static);
+            _storedBoxBatcher = instance?.GetValue(null);
+        }
+
+        private static void ProbeWakeSettled()
+        {
+            if (_wakeSettledProbed)
+            {
+                return;
+            }
+
+            _wakeSettledProbed = true;
+            _wakeSettledBoxesAbove = AccessTools.Method(
+                typeof(InteractablePackagingBox), "WakeSettledBoxesAbove");
+        }
 
         /// <summary>True while an object is in a player's hand (locally or mirrored as a remote
         /// carry). A held package rides that player's avatar, so the placement channel must never
@@ -284,7 +524,7 @@ namespace CardShopCoop.Modules.World
                 return direct;
             }
 
-            var list = RestockManager.GetShelfPackagingBoxList();
+            var list = RestockInterop.ShelfBoxes;
             for (var i = 0; list != null && i < list.Count; i++)
             {
                 var shelf = list[i];
@@ -309,6 +549,13 @@ namespace CardShopCoop.Modules.World
             }
 
             var box = obj.GetPackagingBoxShelf();
+            // Furniture packaging is placement state, not a box entity owned by the box engine.
+            // The package is only a view of the placed furniture.
+            if (box is InteractablePackagingBox_Shelf)
+            {
+                return false;
+            }
+
             return WorldClientBehaviour.IsKnownPackagingBox(box)
                 || WorldHostBehaviour.IsKnownPackagingBox(box);
         }
@@ -328,11 +575,9 @@ namespace CardShopCoop.Modules.World
 
             obj.Init();
             obj.BoxUpObject(false);
+            WarehouseShelfInteraction.SetStoredBoxVisuals(obj, false);
             var package = obj.GetPackagingBoxShelf();
-            if (package != null)
-            {
-                package.transform.SetPositionAndRotation(position, rotation);
-            }
+            package?.transform.SetPositionAndRotation(position, rotation);
 
             return obj;
         }
@@ -370,389 +615,14 @@ namespace CardShopCoop.Modules.World
         }
     }
 
-    internal static class PlacementIdentity
+    /// <summary>
+    /// Host: freezes the save-time list slot of every placement entity for one connection at the
+    /// instant its world save is written. The guest loads that exact order, so the slot is how the
+    /// identity baseline binds an entity the guest already has instead of materializing a second
+    /// one. The slots themselves live in <see cref="WorldTransferManifest"/> beside the box slots.
+    /// </summary>
+    internal sealed class PlacementTransferSlots
     {
-        internal const ushort Invalid = 0;
-
-        private sealed class ReferenceComparer : IEqualityComparer<InteractableObject>
-        {
-            public bool Equals(InteractableObject left, InteractableObject right)
-                => ReferenceEquals(left, right);
-
-            public int GetHashCode(InteractableObject value)
-                => RuntimeHelpers.GetHashCode(value);
-        }
-
-        private static readonly Dictionary<InteractableObject, ushort> ByObject =
-            new(new ReferenceComparer());
-        private static readonly Dictionary<ushort, InteractableObject> ById = new();
-        private static ushort _next = 1;
-
-        internal static void Reset()
-        {
-            ByObject.Clear();
-            ById.Clear();
-            _next = 1;
-        }
-
-        internal static bool TryGet(InteractableObject obj, out ushort id)
-        {
-            if (obj != null && ByObject.TryGetValue(obj, out id) && id != Invalid)
-            {
-                return true;
-            }
-
-            id = Invalid;
-            return false;
-        }
-
-        /// <summary>True when this object already owns a placement identity. Identity is
-        /// exclusive: an incoming delta may only adopt an object that has none. Binding a new
-        /// key onto an already-identified object silently steals it from its own entity, which
-        /// is how a purchased furniture box adopted a same-type piece that was already placed.</summary>
-        internal static bool IsIdentified(InteractableObject obj)
-            => obj != null && ByObject.TryGetValue(obj, out var id) && id != Invalid;
-
-        internal static ushort AssignHost(InteractableObject obj)
-        {
-            if (obj == null)
-            {
-                return Invalid;
-            }
-
-            if (TryGet(obj, out var existing))
-            {
-                return existing;
-            }
-
-            ushort id;
-            do
-            {
-                id = _next++;
-                if (_next == Invalid)
-                {
-                    _next = 1;
-                }
-            }
-            while (id == Invalid || ById.ContainsKey(id));
-
-            Bind(obj, id);
-            return id;
-        }
-
-        internal static void Bind(InteractableObject obj, ushort id)
-        {
-            if (obj == null || id == Invalid)
-            {
-                return;
-            }
-
-            if (ByObject.TryGetValue(obj, out var old) && old != id)
-            {
-                CoopPlugin.Log.LogWarning("[placement] identity moved " + old + "->" + id + " on "
-                    + obj.name + "; a placement object must keep one identity for its lifetime.");
-                ById.Remove(old);
-            }
-
-            if (ById.TryGetValue(id, out var previous) && !ReferenceEquals(previous, obj))
-            {
-                CoopPlugin.Log.LogWarning("[placement] identity " + id + " moved off "
-                    + (previous == null ? "<null>" : previous.name) + " onto " + obj.name
-                    + "; two objects must not share one identity.");
-                ByObject.Remove(previous);
-            }
-
-            ByObject[obj] = id;
-            ById[id] = obj;
-        }
-
-        internal static void Forget(InteractableObject obj)
-        {
-            if (obj == null || !ByObject.TryGetValue(obj, out var id))
-            {
-                return;
-            }
-
-            ByObject.Remove(obj);
-            if (ById.TryGetValue(id, out var current) && ReferenceEquals(current, obj))
-            {
-                ById.Remove(id);
-            }
-        }
-
-        internal static bool TryMakeCompartmentKey(int kind, InteractableObject obj,
-            int compartment, out int key, bool host)
-        {
-            key = 0;
-            if (kind == PlacementApi.DecorationKind || !TryGetId(kind, obj, out var id, host))
-            {
-                return false;
-            }
-
-            key = (kind << 24) | (id << 8) | (compartment & 0xFF);
-            return true;
-        }
-
-        internal static bool TryMakeObjectKey(int kind, InteractableObject obj, out int key,
-            bool host)
-        {
-            key = 0;
-            if (kind == PlacementApi.DecorationKind || !TryGetId(kind, obj, out var id, host))
-            {
-                return false;
-            }
-
-            key = (kind << 24) | id;
-            return true;
-        }
-
-        internal static bool TryMakeBoxableFurnitureEntityId(InteractableObject obj,
-            long worldEpoch, out string entityId, bool host)
-        {
-            entityId = null;
-            if (obj == null || worldEpoch <= 0)
-            {
-                return false;
-            }
-
-            var kind = PlacementInterop.FindKind(obj);
-            if (kind < 0 || !TryMakeObjectKey(kind, obj, out var key, host))
-            {
-                return false;
-            }
-
-            entityId = "furniture-placement:" + worldEpoch.ToString(CultureInfo.InvariantCulture)
-                + ":" + key.ToString(CultureInfo.InvariantCulture);
-            return true;
-        }
-
-        internal static bool TryResolveBoxableFurnitureEntityId(string entityId, long worldEpoch,
-            EObjectType expectedType, out InteractableObject result, bool requireUnboxed,
-            bool requireTypeMatch)
-        {
-            result = null;
-            if (expectedType == EObjectType.None
-                || !TryParseFurnitureEntityId(entityId, worldEpoch, out var key))
-            {
-                return false;
-            }
-
-            var kind = key >> 24;
-            if (kind < 0 || kind >= PlacementApi.KindCount
-                || kind == PlacementApi.DecorationKind || ObjectIdFromObjectKey(key) == Invalid)
-            {
-                return false;
-            }
-
-            if (!TryResolve(PlacementInterop.FindShelfManager(), kind, ObjectIdFromObjectKey(key),
-                out result)
-                || (requireTypeMatch && result.m_ObjectType != expectedType)
-                || (requireUnboxed && (result.GetIsBoxedUp() || result.GetIsMovingObject())))
-            {
-                result = null;
-                return false;
-            }
-
-            return true;
-        }
-
-        /// <summary>Creates the exact boxed furniture the entity id names, through the game's
-        /// factory, and binds the identity to it. The identity must be unbound; the caller reaches
-        /// here only after a resolve attempt failed.</summary>
-        internal static bool TryCreateBoxableFurnitureForIdentity(string entityId, long worldEpoch,
-            EObjectType expectedType, Vector3 position, Quaternion rotation,
-            out InteractableObject created)
-        {
-            created = null;
-            if (expectedType == EObjectType.None
-                || !TryParseFurnitureEntityId(entityId, worldEpoch, out var key))
-            {
-                return false;
-            }
-
-            var kind = key >> 24;
-            var id = ObjectIdFromObjectKey(key);
-            if (kind < 0 || kind >= PlacementApi.KindCount || kind == PlacementApi.DecorationKind
-                || id == Invalid)
-            {
-                return false;
-            }
-
-            if (TryResolve(PlacementInterop.FindShelfManager(), kind, id, out created))
-            {
-                // Raced with another apply; the authoritative object already exists.
-                return created.m_ObjectType == expectedType;
-            }
-
-            created = PlacementInterop.SpawnBoxedObject((int)expectedType, position, rotation);
-            if (created == null)
-            {
-                return false;
-            }
-
-            Bind(created, id);
-            return true;
-        }
-
-        /// <summary>Binds the identity an authoritative furniture entity id names onto the exact
-        /// object a peer already owns. The box channel calls this when a descriptor arrives for a
-        /// box this peer created: the descriptor names the host's entity for the furniture inside,
-        /// and the local object must become that entity so the placement channel resolves one
-        /// object per entity instead of materializing a duplicate. The object must match the
-        /// descriptor's expected type. Returns true when the object holds the named identity
-        /// afterwards (already or newly bound).</summary>
-        internal static bool TryAdoptBoxableFurnitureIdentity(InteractableObject obj, string entityId,
-            long worldEpoch, EObjectType expectedType)
-        {
-            if (obj == null || expectedType == EObjectType.None
-                || !TryParseFurnitureEntityId(entityId, worldEpoch, out var key))
-            {
-                return false;
-            }
-
-            var kind = key >> 24;
-            var id = ObjectIdFromObjectKey(key);
-            if (kind < 0 || kind >= PlacementApi.KindCount || kind == PlacementApi.DecorationKind
-                || id == Invalid)
-            {
-                return false;
-            }
-
-            if (obj.m_ObjectType != expectedType)
-            {
-                CoopPlugin.Log.LogWarning("[placement] furniture identity " + id + " names "
-                    + expectedType + " but the boxed object is " + obj.m_ObjectType
-                    + "; not adopting it.");
-                return false;
-            }
-
-            if (TryGet(obj, out var existing))
-            {
-                if (existing == id)
-                {
-                    return true;
-                }
-
-                CoopPlugin.Log.LogWarning("[placement] furniture identity " + id
-                    + " conflicts with the boxed object's own identity " + existing
-                    + "; the descriptor cannot adopt it.");
-                return false;
-            }
-
-            if (ById.TryGetValue(id, out var bound) && bound != null && !ReferenceEquals(bound, obj))
-            {
-                CoopPlugin.Log.LogWarning("[placement] furniture identity " + id
-                    + " is already bound to " + bound.name + "; the descriptor cannot adopt it onto "
-                    + obj.name + ".");
-                return false;
-            }
-
-            var localKind = PlacementInterop.FindKind(obj);
-            if (localKind != kind)
-            {
-                CoopPlugin.Log.LogWarning("[placement] furniture identity " + id + " is kind " + kind
-                    + " but the boxed object " + obj.name + " lives in kind " + localKind
-                    + "; not adopting it.");
-                return false;
-            }
-
-            Bind(obj, id);
-            CoopPlugin.Log.LogInfo("[placement] adopted authoritative furniture identity " + id
-                + " for boxed object " + obj.name + ".");
-            return true;
-        }
-
-        private static bool TryParseFurnitureEntityId(string entityId, long worldEpoch, out int key)
-        {
-            key = 0;
-            if (string.IsNullOrEmpty(entityId) || worldEpoch <= 0)
-            {
-                return false;
-            }
-
-            var parts = entityId.Split(':');
-            return parts.Length == 3 && parts[0] == "furniture-placement"
-                && long.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture,
-                    out var entityEpoch) && entityEpoch == worldEpoch
-                && int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out key);
-        }
-
-        private static bool TryGetId(int kind, InteractableObject obj, out ushort id, bool host)
-        {
-            id = Invalid;
-            if (obj == null || PlacementInterop.GetList(PlacementInterop.FindShelfManager(), kind)
-                == null)
-            {
-                return false;
-            }
-
-            if (host)
-            {
-                id = AssignHost(obj);
-                return id != Invalid;
-            }
-
-            return TryGet(obj, out id);
-        }
-
-        internal static bool TryResolve(ShelfManager manager, int kind, ushort id,
-            out InteractableObject result)
-        {
-            result = null;
-            var list = kind == PlacementApi.DecorationKind ? null : PlacementInterop.GetList(manager, kind);
-            if (list == null || id == Invalid)
-            {
-                return false;
-            }
-
-            if (ById.TryGetValue(id, out var mapped) && mapped != null && list.Contains(mapped))
-            {
-                result = mapped;
-                return true;
-            }
-
-            return false;
-        }
-
-        internal static ushort ObjectIdFromCompartmentKey(int key)
-            => (ushort)((key >> 8) & 0xFFFF);
-
-        internal static ushort ObjectIdFromObjectKey(int key)
-            => (ushort)(key & 0xFFFF);
-    }
-
-    internal sealed class PlacementPopulationState
-    {
-        internal void Reset() => PlacementIdentity.Reset();
-
-        internal PlacementPopulationMessage BuildMessage(WorldTransferManifest manifest)
-        {
-            var manager = PlacementInterop.FindShelfManager();
-            if (manager == null)
-            {
-                return null;
-            }
-
-            if (manifest == null)
-            {
-                CoopPlugin.Log.LogWarning("[placement] building a baseline without a frozen "
-                    + "save-time manifest; falling back to live list indices. A guest that joined "
-                    + "before this baseline may bind the wrong object if its list order differs.");
-            }
-
-            var message = new PlacementPopulationMessage();
-            for (var kind = 0; kind < PlacementApi.KindCount; kind++)
-            {
-                message.Entries.Add(BuildKind(manager, kind, manifest));
-            }
-
-            return message;
-        }
-
-        /// <summary>Host: freeze, for one connection, the slot each placement entity occupies in
-        /// its kind's live list at the instant the save is written. The guest loads that exact
-        /// order, so the slot is the guest's binding key for an entity it already has. Ids are
-        /// assigned here so the frozen slot and the later baseline share one stable identity.</summary>
         internal void CaptureTransferManifest(WorldTransferManifest manifest)
         {
             if (manifest == null)
@@ -777,182 +647,11 @@ namespace CardShopCoop.Modules.World
                         continue;
                     }
 
-                    manifest.SetPlacementSlot(kind, PlacementIdentity.AssignHost(obj), order);
+                    // The id is minted here if the object predates the session, so the frozen slot
+                    // and the later identity baseline name the same stable entity.
+                    manifest.SetPlacementSlot(kind, PlacementObjectIdentity.AssignHost(obj), order);
                     order++;
                 }
-            }
-        }
-
-        internal bool Apply(PlacementPopulationMessage message)
-        {
-            var manager = PlacementInterop.FindShelfManager();
-            for (var kind = 0; kind < message.Entries.Count; kind++)
-            {
-                if (kind != PlacementApi.DecorationKind
-                    && PlacementInterop.GetList(manager, kind) == null)
-                {
-                    return false;
-                }
-            }
-
-            for (var kind = 0; kind < message.Entries.Count; kind++)
-            {
-                ApplyKind(manager, kind, message.Entries[kind]);
-            }
-
-            return true;
-        }
-
-        private static List<PlacementPopulationEntry> BuildKind(ShelfManager manager, int kind,
-            WorldTransferManifest manifest)
-        {
-            var list = PlacementInterop.GetList(manager, kind);
-            var result = new List<PlacementPopulationEntry>();
-            var order = 0;
-            for (var i = 0; list != null && i < list.Count; i++)
-            {
-                if (list[i] is not InteractableObject obj)
-                {
-                    continue;
-                }
-
-                var id = PlacementIdentity.AssignHost(obj);
-                // The slot is the save-time manifest key the guest already has. With no manifest it
-                // is the live save-order index (a scene-reload re-baseline); when a manifest exists
-                // but names no slot for this id, the entity was created after the snapshot, so it
-                // must be materialized by its descriptor (-1) rather than bound to a save object.
-                var slot = -1;
-                if (manifest != null)
-                {
-                    if (!manifest.TryGetPlacementSlot(kind, id, out slot))
-                    {
-                        slot = -1;
-                    }
-                }
-                else
-                {
-                    slot = order;
-                }
-
-                order++;
-
-                var entry = new PlacementPopulationEntry
-                {
-                    Id = id,
-                    Slot = slot,
-                    ObjType = (int)obj.m_ObjectType,
-                    Pos = obj.transform.position,
-                    Rot = obj.transform.rotation,
-                };
-                if (PlacementInterop.IsBoxed(obj) && obj.GetPackagingBoxShelf() != null)
-                {
-                    entry.IsBoxed = true;
-                    entry.BoxedPos = obj.GetPackagingBoxShelf().transform.position;
-                    entry.BoxedRot = obj.GetPackagingBoxShelf().transform.rotation;
-                }
-
-                result.Add(entry);
-            }
-
-            return result;
-        }
-
-        private static void ApplyKind(ShelfManager manager, int kind,
-            List<PlacementPopulationEntry> wanted)
-        {
-            var list = PlacementInterop.GetList(manager, kind);
-            if (list == null)
-            {
-                return;
-            }
-
-            for (var ordinal = 0; ordinal < wanted.Count; ordinal++)
-            {
-                var entry = wanted[ordinal];
-                var obj = ResolveBaselineObject(manager, kind, list, entry);
-                if (obj == null)
-                {
-                    CoopPlugin.Log.LogWarning("[placement] baseline id=" + entry.Id + " kind=" + kind
-                        + " type=" + entry.ObjType + " boxed=" + entry.IsBoxed
-                        + " did not resolve and could not be recreated.");
-                    continue;
-                }
-
-                ReconcileBaselineObject(obj, entry);
-            }
-        }
-
-        /// <summary>The local object a baseline entry names, bound by its carried stable id. The id
-        /// may already be bound (an earlier baseline or a delta bound it), or it may name the object
-        /// at the entry's explicit transfer-time slot: host and guest reproduce the same list order
-        /// from the transferred save, so the slot belongs to that id. The slot is only trusted when
-        /// its object type matches the entry, so a save whose list order diverged (a different
-        /// furniture item now occupies that slot) can never bind an id to the wrong object. An id
-        /// that names no local object is recreated through the game's factory as the exact object it
-        /// names; a same-type or nearby object is never adopted.</summary>
-        private static InteractableObject ResolveBaselineObject(ShelfManager manager, int kind,
-            IList list, PlacementPopulationEntry entry)
-        {
-            if (PlacementIdentity.TryResolve(manager, kind, entry.Id, out var bound))
-            {
-                return bound;
-            }
-
-            if (entry.Slot >= 0 && entry.Slot < list.Count
-                && list[entry.Slot] is InteractableObject slot
-                && (int)slot.m_ObjectType == entry.ObjType
-                && !PlacementIdentity.IsIdentified(slot))
-            {
-                PlacementIdentity.Bind(slot, entry.Id);
-                return slot;
-            }
-
-            return RecreateBaselineObject(entry);
-        }
-
-        private static InteractableObject RecreateBaselineObject(PlacementPopulationEntry entry)
-        {
-            if (entry.ObjType == PlacementInterop.NoType)
-            {
-                return null;
-            }
-
-            var obj = entry.IsBoxed
-                ? PlacementInterop.SpawnBoxedObject(entry.ObjType, entry.BoxedPos, entry.BoxedRot)
-                : PlacementInterop.SpawnPlacedObject(entry.ObjType, entry.Pos, entry.Rot);
-            if (obj == null)
-            {
-                return null;
-            }
-
-            PlacementIdentity.Bind(obj, entry.Id);
-            CoopPlugin.Log.LogInfo("[placement] baseline recreated missing id=" + entry.Id
-                + " type=" + entry.ObjType + " boxed=" + entry.IsBoxed + " object=" + obj.name + ".");
-            return obj;
-        }
-
-        private static void ReconcileBaselineObject(InteractableObject obj,
-            PlacementPopulationEntry entry)
-        {
-            if (PlacementInterop.IsBoxed(obj) != entry.IsBoxed)
-            {
-                if (entry.IsBoxed)
-                {
-                    if (!PlacementInterop.IsBoxEngineOwned(obj))
-                    {
-                        PlacementInterop.BoxUpPlacedObject(obj);
-                    }
-                }
-                else
-                {
-                    PlacementInterop.PlaceBoxedObject(obj, entry.Pos, entry.Rot);
-                }
-            }
-
-            if (!entry.IsBoxed)
-            {
-                obj.transform.SetPositionAndRotation(entry.Pos, entry.Rot);
-                PlacementInterop.SyncTagGroup(obj.transform);
             }
         }
     }
@@ -967,26 +666,27 @@ namespace CardShopCoop.Modules.World
                 var list = PlacementInterop.GetList(manager, kind);
                 for (var i = 0; list != null && i < list.Count; i++)
                 {
-                    if (list[i] is not InteractableObject obj || obj.GetIsMovingObject()
-                        || !PlacementIdentity.TryMakeObjectKey(kind, obj, out var key,
-                            WorldHostBehaviour.Active != null))
+                    if (list[i] is not InteractableObject obj || obj == null
+                        || obj.GetIsMovingObject()
+                        || !PlacementInterop.HasPlacementIdentity(obj, kind))
                     {
                         continue;
                     }
 
+                    var boxed = PlacementInterop.IsBoxed(obj);
+                    var package = boxed ? obj.GetPackagingBoxShelf() : null;
                     result.Add(new PlacementMoveEntry
                     {
-                        Key = key,
-                        Type = PlacementInterop.TypeIdOf(obj),
+                        Entity = obj,
                         Pos = obj.transform.position,
                         Rot = obj.transform.rotation,
-                        IsBoxed = PlacementInterop.IsBoxed(obj),
-                        BoxedPos = PlacementInterop.IsBoxed(obj)
-                            && obj.GetPackagingBoxShelf() != null
-                            ? obj.GetPackagingBoxShelf().transform.position : Vector3.zero,
-                        BoxedRot = PlacementInterop.IsBoxed(obj)
-                            && obj.GetPackagingBoxShelf() != null
-                            ? obj.GetPackagingBoxShelf().transform.rotation : Quaternion.identity,
+                        IsBoxed = boxed,
+                        BoxedPos = boxed
+                            ? (package != null ? package.transform.position : obj.transform.position)
+                            : Vector3.zero,
+                        BoxedRot = boxed
+                            ? (package != null ? package.transform.rotation : obj.transform.rotation)
+                            : Quaternion.identity,
                     });
                 }
             }
@@ -1003,15 +703,15 @@ namespace CardShopCoop.Modules.World
             var kind = key >> 24;
             return manager == null || kind < 0 || kind >= PlacementApi.KindCount
                 ? null
-                : PlacementIdentity.TryResolve(manager, kind,
-                PlacementIdentity.ObjectIdFromObjectKey(key), out var result) ? result : null;
+                : PlacementObjectIdentity.TryResolveInKind(manager, kind,
+                    PlacementObjectIdentity.ObjectIdFromObjectKey(key), out var result)
+                    ? result : null;
         }
     }
 
     internal sealed class PlacementEntitySnapshot
     {
-        internal int Key;
-        internal int Type;
+        internal InteractableObject Entity;
         internal Vector3 Pos;
         internal Quaternion Rot;
         internal bool IsBoxed;
@@ -1021,64 +721,51 @@ namespace CardShopCoop.Modules.World
         internal PlacementMoveEntry ToEntry()
             => new()
             {
-                Key = Key,
-                Type = Type,
+                Entity = Entity,
                 Pos = Pos,
                 Rot = Rot,
                 IsBoxed = IsBoxed,
                 BoxedPos = BoxedPos,
                 BoxedRot = BoxedRot,
             };
-
-        internal bool SameValue(PlacementEntitySnapshot other)
-            => other != null && Type == other.Type && Pos == other.Pos && Rot == other.Rot
-                && IsBoxed == other.IsBoxed && BoxedPos == other.BoxedPos
-                && BoxedRot == other.BoxedRot;
     }
 
     internal static class PlacementEntityState
     {
-        internal static PlacementEntitySnapshot Capture(InteractableObject obj, int key)
+        internal static PlacementEntitySnapshot Capture(InteractableObject obj)
         {
             var boxed = PlacementInterop.IsBoxed(obj);
             var package = obj?.GetPackagingBoxShelf();
             return new PlacementEntitySnapshot
             {
-                Key = key,
-                Type = PlacementInterop.TypeIdOf(obj),
+                Entity = obj,
                 Pos = obj == null ? Vector3.zero : obj.transform.position,
                 Rot = obj == null ? Quaternion.identity : obj.transform.rotation,
                 IsBoxed = boxed,
-                BoxedPos = boxed && package != null ? package.transform.position : Vector3.zero,
-                BoxedRot = boxed && package != null ? package.transform.rotation
+                BoxedPos = boxed
+                    ? (package != null ? package.transform.position : obj.transform.position)
+                    : Vector3.zero,
+                BoxedRot = boxed
+                    ? (package != null ? package.transform.rotation : obj.transform.rotation)
                     : Quaternion.identity,
             };
         }
 
         internal static bool Apply(PlacementMoveEntry entry, bool settle)
         {
-            if (entry == null)
+            if (entry == null || entry.Entity == null)
             {
                 return false;
             }
 
-            var obj = PlacementMoveState.ResolveObjectByKey(entry.Key) as InteractableObject;
-            if (obj == null || (entry.Type != PlacementInterop.NoType
-                && PlacementInterop.TypeIdOf(obj) != entry.Type))
-            {
-                return false;
-            }
+            var obj = entry.Entity;
 
             if (entry.IsBoxed != PlacementInterop.IsBoxed(obj))
             {
                 if (entry.IsBoxed)
                 {
-                    // The world box engine owns the packaging box and its boxed flag; the
-                    // placement channel must never box an object it already tracks.
-                    if (!PlacementInterop.IsBoxEngineOwned(obj))
-                    {
-                        PlacementInterop.BoxUpPlacedObject(obj);
-                    }
+                    // Furniture boxing is placement state. The package is a view of the object.
+                    PlacementInterop.BoxUpPlacedObject(obj);
                 }
                 else
                 {
@@ -1115,63 +802,22 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
+        /// <summary>Applies a state delta. Creation and removal are never state operations: a
+        /// delta without a live entity is dropped, never a request to build or destroy an object.</summary>
         internal static bool Apply(PlacementDeltaMessage message)
         {
-            if (message == null || message.Entity == null)
+            if (message == null || message.Entity == null || message.Entity.Entity == null)
             {
                 return false;
             }
 
-            if (message.Operation == PlacementDeltaMessage.Remove)
-            {
-                var removed = PlacementMoveState.ResolveObjectByKey(message.Entity.Key)
-                    as InteractableObject;
-                if (removed != null)
-                {
-                    DestroyRemovedEntity(removed);
-                }
-
-                return true;
-            }
-
-            if (message.Operation != PlacementDeltaMessage.Add
-                && message.Operation != PlacementDeltaMessage.Update
+            if (message.Operation != PlacementDeltaMessage.Update
                 && message.Operation != PlacementDeltaMessage.Pose)
             {
                 return false;
             }
 
-            var entry = message.Entity;
-            var objectKey = entry.Key;
-            var obj = PlacementMoveState.ResolveObjectByKey(objectKey) as InteractableObject;
-            if (obj == null)
-            {
-                // The stable key names no local object yet. Boxed furniture is owned by the box
-                // channel: its descriptor names this exact entity and binds it onto the local
-                // object (the peer's own predicted box, or one materialized from the descriptor),
-                // after which this delta is retried. Never construct a second object here - that
-                // duplicate would be unknown to the host and could never be interacted with.
-                return false;
-            }
-
-            return Apply(entry, false);
-        }
-
-        /// <summary>The host publishes a remove only for an entity it no longer holds, so the
-        /// local counterpart was destroyed there (trashed or sold furniture). The box channels
-        /// deliberately keep boxed furniture alive when a package is retired (unbox, warehouse
-        /// move), so this is the one place that turns a host-side destruction into the matching
-        /// local destruction. Without it the client kept an inactive ghost inside the game's
-        /// lists - the register's cashier-counter list and every other list-index consumer then
-        /// drifted from the host, and the ghost itself never cleared.
-        ///
-        /// The game's own destroy entry point is used rather than a raw <c>Object.Destroy</c>: it
-        /// removes the object from its <c>ShelfManager</c> list, disables its compartments and
-        /// destroys its world UI group and GameObject, exactly as when the host destroys it.</summary>
-        private static void DestroyRemovedEntity(InteractableObject obj)
-        {
-            PlacementIdentity.Forget(obj);
-            obj.OnDestroyed();
+            return Apply(message.Entity, false);
         }
     }
 }

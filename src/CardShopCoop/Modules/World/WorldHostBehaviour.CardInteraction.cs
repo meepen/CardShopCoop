@@ -1,4 +1,5 @@
 using CardShopCoop.Attributes;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 
@@ -23,7 +24,7 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [MessageHandler(typeof(CardDeltaRequestMessage))]
+        [MessageHandler]
         private void HandleCardDelta(MessageContext context, CardDeltaRequestMessage message)
         {
             if (_context.InGame() && IsJoinPhaseSender(context))
@@ -38,7 +39,7 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [MessageHandler(typeof(CardDeltaBatchRequestMessage))]
+        [MessageHandler]
         private void HandleCardDeltaBatch(MessageContext context, CardDeltaBatchRequestMessage message)
         {
             if (_context.InGame() && IsJoinPhaseSender(context))
@@ -52,7 +53,7 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [MessageHandler(typeof(GradedRemoveRequestMessage))]
+        [MessageHandler]
         private void HandleGradedRemove(MessageContext context, GradedRemoveRequestMessage message)
         {
             if (_context.InGame() && IsJoinPhaseSender(context))
@@ -65,20 +66,158 @@ namespace CardShopCoop.Modules.World
                 RejectWorldIntent(context, message);
             }
         }
+        [IntentValidator]
+        private IntentValidation ValidateEmptyBoxTake(CoopMessageContext context,
+            EmptyBoxTakeIntent message)
+            => ValidateEmptyBoxIntent(context, message?.Container, take: true);
 
-        [MessageHandler(typeof(ContainerOpMessage))]
-        private void HandleContainerOp(MessageContext context, ContainerOpMessage message)
+        [IntentValidator]
+        private IntentValidation ValidateEmptyBoxStore(CoopMessageContext context,
+            EmptyBoxStoreIntent message)
+            => ValidateEmptyBoxIntent(context, message?.Container, take: false);
+
+        private IntentValidation ValidateEmptyBoxIntent(CoopMessageContext context,
+            InteractableObject container, bool take)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context))
+            if (_context == null || !_context.InGame() || context?.Connection == null)
             {
-                ExecuteWorldCommand(context, message, ()
-                    => ApplyContainerCommand(context, message));
+                return IntentValidation.Deny("session is not active");
             }
-            else
+
+            if (!context.IsAuthenticated)
+            {
+                return IntentValidation.Deny("player is not authenticated");
+            }
+
+            if (container is not InteractableEmptyBoxStorage storage)
+            {
+                return IntentValidation.Deny("container is not empty-box storage");
+            }
+
+            if (take && storage.GetBoxStoredCount() <= 0)
+            {
+                return IntentValidation.Deny("empty-box storage is empty");
+            }
+
+            return IntentValidation.Allow();
+        }
+
+        [MessageHandler]
+        private void HandleEmptyBoxTake(MessageContext context, EmptyBoxTakeIntent message)
+        {
+            if (!_context.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
             {
                 RejectWorldIntent(context, message);
+                return;
             }
+
+            ExecuteWorldCommand(context, message, () => ApplyContainerCommand(context, message));
         }
+
+        [MessageHandler]
+        private void HandleEmptyBoxStore(MessageContext context, EmptyBoxStoreIntent message)
+        {
+            if (!_context.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
+            {
+                RejectWorldIntent(context, message);
+                return;
+            }
+
+            ExecuteWorldCommand(context, message, () => ApplyContainerCommand(context, message));
+        }
+
+        private IntentValidation ValidateContainerCommand(CoopMessageContext context,
+            InteractableObject container)
+        {
+            if (_context == null || !_context.InGame() || context?.Connection == null)
+            {
+                return IntentValidation.Deny("session is not active");
+            }
+
+            if (!context.IsAuthenticated)
+            {
+                return IntentValidation.Deny("player is not authenticated");
+            }
+
+            return container == null
+                ? IntentValidation.Deny("container is not live")
+                : IntentValidation.Allow();
+        }
+
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, ContainerContentSetIntent m)
+            => ValidateContainerCommand(context, m?.Container);
+
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, PackInsertIntent m)
+            => ValidateContainerCommand(context, m?.Container);
+
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, PackTurnOnIntent m)
+            => ValidateContainerCommand(context, m?.Container);
+
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, PackCollectIntent m)
+            => ValidateContainerCommand(context, m?.Container);
+
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, PackClaimIntent m)
+            => ValidateContainerCommand(context, m?.Container);
+
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, CleanserToggleIntent m)
+            => ValidateContainerCommand(context, m?.Container);
+
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, CleanserRefillIntent m)
+            => ValidateContainerCommand(context, m?.Container);
+
+        [IntentValidator]
+        private IntentValidation Validate(CoopMessageContext context, WorkerTakeFlagIntent m)
+            => ValidateContainerCommand(context, m?.Container);
+
+        private void ApplyContainerIntent(MessageContext context, ContainerIntent intent)
+        {
+            if (!_context.InGame() || !IsJoinPhaseSender(context) || intent?.Container == null)
+            {
+                RejectWorldIntent(context, intent);
+                return;
+            }
+
+            ExecuteWorldCommand(context, intent, () => ApplyContainerCommand(context, intent));
+        }
+
+        [MessageHandler]
+        private void HandleContentSet(MessageContext context, ContainerContentSetIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private void HandlePackInsert(MessageContext context, PackInsertIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private void HandlePackTurnOn(MessageContext context, PackTurnOnIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private void HandlePackCollect(MessageContext context, PackCollectIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private void HandlePackClaim(MessageContext context, PackClaimIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private void HandleCleanserToggle(MessageContext context, CleanserToggleIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private void HandleCleanserRefill(MessageContext context, CleanserRefillIntent message)
+            => ApplyContainerIntent(context, message);
+
+        [MessageHandler]
+        private void HandleWorkerTakeFlag(MessageContext context, WorkerTakeFlagIntent message)
+            => ApplyContainerIntent(context, message);
 
         private bool ApplyCardDeltaBatchCommand(MessageContext context,
             CardDeltaBatchRequestMessage message)
@@ -94,7 +233,7 @@ namespace CardShopCoop.Modules.World
                 && _cardInteraction.HandleGradedRemove(context.ConnectionId, message);
         }
 
-        private bool ApplyContainerCommand(MessageContext context, ContainerOpMessage message)
+        private bool ApplyContainerCommand(MessageContext context, ContainerIntent message)
         {
             if (_cardInteraction == null)
             {
@@ -103,7 +242,7 @@ namespace CardShopCoop.Modules.World
             }
 
 
-            return _cardInteraction.Containers.HostApplyOp(message, context.ConnectionId,
+            return _cardInteraction.Containers.HostApplyIntent(message, context.ConnectionId,
                 response => SendWorldTo(context.ConnectionId, response));
         }
 

@@ -26,7 +26,7 @@ namespace CardShopCoop.Modules.Tournament
         public bool PlayerIsTournamentCustomer;
         public bool PlayerIsTournamentWin;
         public bool PlayerHasRegisteredResult;
-        public int PlayerTournamentCustomerPlayTableIndex;
+        public InteractablePlayTable PlayerTournamentPlayTable;
         public int PlayerTournamentWinCount;
         public int PlayerTournamentWinPoints;
         public int PlayerTournamentPlacementIndex;
@@ -53,9 +53,13 @@ namespace CardShopCoop.Modules.Tournament
         public bool HasFinishCurrentTournamentRound;
         public bool HasRegisteredTournamentStart;
         public bool HasRegisteredTournamentResult;
+        /// <summary>Tournament participant id (the game's <c>m_TournamentCustomerIndex</c>), a
+        /// tournament-domain data index, not a live customer reference.</summary>
         public int TournamentCustomerIndex;
+        /// <summary>Bracket position (the game's <c>m_TournamentCustomerSortedIndex</c>).</summary>
         public int TournamentCustomerSortedIndex;
-        public int TournamentCustomerPlayTableIndex;
+        /// <summary>The live tournament play table this participant is assigned to.</summary>
+        public InteractablePlayTable PlayTable;
         public int TournamentWinCount;
         public int TournamentWinPoints;
         public int TournamentOMW;

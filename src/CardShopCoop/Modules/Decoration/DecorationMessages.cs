@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -30,18 +29,18 @@ namespace CardShopCoop.Modules.Decoration
         public List<bool> FloorUnlocks = new();
         public List<bool> CeilingUnlocks = new();
         public List<int> Inventory = new();
-        public List<DecorationPose> Placed = new();
     }
 
-    /// <summary>Client intent. Prices, inventory, validity and host object ids are never trusted
-    /// from this message.</summary>
+    /// <summary>
+    /// Client intent. Prices, inventory and placement validity are never trusted from this
+    /// message. <see cref="Entity"/> is the live decoration being moved or removed. A new
+    /// placement has no host object yet and therefore leaves it null: identity assigns the
+    /// decoration's id on the host when the object is created, and the client's local piece is
+    /// reconciled by the resulting lifecycle message.
+    /// </summary>
     [NetworkMessage]
-    public sealed class DecorationIntentMessage : IPredictedMessage
+    public sealed class DecorationIntentMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public byte Action;
         public int Category;
         public int Index;
@@ -52,26 +51,24 @@ namespace CardShopCoop.Modules.Decoration
         public bool Vertical;
         public bool WarehouseWallSnap;
         public int WallIndex;
-        public long ObjectId;
+        public InteractableObject Entity;
     }
 
+    /// <summary>Authoritative decoration state delta. Object creation, movement and removal are
+    /// identity lifecycle events; this message carries only inventory/equip state.</summary>
     [NetworkMessage]
-    public sealed class DecorationDeltaMessage : IPredictedMessage
+    public sealed class DecorationDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public byte Action;
         public int Category;
         public int Index;
         public EDecoObject DecorationType;
         public bool LotB;
         public int InventoryCount;
-        public long ObjectId;
-        public DecorationPose Pose;
     }
 
+    /// <summary>Local pose carrier between the module and the identity adapter. It is never sent
+    /// on the wire: settlement flows through the identity lifecycle descriptors.</summary>
     public sealed class DecorationPose
     {
         public long Id;

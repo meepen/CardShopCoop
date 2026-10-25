@@ -1,7 +1,13 @@
 # CardShopCoopCommunity — Changelog
 
-True co-op multiplayer for TCG Card Shop Simulator. Both players must run the
-**same version** — the join handshake enforces it.
+## 2.2.0
+- Added a public networking API for external mods: send typed messages to individual players or the host, attach replicated data to live NPCs, packaging boxes, decorations and placed objects, keep a session-wide host-authoritative value with a join baseline, and submit host-validated actions that roll back cleanly when refused. The API is documented in `docs/third-party-integration.md` and demonstrated by the sample mod.
+- Updated the built-in modules - including Register, Custom TV and Play Tables, among others - to the new shared object and action layer. Shared objects are addressed by stable session ids instead of list positions or internal data structures, so a late joiner and a live peer see the same object even when their local lists differ.
+- Updated ghost furniture to look closer to vanilla when the other player is holding furniture.
+- Fixed a host customer appearing as the wrong body or gender on a player whose game build orders the customer pools differently (Steam vs Game Pass). The customer now keeps the host's body while a register or trade is using it.
+- Fixed guests being unable to toggle the open/close sign during the tutorial. The host now seeds the access-sign state at session start, so the guest's first click is no longer dropped while waiting for a baseline.
+- Fixed the access-sign swap animation snapping to the new face immediately on a guest. The sign now turns at the animation's midpoint, and a guest's own click animation is no longer interrupted by the host's echo.
+- External mods built against the 2.1.x API need to be rebuilt against `CardShopCoop.Api` 2.2.0. The old prediction helpers and transport contract were replaced by the action, identity and networking surfaces; the sample mod and API guide show the new pattern.
 
 ## 2.1.2
 - Added a 30s timer before day rollover automatically happens after one user is ready.
@@ -137,7 +143,7 @@ their real box. Co-op also works on the game's 1.0 update.**
 
 **Shop interactions that stay in sync**
 - Shelves are host-authoritative: a placement that no longer fits is rolled back to the player's
-  hand through one reusable prediction path, and shelf updates merge single items instead of
+  hand through one reusable action path, and shelf updates merge single items instead of
   rebuilding the whole compartment, so shelves no longer flicker or lose their price tags.
 - Register sales, customer card-for-cash trades, purchases (card packs, licenses, scanner
   upgrades, and furniture), shop renaming, decorations, signage, staff, bills, expansions, and

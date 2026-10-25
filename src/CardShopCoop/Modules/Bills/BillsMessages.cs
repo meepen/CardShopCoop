@@ -1,4 +1,3 @@
-using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
@@ -15,12 +14,8 @@ namespace CardShopCoop.Modules.Bills
     }
 
     [NetworkMessage]
-    public sealed class BillsDeltaMessage : IPredictedMessage
+    public sealed class BillsDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public byte BillType;
         public bool All;
         public BillValue Value = new();
@@ -30,12 +25,8 @@ namespace CardShopCoop.Modules.Bills
     }
 
     [NetworkMessage]
-    public sealed class BillPaymentMessage : IPredictedMessage
+    public sealed class BillPaymentMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         /// <summary>Zero pays all bills; otherwise this is the game's EBillType value.</summary>
         public byte BillType;
     }

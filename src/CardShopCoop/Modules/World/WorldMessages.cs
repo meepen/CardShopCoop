@@ -1,44 +1,18 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
+using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Net;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.World
 {
-    /// <summary>Semantic operation carried by a World command.</summary>
-    public enum WorldOperationKind : ushort
+    /// <summary>Common correlation carried by world messages. Every entity the message addresses
+    /// is a live scene reference; the identity module owns object/identity translation on the
+    /// wire. ActionId is non-empty only on a client intent and the accepted authoritative
+    /// delta that reconciles it.</summary>
+    public abstract class WorldMessage : ActionMessage
     {
-        Unknown = 0,
-        BoxDestroy = 2,
-        FurnitureBoxUp = 3,
-        PlayerBoxPickup = 4,
-        PlayerBoxPlacement = 5,
-        PlayerBoxThrow = 6,
-        ShelfAdd = 7,
-        ShelfRemove = 8,
-        WarehouseStore = 9,
-        WarehouseTake = 10,
-        Container = 11,
-        CardDelta = 12,
-        CardDeltaBatch = 13,
-        GradedRemove = 14,
-        BoxState = 15,
-        CardDisplay = 16,
-        Workbench = 17,
-    }
-
-    /// <summary>Common identity carried by world messages. Stable entity IDs make validation
-    /// independent of Unity instance IDs; PredictionId is non-empty only on a client intent and
-    /// the accepted authoritative delta that reconciles it.</summary>
-    public abstract class WorldMessage : IPredictedMessage
-    {
-        public Guid PredictionId
-        {
-            get; set;
-        }
-        public WorldOperationKind OperationKind;
-        public string StableEntityId;
     }
 
     /// <summary>Internal control marker used by the ordered world-baseline lifecycle.</summary>
@@ -51,7 +25,6 @@ namespace CardShopCoop.Modules.World
     {
         Item = 1,
         Card = 2,
-        Furniture = 3,
     }
 
     /// <summary>One card carried by a card packaging box. This deliberately uses named enum
@@ -70,7 +43,9 @@ namespace CardShopCoop.Modules.World
         public int GradedCardIndex;
     }
 
-    /// <summary>Host-authoritative descriptor used to create one physical packaging box.</summary>
+    /// <summary>Identity-module descriptor used to create one physical packaging box. This is the
+    /// creation payload of the identity module, not a World wire message, so it keeps the stable
+    /// box id that names the entity being created.</summary>
     public sealed class BoxNetworkState
     {
         public Guid BoxNetworkId;
@@ -87,41 +62,16 @@ namespace CardShopCoop.Modules.World
         // Card box payload.
         public List<BoxCardState> Cards = new();
 
-        // Furniture box payload.
-        public EObjectType FurnitureObjectType;
-    }
-
-    /// <summary>Host -> clients: create or bind a box to its stable network ID.</summary>
-    [NetworkMessage]
-    public sealed class BoxCreatedMessage : WorldMessage
-    {
-        public BoxNetworkState Box;
-
-        /// <summary>Index of this box in the world snapshot's serialization order for its kind,
-        /// or -1 for a box created after the snapshot. The guest reproduces the same index from
-        /// the transferred save, so a scene box is adopted by slot instead of by content/pose.
-        /// </summary>
-        public int SnapshotSlot = -1;
     }
 
     /// <summary>Client -> host: request retirement of a locally consumed box.</summary>
     [NetworkMessage]
     public sealed class BoxDestroyRequestMessage : WorldMessage
     {
+        /// <summary>The identity minted when the box was created. The local destroy hook has
+        /// already unbound the box by the time this intent is serialized, so the id — never the
+        /// live object — names the box being retired.</summary>
         public Guid BoxNetworkId;
-    }
-
-    /// <summary>Host -> clients: the box ID no longer represents a physical or stored box.</summary>
-    [NetworkMessage]
-    public sealed class BoxDestroyedMessage : WorldMessage
-    {
-        public Guid BoxNetworkId;
-    }
-
-    /// <summary>Marks the end of a per-connection box creation baseline.</summary>
-    [NetworkMessage]
-    public sealed class BoxBaselineCompleteMessage : WorldControlMessage
-    {
     }
 
     /// <summary>Client -> host: an item box's open flag and/or contents changed after a local
@@ -129,23 +79,26 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class BoxStateRequestMessage : WorldMessage
     {
-        public Guid BoxNetworkId;
+        public InteractablePackagingBox Box;
         public bool IsBoxOpened;
         public bool ContentsChanged;
         public EItemType ItemType;
         public int ItemCount;
     }
 
-    /// <summary>Host -> clients: authoritative item-box open flag and contents. Carries no pose,
-    /// so a held box keeps its local/remote hand anchor.</summary>
+    /// <summary>Host -> clients: authoritative box state. <see cref="PoseChanged"/> carries a
+    /// pose refresh for an already-created box; a held box or a newer local move ignores it.</summary>
     [NetworkMessage]
     public sealed class BoxStateMessage : WorldMessage
     {
-        public Guid BoxNetworkId;
+        public InteractablePackagingBox Box;
         public bool IsBoxOpened;
         public bool ContentsChanged;
         public EItemType ItemType;
         public int ItemCount;
+        public bool PoseChanged;
+        public Vector3 Position;
+        public Quaternion Rotation;
     }
 
     /// <summary>Marks the end of the complete per-connection shared-world baseline.</summary>
@@ -163,247 +116,93 @@ namespace CardShopCoop.Modules.World
 
     internal static class WorldMessageMetadata
     {
-        // Placement's furniture identity API predates generic world prediction and still needs
-        // a positive namespace value. It is not carried on the wire or used for intent validity.
-        internal const long FurnitureIdentityScope = 1L;
-
-        internal static string StableEntityId(WorldMessage message)
-        {
-            if (message == null)
-            {
-                return string.Empty;
-            }
-
-            if (!string.IsNullOrEmpty(message.StableEntityId))
-            {
-                return message.StableEntityId;
-            }
-
-            if (message is BoxCreatedMessage created && created.Box != null)
-            {
-                return "box:" + created.Box.BoxNetworkId;
-            }
-
-            if (message is BoxDestroyRequestMessage destroy)
-            {
-                return "box:" + destroy.BoxNetworkId;
-            }
-
-            if (message is BoxDestroyedMessage destroyed)
-            {
-                return "box:" + destroyed.BoxNetworkId;
-            }
-
-            if (message is BoxStateRequestMessage boxState)
-            {
-                return "box:" + boxState.BoxNetworkId;
-            }
-
-            if (message is BoxStateMessage boxStateResult)
-            {
-                return "box:" + boxStateResult.BoxNetworkId;
-            }
-
-            if (message is PlayerBoxInteractionMessage player)
-            {
-                return "box:" + player.BoxNetworkId;
-            }
-
-            if (message is CardDisplayRequestMessage cardDisplay)
-            {
-                return CardDisplayEntityId(cardDisplay.ShelfKey, cardDisplay.Compartment);
-            }
-
-            if (message is CardDisplayMessage cardDisplayState)
-            {
-                return CardDisplayEntityId(cardDisplayState.ShelfKey, cardDisplayState.Compartment);
-            }
-
-            if (message is ContainerOpMessage container)
-            {
-                return ContainerEntityId(container.Kind, container.Index);
-            }
-
-            if (message is WarehouseStoreMessage store)
-            {
-                return WarehouseEntityId(store.ShelfIndex, store.CompartmentIndex);
-            }
-
-            if (message is WarehouseTakeMessage take)
-            {
-                return WarehouseEntityId(take.ShelfIndex, take.CompartmentIndex);
-            }
-
-            if (message is ShelfInteractionMessage shelf)
-            {
-                return "shelf:" + shelf.ShelfKey + ":" + shelf.Compartment;
-            }
-
-            if (message is FurnitureBoxUpRequestMessage furniture)
-            {
-                return "furniture:" + furniture.ObjectType + ":"
-                    + furniture.Position.x.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
-                    + ":" + furniture.Position.y.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
-                    + ":" + furniture.Position.z.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (message is ContainerStateMessage state)
-            {
-                return "container-state";
-            }
-
-            if (message is WorkbenchStateMessage workbench)
-            {
-                return WorkbenchEntityId(workbench.Index);
-            }
-
-            if (message is WorkbenchOpMessage workbenchOp)
-            {
-                return WorkbenchEntityId(workbenchOp.Index);
-            }
-
-            if (message is WorkbenchBundleMessage bundle)
-            {
-                return WorkbenchEntityId(bundle.Index);
-            }
-
-            if (message is WarehouseStateMessage)
-            {
-                return "warehouse-state";
-            }
-
-            if (message is MarketStateMessage)
-            {
-                return "market";
-            }
-
-            return message.GetType().FullName ?? message.GetType().Name;
-        }
-
-        internal static string CardDisplayEntityId(int shelfKey, int compartment)
-            => "card-display:" + shelfKey + ":" + compartment;
-
-        internal static string ContainerEntityId(int kind, int index)
-            => "container:" + kind + ":" + index;
-
         internal static string WorkbenchEntityId(int index)
             => "workbench:" + index;
 
-        internal static string WarehouseEntityId(int shelfIndex, int compartmentIndex)
-            => "warehouse:" + shelfIndex + ":" + compartmentIndex;
-
-        internal static void PrepareIntent(WorldMessage message)
-        {
-            if (message == null)
-            {
-                throw new ArgumentNullException(nameof(message));
-            }
-
-            message.StableEntityId ??= StableEntityId(message);
-            message.OperationKind = OperationFor(message);
-        }
-
+        /// <summary>An intent is valid only when it carries its correlation id and every entity
+        /// it addresses resolved to a live scene object. A message whose entity did not resolve
+        /// is dropped, never resolved by a fallback id.</summary>
         internal static bool IsValidIntent(WorldMessage message)
-            => message != null && message.PredictionId != Guid.Empty
-                && message.OperationKind == OperationFor(message)
-                && message.OperationKind != WorldOperationKind.Unknown
-                && !string.IsNullOrEmpty(message.StableEntityId);
+            => message != null && message.ActionId != Guid.Empty && HasLiveEntity(message);
 
-        private static WorldOperationKind OperationFor(WorldMessage message)
+        private static bool HasLiveEntity(WorldMessage message) => message switch
         {
-            if (message is BoxDestroyRequestMessage)
-            {
-                return WorldOperationKind.BoxDestroy;
-            }
-
-            if (message is BoxStateRequestMessage)
-            {
-                return WorldOperationKind.BoxState;
-            }
-
-            if (message is FurnitureBoxUpRequestMessage)
-            {
-                return WorldOperationKind.FurnitureBoxUp;
-            }
-
-            if (message is PlayerBoxPickupRequestMessage)
-            {
-                return WorldOperationKind.PlayerBoxPickup;
-            }
-
-            if (message is PlayerBoxPlacementRequestMessage)
-            {
-                return WorldOperationKind.PlayerBoxPlacement;
-            }
-
-            if (message is PlayerBoxThrowRequestMessage)
-            {
-                return WorldOperationKind.PlayerBoxThrow;
-            }
-
-            if (message is ShelfItemAddRequestMessage)
-            {
-                return WorldOperationKind.ShelfAdd;
-            }
-
-            if (message is ShelfItemRemoveRequestMessage)
-            {
-                return WorldOperationKind.ShelfRemove;
-            }
-
-            if (message is WarehouseStoreMessage)
-            {
-                return WorldOperationKind.WarehouseStore;
-            }
-
-            if (message is WarehouseTakeMessage)
-            {
-                return WorldOperationKind.WarehouseTake;
-            }
-
-            if (message is CardDisplayRequestMessage)
-            {
-                return WorldOperationKind.CardDisplay;
-            }
-
-            if (message is ContainerOpMessage)
-            {
-                return WorldOperationKind.Container;
-            }
-
-            if (message is CardDeltaBatchRequestMessage)
-            {
-                return WorldOperationKind.CardDeltaBatch;
-            }
-
-            if (message is CardDeltaRequestMessage)
-            {
-                return WorldOperationKind.CardDelta;
-            }
-
-            if (message is GradedRemoveRequestMessage)
-            {
-                return WorldOperationKind.GradedRemove;
-            }
-
-            if (message is WorkbenchOpMessage || message is WorkbenchBundleMessage)
-            {
-                return WorldOperationKind.Workbench;
-            }
-
-            return WorldOperationKind.Unknown;
-        }
+            BoxDestroyRequestMessage destroy => destroy.BoxNetworkId != Guid.Empty,
+            BoxStateRequestMessage state => state.Box != null,
+            FurnitureBoxUpRequestMessage furniture => furniture.Entity != null,
+            FurnitureDestroyIntent furnitureDestroy => furnitureDestroy.Entity != null,
+            PlayerBoxInteractionMessage playerBox => playerBox.Box != null,
+            ShelfInteractionMessage shelf => shelf.Shelf != null,
+            WarehouseStoreMessage store => store.Shelf != null && store.Box != null,
+            WarehouseTakeMessage take => take.Source != null && take.Source.Shelf != null
+                && take.CreatedBox != null,
+            CardDisplayRequestMessage cardDisplay => cardDisplay.Shelf != null,
+            ContainerIntent container => container.Container != null,
+            _ => true,
+        };
     }
 
-    /// <summary>Client intent to box an existing furniture object; execution remains host-side.</summary>
+    /// <summary>Client intent to retire a furniture object the player sold or trashed while it was
+    /// boxed. The package is a view of the furniture; destroying the furniture retires both.</summary>
+    [NetworkMessage]
+    public sealed class FurnitureDestroyIntent : WorldMessage
+    {
+        public InteractableObject Entity;
+    }
+
+    /// <summary>Client intent to box an existing furniture object; execution remains host-side.
+    /// The entity is the live placed object the client boxed up. Its packaging box is a view of
+    /// that furniture and shares its session Guid, so the intent never carries a box id.</summary>
     [NetworkMessage]
     public sealed class FurnitureBoxUpRequestMessage : WorldMessage
     {
         public EObjectType ObjectType;
         public Vector3 Position;
-        /// <summary>The client assigns the box's stable id at its local box-up and carries it here so
-        /// the host binds its counterpart to the same id instead of allocating one.</summary>
-        public Guid BoxNetworkId;
+        public InteractableObject Entity;
+    }
+
+    /// <summary>Location of one warehouse entry. The shelf is a live scene object; the
+    /// compartment index names its storage compartment and the slot is a hint that mirrors the
+    /// compartment's current order. The identity module owns the Guid that travels on the wire; it
+    /// is not part of the public DTO surface and is used internally by the wire converter and the
+    /// location registry.</summary>
+    public sealed class WarehouseShelfBoxRef
+    {
+        public WarehouseShelf Shelf;
+        public int CompartmentIndex;
+        public int Slot = -1;
+
+        /// <summary>Wire identity, owned by the identity module's warehouse location registry.
+        /// It is deliberately internal: feature DTOs expose live objects or shelf locations, never
+        /// a public Guid surface.</summary>
+        internal Guid Identity;
+
+        /// <summary>The shelf's structured identity, retained when the live shelf is not loaded yet
+        /// so a deferred message can resolve it later.</summary>
+        internal GameObjectId ShelfIdentity;
+    }
+
+    /// <summary>One warehouse compartment header. ItemType and IsBig are a property of the
+    /// compartment's cached box set, so they travel once instead of once per entry.</summary>
+    public sealed class WarehouseCompartmentState
+    {
+        public WarehouseShelf Shelf;
+        public int CompartmentIndex;
+        public EItemType ItemType;
+        public bool IsBig;
+        public List<WarehouseBoxEntry> Boxes = new();
+
+        /// <summary>The shelf's structured identity, retained for deferred application.</summary>
+        internal GameObjectId ShelfIdentity;
+    }
+
+    /// <summary>One stored warehouse entry. <see cref="Box"/> is only a live representation hint:
+    /// a record-backed entry has no live object and stays valid with a null box.</summary>
+    public sealed class WarehouseBoxEntry
+    {
+        public WarehouseShelfBoxRef Ref;
+        public int Amount;
+        public InteractablePackagingBox Box;
     }
 
     [NetworkMessage]
@@ -412,52 +211,38 @@ namespace CardShopCoop.Modules.World
         public List<WarehouseCompartmentState> Compartments = new();
     }
 
-    public sealed class WarehouseCompartmentState
-    {
-        public string StableEntityId;
-        public int ShelfIndex;
-        public int CompartmentIndex;
-        public List<WarehouseBoxState> Boxes = new();
-    }
-
-    public sealed class WarehouseBoxState
-    {
-        public Guid BoxNetworkId;
-        public EItemType ItemType;
-        public int Amount;
-        public bool IsBig;
-    }
-
     [NetworkMessage]
     public sealed class WarehouseStoreMessage : WorldMessage
     {
-        public Guid BoxNetworkId;
-        public int ShelfIndex;
+        public WarehouseShelf Shelf;
         public int CompartmentIndex;
+        public InteractablePackagingBox Box;
         public EItemType ItemType;
         public int Amount;
         public bool IsBig;
     }
 
+    /// <summary>Client -> host: take the top entry of <see cref="Source"/>. The locally spawned
+    /// live box is a creation event and arrives as a descriptor with its own identity; it may keep
+    /// the stored entry's host id or carry a fresh one.</summary>
     [NetworkMessage]
     public sealed class WarehouseTakeMessage : WorldMessage
     {
-        public Guid BoxNetworkId;
-        public int ShelfIndex;
-        public int CompartmentIndex;
+        public WarehouseShelfBoxRef Source;
+        public EntityDescriptor CreatedBox;
     }
 
-    /// <summary>One accepted warehouse inventory change. The complete compartment list is sent
-    /// only in WarehouseStateMessage during the join baseline.</summary>
+    /// <summary>One accepted warehouse inventory change. <see cref="Ref"/> names the entry;
+    /// <see cref="Box"/> is an optional live representation and is null for record-backed and
+    /// worker/auto-restock entries. Deltas are authoritative state, never intents.</summary>
     [NetworkMessage]
     public sealed class WarehouseDeltaMessage : WorldMessage
     {
         public bool IsStore;
-        public int ShelfIndex;
-        public int CompartmentIndex;
-        public Guid BoxNetworkId;
+        public WarehouseShelfBoxRef Ref;
         public EItemType ItemType;
         public int Amount;
         public bool IsBig;
+        public InteractablePackagingBox Box;
     }
 }

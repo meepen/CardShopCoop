@@ -1,8 +1,9 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -16,10 +17,6 @@ namespace CardShopCoop.Modules.Decoration
     public sealed class DecorationHostBehaviour : CoopBehaviour
     {
         private static DecorationHostBehaviour _active;
-        /// <summary>The placement attempt currently inside the game's PlaceMovedObject frame. The
-        /// commit callback also runs for box-up and the World hold cancel, so only a call made
-        /// inside this frame is a placement this host must publish.</summary>
-        private static InteractableObject _placingInstance;
         private readonly HashSet<int> _fullyJoined = new();
         private CoopRuntimeContext _context;
         private Harmony _harmony;
@@ -47,10 +44,6 @@ namespace CardShopCoop.Modules.Decoration
                 _harmony.CreateClassProcessor(typeof(EquipPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(BuyItemPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(PlaceAttemptPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(PlacedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(RemovePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(LockedRoomHiddenPatch)).Patch();
             }
             catch (Exception exception)
             {
@@ -99,7 +92,7 @@ namespace CardShopCoop.Modules.Decoration
 
         }
 
-        [MessageHandler(typeof(DecorationIntentMessage))]
+        [MessageHandler]
         private void HandleIntent(MessageContext context, DecorationIntentMessage message)
         {
             if (!IsPeerMessage(context) || message == null)
@@ -109,17 +102,24 @@ namespace CardShopCoop.Modules.Decoration
 
 
             var accepted = false;
-            InteractableObject placed = null;
             try
             {
+                // Identity publishes the decoration's lifecycle inside this scope. The intent
+                // handler then sends the state delta with its prediction id, so the lifecycle
+                // hooks suppress their own prediction-less inventory broadcast while this scope
+                // is active. Identity assigns the id of a newly created piece; there is no
+                // client-proposed id to adopt.
                 _applyingIntent = true;
-                try
+                using (DecorationIdentityAdapter.BeginHostIntent(0))
                 {
-                    accepted = ApplyIntent(message, out placed);
-                }
-                finally
-                {
-                    _applyingIntent = false;
+                    try
+                    {
+                        accepted = ApplyIntent(message);
+                    }
+                    finally
+                    {
+                        _applyingIntent = false;
+                    }
                 }
             }
             catch (Exception exception)
@@ -130,9 +130,7 @@ namespace CardShopCoop.Modules.Decoration
 
             if (accepted)
             {
-                // The place path hands back the exact object it mutated, so the delta is keyed by
-                // that object's id instead of being searched for by type and position.
-                var delta = BuildDelta(message, placed);
+                var delta = BuildDelta(message);
                 if (delta != null)
                 {
                     BroadcastDelta(delta);
@@ -143,23 +141,22 @@ namespace CardShopCoop.Modules.Decoration
 
                 DecorationInterop.RefreshUi();
             }
-            else if (message.PredictionId != Guid.Empty)
+            else if (message.ActionId != Guid.Empty)
             {
                 CoopPlugin.Log.LogInfo("[decoration] intent rejected action=" + message.Action
-                    + " type=" + message.DecorationType + " prediction=" + message.PredictionId + ".");
+                    + " type=" + message.DecorationType + " prediction=" + message.ActionId + ".");
                 // The rollback's undo restores the requester's captured snapshot, which may be
                 // stale if the host or another guest changed the decorations during the round
                 // trip. DecorationStateMessage cannot carry the prediction id, so the
                 // authoritative snapshot follows the rollback: the undo runs first and the state
                 // then overrides it on the same reliable lane.
-                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
                 SendState(context.Connection.Id);
             }
         }
 
-        private bool ApplyIntent(DecorationIntentMessage message, out InteractableObject placed)
+        private static bool ApplyIntent(DecorationIntentMessage message)
         {
-            placed = null;
             switch (message.Action)
             {
                 case DecorationActions.Equip:
@@ -197,55 +194,90 @@ namespace CardShopCoop.Modules.Decoration
                         () => DecorationInterop.InventoryCount(message.DecorationType)
                             > inventoryBefore);
                 case DecorationActions.Place:
-                    if (!DecorationInterop.ValidPose(message.Position, message.Rotation)
-                        || message.WallIndex < -1 || message.WallIndex > 1024
-                        || (message.ObjectId <= 0 && !DecorationInterop.HasInventory(message.DecorationType)))
-                    {
-                        return false;
-                    }
-
-                    var pose = new DecorationPose
-                    {
-                        DecorationType = message.DecorationType,
-                        Position = message.Position,
-                        Rotation = message.Rotation,
-                        Vertical = message.Vertical,
-                        WarehouseWallSnap = message.WarehouseWallSnap,
-                        Wall = message.WallIndex,
-                    };
-                    var consumesInventory = message.ObjectId <= 0;
-                    var taken = false;
-                    try
-                    {
-                        if (consumesInventory)
-                        {
-                            DecorationInterop.AdjustInventory(message.DecorationType, -1);
-                            taken = true;
-                        }
-                        if (DecorationInterop.TryPlace(pose, message.ObjectId, out placed))
-                        {
-                            taken = false;
-                            return true;
-                        }
-                        return false;
-                    }
-                    finally
-                    {
-                        // TryPlace owns the placement itself, but the inventory take is ours:
-                        // give it back when placement is refused or throws (for example a
-                        // decoration prefab that cannot be instantiated), so a failed placement
-                        // cannot consume an item.
-                        if (taken)
-                        {
-                            DecorationInterop.AdjustInventory(message.DecorationType, 1);
-                        }
-
-                    }
+                    return ApplyPlace(message);
                 case DecorationActions.Remove:
-                    return message.ObjectId > 0 && DecorationInterop.TryRemove(message.ObjectId);
+                    return ApplyRemove(message);
                 default:
                     return false;
             }
+        }
+
+        /// <summary>A placement targets an existing piece when the intent carries it. Without one
+        /// the client is placing a new piece from its inventory, and identity assigns the id when
+        /// the host creates the object.</summary>
+        private static bool ApplyPlace(DecorationIntentMessage message)
+        {
+            var existing = message.Entity;
+            var creates = existing == null;
+            if (!DecorationInterop.ValidPose(message.Position, message.Rotation)
+                || message.WallIndex < -1 || message.WallIndex > 1024
+                || (creates && !DecorationInterop.HasInventory(message.DecorationType)))
+            {
+                return false;
+            }
+
+            if (!creates && !DecorationInterop.IsDecoration(existing))
+            {
+                CoopPlugin.Log.LogWarning("[decoration] place intent dropped: entity is no longer a"
+                    + " live decoration.");
+                return false;
+            }
+
+            var pose = new DecorationPose
+            {
+                DecorationType = message.DecorationType,
+                Position = message.Position,
+                Rotation = message.Rotation,
+                Vertical = message.Vertical,
+                WarehouseWallSnap = message.WarehouseWallSnap,
+                Wall = message.WallIndex,
+            };
+            var taken = false;
+            try
+            {
+                if (creates)
+                {
+                    DecorationInterop.AdjustInventory(message.DecorationType, -1);
+                    taken = true;
+                }
+
+                // Identity owns the target binding and publishes the added/moved lifecycle from
+                // inside the game's placement sequence.
+                if (DecorationInterop.TryPlace(pose, existing, out _))
+                {
+                    taken = false;
+                    return true;
+                }
+                return false;
+            }
+            finally
+            {
+                // TryPlace owns the placement itself, but the inventory take is ours:
+                // give it back when placement is refused or throws (for example a
+                // decoration prefab that cannot be instantiated), so a failed placement
+                // cannot consume an item.
+                if (taken)
+                {
+                    DecorationInterop.AdjustInventory(message.DecorationType, 1);
+                }
+
+            }
+        }
+
+        /// <summary>Removal runs the game's own box-up on the live entity the intent carries.
+        /// A decoration is never addressed by an id here: without its object the message cannot
+        /// describe anything this host can act on, so it is dropped.</summary>
+        private static bool ApplyRemove(DecorationIntentMessage message)
+        {
+            var entity = message.Entity;
+            if (entity == null || !DecorationInterop.IsDecoration(entity))
+            {
+                CoopPlugin.Log.LogWarning("[decoration] remove intent dropped: no live decoration"
+                    + " entity.");
+                return false;
+            }
+
+            return DecorationInterop.TryRemove(entity);
         }
 
         private static bool TryApplyReservedPurchase(float price, string context,
@@ -322,64 +354,52 @@ namespace CardShopCoop.Modules.Decoration
             }
 
 
-            var state = DecorationInterop.Snapshot();
-            message = new DecorationStateMessage
-            {
-                Wall = state.Wall,
-                WallB = state.WallB,
-                Floor = state.Floor,
-                FloorB = state.FloorB,
-                Ceiling = state.Ceiling,
-                CeilingB = state.CeilingB,
-                WallUnlocks = state.WallUnlocks,
-                FloorUnlocks = state.FloorUnlocks,
-                CeilingUnlocks = state.CeilingUnlocks,
-                Inventory = state.Inventory,
-                Placed = state.Placed,
-            };
-            return true;
+            message = DecorationInterop.ToStateMessage(DecorationInterop.Snapshot());
+            return message != null;
         }
 
         private bool IsPeerMessage(MessageContext context)
             => !_shutdown && context?.Connection != null
                 && _fullyJoined.Contains(context.Connection.Id);
 
-        private static DecorationDeltaMessage BuildDelta(DecorationIntentMessage intent,
-            InteractableObject placed)
+        /// <summary>Broadcasts only the inventory result of a host-originated decoration action.
+        /// The lifecycle (added/moved/removed) is already published by the identity hooks.</summary>
+        internal static void PublishInventoryDelta(byte action, EDecoObject type)
+            => _active?.BroadcastInventory(action, type);
+
+        private void BroadcastInventory(byte action, EDecoObject type)
+        {
+            if (_shutdown || _context == null || !_context.InGame()
+                || type == EDecoObject.None)
+            {
+                return;
+            }
+
+            BroadcastDelta(new DecorationDeltaMessage
+            {
+                ActionId = Guid.Empty,
+                Action = action,
+                DecorationType = type,
+                InventoryCount = DecorationInterop.InventoryCount(type),
+            });
+            DecorationInterop.RefreshUi();
+        }
+
+        private static DecorationDeltaMessage BuildDelta(DecorationIntentMessage intent)
         {
             var delta = new DecorationDeltaMessage
             {
-                PredictionId = intent.PredictionId,
+                ActionId = intent.ActionId,
                 Action = intent.Action,
                 Category = intent.Category,
                 Index = intent.Index,
                 DecorationType = intent.DecorationType,
                 LotB = intent.LotB,
-                ObjectId = intent.ObjectId,
             };
-            if (intent.Action == DecorationActions.BuyItemDecoration)
+            if (intent.Action == DecorationActions.BuyItemDecoration
+                || intent.Action == DecorationActions.Remove
+                || intent.Action == DecorationActions.Place)
             {
-                delta.InventoryCount = DecorationInterop.InventoryCount(intent.DecorationType);
-            }
-            else if (intent.Action == DecorationActions.Remove)
-            {
-                delta.InventoryCount = DecorationInterop.InventoryCount(intent.DecorationType);
-            }
-            else if (intent.Action == DecorationActions.Place)
-            {
-                // The applied object is the authoritative piece itself; read its real pose and its
-                // id directly instead of scanning the snapshot for a type/position match.
-                if (placed == null)
-                {
-
-                    return null;
-                }
-
-
-                var pose = DecorationInterop.ReadPose(placed);
-                pose.Id = DecorationInterop.EnsureHostId(placed);
-                delta.Pose = pose;
-                delta.ObjectId = pose.Id;
                 delta.InventoryCount = DecorationInterop.InventoryCount(intent.DecorationType);
             }
             return delta;
@@ -435,7 +455,7 @@ namespace CardShopCoop.Modules.Decoration
                     Category = DecorationInterop.CategoryFor(__instance),
                     Index = shopDecoIndex,
                     LotB = isShopLotB,
-                    PredictionId = Guid.Empty,
+                    ActionId = Guid.Empty,
                 });
             }
         }
@@ -479,7 +499,7 @@ namespace CardShopCoop.Modules.Decoration
                     Action = DecorationActions.BuyShopDecoration,
                     Category = __state.Category,
                     Index = shopDecoIndex,
-                    PredictionId = Guid.Empty,
+                    ActionId = Guid.Empty,
                 });
             }
         }
@@ -501,150 +521,7 @@ namespace CardShopCoop.Modules.Decoration
                     Action = DecorationActions.BuyItemDecoration,
                     DecorationType = itemType,
                     InventoryCount = DecorationInterop.InventoryCount(itemType),
-                    PredictionId = Guid.Empty,
-                });
-            }
-        }
-
-        /// <summary>Marks the game's placement attempt for a decoration. The marker exists only
-        /// while the synchronous PlaceMovedObject frame runs; an attempt vanilla refuses (invalid
-        /// aim) never commits and therefore publishes nothing.</summary>
-        [HarmonyPatch(typeof(InteractableObject), "PlaceMovedObject")]
-        private static class PlaceAttemptPatch
-        {
-            [HarmonyPrefix]
-            private static void Prefix(InteractableObject __instance)
-            {
-                if (_active == null || _active._applyingIntent || __instance == null
-                    || __instance.m_DecoObjectType == EDecoObject.None
-                    || !__instance.GetIsMovingObject())
-                {
-                    return;
-                }
-
-
-                _placingInstance = __instance;
-            }
-
-            [HarmonyFinalizer]
-            private static void Finalizer() => _placingInstance = null;
-        }
-
-        /// <summary>The game's placement commit callback. Box-up and the World hold cancel share
-        /// it, so only a call made inside this host's PlaceMovedObject frame is published. A moved
-        /// piece already owns a host id; the delta carries that exact object.</summary>
-        [HarmonyPatch(typeof(InteractableObject), "OnPlacedMovedObject")]
-        private static class PlacedPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(InteractableObject __instance)
-            {
-                var host = _active;
-                if (host == null || host._applyingIntent || __instance == null
-                    || !ReferenceEquals(_placingInstance, __instance)
-                    || __instance.m_DecoObjectType == EDecoObject.None)
-                {
-                    return;
-                }
-
-
-                var delta = BuildDelta(new DecorationIntentMessage
-                {
-                    Action = DecorationActions.Place,
-                    DecorationType = __instance.m_DecoObjectType,
-                    ObjectId = DecorationInterop.HostIdFor(__instance),
-                }, __instance);
-                if (delta != null)
-                {
-                    CoopPlugin.Log.LogInfo("[decoration] host placed id=" + delta.ObjectId
-                        + " type=" + delta.DecorationType + ".");
-                    host.BroadcastDelta(delta);
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(InteractableObject), "BoxUpObject")]
-        private static class RemovePatch
-        {
-            private struct State
-            {
-                public long Id;
-                public EDecoObject Type;
-            }
-
-            [HarmonyPrefix]
-            private static void Prefix(InteractableObject __instance, out State __state)
-                => __state = new State
-                {
-                    Id = DecorationInterop.HostIdFor(__instance),
-                    Type = __instance.m_DecoObjectType,
-                };
-
-            [HarmonyPostfix]
-            private static void Postfix(State __state)
-            {
-                if (_active == null || _active._applyingIntent || __state.Type == EDecoObject.None)
-                {
-                    return;
-                }
-                // A zero id means this piece was never published: a decoration taken from the
-                // inventory and boxed again before it was placed. The object half of the delta is
-                // a no-op for guests, but the count must still go out - a join or rejection
-                // baseline taken while the host was holding the piece carried the reduced count,
-                // so the cancel's +1 has to reach them.
-
-                _active.BroadcastDelta(new DecorationDeltaMessage
-                {
-                    Action = DecorationActions.Remove,
-                    ObjectId = __state.Id,
-                    DecorationType = __state.Type,
-                    InventoryCount = DecorationInterop.InventoryCount(__state.Type),
-                    PredictionId = Guid.Empty,
-                });
-            }
-        }
-
-        /// <summary>Room and warehouse expansion hide the blocker and return every vertical
-        /// decoration on it to the inventory through OnLockedRoomHidden, which bypasses
-        /// BoxUpObject. Publish that removal exactly like a box-up so every guest loses the piece
-        /// and gains the item instead of keeping a copy the host no longer has.</summary>
-        [HarmonyPatch(typeof(InteractableObject), "OnLockedRoomHidden")]
-        private static class LockedRoomHiddenPatch
-        {
-            private struct State
-            {
-                public long Id;
-                public EDecoObject Type;
-            }
-
-            [HarmonyPrefix]
-            private static void Prefix(InteractableObject __instance, out State __state)
-                => __state = new State
-                {
-                    Id = DecorationInterop.HostIdFor(__instance),
-                    Type = __instance == null ? EDecoObject.None : __instance.m_DecoObjectType,
-                };
-
-            [HarmonyPostfix]
-            private static void Postfix(State __state)
-            {
-                if (_active == null || _active._applyingIntent
-                    || __state.Type == EDecoObject.None)
-                {
-                    return;
-                }
-
-
-                var count = DecorationInterop.InventoryCount(__state.Type);
-                CoopPlugin.Log.LogInfo("[decoration] host locked-room removed id=" + __state.Id
-                    + " type=" + __state.Type + " count=" + count + ".");
-                _active.BroadcastDelta(new DecorationDeltaMessage
-                {
-                    Action = DecorationActions.Remove,
-                    ObjectId = __state.Id,
-                    DecorationType = __state.Type,
-                    InventoryCount = count,
-                    PredictionId = Guid.Empty,
+                    ActionId = Guid.Empty,
                 });
             }
         }

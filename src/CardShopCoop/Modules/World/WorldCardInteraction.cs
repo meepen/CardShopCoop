@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Net;
 using CardShopCoop.Modules.Grading;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.SaveTransfer;
 using CardShopCoop.Runtime;
 
@@ -179,7 +179,7 @@ namespace CardShopCoop.Modules.World
                 Card = snapshot,
             };
             var binding = isAdd ? null : CreateBinderTakeBinding();
-            WorldPrediction.Predict(WorldPrediction.CardsScope, intent,
+            WorldAction.Submit(WorldAction.CardsScope, intent,
                 () =>
                 {
                     ApplyPredictedCardDelta(snapshot, amount, isAdd);
@@ -246,7 +246,7 @@ namespace CardShopCoop.Modules.World
             // through another player) must never be put back by the rollback: the row is gone in
             // the shared album, and restoring it would mint a ghost certificate.
             var guard = new GradedRemovalGuard { Superseded = !removedLocally };
-            var predictionId = WorldPrediction.Predict(WorldPrediction.CardsScope, intent,
+            var actionId = WorldAction.Submit(WorldAction.CardsScope, intent,
                 () =>
                 {
                     // A superseded pick's net local effect is zero (its row was already gone):
@@ -275,7 +275,7 @@ namespace CardShopCoop.Modules.World
                     DespawnRejectedBinderTake(binding, snapshot);
                     GradingApi.OnCardRemovalRefused(snapshot, 1);
                 });
-            RegisterGradedRemovalGuard(predictionId, guard, snapshot);
+            RegisterGradedRemovalGuard(actionId, guard, snapshot);
             return true;
         }
 
@@ -391,7 +391,7 @@ namespace CardShopCoop.Modules.World
                 var count = Math.Min(CardDeltaBatchMax, entries.Count - offset);
                 var chunk = entries.GetRange(offset, count);
                 var message = new CardDeltaBatchRequestMessage { Deltas = chunk };
-                WorldPrediction.Predict(WorldPrediction.CardsScope, message,
+                WorldAction.Submit(WorldAction.CardsScope, message,
                     () => ApplyPredictedCardBatch(chunk, false),
                     () => ApplyPredictedCardBatch(chunk, true));
             }
@@ -455,7 +455,7 @@ namespace CardShopCoop.Modules.World
             }
 
             var applied = ApplyOrHoldCardDelta(connectionId, message.IsAdd, message.Amount,
-                message.Card, out var relayAnyway, message.PredictionId);
+                message.Card, out var relayAnyway, message.ActionId);
             if (!applied && !relayAnyway)
             {
                 return false;
@@ -470,7 +470,7 @@ namespace CardShopCoop.Modules.World
                 // third peer still drops a stale copy), then the sender is refused.
                 Broadcast(new CardDeltaMessage
                 {
-                    PredictionId = Guid.Empty,
+                    ActionId = Guid.Empty,
                     IsAdd = false,
                     Amount = message.Amount,
                     Card = SnapshotCard(message.Card),
@@ -494,7 +494,7 @@ namespace CardShopCoop.Modules.World
             {
                 Broadcast(new CardDeltaMessage
                 {
-                    PredictionId = message.PredictionId,
+                    ActionId = message.ActionId,
                     IsAdd = message.IsAdd,
                     Amount = message.Amount,
                     Card = SnapshotCard(message.Card),
@@ -537,7 +537,7 @@ namespace CardShopCoop.Modules.World
                 {
                     ApplyOrHoldCardDelta(connectionId, message.Deltas[i].IsAdd,
                         message.Deltas[i].Amount, message.Deltas[i].Card, out _,
-                        message.PredictionId);
+                        message.ActionId);
                 }
                 return true;
             }
@@ -560,7 +560,7 @@ namespace CardShopCoop.Modules.World
                 try
                 {
                     ok = ApplyOrHoldCardDelta(connectionId, delta.IsAdd, delta.Amount, delta.Card,
-                        out relayAnyway, message.PredictionId);
+                        out relayAnyway, message.ActionId);
                 }
                 catch (Exception e)
                 {
@@ -641,7 +641,7 @@ namespace CardShopCoop.Modules.World
             if (applied == total && relayedOnly == 0 && total > 0)
             {
                 var authoritative = ToAuthoritative(message);
-                authoritative.PredictionId = _host ? message.PredictionId : Guid.Empty;
+                authoritative.ActionId = _host ? message.ActionId : Guid.Empty;
                 Broadcast(authoritative);
             }
             else if (_batchRelayBuf.Count > 0)
@@ -683,7 +683,7 @@ namespace CardShopCoop.Modules.World
                 _pendingCardDeltas.Add(new PendingCard
                 {
                     ConnectionId = connectionId,
-                    PredictionId = message.PredictionId,
+                    ActionId = message.ActionId,
                     IsAdd = false,
                     IsGradedRemoval = true,
                     Amount = 1,
@@ -711,7 +711,7 @@ namespace CardShopCoop.Modules.World
                 // a stale copy (the documented relay). Then the refusal despawns the hand card.
                 Broadcast(new GradedRemoveMessage
                 {
-                    PredictionId = Guid.Empty,
+                    ActionId = Guid.Empty,
                     Card = SnapshotCard(message.Card),
                 });
                 return false;
@@ -731,7 +731,7 @@ namespace CardShopCoop.Modules.World
             {
                 Broadcast(new GradedRemoveMessage
                 {
-                    PredictionId = message.PredictionId,
+                    ActionId = message.ActionId,
                     Card = SnapshotCard(message.Card),
                 });
             }
@@ -1563,7 +1563,7 @@ namespace CardShopCoop.Modules.World
         private struct PendingCard
         {
             public int ConnectionId;
-            public Guid PredictionId;
+            public Guid ActionId;
             public bool IsAdd;
             public bool IsGradedRemoval;
             public int Amount;
@@ -1800,7 +1800,7 @@ namespace CardShopCoop.Modules.World
         /// through <paramref name="relayAnyway"/> the "this PC lacks the content, but the delta
         /// is fine" refusal that must still be forwarded (see ApplyCardDelta).</summary>
         internal bool ApplyOrHoldCardDelta(int connectionId, bool isAdd, int amount,
-            CardData card, out bool relayAnyway, Guid predictionId = default)
+            CardData card, out bool relayAnyway, Guid actionId = default)
         {
             relayAnyway = false;
             if (_host && !TryValidateCardDelta(card, amount, out var invalidReason))
@@ -1819,7 +1819,7 @@ namespace CardShopCoop.Modules.World
                 _pendingCardDeltas.Add(new PendingCard
                 {
                     ConnectionId = connectionId,
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     IsAdd = isAdd,
                     Amount = amount,
                     Card = SnapshotCard(card),
@@ -2308,7 +2308,7 @@ namespace CardShopCoop.Modules.World
             try
             {
                 var ipc = SceneRef<InteractionPlayerController>.Get();
-                var ctrl = ipc != null ? ipc.m_CollectionBinderFlipAnimCtrl : null;
+                var ctrl = ipc?.m_CollectionBinderFlipAnimCtrl;
                 if (ctrl == null)
                 {
                     return;
@@ -2533,7 +2533,7 @@ namespace CardShopCoop.Modules.World
                         {
                             Broadcast(new GradedRemoveMessage
                             {
-                                PredictionId = Guid.Empty,
+                                ActionId = Guid.Empty,
                                 Card = SnapshotCard(p.Card),
                             });
                         }
@@ -2541,14 +2541,14 @@ namespace CardShopCoop.Modules.World
                         {
                             Broadcast(new CardDeltaMessage
                             {
-                                PredictionId = Guid.Empty,
+                                ActionId = Guid.Empty,
                                 IsAdd = false,
                                 Amount = p.Amount,
                                 Card = SnapshotCard(p.Card),
                             });
                         }
 
-                        PredictionHost.Reject(_context, p.ConnectionId, p.PredictionId);
+                        ActionHost.Reject(_context, p.ConnectionId, p.ActionId);
                     }
                 }
 
@@ -2564,7 +2564,7 @@ namespace CardShopCoop.Modules.World
                         {
                             var message = new GradedRemoveMessage
                             {
-                                PredictionId = p.PredictionId,
+                                ActionId = p.ActionId,
                                 Card = SnapshotCard(p.Card),
                             };
                             SendAcceptedPendingCard(p, message);
@@ -2573,7 +2573,7 @@ namespace CardShopCoop.Modules.World
                         {
                             var message = new CardDeltaMessage
                             {
-                                PredictionId = p.PredictionId,
+                                ActionId = p.ActionId,
                                 IsAdd = p.IsAdd,
                                 Amount = p.Amount,
                                 Card = SnapshotCard(p.Card),
@@ -2587,7 +2587,7 @@ namespace CardShopCoop.Modules.World
 
         private void SendAcceptedPendingCard(PendingCard pending, WorldMessage message)
         {
-            if (pending.PredictionId != Guid.Empty && pending.ConnectionId > 0)
+            if (pending.ActionId != Guid.Empty && pending.ConnectionId > 0)
             {
                 Send(pending.ConnectionId, message);
             }

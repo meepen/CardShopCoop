@@ -1,6 +1,6 @@
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -21,18 +21,18 @@ namespace CardShopCoop.Modules.Hud
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
-        private Guid _pendingPredictionId;
+        private Guid _pendingActionId;
         private readonly Dictionary<CEvent, PendingContribution> _contributionsByEvent = new();
 
         private readonly struct PendingContribution
         {
             internal readonly HudContributionKind Kind;
-            internal readonly Guid PredictionId;
+            internal readonly Guid ActionId;
 
-            internal PendingContribution(HudContributionKind kind, Guid predictionId)
+            internal PendingContribution(HudContributionKind kind, Guid actionId)
             {
                 Kind = kind;
-                PredictionId = predictionId;
+                ActionId = actionId;
             }
         }
 
@@ -98,7 +98,7 @@ namespace CardShopCoop.Modules.Hud
             SendBaseline(connection.Id);
         }
 
-        [MessageHandler(typeof(HudContributionIntent))]
+        [MessageHandler]
         private void HandleContribution(MessageContext context, HudContributionIntent message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
@@ -108,24 +108,24 @@ namespace CardShopCoop.Modules.Hud
 
             if (!TryValidateContribution(message))
             {
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
 
             switch (message.Kind)
             {
                 case HudContributionKind.AddCoin:
-                    QueueContribution(message.PredictionId, new CEventPlayer_AddCoin(message.Value));
+                    QueueContribution(message.ActionId, new CEventPlayer_AddCoin(message.Value));
                     break;
                 case HudContributionKind.ReduceCoin:
                     if (!EconomyAuthority.TryReserveHostSpend(message.Value, out var spend))
                     {
-                        Reject(context, message.PredictionId);
-                        _pendingPredictionId = Guid.Empty;
+                        Reject(context, message.ActionId);
+                        _pendingActionId = Guid.Empty;
                         return;
                     }
 
-                    _pendingPredictionId = message.PredictionId;
+                    _pendingActionId = message.ActionId;
                     bool queued;
                     try
                     {
@@ -133,21 +133,21 @@ namespace CardShopCoop.Modules.Hud
                     }
                     finally
                     {
-                        _pendingPredictionId = Guid.Empty;
+                        _pendingActionId = Guid.Empty;
                     }
 
                     if (!queued)
                     {
                         spend.Dispose();
-                        Reject(context, message.PredictionId);
+                        Reject(context, message.ActionId);
                     }
                     break;
                 case HudContributionKind.AddShopExperience:
-                    QueueContribution(message.PredictionId,
+                    QueueContribution(message.ActionId,
                         new CEventPlayer_AddShopExp((int)message.Value));
                     break;
                 case HudContributionKind.AddFame:
-                    QueueContribution(message.PredictionId,
+                    QueueContribution(message.ActionId,
                         new CEventPlayer_AddFame((int)message.Value));
                     break;
                 default:
@@ -161,11 +161,11 @@ namespace CardShopCoop.Modules.Hud
                 && context.IsAuthenticated;
         }
 
-        private void Reject(MessageContext context, Guid predictionId)
+        private void Reject(MessageContext context, Guid actionId)
         {
-            if (predictionId != Guid.Empty && context?.Connection != null)
+            if (actionId != Guid.Empty && context?.Connection != null)
             {
-                PredictionApi.Rollback(_context, context.Connection.Id, predictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, actionId);
             }
         }
 
@@ -188,16 +188,16 @@ namespace CardShopCoop.Modules.Hud
                 && message.Value == (int)message.Value;
         }
 
-        private void QueueContribution(Guid predictionId, CEvent contribution)
+        private void QueueContribution(Guid actionId, CEvent contribution)
         {
-            _pendingPredictionId = predictionId;
+            _pendingActionId = actionId;
             try
             {
                 CEventManager.QueueEvent(contribution);
             }
             finally
             {
-                _pendingPredictionId = Guid.Empty;
+                _pendingActionId = Guid.Empty;
             }
         }
 
@@ -228,7 +228,7 @@ namespace CardShopCoop.Modules.Hud
                 case HudContributionKind.ReduceCoin:
                     _context.Broadcast(new HudWalletDeltaMessage
                     {
-                        PredictionId = contribution.PredictionId,
+                        ActionId = contribution.ActionId,
                         Coins = snapshot.Coins,
                         CoinDisplay = snapshot.CoinDisplay,
                     });
@@ -237,7 +237,7 @@ namespace CardShopCoop.Modules.Hud
                 case HudContributionKind.AddShopExperience:
                     _context.Broadcast(new HudProgressDeltaMessage
                     {
-                        PredictionId = contribution.PredictionId,
+                        ActionId = contribution.ActionId,
                         Experience = snapshot.Experience,
                         Level = snapshot.Level,
                     });
@@ -246,7 +246,7 @@ namespace CardShopCoop.Modules.Hud
                 case HudContributionKind.AddFame:
                     _context.Broadcast(new HudFameDeltaMessage
                     {
-                        PredictionId = contribution.PredictionId,
+                        ActionId = contribution.ActionId,
                         Fame = snapshot.Fame,
                     });
 
@@ -318,7 +318,7 @@ namespace CardShopCoop.Modules.Hud
                 _active = null;
             }
 
-            _pendingPredictionId = Guid.Empty;
+            _pendingActionId = Guid.Empty;
             _contributionsByEvent.Clear();
             HudPresentationState.Clear();
             _context = null;
@@ -340,7 +340,7 @@ namespace CardShopCoop.Modules.Hud
                 }
 
                 active._contributionsByEvent[evt] = new PendingContribution(kind,
-                    active._pendingPredictionId);
+                    active._pendingActionId);
             }
         }
 

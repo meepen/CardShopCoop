@@ -8,8 +8,8 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class CardDisplayRequestMessage : WorldMessage
     {
-        /// <summary>Placement identity of the owning <c>CardShelf</c>: kind&lt;&lt;24 | object id.</summary>
-        public int ShelfKey;
+        /// <summary>The live display shelf that owns the compartment.</summary>
+        public CardShelf Shelf;
 
         /// <summary>Index of the compartment in the shelf's <c>GetCardCompartmentList()</c>.</summary>
         public int Compartment;
@@ -25,7 +25,7 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class CardDisplayMessage : WorldMessage
     {
-        public int ShelfKey;
+        public CardShelf Shelf;
         public int Compartment;
         public bool Occupied;
         public BoxCardState Card;

@@ -128,10 +128,6 @@ namespace CardShopCoop.Modules.StoreAccess
 
         }
 
-        internal static bool IsSceneReady()
-            => FindOpenSign() != null
-                && (FindWarehouseSign() != null || FindUnlockRoomManager() != null);
-
         private static bool PlayAnimation(MonoBehaviour sign, FieldInfo animationField,
             FieldInfo swappingField, MethodInfo delayMethod)
         {

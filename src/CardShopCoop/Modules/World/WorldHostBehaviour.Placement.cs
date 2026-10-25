@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.PlayTable;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using HarmonyLib;
@@ -11,7 +11,9 @@ using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.World
 {
-    /// <summary>Host authority for stable placement identities and settled object poses.</summary>
+    /// <summary>Host authority for placement pose/state deltas. Placement creation, removal and
+    /// identity are owned by the GameObjectIdentity module; this partial only observes and
+    /// broadcasts pose/boxed state for entities that already exist.</summary>
     public sealed partial class WorldHostBehaviour
     {
         private const float MaxPlacementCoordinate = 1000f;
@@ -28,9 +30,11 @@ namespace CardShopCoop.Modules.World
         private static bool IsFinite(float value)
             => !float.IsNaN(value) && !float.IsInfinity(value);
 
-        private readonly PlacementPopulationState _placementPopulation = new();
-        private readonly Dictionary<int, PlacementEntitySnapshot> _known = new();
-        private readonly Dictionary<ushort, int> _knownKeyById = new();
+        // Save-time slots are frozen when a joining peer's world save is written; the identity
+        // module reads them back to stamp the descriptor the peer binds its loaded objects with.
+        private readonly PlacementTransferSlots _placementSlots = new();
+        private readonly Dictionary<InteractableObject, PlacementEntitySnapshot> _known =
+            new(PlacementObjectComparer.Instance);
         private readonly HashSet<int> _fullyJoined = new();
         private int _applyingIntent;
         private Guid _nextMutationPrediction;
@@ -47,16 +51,14 @@ namespace CardShopCoop.Modules.World
         {
             PlacementInterop.ProbeBetaSurface();
             SceneManager.sceneLoaded += OnPlacementSceneLoaded;
-            InstallPlacementPatches();
+            InstallPlacementMutationPatches();
             RefreshKnown();
         }
 
         internal void ShutdownPlacement()
         {
             SceneManager.sceneLoaded -= OnPlacementSceneLoaded;
-            _placementPopulation.Reset();
             _known.Clear();
-            _knownKeyById.Clear();
             _fullyJoined.Clear();
         }
 
@@ -72,11 +74,11 @@ namespace CardShopCoop.Modules.World
             SendBaseline(connection.Id);
         }
 
-        /// <summary>Answers a fully-connected guest's request for one more baseline. This is
+        /// <summary>Answers a fully-connected guest's request for one more state baseline. This is
         /// deliberately per-connection: only the requester is re-sent, never the other players.
         /// A fresh baseline is built from the host's current live lists, so objects the guest's
-        /// scene finished spawning after the join baseline are bound and posed on this pass.</summary>
-        [MessageHandler(typeof(PlacementBaselineRequestMessage))]
+        /// scene finished spawning after the join baseline are posed on this pass.</summary>
+        [MessageHandler]
         private void HandlePlacementBaselineRequest(MessageContext context,
             PlacementBaselineRequestMessage message)
         {
@@ -86,7 +88,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            CoopPlugin.Log.LogInfo("[placement] re-sending baseline to connection "
+            CoopPlugin.Log.LogInfo("[placement] re-sending state baseline to connection "
                 + context.ConnectionId + " on request.");
             SendBaseline(context.Connection.Id);
         }
@@ -100,7 +102,21 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [MessageHandler(typeof(PlacementMoveIntentMessage))]
+        /// <summary>The identity module removed a placement entity. Drop this host's pose state for
+        /// it before the game destroys the component.</summary>
+        internal static void OnPlacementObjectDestroyed(InteractableObject obj)
+            => _instance?.ForgetPlacementObject(obj);
+
+        private void ForgetPlacementObject(InteractableObject obj)
+        {
+            _placementHold?.LocalEnded(obj);
+            if (obj != null)
+            {
+                _known.Remove(obj);
+            }
+        }
+
+        [MessageHandler]
         private void HandleMoveIntent(MessageContext messageContext,
             PlacementMoveIntentMessage message)
         {
@@ -109,10 +125,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (message.Move == null)
+            if (message.Move == null || message.Move.Entity == null)
             {
-                Reject(messageContext.Connection.Id, message.PredictionId,
-                    "placement intent has no entity");
+                CoopPlugin.Log.LogWarning("[placement] dropped move intent from connection="
+                    + messageContext.Connection.Id + " with no live entity.");
+                Reject(messageContext.Connection.Id, message.ActionId,
+                    "placement intent has no live entity");
                 return;
             }
 
@@ -122,25 +140,17 @@ namespace CardShopCoop.Modules.World
                 || (message.Move.IsBoxed
                     && !IsSanePose(message.Move.BoxedPos, message.Move.BoxedRot)))
             {
-                Reject(messageContext.Connection.Id, message.PredictionId,
+                Reject(messageContext.Connection.Id, message.ActionId,
                     "placement pose is not finite/bounded");
                 return;
             }
 
-            var table = PlacementApi.ResolveObjectByKey(message.Move.Key) as InteractablePlayTable;
+            var obj = message.Move.Entity;
+            var table = obj as InteractablePlayTable;
             if (table != null && !PlayTableHostBehaviour.IsPlacementMoveAllowed(table))
             {
-                Reject(messageContext.Connection.Id, message.PredictionId,
+                Reject(messageContext.Connection.Id, message.ActionId,
                     "play table is occupied or reserved");
-                return;
-            }
-
-            var obj = PlacementApi.ResolveObjectByKey(message.Move.Key) as InteractableObject;
-            if (obj == null || (message.Move.Type != PlacementInterop.NoType
-                && PlacementInterop.TypeIdOf(obj) != message.Move.Type))
-            {
-                Reject(messageContext.Connection.Id, message.PredictionId,
-                    "placement identity or type is stale");
                 return;
             }
 
@@ -151,7 +161,7 @@ namespace CardShopCoop.Modules.World
                 || presence.Age > TimeSpan.FromSeconds(2)
                 || !IsWithinPlacementReach(presence.Position, obj.transform.position))
             {
-                Reject(messageContext.Connection.Id, message.PredictionId,
+                Reject(messageContext.Connection.Id, message.ActionId,
                     "sender is not within reach of the placement");
                 return;
             }
@@ -161,7 +171,7 @@ namespace CardShopCoop.Modules.World
             {
                 if (!PlacementMoveState.Apply(message.Move, true))
                 {
-                    Reject(messageContext.Connection.Id, message.PredictionId,
+                    Reject(messageContext.Connection.Id, message.ActionId,
                         "placement pose could not be applied");
                     return;
                 }
@@ -171,140 +181,100 @@ namespace CardShopCoop.Modules.World
                 _applyingIntent--;
             }
 
-            NotifyObjectChanged(obj, message.PredictionId, true);
+            NotifyObjectChanged(obj, message.ActionId, true);
         }
 
+        /// <summary>Re-read the live lists: publish a state update for every entity whose observed
+        /// state changed, record newly seen entities, and forget entities the identity module
+        /// removed. Creation and removal themselves are never published here.</summary>
         internal void NotifyStructureChanged()
         {
             var current = BuildCurrentEntities();
-            var removed = new List<PlacementEntitySnapshot>();
+            var stale = new List<InteractableObject>();
             foreach (var pair in _known)
             {
                 if (!current.ContainsKey(pair.Key))
                 {
-                    removed.Add(pair.Value);
+                    stale.Add(pair.Key);
                 }
             }
 
-            for (var i = 0; i < removed.Count; i++)
+            for (var i = 0; i < stale.Count; i++)
             {
-                PublishDelta(PlacementDeltaMessage.Remove, RemovalEntry(removed[i]), Guid.Empty);
-                _known.Remove(removed[i].Key);
+                _known.Remove(stale[i]);
             }
 
             foreach (var pair in current)
             {
-                if (!_known.TryGetValue(pair.Key, out var old))
-                {
-                    PublishDelta(PlacementDeltaMessage.Add, pair.Value.ToEntry(), Guid.Empty);
-                }
-                else if (!old.SameValue(pair.Value))
-                {
-                    PublishDelta(PlacementDeltaMessage.Update, pair.Value.ToEntry(), Guid.Empty);
-                }
-
-                _known[pair.Key] = pair.Value;
+                PublishState(pair.Value, Guid.Empty, false);
             }
 
-            RebuildKeyIndex();
             PlacementInterop.NotifyStructureChanged(-1);
         }
 
         internal void NotifyObjectChanged(InteractableObject obj)
             => NotifyObjectChanged(obj, Guid.Empty, false);
 
-        internal void SetNextMutationPrediction(Guid predictionId)
-            => _nextMutationPrediction = predictionId;
+        internal void SetNextMutationPrediction(Guid actionId)
+            => _nextMutationPrediction = actionId;
 
-        private void NotifyObjectChanged(InteractableObject obj, Guid predictionId, bool force)
+        private void NotifyObjectChanged(InteractableObject obj, Guid actionId, bool force)
         {
             if (_applyingIntent != 0 || obj == null)
             {
                 return;
             }
 
-            var kind = PlacementInterop.FindKind(obj);
-            if (kind < 0)
+            if (PlacementInterop.FindKind(obj) < 0)
             {
                 // A packaging box (or other object outside the placement lists) changing pose is
                 // owned by its own channel, not placement. Do not emit a structure refresh for it.
                 return;
             }
 
-            if (!PlacementApi.TryMakeObjectKey(kind, obj, out var key))
+            PublishState(PlacementEntityState.Capture(obj), actionId, force);
+        }
+
+        /// <summary>Publishes the smallest delta that carries <paramref name="current"/>. An entity
+        /// the host has not observed yet gets a full update rather than an add: the identity module
+        /// already announced it and its creation pose, so this is a reference-message state sync,
+        /// not a creation.</summary>
+        private void PublishState(PlacementEntitySnapshot current, Guid actionId, bool forcePose)
+        {
+            if (current == null || current.Entity == null
+                || !PlacementInterop.HasPlacementIdentity(current.Entity,
+                    PlacementInterop.FindKind(current.Entity)))
             {
-                CoopPlugin.Log.LogInfo("[placement] changed without a key (" + obj.name + ").");
-                NotifyStructureChanged();
+                CoopPlugin.Log.LogInfo("[placement] skipped state without a shared placement entity.");
                 return;
             }
 
-            var current = PlacementEntityState.Capture(obj, key);
-            if (!_known.TryGetValue(key, out var old))
+            if (!_known.TryGetValue(current.Entity, out var old))
             {
-                PublishDelta(PlacementDeltaMessage.Add, current.ToEntry(), predictionId);
+                PublishDelta(PlacementDeltaMessage.Update, current.ToEntry(), actionId);
             }
-            else if (old.Type != current.Type || old.IsBoxed != current.IsBoxed
+            else if (old.IsBoxed != current.IsBoxed
                 || old.BoxedPos != current.BoxedPos || old.BoxedRot != current.BoxedRot)
             {
-                PublishDelta(PlacementDeltaMessage.Update, current.ToEntry(), predictionId);
+                PublishDelta(PlacementDeltaMessage.Update, current.ToEntry(), actionId);
             }
-            else if (force || old.Pos != current.Pos || old.Rot != current.Rot)
+            else if (forcePose || old.Pos != current.Pos || old.Rot != current.Rot)
             {
-                PublishDelta(PlacementDeltaMessage.Pose, current.ToEntry(), predictionId);
+                PublishDelta(PlacementDeltaMessage.Pose, current.ToEntry(), actionId);
             }
             else
             {
-                CoopPlugin.Log.LogInfo("[placement] no change key=" + key + " (" + obj.name + ").");
+                CoopPlugin.Log.LogInfo("[placement] no change entity="
+                    + PlacementInterop.Describe(current.Entity) + ".");
             }
 
-            _known[key] = current;
-            _knownKeyById[PlacementApi.ObjectIdFromObjectKey(key)] = key;
+            _known[current.Entity] = current;
         }
 
-        private void NotifyObjectRemoved(InteractableObject obj)
-        {
-            if (obj == null || !PlacementIdentity.TryGet(obj, out var id))
-            {
-                return;
-            }
-
-            var kind = PlacementInterop.FindKind(obj);
-            var key = kind < 0 ? 0 : (kind << 24) | id;
-            if (kind < 0)
-            {
-                // The object can already be gone from its list when its destroy runs, so
-                // FindKind cannot name the kind. Recover the key this object was registered
-                // under from its own id through the index instead of scanning _known.
-                _knownKeyById.TryGetValue(id, out key);
-            }
-
-            if (key == 0)
-            {
-                PlacementIdentity.Forget(obj);
-                return;
-            }
-
-            _knownKeyById.Remove(id);
-            if (_known.TryGetValue(key, out var known))
-            {
-                PublishDelta(PlacementDeltaMessage.Remove, RemovalEntry(known), Guid.Empty);
-                _known.Remove(key);
-            }
-            else
-            {
-                PublishDelta(PlacementDeltaMessage.Remove, new PlacementMoveEntry
-                {
-                    Key = key,
-                    Type = PlacementInterop.TypeIdOf(obj),
-                }, Guid.Empty);
-            }
-        }
-
-        private PlacementBaselineMessage BuildBaseline(WorldTransferManifest manifest)
+        private PlacementBaselineMessage BuildBaseline()
         {
             var manager = PlacementInterop.FindShelfManager();
-            var population = _placementPopulation.BuildMessage(manifest);
-            if (manager == null || population == null)
+            if (manager == null)
             {
                 return null;
             }
@@ -312,7 +282,6 @@ namespace CardShopCoop.Modules.World
             RefreshKnown();
             return new PlacementBaselineMessage
             {
-                Population = population,
                 Moves = PlacementMoveState.Build(manager),
             };
         }
@@ -324,7 +293,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var baseline = BuildBaseline(TransferManifestFor(connectionId));
+            var baseline = BuildBaseline();
             if (baseline != null)
             {
                 _context.Send(connectionId, baseline);
@@ -339,40 +308,34 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private void PublishDelta(byte operation, PlacementMoveEntry entity, Guid predictionId)
+        private void PublishDelta(byte operation, PlacementMoveEntry entity, Guid actionId)
         {
-            if (_shutdown || !_context.InGame() || entity == null)
+            if (_shutdown || !_context.InGame() || entity == null || entity.Entity == null
+                || !PlacementInterop.HasSharedIdentity(entity.Entity))
             {
-                CoopPlugin.Log.LogInfo("[placement] skip delta op=" + operation + " key="
-                    + (entity == null ? -1 : entity.Key) + " shutdown=" + _shutdown
-                    + " inGame=" + _context.InGame() + ".");
+                CoopPlugin.Log.LogInfo("[placement] skip delta op=" + operation + " entity="
+                    + (entity == null ? "<no-entry>" : PlacementInterop.Describe(entity.Entity))
+                    + " shutdown=" + _shutdown + " inGame=" + _context.InGame() + ".");
                 return;
             }
 
-            CoopPlugin.Log.LogInfo("[placement] publish delta op=" + operation + " key="
-                + entity.Key + ".");
+            CoopPlugin.Log.LogInfo("[placement] publish delta op=" + operation + " entity="
+                + PlacementInterop.Describe(entity.Entity) + ".");
             _context.Broadcast(new PlacementDeltaMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Operation = operation,
                 Entity = entity,
             });
         }
 
-        private static PlacementMoveEntry RemovalEntry(PlacementEntitySnapshot entity)
-            => new()
-            {
-                Key = entity.Key,
-                Type = entity.Type,
-            };
-
-        private void Reject(int connectionId, Guid predictionId, string reason)
+        private void Reject(int connectionId, Guid actionId, string reason)
         {
             CoopPlugin.Log.LogWarning("placement intent rejected for connection=" + connectionId
                 + ": " + reason);
-            if (predictionId != Guid.Empty)
+            if (actionId != Guid.Empty)
             {
-                PredictionApi.Rollback(_context, connectionId, predictionId);
+                ActionLedger.Rollback(_context, connectionId, actionId);
             }
         }
 
@@ -383,22 +346,23 @@ namespace CardShopCoop.Modules.World
         private static bool IsJoinPhase(ConnectionState state)
             => state == ConnectionState.Transferring || state == ConnectionState.FullyJoined;
 
-        private Dictionary<int, PlacementEntitySnapshot> BuildCurrentEntities()
+        private Dictionary<InteractableObject, PlacementEntitySnapshot> BuildCurrentEntities()
         {
-            var result = new Dictionary<int, PlacementEntitySnapshot>();
+            var result = new Dictionary<InteractableObject, PlacementEntitySnapshot>(
+                PlacementObjectComparer.Instance);
             var manager = PlacementInterop.FindShelfManager();
             for (var kind = 0; kind < PlacementApi.KindCount; kind++)
             {
                 var list = PlacementInterop.GetList(manager, kind);
                 for (var i = 0; list != null && i < list.Count; i++)
                 {
-                    if (list[i] is not InteractableObject obj
-                        || !PlacementApi.TryMakeObjectKey(kind, obj, out var key))
+                    if (list[i] is not InteractableObject obj || obj == null
+                        || !PlacementInterop.HasPlacementIdentity(obj, kind))
                     {
                         continue;
                     }
 
-                    result[key] = PlacementEntityState.Capture(obj, key);
+                    result[obj] = PlacementEntityState.Capture(obj);
                 }
             }
 
@@ -412,93 +376,55 @@ namespace CardShopCoop.Modules.World
             {
                 _known.Add(pair.Key, pair.Value);
             }
-
-            RebuildKeyIndex();
-        }
-
-        /// <summary>Rebuild the id -> key index from the live snapshot. A placement id is globally
-        /// unique to one object for its lifetime, so this is a direct object-id lookup for a
-        /// removal whose kind can no longer be read from the lists.</summary>
-        private void RebuildKeyIndex()
-        {
-            _knownKeyById.Clear();
-            foreach (var key in _known.Keys)
-            {
-                var id = PlacementApi.ObjectIdFromObjectKey(key);
-                if (id != PlacementIdentity.Invalid)
-                {
-                    _knownKeyById[id] = key;
-                }
-            }
         }
 
         private void OnPlacementSceneLoaded(Scene _, LoadSceneMode __)
         {
+            // A scene load is either the end of this session (CoopCore shuts the session down for
+            // any non-Title load) or the title screen. Nothing here may touch the game's managers:
+            // `sceneLoaded` fires while the incoming shop's Awake/Start have not all run, so the
+            // game's CSingleton getters (ShelfManager.GetCardShelfList, the RestockManager list
+            // getters, ...) cannot resolve the scene object and instead fabricate an empty
+            // DontDestroyOnLoad copy that shadows the real manager for the rest of the run. A host
+            // that loaded a world while hosting hit exactly this: the shadow RestockManager has no
+            // prefabs or spawn locations, so every delivery spawn threw and no restock box could
+            // ever appear for either player. There is also no baseline to re-send here: the session
+            // is already gone, and a joiner gets its baseline from OnFullyJoined.
+            if (_shutdown)
+            {
+                // Unity dispatches the invocation list captured before the session shut down, so
+                // this handler can still run after Shutdown. Do nothing in that case.
+                return;
+            }
+
             _placementHold?.Reset();
-            _placementPopulation.Reset();
-            // Placement ids reset with the scene, so every frozen manifest is now stale; a
-            // post-reload baseline falls back to live indices rather than binding a reused id.
+            // Placement ids restart with the scene, so every frozen manifest is stale; a post-reload
+            // baseline falls back to descriptors rather than binding a reused id.
             _transferManifests.Clear();
             _known.Clear();
-            PlacementIdentity.Reset();
-            RefreshKnown();
-            SendBaselinesToJoined();
+            _warehouseShelfInteraction?.Reset();
         }
 
-        private void InstallPlacementPatches()
+        /// <summary>Only pose/state hooks here. Creation, removal and identity are installed by the
+        /// GameObjectIdentity module.</summary>
+        private void InstallPlacementMutationPatches()
         {
-            Patch(typeof(InteractableObject), "OnDestroyed", null,
-                nameof(InteractableObjectDestroyedPostfix));
-            Patch(typeof(InteractableObject), "BoxUpObject", null,
-                nameof(ObjectMutationPostfix));
-            Patch(typeof(InteractableObject), "PlaceMovedObject", null,
-                nameof(ObjectMutationPostfix));
-
-            PatchInit(typeof(ShelfManager), "InitInteractableObject", typeof(InteractableObject));
-            PatchInit(typeof(ShelfManager), "InitDecoObject", typeof(InteractableObject));
-            PatchInit(typeof(ShelfManager), "InitShelf", typeof(Shelf));
-            PatchInit(typeof(ShelfManager), "InitWarehouseShelf", typeof(WarehouseShelf));
-            PatchInit(typeof(ShelfManager), "InitCardShelf", typeof(CardShelf));
-            PatchInit(typeof(ShelfManager), "InitCardItemCombiShelf", typeof(CardItemCombiShelf));
-            PatchInit(typeof(ShelfManager), "InitTournamentPrizeShelf", typeof(TournamentPrizeShelf));
-            PatchInit(typeof(ShelfManager), "InitPlayTable", typeof(InteractablePlayTable));
-            PatchInit(typeof(ShelfManager), "InitAutoCleanser", typeof(InteractableAutoCleanser));
-            PatchInit(typeof(ShelfManager), "InitAutoPackOpener", typeof(InteractableAutoPackOpener));
-            PatchInit(typeof(ShelfManager), "InitWorkbench", typeof(InteractableWorkbench));
-            PatchInit(typeof(ShelfManager), "InitBulkDonationBox", typeof(InteractableBulkDonationBox));
-            PatchInit(typeof(ShelfManager), "InitCardStorageShelf", typeof(InteractableCardStorageShelf));
-            PatchInit(typeof(ShelfManager), "InitTrashBin", typeof(InteractableTrashBin));
-            PatchInit(typeof(ShelfManager), "InitEmptyBoxStorage", typeof(InteractableEmptyBoxStorage));
-            PatchInit(typeof(ShelfManager), "InitCashierCounter", typeof(InteractableCashierCounter));
+            PatchPlacementMutation(typeof(InteractableObject), "BoxUpObject");
+            PatchPlacementMutation(typeof(InteractableObject), "PlaceMovedObject");
         }
 
-        private void PatchInit(Type target, string method, Type argument)
+        private void PatchPlacementMutation(Type target, string method)
         {
-            var original = AccessTools.Method(target, method, new[] { argument });
+            var original = AccessTools.Method(target, method);
             if (original == null)
             {
-                CoopPlugin.Log.LogWarning("placement host init patch target missing: "
+                CoopPlugin.Log.LogWarning("placement host state patch target missing: "
                     + target.Name + "." + method);
                 return;
             }
 
             _harmony.Patch(original, postfix: new HarmonyMethod(
-                typeof(WorldHostBehaviour), nameof(ShelfInitPostfix)));
-        }
-
-        private void Patch(Type target, string method, string prefix, string postfix)
-        {
-            var original = AccessTools.Method(target, method);
-            if (original == null)
-            {
-                CoopPlugin.Log.LogWarning("placement host patch target missing: "
-                    + target.Name + "." + method);
-                return;
-            }
-
-            _harmony.Patch(original,
-                prefix: prefix == null ? null : new HarmonyMethod(typeof(WorldHostBehaviour), prefix),
-                postfix: postfix == null ? null : new HarmonyMethod(typeof(WorldHostBehaviour), postfix));
+                typeof(WorldHostBehaviour), nameof(ObjectMutationPostfix)));
         }
 
         public static void ObjectMutationPostfix(InteractableObject __instance)
@@ -518,25 +444,11 @@ namespace CardShopCoop.Modules.World
             }
 
             host._placementHold?.LocalEnded(__instance);
-            var predictionId = host._nextMutationPrediction;
+            WarehouseShelfInteraction.SetStoredBoxVisuals(__instance,
+                !__instance.GetIsBoxedUp());
+            var actionId = host._nextMutationPrediction;
             host._nextMutationPrediction = Guid.Empty;
-            host.NotifyObjectChanged(__instance, predictionId, false);
-        }
-
-        public static void ShelfInitPostfix()
-            => _instance?.NotifyStructureChanged();
-
-        public static void InteractableObjectDestroyedPostfix(InteractableObject __instance)
-        {
-            var host = _instance;
-            if (__instance == null || host == null)
-            {
-                return;
-            }
-
-            host._placementHold?.LocalEnded(__instance);
-            host.NotifyObjectRemoved(__instance);
-            PlacementIdentity.Forget(__instance);
+            host.NotifyObjectChanged(__instance, actionId, false);
         }
     }
 }

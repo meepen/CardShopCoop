@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
-using CardShopCoop.Modules.World;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -54,7 +53,6 @@ namespace CardShopCoop.Modules.Settings
                 Patch(typeof(TableInitPatch));
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                PlacementApi.StructureChanged += OnPlacementStructureChanged;
             }
             catch (Exception error)
             {
@@ -63,7 +61,6 @@ namespace CardShopCoop.Modules.Settings
                 _harmony = null;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
-                PlacementApi.StructureChanged -= OnPlacementStructureChanged;
                 if (handlersRegistered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -90,13 +87,6 @@ namespace CardShopCoop.Modules.Settings
         private void OnGameDataFinishLoaded(CEventPlayer_GameDataFinishLoaded _)
             => TryApplyPendingState();
 
-        /// <summary>A placement structure change materializes (or removes) a placed object, which
-        /// is also when its stable identity becomes computable. A keyed partial that arrived before
-        /// its cashier/table existed - including a runtime-added counter whose identity binds after
-        /// its Awake - is retried here, so it no longer strands until the next scene load.</summary>
-        private void OnPlacementStructureChanged(int _)
-            => TryApplyPendingState();
-
         private void TryApplyPendingState()
         {
             if (_shutdown || !_context.InGame()
@@ -111,7 +101,7 @@ namespace CardShopCoop.Modules.Settings
                 _pendingFullState = null;
                 // Confirm, not AckOrApply: the host's state is authoritative and can carry a
                 // clamped/transformed value the optimistic local run did not produce.
-                PredictionApi.Confirm(full.PredictionId, () => ApplyState(full));
+                ActionLedger.Confirm(full.ActionId, () => ApplyState(full));
             }
 
             if (_pendingStates.Count > 0)
@@ -132,15 +122,15 @@ namespace CardShopCoop.Modules.Settings
                     _pendingStates.Remove(states[i].Key);
                     // Confirm: retire the actor's prediction and apply the host's absolute value
                     // (the host may clamp or otherwise transform the requested value).
-                    PredictionApi.Confirm(state.PredictionId, () => ApplyState(state));
+                    ActionLedger.Confirm(state.ActionId, () => ApplyState(state));
                 }
             }
         }
 
-        /// <summary>True when a partial mutation's keyed element exists locally. Tombstones never
+        /// <summary>True when a partial mutation's live element exists locally. Tombstones never
         /// need the element (they only trim the local tail), and a full state is applied with
-        /// per-element skips. Cashier/table partials are keyed by their stable placement key, which
-        /// may resolve here only after the object has been materialized on this peer.</summary>
+        /// per-element skips. A partial whose live object is null was already dropped when it was
+        /// decoded.</summary>
         private static bool CanApply(SettingsStateMessage message)
         {
             if (message == null || message.Full || message.Tombstone)
@@ -150,13 +140,13 @@ namespace CardShopCoop.Modules.Settings
 
             return message.Index switch
             {
-                6 => SettingsInterop.ResolveCashier(message.CashierKey) != null,
-                7 => SettingsInterop.ResolveTable(message.TableKey) != null,
+                6 => message.Cashier != null,
+                7 => message.Table != null,
                 _ => true,
             };
         }
 
-        [MessageHandler(typeof(SettingsStateMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, SettingsStateMessage message)
         {
             if (_shutdown)
@@ -164,6 +154,20 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
+
+            if (!message.Full && message.Index == 6 && message.Cashier == null)
+            {
+                CoopPlugin.Log.LogWarning("Settings client: dropped cashier state with no live counter.");
+                ActionLedger.Ack(message.ActionId);
+                return;
+            }
+
+            if (!message.Full && message.Index == 7 && message.Table == null)
+            {
+                CoopPlugin.Log.LogWarning("Settings client: dropped table state with no live table.");
+                ActionLedger.Ack(message.ActionId);
+                return;
+            }
 
             if (message.Full)
             {
@@ -175,7 +179,7 @@ namespace CardShopCoop.Modules.Settings
                 var key = StateKey(message);
                 if (_pendingStates.TryGetValue(key, out var previous))
                 {
-                    PredictionApi.Ack(previous.PredictionId);
+                    ActionLedger.Ack(previous.ActionId);
                 }
 
 
@@ -211,8 +215,8 @@ namespace CardShopCoop.Modules.Settings
                 CPlayerData.m_PendingGameEventExpansionType = message.PendingGameEventExpansion;
 
                 ApplyFees(message.GameEventPrices, message.GameEventPrices.Count);
-                ApplyCashiers(message.CashierFlags, message.CashierKeys, message.CashierFlags.Count);
-                ApplyTables(message.TableNumbers, message.TableKeys, message.TableNumbers.Count);
+                ApplyCashiers(message.CashierFlags, message.Cashiers, message.CashierFlags.Count);
+                ApplyTables(message.TableNumbers, message.Tables, message.TableNumbers.Count);
                 return true;
             }
             finally
@@ -253,22 +257,20 @@ namespace CardShopCoop.Modules.Settings
             }
             else if (message.Index == 6)
             {
-                // The authoritative length trims/resets local tails; the keyed element then carries
-                // the one counter's flags. There is no index on the wire to fall back to.
+                // The authoritative length trims/resets local tails; the live counter then carries
+                // the one counter's flags. There is no index or key on the wire to fall back to.
                 ApplyCashierTail(message.CashierCount);
-                if (!message.Tombstone && message.CashierFlags.Count > 0
-                    && !ApplyCashierByKey(message.CashierKey, message.CashierFlags[0]))
+                if (!message.Tombstone && message.CashierFlags.Count > 0)
                 {
-                    return false;
+                    ApplyCashier(message.Cashier, message.CashierFlags[0]);
                 }
             }
             else if (message.Index == 7)
             {
                 ApplyTableTail(message.TableCount);
-                if (!message.Tombstone && message.TableNumbers.Count > 0
-                    && !ApplyTableByKey(message.TableKey, message.TableNumbers[0]))
+                if (!message.Tombstone && message.TableNumbers.Count > 0)
                 {
-                    return false;
+                    ApplyTable(message.Table, message.TableNumbers[0]);
                 }
             }
             else
@@ -284,12 +286,12 @@ namespace CardShopCoop.Modules.Settings
         {
             if (message.Index == 6)
             {
-                return "6:" + message.CashierKey;
+                return "6:" + (message.Cashier == null ? 0 : message.Cashier.GetInstanceID());
             }
 
             if (message.Index == 7)
             {
-                return "7:" + message.TableKey;
+                return "7:" + (message.Table == null ? 0 : message.Table.GetInstanceID());
             }
 
             return message.Index + ":" + message.ItemIndex;
@@ -299,49 +301,44 @@ namespace CardShopCoop.Modules.Settings
         {
             foreach (var state in _pendingStates.Values)
             {
-                PredictionApi.Ack(state.PredictionId);
+                ActionLedger.Ack(state.ActionId);
             }
 
 
             _pendingStates.Clear();
             if (_pendingFullState != null)
             {
-                PredictionApi.Ack(_pendingFullState.PredictionId);
+                ActionLedger.Ack(_pendingFullState.ActionId);
             }
 
 
             _pendingFullState = null;
         }
 
-        /// <summary>Applies one counter's flags addressed by its stable placement key. Returns
-        /// false when the key does not resolve here yet, so the caller retries from the counter's
-        /// init hook instead of applying against the wrong list slot.</summary>
-        private static bool ApplyCashierByKey(int key, byte flags)
+        /// <summary>Applies one counter's flags to the live counter the host named. A null object
+        /// is an unresolved entity and is logged and dropped.</summary>
+        private static void ApplyCashier(InteractableCashierCounter counter, byte flags)
         {
-            var counter = SettingsInterop.ResolveCashier(key);
             if (counter == null)
             {
-                return false;
+                CoopPlugin.Log.LogWarning("Settings client: dropped cashier flags with no live counter.");
+                return;
             }
 
-            var checkout = (flags & 1) != 0;
-            var trade = (flags & 2) != 0;
-            counter.SetCanCheckout(checkout);
-            counter.SetCanTradeCard(trade);
-            return true;
+            counter.SetCanCheckout((flags & 1) != 0);
+            counter.SetCanTradeCard((flags & 2) != 0);
         }
 
-        /// <summary>Applies one table's number addressed by its stable placement key.</summary>
-        private static bool ApplyTableByKey(int key, byte number)
+        /// <summary>Applies one table's number to the live table the host named.</summary>
+        private static void ApplyTable(InteractablePlayTable table, byte number)
         {
-            var table = SettingsInterop.ResolveTable(key);
             if (table == null)
             {
-                return false;
+                CoopPlugin.Log.LogWarning("Settings client: dropped table number with no live table.");
+                return;
             }
 
             table.SetTournamentPlayTableNumber(number);
-            return true;
         }
 
         private static void ResizeFees(int count)
@@ -368,21 +365,16 @@ namespace CardShopCoop.Modules.Settings
             }
         }
 
-        /// <summary>Applies a full baseline's cashier flags by stable key. The authoritative
-        /// length still trims the local tail, but each flagged entry is addressed by the key the
-        /// host stamped, never by list position: an order divergence at join would otherwise land
-        /// a flag on a different counter. An entry with no resolvable key is applied to nothing.</summary>
-        private static void ApplyCashiers(List<byte> flags, List<int> keys, int count)
+        /// <summary>Applies a full baseline's cashier flags to the live counters the host named. The
+        /// authoritative length still trims the local tail, but each flagged entry is applied to
+        /// its object, never by list position. A null entry is logged and dropped.</summary>
+        private static void ApplyCashiers(List<byte> flags,
+            List<InteractableCashierCounter> counters, int count)
         {
             ApplyCashierTail(count);
-            for (var i = 0; i < flags.Count && i < keys.Count; i++)
+            for (var i = 0; i < flags.Count && i < counters.Count; i++)
             {
-                if (keys[i] == 0)
-                {
-                    continue;
-                }
-
-                ApplyCashierByKey(keys[i], flags[i]);
+                ApplyCashier(counters[i], flags[i]);
             }
         }
 
@@ -404,20 +396,16 @@ namespace CardShopCoop.Modules.Settings
             }
         }
 
-        /// <summary>Applies a full baseline's table numbers by stable key, mirroring
-        /// <see cref="ApplyCashiers"/>: position never addresses an entry, and a key that cannot
-        /// resolve applies to nothing.</summary>
-        private static void ApplyTables(List<byte> numbers, List<int> keys, int count)
+        /// <summary>Applies a full baseline's table numbers to the live tables, mirroring
+        /// <see cref="ApplyCashiers"/>: position never addresses an entry, and a null entry is
+        /// logged and dropped.</summary>
+        private static void ApplyTables(List<byte> numbers, List<InteractablePlayTable> tables,
+            int count)
         {
             ApplyTableTail(count);
-            for (var i = 0; i < numbers.Count && i < keys.Count; i++)
+            for (var i = 0; i < numbers.Count && i < tables.Count; i++)
             {
-                if (keys[i] == 0)
-                {
-                    continue;
-                }
-
-                ApplyTableByKey(keys[i], numbers[i]);
+                ApplyTable(tables[i], numbers[i]);
             }
         }
 
@@ -431,10 +419,7 @@ namespace CardShopCoop.Modules.Settings
 
             for (var i = count < 0 ? 0 : count; i < tables.Count; i++)
             {
-                if (tables[i] != null)
-                {
-                    tables[i].SetTournamentPlayTableNumber(0);
-                }
+                tables[i]?.SetTournamentPlayTableNumber(0);
             }
         }
 
@@ -484,16 +469,10 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            if (!SettingsInterop.TryGetCashierKey(counter, out var key))
-            {
-                CoopPlugin.Log.LogWarning("Settings client: cashier mutation has no stable identity");
-                return;
-            }
-
             _active.SendIntent(new SettingsOpMessage
             {
                 Op = OpCashier,
-                CashierKey = key,
+                Cashier = counter,
                 CashierFlags = (byte)((counter.CanCheckout() ? 1 : 0)
                     | (counter.CanTradeCard() ? 2 : 0)),
             }, () => ApplyUndo(() =>
@@ -511,16 +490,10 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            if (!SettingsInterop.TryGetTableKey(table, out var key))
-            {
-                CoopPlugin.Log.LogWarning("Settings client: table mutation has no stable identity");
-                return;
-            }
-
             _active.SendIntent(new SettingsOpMessage
             {
                 Op = OpTableNumber,
-                TableKey = key,
+                Table = table,
                 TableNumber = number,
             }, () => ApplyUndo(() => table.SetTournamentPlayTableNumber(previousNumber)));
         }
@@ -534,10 +507,10 @@ namespace CardShopCoop.Modules.Settings
 
             // Post-hoc prediction: the game already applied the mutation in the postfix that
             // called here, so only a rejection's undo closure is needed.
-            PredictionApi.Predict("settings",
-                predictionId =>
+            ActionLedger.Submit("settings",
+                actionId =>
                 {
-                    message.PredictionId = predictionId;
+                    message.ActionId = actionId;
                     _context.Send(1, message);
                 },
                 () => { }, undo ?? (() => { }));
@@ -573,7 +546,6 @@ namespace CardShopCoop.Modules.Settings
             _shutdown = true;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            PlacementApi.StructureChanged -= OnPlacementStructureChanged;
             _context?.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;

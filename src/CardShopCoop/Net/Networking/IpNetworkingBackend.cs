@@ -5,9 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
-using CardShopCoop.Net.Connection;
 using CardShopCoop.Net.Datagrams;
-using CardShopCoop.Net.Kcp;
 using UnityEngine;
 using CardShopCoop.Api;
 
@@ -31,10 +29,9 @@ namespace CardShopCoop.Net.Networking
     /// home connection, so it is NEVER logged and NEVER drawn in the window - it lives only on the
     /// clipboard.
     /// </summary>
-    internal sealed class IpNetworkingBackend : INetworkingBackend
+    internal sealed class IpNetworkingBackend : INetworkingBackend, INetworkingBackendDiagnostics
     {
         public const string BackendId = "ip";
-        public const int IdBase = 2_000_000;
 
         private readonly object _gate = new();
         private readonly Dictionary<FieldId, string> _configured = new();
@@ -50,9 +47,7 @@ namespace CardShopCoop.Net.Networking
         private long _mappingEpoch;
         private int _listenPort;
         private int _generation;
-        private long _nextId;
         private long _active;
-        private ICoopTransport _transport;
         private bool _isHost;
 
         public IpNetworkingBackend()
@@ -66,8 +61,6 @@ namespace CardShopCoop.Net.Networking
 
         public string DisplayName => "IP / LAN";
 
-        public int ConnectionIdBase => IdBase;
-
         public ulong LocalUserId => 0UL;
 
         /// <summary>IP has no platform persona. It must stay empty: the identity resolver treats a
@@ -76,13 +69,7 @@ namespace CardShopCoop.Net.Networking
         /// here would mask the Xbox gamertag on Game Pass and the configured name on LAN.</summary>
         public string LocalUserName => "";
 
-        public ICoopTransport Transport => _transport;
-
-        public event Action<ConnectionId, ICoopTransport> TransportChanged;
-
-#pragma warning disable 0067 // never raised here; a UDP bearer has no out-of-band failure
-        public event Action<ConnectionId, PeerConnection> PeerConnected;
-        public event Action<ConnectionId, string> Failed;
+#pragma warning disable 0067 // never raised here; a UDP bearer has no out-of-band join request
         public event Action<INetworkingBackend, FieldValues> JoinRequested;
 #pragma warning restore 0067
 
@@ -181,14 +168,20 @@ namespace CardShopCoop.Net.Networking
                 fields.Add(new BackendField(FieldId.IpAddress, "Host address", FieldKind.Text,
                     Value(FieldId.IpAddress), required: true,
                     tooltip: "The host's address: an IP like 192.168.1.50, or IP:port when the host "
-                        + "uses a different port. Ask the host to press the copy button."));
+                        + "uses a different port. Ask the host to press the copy button.")
+                {
+                    Sensitive = true,
+                });
             }
 
             fields.Add(new BackendField(FieldId.Password, "Password", FieldKind.Password,
                 Value(FieldId.Password),
                 tooltip: mode == ConnectMode.Host
                     ? "The password a friend must type to join. Press Copy password to hand it over."
-                    : "The password the host set."));
+                    : "The password the host set.")
+            {
+                Sensitive = true,
+            });
 
             if (mode == ConnectMode.Host)
             {
@@ -201,6 +194,41 @@ namespace CardShopCoop.Net.Networking
             }
 
             return fields;
+        }
+
+        /// <summary>The support-report view of this backend. Values the window deliberately keeps
+        /// off screen - the session password and the public "ip:port" - are still listed, but marked
+        /// sensitive so the report censors them completely.</summary>
+        public IReadOnlyList<BackendDiagnosticField> GetDiagnosticFields(ConnectMode mode)
+        {
+            if (mode == ConnectMode.Host)
+            {
+                var fields = new List<BackendDiagnosticField>
+                {
+                    new BackendDiagnosticField("Backend", Id),
+                    new BackendDiagnosticField("Local port",
+                        ResolvePort().ToString(CultureInfo.InvariantCulture)),
+                    new BackendDiagnosticField("Password", Value(FieldId.Password), sensitive: true),
+                    new BackendDiagnosticField("Open router's port",
+                        Flag(FieldId.AutoForward) ? "yes" : "no"),
+                };
+
+                var publicEndpoint = _publicEndpoint;
+                if (!string.IsNullOrEmpty(publicEndpoint))
+                {
+                    fields.Add(new BackendDiagnosticField("Public address", publicEndpoint,
+                        sensitive: true));
+                }
+
+                return fields;
+            }
+
+            return new[]
+            {
+                new BackendDiagnosticField("Backend", Id),
+                new BackendDiagnosticField("Host address", Value(FieldId.IpAddress), sensitive: true),
+                new BackendDiagnosticField("Password", Value(FieldId.Password), sensitive: true),
+            };
         }
 
         public IReadOnlyList<BackendAction> Actions => BuildActions();
@@ -292,10 +320,18 @@ namespace CardShopCoop.Net.Networking
 
         // ------------------------------------------------------------------ connect / disconnect
 
-        public ConnectionId Connect(ConnectMode mode, FieldValues values,
-            Action<ConnectionId, ConnectResult> onResult)
+        public void Connect(ConnectionId attempt, ConnectMode mode, FieldValues values,
+            IBackendConnectCallbacks callbacks)
         {
-            var id = new ConnectionId(Interlocked.Increment(ref _nextId));
+            if (attempt.Value == 0)
+            {
+                throw new ArgumentException("A live connection attempt is required.", nameof(attempt));
+            }
+            if (callbacks == null)
+            {
+                throw new ArgumentNullException(nameof(callbacks));
+            }
+
             Interlocked.Increment(ref _generation);
             lock (_gate)
             {
@@ -313,22 +349,20 @@ namespace CardShopCoop.Net.Networking
                 _isHost = mode == ConnectMode.Host;
                 if (_isHost)
                 {
-                    ConnectHost(id, onResult);
+                    ConnectHost(attempt, callbacks);
                 }
                 else
                 {
-                    ConnectClient(id, onResult);
+                    ConnectClient(attempt, callbacks);
                 }
             }
             catch (Exception error)
             {
-                onResult?.Invoke(id, new ConnectResult(false, error.Message));
+                callbacks.Failed(attempt, error.Message);
             }
-
-            return id;
         }
 
-        private void ConnectHost(ConnectionId id, Action<ConnectionId, ConnectResult> onResult)
+        private void ConnectHost(ConnectionId attempt, IBackendConnectCallbacks callbacks)
         {
             var requestedPort = ResolvePort();
             var socket = BindSocket(requestedPort);
@@ -349,20 +383,22 @@ namespace CardShopCoop.Net.Networking
                         + " was busy; listening on " + port.ToString(CultureInfo.InvariantCulture) + ".";
             }
 
-            // The transport owns the socket from here: a host socket accepts a peer from any
-            // endpoint, so one listening port serves every friend who dials it.
+            // The runtime owns the bearer from here: it wraps it in the KCP session, assigns the
+            // peer-id band, starts it, and disposes it on disconnect. A host socket accepts a peer
+            // from any endpoint, so one listening port serves every friend who dials it.
             var datagrams = UdpDatagramTransport.CreateHost(socket);
-            Publish(id, datagrams);
-            onResult?.Invoke(id, new ConnectResult(true));
+            Interlocked.Exchange(ref _active, attempt.Value);
+            callbacks.BearerReady(attempt, datagrams);
+            callbacks.Connected(attempt);
 
             StartHostAddressSetup(port, Flag(FieldId.AutoForward));
         }
 
-        private void ConnectClient(ConnectionId id, Action<ConnectionId, ConnectResult> onResult)
+        private void ConnectClient(ConnectionId attempt, IBackendConnectCallbacks callbacks)
         {
             if (!TryParseHostAddress(Value(FieldId.IpAddress), out var remote, out var error))
             {
-                onResult?.Invoke(id, new ConnectResult(false, error));
+                callbacks.Failed(attempt, error);
                 return;
             }
 
@@ -378,10 +414,11 @@ namespace CardShopCoop.Net.Networking
             }
 
             // A client transport is pinned to the one endpoint it dialled, so the host is always a
-            // single peer and the client's PeerConnection.Id is always 1.
+            // single peer and the runtime's peer id is always 1.
             var datagrams = new UdpDatagramTransport(new IPEndPoint(IPAddress.Any, 0), remote);
-            Publish(id, datagrams);
-            onResult?.Invoke(id, new ConnectResult(true));
+            Interlocked.Exchange(ref _active, attempt.Value);
+            callbacks.BearerReady(attempt, datagrams);
+            callbacks.Connected(attempt);
         }
 
         /// <summary>A host address is an IPv4 literal, optionally with ":port". A hostname is
@@ -429,25 +466,6 @@ namespace CardShopCoop.Net.Networking
 
             endpoint = new IPEndPoint(ip, port);
             return true;
-        }
-
-        private void Publish(ConnectionId id, IDatagramTransport datagrams)
-        {
-            var manager = new KcpSessionManager(datagrams, _isHost);
-            manager.SetConnectionIdBand(IdBase, IdBase + NetworkingBands.Size);
-            manager.PeerConnected += connection =>
-            {
-                try
-                {
-                    PeerConnected?.Invoke(id, connection);
-                }
-                catch (Exception e) { CoopLog.Swallow(e); }
-            };
-            var child = LagTransport.Wrap(manager);
-            _transport = child;
-            Interlocked.Exchange(ref _active, id.Value);
-
-            TransportChanged?.Invoke(id, child);
         }
 
         /// <summary>
@@ -594,11 +612,8 @@ namespace CardShopCoop.Net.Networking
             _publicEndpoint = null;
             _addressLookupDone = false;
 
-            // Do NOT stop or dispose the transport here. Teardown must run on the pump thread, so it
-            // is queued on the group by RemoveBackendChild, which TransportChanged (below) triggers.
-            // Stopping it from this (main) thread races the pump that is still advancing it.
-            _transport = null;
-
+            // The runtime owns the bearer and disposes it on the pump thread. This method only
+            // releases backend-owned state (the router mapping and the advertised address).
             long unmapEpoch;
             lock (_gate)
             {
@@ -627,8 +642,6 @@ namespace CardShopCoop.Net.Networking
                     Name = "CoopUnmap",
                 }.Start();
             }
-
-            TransportChanged?.Invoke(connection, null);
         }
     }
 }

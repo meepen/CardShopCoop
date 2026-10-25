@@ -75,6 +75,7 @@ namespace CardShopCoop
         private void Awake()
         {
             Log = Logger;
+            Runtime.MainThreadGuard.Capture();
             // Install the public integration contract before anything else can read it. External
             // mods may touch CoopApi from their own Awake, which runs after ours.
             CoopApi.Binding = Runtime.ExternalCoopMods.Instance;

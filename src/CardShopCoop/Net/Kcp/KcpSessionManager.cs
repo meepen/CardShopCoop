@@ -8,6 +8,7 @@ using CardShopCoop.Net.Connection;
 using CardShopCoop.Net.Datagrams;
 using CardShopCoop.Net.Messages;
 using CardShopCoop.Net.Protocol;
+using CardShopCoop.Runtime;
 using kcp2k;
 using PeerConnection = CardShopCoop.Net.Connection.PeerConnection;
 
@@ -19,11 +20,14 @@ namespace CardShopCoop.Net.Kcp
     /// The datagram bearer is deliberately not a protocol implementation.  This class owns the
     /// KCP sessions, the application frame envelope, queue admission, and the PeerConnection
     /// lifecycle.  Producers may call the send methods from any thread; only an owned encoded
-    /// frame is placed in a bounded queue by those calls.  Polling, KCP input/ticks, decoding,
-    /// and all public lifecycle output happen in <see cref="PumpNetworkThread"/>.
+    /// frame is placed in a bounded queue by those calls.  Polling, KCP input/ticks, frame
+    /// validation, and all public lifecycle output happen in
+    /// <see cref="PumpNetworkThread"/> or the framing worker. JSON deserialization happens in
+    /// <see cref="TryDequeueIncoming"/> on the Unity thread because entity-bearing DTO converters
+    /// resolve live scene objects.
     /// </summary>
-    public sealed class KcpSessionManager : ICoopTransport, ICoopHandshakeTransport,
-        ICoopRelayTransport, ICoopStartable
+    internal sealed class KcpSessionManager : ICoopTransport, ICoopHandshakeTransport,
+        ICoopRelayTransport, ICoopStartable, IWireFrameTransport
     {
         // The envelope is transport-private.  It is intentionally outside Msg's DTO frame so
         // Type.FullName remains the sole application identity on the wire.
@@ -141,11 +145,32 @@ namespace CardShopCoop.Net.Kcp
 
         public bool TryDequeueIncoming(out InMsg message)
         {
+            // Entity-bearing DTOs are deserialized here; that is a Unity-thread operation.
+            MainThreadGuard.RequireMainThread("KCP message decoding");
+            if (!TryDequeueWireFrame(out var frame))
+            {
+                message = default(InMsg);
+                return false;
+            }
+
+            if (!Msg.TryDecodeFrame(frame, out message))
+            {
+                GracefulDisconnect(frame.Connection, new DisconnectInfo(
+                    "invalid application frame", false, "protocol_error", false,
+                    frame.Connection?.State ?? ConnectionState.Disconnected));
+                return false;
+            }
+
+            return true;
+        }
+
+        public bool TryDequeueWireFrame(out WireFrame frame)
+        {
             lock (_gate)
             {
                 if (!_incoming.TryDequeue(out var item))
                 {
-                    message = default(InMsg);
+                    frame = null;
                     return false;
                 }
 
@@ -155,7 +180,8 @@ namespace CardShopCoop.Net.Kcp
                     LogError("KCP incoming-byte accounting underflow");
                     _incomingBytes = 0;
                 }
-                message = item.Message;
+
+                frame = item.Frame;
                 return true;
             }
         }
@@ -203,12 +229,12 @@ namespace CardShopCoop.Net.Kcp
             }
         }
 
-        public KcpSessionManager(IDatagramTransport datagrams, bool isHost)
+        internal KcpSessionManager(IDatagramTransport datagrams, bool isHost)
             : this(datagrams, isHost, new KcpConfig(), null)
         {
         }
 
-        public KcpSessionManager(IDatagramTransport datagrams, bool isHost,
+        internal KcpSessionManager(IDatagramTransport datagrams, bool isHost,
             KcpConfig config, KcpSessionManagerOptions options)
         {
             _datagrams = datagrams ?? throw new ArgumentNullException(nameof(datagrams));
@@ -1759,9 +1785,10 @@ namespace CardShopCoop.Net.Kcp
                 return;
             }
 
-            // The pump no longer JSON-decodes here. It hands an owned frame copy to the decode
-            // worker and re-applies the exact same validation once the decoded object comes back
-            // (DrainDecodeResults), so every KCP-touching step stays on the pump thread.
+            // The pump validates and frames here, then hands an owned frame copy to the framing
+            // worker. The worker returns a WireFrame (payload not yet deserialized); the Unity
+            // thread deserializes it in TryDequeueIncoming so entity converters can resolve scene
+            // objects.
             if (!TryReserveDecodeBudget(count))
             {
                 if (reliable)
@@ -1846,7 +1873,7 @@ namespace CardShopCoop.Net.Kcp
                 && frame[offset + Msg.FrameHeaderSize] == Msg.CompactTokenKind;
         }
 
-        private bool TryEnqueueIncoming(InMsg message, int encodedBytes)
+        private bool TryEnqueueIncoming(WireFrame frame, int encodedBytes)
         {
             lock (_gate)
             {
@@ -1859,7 +1886,7 @@ namespace CardShopCoop.Net.Kcp
                     return false;
                 }
 
-                _incoming.Enqueue(new IncomingItem(message, encodedBytes));
+                _incoming.Enqueue(new IncomingItem(frame, encodedBytes));
                 _incomingBytes += encodedBytes;
                 return true;
             }
@@ -1950,10 +1977,13 @@ namespace CardShopCoop.Net.Kcp
             };
             try
             {
-                if (Msg.TryDecodeFrame(work.Frame, 0, work.Frame.Length, work.State.Connection,
-                    work.FrameLimit, work.Snapshot, work.CompactIds, out var message))
+                if (Msg.TryReadFrame(work.Frame, 0, work.Frame.Length, work.State.Connection,
+                    work.FrameLimit, work.Snapshot, work.CompactIds, out var frame))
                 {
-                    result.Message = message;
+                    frame.Reliable = work.Reliable;
+                    frame.BeforeActivation = work.BeforeActivation;
+                    frame.EncodedBytes = work.EncodedBytes;
+                    result.Frame = frame;
                     result.Ok = true;
                 }
             }
@@ -1978,7 +2008,7 @@ namespace CardShopCoop.Net.Kcp
             }
         }
 
-        /// <summary>Applies the exact post-decode validation the synchronous path used, on the
+        /// <summary>Applies the exact post-framing validation the synchronous path used, on the
         /// pump thread, for every frame the worker finished since the last pass.</summary>
         private void DrainDecodeResults()
         {
@@ -1991,19 +2021,18 @@ namespace CardShopCoop.Net.Kcp
                     continue;
                 }
 
-                if (!result.Ok || result.Message.Message == null)
+                if (!result.Ok || result.Frame == null || result.Frame.Descriptor == null)
                 {
                     DisconnectForProtocol(state, "invalid application frame");
                     continue;
                 }
 
-                var message = result.Message;
-                message.ReceivedBeforeMessageIdActivation = result.BeforeActivation;
+                var frame = result.Frame;
 
                 // Compact identity is only a decoding choice. It never authenticates a peer or
                 // grants a handler path; Core's central router still applies application gates.
                 if (result.Snapshot == null
-                    || !result.Snapshot.TryGet(message.MessageType, out var descriptor)
+                    || !result.Snapshot.TryGet(frame.Descriptor.MessageType, out var descriptor)
                     || (result.Reliable ? descriptor.Reliability != Reliability.Reliable
                         : descriptor.Reliability != Reliability.Transient))
                 {
@@ -2013,14 +2042,16 @@ namespace CardShopCoop.Net.Kcp
 
                 // The terminal disconnect control is transport lifecycle, not feature data: record
                 // the peer's reason as the connection's terminal claim before anything else so the
-                // ConnectionEvent carries it. The message is still admitted below for the
-                // application-level fallback path; Core drops it once the connection is terminal.
-                if (message.Message is DisconnectMessage disconnectMessage)
+                // ConnectionEvent carries it. DisconnectMessage has no entity fields, so decoding
+                // it on the pump is safe.
+                if (frame.Descriptor.MessageType == typeof(DisconnectMessage)
+                    && Msg.TryDecodeFrame(frame, out var disconnectDecoded)
+                    && disconnectDecoded.Message is DisconnectMessage disconnectMessage)
                 {
                     ApplyRemoteDisconnect(state, disconnectMessage);
                 }
 
-                if (!TryEnqueueIncoming(message, result.EncodedBytes))
+                if (!TryEnqueueIncoming(frame, result.EncodedBytes))
                 {
                     if (result.Reliable)
                     {
@@ -3063,12 +3094,12 @@ namespace CardShopCoop.Net.Kcp
 
         private struct IncomingItem
         {
-            internal readonly InMsg Message;
+            internal readonly WireFrame Frame;
             internal readonly int EncodedBytes;
 
-            internal IncomingItem(InMsg message, int encodedBytes)
+            internal IncomingItem(WireFrame frame, int encodedBytes)
             {
-                Message = message;
+                Frame = frame;
                 EncodedBytes = encodedBytes;
             }
         }
@@ -3090,7 +3121,7 @@ namespace CardShopCoop.Net.Kcp
         private struct DecodeResult
         {
             internal SessionState State;
-            internal InMsg Message;
+            internal WireFrame Frame;
             internal bool Reliable;
             internal bool BeforeActivation;
             internal ProtocolSnapshot Snapshot;

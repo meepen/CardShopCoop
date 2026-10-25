@@ -16,12 +16,10 @@ namespace CardShopCoop.Modules.Tutorial
             typeof(TutorialManager), "m_TutorialTargetIndicator");
         internal static readonly FieldInfo FiTutorialFinished = AccessTools.Field(
             typeof(TutorialManager), "m_FinishedTutorial");
-        private static InteractionPlayerController _controller;
         private static GameUIScreen _gameUi;
 
         internal static void Reset()
         {
-            _controller = null;
             _gameUi = null;
         }
 
@@ -62,23 +60,6 @@ namespace CardShopCoop.Modules.Tutorial
             return true;
         }
 
-        internal static float ValueFor(ETutorialTaskCondition condition)
-        {
-            var values = CPlayerData.m_TutorialDataList;
-            for (var i = 0; values != null && i < values.Count; i++)
-            {
-
-                if (values[i] != null && values[i].tutorialTaskCondition == condition)
-                {
-
-                    return values[i].value;
-                }
-            }
-
-
-            return 0f;
-        }
-
         internal static void SyncMarker(TutorialManager manager, int tutorialIndex)
         {
             if (manager == null || FiTutorialIndicator == null)
@@ -87,10 +68,7 @@ namespace CardShopCoop.Modules.Tutorial
             }
 
             var indicator = FiTutorialIndicator.GetValue(manager) as GameObject;
-            if (indicator != null)
-            {
-                indicator.SetActive(tutorialIndex == 0);
-            }
+            indicator?.SetActive(tutorialIndex == 0);
         }
 
         /// <summary>The game only ever sets <c>m_FinishedTutorial</c> true and never clears it, so
@@ -106,30 +84,30 @@ namespace CardShopCoop.Modules.Tutorial
             FiTutorialFinished.SetValue(manager, finished);
         }
 
+        /// <summary>
+        /// Ends the intro's local presentation once the shared tutorial leaves index 0: the
+        /// movement key hints and the hidden HUD. The target marker is the intro's own state - it
+        /// is shown together with the key hints and hidden by the trigger/confirm path - so it
+        /// tells us whether this peer still has the intro on screen. Call this before
+        /// <see cref="SyncMarker"/> hides the marker, and never force the HUD back over an
+        /// unrelated screen when the intro is already gone.
+        /// </summary>
         internal static void ClearIntroPresentation()
         {
-            if (_controller == null)
+            var manager = FindManager();
+            var indicator = manager == null || FiTutorialIndicator == null
+                ? null
+                : FiTutorialIndicator.GetValue(manager) as GameObject;
+            if (indicator == null || !indicator.activeSelf)
             {
-                _controller = FindSceneObject<InteractionPlayerController>();
+                return;
             }
 
-            var controller = _controller;
-            if (controller != null)
+            // The game's own clear-all, rather than replaying the movement action list: the intro
+            // is the only thing showing hints while the marker is up.
+            if (SceneRef<InteractionPlayerController>.Get() != null)
             {
-                var actions = new[]
-                {
-                    EGameAction.MoveForward,
-                    EGameAction.MoveLeft,
-                    EGameAction.MoveBackward,
-                    EGameAction.MoveRight,
-                    EGameAction.Jump,
-                    EGameAction.Sprint,
-                    EGameAction.Crouch,
-                };
-                for (var i = 0; i < actions.Length; i++)
-                {
-                    InteractionPlayerController.RemoveToolTip(actions[i]);
-                }
+                InteractionPlayerController.ClearToolTip();
             }
 
             if (_gameUi == null)
@@ -141,6 +119,9 @@ namespace CardShopCoop.Modules.Tutorial
             {
                 GameUIScreen.SetGameUIVisible(true);
             }
+
+            CoopPlugin.Log.LogDebug(
+                "Tutorial intro presentation cleared; the shared tutorial left the intro.");
         }
 
         internal static bool IsFiniteNonNegative(float value)

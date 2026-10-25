@@ -44,12 +44,8 @@ namespace CardShopCoop.Modules.Presence
     /// <summary>Client-to-host appearance intent. The host never trusts a client id from a
     /// payload; the transport connection supplies identity.</summary>
     [NetworkMessage]
-    public sealed class PresenceModelRequestMessage : IPredictedMessage
+    public sealed class PresenceModelRequestMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public bool Female;
         public int ModelIndex;
         public string CustomizationJson;
@@ -72,12 +68,8 @@ namespace CardShopCoop.Modules.Presence
     }
 
     [NetworkMessage]
-    public sealed class PresenceModelDeltaMessage : IPredictedMessage
+    public sealed class PresenceModelDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public PresenceEntityDeltaKind Kind;
         public int Id;
         public PresenceModelEntry Entry;

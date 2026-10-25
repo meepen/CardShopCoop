@@ -1,5 +1,5 @@
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -155,11 +155,11 @@ namespace CardShopCoop.Modules.Hud
 
 
             var version = VersionFor(kind);
-            PredictionApi.Predict(
+            ActionLedger.Submit(
                 PredictionScope,
-                predictionId => _context.Send(1, new HudContributionIntent
+                actionId => _context.Send(1, new HudContributionIntent
                 {
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     Kind = kind,
                     Value = value,
                 }),
@@ -169,15 +169,13 @@ namespace CardShopCoop.Modules.Hud
 
         private int VersionFor(HudContributionKind kind)
         {
-            switch (kind)
+            return kind switch
             {
-                case HudContributionKind.AddShopExperience:
-                    return _progressVersion;
-                case HudContributionKind.AddFame:
-                    return _fameVersion;
-                default:
-                    return _walletVersion;
-            }
+                HudContributionKind.AddShopExperience => _progressVersion,
+                HudContributionKind.AddFame => _fameVersion,
+                _ => _walletVersion,
+            };
+
         }
 
         /// <summary>Rolls a rejected contribution back to the captured pre-change state, unless an
@@ -210,7 +208,7 @@ namespace CardShopCoop.Modules.Hud
             ForwardObserved(pending.Kind, pending.Value, pending.Previous);
         }
 
-        [MessageHandler(typeof(HudAuthoritativeState))]
+        [MessageHandler]
         private void State(MessageContext _, HudAuthoritativeState state)
         {
             if (state == null)
@@ -223,7 +221,7 @@ namespace CardShopCoop.Modules.Hud
             ApplyPendingIfReady();
         }
 
-        [MessageHandler(typeof(HudWalletDeltaMessage))]
+        [MessageHandler]
         private void WalletDelta(MessageContext _, HudWalletDeltaMessage message)
         {
             if (message == null)
@@ -242,11 +240,11 @@ namespace CardShopCoop.Modules.Hud
             // that a remote player's spend now updates the wallet silently (it only reaches the
             // guest as an absolute SetCoin, which the game never pops).
 
-            PredictionApi.Confirm(message.PredictionId,
+            ActionLedger.Confirm(message.ActionId,
                 () => ApplyWallet(message.Coins, message.CoinDisplay));
         }
 
-        [MessageHandler(typeof(HudProgressDeltaMessage))]
+        [MessageHandler]
         private void ProgressDelta(MessageContext _, HudProgressDeltaMessage message)
         {
             if (message == null)
@@ -257,11 +255,11 @@ namespace CardShopCoop.Modules.Hud
             // Absolute exp/level: retire our own pending contribution and always fold the host's
             // values in (see the wallet handler).
 
-            PredictionApi.Confirm(message.PredictionId,
+            ActionLedger.Confirm(message.ActionId,
                 () => ApplyProgress(message.Experience, message.Level));
         }
 
-        [MessageHandler(typeof(HudFameDeltaMessage))]
+        [MessageHandler]
         private void FameDelta(MessageContext _, HudFameDeltaMessage message)
         {
             if (message == null)
@@ -272,7 +270,7 @@ namespace CardShopCoop.Modules.Hud
             // Absolute fame: retire our own pending contribution and always fold the host's
             // value in (see the wallet handler).
 
-            PredictionApi.Confirm(message.PredictionId,
+            ActionLedger.Confirm(message.ActionId,
                 () => ApplyFame(message.Fame));
         }
 
@@ -516,7 +514,7 @@ namespace CardShopCoop.Modules.Hud
                     || !active._context.InGame() || evt == null
                     || active._applyingSnapshot != 0
                     || EconomyActionScope.Active
-                    || PredictionApi.IsApplying || PredictionApi.IsReconciling)
+                    || ActionLedger.IsApplying || ActionLedger.IsReconciling)
                 {
                     return;
                 }

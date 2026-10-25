@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Runtime;
 using UnityEngine;
 
@@ -122,11 +122,11 @@ namespace CardShopCoop.Modules.Presence
             {
                 Kind = PresenceEntityDeltaKind.Remove,
                 Id = connection.Id,
-                PredictionId = Guid.Empty,
+                ActionId = Guid.Empty,
             });
         }
 
-        [MessageHandler(typeof(PresenceStateMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, PresenceStateMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
@@ -152,7 +152,7 @@ namespace CardShopCoop.Modules.Presence
             }
         }
 
-        [MessageHandler(typeof(PresenceHoldMessage))]
+        [MessageHandler]
         private void HandleHold(MessageContext context, PresenceHoldMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
@@ -179,7 +179,7 @@ namespace CardShopCoop.Modules.Presence
             }
         }
 
-        [MessageHandler(typeof(PresenceModelRequestMessage))]
+        [MessageHandler]
         private void HandleModelRequest(MessageContext context, PresenceModelRequestMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
@@ -189,7 +189,7 @@ namespace CardShopCoop.Modules.Presence
 
             if (message.ModelIndex < 0 || message.CustomizationJson?.Length > MaxCustomizationJson)
             {
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
 
@@ -213,11 +213,11 @@ namespace CardShopCoop.Modules.Presence
                 Kind = kind,
                 Id = context.Connection.Id,
                 Entry = Clone(model),
-                PredictionId = message.PredictionId,
+                ActionId = message.ActionId,
             });
         }
 
-        [MessageHandler(typeof(PresenceEmoteMessage))]
+        [MessageHandler]
         private void HandleEmote(MessageContext context, PresenceEmoteMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
@@ -229,7 +229,7 @@ namespace CardShopCoop.Modules.Presence
             RelayTag(context.Connection.Id, 0, default(EItemType));
         }
 
-        [MessageHandler(typeof(PresenceActivityMessage))]
+        [MessageHandler]
         private void HandleActivity(MessageContext context, PresenceActivityMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
@@ -245,6 +245,21 @@ namespace CardShopCoop.Modules.Presence
         {
             presence = default(PeerPresence);
             return _context != null && _context.PeerPresence.TryGet(connectionId, out presence);
+        }
+
+        /// <summary>A copy of one session member's appearance, keyed by the host's canonical
+        /// connection id (0 is this host). Used only by the diagnostics report, which must never
+        /// read a live model object while the renderer owns it.</summary>
+        internal bool TryGetModel(int connectionId, out PresenceModelEntry model)
+        {
+            if (_models.TryGetValue(connectionId, out var stored) && stored != null)
+            {
+                model = Clone(stored);
+                return true;
+            }
+
+            model = null;
+            return false;
         }
 
         /// <summary>The session roster for the window: this host first, then each joined peer in id
@@ -383,7 +398,7 @@ namespace CardShopCoop.Modules.Presence
                     Kind = PresenceEntityDeltaKind.Update,
                     Id = 0,
                     Entry = Clone(model),
-                    PredictionId = Guid.Empty,
+                    ActionId = Guid.Empty,
                 });
             }
         }
@@ -480,11 +495,11 @@ namespace CardShopCoop.Modules.Presence
             }
         }
 
-        private void Reject(MessageContext context, Guid predictionId)
+        private void Reject(MessageContext context, Guid actionId)
         {
-            if (predictionId != Guid.Empty && context?.Connection != null)
+            if (actionId != Guid.Empty && context?.Connection != null)
             {
-                PredictionApi.Rollback(_context, context.Connection.Id, predictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, actionId);
             }
         }
 

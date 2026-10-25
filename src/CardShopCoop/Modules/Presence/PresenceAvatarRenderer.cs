@@ -251,16 +251,10 @@ namespace CardShopCoop.Modules.Presence
             var savedApparelTints = data.ColorProperties != null
                 ? data.ColorProperties.FindAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal))
                 : new List<CC.CC_Property>();
-            if (data.ColorProperties != null)
-            {
-                data.ColorProperties.RemoveAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal));
-            }
+            data.ColorProperties?.RemoveAll(p => p != null && p.propertyName != null && p.propertyName.StartsWith(ApparelTintPrefix, System.StringComparison.Ordinal));
 
             custom.ApplyCharacterVars(data);
-            if (data.ColorProperties != null)
-            {
-                data.ColorProperties.AddRange(savedApparelTints);
-            }
+            data.ColorProperties?.AddRange(savedApparelTints);
 
             ApplyStoredApparelTints(custom, savedApparelTints);
         }
@@ -617,7 +611,7 @@ namespace CardShopCoop.Modules.Presence
             }
 
             var prefix = female ? "Female" : "Male";
-            var presets = custom.Presets != null ? custom.Presets.Presets : null;
+            var presets = custom.Presets?.Presets;
             if (presets != null && presets.Count > 0)
             {
                 var matches = new List<CC.CC_CharacterData>();
@@ -1139,6 +1133,23 @@ namespace CardShopCoop.Modules.Presence
             return false;
         }
 
+        /// <summary>Newest camera sample without any interpolation. Placement's own per-frame
+        /// target ray wants the holder's current aim; the object's vanilla lerp supplies smoothing.</summary>
+        public bool TryGetPlacementCameraLatest(int connId, out Vector3 position,
+            out Quaternion rotation)
+        {
+            if (_avatars.TryGetValue(connId, out var avatar) && avatar.HasState && avatar.HasCamera)
+            {
+                position = avatar.CameraPosition;
+                rotation = avatar.CameraRotation;
+                return true;
+            }
+
+            position = default(Vector3);
+            rotation = Quaternion.identity;
+            return false;
+        }
+
         public void ShowEmote(int connId)
         {
             ShowTag(connId, "\\o/  hi!", 2.5f);
@@ -1445,7 +1456,7 @@ namespace CardShopCoop.Modules.Presence
             Transform chest = null;
             try
             {
-                chest = av.Anim != null ? av.Anim.GetBoneTransform(HumanBodyBones.Chest) : null;
+                chest = av.Anim?.GetBoneTransform(HumanBodyBones.Chest);
             }
             catch (System.Exception e) { CoopLog.Swallow(e); }
 
@@ -1517,10 +1528,8 @@ namespace CardShopCoop.Modules.Presence
                 // resolves to the prefab's own root instead. Deactivating that root would switch
                 // off the whole customer/avatar, so HideProp refuses to hide the root and only
                 // hides genuine children.
-                HideProp(customer.m_ShoppingBagTransform != null
-                    ? customer.m_ShoppingBagTransform.gameObject : null, customer);
-                HideProp(customer.m_CustomerCash != null
-                    ? customer.m_CustomerCash.gameObject : null, customer);
+                HideProp(customer.m_ShoppingBagTransform?.gameObject, customer);
+                HideProp(customer.m_CustomerCash?.gameObject, customer);
                 HideProp(customer.m_GameCardFanOut, customer);
                 HideProp(customer.m_GameCardSingle, customer);
                 HideProp(customer.m_CleanFX, customer);
@@ -1578,10 +1587,7 @@ namespace CardShopCoop.Modules.Presence
             av.PackTimer = 4f;
             try
             {
-                if (av.Anim != null)
-                {
-                    av.Anim.SetTrigger("GrabItem");
-                }
+                av.Anim?.SetTrigger("GrabItem");
             }
             catch (System.Exception e) { CoopLog.Swallow(e); }
             // packIndex is ALREADY A LOCAL EItemType: both presence handlers receive it after
@@ -2013,7 +2019,7 @@ namespace CardShopCoop.Modules.Presence
                 // that GetComponentInChildren returned first, so the avatar was driven through an
                 // Animator with no MoveSpeed/IsHoldingBox parameters. Capture the game's own reference
                 // before the component strip below destroys the Customer behaviour that holds it.
-                var characterAnimator = cust != null ? cust.m_Anim : null;
+                var characterAnimator = cust?.m_Anim;
                 if (cust != null)
                 {
                     var hasJson = !string.IsNullOrEmpty(av.CustomizationJson);
@@ -2134,7 +2140,7 @@ namespace CardShopCoop.Modules.Presence
                     }
                 }
 
-                var heightFactor = GetCharacterHeightFactor(cust != null ? cust.m_CharacterCustom : null);
+                var heightFactor = GetCharacterHeightFactor(cust?.m_CharacterCustom);
                 av.NameTag = MakeTag(clone.transform, av.Name, 2.25f * heightFactor, Color.white);
                 av.EmoteTag = MakeTag(clone.transform, "", 2.55f * heightFactor, new Color(1f, 0.85f, 0.2f));
                 // key= names which dictionary slot this body belongs to (1 = host on a client,

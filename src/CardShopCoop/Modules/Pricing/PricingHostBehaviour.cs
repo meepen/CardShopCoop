@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Grading;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -117,7 +117,7 @@ namespace CardShopCoop.Modules.Pricing
             _baselinePending.Remove(peer.Id);
         }
 
-        [MessageHandler(typeof(PricingItemIntentMessage))]
+        [MessageHandler]
         private void Item(MessageContext context, PricingItemIntentMessage message)
         {
             if (_shutdown || context?.Connection == null || message == null
@@ -125,15 +125,15 @@ namespace CardShopCoop.Modules.Pricing
                 || !PricingInterop.ValidPrice(message.Price)
                 || !TrySetItem(message.ItemType, message.Price, out _))
             {
-                Reject(context, message?.PredictionId ?? Guid.Empty);
+                Reject(context, message?.ActionId ?? Guid.Empty);
                 return;
             }
 
-            QueueItemDelta(message.PredictionId, message.ItemType,
+            QueueItemDelta(message.ActionId, message.ItemType,
                 PricingInterop.ReadItem(message.ItemType));
         }
 
-        [MessageHandler(typeof(PricingCardIntentMessage))]
+        [MessageHandler]
         private void Card(MessageContext context, PricingCardIntentMessage message)
         {
             if (_shutdown || context?.Connection == null || message?.Card == null
@@ -145,21 +145,28 @@ namespace CardShopCoop.Modules.Pricing
                     + " valid=" + (message?.Card != null && PricingInterop.ValidCard(message.Card))
                     + " price=" + (message?.Price ?? -1f) + " grade=" + (message?.EncodedGrade ?? -1)
                     + ".");
-                Reject(context, message?.PredictionId ?? Guid.Empty);
+                Reject(context, message?.ActionId ?? Guid.Empty);
+                return;
+            }
+
+            if (message.Shelf == null)
+            {
+                CoopPlugin.Log.LogWarning("[pricing] dropped card intent with no live display shelf.");
+                Reject(context, message.ActionId);
                 return;
             }
 
             var key = PricingInterop.CardKey(message.Card, message.EncodedGrade);
             if (key == null
-                || !WorldCardDisplay.TryResolve(message.ShelfKey, message.Compartment,
+                || !WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
                     out var compartment)
                 || !WorldCardDisplay.Matches(compartment, message.Card, message.EncodedGrade))
             {
                 CoopPlugin.Log.LogWarning("[pricing] rejected card intent: not the displayed card"
-                    + " shelf=" + message.ShelfKey + " compartment=" + message.Compartment
+                    + " shelf=" + message.Shelf.name + " compartment=" + message.Compartment
                     + " card=" + Describe(message.Card) + " key=" + (key ?? "null") + " grade="
                     + message.EncodedGrade + ".");
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
 
@@ -174,13 +181,13 @@ namespace CardShopCoop.Modules.Pricing
                         : GradingApi.Encoded(canonical)) + " requestedPrice=" + message.Price
                     + " actualPrice=" + (canonical == null ? -1f : PricingInterop.ReadCard(canonical))
                     + ".");
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
 
             GradingApi.Remember(canonical);
             _cards[key] = new OwnedCardState { Card = canonical, Price = actual };
-            QueueCardDelta(message.PredictionId, canonical, actual, false);
+            QueueCardDelta(message.ActionId, canonical, actual, false);
         }
 
         private static string Describe(CardData card)
@@ -362,7 +369,7 @@ namespace CardShopCoop.Modules.Pricing
 
         /// <summary>Queues one item price change for this frame's batch. Queuing instead of
         /// sending keeps a mass price pass to one message per frame per peer.</summary>
-        private void QueueItemDelta(Guid predictionId, EItemType type, float price)
+        private void QueueItemDelta(Guid actionId, EItemType type, float price)
         {
             if (_shutdown || _context?.InGame() != true)
             {
@@ -372,7 +379,7 @@ namespace CardShopCoop.Modules.Pricing
 
             _pendingItemDeltas.Add(new PricingItemDeltaEntry
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 ItemType = type,
                 Price = price,
             });
@@ -380,7 +387,7 @@ namespace CardShopCoop.Modules.Pricing
 
         /// <summary>Queues one card price change for this frame's batch. The card is snapshotted
         /// here, while it is still the caller's live object.</summary>
-        private void QueueCardDelta(Guid predictionId, CardData card, float price, bool removed)
+        private void QueueCardDelta(Guid actionId, CardData card, float price, bool removed)
         {
             if (_shutdown || _context?.InGame() != true)
             {
@@ -390,7 +397,7 @@ namespace CardShopCoop.Modules.Pricing
 
             _pendingCardDeltas.Add(new PricingCardDeltaEntry
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Card = PricingInterop.CopyCard(card, GradingApi.Encoded(card)),
                 Price = price,
                 EncodedGrade = GradingApi.Encoded(card),
@@ -438,11 +445,11 @@ namespace CardShopCoop.Modules.Pricing
 
         }
 
-        private void Reject(MessageContext context, Guid predictionId)
+        private void Reject(MessageContext context, Guid actionId)
         {
-            if (predictionId != Guid.Empty && context?.Connection != null)
+            if (actionId != Guid.Empty && context?.Connection != null)
             {
-                PredictionApi.Rollback(_context, context.Connection.Id, predictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, actionId);
             }
 
         }

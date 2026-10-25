@@ -1327,7 +1327,7 @@ namespace CardShopCoop.Net
             string uri = null;
             try
             {
-                uri = resp.ResponseUri != null ? resp.ResponseUri.ToString() : null;
+                uri = resp.ResponseUri?.ToString();
             }
             catch (Exception e) { CoopLog.Swallow(e); }
             if (uri != null && IsPrivateHttpUrl(uri))

@@ -1,15 +1,14 @@
 using System;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace CardShopCoop.Modules.Tv
+namespace CardShopCoop.CustomTv
 {
-    /// <summary>Client playback mirror and immediately predictive control forwarding.</summary>
+    /// <summary>Client playback mirror and immediately applied control forwarding.</summary>
     [ClientBehaviour]
     public sealed class TvClientBehaviour : CoopBehaviour
     {
@@ -20,19 +19,12 @@ namespace CardShopCoop.Modules.Tv
         private const byte Shuffle = 5;
         private const byte Seek = 6;
         private const byte Open = 7;
-        private const string PredictionScope = "tv";
 
         private static TvClientBehaviour _active;
         private ICoopContext _context;
         private Harmony _harmony;
-        private TvBaselineMessage _latestBaseline;
-        private TvMediaDeltaMessage _pendingMedia;
-        private TvPauseDeltaMessage _pendingPause;
-        private TvPowerDeltaMessage _pendingPower;
-        private TvShuffleDeltaMessage _pendingShuffle;
-        private TvSeekDeltaMessage _pendingSeek;
-        private TvBarrierDeltaMessage _pendingBarrier;
-        private TvPlaybackErrorDeltaMessage _pendingError;
+        private TvState _appliedState;
+        private Guid _pendingActionId;
         private bool _shutdown;
         private bool _joined;
         private bool _clientBarrier;
@@ -46,12 +38,9 @@ namespace CardShopCoop.Modules.Tv
             }
 
             _context = Context;
-            var registered = false;
             try
             {
                 ResetSessionState();
-                _context.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 _active = this;
@@ -64,10 +53,6 @@ namespace CardShopCoop.Modules.Tv
                 CoopLog.Error("TV client initialization failed: " + exception);
                 _harmony?.UnpatchSelf();
                 _harmony = null;
-                if (registered)
-                {
-                    _context.Messages.UnregisterAttributedHandlers(this);
-                }
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (ReferenceEquals(_active, this))
@@ -84,137 +69,19 @@ namespace CardShopCoop.Modules.Tv
         private void MarkJoined(PeerConnection _)
         {
             _joined = true;
-            ApplyLatestState();
+            _appliedState = null;
+            ApplyLatestState(null, true);
         }
 
-        [MessageHandler(typeof(TvBaselineMessage))]
-        private void HandleBaseline(CoopMessageContext context, TvBaselineMessage message)
+        [GlobalInformationHandler]
+        private void OnTvState(InformationChange<TvState> change)
         {
-            if (_shutdown || !TvInterop.Present)
+            if (_shutdown || !TvInterop.Present || change.Current == null)
             {
                 return;
             }
 
-            if (message.Generation < _clientGeneration)
-            {
-                return;
-            }
-
-            _latestBaseline = message;
-            ApplyLatestState();
-        }
-
-        [MessageHandler(typeof(TvMediaDeltaMessage))]
-        private void HandleMediaDelta(CoopMessageContext context, TvMediaDeltaMessage message)
-        {
-            if (_shutdown || !TvInterop.Present)
-            {
-                return;
-            }
-
-            if (message.Generation < _clientGeneration
-                || _pendingMedia != null && _pendingMedia.Generation > message.Generation)
-            {
-                // Stale media delta (older than already-applied state): retire without applying.
-                CoopPredict.Ack(message.PredictionId);
-                return;
-            }
-
-            Supersede(ref _pendingMedia, message);
-            if (_pendingError != null && _pendingError.Generation < message.Generation)
-            {
-                // The newer media state supersedes the older pending error: retire it unapplied.
-                CoopPredict.Ack(_pendingError.PredictionId);
-                _pendingError = null;
-            }
-            ReconcileWithoutController(message.PredictionId);
-            ApplyLatestState();
-        }
-
-        [MessageHandler(typeof(TvPauseDeltaMessage))]
-        private void HandlePauseDelta(CoopMessageContext context, TvPauseDeltaMessage message)
-        {
-            if (_shutdown || !TvInterop.Present)
-            {
-                return;
-            }
-
-            Supersede(ref _pendingPause, message);
-            ReconcileWithoutController(message.PredictionId);
-            ApplyLatestState();
-        }
-
-        [MessageHandler(typeof(TvPowerDeltaMessage))]
-        private void HandlePowerDelta(CoopMessageContext context, TvPowerDeltaMessage message)
-        {
-            if (_shutdown || !TvInterop.Present)
-            {
-                return;
-            }
-
-            Supersede(ref _pendingPower, message);
-            ReconcileWithoutController(message.PredictionId);
-            ApplyLatestState();
-        }
-
-        [MessageHandler(typeof(TvShuffleDeltaMessage))]
-        private void HandleShuffleDelta(CoopMessageContext context, TvShuffleDeltaMessage message)
-        {
-            if (_shutdown || !TvInterop.Present)
-            {
-                return;
-            }
-
-            Supersede(ref _pendingShuffle, message);
-            ReconcileWithoutController(message.PredictionId);
-            ApplyLatestState();
-        }
-
-        [MessageHandler(typeof(TvSeekDeltaMessage))]
-        private void HandleSeekDelta(CoopMessageContext context, TvSeekDeltaMessage message)
-        {
-            if (_shutdown || !TvInterop.Present)
-            {
-                return;
-            }
-
-            Supersede(ref _pendingSeek, message);
-            ReconcileWithoutController(message.PredictionId);
-            ApplyLatestState();
-        }
-
-        [MessageHandler(typeof(TvBarrierDeltaMessage))]
-        private void HandleBarrierDelta(CoopMessageContext context, TvBarrierDeltaMessage message)
-        {
-            if (_shutdown || !TvInterop.Present)
-            {
-                return;
-            }
-
-            Supersede(ref _pendingBarrier, message);
-            ReconcileWithoutController(message.PredictionId);
-            ApplyLatestState();
-        }
-
-        [MessageHandler(typeof(TvPlaybackErrorDeltaMessage))]
-        private void HandlePlaybackError(CoopMessageContext context, TvPlaybackErrorDeltaMessage message)
-        {
-            if (_shutdown || !TvInterop.Present)
-            {
-                return;
-            }
-
-            if (message.Generation < _clientGeneration
-                || _pendingMedia != null && _pendingMedia.Generation > message.Generation)
-            {
-                // Stale error (superseded by newer/queued media): retire without applying.
-                CoopPredict.Ack(message.PredictionId);
-                return;
-            }
-
-            Supersede(ref _pendingError, message);
-            ReconcileWithoutController(message.PredictionId);
-            ApplyLatestState();
+            ApplyLatestState(change.Current, change.IsFirstValue);
         }
 
         internal void Shutdown()
@@ -225,7 +92,6 @@ namespace CardShopCoop.Modules.Tv
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
@@ -243,26 +109,24 @@ namespace CardShopCoop.Modules.Tv
         private void ResetSessionState()
         {
             TvInterop.ResetSession();
-            _latestBaseline = null;
-            _pendingMedia = null;
-            _pendingPause = null;
-            _pendingPower = null;
-            _pendingShuffle = null;
-            _pendingSeek = null;
-            _pendingBarrier = null;
-            _pendingError = null;
+            _appliedState = null;
+            _pendingActionId = Guid.Empty;
             _joined = false;
             _clientBarrier = false;
             _clientGeneration = -1;
         }
 
         private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _)
-            => ApplyLatestState();
+        {
+            _appliedState = null;
+            ApplyLatestState();
+        }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
             TvInterop.NotifySceneLoaded();
             _clientGeneration = -1;
+            _appliedState = null;
             ApplyLatestState();
         }
 
@@ -283,34 +147,10 @@ namespace CardShopCoop.Modules.Tv
             }
         }
 
-        private static void ReconcileWithoutController(Guid predictionId)
-        {
-            if (!TvInterop.ControllerReady)
-            {
-                // The controller cannot apply yet; retire the prediction with a no-op. The delta is
-                // still retained in _pendingX and its authoritative apply runs from ApplyLatestState
-                // once the controller is ready.
-                CoopPredict.AckOrApply(predictionId, () => { });
-            }
-        }
-
-        /// <summary>Replaces a pending delta with a newer one, retiring the superseded delta's
-        /// prediction first. Without this a delta that is overwritten before ApplyLatestState runs
-        /// keeps its prediction alive, so a late rollback for it reverts playback the player has
-        /// already moved past.</summary>
-        private static void Supersede<T>(ref T slot, T message)
-            where T : class, IPredictedMessage
-        {
-            var previous = slot;
-            if (previous != null && previous.PredictionId != Guid.Empty)
-            {
-                CoopPredict.Ack(previous.PredictionId);
-            }
-
-            slot = message;
-        }
-
         private void ApplyLatestState()
+            => ApplyLatestState(Global<TvState>.Value, false);
+
+        private void ApplyLatestState(TvState state, bool first)
         {
             if (_shutdown || !_joined || _context == null || !_context.InGame
                 || !TvInterop.Present || TvInterop.ApplyingRemote || !TvInterop.ControllerReady)
@@ -318,189 +158,138 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            if (_latestBaseline != null)
+            if (state == null || ReferenceEquals(state, _appliedState))
             {
-                var baseline = _latestBaseline;
-                if (!string.IsNullOrWhiteSpace(baseline.SourceUrl) && !TvInterop.EnrollmentReady)
-                {
-                    TvInterop.RequestClientEnrollment();
-                    return;
-                }
-
-                ApplyBaseline(baseline);
-                _latestBaseline = null;
+                return;
             }
 
-            if (_pendingMedia != null && _pendingMedia.Generation < _clientGeneration)
+            if (!first && state.Generation < _clientGeneration)
             {
-                // Stale media delta superseded by applied state: retire without applying.
-                CoopPredict.Ack(_pendingMedia.PredictionId);
-                _pendingMedia = null;
+                RetireAction(state.ActionId);
+                _appliedState = state;
+                return;
             }
 
-            if (_pendingError != null && _pendingError.Generation < _clientGeneration)
-            {
-                // Stale error superseded by applied state: retire without applying.
-                CoopPredict.Ack(_pendingError.PredictionId);
-                _pendingError = null;
-            }
-
-            if (_pendingMedia != null && !string.IsNullOrWhiteSpace(_pendingMedia.SourceUrl)
-                && !TvInterop.EnrollmentReady)
+            SupersedeAction(state.ActionId);
+            if (!string.IsNullOrWhiteSpace(state.SourceUrl) && !TvInterop.EnrollmentReady)
             {
                 TvInterop.RequestClientEnrollment();
                 return;
             }
 
-            ApplyMediaDelta();
-            ApplyPauseDelta();
-            ApplyPowerDelta();
-            ApplyShuffleDelta();
-            ApplySeekDelta();
-            ApplyBarrierDelta();
-            ApplyErrorDelta();
-        }
-
-        private void ApplyBaseline(TvBaselineMessage message)
-        {
-            _clientGeneration = message.Generation;
-            _clientBarrier = message.Barrier;
-            TvInterop.ApplyMediaState(message.SourceUrl, message.StreamUrl, message.StreamTitle,
-                message.PlaylistUrl, message.IsLive, message.IsSegmentedVod, message.PlaylistIndex,
-                message.Position, message.Paused, message.PoweredOff, message.Shuffle,
-                message.Barrier, message.Resume, message.Generation);
-        }
-
-        private void ApplyMediaDelta()
-        {
-            if (_pendingMedia == null)
+            if (first)
             {
-                return;
+                ApplyBaselineState(state);
+            }
+            else
+            {
+                ApplyState(state);
             }
 
-            var message = _pendingMedia;
-            // The delta carries the host's resolved media identity (SourceUrl/StreamUrl/title/
-            // playlist index) plus its own Generation and Barrier. The optimistic Open/Next/Previous
-            // only re-ran the game operation and never produced those fields, so Confirm retires the
-            // prediction and still applies the authoritative state.
-            CoopPredict.Confirm(message.PredictionId, () =>
+            _appliedState = state;
+        }
+
+        private void ApplyBaselineState(TvState state)
+        {
+            ActionRuntime.Confirm(state.ActionId, () =>
             {
-                _clientGeneration = message.Generation;
-                _clientBarrier = message.Barrier;
-                TvInterop.ApplyMediaState(message.SourceUrl, message.StreamUrl, message.StreamTitle,
-                    message.PlaylistUrl, message.IsLive, message.IsSegmentedVod,
-                    message.PlaylistIndex, message.Position, message.Paused, message.PoweredOff,
-                    message.Shuffle, message.Barrier, message.Resume, message.Generation);
+                _clientGeneration = state.Generation;
+                _clientBarrier = state.Barrier;
+                ApplyMediaState(state);
             });
-            _pendingMedia = null;
+            _pendingActionId = Guid.Empty;
         }
 
-        private void ApplyPauseDelta()
+        private void SupersedeAction(Guid actionId)
         {
-            if (_pendingPause == null)
+            if (_pendingActionId != Guid.Empty && _pendingActionId != actionId)
             {
-                return;
+                ActionRuntime.Ack(_pendingActionId);
             }
 
-            var message = _pendingPause;
-            // Single-bit echo of the same toggle the game already ran locally; no host-computed
-            // fields, so retiring the prediction keeps the optimistic value.
-            CoopPredict.AckOrApply(message.PredictionId,
-                () => TvInterop.ApplyPaused(message.Paused));
-            _pendingPause = null;
+            _pendingActionId = actionId;
         }
 
-        private void ApplyPowerDelta()
+        private static void RetireAction(Guid actionId)
         {
-            if (_pendingPower == null)
+            if (actionId != Guid.Empty)
             {
-                return;
+                ActionRuntime.Ack(actionId);
             }
-
-            var message = _pendingPower;
-            // Single-bit echo of the same toggle the game already ran locally; no host-computed
-            // fields, so retiring the prediction keeps the optimistic value.
-            CoopPredict.AckOrApply(message.PredictionId,
-                () => TvInterop.ApplyPowered(message.PoweredOff));
-            _pendingPower = null;
         }
 
-        private void ApplyShuffleDelta()
+        private void ApplyState(TvState state)
         {
-            if (_pendingShuffle == null)
+            switch (state.Operation)
             {
-                return;
+                case TvStateOperations.Open:
+                case TvStateOperations.Playlist:
+                case TvStateOperations.Next:
+                case TvStateOperations.Previous:
+                    ActionRuntime.Confirm(state.ActionId, () =>
+                    {
+                        _clientGeneration = state.Generation;
+                        _clientBarrier = state.Barrier;
+                        ApplyMediaState(state);
+                    });
+                    break;
+
+                case TvStateOperations.Pause:
+                    ActionRuntime.AckOrApply(state.ActionId,
+                        () => TvInterop.ApplyPaused(state.Paused));
+                    break;
+
+                case TvStateOperations.Power:
+                    ActionRuntime.AckOrApply(state.ActionId,
+                        () => TvInterop.ApplyPowered(state.PoweredOff));
+                    break;
+
+                case TvStateOperations.Shuffle:
+                    ActionRuntime.AckOrApply(state.ActionId,
+                        () => TvInterop.ApplyShuffle(state.Shuffle));
+                    break;
+
+                case TvStateOperations.Seek:
+                    ActionRuntime.Confirm(state.ActionId,
+                        () => TvInterop.ApplySeek(state.Position));
+                    break;
+
+                case TvStateOperations.Barrier:
+                    ActionRuntime.Confirm(state.ActionId, () =>
+                    {
+                        _clientBarrier = state.Barrier;
+                        TvInterop.ApplyBarrier(state.Barrier, state.Resume);
+                    });
+                    break;
+
+                case TvStateOperations.Error:
+                    ActionRuntime.Confirm(state.ActionId, () =>
+                    {
+                        _clientGeneration = Math.Max(_clientGeneration, state.Generation);
+                        _clientBarrier = false;
+                        TvInterop.ApplyPlaybackError();
+                    });
+                    break;
+
+                default:
+                    ActionRuntime.Confirm(state.ActionId, () =>
+                    {
+                        _clientGeneration = state.Generation;
+                        _clientBarrier = state.Barrier;
+                        ApplyMediaState(state);
+                    });
+                    break;
             }
 
-            var message = _pendingShuffle;
-            // Single-bit echo of the same toggle the game already ran locally; no host-computed
-            // fields, so retiring the prediction keeps the optimistic value.
-            CoopPredict.AckOrApply(message.PredictionId,
-                () => TvInterop.ApplyShuffle(message.Shuffle));
-            _pendingShuffle = null;
+            _pendingActionId = Guid.Empty;
         }
 
-        private void ApplySeekDelta()
+        private static void ApplyMediaState(TvState state)
         {
-            if (_pendingSeek == null)
-            {
-                return;
-            }
-
-            var message = _pendingSeek;
-            // The host seeks from its own playback clock and returns the resulting absolute
-            // Position; the client's optimistic target came from its own (drifting) clock, so
-            // Confirm retires the prediction and applies the host position.
-            CoopPredict.Confirm(message.PredictionId,
-                () => TvInterop.ApplySeek(message.Position));
-            _pendingSeek = null;
-        }
-
-        private void ApplyBarrierDelta()
-        {
-            if (_pendingBarrier == null)
-            {
-                return;
-            }
-
-            var message = _pendingBarrier;
-            // Barrier is host-assigned state the client never predicts; PublishBarrierDelta always
-            // sends Guid.Empty today, so this always applied, and Confirm keeps that guarantee if an
-            // id is ever attached.
-            CoopPredict.Confirm(message.PredictionId, () =>
-            {
-                _clientBarrier = message.Barrier;
-                TvInterop.ApplyBarrier(message.Barrier, message.Resume);
-            });
-            _pendingBarrier = null;
-        }
-
-        private void ApplyErrorDelta()
-        {
-            if (_pendingError == null)
-            {
-                return;
-            }
-
-            var message = _pendingError;
-            if (message.Generation < _clientGeneration)
-            {
-                // Stale error superseded by applied state: retire without applying.
-                CoopPredict.Ack(message.PredictionId);
-                _pendingError = null;
-                return;
-            }
-
-            // The error carries the host Generation and marks playback the host aborted; the
-            // optimistic media run could not produce that, so Confirm retires the prediction and
-            // still stops/clears the failed stream.
-            CoopPredict.Confirm(message.PredictionId, () =>
-            {
-                _clientGeneration = Math.Max(_clientGeneration, message.Generation);
-                _clientBarrier = false;
-                TvInterop.ApplyPlaybackError();
-            });
-            _pendingError = null;
+            TvInterop.ApplyMediaState(state.SourceUrl, state.StreamUrl, state.StreamTitle,
+                state.PlaylistUrl, state.IsLive, state.IsSegmentedVod, state.PlaylistIndex,
+                state.Position, state.Paused, state.PoweredOff, state.Shuffle,
+                state.Barrier, state.Resume, state.Generation);
         }
 
         private static void ApplyPatches(Harmony harmony)
@@ -521,7 +310,7 @@ namespace CardShopCoop.Modules.Tv
             TryPatch(harmony, "StreamYouTube", null,
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(StreamYouTubePostfix)));
             // The game performs every control through its own path; these observe the resulting
-            // local change and register one post-hoc prediction. No vanilla input is suppressed.
+            // local change and register one post-hoc action. No vanilla input is suppressed.
             TryPatch(harmony, "HandleGlobalInput",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(GlobalInputPrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(GlobalInputPostfix)));
@@ -619,24 +408,21 @@ namespace CardShopCoop.Modules.Tv
             }
         }
 
-        private static bool CanPredict()
+        private static bool CanAct()
         {
             return _active != null && !_active._shutdown && _active._joined
                 && _active._context != null && _active._context.InGame && TvInterop.Present;
         }
 
-        private static void SendIntent(Guid predictionId, byte op, string url = null,
-            string title = null, double value = 0)
-        {
-            _active._context.Send(1, new TvOpMessage
+        private static void SendAction(byte op, string url = null, string title = null,
+            double value = 0, Action apply = null, Action undo = null)
+            => ActionRuntime.Submit(new TvOpMessage
             {
-                PredictionId = predictionId,
                 Op = op,
                 Url = url,
                 Title = title,
                 Value = value,
-            });
-        }
+            }, apply, undo);
 
         /// <summary>Captures the pending URL before the game clears it, so the Open the quality
         /// dialog launches can be observed and forwarded with its original (pre-resolution) URL.</summary>
@@ -650,7 +436,7 @@ namespace CardShopCoop.Modules.Tv
         private static void QualityPrefix(out QualityState __state)
         {
             __state = default;
-            if (!CanPredict() || TvInterop.ApplyingRemote)
+            if (!CanAct() || TvInterop.ApplyingRemote)
             {
                 return;
             }
@@ -668,7 +454,7 @@ namespace CardShopCoop.Modules.Tv
 
         private static void QualityPostfix(QualityState __state)
         {
-            if (!__state.Armed || !CanPredict() || TvInterop.ApplyingRemote)
+            if (!__state.Armed || !CanAct() || TvInterop.ApplyingRemote)
             {
                 return;
             }
@@ -702,7 +488,7 @@ namespace CardShopCoop.Modules.Tv
             var now = TvInterop.Position;
             var seekHeld = alt
                 && (Input.GetKey(KeyCode.RightBracket) || Input.GetKey(KeyCode.LeftBracket));
-            if (CanPredict() && !TvInterop.ApplyingRemote && _seekHeld
+            if (CanAct() && !TvInterop.ApplyingRemote && _seekHeld
                 && Math.Abs(now - _seekObservedPosition) >= 1.0)
             {
                 ForwardSeek(_seekObservedPosition, now - _seekObservedPosition);
@@ -711,7 +497,7 @@ namespace CardShopCoop.Modules.Tv
             _seekObservedPosition = now;
             _seekHeld = seekHeld;
 
-            if (!CanPredict() || TvInterop.ApplyingRemote || !alt)
+            if (!CanAct() || TvInterop.ApplyingRemote || !alt)
             {
                 return;
             }
@@ -742,7 +528,7 @@ namespace CardShopCoop.Modules.Tv
 
         private static void GlobalInputPostfix(GlobalInputState __state)
         {
-            if (!CanPredict() || TvInterop.ApplyingRemote)
+            if (!CanAct() || TvInterop.ApplyingRemote)
             {
                 return;
             }
@@ -766,48 +552,45 @@ namespace CardShopCoop.Modules.Tv
         }
 
         /// <summary>Captures the playback state before a control the game performs itself, so the
-        /// postfix can register one observed prediction and replay it if the host rejects it.</summary>
+        /// postfix can register one observed action and replay it if the host rejects it.</summary>
         private static void CapturePrefix(out TvInterop.PlaybackUndoState __state)
             => __state = TvInterop.CapturePlaybackState();
 
         private static void PausePostfix(TvInterop.PlaybackUndoState __state)
         {
-            if (!CanPredict() || TvInterop.ApplyingRemote || TvInterop.Paused == __state.Paused)
+            if (!CanAct() || TvInterop.ApplyingRemote || TvInterop.Paused == __state.Paused)
             {
                 return;
             }
 
-            CoopPredict.Predict(PredictionScope,
-                predictionId => SendIntent(predictionId, Pause),
-                () => TvInterop.ApplyPaused(!__state.Paused),
-                () => TvInterop.ApplyPaused(__state.Paused));
+            SendAction(Pause,
+                apply: () => TvInterop.ApplyPaused(!__state.Paused),
+                undo: () => TvInterop.ApplyPaused(__state.Paused));
         }
 
         private static void PowerPostfix(TvInterop.PlaybackUndoState __state)
         {
-            if (!CanPredict() || TvInterop.ApplyingRemote
+            if (!CanAct() || TvInterop.ApplyingRemote
                 || TvInterop.PoweredOff == __state.PoweredOff)
             {
                 return;
             }
 
-            CoopPredict.Predict(PredictionScope,
-                predictionId => SendIntent(predictionId, Power),
-                () => TvInterop.ApplyPowered(!__state.PoweredOff),
-                () => TvInterop.ApplyPowered(__state.PoweredOff));
+            SendAction(Power,
+                apply: () => TvInterop.ApplyPowered(!__state.PoweredOff),
+                undo: () => TvInterop.ApplyPowered(__state.PoweredOff));
         }
 
         private static void ShufflePostfix(TvInterop.PlaybackUndoState __state)
         {
-            if (!CanPredict() || TvInterop.ApplyingRemote || TvInterop.Shuffle == __state.Shuffle)
+            if (!CanAct() || TvInterop.ApplyingRemote || TvInterop.Shuffle == __state.Shuffle)
             {
                 return;
             }
 
-            CoopPredict.Predict(PredictionScope,
-                predictionId => SendIntent(predictionId, Shuffle),
-                () => TvInterop.ApplyShuffle(!__state.Shuffle),
-                () => TvInterop.ApplyShuffle(__state.Shuffle));
+            SendAction(Shuffle,
+                apply: () => TvInterop.ApplyShuffle(!__state.Shuffle),
+                undo: () => TvInterop.ApplyShuffle(__state.Shuffle));
         }
 
         private static void NextPostfix(TvInterop.PlaybackUndoState __state)
@@ -821,15 +604,14 @@ namespace CardShopCoop.Modules.Tv
         private static void ForwardMedia(byte op, TvInterop.PlaybackUndoState prior, string url,
             string title)
         {
-            if (!CanPredict() || TvInterop.ApplyingRemote)
+            if (!CanAct() || TvInterop.ApplyingRemote)
             {
                 return;
             }
 
-            CoopPredict.Predict(PredictionScope,
-                predictionId => SendIntent(predictionId, op, url, title),
-                () => TvInterop.ApplyOperation(op, url, title, 0),
-                () => TvInterop.RestorePlaybackState(prior));
+            SendAction(op, url, title,
+                apply: () => TvInterop.ApplyOperation(op, url, title, 0),
+                undo: () => TvInterop.RestorePlaybackState(prior));
         }
 
         /// <summary>Shuffle/power have no vanilla key binding: drive the game's own control for the
@@ -842,20 +624,18 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            CoopPredict.Predict(PredictionScope,
-                predictionId => SendIntent(predictionId, op),
-                () => TvInterop.ApplyOperation(op, null, null, 0),
-                () => TvInterop.RestorePlaybackState(prior));
+            SendAction(op,
+                apply: () => TvInterop.ApplyOperation(op, null, null, 0),
+                undo: () => TvInterop.RestorePlaybackState(prior));
         }
 
         private static void ForwardSeek(double fromPosition, double delta)
         {
             var target = Math.Max(0.0,
                 Math.Min(TvInterop.MaxPositionSeconds, fromPosition + delta));
-            CoopPredict.Predict(PredictionScope,
-                predictionId => SendIntent(predictionId, Seek, value: delta),
-                () => TvInterop.ApplySeek(target),
-                () => TvInterop.ApplySeek(fromPosition));
+            SendAction(Seek, value: delta,
+                apply: () => TvInterop.ApplySeek(target),
+                undo: () => TvInterop.ApplySeek(fromPosition));
         }
     }
 }

@@ -75,6 +75,10 @@ namespace CardShopCoop.Util
                 catch (Exception e) { CoopLog.Swallow(e); }
             }
         }
+
+        /// <summary>Flushes the batched log immediately. A support report reads the file right
+        /// after this call, so the line the player is looking at must already be on disk.</summary>
+        public static void FlushNow() => Flush();
     }
 }
 

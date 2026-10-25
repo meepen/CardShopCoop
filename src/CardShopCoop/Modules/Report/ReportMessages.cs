@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
@@ -41,12 +40,8 @@ namespace CardShopCoop.Modules.Report
     }
 
     [NetworkMessage]
-    public sealed class ReportDeltaMessage : IPredictedMessage
+    public sealed class ReportDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public byte Kind;
         public bool OpenScreen;
         public bool CloseScreen;

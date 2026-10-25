@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Runtime;
 using UnityEngine;
 
@@ -18,6 +18,7 @@ namespace CardShopCoop.Modules.Presence
         // Host connection id -> display name, kept from the roster so the window can list players.
         private readonly Dictionary<int, string> _rosterNames = new();
         private readonly HashSet<int> _modelIds = new();
+        private readonly Dictionary<int, PresenceModelEntry> _models = new();
         private CoopRuntimeContext _context;
         private PresenceService _service;
         private float _stateTimer;
@@ -32,6 +33,23 @@ namespace CardShopCoop.Modules.Presence
 
         internal bool IsLocalConnection(int connectionId)
             => _selfId > 0 && connectionId == _selfId;
+
+        /// <summary>The host sends the host's own model as id 0, while a client's roster calls the
+        /// host 1. Normalize the model store to roster ids so diagnostics can look a player up by
+        /// the same id the window lists.</summary>
+        private static int RosterModelId(int id) => id == 0 ? 1 : id;
+
+        internal bool TryGetModel(int connectionId, out PresenceModelEntry model)
+        {
+            if (_models.TryGetValue(connectionId, out var stored) && stored != null)
+            {
+                model = Clone(stored);
+                return true;
+            }
+
+            model = null;
+            return false;
+        }
 
         /// <summary>The session roster for the window: the host first (id 1 from a client's view),
         /// then this player, then the other clients in id order.</summary>
@@ -136,7 +154,7 @@ namespace CardShopCoop.Modules.Presence
             SendLocalModel();
         }
 
-        [MessageHandler(typeof(PresenceRosterMessage))]
+        [MessageHandler]
         private void HandleRoster(MessageContext context, PresenceRosterMessage message)
         {
             if (message == null)
@@ -187,7 +205,7 @@ namespace CardShopCoop.Modules.Presence
             }
         }
 
-        [MessageHandler(typeof(PresenceRosterDeltaMessage))]
+        [MessageHandler]
         private void HandleRosterDelta(MessageContext _, PresenceRosterDeltaMessage message)
         {
             if (message == null)
@@ -214,7 +232,7 @@ namespace CardShopCoop.Modules.Presence
             _service.SetName(avatarId, message.Entry.Name);
         }
 
-        [MessageHandler(typeof(PresenceStateMessage))]
+        [MessageHandler]
         private void HandleHostState(MessageContext context, PresenceStateMessage message)
         {
             if (message == null)
@@ -225,7 +243,7 @@ namespace CardShopCoop.Modules.Presence
             _service.ApplyState(1, message);
         }
 
-        [MessageHandler(typeof(PresenceRelayStateMessage))]
+        [MessageHandler]
         private void HandleRelayState(MessageContext context, PresenceRelayStateMessage message)
         {
             if (message == null)
@@ -236,7 +254,7 @@ namespace CardShopCoop.Modules.Presence
             _service.ApplyState(1000 + message.SenderId, message.State);
         }
 
-        [MessageHandler(typeof(PresenceHoldMessage))]
+        [MessageHandler]
         private void HandleHostHold(MessageContext context, PresenceHoldMessage message)
         {
             if (message == null)
@@ -247,7 +265,7 @@ namespace CardShopCoop.Modules.Presence
             _service.ApplyHold(1, message);
         }
 
-        [MessageHandler(typeof(PresenceRelayHoldMessage))]
+        [MessageHandler]
         private void HandleRelayHold(MessageContext context, PresenceRelayHoldMessage message)
         {
             if (message?.Hold == null)
@@ -258,7 +276,7 @@ namespace CardShopCoop.Modules.Presence
             _service.ApplyHold(1000 + message.SenderId, message.Hold);
         }
 
-        [MessageHandler(typeof(PresenceModelStateMessage))]
+        [MessageHandler]
         private void HandleModelState(MessageContext context, PresenceModelStateMessage message)
         {
             if (message == null)
@@ -289,6 +307,7 @@ namespace CardShopCoop.Modules.Presence
             foreach (var entry in message.Entries)
             {
                 seen.Add(entry.Id);
+                _models[RosterModelId(entry.Id)] = Clone(entry);
                 if (entry.Id == _selfId)
                 {
                     _lastSentModel = Clone(entry);
@@ -313,11 +332,12 @@ namespace CardShopCoop.Modules.Presence
             foreach (var id in stale)
             {
                 _modelIds.Remove(id);
+                _models.Remove(RosterModelId(id));
                 _service.Remove(id == 0 ? 1 : 1000 + id);
             }
         }
 
-        [MessageHandler(typeof(PresenceModelDeltaMessage))]
+        [MessageHandler]
         private void HandleModelDelta(MessageContext _, PresenceModelDeltaMessage message)
         {
             if (message == null)
@@ -328,6 +348,7 @@ namespace CardShopCoop.Modules.Presence
             if (message.Kind == PresenceEntityDeltaKind.Remove)
             {
                 _modelIds.Remove(message.Id);
+                _models.Remove(RosterModelId(message.Id));
                 _service.Remove(message.Id == 0 ? 1 : 1000 + message.Id);
                 return;
             }
@@ -337,9 +358,11 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
+            _models[RosterModelId(message.Id)] = Clone(message.Entry);
+
             if (message.Id == _selfId)
             {
-                PredictionApi.AckOrApply(message.PredictionId,
+                ActionLedger.AckOrApply(message.ActionId,
                     () =>
                     {
                         _service.ApplyPredictionLocalModel(message.Entry);
@@ -352,7 +375,7 @@ namespace CardShopCoop.Modules.Presence
             _service.SetModel(message.Id == 0 ? 1 : 1000 + message.Id, message.Entry);
         }
 
-        [MessageHandler(typeof(PresenceRelayTagMessage))]
+        [MessageHandler]
         private void HandleRelayTag(MessageContext context, PresenceRelayTagMessage message)
         {
             if (message == null)
@@ -390,6 +413,7 @@ namespace CardShopCoop.Modules.Presence
             _rosterIds.Clear();
             _rosterNames.Clear();
             _modelIds.Clear();
+            _models.Clear();
             _joined = false;
             _service?.ClearRemoteAvatars();
         }
@@ -434,6 +458,7 @@ namespace CardShopCoop.Modules.Presence
             _rosterIds.Clear();
             _rosterNames.Clear();
             _modelIds.Clear();
+            _models.Clear();
             _joined = false;
             _modelPending = false;
             _pendingModelState = null;
@@ -458,7 +483,7 @@ namespace CardShopCoop.Modules.Presence
                 {
                     _context.Send(1, new PresenceModelRequestMessage
                     {
-                        PredictionId = Guid.Empty,
+                        ActionId = Guid.Empty,
                         Female = next.Female,
                         ModelIndex = next.ModelIndex,
                         CustomizationJson = next.CustomizationJson,
@@ -472,11 +497,11 @@ namespace CardShopCoop.Modules.Presence
                 // (OnLocalModelChanged runs from the service's ModelChanged event), so register the
                 // prediction post-hoc: apply/undo only replay the change through the service, and
                 // the local send record is advanced here rather than by the prediction.
-                PredictionApi.Predict(
+                ActionLedger.Submit(
                     "presence.model",
-                    predictionId => _context.Send(1, new PresenceModelRequestMessage
+                    actionId => _context.Send(1, new PresenceModelRequestMessage
                     {
-                        PredictionId = predictionId,
+                        ActionId = actionId,
                         Female = next.Female,
                         ModelIndex = next.ModelIndex,
                         CustomizationJson = next.CustomizationJson,

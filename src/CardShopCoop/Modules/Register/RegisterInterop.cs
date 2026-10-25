@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using CardShopCoop.Modules.World;
 using CardShopCoop.Runtime;
 using CardShopCoop.Util;
 using UnityEngine;
@@ -46,24 +45,6 @@ namespace CardShopCoop.Modules.Register
             field?.SetValue(target, value);
         }
 
-        internal const int CashierKind = 4;
-
-        /// <summary>The stable placement key of a cashier counter, or 0 when it has none. The key
-        /// (kind + placement identity) is independent of the live list order, so it survives a
-        /// counter being sold or moved while another register is in use. The host assigns an
-        /// identity on first use; a client only answers for identities the placement channel has
-        /// already bound to its own counter objects.</summary>
-        internal static int Key(InteractableCashierCounter counter)
-            => counter != null && PlacementApi.TryMakeObjectKey(CashierKind, counter, out var key)
-                ? key : 0;
-
-        /// <summary>The live counter a stable key names, or null when this peer does not hold it
-        /// (yet). Never adopts a different object: the placement channel binds one identity per
-        /// entity, so an unresolved key simply waits instead of addressing the wrong register.</summary>
-        internal static InteractableCashierCounter CounterForKey(int key)
-            => key != 0 && PlacementApi.ResolveObjectByKey(key) is InteractableCashierCounter counter
-                ? counter : null;
-
         internal static UI_CashCounterScreen CashScreen(InteractableCashierCounter counter)
             => Read(counter, "m_UICashCounterScreen") as UI_CashCounterScreen;
 
@@ -96,8 +77,12 @@ namespace CardShopCoop.Modules.Register
 
         internal static void SetGivenAmount(InteractableCounterMoneyChange change, int amount)
         {
-            if (change == null)
+            if (change == null || change.m_CashierCounter == null
+                || !change.m_CashierCounter.IsGivingChange())
             {
+                // The game's click path only accepts input while giving change. Writing the field
+                // without the clicks would fabricate a count with no visuals or added counters, so
+                // an absolute restore must enter the phase first (Render uses RebuildChangeStack).
                 return;
             }
 
@@ -105,7 +90,7 @@ namespace CardShopCoop.Modules.Register
             var current = GivenAmount(change);
             if (current == amount)
             {
-                // The optimistic prediction (or an earlier delta) already produced this absolute
+                // The optimistic action (or an earlier delta) already produced this absolute
                 // count. ResetAmountGiven only clears m_GivenAmount and the stack visuals - it does
                 // NOT undo OnGiveChange, so replaying OnMouseButtonUp here called OnGiveChange a
                 // second time and double-counted the counter's change value and coin/bill counters.
@@ -135,16 +120,6 @@ namespace CardShopCoop.Modules.Register
             // even when this absolute delta arrives after the phase has already advanced.
             Write(change, "m_GivenAmount", amount);
         }
-
-        internal static int CustomerIndex(Customer customer)
-        {
-            var manager = SceneRef<CustomerManager>.Get();
-            var customers = manager?.GetCustomerList();
-            return customers == null || customer == null ? -1 : customers.IndexOf(customer);
-        }
-
-        internal static bool IsManned(InteractableCashierCounter counter)
-            => counter != null && counter.IsMannedByPlayer();
 
         internal static bool IsFinite(double value)
             => !double.IsNaN(value) && !double.IsInfinity(value);
@@ -202,7 +177,7 @@ namespace CardShopCoop.Modules.Register
         /// <summary>Returns the credit card machine to its resting spot and hides the hand-held
         /// card model. Mirrors the card half of vanilla <c>OnPressSpaceBar</c>, which only runs
         /// when the local player is standing at the counter. The client needs it too when a
-        /// prediction is rolled back so a later re-entry into giving change cannot capture the
+        /// action is rolled back so a later re-entry into giving change cannot capture the
         /// already-moved machine as its "original" position.</summary>
         internal static void RestoreCreditCardMachine(InteractableCashierCounter counter)
         {
@@ -312,18 +287,55 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
+            // The item and card pools are scene singletons. During a game or scene teardown they
+            // are already gone, and returning content to them throws inside the game's own
+            // DisableItem (ItemSpawnManager.m_ItemParentGrp is null by then). The pool is the
+            // normal path; once it is gone the mirror content has no home, so destroy it instead of
+            // leaving the station's clones parented to a destroyed counter.
+            var itemPool = SceneRef<ItemSpawnManager>.Get();
+            var itemsArePoolable = itemPool != null && itemPool.m_ItemParentGrp != null;
+            var cardsArePoolable = SceneRef<Card3dUISpawner>.Get() != null;
+
             var items = customer.m_ItemInBagList;
             for (var i = items == null ? -1 : items.Count - 1; i >= 0; i--)
             {
-                items[i]?.DisableItem();
+                var item = items[i];
+                if (item == null)
+                {
+                    continue;
+                }
+
+                if (itemsArePoolable)
+                {
+                    item.DisableItem();
+                }
+                else
+                {
+                    UnityEngine.Object.Destroy(item.gameObject);
+                }
             }
+
             items?.Clear();
 
             var cards = customer.m_CardInBagList;
             for (var i = cards == null ? -1 : cards.Count - 1; i >= 0; i--)
             {
-                cards[i]?.OnDestroyed();
+                var card = cards[i];
+                if (card == null)
+                {
+                    continue;
+                }
+
+                if (cardsArePoolable)
+                {
+                    card.OnDestroyed();
+                }
+                else
+                {
+                    UnityEngine.Object.Destroy(card.gameObject);
+                }
             }
+
             cards?.Clear();
         }
 
@@ -348,7 +360,7 @@ namespace CardShopCoop.Modules.Register
 
             item.m_InteractableScanItem.enabled = true;
             item.m_InteractableScanItem.RegisterScanItem(customer,
-                counter != null ? counter.m_ScannedItemLerpPos : null);
+                counter?.m_ScannedItemLerpPos);
         }
 
         /// <summary>Card counterpart of <see cref="UnscanItem"/>.</summary>
@@ -369,7 +381,7 @@ namespace CardShopCoop.Modules.Register
                 rigidbody.isKinematic = false;
             }
 
-            card.RegisterScanCard(customer, counter != null ? counter.m_ScannedItemLerpPos : null);
+            card.RegisterScanCard(customer, counter?.m_ScannedItemLerpPos);
         }
 
         internal static Item SpawnItem(InteractableCashierCounter counter, Customer customer,

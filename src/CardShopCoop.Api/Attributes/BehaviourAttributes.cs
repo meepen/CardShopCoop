@@ -20,7 +20,9 @@ namespace CardShopCoop.Attributes
     }
 
     /// <summary>Marks a behaviour that exists for the lifetime of the plugin process rather
-    /// than only while a host/client session is active.</summary>
+    /// than only while a host/client session is active. It still receives
+    /// <c>[OnSessionStarted]</c> and <c>[OnSessionStopped]</c> once for each session while it
+    /// remains alive across them.</summary>
     [AttributeUsage(AttributeTargets.Class, Inherited = false)]
     public sealed class PersistentBehaviourAttribute : Attribute
     {

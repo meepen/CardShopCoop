@@ -1,4 +1,3 @@
-using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 using UnityEngine;
@@ -7,22 +6,14 @@ namespace CardShopCoop.Modules.Light
 {
     /// <summary>Host-owned shop-light state.</summary>
     [NetworkMessage]
-    public sealed class LightSwitchStateMessage : IPredictedMessage
+    public sealed class LightSwitchStateMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public bool IsActive;
     }
 
     [NetworkMessage]
-    public sealed class LightSwitchIntentMessage : IPredictedMessage
+    public sealed class LightSwitchIntentMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public bool IsActive;
     }
 
@@ -67,15 +58,9 @@ namespace CardShopCoop.Modules.Light
                     continue;
                 }
 
-                if (lightSwitch.m_SwitchOnModel != null)
-                {
-                    lightSwitch.m_SwitchOnModel.SetActive(isActive);
-                }
+                lightSwitch.m_SwitchOnModel?.SetActive(isActive);
 
-                if (lightSwitch.m_SwitchOffModel != null)
-                {
-                    lightSwitch.m_SwitchOffModel.SetActive(!isActive);
-                }
+                lightSwitch.m_SwitchOffModel?.SetActive(!isActive);
             }
         }
     }

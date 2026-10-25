@@ -97,15 +97,13 @@ namespace CardShopCoop.Modules.Catalog
         /// path that has to refuse an unmappable id must test for None explicitly.</summary>
         public static int Sentinel(EnumKind kind)
         {
-            switch (kind)
+            return kind switch
             {
-                case EnumKind.DecoObject:
-                    return 0;  // EDecoObject.None = 0
-                case EnumKind.MonsterType:
-                    return 0; // EMonsterType.None = 0 (EarlyPlayer = -1)
-                default:
-                    return -1;                  // EItemType/EObjectType/ECardExpansionType.None = -1
-            }
+                EnumKind.DecoObject => 0,// EDecoObject.None = 0
+                EnumKind.MonsterType => 0,// EMonsterType.None = 0 (EarlyPlayer = -1)
+                _ => -1,// EItemType/EObjectType/ECardExpansionType.None = -1
+            };
+
         }
 
         // ------------------------------------------------------------------ value-map API
@@ -244,25 +242,18 @@ namespace CardShopCoop.Modules.Catalog
 
         internal static Type WireType(EnumKind kind)
         {
-            switch (kind)
+            return kind switch
             {
-                case EnumKind.ItemType:
-                    return typeof(EItemType);
-                case EnumKind.ObjectType:
-                    return typeof(EObjectType);
-                case EnumKind.DecoObject:
-                    return typeof(EDecoObject);
-                case EnumKind.CardExpansion:
-                    return typeof(ECardExpansionType);
-                case EnumKind.MonsterType:
-                    return typeof(EMonsterType);
-                case EnumKind.Rarity:
-                    return typeof(ERarity);
-                case EnumKind.CollectionPack:
-                    return typeof(ECollectionPackType);
-                default:
-                    throw new ArgumentOutOfRangeException("kind", kind, "Unknown enum kind");
-            }
+                EnumKind.ItemType => typeof(EItemType),
+                EnumKind.ObjectType => typeof(EObjectType),
+                EnumKind.DecoObject => typeof(EDecoObject),
+                EnumKind.CardExpansion => typeof(ECardExpansionType),
+                EnumKind.MonsterType => typeof(EMonsterType),
+                EnumKind.Rarity => typeof(ERarity),
+                EnumKind.CollectionPack => typeof(ECollectionPackType),
+                _ => throw new ArgumentOutOfRangeException("kind", kind, "Unknown enum kind"),
+            };
+
         }
 
         /// <summary>True when <paramref name="value"/> is a DEFINED member of the runtime enum for

@@ -54,8 +54,11 @@ soft-depends on `dev.meepen.cardshopcoop` is integrated automatically). There is
 The transport pump runs on a dedicated background thread, not the Unity frame loop. `NetworkPump`
 owns that thread and is the only thing that advances the pump:
 
-- The chain is `NetworkPump(LagTransport(bearer + KcpSessionManager))`. Providers create and start
-  it; `CoopCore.Net` is the pump. Never call `PumpNetworkThread` from the Unity update loop.
+- The chain is `NetworkPump(LagTransport(KcpSessionManager(bearer)))`. A contributed transport
+  provides only an `IDatagramTransport` bearer through `INetworkingBackend`; `CoopCore` creates and
+  starts the KCP session and the pump, and owns the attempt handle, peer identities, and id band.
+  A backend never creates `KcpSessionManager`, `PeerConnection`, or `ConnectionId`.
+  `CoopCore.Net` is the pump. Never call `PumpNetworkThread` from the Unity update loop.
 - `KcpSessionManager` is single-threaded: `Start`, `PumpNetworkThread`, `ActivateMessageIds`,
   `Stop`, and `Dispose` all run on the network thread. `NetworkPump` marshals the lifecycle calls
   onto it. Producers may call `Send`/`Broadcast` from any thread; they only enqueue an owned frame
@@ -64,6 +67,13 @@ owns that thread and is the only thing that advances the pump:
   thread, so application work such as `SendHello` is marshalled to the Unity thread, and pump
   sampling uses `PerfProbe.ThreadSample`, never `PerfProbe.Sample` (which calls the Unity
   profiler).
+- Frame validation may run on the framing worker, but JSON deserialization runs on the Unity
+  thread (`KcpSessionManager.TryDequeueIncoming` / `CoopCore`). Entity-bearing DTO converters
+  resolve live scene objects, so `JsonConverter.ReadJson` must never run on the pump or worker.
+  `LagTransport` delays `WireFrame`s, not decoded DTOs, and must not re-encode a message to
+  estimate bytes.
+- Entity-bearing DTOs must be constructed and sent on the Unity thread; `MainThreadGuard` enforces
+  this at the converter boundary.
 - Steamworks is split: `SteamAPI` init/`RunCallbacks` and the status-callback registration stay on
   the main thread, while the bearer `Send`/`Poll` run on the network thread. Host authorization is
   evaluated in the status callback (main) and carried with the queued change, so `Poll` never

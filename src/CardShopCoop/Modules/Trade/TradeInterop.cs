@@ -28,16 +28,20 @@ namespace CardShopCoop.Modules.Trade
             return (player - target).sqrMagnitude <= radius * radius;
         }
 
-        internal static int CustomerListIndex(Customer customer)
+        internal static int LocalCustomerIndex(Customer customer)
         {
-            var customers = Customers;
-            return customers == null || customer == null ? -1 : customers.IndexOf(customer);
-        }
+            if (customer == null)
+            {
+                return -1;
+            }
 
-        internal static ushort CustomerIdentity(Customer customer)
-        {
-            var index = CustomerListIndex(customer);
-            return index < 0 || index > ushort.MaxValue ? ushort.MaxValue : (ushort)index;
+            if (NpcClientBehaviour.TryGetWireIdentity(customer, out var wireIndex, out _))
+            {
+                return wireIndex;
+            }
+
+            var customers = Customers;
+            return customers == null ? -1 : customers.IndexOf(customer);
         }
 
         internal static int CustomerGeneration(Customer customer)
@@ -45,24 +49,15 @@ namespace CardShopCoop.Modules.Trade
             return customer == null ? 0 : NpcHostBehaviour.GetCustomerGeneration(customer);
         }
 
-        internal static bool SameCustomer(Customer customer, ushort index, int generation)
-        {
-            return customer != null && CustomerIdentity(customer) == index
-                && CustomerGeneration(customer) == generation;
-        }
-
         internal static bool IsWaitingForTrade(Customer customer)
         {
             return customer != null && customer.m_CurrentState == ECustomerState.WaitingToTradeCard;
         }
 
-        internal static int CounterIndex(Customer customer)
-        {
-            var counter = Read(customer, "m_CurrentTradeCardCashierCounter") as InteractableCashierCounter;
-            var shelf = SceneRef<ShelfManager>.Get();
-            var counters = shelf?.m_CashierCounterList;
-            return counter == null || counters == null ? -1 : counters.IndexOf(counter);
-        }
+        /// <summary>The live counter the customer is trading at, or null when it is not waiting
+        /// at one. Never a list index.</summary>
+        internal static InteractableCashierCounter TradeCounter(Customer customer)
+            => Read(customer, "m_CurrentTradeCardCashierCounter") as InteractableCashierCounter;
 
         internal static Customer CurrentCustomer(CustomerTradeCardScreen screen)
         {

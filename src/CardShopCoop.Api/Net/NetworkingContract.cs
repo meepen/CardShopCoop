@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Threading.Tasks;
 using CardShopCoop.Net.Connection;
+using CardShopCoop.Net.Datagrams;
 
 namespace CardShopCoop.Net.Networking
 {
@@ -56,10 +57,10 @@ namespace CardShopCoop.Net.Networking
 
     /// <summary>
     /// Opaque handle for one Connect attempt and the session it becomes, allocated by the
-    /// backend. Every callback carries it, so a backend can drop a late callback from an attempt
-    /// the player already replaced, and the runtime can drop anything addressed to a session it
-    /// has moved past. NOT the same thing as <see cref="PeerConnection.Id"/> (a small per-peer id
-    /// where 1 is the host) - this identifies the local side's connection attempt.
+    /// runtime. The backend receives it in Connect and passes it back to every callback; the
+    /// runtime ignores anything addressed to an attempt it has moved past. NOT the same thing as
+    /// <see cref="PeerConnection.Id"/> (a per-peer id where 1 is the host) - this identifies the
+    /// local side's connection attempt.
     /// </summary>
     public readonly struct ConnectionId : IEquatable<ConnectionId>
     {
@@ -173,30 +174,57 @@ namespace CardShopCoop.Net.Networking
         {
             get;
         }
+
+        /// <summary>True when the value is private enough that a support report must never print it
+        /// (a password, a home IP, a lobby id). The UI still edits it normally; diagnostics replace
+        /// the value entirely rather than partially masking it. A backend marks its own field by
+        /// setting this when it builds the field, leaving the constructor signature unchanged for
+        /// transports compiled against an earlier API build.</summary>
+        public bool Sensitive
+        {
+            get; set;
+        }
     }
 
-    /// <summary>The outcome of one Connect attempt, delivered on the Unity thread.</summary>
-    public readonly struct ConnectResult
+    /// <summary>One line of backend-owned hosting information for a support report. Unlike a
+    /// <see cref="BackendField"/>, this is not editable and can carry values the window deliberately
+    /// never draws - a public address or a hosted lobby id - so each entry states whether it is
+    /// sensitive and must be censored by the report.</summary>
+    public sealed class BackendDiagnosticField
     {
-        public ConnectResult(bool success, string error = null, bool retryable = false)
+        public BackendDiagnosticField(string key, string value, bool sensitive = false)
         {
-            Success = success;
-            Error = error;
-            Retryable = retryable;
+            Key = key ?? "";
+            Value = value ?? "";
+            Sensitive = sensitive;
         }
 
-        public bool Success
+        public string Key
         {
             get;
         }
-        public string Error
+        public string Value
         {
             get;
         }
-        public bool Retryable
+        public bool Sensitive
         {
             get;
         }
+    }
+
+    /// <summary>
+    /// Optional companion to <see cref="INetworkingBackend"/> for diagnostic reporting. The
+    /// co-op window falls back to <see cref="INetworkingBackend.GetFields"/> when a backend does
+    /// not implement this, so adding it is never required of a third-party transport. Values are
+    /// read on the Unity thread only, from the same snapshot the window draws.
+    /// </summary>
+    public interface INetworkingBackendDiagnostics
+    {
+        /// <summary>Backend-owned hosting/join details for a support report, in display order.
+        /// Every entry is marked sensitive or not; sensitive values are never written to the
+        /// report.</summary>
+        IReadOnlyList<BackendDiagnosticField> GetDiagnosticFields(ConnectMode mode);
     }
 
     /// <summary>A backend-specific button (invite dialog, refresh lobbies, copy code...).</summary>
@@ -379,23 +407,15 @@ namespace CardShopCoop.Net.Networking
         }
     }
 
-    /// <summary>Reserved width of one transport's <see cref="PeerConnection"/>.Id band. A host
-    /// running several backends at once gives each one a band of this size so a
-    /// PeerConnection.Id is never handed out twice.</summary>
-    public static class NetworkingBands
-    {
-        public const int Size = 1_000_000;
-    }
-
     /// <summary>
     /// One way to connect two machines, and everything the co-op window needs to drive and
-    /// describe it. An implementation owns its transport bearer, its own configuration, and its
-    /// own connection metadata; the runtime and the UI only ever touch THIS surface, so a new
-    /// transport is one new implementation and zero changes outside it.
+    /// describe it. A backend owns its configuration, connect flow, and a datagram bearer. The
+    /// runtime owns the reliable session, peer identity, the peer-id band, and authorization; a
+    /// backend must not create or manage any of those.
     ///
-    /// This is a public extension surface: a transport ships in its own assembly (the Steam
-    /// transport does) and registers itself with the runtime at plugin load. Keep implementations
-    /// free of any type that can fail to load on a build the transport does not support.
+    /// This is a public extension surface: a transport ships in its own assembly and registers
+    /// itself with the runtime at plugin load. Keep implementations free of any type that can
+    /// fail to load on a build the transport does not support.
     /// </summary>
     public interface INetworkingBackend
     {
@@ -434,17 +454,21 @@ namespace CardShopCoop.Net.Networking
         IReadOnlyList<BackendField> GetFields(ConnectMode mode);
 
         /// <summary>
-        /// Begin a session and return its handle. The outcome is reported through
-        /// <paramref name="onResult"/>, which receives the same handle so a caller can ignore a
-        /// late result for an attempt it already replaced. A rejected attempt never throws.
-        /// <paramref name="values"/> is merged over the configured ones.
+        /// Begin a session. The runtime allocates <paramref name="attempt"/> before this call and
+        /// passes the same value to every callback; use it verbatim. The backend creates its
+        /// datagram bearer and calls <see cref="IBackendConnectCallbacks.BearerReady"/> when the
+        /// bearer is live, <see cref="IBackendConnectCallbacks.Connected"/> when the player-facing
+        /// attempt is fully live, or <see cref="IBackendConnectCallbacks.Failed"/> when it cannot
+        /// start. A rejected attempt never throws. <paramref name="values"/> is merged over the
+        /// configured ones.
         /// </summary>
-        ConnectionId Connect(ConnectMode mode, FieldValues values,
-            Action<ConnectionId, ConnectResult> onResult);
+        void Connect(ConnectionId attempt, ConnectMode mode, FieldValues values,
+            IBackendConnectCallbacks callbacks);
 
-        /// <summary>End the session behind <paramref name="connection"/> and release its
-        /// transport. Ignored if that handle is no longer the active one.</summary>
-        void Disconnect(ConnectionId connection);
+        /// <summary>End the session behind <paramref name="attempt"/> and release backend-owned
+        /// resources (leave a lobby, remove a router mapping). The runtime owns and disposes the
+        /// datagram bearer. Ignored if the attempt is no longer current.</summary>
+        void Disconnect(ConnectionId attempt);
 
         /// <summary>Backend-specific buttons for the current view (may be empty).</summary>
         IReadOnlyList<BackendAction> Actions
@@ -473,36 +497,35 @@ namespace CardShopCoop.Net.Networking
             get;
         }
 
-        /// <summary>The live transport, or null before a session starts.</summary>
-        ICoopTransport Transport
-        {
-            get;
-        }
-
-        /// <summary>First id in this backend's disjoint PeerConnection.Id band. A host running
-        /// several backends at once needs the bands to not overlap, so the runtime can route a
-        /// send to the transport that owns an id. Use distinct, well-separated bases - band width
-        /// is 1,000,000.</summary>
-        int ConnectionIdBase
-        {
-            get;
-        }
-
         /// <summary>Raised when a peer's incoming invite was accepted out of band (Steam's overlay
         /// "Join game"): the runtime should start a CLIENT session on this backend with these
         /// values. The runtime enqueues the join onto the Unity thread.</summary>
         event Action<INetworkingBackend, FieldValues> JoinRequested;
+    }
 
-        /// <summary>Raised when a connection's transport is created or torn down. The runtime pumps
-        /// the transport from here; the handle lets it ignore a superseded connection.</summary>
-        event Action<ConnectionId, ICoopTransport> TransportChanged;
+    /// <summary>
+    /// The callbacks a backend uses to hand its datagram bearer to the runtime, report that the
+    /// attempt is fully live, and report session-level failure. They may be invoked synchronously
+    /// from <see cref="INetworkingBackend.Connect"/> or later from a platform thread; the runtime
+    /// marshals them and ignores a callback whose attempt is no longer current.
+    /// </summary>
+    public interface IBackendConnectCallbacks
+    {
+        /// <summary>The backend has a live bearer. The runtime takes ownership from here: it
+        /// wraps the bearer in the runtime's reliable session, assigns the peer-id band, starts
+        /// it, and disposes it on disconnect. The backend must not start, stop, send on, or dispose
+        /// the bearer after this call. A second call for the same attempt is a protocol error.</summary>
+        void BearerReady(ConnectionId attempt, IDatagramTransport bearer);
 
-        /// <summary>Raised when a peer's transport connection comes up, with the owning handle.</summary>
-        event Action<ConnectionId, PeerConnection> PeerConnected;
+        /// <summary>The attempt is fully live: the player-facing connect flow succeeded. A Steam
+        /// backend calls this when the lobby is live or the host connection is established; a
+        /// direct backend calls it once its bearer is ready. The runtime clears the backend error
+        /// and reports the session as connected.</summary>
+        void Connected(ConnectionId attempt);
 
-        /// <summary>Raised for a failure that must end or abort the session after Connect
-        /// returned (a Steam join rejected, a lobby that dies before it is usable), with the
-        /// owning handle.</summary>
-        event Action<ConnectionId, string> Failed;
+        /// <summary>The attempt failed before or after its bearer became usable. A failure after
+        /// <see cref="BearerReady"/> ends the session; <paramref name="retryable"/> is advisory
+        /// for the UI.</summary>
+        void Failed(ConnectionId attempt, string reason, bool retryable = false);
     }
 }

@@ -5,6 +5,9 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using UnityEngine;
 using CardShopCoop.Modules.Catalog;
+using CardShopCoop.Modules.ExtendedInformation;
+using CardShopCoop.Modules.GameObjectIdentity;
+using CardShopCoop.Modules.World;
 
 namespace CardShopCoop.Net
 {
@@ -32,6 +35,19 @@ namespace CardShopCoop.Net
             settings.Converters.Add(new EnumWireConverter<EMonsterType>(EnumKind.MonsterType));
             settings.Converters.Add(new EnumWireConverter<ERarity>(EnumKind.Rarity));
             settings.Converters.Add(new EnumWireConverter<ECollectionPackType>(EnumKind.CollectionPack));
+            // Entity fields are live scene references in the DTO. GameObjectIdentity owns the
+            // single object<->identity cache and the structured GameObjectId wire form.
+            settings.Converters.Add(new EntityDescriptorJsonConverter());
+            settings.Converters.Add(new ExtendedInformationValueJsonConverter());
+            settings.Converters.Add(new GameObjectIdJsonConverter());
+            settings.Converters.Add(new GameObjectEntityJsonConverter());
+            // A PlayerRef names a session player by host-canonical roster id; the receiver
+            // resolves the local roster entry (id, name, host/self flags).
+            settings.Converters.Add(new PlayerRefJsonConverter());
+            // Warehouse entries may have no live object at all (record-backed storage), so they
+            // carry a shelf location converted to/from the identity-owned warehouse Guid.
+            settings.Converters.Add(new WarehouseShelfBoxRefJsonConverter());
+            settings.Converters.Add(new WarehouseCompartmentStateJsonConverter());
             // Every enum that is NOT a gated registry enum travels as its member-name string, so a
             // non-renumbered enum can never be silently misread. Registered after the gated
             // converters, which therefore win for their own types.

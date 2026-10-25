@@ -2,7 +2,7 @@ using CardShopCoop.Util;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using CardShopCoop.Modules.Catalog;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -45,18 +45,8 @@ namespace CardShopCoop.Modules.World
         private const int KindDonation = 13;
 
         // client -> host op codes (first byte of a ContainerOp payload)
-        private const byte OpContentSet = 1;
-        private const byte OpPackInsert = 2;
-        private const byte OpPackTurnOn = 3;
-        private const byte OpPackCollect = 4;
-        private const byte OpPackClaim = 6;
-        private const byte OpCleanserToggle = 7;
-        private const byte OpCleanserRefill = 8;
-        private const byte OpWorkerTakeFlag = 9;
-        private const byte OpEmptyBoxTake = 10;
-        private const byte OpEmptyBoxStore = 11;
 
-        /// <summary>Set by WorldCardInteraction: client -> host op (ContainerOpMessage).</summary>
+        /// <summary>Set by WorldCardInteraction: the client -> host container intent.</summary>
         public Action<INetMessage> SendOp;
         /// <summary>Set by WorldCardInteraction: host -> clients state (ContainerStateMessage).</summary>
         public Action<INetMessage> BroadcastState;
@@ -185,6 +175,7 @@ namespace CardShopCoop.Modules.World
             internal WorldContainerInteraction Self;
             internal InteractableEmptyBoxStorage Storage;
             internal int Index;
+            internal InteractablePackagingBox_Item Box;
             internal Guid BoxNetworkId;
             internal int PriorCount;
             internal bool IsPlayer;
@@ -205,9 +196,8 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private readonly Dictionary<object, int> _hostKeys = new();
-        // A partial is exactly one ContainerRecord. Index is the packed kind/index identity;
-        // Records carries the record itself, so omitted records are never deletions.
+        // A partial is exactly one ContainerRecord. Records carries the live container and the
+        // record itself, so an omitted record is never a deletion.
         private BulkDonationBoxUIScreen _cachedContainerScreen;
         private BulkDonationBoxPlusMinusScreen _cachedAmountModal;
         private readonly Dictionary<int, PendingPackCollection> _pendingPackCollections = new();
@@ -221,21 +211,14 @@ namespace CardShopCoop.Modules.World
         // layers (see ClientApplyDelta) instead of applying the stale record raw.
         private readonly HashSet<Guid> _pendingPackInserts = new();
         private int _nextPackClaimToken = 1;
-        // Records whose target object the world has not produced yet. The join baseline can
-        // name a placement the guest rebuilds only after the baseline is applied, and applying
-        // such a record against a null target throws out of the reliable handler and drops the
-        // session. Keyed by the packed (kind, index) identity; the newest authoritative value
-        // for a key wins. Re-applied from the placement structure-change hook, never dropped.
-        private readonly Dictionary<int, ContainerRecord> _pendingRecords = new();
         private readonly BoxNetworkInteraction _boxes;
         private readonly PlayerBoxInteraction _playerBox;
-        private Guid _hostPredictionId;
+        private Guid _hostActionId;
         private int _hostActorConnectionId;
-        private BoxNetworkState _hostDeltaBox;
+        private InteractablePackagingBox _hostDeltaBox;
         private bool _hostDeltaTakeIntoHand;
         private bool _hostDeltaReleaseHold;
         private bool _hostCompletePackCollection;
-        private byte _hostPackIndex;
 
         internal WorldContainerInteraction(BoxNetworkInteraction boxes = null,
             PlayerBoxInteraction playerBox = null)
@@ -271,7 +254,6 @@ namespace CardShopCoop.Modules.World
 
         public override void Reset()
         {
-            _hostKeys.Clear();
             _cachedContainerScreen = null;
             _cachedAmountModal = null;
             _claimedPackIndices.Clear();
@@ -280,52 +262,25 @@ namespace CardShopCoop.Modules.World
             _packClaimOwner.Clear();
             _packClaimToken.Clear();
             _nextPackClaimToken = 1;
-            _pendingRecords.Clear();
-            _hostPredictionId = Guid.Empty;
+            _hostActionId = Guid.Empty;
             _hostActorConnectionId = 0;
             _hostDeltaBox = null;
             _hostDeltaTakeIntoHand = false;
             _hostDeltaReleaseHold = false;
             _hostCompletePackCollection = false;
-            _hostPackIndex = 0;
         }
 
-        /// <summary>Drops records whose target object the world had not produced yet. Called on a
-        /// world re-baseline: the new baseline re-sends every container it knows, so a record that
-        /// never found its target must not survive into the new baseline and later bind to whatever
-        /// object occupies that index.</summary>
+        /// <summary>Drops any state retained for an object the world had not produced. Live
+        /// reference messages are applied directly; there is nothing to defer.</summary>
         internal void ClearPendingRecords()
         {
-            _pendingRecords.Clear();
         }
 
-        /// <summary>Re-applies every record whose target object the world had not produced when it
-        /// arrived, and returns immediately when nothing is outstanding. Called from the world-ready
-        /// paths (through WorldCardInteraction.FlushWorldReady, the way every interaction class in this
-        /// module is) and on every placement structure change - the late-join signal PlayTable, Register
-        /// and CardDisplay use - so an object the placement layer recreates after the baseline is
-        /// reconciled instead of being left unapplied. ONE entry point per class, as its siblings have.</summary>
+        /// <summary>Applies retained client state. Every container message names live objects, so a
+        /// message that resolved at deserialization was applied immediately; anything that did not
+        /// resolve was logged and dropped at the handler.</summary>
         internal void FlushClientState()
         {
-            if (_pendingRecords.Count == 0 || !InGame)
-            {
-                return;
-            }
-
-            var pending = new List<KeyValuePair<int, ContainerRecord>>(_pendingRecords);
-            for (var i = 0; i < pending.Count; i++)
-            {
-                var key = pending[i].Key;
-                var kind = key >> 8;
-                var idx = key & 0xFF;
-                if (!HasTarget(kind, idx))
-                {
-                    continue;
-                }
-
-                _pendingRecords.Remove(key);
-                ApplyRecord(kind, idx, pending[i].Value);
-            }
         }
 
         internal void AppendBaselineMessages(Action<INetMessage> append)
@@ -339,10 +294,14 @@ namespace CardShopCoop.Modules.World
         private ContainerStateMessage BuildBaselineMessage()
         {
             var records = new List<ContainerRecord>();
-            var keys = GetContainerKeys();
-            for (var i = 0; i < keys.Count; i++)
+            var containers = GetContainers();
+            for (var i = 0; i < containers.Count; i++)
             {
-                records.Add(BuildRecord(keys[i] >> 8, keys[i] & 0xFF));
+                var record = BuildRecord(containers[i]);
+                if (record.Container != null)
+                {
+                    records.Add(record);
+                }
             }
 
             return new ContainerStateMessage
@@ -414,27 +373,6 @@ namespace CardShopCoop.Modules.World
             return list[idx] as T;
         }
 
-        /// <summary>True when the authoritative record's target object resolves on this peer.
-        /// An unknown kind is left to <see cref="ApplyRecord"/>, which rejects it explicitly.</summary>
-        private bool HasTarget(int kind, int idx) => kind switch
-        {
-            KindCardStorage => Get<InteractableCardStorageShelf>(kind, idx) != null,
-            KindDonation => Get<InteractableBulkDonationBox>(kind, idx) != null,
-            KindPackOpener => Get<InteractableAutoPackOpener>(kind, idx) != null,
-            KindCleanser => Get<InteractableAutoCleanser>(kind, idx) != null,
-            KindEmptyBoxStorage => Get<InteractableEmptyBoxStorage>(kind, idx) != null,
-            _ => true,
-        };
-
-        /// <summary>The length of a kind's placement list, for the deferral diagnostic. -1 when
-        /// the shelf manager or the list itself is missing.</summary>
-        private int ListCount(int kind)
-        {
-            var sm = Sm();
-            var list = sm == null ? null : PlacementApi.GetList(sm, kind);
-            return list?.Count ?? -1;
-        }
-
         /// <summary>True when a bulk donation box is a defined game object type and therefore
         /// safe for the raw compact-card-list sync. A content mod can reuse
         /// <see cref="InteractableBulkDonationBox"/> for furniture whose card list is an opaque
@@ -453,25 +391,34 @@ namespace CardShopCoop.Modules.World
 
         // ---------------- host: change pushes ----------------
 
-        private List<int> GetContainerKeys()
+        private static int KindOf(InteractableObject container) => container switch
         {
-            var result = new List<int>();
+            InteractableCardStorageShelf => KindCardStorage,
+            InteractableBulkDonationBox => KindDonation,
+            InteractableAutoPackOpener => KindPackOpener,
+            InteractableAutoCleanser => KindCleanser,
+            InteractableEmptyBoxStorage => KindEmptyBoxStorage,
+            _ => -1,
+        };
+
+        private List<InteractableObject> GetContainers()
+        {
+            var result = new List<InteractableObject>();
             var sm = Sm();
             if (sm == null)
             {
                 return result;
             }
 
-            _hostKeys.Clear();
-            AddKeys(result, sm, KindCardStorage);
-            AddKeys(result, sm, KindDonation);
-            AddKeys(result, sm, KindPackOpener);
-            AddKeys(result, sm, KindEmptyBoxStorage);
-            AddKeys(result, sm, KindCleanser);
+            AddContainers(result, sm, KindCardStorage);
+            AddContainers(result, sm, KindDonation);
+            AddContainers(result, sm, KindPackOpener);
+            AddContainers(result, sm, KindEmptyBoxStorage);
+            AddContainers(result, sm, KindCleanser);
             return result;
         }
 
-        private void AddKeys(List<int> result, ShelfManager sm, int kind)
+        private void AddContainers(List<InteractableObject> result, ShelfManager sm, int kind)
         {
             var list = PlacementApi.GetList(sm, kind);
             if (list == null)
@@ -481,40 +428,40 @@ namespace CardShopCoop.Modules.World
 
             for (var i = 0; i < list.Count && i < 250; i++)
             {
-                if (list[i] == null)
+                if (list[i] is not InteractableObject container)
                 {
                     continue;
                 }
 
-                // Modded boxes never enter the key set, so the join baseline, the change pushes
-                // and the client-intent resolution all skip them while vanilla raw indexes and
-                // wire ids stay exactly as before.
+                // Modded boxes never enter the container set, so the join baseline, the change
+                // pushes and the client-intent resolution all skip them.
                 if (kind == KindDonation
-                    && !IsSyncedDonationBox(list[i] as InteractableBulkDonationBox))
+                    && !IsSyncedDonationBox(container as InteractableBulkDonationBox))
                 {
                     continue;
                 }
 
-                var key = (kind << 8) | i;
-                result.Add(key);
-                _hostKeys[list[i]] = key;
+                result.Add(container);
             }
         }
 
-        private void SendHostRecord(int key)
+        private void SendHostRecord(InteractableObject container)
         {
-            var record = BuildRecord(key >> 8, key & 0xFF);
+            var record = BuildRecord(container);
+            if (record.Container == null)
+            {
+                return;
+            }
+
             var delta = new ContainerDeltaMessage
             {
-                PredictionId = _hostPredictionId,
-                Key = key,
+                ActionId = _hostActionId,
+                Container = container,
                 Record = record,
-                HasBox = _hostDeltaBox != null,
                 Box = _hostDeltaBox,
                 TakeIntoHand = _hostDeltaTakeIntoHand,
                 ReleaseHold = _hostDeltaReleaseHold,
                 CompletePackCollection = _hostCompletePackCollection,
-                PackIndex = _hostPackIndex,
             };
 
             // TakeIntoHand / ReleaseHold describe the acting player's own hands. Only the intent's
@@ -527,15 +474,13 @@ namespace CardShopCoop.Modules.World
                 SendToClient(actor, delta);
                 RelayState(actor, new ContainerDeltaMessage
                 {
-                    PredictionId = delta.PredictionId,
-                    Key = delta.Key,
+                    ActionId = delta.ActionId,
+                    Container = delta.Container,
                     Record = delta.Record,
-                    HasBox = delta.HasBox,
                     Box = delta.Box,
                     TakeIntoHand = false,
                     ReleaseHold = false,
                     CompletePackCollection = delta.CompletePackCollection,
-                    PackIndex = delta.PackIndex,
                 });
                 return;
             }
@@ -543,50 +488,30 @@ namespace CardShopCoop.Modules.World
             BroadcastState?.Invoke(delta);
         }
 
-        private void HostChanged(int kind, object container)
+        private void HostChanged(InteractableObject container)
         {
             if (!InGame || container == null || BroadcastState == null)
             {
                 return;
             }
-            int key;
-            if (!TryResolveHostKey(kind, container, out key))
-            {
-                return;
-            }
-            Guarded("change", () => SendHostRecord(key));
+
+            Guarded("change", () => SendHostRecord(container));
         }
 
-        private bool TryResolveHostKey(int kind, object container, out int key)
+        private ContainerRecord BuildRecord(InteractableObject container)
         {
-            key = 0;
-            try
+            var kind = KindOf(container);
+            var idx = kind < 0 ? -1 : IndexOf(kind, container);
+            if (idx < 0)
             {
-                if (_hostKeys.TryGetValue(container, out key)
-                    && (key >> 8) == kind
-                    && ReferenceEquals(Get<object>(kind, key & 0xFF), container))
-                {
-                    return true;
-                }
-                GetContainerKeys();
-                return _hostKeys.TryGetValue(container, out key)
-                    && (key >> 8) == kind
-                    && ReferenceEquals(Get<object>(kind, key & 0xFF), container);
+                CoopPlugin.Log.LogWarning("[containers] dropped record: the container is not in "
+                    + "its live placement list.");
+                return default;
             }
-            catch (Exception e)
-            {
-                ModuleGuard.Log("containers:resolve-key", e);
-                return false;
-            }
-        }
 
-        private ContainerRecord BuildRecord(int kind, int idx)
-        {
             var rec = new ContainerRecord
             {
-                StableEntityId = WorldMessageMetadata.ContainerEntityId(kind, idx),
-                Kind = (byte)kind,
-                Index = (byte)idx,
+                Container = container,
             };
             switch (kind)
             {
@@ -678,7 +603,7 @@ namespace CardShopCoop.Modules.World
 
         // ---------------- host: apply client ops ----------------
 
-        public bool HostApplyOp(ContainerOpMessage message, int connId,
+        public bool HostApplyIntent(ContainerIntent message, int connId,
             Action<INetMessage> response = null)
         {
             if (message == null || connId <= 0)
@@ -686,374 +611,367 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            var op = message.Op;
+            var op = message.GetType().Name;
             var accepted = false;
             var reason = (string)null;
-            BoxNetworkState createdBox = null;
-            var kind = (int)message.Kind;
-            var idx = (int)message.Index;
-            if (op == OpWorkerTakeFlag)
+            InteractablePackagingBox createdBox = null;
+            var container = message.Container;
+            if (container == null)
             {
-                kind = KindCardStorage;
-            }
-            else if (op == OpPackInsert || op == OpPackTurnOn || op == OpPackClaim
-                || op == OpPackCollect)
-            {
-                kind = KindPackOpener;
-            }
-            else if (op == OpCleanserToggle || op == OpCleanserRefill)
-            {
-                kind = KindCleanser;
-            }
-            else if (op == OpEmptyBoxTake || op == OpEmptyBoxStore)
-            {
-                kind = KindEmptyBoxStorage;
+                CoopPlugin.Log.LogWarning("[containers] dropped op=" + op
+                    + ": the container did not resolve to a live object.");
+                return false;
             }
 
-            _hostPredictionId = message.PredictionId;
+            var kind = KindOf(container);
+            var idx = kind < 0 ? -1 : IndexOf(kind, container);
+            if (kind < 0 || idx < 0)
+            {
+                CoopPlugin.Log.LogWarning("[containers] dropped op=" + op + " for "
+                    + container.name + ": the container is not in its live placement list.");
+                return false;
+            }
+
+            _hostActionId = message.ActionId;
             _hostActorConnectionId = connId;
             try
             {
-                switch (op)
+                do
                 {
-                    case OpContentSet:
+                    if (message is ContainerContentSetIntent contentSet)
+                    {
+                        var canTake = contentSet.CanWorkerTake;
+                        var cards = contentSet.Cards;
+                        if (container is not InteractableCardStorageShelf
+                            && container is not InteractableBulkDonationBox)
                         {
-                            var canTake = message.CanWorkerTake;
-                            var cards = message.Cards;
-                            if ((kind != KindCardStorage && kind != KindDonation)
-                                || Get<object>(kind, idx) == null)
-                            {
-                                reason = "container does not exist";
-                                break;
-                            }
+                            reason = "container is not a card storage shelf or donation box";
+                            break;
+                        }
 
-                            if (kind == KindDonation
-                                && !IsSyncedDonationBox(Get<InteractableBulkDonationBox>(kind, idx)))
-                            {
-                                reason = "donation box is not synced";
-                                break;
-                            }
+                        if (container is InteractableBulkDonationBox donation
+                            && !IsSyncedDonationBox(donation))
+                        {
+                            reason = "donation box is not synced";
+                            break;
+                        }
 
-                            if (cards == null)
+                        if (cards == null)
+                        {
+                            reason = "container card payload is missing";
+                            break;
+                        }
+                        // never drop this even if the host has the same UI open: the
+                        // joiner's binder already paid these cards through the CardDelta
+                        // mirror, so losing the list here would lose the cards for real
+                        var priorCards = container is InteractableCardStorageShelf storageShelf
+                            ? new List<CompactCardDataAmount>(
+                                storageShelf.GetCompactCardDataAmountList())
+                            : new List<CompactCardDataAmount>(
+                                ((InteractableBulkDonationBox)container)
+                                    .GetCompactCardDataAmountList());
+                        var priorCanTake = container is InteractableCardStorageShelf priorShelf
+                            && priorShelf.CanWorkerTake();
+                        try
+                        {
+                            ApplyContent(kind, idx, cards, kind == KindCardStorage, canTake);
+                            HostChanged(container);
+                        }
+                        catch
+                        {
+                            if (container is InteractableCardStorageShelf shelf)
                             {
-                                reason = "container card payload is missing";
-                                break;
+                                var targetCards = shelf.GetCompactCardDataAmountList();
+                                targetCards.Clear();
+                                targetCards.AddRange(priorCards);
+                                shelf.SetCanWorkerTake(priorCanTake);
                             }
-                            // never drop this even if the host has the same UI open: the
-                            // joiner's binder already paid these cards through the CardDelta
-                            // mirror, so losing the list here would lose the cards for real
-                            var priorCards = kind == KindCardStorage
-                                ? new List<CompactCardDataAmount>(
-                                    ((InteractableCardStorageShelf)Get<object>(kind, idx))
-                                        .GetCompactCardDataAmountList())
-                                : new List<CompactCardDataAmount>(
-                                    ((InteractableBulkDonationBox)Get<object>(kind, idx))
-                                        .GetCompactCardDataAmountList());
-                            var priorCanTake = kind == KindCardStorage
-                                && ((InteractableCardStorageShelf)Get<object>(kind, idx)).CanWorkerTake();
+                            else if (container is InteractableBulkDonationBox donationTarget)
+                            {
+                                var targetCards = donationTarget.GetCompactCardDataAmountList();
+                                targetCards.Clear();
+                                targetCards.AddRange(priorCards);
+                            }
+                            throw;
+                        }
+                        accepted = true;
+                        break;
+                    }
+                    else if (message is WorkerTakeFlagIntent takeFlag)
+                    {
+                        var canTake = takeFlag.CanWorkerTake;
+                        var s = container as InteractableCardStorageShelf;
+                        if (s == null)
+                        {
+                            reason = "card storage does not exist";
+                            break;
+                        }
+
+                        ApplyingRemote = true;
+                        try
+                        {
+                            var priorCanTake = s.CanWorkerTake();
                             try
                             {
-                                ApplyContent(kind, idx, cards, kind == KindCardStorage, canTake);
-                                HostChanged(kind, Get<object>(kind, idx));
+                                s.SetCanWorkerTake(canTake);
+                                s.OnCardStorageShelfSettingDone();
                             }
                             catch
                             {
-                                var target = Get<object>(kind, idx);
-                                if (target is InteractableCardStorageShelf shelf)
-                                {
-                                    var targetCards = shelf.GetCompactCardDataAmountList();
-                                    targetCards.Clear();
-                                    targetCards.AddRange(priorCards);
-                                    shelf.SetCanWorkerTake(priorCanTake);
-                                }
-                                else if (target is InteractableBulkDonationBox donation)
-                                {
-                                    var targetCards = donation.GetCompactCardDataAmountList();
-                                    targetCards.Clear();
-                                    targetCards.AddRange(priorCards);
-                                }
+                                s.SetCanWorkerTake(priorCanTake);
                                 throw;
                             }
-                            accepted = true;
+                        }
+                        finally { ApplyingRemote = false; }
+                        HostChanged(s);
+                        accepted = true;
+                        break;
+                    }
+                    else if (message is PackInsertIntent insert)
+                    {
+                        var itemType = insert.ItemType; // guest id -> ours; see PackOpenerAddItemPostfix
+                        var p = container as InteractableAutoPackOpener;
+                        if (p == null)
+                        {
+                            reason = "pack opener does not exist";
                             break;
                         }
-                    case OpWorkerTakeFlag:
+                        // a pack from a content pack THIS PC does not have arrives as
+                        // EItemType.None. Note WHY this has to be an explicit value test:
+                        // GetItemMeshData(None) does not fail, it returns a BLANK but NON-NULL
+                        // ItemMeshData, so SpawnItem would happily build a meshless prop the
+                        // opener then holds forever. Skip explicitly and say so once.
+                        if (itemType == EItemType.None)
                         {
-                            var canTake = message.CanWorkerTake;
-                            var s = Get<InteractableCardStorageShelf>(KindCardStorage, idx);
-                            if (s == null)
-                            {
-                                reason = "card storage does not exist";
-                                break;
-                            }
+                            CoopPlugin.Log.LogWarning(
+                                "WorldContainerInteraction pack insert: item type has no counterpart here (one-sided content pack)");
+                            reason = "pack type is unavailable on host";
+                            break;
+                        }
+                        // The acting client's local machine can be ahead of the authoritative
+                        // one: its vanilla collect resets the machine before this host applies
+                        // OpPackCollect (the claim round trip still has to run), and two peers
+                        // can pass their own local slot checks in the same instant. Re-check
+                        // vanilla's own player gates against the host machine so neither race
+                        // can push a pack past m_MaxPackCount (which vanilla itself never
+                        // allows). A refusal rolls the client's insert prediction back, and its
+                        // undo returns the pack to the acting hand - the pack is not eaten.
+                        if (p.GetIsProcessing())
+                        {
+                            reason = "pack opener is already running";
+                            break;
+                        }
+                        if (!p.HasEnoughSlot())
+                        {
+                            reason = "pack opener is full (" + p.GetStoredItemList().Count
+                                + "+" + p.GetPackOpenedCount() + "/" + p.m_MaxPackCount + ")";
+                            break;
+                        }
+                        var priorStored = new List<Item>(p.GetStoredItemList());
+                        var priorProcessing = p.GetIsProcessing();
+                        var priorTimer = FiPoOpenTimer?.GetValue(p) as float? ?? 0f;
+                        var priorOpenedCount = p.GetPackOpenedCount();
+                        var priorState = p.m_CurrentState;
+                        Item item = null;
+                        try
+                        {
+                            item = SpawnItem(itemType, p.m_PosInside);
 
                             ApplyingRemote = true;
                             try
                             {
-                                var priorCanTake = s.CanWorkerTake();
-                                try
-                                {
-                                    s.SetCanWorkerTake(canTake);
-                                    s.OnCardStorageShelfSettingDone();
-                                }
-                                catch
-                                {
-                                    s.SetCanWorkerTake(priorCanTake);
-                                    throw;
-                                }
+                                p.AddItem(item, addToFront: true, isPlayer: false);
                             }
                             finally { ApplyingRemote = false; }
-                            HostChanged(KindCardStorage, s);
+                            HostChanged(p);
                             accepted = true;
-                            break;
                         }
-                    case OpPackInsert:
+                        catch
                         {
-                            var itemType = message.ItemType; // guest id -> ours; see PackOpenerAddItemPostfix
-                            var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
-                            if (p == null)
-                            {
-                                reason = "pack opener does not exist";
-                                break;
-                            }
-                            // a pack from a content pack THIS PC does not have arrives as
-                            // EItemType.None. Note WHY this has to be an explicit value test:
-                            // GetItemMeshData(None) does not fail, it returns a BLANK but NON-NULL
-                            // ItemMeshData, so SpawnItem would happily build a meshless prop the
-                            // opener then holds forever. Skip explicitly and say so once.
-                            if (itemType == EItemType.None)
-                            {
-                                CoopPlugin.Log.LogWarning(
-                                    "WorldContainerInteraction pack insert: item type has no counterpart here (one-sided content pack)");
-                                reason = "pack type is unavailable on host";
-                                break;
-                            }
-                            // The acting client's local machine can be ahead of the authoritative
-                            // one: its vanilla collect resets the machine before this host applies
-                            // OpPackCollect (the claim round trip still has to run), and two peers
-                            // can pass their own local slot checks in the same instant. Re-check
-                            // vanilla's own player gates against the host machine so neither race
-                            // can push a pack past m_MaxPackCount (which vanilla itself never
-                            // allows). A refusal rolls the client's insert prediction back, and its
-                            // undo returns the pack to the acting hand - the pack is not eaten.
-                            if (p.GetIsProcessing())
-                            {
-                                reason = "pack opener is already running";
-                                break;
-                            }
-                            if (!p.HasEnoughSlot())
-                            {
-                                reason = "pack opener is full (" + p.GetStoredItemList().Count
-                                    + "+" + p.GetPackOpenedCount() + "/" + p.m_MaxPackCount + ")";
-                                break;
-                            }
+                            RestorePackOpener(p, priorStored, priorProcessing, priorTimer,
+                                priorOpenedCount, priorState);
+                            throw;
+                        }
+                        break;
+                    }
+                    else if (message is PackTurnOnIntent)
+                    {
+                        var p = container as InteractableAutoPackOpener;
+                        // the state check pins vanilla OnMouseButtonUp to its turn-on
+                        // branch; anything else means the click raced and is stale
+                        if (p != null && !p.GetIsProcessing() && p.GetStoredItemList().Count > 0)
+                        {
                             var priorStored = new List<Item>(p.GetStoredItemList());
                             var priorProcessing = p.GetIsProcessing();
                             var priorTimer = FiPoOpenTimer?.GetValue(p) as float? ?? 0f;
                             var priorOpenedCount = p.GetPackOpenedCount();
                             var priorState = p.m_CurrentState;
-                            Item item = null;
                             try
                             {
-                                item = SpawnItem(itemType, p.m_PosInside);
-
-                                ApplyingRemote = true;
-                                try
-                                {
-                                    p.AddItem(item, addToFront: true, isPlayer: false);
-                                }
-                                finally { ApplyingRemote = false; }
-                                HostChanged(KindPackOpener, p);
-                                accepted = true;
+                                p.OnMouseButtonUp();
+                                accepted = p.GetIsProcessing();
                             }
                             catch
                             {
-                                RestorePackOpener(p, priorStored, priorProcessing, priorTimer,
-                                    priorOpenedCount, priorState);
+                                RestorePackOpener(p, priorStored,
+                                    priorProcessing, priorTimer, priorOpenedCount, priorState);
                                 throw;
                             }
-                            break;
                         }
-                    case OpPackTurnOn:
+                        if (!accepted)
                         {
-                            var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
-                            // the state check pins vanilla OnMouseButtonUp to its turn-on
-                            // branch; anything else means the click raced and is stale
-                            if (p != null && !p.GetIsProcessing() && p.GetStoredItemList().Count > 0)
-                            {
-                                var priorStored = new List<Item>(p.GetStoredItemList());
-                                var priorProcessing = p.GetIsProcessing();
-                                var priorTimer = FiPoOpenTimer?.GetValue(p) as float? ?? 0f;
-                                var priorOpenedCount = p.GetPackOpenedCount();
-                                var priorState = p.m_CurrentState;
-                                try
-                                {
-                                    p.OnMouseButtonUp();
-                                    accepted = p.GetIsProcessing();
-                                }
-                                catch
-                                {
-                                    RestorePackOpener(p, priorStored,
-                                        priorProcessing, priorTimer, priorOpenedCount, priorState);
-                                    throw;
-                                }
-                            }
-                            if (!accepted)
-                            {
-                                reason = p == null ? "pack opener does not exist" : "pack opener state changed";
-                            }
+                            reason = p == null ? "pack opener does not exist" : "pack opener state changed";
+                        }
 
-                            break;
-                        }
-                    case OpPackClaim:
-                        {
-                            accepted = HostApplyPackClaim(message.Index, connId, out reason, response);
-                            break;
-                        }
-                    case OpPackCollect:
-                        {
-                            var opener = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
-                            accepted = HostApplyPackCollect(idx, message.ClaimToken, connId,
-                                out reason);
-                            if (accepted)
-                            {
-                                _hostCompletePackCollection = true;
-                                _hostPackIndex = message.Index;
-                                HostChanged(KindPackOpener, opener);
-                            }
-                            break;
-                        }
-                    case OpCleanserToggle:
-                        {
-                            var on = message.TurnedOn;
-                            var c = Get<InteractableAutoCleanser>(KindCleanser, idx);
-                            if (c == null)
-                            {
-                                reason = "cleanser does not exist";
-                                break;
-                            }
-                            // direct field write instead of vanilla OnMouseButtonUp: the
-                            // vanilla path would flash tooltips/popups on the HOST's HUD
-                            // for a button the host never touched
-                            var priorOn = c.IsTurnedOn();
-                            var priorCooldown = FiClCooldown?.GetValue(c) as bool? ?? false;
-                            var priorTimer = FiClTimer?.GetValue(c) as float? ?? 0f;
-                            try
-                            {
-                                FiClTurnedOn?.SetValue(c, on);
-                                if (!on)
-                                {
-                                    FiClCooldown?.SetValue(c, true);
-                                    FiClTimer?.SetValue(c, 0f);
-                                }
-                                HostChanged(KindCleanser, c);
-                            }
-                            catch
-                            {
-                                FiClTurnedOn?.SetValue(c, priorOn);
-                                FiClCooldown?.SetValue(c, priorCooldown);
-                                FiClTimer?.SetValue(c, priorTimer);
-                                throw;
-                            }
-                            accepted = true;
-                            break;
-                        }
-                    case OpCleanserRefill:
-                        {
-                            var fill = message.Fill;
-                            var c = Get<InteractableAutoCleanser>(KindCleanser, idx);
-                            if (!IsFinite(fill) || fill < 0f || fill > 1f)
-                            {
-                                reason = "invalid cleanser fill";
-                                break;
-                            }
-                            if (c == null || !c.HasEnoughSlot())
-                            {
-                                reason = c == null ? "cleanser does not exist" : "cleanser has no slot";
-                                break;
-                            }
-
-                            var priorStored = new List<Item>(c.GetStoredItemList());
-                            var priorItemAmount = FiClItemAmount?.GetValue(c) as int?
-                                ?? priorStored.Count;
-                            var priorNeedRefill = c.IsNeedRefill();
-                            Item item = null;
-                            try
-                            {
-                                item = SpawnItem(EItemType.Deodorant, c.m_PosList[0], fill);
-
-                                ApplyingRemote = true;
-                                try
-                                {
-                                    c.AddItem(item, addToFront: true);
-                                }
-                                finally { ApplyingRemote = false; }
-                                HostChanged(KindCleanser, c);
-                                accepted = true;
-                            }
-                            catch
-                            {
-                                RestoreCleanser(c, priorStored, priorItemAmount,
-                                    priorNeedRefill);
-                                throw;
-                            }
-                            break;
-                        }
-                    case OpEmptyBoxTake:
-                        {
-                            var storage = Get<InteractableEmptyBoxStorage>(KindEmptyBoxStorage, idx);
-                            if (storage == null)
-                            {
-                                reason = "empty-box storage does not exist";
-                                break;
-                            }
-
-                            _boxes.HostPredictionId = _hostPredictionId;
-                            try
-                            {
-                                accepted = HostTakeEmptyBox(storage, message.BoxNetworkId,
-                                    out reason, out createdBox);
-                            }
-                            finally
-                            {
-                                _boxes.HostPredictionId = Guid.Empty;
-                            }
-                            if (accepted)
-                            {
-                                _hostDeltaBox = createdBox;
-                                _hostDeltaTakeIntoHand = message.IsPlayer;
-                                HostChanged(KindEmptyBoxStorage, storage);
-                                if (message.IsPlayer && createdBox != null)
-                                {
-                                    // The taker's own pickup was a covered forward that raced
-                                    // ahead of the box's creation; announce the grant so the host
-                                    // knows the box is held and observers attach it to the avatar.
-                                    _playerBox?.AnnounceGrantedHold(createdBox.BoxNetworkId, connId);
-                                }
-                            }
-                            break;
-                        }
-                    case OpEmptyBoxStore:
-                        {
-                            var storage = Get<InteractableEmptyBoxStorage>(KindEmptyBoxStorage, idx);
-                            if (storage == null)
-                            {
-                                reason = "empty-box storage does not exist";
-                                break;
-                            }
-
-                            accepted = HostStoreEmptyBox(storage, message.BoxNetworkId, out reason);
-                            if (accepted)
-                            {
-                                _hostDeltaReleaseHold = message.IsPlayer;
-                                HostChanged(KindEmptyBoxStorage, storage);
-                            }
-                            break;
-                        }
-                    default:
-                        reason = "unknown container operation";
                         break;
-                }
+                    }
+                    else if (message is PackClaimIntent)
+                    {
+                        accepted = HostApplyPackClaim(container as InteractableAutoPackOpener, idx,
+                            connId, out reason, response);
+                        break;
+                    }
+                    else if (message is PackCollectIntent collect)
+                    {
+                        var opener = container as InteractableAutoPackOpener;
+                        accepted = HostApplyPackCollect(opener, idx, collect.ClaimToken, connId,
+                            out reason);
+                        if (accepted)
+                        {
+                            _hostCompletePackCollection = true;
+                            HostChanged(opener);
+                        }
+                        break;
+                    }
+                    else if (message is CleanserToggleIntent toggle)
+                    {
+                        var on = toggle.TurnedOn;
+                        var c = container as InteractableAutoCleanser;
+                        if (c == null)
+                        {
+                            reason = "cleanser does not exist";
+                            break;
+                        }
+                        // direct field write instead of vanilla OnMouseButtonUp: the
+                        // vanilla path would flash tooltips/popups on the HOST's HUD
+                        // for a button the host never touched
+                        var priorOn = c.IsTurnedOn();
+                        var priorCooldown = FiClCooldown?.GetValue(c) as bool? ?? false;
+                        var priorTimer = FiClTimer?.GetValue(c) as float? ?? 0f;
+                        try
+                        {
+                            FiClTurnedOn?.SetValue(c, on);
+                            if (!on)
+                            {
+                                FiClCooldown?.SetValue(c, true);
+                                FiClTimer?.SetValue(c, 0f);
+                            }
+                            HostChanged(c);
+                        }
+                        catch
+                        {
+                            FiClTurnedOn?.SetValue(c, priorOn);
+                            FiClCooldown?.SetValue(c, priorCooldown);
+                            FiClTimer?.SetValue(c, priorTimer);
+                            throw;
+                        }
+                        accepted = true;
+                        break;
+                    }
+                    else if (message is CleanserRefillIntent refill)
+                    {
+                        var fill = refill.Fill;
+                        var c = container as InteractableAutoCleanser;
+                        if (!IsFinite(fill) || fill < 0f || fill > 1f)
+                        {
+                            reason = "invalid cleanser fill";
+                            break;
+                        }
+                        if (c == null || !c.HasEnoughSlot())
+                        {
+                            reason = c == null ? "cleanser does not exist" : "cleanser has no slot";
+                            break;
+                        }
+
+                        var priorStored = new List<Item>(c.GetStoredItemList());
+                        var priorItemAmount = FiClItemAmount?.GetValue(c) as int?
+                            ?? priorStored.Count;
+                        var priorNeedRefill = c.IsNeedRefill();
+                        Item item = null;
+                        try
+                        {
+                            item = SpawnItem(EItemType.Deodorant, c.m_PosList[0], fill);
+
+                            ApplyingRemote = true;
+                            try
+                            {
+                                c.AddItem(item, addToFront: true);
+                            }
+                            finally { ApplyingRemote = false; }
+                            HostChanged(c);
+                            accepted = true;
+                        }
+                        catch
+                        {
+                            RestoreCleanser(c, priorStored, priorItemAmount,
+                                priorNeedRefill);
+                            throw;
+                        }
+                        break;
+                    }
+                    else if (message is EmptyBoxTakeIntent take)
+                    {
+                        var storage = container as InteractableEmptyBoxStorage;
+                        if (storage == null)
+                        {
+                            reason = "empty-box storage does not exist";
+                            break;
+                        }
+
+                        // The taker minted the box id locally when its game spawned the box.
+                        // The host does not need that live object -- it cannot resolve it yet --
+                        // only the id, which it binds its own created box to.
+                        accepted = HostTakeEmptyBox(storage, take.BoxNetworkId,
+                            out reason, out createdBox);
+                        if (accepted)
+                        {
+                            _hostDeltaBox = createdBox;
+                            _hostDeltaTakeIntoHand = take.IsPlayer;
+                            HostChanged(storage);
+                            if (take.IsPlayer && createdBox != null)
+                            {
+                                // The taker's own pickup was a covered forward that raced
+                                // ahead of the box's creation; announce the grant so the host
+                                // knows the box is held and observers attach it to the avatar.
+                                _playerBox?.AnnounceGrantedHold(createdBox, connId);
+                            }
+                        }
+                        break;
+                    }
+                    else if (message is EmptyBoxStoreIntent store)
+                    {
+                        var storage = container as InteractableEmptyBoxStorage;
+                        if (storage == null
+                            || !_boxes.TryGetBox(store.BoxNetworkId, out var stored)
+                            || stored is not InteractablePackagingBox_Item storedBox)
+                        {
+                            reason = "empty-box storage or box does not exist";
+                            break;
+                        }
+
+                        accepted = HostStoreEmptyBox(storage, storedBox, out reason);
+                        if (accepted)
+                        {
+                            _hostDeltaReleaseHold = store.IsPlayer;
+                            HostChanged(storage);
+                        }
+                        break;
+                    }
+                    else
+                    {
+                        reason = "unknown container operation";
+                    }
+                } while (false);
             }
             catch (Exception e)
             {
@@ -1071,21 +989,26 @@ namespace CardShopCoop.Modules.World
                 CoopPlugin.Log.LogWarning("WorldContainerInteraction rejected op=" + op
                     + " kind=" + kind + " index=" + idx + ": " + reason);
             }
-            _hostPredictionId = Guid.Empty;
+            _hostActionId = Guid.Empty;
             _hostActorConnectionId = 0;
             _hostDeltaBox = null;
             _hostDeltaTakeIntoHand = false;
             _hostDeltaReleaseHold = false;
             _hostCompletePackCollection = false;
-            _hostPackIndex = 0;
             return accepted;
         }
 
         private bool HostTakeEmptyBox(InteractableEmptyBoxStorage storage, Guid creatorId,
-            out string reason, out BoxNetworkState descriptor)
+            out string reason, out InteractablePackagingBox descriptor)
         {
             reason = null;
             descriptor = null;
+            if (creatorId == Guid.Empty)
+            {
+                reason = "empty box take has no minted identity";
+                return false;
+            }
+
             var count = storage.GetBoxStoredCount();
             if (count <= 0)
             {
@@ -1146,7 +1069,7 @@ namespace CardShopCoop.Modules.World
                 // moved it. Replace that descriptor with the authoritative spawn pose; the world
                 // baseline deferral coalesces both announcements by box ID.
                 _boxes.HostRefresh(id);
-                descriptor = _boxes.DescribeAuthoritative(id);
+                descriptor = _boxes.TryGetBox(id, out var liveBox) ? liveBox : null;
                 if (descriptor != null)
                 {
                     return true;
@@ -1165,10 +1088,7 @@ namespace CardShopCoop.Modules.World
             {
                 FiEmptyStoredCount.SetValue(storage, count);
                 MiEmptyEvaluateStack.Invoke(storage, null);
-                if (box != null)
-                {
-                    box.OnDestroyed();
-                }
+                box?.OnDestroyed();
 
                 // A throw before the box existed leaves the parked id unclaimed; release it so a
                 // later, unrelated creation cannot bind to the client's id. No-op once consumed.
@@ -1179,15 +1099,14 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private bool HostStoreEmptyBox(InteractableEmptyBoxStorage storage, Guid boxId,
-            out string reason)
+        private bool HostStoreEmptyBox(InteractableEmptyBoxStorage storage,
+            InteractablePackagingBox_Item item, out string reason)
         {
             reason = null;
-            if (boxId == Guid.Empty || !_boxes.TryGetBox(boxId, out var box)
-                || box is not InteractablePackagingBox_Item item
-                || item.m_ItemCompartment == null)
+            if (item == null || item.m_ItemCompartment == null
+                || !_boxes.TryGetId(item, out _))
             {
-                reason = "empty box identity is unknown";
+                reason = "empty box does not exist";
                 return false;
             }
 
@@ -1224,11 +1143,10 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        private bool HostApplyPackClaim(int idx, int connId, out string reason,
-            Action<INetMessage> response = null)
+        private bool HostApplyPackClaim(InteractableAutoPackOpener p, int idx, int connId,
+            out string reason, Action<INetMessage> response = null)
         {
             reason = null;
-            var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
             var output = p?.GetCompactCardDataAmountList();
             var key = (KindPackOpener << 8) | idx;
             if (p == null || !p.GetIsProcessing() || p.GetStoredItemList().Count > 0
@@ -1245,8 +1163,8 @@ namespace CardShopCoop.Modules.World
 
             var claim = new ContainerPackClaimMessage
             {
-                PredictionId = _hostPredictionId,
-                Index = (byte)idx,
+                ActionId = _hostActionId,
+                Container = p,
                 ClaimToken = token,
                 Cards = new List<CompactCardDataAmount>(output),
             };
@@ -1277,11 +1195,10 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        private bool HostApplyPackCollect(int idx, int token,
+        private bool HostApplyPackCollect(InteractableAutoPackOpener p, int idx, int token,
             int connId, out string reason)
         {
             reason = null;
-            var p = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
             if (p == null)
             {
                 reason = "pack opener does not exist";
@@ -1338,7 +1255,7 @@ namespace CardShopCoop.Modules.World
                 }
                 _packClaimOwner.Remove(key);
                 _packClaimToken.Remove(key);
-                HostChanged(KindPackOpener, p);
+                HostChanged(p);
             }
             catch
             {
@@ -1373,48 +1290,33 @@ namespace CardShopCoop.Modules.World
             var records = message.Records;
             for (var r = 0; r < records.Count; r++)
             {
-                var rec = records[r];
-                ApplyOrDefer((int)rec.Kind, (int)rec.Index, rec);
+                ApplyRecord(records[r]);
             }
         }
 
-        /// <summary>Applies one authoritative record when its target object exists, or keeps it
-        /// until the world produces that object. A join baseline can name a placement the guest
-        /// only rebuilds after this message (the placement baseline is requested after the world
-        /// baseline), and applying it against a null target throws out of the reliable handler
-        /// and drops the session. The record is never dropped: the placement layer's
-        /// structure-change signal re-applies it once the object exists.</summary>
-        private void ApplyOrDefer(int kind, int idx, ContainerRecord rec)
+        /// <summary>Applies one authoritative record. The record names the live container itself,
+        /// so an unresolved or unlisted object is logged and dropped; there is no id to defer.</summary>
+        private void ApplyRecord(ContainerRecord rec)
         {
-            var key = (kind << 8) | idx;
-            if (!InGame || !HasTarget(kind, idx))
+            var container = rec.Container;
+            var kind = KindOf(container);
+            var idx = kind < 0 ? -1 : IndexOf(kind, container);
+            if (container == null || kind < 0 || idx < 0)
             {
-                if (InGame)
-                {
-                    CoopPlugin.Log.LogWarning("[containers] deferring record kind=" + kind
-                        + " idx=" + idx + " until the world produces the object (list.Count="
-                        + ListCount(kind) + ").");
-                }
-
-                _pendingRecords[key] = rec;
+                CoopPlugin.Log.LogWarning("[containers] dropped record: the container did not "
+                    + "resolve to a live placed object.");
                 return;
             }
 
-            _pendingRecords.Remove(key);
-            ApplyRecord(kind, idx, rec);
-        }
-
-        private void ApplyRecord(int kind, int idx, ContainerRecord rec)
-        {
             switch (kind)
             {
                 case KindCardStorage:
-                    ApplyContentInPlace(Get<InteractableCardStorageShelf>(kind, idx),
+                    ApplyContentInPlace((InteractableCardStorageShelf)container,
                         rec.Cards, rec.CanWorkerTake);
                     break;
                 case KindDonation:
                     {
-                        var donation = Get<InteractableBulkDonationBox>(kind, idx);
+                        var donation = (InteractableBulkDonationBox)container;
                         if (IsSyncedDonationBox(donation))
                         {
                             ApplyContentInPlace(donation, rec.Cards);
@@ -1423,7 +1325,7 @@ namespace CardShopCoop.Modules.World
                         break;
                     }
                 case KindPackOpener:
-                    ApplyPackState(Get<InteractableAutoPackOpener>(kind, idx), rec);
+                    ApplyPackState((InteractableAutoPackOpener)container, rec);
                     if (rec.CollectClaimed)
                     {
                         _claimedPackIndices.Add(idx);
@@ -1435,18 +1337,18 @@ namespace CardShopCoop.Modules.World
 
                     break;
                 case KindCleanser:
-                    var cleanser = Get<InteractableAutoCleanser>(kind, idx);
-                    ApplyCleanserState(idx, cleanser, (rec.Flags & 1) != 0,
-                        (rec.Flags & 2) != 0, rec.Fills);
+                    ApplyCleanserState(idx, (InteractableAutoCleanser)container,
+                        (rec.Flags & 1) != 0, (rec.Flags & 2) != 0, rec.Fills);
                     break;
                 case KindEmptyBoxStorage:
-                    var storage = Get<InteractableEmptyBoxStorage>(kind, idx);
+                    var storage = (InteractableEmptyBoxStorage)container;
                     FiEmptyStoredCount.SetValue(storage, rec.Count);
                     MiEmptyEvaluateStack.Invoke(storage, null);
                     break;
                 default:
-                    throw new InvalidOperationException("Unknown authoritative container kind "
-                        + kind + ".");
+                    CoopPlugin.Log.LogWarning("[containers] dropped record: unsupported live "
+                        + "container type " + container.GetType().Name + ".");
+                    break;
             }
         }
 
@@ -1457,32 +1359,39 @@ namespace CardShopCoop.Modules.World
                 throw new InvalidOperationException("Authoritative container delta is missing.");
             }
 
+            if (message.Container == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[containers] dropped delta: the container did not resolve to a live object.");
+                return;
+            }
+
             // An insert echo reconciles in layers: the record was built before any newer local
             // inserts still in flight, and applying it raw trimmed those newer optimistic entries
             // away - the pack count that bounced down and back up while a guest fed a machine.
-            if (_pendingPackInserts.Remove(message.PredictionId))
+            if (_pendingPackInserts.Remove(message.ActionId))
             {
-                WorldPrediction.ApplyAuthoritative(message, () => ApplyDeltaRecord(message));
+                WorldAction.ApplyAuthoritative(message, () => ApplyDeltaRecord(message));
             }
             else
             {
                 // Every other record is an absolute state-set: retire this peer's own prediction
                 // (the game already applied it) or apply another peer's change directly.
-                WorldPrediction.Confirm(message, () => ApplyDeltaRecord(message));
+                WorldAction.Confirm(message, () => ApplyDeltaRecord(message));
             }
 
-            if (message.HasBox)
+            if (message.Box != null)
             {
-                _boxes.ClientApplyCreated(new BoxCreatedMessage { Box = message.Box });
-                if (!_boxes.TryGetBox(message.Box.BoxNetworkId, out var box))
-                {
-                    throw new InvalidOperationException("Container delta box was not materialized.");
-                }
-
-                if (message.TakeIntoHand && box is InteractablePackagingBox_Item item)
+                if (message.TakeIntoHand && message.Box is InteractablePackagingBox_Item item)
                 {
                     TakeIntoLocalHand(item);
                 }
+            }
+            else if (message.TakeIntoHand)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[containers] delta asked to take a box into the hand, but the box did not "
+                    + "resolve to a live object.");
             }
 
             if (message.ReleaseHold)
@@ -1498,9 +1407,11 @@ namespace CardShopCoop.Modules.World
                 // pending collection (the host sends ContainerPackClaimMessage to the claimant
                 // alone). Observers therefore have nothing to apply here and must not reveal or
                 // bank on the claimant's behalf.
-                if (_pendingPackCollections.ContainsKey(message.PackIndex))
+                var opener = message.Container as InteractableAutoPackOpener;
+                var idx = opener == null ? -1 : IndexOf(KindPackOpener, opener);
+                if (idx >= 0 && _pendingPackCollections.ContainsKey(idx))
                 {
-                    CompletePackCollection(message.PackIndex);
+                    CompletePackCollection(idx);
                 }
             }
         }
@@ -1508,10 +1419,13 @@ namespace CardShopCoop.Modules.World
         /// <summary>Applies the single record a delta carries.</summary>
         private void ApplyDeltaRecord(ContainerDeltaMessage message)
         {
-            ClientApplyState(new ContainerStateMessage
+            var record = message.Record;
+            if (record.Container == null)
             {
-                Records = new List<ContainerRecord> { message.Record },
-            });
+                record.Container = message.Container;
+            }
+
+            ApplyRecord(record);
         }
 
         /// <summary>Retires the local claim bookkeeping once the host's collect delta arrives.
@@ -1841,10 +1755,7 @@ namespace CardShopCoop.Modules.World
             {
                 var last = stored[stored.Count - 1];
                 stored.RemoveAt(stored.Count - 1);
-                if (last != null)
-                {
-                    last.DisableItem();
-                }
+                last?.DisableItem();
             }
 
             while (stored.Count < targetCount)
@@ -1929,10 +1840,7 @@ namespace CardShopCoop.Modules.World
                 {
                     for (var i = 0; i < stored.Count && i < fills.Count; i++)
                     {
-                        if (stored[i] != null)
-                        {
-                            stored[i].SetContentFill(fills[i]);
-                        }
+                        stored[i]?.SetContentFill(fills[i]);
                     }
                 }
                 // Force the counter into agreement with what the machine physically holds.
@@ -1964,15 +1872,13 @@ namespace CardShopCoop.Modules.World
             {
                 if (observe.PriorStored > 0)
                 {
-                    var command = new ContainerOpMessage
+                    var command = new PackTurnOnIntent
                     {
-                        Op = OpPackTurnOn,
-                        Kind = (byte)KindPackOpener,
-                        Index = (byte)idx
+                        Container = p,
                     };
                     // Vanilla already turned the machine on; the prediction only records how to
                     // replay/undo the turn-on if a later rejection unwinds it.
-                    WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+                    WorldAction.Submit(WorldAction.ContainersScope, command,
                         () => ApplyPackRunning(p),
                         () => ApplyPackSnapshot(p, observe.PriorProcessing, observe.PriorState,
                             observe.PriorOpened, observe.PriorTimer));
@@ -1996,13 +1902,11 @@ namespace CardShopCoop.Modules.World
                 // Vanilla already ran the collect branch; the claim only asks the host to mint the
                 // authoritative output.
                 _claimedPackIndices.Add(idx);
-                var claim = new ContainerOpMessage
+                var claim = new PackClaimIntent
                 {
-                    Op = OpPackClaim,
-                    Kind = (byte)KindPackOpener,
-                    Index = (byte)idx,
+                    Container = p,
                 };
-                WorldPrediction.Predict(WorldPrediction.ContainersScope, claim,
+                WorldAction.Submit(WorldAction.ContainersScope, claim,
                     () => _claimedPackIndices.Add(idx),
                     () => _claimedPackIndices.Remove(idx));
             }
@@ -2044,29 +1948,36 @@ namespace CardShopCoop.Modules.World
 
         private void ClientEmptyBoxTake(InteractableEmptyBoxStorage storage)
         {
+            var heldBox = _playerBox?.LocalHeldBox;
+            if (storage == null || heldBox == null)
+            {
+                CoopPlugin.Log.LogWarning("WorldContainerInteraction: empty-box take has no live "
+                    + "box in hand; not forwarded.");
+                return;
+            }
+
             var idx = IndexOf(KindEmptyBoxStorage, storage);
             if (idx >= 0)
             {
-                var command = new ContainerOpMessage
+                var boxId = _playerBox?.LocalHeldBoxId ?? Guid.Empty;
+                if (boxId == Guid.Empty)
                 {
-                    Op = OpEmptyBoxTake,
-                    Kind = (byte)KindEmptyBoxStorage,
-                    Index = (byte)idx,
-                    // The client is the creator: the box vanilla just spawned and held already has
-                    // its stable id, carried so the host binds its counterpart to the same id.
-                    BoxNetworkId = _playerBox != null && _playerBox.LocalHeldBox != null
-                        && _boxes.TryGetId(_playerBox.LocalHeldBox, out var takenId)
-                        ? takenId
-                        : Guid.Empty,
-                    // Only the host creates the authoritative physical box. Vanilla already spawned
-                    // and held a local box; flagging the take as a player action makes the host's
-                    // accepted delta arrive as TakeIntoHand, and the host box reconciles the local
-                    // copy.
+                    // The spawn hook normally binds the box. If this observation ran first, mint
+                    // the id here so the intent always carries the creator's stable id.
+                    boxId = _boxes.AssignClientCreated(heldBox);
+                }
+
+                var command = new EmptyBoxTakeIntent
+                {
+                    Container = storage,
+                    // The client is the creator: its game already spawned the box and minted this
+                    // id. The host binds its created counterpart to the same id.
+                    BoxNetworkId = boxId,
                     IsPlayer = true,
                 };
                 // The observation records the storage count so a rejection can restore it; vanilla
                 // already decremented it.
-                WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+                WorldAction.Submit(WorldAction.ContainersScope, command,
                     () =>
                     {
                         var count = storage.GetBoxStoredCount();
@@ -2145,7 +2056,15 @@ namespace CardShopCoop.Modules.World
 
         public void ClientApplyPackClaim(ContainerPackClaimMessage message)
         {
-            var idx = (int)message.Index;
+            var opener = message?.Container;
+            var idx = opener == null ? -1 : IndexOf(KindPackOpener, opener);
+            if (idx < 0)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[pack] dropped claim: the pack opener did not resolve to a live object.");
+                return;
+            }
+
             _claimedPackIndices.Add(idx);
             _pendingPackCollections[idx] = new PendingPackCollection
             {
@@ -2164,11 +2083,17 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            var command = new ContainerOpMessage
+            var opener = Get<InteractableAutoPackOpener>(KindPackOpener, idx);
+            if (opener == null)
             {
-                Op = OpPackCollect,
-                Kind = (byte)KindPackOpener,
-                Index = (byte)idx,
+                CoopPlugin.Log.LogWarning("[pack] dropped collect: the pack opener did not "
+                    + "resolve to a live object.");
+                return false;
+            }
+
+            var command = new PackCollectIntent
+            {
+                Container = opener,
                 ClaimToken = pending.ClaimToken,
                 Cards = new List<CompactCardDataAmount>(pending.Cards),
             };
@@ -2177,7 +2102,7 @@ namespace CardShopCoop.Modules.World
             // (and already banked and revealed), so there is nothing to apply or undo in the game.
             // A rejection only clears the claim bookkeeping that otherwise keeps a stale token
             // alive and resubmitting forever.
-            WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+            WorldAction.Submit(WorldAction.ContainersScope, command,
                 () => { }, () => { }, () => AbandonPackCollection(idx));
             return true;
         }
@@ -2311,15 +2236,13 @@ namespace CardShopCoop.Modules.World
 
             var desired = CloneCards(__instance.GetCompactCardDataAmountList());
             var desiredCanTake = __instance.CanWorkerTake();
-            var command = new ContainerOpMessage
+            var command = new ContainerContentSetIntent
             {
-                Op = OpContentSet,
-                Kind = (byte)KindCardStorage,
-                Index = (byte)index,
+                Container = __instance,
                 CanWorkerTake = desiredCanTake,
                 Cards = CloneCards(desired),
             };
-            WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+            WorldAction.Submit(WorldAction.ContainersScope, command,
                 () => self.ApplyContentInPlace(__instance, CloneCards(desired), desiredCanTake),
                 () => { });
         }
@@ -2343,14 +2266,12 @@ namespace CardShopCoop.Modules.World
             }
 
             var desired = CloneCards(__instance.GetCompactCardDataAmountList());
-            var command = new ContainerOpMessage
+            var command = new ContainerContentSetIntent
             {
-                Op = OpContentSet,
-                Kind = (byte)KindDonation,
-                Index = (byte)index,
+                Container = __instance,
                 Cards = CloneCards(desired),
             };
-            WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+            WorldAction.Submit(WorldAction.ContainersScope, command,
                 () => self.ApplyContentInPlace(__instance, CloneCards(desired)),
                 () => { });
         }
@@ -2390,14 +2311,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var command = new ContainerOpMessage
+            var command = new WorkerTakeFlagIntent
             {
-                Op = OpWorkerTakeFlag,
-                Kind = (byte)KindCardStorage,
-                Index = (byte)__state.Index,
+                Container = __instance,
                 CanWorkerTake = __state.Desired,
             };
-            WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+            WorldAction.Submit(WorldAction.ContainersScope, command,
                 () => ApplyWorkerTake(__instance, __state.Desired),
                 () => ApplyWorkerTake(__instance, __state.Prior));
         }
@@ -2444,14 +2363,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var command = new ContainerOpMessage
+            var command = new CleanserToggleIntent
             {
-                Op = OpCleanserToggle,
-                Kind = (byte)KindCleanser,
-                Index = (byte)__state.Index,
+                Container = __instance,
                 TurnedOn = desired,
             };
-            WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+            WorldAction.Submit(WorldAction.ContainersScope, command,
                 () => ApplyCleanserToggle(__instance, desired),
                 () =>
                 {
@@ -2495,7 +2412,7 @@ namespace CardShopCoop.Modules.World
 
         public static void HostStorageContentPostfix(InteractableCardStorageShelf __instance)
         {
-            Current?.HostChanged(KindCardStorage, __instance);
+            Current?.HostChanged(__instance);
         }
 
         public static void HostDonationContentPostfix(InteractableBulkDonationBox __instance)
@@ -2504,25 +2421,25 @@ namespace CardShopCoop.Modules.World
             // enumeration would refuse them anyway, so skip before doing any work.
             if (IsSyncedDonationBox(__instance))
             {
-                Current?.HostChanged(KindDonation, __instance);
+                Current?.HostChanged(__instance);
             }
         }
 
         public static void HostWorkerTakePostfix(InteractableCardStorageShelf __instance)
         {
-            Current?.HostChanged(KindCardStorage, __instance);
+            Current?.HostChanged(__instance);
         }
 
         public static void CardStorageRandomCardPostfix(InteractableCardStorageShelf __instance)
         {
-            Current?.HostChanged(KindCardStorage, __instance);
+            Current?.HostChanged(__instance);
         }
 
         public static void DonationRandomCardPostfix(InteractableBulkDonationBox __instance)
         {
             if (IsSyncedDonationBox(__instance))
             {
-                Current?.HostChanged(KindDonation, __instance);
+                Current?.HostChanged(__instance);
             }
         }
 
@@ -2538,12 +2455,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            Current?.HostChanged(KindPackOpener, __instance);
+            Current?.HostChanged(__instance);
         }
 
         public static void CleanserChangedPostfix(InteractableAutoCleanser __instance)
         {
-            Current?.HostChanged(KindCleanser, __instance);
+            Current?.HostChanged(__instance);
         }
 
         /// <summary>Snapshots the pack opener before vanilla's click runs.</summary>
@@ -2700,6 +2617,7 @@ namespace CardShopCoop.Modules.World
                 Self = self,
                 Storage = __instance,
                 Index = idx,
+                Box = packagingBox,
                 BoxNetworkId = boxId,
                 PriorCount = __instance.GetBoxStoredCount(),
                 IsPlayer = isPlayer,
@@ -2724,15 +2642,20 @@ namespace CardShopCoop.Modules.World
             }
 
             var self = __state.Self;
-            var command = new ContainerOpMessage
+            if (__state.BoxNetworkId == Guid.Empty)
             {
-                Op = OpEmptyBoxStore,
-                Kind = (byte)KindEmptyBoxStorage,
-                Index = (byte)__state.Index,
+                CoopPlugin.Log.LogWarning("WorldContainerInteraction: empty-box store consumed box "
+                    + __state.BoxNetworkId + " with no identity; the store is not sent.");
+                return;
+            }
+
+            var command = new EmptyBoxStoreIntent
+            {
+                Container = __state.Storage,
                 BoxNetworkId = __state.BoxNetworkId,
                 IsPlayer = __state.IsPlayer,
             };
-            WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+            WorldAction.Submit(WorldAction.ContainersScope, command,
                 () => self.ApplyEmptyBoxStored(__state.Storage, __state.BoxNetworkId),
                 () => self.ApplyEmptyBoxTaken(__state.Storage, __state.BoxNetworkId));
         }
@@ -2749,12 +2672,12 @@ namespace CardShopCoop.Modules.World
 
         public static void EmptyBoxTakeChangedPostfix(InteractableEmptyBoxStorage __instance)
         {
-            Current?.HostChanged(KindEmptyBoxStorage, __instance);
+            Current?.HostChanged(__instance);
         }
 
         public static void EmptyBoxStoreChangedPostfix(InteractableEmptyBoxStorage __instance)
         {
-            Current?.HostChanged(KindEmptyBoxStorage, __instance);
+            Current?.HostChanged(__instance);
         }
 
         /// <summary>Observes a pack the local player inserted. Vanilla <c>AddItem</c> already put
@@ -2782,19 +2705,17 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var command = new ContainerOpMessage
+            var command = new PackInsertIntent
             {
-                Op = OpPackInsert,
-                Kind = (byte)KindPackOpener,
-                Index = (byte)idx,
+                Container = __instance,
                 // the host spawns a real pack prefab from this, so a modded id minted in
                 // a different order here would insert the WRONG product on the host
                 ItemType = item.GetItemType(),
             };
             // One prediction key per machine: an insert echo's layered reconcile must undo/replay
             // only this opener's own in-flight inserts, never another container's pending action.
-            var predictionId = Guid.Empty;
-            predictionId = WorldPrediction.Predict(PackInsertPredictionKey(idx), command,
+            var actionId = Guid.Empty;
+            actionId = WorldAction.Submit(PackInsertPredictionKey(idx), command,
                 () =>
                 {
                     ApplyingRemote = true;
@@ -2820,7 +2741,7 @@ namespace CardShopCoop.Modules.World
                     // right after, so it is removed here. The retired target is left in place:
                     // either the authoritative record being applied already carries it, or a
                     // terminal rejection's callback hands it back.
-                    if (!PredictionApi.IsPending(predictionId)
+                    if (!ActionLedger.IsPending(actionId)
                         || !__instance.GetStoredItemList().Contains(item))
                     {
                         return;
@@ -2840,7 +2761,7 @@ namespace CardShopCoop.Modules.World
                 {
                     // Terminal rejection: the target undo above deliberately left the pack in the
                     // machine, so take it out here and put it back in the acting hand.
-                    self._pendingPackInserts.Remove(predictionId);
+                    self._pendingPackInserts.Remove(actionId);
                     ApplyingRemote = true;
                     try
                     {
@@ -2855,7 +2776,7 @@ namespace CardShopCoop.Modules.World
                     }
                     RestoreHeldPack(item);
                 });
-            self._pendingPackInserts.Add(predictionId);
+            self._pendingPackInserts.Add(actionId);
         }
 
         /// <summary>Observes the local player's cleanser refill. The game's own <c>AddItem</c> has
@@ -2880,14 +2801,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var command = new ContainerOpMessage
+            var command = new CleanserRefillIntent
             {
-                Op = OpCleanserRefill,
-                Kind = (byte)KindCleanser,
-                Index = (byte)idx,
+                Container = __instance,
                 Fill = item.GetContentFill(),
             };
-            WorldPrediction.Predict(WorldPrediction.ContainersScope, command,
+            WorldAction.Submit(WorldAction.ContainersScope, command,
                 () =>
                 {
                     ApplyingRemote = true;
@@ -2925,7 +2844,7 @@ namespace CardShopCoop.Modules.World
         /// <summary>One prediction key per pack opener, so an insert echo's layered reconcile only
         /// undoes/replays that machine's own in-flight inserts.</summary>
         private static string PackInsertPredictionKey(int idx)
-            => WorldPrediction.ContainersScope + ":pack:" + idx;
+            => WorldAction.ContainersScope + ":pack:" + idx;
 
         /// <summary>Puts a pack that a rejected insert removed from the local hand back where it
         /// was. Vanilla's EvaluatePutItemOnShelf removes the pack from the hold list right after
@@ -2940,10 +2859,7 @@ namespace CardShopCoop.Modules.World
 
             item.gameObject.SetActive(true);
             var controller = SceneRef<InteractionPlayerController>.Get();
-            if (controller != null)
-            {
-                controller.AddHoldItemToFront(item);
-            }
+            controller?.AddHoldItemToFront(item);
         }
 
         private static void RestorePackOpener(InteractableAutoPackOpener opener,
@@ -2961,10 +2877,7 @@ namespace CardShopCoop.Modules.World
 
                     var extra = current[i];
                     current.RemoveAt(i);
-                    if (extra != null)
-                    {
-                        extra.DisableItem();
-                    }
+                    extra?.DisableItem();
                 }
                 current.Clear();
                 current.AddRange(stored);
@@ -2991,10 +2904,7 @@ namespace CardShopCoop.Modules.World
 
                     var extra = current[i];
                     current.RemoveAt(i);
-                    if (extra != null)
-                    {
-                        extra.DisableItem();
-                    }
+                    extra?.DisableItem();
                 }
                 current.Clear();
                 current.AddRange(stored);
@@ -3027,10 +2937,7 @@ namespace CardShopCoop.Modules.World
             catch (Exception e)
             {
                 CoopPlugin.Log.LogWarning($"WorldContainerInteraction spawn {itemType}: {e.Message}");
-                if (item != null)
-                {
-                    item.DisableItem();
-                }
+                item?.DisableItem();
                 throw;
             }
         }

@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -93,7 +93,7 @@ namespace CardShopCoop.Modules.Light
 
         }
 
-        [MessageHandler(typeof(LightSwitchIntentMessage))]
+        [MessageHandler]
         private void HandleIntent(MessageContext context, LightSwitchIntentMessage message)
         {
             if (!IsPeerMessage(context))
@@ -104,14 +104,14 @@ namespace CardShopCoop.Modules.Light
 
             if (!LightInterop.IsSceneReady(LightInterop.FindSceneManager()))
             {
-                PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
                 return;
             }
             LightSwitchState.Apply(message.IsActive);
-            BroadcastState(message.PredictionId);
+            BroadcastState(message.ActionId);
         }
 
-        private void BroadcastState(Guid predictionId)
+        private void BroadcastState(Guid actionId)
         {
             if (_shutdown || _context == null || !_context.InGame()
                 || !LightSwitchState.TryGet(out var isActive))
@@ -122,7 +122,7 @@ namespace CardShopCoop.Modules.Light
 
             _context.Broadcast(new LightSwitchStateMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 IsActive = isActive,
             });
         }
@@ -138,7 +138,7 @@ namespace CardShopCoop.Modules.Light
 
             _context.Send(peer, new LightSwitchStateMessage
             {
-                PredictionId = Guid.Empty,
+                ActionId = Guid.Empty,
                 IsActive = isActive,
             });
         }

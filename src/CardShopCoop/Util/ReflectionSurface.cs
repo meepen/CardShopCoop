@@ -33,22 +33,16 @@ namespace CardShopCoop.Util
                 (required ? " (required)" : " (optional; feature disabled)");
             if (required)
             {
-                if (CoopPlugin.Log != null)
-                {
-                    CoopPlugin.Log.LogError(message);
-                }
+                CoopPlugin.Log?.LogError(message);
 
                 throw new MissingMemberException(message);
             }
-            if (CoopPlugin.Log != null)
-            {
-                CoopPlugin.Log.LogWarning(message);
-            }
+            CoopPlugin.Log?.LogWarning(message);
         }
 
         internal static FieldInfo RequiredField(Type type, string name)
         {
-            var result = type == null ? null : type.GetField(name,
+            var result = type?.GetField(name,
                 BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (result == null)
             {
@@ -71,7 +65,7 @@ namespace CardShopCoop.Util
 
         internal static PropertyInfo OptionalProperty(Type type, string name)
         {
-            var result = type == null ? null : type.GetProperty(name,
+            var result = type?.GetProperty(name,
                 BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (result == null)
             {
@@ -83,7 +77,7 @@ namespace CardShopCoop.Util
 
         internal static FieldInfo OptionalField(Type type, string name)
         {
-            var result = type == null ? null : type.GetField(name,
+            var result = type?.GetField(name,
                 BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (result == null)
             {
@@ -190,11 +184,8 @@ namespace CardShopCoop.Util
                 return;
             }
 
-            if (CoopPlugin.Log != null)
-            {
-                CoopPlugin.Log.LogWarning("coop: skipped a type that cannot load on this build ("
+            CoopPlugin.Log?.LogWarning("coop: skipped a type that cannot load on this build ("
                     + name + "): " + error.Message);
-            }
         }
 
         private static MethodInfo ResolveMethod(Type type, string name, Type[] args)

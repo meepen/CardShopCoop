@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Npc;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -22,9 +22,9 @@ namespace CardShopCoop.Modules.Staff
         private static bool _applyingRemote;
         private static bool _allowWorkerOpen;
 
-        private readonly Dictionary<int, bool> _workerBusy = new();
-        private readonly HashSet<int> _workerLease = new();
-        private readonly Dictionary<int, uint> _workerGenerations = new();
+        private readonly Dictionary<Worker, bool> _workerBusy = new();
+        private readonly HashSet<Worker> _workerLease = new();
+        private readonly Dictionary<Worker, uint> _workerGenerations = new();
         private readonly Dictionary<string, StaffModuleDeltaMessage> _deferredDeltas = new();
         private StaffModuleBaselineMessage _pendingBaseline;
         private CoopRuntimeContext _context;
@@ -44,6 +44,7 @@ namespace CardShopCoop.Modules.Staff
         private sealed class StaffAction
         {
             public Worker Worker;
+            /// <summary>Local prediction/correlation key, never a wire field.</summary>
             public int Index;
             public StaffModuleEntry Before;
             public StaffModuleIntentMessage Message;
@@ -102,29 +103,36 @@ namespace CardShopCoop.Modules.Staff
             TryApplyPending();
         }
 
-        [MessageHandler(typeof(StaffModuleBaselineMessage))]
+        [MessageHandler]
         private void HandleBaseline(MessageContext _, StaffModuleBaselineMessage message)
         {
             _pendingBaseline = message;
             TryApplyPending();
         }
 
-        [MessageHandler(typeof(StaffModuleDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext _, StaffModuleDeltaMessage message)
         {
+            if (message == null || message.Worker == null)
+            {
+                CoopPlugin.Log.LogWarning("[staff] client dropped delta with no live worker.");
+                ActionLedger.Ack(message?.ActionId ?? Guid.Empty);
+                return;
+            }
+
             if (!ApplyDelta(message))
             {
                 var key = DeltaKey(message);
                 if (_deferredDeltas.TryGetValue(key, out var previous))
                 {
-                    PredictionApi.Ack(previous.PredictionId);
+                    ActionLedger.Ack(previous.ActionId);
                 }
 
 
                 _deferredDeltas[key] = message;
-                CoopPlugin.Log.LogInfo("[staff] deferred " + message.Kind + " index=" + message.Index
-                    + " generation=" + message.Generation + " known="
-                    + (_workerGenerations.TryGetValue(message.Index, out var known)
+                CoopPlugin.Log.LogInfo("[staff] deferred " + message.Kind + " worker="
+                    + message.Worker.name + " generation=" + message.Generation + " known="
+                    + (_workerGenerations.TryGetValue(message.Worker, out var known)
                         ? known.ToString() : "none"));
             }
         }
@@ -165,7 +173,7 @@ namespace CardShopCoop.Modules.Staff
                 _workerGenerations.Clear();
                 for (var i = 0; i < _pendingBaseline.Entries.Count; i++)
                 {
-                    ApplyEntry(i, _pendingBaseline.Entries[i]);
+                    ApplyEntry(_pendingBaseline.Entries[i]);
                 }
             }
             finally
@@ -191,19 +199,6 @@ namespace CardShopCoop.Modules.Staff
                 return false;
             }
 
-            if (message.Kind != StaffDeltaKind.Hired && message.Kind != StaffDeltaKind.Fired
-                && message.Kind != StaffDeltaKind.Interaction
-                && StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out var missing) == false)
-            {
-                return false;
-            }
-
-            if (message.Kind == StaffDeltaKind.Interaction && message.Occupied && message.Granted
-                && !StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out _))
-            {
-                return false;
-            }
-
             Action apply = () =>
             {
                 _applyingRemote = true;
@@ -223,7 +218,7 @@ namespace CardShopCoop.Modules.Staff
             // keeps the local interaction as-is.
             if (message.Kind == StaffDeltaKind.Fired || message.Kind == StaffDeltaKind.Interaction)
             {
-                PredictionApi.AckOrApply(message.PredictionId, apply);
+                ActionLedger.AckOrApply(message.ActionId, apply);
             }
             else
             {
@@ -232,7 +227,7 @@ namespace CardShopCoop.Modules.Staff
                 // ApplyEntry) and the Hired bootstrap/manager entry. AckOrApply retired the
                 // actor's own prediction and returned, losing that state, so Confirm retires it
                 // and still runs the authoritative apply.
-                PredictionApi.Confirm(message.PredictionId, apply);
+                ActionLedger.Confirm(message.ActionId, apply);
             }
 
             return true;
@@ -245,7 +240,7 @@ namespace CardShopCoop.Modules.Staff
                 return true;
             }
 
-            return _workerGenerations.TryGetValue(message.Index, out var generation)
+            return _workerGenerations.TryGetValue(message.Worker, out var generation)
                 && generation == message.Generation;
         }
 
@@ -254,19 +249,15 @@ namespace CardShopCoop.Modules.Staff
             switch (message.Kind)
             {
                 case StaffDeltaKind.Hired:
-                    _workerGenerations[message.Index] = message.Generation;
-                    ApplyEntry(message.Index, message.Bootstrap);
+                    _workerGenerations[message.Worker] = message.Generation;
+                    ApplyEntry(message.Bootstrap);
                     break;
                 case StaffDeltaKind.Fired:
-                    _workerGenerations[message.Index] = message.Generation;
-                    EnsureHiredSlot(message.Index);
-                    CPlayerData.SetIsWorkerHired(message.Index, false);
-                    if (StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out var fired))
-                    {
-                        fired.FireWorker();
-                        RefreshWorker(fired);
-                    }
-
+                    _workerGenerations[message.Worker] = message.Generation;
+                    EnsureHiredSlot(message.Worker.m_WorkerIndex);
+                    CPlayerData.SetIsWorkerHired(message.Worker.m_WorkerIndex, false);
+                    message.Worker.FireWorker();
+                    RefreshWorker(message.Worker);
                     RefreshHirePanels();
                     break;
                 case StaffDeltaKind.Task:
@@ -293,15 +284,23 @@ namespace CardShopCoop.Modules.Staff
             }
         }
 
-        private void ApplyEntry(int index, StaffModuleEntry entry)
+        private void ApplyEntry(StaffModuleEntry entry)
         {
+            var worker = entry.Worker;
+            if (worker == null)
+            {
+                CoopPlugin.Log.LogWarning("[staff] client dropped worker entry with no live worker.");
+                return;
+            }
+
+            var index = worker.m_WorkerIndex;
             // Prediction snapshots (CaptureEntry/CaptureWorkerEntry) leave Generation at its
             // default 0 because they describe only worker data. Never overwrite the tracked
             // generation with that default: doing so makes every later Task/Options/Bonus/
             // Experience delta for the worker fail the generation check and defer forever.
             if (entry.Generation != 0)
             {
-                _workerGenerations[index] = entry.Generation;
+                _workerGenerations[worker] = entry.Generation;
             }
 
             EnsureHiredSlot(index);
@@ -318,11 +317,7 @@ namespace CardShopCoop.Modules.Staff
                 saved[index] = data;
                 StaffModuleInterop.ApplyEntryToSave(entry, data);
                 StaffModuleInterop.RefreshWorkerUi(index, data);
-                if (StaffModuleInterop.TryGetWorkerFromPuppet(index, out var worker))
-                {
-                    StaffModuleInterop.ApplyEntryToWorker(worker, entry);
-                }
-
+                StaffModuleInterop.ApplyEntryToWorker(worker, entry);
                 RefreshInteractScreen(_interactScreenCache.Get(), index);
             }
 
@@ -331,11 +326,7 @@ namespace CardShopCoop.Modules.Staff
 
         private void ApplyTask(StaffModuleDeltaMessage message)
         {
-            if (!StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out var worker))
-            {
-                return;
-            }
-
+            var worker = message.Worker;
             worker.SetTask((EWorkerTask)message.PrimaryTask);
             worker.SetLastTask((EWorkerTask)message.WorkerTask);
             worker.SetSecondaryTask((EWorkerTask)message.SecondaryTask);
@@ -344,11 +335,7 @@ namespace CardShopCoop.Modules.Staff
 
         private void ApplyOptions(StaffModuleDeltaMessage message)
         {
-            if (!StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out var worker))
-            {
-                return;
-            }
-
+            var worker = message.Worker;
             worker.SetRestockShelfWithNoLabel(message.FillNoLabel);
             worker.UpdateSetPriceOption(message.RoundUpPrice, message.AvoidSetCardPrice, message.PriceMult);
             worker.UpdateSetCardPriceOption(message.RoundUpCardPrice, message.AvoidSetCardPriceRestock,
@@ -361,11 +348,7 @@ namespace CardShopCoop.Modules.Staff
 
         private void ApplyPack(StaffModuleDeltaMessage message)
         {
-            if (!StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out var worker))
-            {
-                return;
-            }
-
+            var worker = message.Worker;
             if (message.PackChanges != null && message.PackChanges.Count > 0)
             {
                 for (var i = 0; i < message.PackChanges.Count; i++)
@@ -387,48 +370,38 @@ namespace CardShopCoop.Modules.Staff
 
         private void ApplyBonus(StaffModuleDeltaMessage message)
         {
-            if (!StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out var worker))
-            {
-                return;
-            }
-
+            var worker = message.Worker;
             worker.m_BonusBoostedCount = message.BonusCount;
             worker.m_IsBonusBoosted = message.BonusBoosted;
             RefreshWorker(worker);
-            RefreshInteractScreen(_interactScreenCache.Get(), message.Index);
+            RefreshInteractScreen(_interactScreenCache.Get(), worker.m_WorkerIndex);
         }
 
         private void ApplyExperience(StaffModuleDeltaMessage message)
         {
-            if (StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out var worker))
-            {
-                StaffModuleInterop.SetExperience(worker, (EWorkerTask)message.ExperienceTask,
-                    message.ExperienceAmount);
-                RefreshWorker(worker);
-            }
+            var worker = message.Worker;
+            StaffModuleInterop.SetExperience(worker, (EWorkerTask)message.ExperienceTask,
+                message.ExperienceAmount);
+            RefreshWorker(worker);
         }
 
         private void ApplyInteraction(StaffModuleDeltaMessage message)
         {
-            _workerBusy[message.Index] = message.Occupied;
+            var worker = message.Worker;
+            _workerBusy[worker] = message.Occupied;
             if (!message.Occupied)
             {
-                _workerLease.Remove(message.Index);
-                if (StaffModuleInterop.TryGetWorkerFromPuppet(message.Index, out var released))
-                {
-                    WithRemote(released.OnPressStopInteract);
-                }
-
+                _workerLease.Remove(worker);
+                WithRemote(worker.OnPressStopInteract);
                 return;
             }
 
-            if (!message.Granted || !StaffModuleInterop.TryGetWorkerFromPuppet(message.Index,
-                out var worker))
+            if (!message.Granted)
             {
                 return;
             }
 
-            _workerLease.Add(message.Index);
+            _workerLease.Add(worker);
             _allowWorkerOpen = true;
             try
             {
@@ -466,10 +439,15 @@ namespace CardShopCoop.Modules.Staff
         /// stopped the local interaction UI, so the module's lease/busy flags must follow. This
         /// must not depend on the later <see cref="StaffDeltaKind.Interaction"/> delta, which can
         /// be deferred.</summary>
-        private void ReleaseLocalInteraction(int index)
+        private void ReleaseLocalInteraction(Worker worker)
         {
-            _workerLease.Remove(index);
-            _workerBusy[index] = false;
+            if (worker == null)
+            {
+                return;
+            }
+
+            _workerLease.Remove(worker);
+            _workerBusy[worker] = false;
         }
 
         private void WithPrediction(Action action)
@@ -555,7 +533,7 @@ namespace CardShopCoop.Modules.Staff
             _applyingRemote = true;
             try
             {
-                ApplyEntry(worker.m_WorkerIndex, entry);
+                ApplyEntry(entry);
             }
             finally
             {
@@ -569,10 +547,10 @@ namespace CardShopCoop.Modules.Staff
         private void RegisterPostHoc(string key, StaffModuleIntentMessage message, Action apply,
             Action undo)
         {
-            PredictionApi.Predict(key,
+            ActionLedger.Submit(key,
                 id =>
                 {
-                    message.PredictionId = id;
+                    message.ActionId = id;
                     Send(message);
                 },
                 apply,
@@ -607,7 +585,7 @@ namespace CardShopCoop.Modules.Staff
         private bool CanObserve()
             => !_shutdown && _joined && _context != null && _context.InGame()
                 && !_applyingRemote && _applyingPrediction == 0 && _insideStaffAction == 0
-                && !PredictionApi.IsReconciling;
+                && !ActionLedger.IsReconciling;
 
         /// <summary>Capture-only prefix for a local hire: snapshot the manager slot before vanilla
         /// OnPressHireButton spends the wallet and activates the worker. The postfix registers one
@@ -631,15 +609,28 @@ namespace CardShopCoop.Modules.Staff
                 && index >= 0 && index < manager.m_WorkerDataList.Count
                 && manager.m_WorkerDataList[index] != null
                 ? manager.m_WorkerDataList[index].hiringCost : 0f;
+            // The intent names the live scene worker. An un-hired slot has no replicated identity
+            // yet, so it cannot be addressed over the wire; log and skip the prediction.
+            var workers = StaffModuleInterop.GetWorkers(manager);
+            var worker = workers != null && index >= 0 && index < workers.Count
+                ? workers[index] : null;
+            if (worker == null || !NpcClientBehaviour.TryGetWireIdentity(worker, out _, out _))
+            {
+                CoopPlugin.Log.LogWarning("[staff] hire target index=" + index
+                    + " has no live replicated worker; not forwarding.");
+                return null;
+            }
+
             return new StaffAction
             {
+                Worker = worker,
                 Index = index,
                 Before = CaptureManagerEntry(index),
                 Spend = spend,
                 Message = new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.Hire,
-                    Index = index,
+                    Worker = worker,
                 },
             };
         }
@@ -666,14 +657,14 @@ namespace CardShopCoop.Modules.Staff
                 {
                     // Replay re-hires through the module path, which does not spend, so mirror the
                     // wallet debit the host owns for this hire.
-                    ApplyEntry(index, predicted);
+                    ApplyEntry(predicted);
                     Charge(spend);
                 },
                 () =>
                 {
                     // The vanilla OnPressHireButton already debited the guest's mirror (the Hud
                     // observer was suppressed), so a rejection must refund it.
-                    ApplyEntry(index, before);
+                    ApplyEntry(before);
                     Refund(spend);
                 });
             _context.SetStatusLine?.Invoke("hired - starting work at the host's shop", 4f);
@@ -706,7 +697,7 @@ namespace CardShopCoop.Modules.Staff
                 Message = new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.Bonus,
-                    Index = worker.m_WorkerIndex,
+                    Worker = worker,
                 },
             };
         }
@@ -769,7 +760,7 @@ namespace CardShopCoop.Modules.Staff
                 Message = new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.Fire,
-                    Index = worker.m_WorkerIndex,
+                    Worker = worker,
                 },
             };
         }
@@ -799,11 +790,11 @@ namespace CardShopCoop.Modules.Staff
                 () =>
                 {
                     Restore(state.Before, worker);
-                    _workerLease.Add(index);
-                    _workerBusy[index] = true;
+                    _workerLease.Add(worker);
+                    _workerBusy[worker] = true;
                     WithRemote(worker.OnMousePress);
                 });
-            ReleaseLocalInteraction(index);
+            ReleaseLocalInteraction(worker);
         }
 
         /// <summary>Capture-only prefix for a task choice: snapshot the worker before vanilla
@@ -848,10 +839,10 @@ namespace CardShopCoop.Modules.Staff
 
             _insideStaffAction--;
             var worker = state.Worker;
-            RegisterPostHoc(PredictionScope + ":" + worker.m_WorkerIndex, state.Message,
+            RegisterPostHoc(PredictionScope + ":" + worker.GetInstanceID(), state.Message,
                 () => WithPrediction(() => screen.SetTaskAsPrimaryOrSecondary(isPrimary)),
                 () => Restore(state.Before, worker));
-            ReleaseLocalInteraction(worker.m_WorkerIndex);
+            ReleaseLocalInteraction(worker);
         }
 
         private StaffModuleIntentMessage BuildTaskIntent(Worker worker, bool isPrimary, EWorkerTask task)
@@ -860,7 +851,7 @@ namespace CardShopCoop.Modules.Staff
             return new StaffModuleIntentMessage
             {
                 Kind = StaffIntentKind.Task,
-                Index = worker.m_WorkerIndex,
+                Worker = worker,
                 PrimaryTask = (byte)(isPrimary ? task : data.primaryTask),
                 SecondaryTask = (byte)(isPrimary ? data.secondaryTask : task),
                 WorkerTask = (byte)(isPrimary ? task : data.workerTask),
@@ -875,7 +866,7 @@ namespace CardShopCoop.Modules.Staff
             return new StaffModuleIntentMessage
             {
                 Kind = StaffIntentKind.Options,
-                Index = worker.m_WorkerIndex,
+                Worker = worker,
                 FillNoLabel = noLabel,
                 PrimaryTask = (byte)(worker.GetIsSetTaskSettingPrimarySecondary()
                     ? (EWorkerTask)taskIndex : data.primaryTask),
@@ -926,10 +917,10 @@ namespace CardShopCoop.Modules.Staff
 
             _insideStaffAction--;
             var worker = state.Worker;
-            RegisterPostHoc(PredictionScope + ":" + worker.m_WorkerIndex, state.Message,
+            RegisterPostHoc(PredictionScope + ":" + worker.GetInstanceID(), state.Message,
                 () => WithPrediction(() => screen.OnPressRestockShelfWithNoLabel(noLabel)),
                 () => Restore(state.Before, worker));
-            ReleaseLocalInteraction(worker.m_WorkerIndex);
+            ReleaseLocalInteraction(worker);
         }
 
         private StaffModuleIntentMessage BuildPriceIntent(WorkerOptionSetPriceUIScreen screen,
@@ -944,7 +935,7 @@ namespace CardShopCoop.Modules.Staff
             return new StaffModuleIntentMessage
             {
                 Kind = StaffIntentKind.Options,
-                Index = worker.m_WorkerIndex,
+                Worker = worker,
                 PrimaryTask = (byte)(worker.GetIsSetTaskSettingPrimarySecondary() ? task : data.primaryTask),
                 SecondaryTask = (byte)(worker.GetIsSetTaskSettingPrimarySecondary()
                     ? data.secondaryTask : task),
@@ -994,10 +985,10 @@ namespace CardShopCoop.Modules.Staff
 
             _insideStaffAction--;
             var worker = state.Worker;
-            RegisterPostHoc(PredictionScope + ":" + worker.m_WorkerIndex, state.Message,
+            RegisterPostHoc(PredictionScope + ":" + worker.GetInstanceID(), state.Message,
                 () => WithPrediction(screen.OnPressConfirm),
                 () => Restore(state.Before, worker));
-            ReleaseLocalInteraction(worker.m_WorkerIndex);
+            ReleaseLocalInteraction(worker);
         }
 
         private StaffModuleIntentMessage BuildPackIntent(WorkerSetPackOpenerTypeOptionScreen screen,
@@ -1018,7 +1009,7 @@ namespace CardShopCoop.Modules.Staff
             return new StaffModuleIntentMessage
             {
                 Kind = StaffIntentKind.Pack,
-                Index = worker.m_WorkerIndex,
+                Worker = worker,
                 PrimaryTask = (byte)(worker.GetIsSetTaskSettingPrimarySecondary()
                     ? EWorkerTask.RefillCardOpener : data.primaryTask),
                 SecondaryTask = (byte)(worker.GetIsSetTaskSettingPrimarySecondary()
@@ -1063,10 +1054,10 @@ namespace CardShopCoop.Modules.Staff
 
             _insideStaffAction--;
             var worker = state.Worker;
-            RegisterPostHoc(PredictionScope + ":" + worker.m_WorkerIndex, state.Message,
+            RegisterPostHoc(PredictionScope + ":" + worker.GetInstanceID(), state.Message,
                 () => WithPrediction(screen.OnPressConfirm),
                 () => Restore(state.Before, worker));
-            ReleaseLocalInteraction(worker.m_WorkerIndex);
+            ReleaseLocalInteraction(worker);
         }
 
         /// <summary>Capture-only prefix for a local worker click: vanilla OnMousePress owns the
@@ -1080,8 +1071,7 @@ namespace CardShopCoop.Modules.Staff
                 return null;
             }
 
-            var index = worker.m_WorkerIndex;
-            if (_workerLease.Contains(index))
+            if (_workerLease.Contains(worker))
             {
                 return null;
             }
@@ -1094,11 +1084,11 @@ namespace CardShopCoop.Modules.Staff
             return new StaffAction
             {
                 Worker = worker,
-                Index = index,
+                Index = worker.GetInstanceID(),
                 Message = new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.BeginInteraction,
-                    Index = index,
+                    Worker = worker,
                     Position = position,
                 },
             };
@@ -1112,20 +1102,19 @@ namespace CardShopCoop.Modules.Staff
             }
 
             var worker = state.Worker;
-            var index = state.Index;
-            _workerBusy[index] = true;
-            _workerLease.Add(index);
-            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+            _workerBusy[worker] = true;
+            _workerLease.Add(worker);
+            RegisterPostHoc(PredictionScope + ":" + state.Index, state.Message,
                 () => WithPrediction(() =>
                 {
-                    _workerBusy[index] = true;
-                    _workerLease.Add(index);
+                    _workerBusy[worker] = true;
+                    _workerLease.Add(worker);
                     worker.OnMousePress();
                 }),
                 () =>
                 {
-                    _workerLease.Remove(index);
-                    _workerBusy[index] = false;
+                    _workerLease.Remove(worker);
+                    _workerBusy[worker] = false;
                     WithRemote(worker.OnPressStopInteract);
                 });
         }
@@ -1136,7 +1125,7 @@ namespace CardShopCoop.Modules.Staff
         /// screen makes are excluded by <see cref="CanObserve"/>'s action guard.</summary>
         private StaffAction BeginWorkerStop(Worker worker)
         {
-            if (!CanObserve() || worker == null || !_workerLease.Contains(worker.m_WorkerIndex))
+            if (!CanObserve() || worker == null || !_workerLease.Contains(worker))
             {
                 return null;
             }
@@ -1144,11 +1133,11 @@ namespace CardShopCoop.Modules.Staff
             return new StaffAction
             {
                 Worker = worker,
-                Index = worker.m_WorkerIndex,
+                Index = worker.GetInstanceID(),
                 Message = new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.EndInteraction,
-                    Index = worker.m_WorkerIndex,
+                    Worker = worker,
                 },
             };
         }
@@ -1161,20 +1150,19 @@ namespace CardShopCoop.Modules.Staff
             }
 
             var worker = state.Worker;
-            var index = state.Index;
-            _workerLease.Remove(index);
-            _workerBusy[index] = false;
-            RegisterPostHoc(PredictionScope + ":" + index, state.Message,
+            _workerLease.Remove(worker);
+            _workerBusy[worker] = false;
+            RegisterPostHoc(PredictionScope + ":" + state.Index, state.Message,
                 () => WithPrediction(() =>
                 {
-                    _workerLease.Remove(index);
-                    _workerBusy[index] = false;
+                    _workerLease.Remove(worker);
+                    _workerBusy[worker] = false;
                     worker.OnPressStopInteract();
                 }),
                 () =>
                 {
-                    _workerLease.Add(index);
-                    _workerBusy[index] = true;
+                    _workerLease.Add(worker);
+                    _workerBusy[worker] = true;
                     WithRemote(worker.OnMousePress);
                 });
         }
@@ -1255,14 +1243,15 @@ namespace CardShopCoop.Modules.Staff
         private void OnDestroy() => Shutdown();
 
         private static string DeltaKey(StaffModuleDeltaMessage message)
-            => message.Index + ":" + (byte)message.Kind + ":" + message.Generation
+            => (message.Worker == null ? 0 : message.Worker.GetInstanceID()) + ":"
+                + (byte)message.Kind + ":" + message.Generation
                 + ":" + message.PackIndex + ":" + message.ExperienceTask;
 
         private void ClearDeferredDeltas()
         {
             foreach (var delta in _deferredDeltas.Values)
             {
-                PredictionApi.Ack(delta.PredictionId);
+                ActionLedger.Ack(delta.ActionId);
             }
 
 

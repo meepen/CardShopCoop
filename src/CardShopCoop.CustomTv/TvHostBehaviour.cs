@@ -7,7 +7,7 @@ using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-namespace CardShopCoop.Modules.Tv
+namespace CardShopCoop.CustomTv
 {
     /// <summary>Host-authoritative TV controls and event-driven playback deltas.</summary>
     [ServerBehaviour]
@@ -43,7 +43,8 @@ namespace CardShopCoop.Modules.Tv
         private int _generation;
         private bool _hasPendingMediaOperation;
         private byte _pendingMediaOperation;
-        private Guid _pendingMediaPredictionId;
+        private Guid _pendingMediaActionId;
+        private bool _statePublished;
 
         private void OnEnable()
         {
@@ -53,12 +54,9 @@ namespace CardShopCoop.Modules.Tv
             }
 
             _context = Context;
-            var registered = false;
             try
             {
                 ResetSessionState();
-                _context.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.tv.host.runtime");
@@ -70,10 +68,6 @@ namespace CardShopCoop.Modules.Tv
                 CoopLog.Error("TV host initialization failed: " + exception);
                 _harmony?.UnpatchSelf();
                 _harmony = null;
-                if (registered)
-                {
-                    _context.Messages.UnregisterAttributedHandlers(this);
-                }
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (ReferenceEquals(_active, this))
                 {
@@ -85,32 +79,19 @@ namespace CardShopCoop.Modules.Tv
             }
         }
 
-        [OnFullyJoined]
-        private void SendJoinBaseline(PeerConnection connection)
+        [OnClientJoined]
+        private void PublishStateForJoin(PeerConnection connection)
         {
-            if (_shutdown || connection == null
-                || (connection.State != ConnectionState.Transferring
-                    && connection.State != ConnectionState.FullyJoined))
+            if (_statePublished || !TvInterop.Present)
             {
                 return;
             }
 
-            if (TvInterop.Present)
-            {
-                var activePlayback = TvInterop.IsPlayingStream || TvInterop.IsFetching
-                    || !string.IsNullOrWhiteSpace(TvInterop.PendingSourceUrl);
-                if (activePlayback && string.IsNullOrWhiteSpace(TvInterop.SourceUrl))
-                {
-                    return;
-                }
-
-                CaptureHostState(false);
-            }
-
-            _context.Send(connection.Id, BuildBaseline());
+            CaptureHostState(false);
+            PublishState(TvStateOperations.Open, Guid.Empty);
         }
 
-        [MessageHandler(typeof(TvOpMessage))]
+        [MessageHandler]
         private void HandleOperation(CoopMessageContext context, TvOpMessage message)
         {
             if (_shutdown || message == null || !IsJoinedClient(context) || !TvInterop.Present
@@ -122,22 +103,22 @@ namespace CardShopCoop.Modules.Tv
             var mediaOperation = message.Op == Next || message.Op == Previous || message.Op == Open;
             if (mediaOperation)
             {
-                if (!TryBeginPendingMediaOperation(message.Op, message.PredictionId))
+                if (!TryBeginPendingMediaOperation(message.Op, message.ActionId))
                 {
-                    CoopPredict.Rollback(_context, context.Connection.Id, message.PredictionId);
+                    ActionRuntime.Rollback(_context, context.Connection.Id, message.ActionId);
                     return;
                 }
             }
 
             var pendingOperation = mediaOperation ? _pendingMediaOperation : (byte)0;
-            var pendingPredictionId = mediaOperation ? _pendingMediaPredictionId : Guid.Empty;
+            var pendingActionId = mediaOperation ? _pendingMediaActionId : Guid.Empty;
             var applied = TvInterop.ApplyOperation(message.Op, message.Url, message.Title, message.Value);
             if (!applied)
             {
-                CoopPredict.Rollback(_context, context.Connection.Id, message.PredictionId);
+                ActionRuntime.Rollback(_context, context.Connection.Id, message.ActionId);
                 if (mediaOperation)
                 {
-                    ClearPendingMediaOperation(pendingOperation, pendingPredictionId);
+                    ClearPendingMediaOperation(pendingOperation, pendingActionId);
                 }
                 return;
             }
@@ -147,7 +128,7 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            PublishScalarDelta(message.Op, message.PredictionId);
+            PublishScalarDelta(message.Op, message.ActionId);
         }
 
         internal void Shutdown()
@@ -158,7 +139,6 @@ namespace CardShopCoop.Modules.Tv
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
             {
@@ -191,14 +171,16 @@ namespace CardShopCoop.Modules.Tv
             _barrier = false;
             _resumePulse = false;
             _generation = 0;
+            _statePublished = false;
             ClearPendingMediaOperation();
         }
 
         private static bool IsJoinedClient(CoopMessageContext context)
         {
-            return context?.Connection != null && context.Connection.Id != 1
+            return context?.Connection != null
                 && (context.Connection.State == ConnectionState.Transferring
-                    || context.Connection.State == ConnectionState.FullyJoined);
+                    || context.Connection.State == ConnectionState.FullyJoined)
+                && (context.Sender == null || !context.Sender.IsHost);
         }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
@@ -212,6 +194,7 @@ namespace CardShopCoop.Modules.Tv
             _barrier = false;
             _resumePulse = false;
             _generation++;
+            _statePublished = false;
             ClearPendingMediaOperation();
             OnControllerLifecycle();
         }
@@ -226,7 +209,7 @@ namespace CardShopCoop.Modules.Tv
             TvInterop.AttachVideoErrorHandler(OnHostVideoError);
             if (CaptureHostState(false) && !string.IsNullOrEmpty(_lastSource))
             {
-                PublishMediaDelta(TvMediaDeltaMessage.Open, Guid.Empty, true);
+                PublishMediaDelta(TvStateOperations.Open, Guid.Empty, true);
             }
         }
 
@@ -290,14 +273,14 @@ namespace CardShopCoop.Modules.Tv
             return changed;
         }
 
-        private void PublishMediaDelta(byte operation, Guid predictionId, bool force)
+        private void PublishMediaDelta(byte operation, Guid actionId, bool force)
         {
             if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
             {
                 return;
             }
 
-            var changed = CaptureHostState(operation != TvMediaDeltaMessage.Playlist);
+            var changed = CaptureHostState(operation != TvStateOperations.Playlist);
             if (!changed && !force)
             {
                 return;
@@ -308,30 +291,11 @@ namespace CardShopCoop.Modules.Tv
                 return;
             }
 
-            _context.Broadcast(new TvMediaDeltaMessage
-            {
-                PredictionId = predictionId,
-                Operation = operation,
-                SourceUrl = _lastSource,
-                StreamUrl = _lastUrl,
-                StreamTitle = _lastTitle,
-                PlaylistUrl = _lastPlaylist,
-                IsLive = _lastLive,
-                IsSegmentedVod = _lastSegmented,
-                PlaylistIndex = _lastPlaylistIndex,
-                Position = _lastPosition,
-                Paused = _lastPaused,
-                PoweredOff = _lastPowered,
-                Shuffle = _lastShuffle,
-                Barrier = _barrier,
-                Resume = _resumePulse,
-                Generation = _generation,
-            });
-            _resumePulse = false;
-            ClearPendingMediaOperation(operation, predictionId);
+            PublishState(operation, actionId);
+            ClearPendingMediaOperation(operation, actionId);
         }
 
-        private void PublishScalarDelta(byte operation, Guid predictionId)
+        private void PublishScalarDelta(byte operation, Guid actionId)
         {
             if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
             {
@@ -339,60 +303,30 @@ namespace CardShopCoop.Modules.Tv
             }
 
             CaptureHostState(false);
-            switch (operation)
-            {
-                case Pause:
-                    _context.Broadcast(new TvPauseDeltaMessage
-                    {
-                        PredictionId = predictionId,
-                        Paused = _lastPaused,
-                    });
-                    break;
-                case Power:
-                    _context.Broadcast(new TvPowerDeltaMessage
-                    {
-                        PredictionId = predictionId,
-                        PoweredOff = _lastPowered,
-                    });
-                    break;
-                case Shuffle:
-                    _context.Broadcast(new TvShuffleDeltaMessage
-                    {
-                        PredictionId = predictionId,
-                        Shuffle = _lastShuffle,
-                    });
-                    break;
-                case Seek:
-                    _context.Broadcast(new TvSeekDeltaMessage
-                    {
-                        PredictionId = predictionId,
-                        Position = _lastPosition,
-                    });
-                    break;
-                default:
-                    throw new InvalidOperationException("Unknown scalar TV operation " + operation + ".");
-            }
+            PublishState(ScalarOperation(operation), actionId);
         }
 
-        private void PublishBarrierDelta(Guid predictionId)
+        private void PublishBarrierDelta(Guid actionId)
         {
             if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
             {
                 return;
             }
 
-            _context.Broadcast(new TvBarrierDeltaMessage
-            {
-                PredictionId = predictionId,
-                Barrier = _barrier,
-                Resume = _resumePulse,
-            });
-            _resumePulse = false;
+            PublishState(TvStateOperations.Barrier, actionId);
         }
 
-        private TvBaselineMessage BuildBaseline()
+        /// <summary>Publishes one immutable snapshot. The global information store owns the
+        /// baseline, host echo and client apply; the TV only decides when the snapshot changed and
+        /// which operation caused it.</summary>
+        private void PublishState(byte operation, Guid actionId)
         {
-            return new TvBaselineMessage
+            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
+            {
+                return;
+            }
+
+            Global<TvState>.Value = new TvState
             {
                 SourceUrl = _lastSource,
                 StreamUrl = _lastUrl,
@@ -408,10 +342,21 @@ namespace CardShopCoop.Modules.Tv
                 Barrier = _barrier,
                 Resume = _resumePulse,
                 Generation = _generation,
+                Operation = operation,
+                ActionId = actionId,
             };
+            _statePublished = true;
+            _resumePulse = false;
         }
 
-        private bool TryBeginPendingMediaOperation(byte operation, Guid predictionId)
+        private static byte ScalarOperation(byte operation)
+            => operation == Pause ? TvStateOperations.Pause
+                : operation == Power ? TvStateOperations.Power
+                : operation == Shuffle ? TvStateOperations.Shuffle
+                : operation == Seek ? TvStateOperations.Seek
+                : throw new InvalidOperationException("Unknown scalar TV operation " + operation + ".");
+
+        private bool TryBeginPendingMediaOperation(byte operation, Guid actionId)
         {
             if (_hasPendingMediaOperation)
             {
@@ -419,30 +364,30 @@ namespace CardShopCoop.Modules.Tv
             }
 
             _hasPendingMediaOperation = true;
-            _pendingMediaOperation = operation == Next ? TvMediaDeltaMessage.Next
-                : operation == Previous ? TvMediaDeltaMessage.Previous : TvMediaDeltaMessage.Open;
-            _pendingMediaPredictionId = predictionId;
+            _pendingMediaOperation = operation == Next ? TvStateOperations.Next
+                : operation == Previous ? TvStateOperations.Previous : TvStateOperations.Open;
+            _pendingMediaActionId = actionId;
             return true;
         }
 
-        private void ClearPendingMediaOperation(byte operation, Guid predictionId)
+        private void ClearPendingMediaOperation(byte operation, Guid actionId)
         {
             if (!_hasPendingMediaOperation || _pendingMediaOperation != operation
-                || _pendingMediaPredictionId != predictionId)
+                || _pendingMediaActionId != actionId)
             {
                 return;
             }
 
             _hasPendingMediaOperation = false;
             _pendingMediaOperation = 0;
-            _pendingMediaPredictionId = Guid.Empty;
+            _pendingMediaActionId = Guid.Empty;
         }
 
         private void ClearPendingMediaOperation()
         {
             _hasPendingMediaOperation = false;
             _pendingMediaOperation = 0;
-            _pendingMediaPredictionId = Guid.Empty;
+            _pendingMediaActionId = Guid.Empty;
         }
 
         private static void ApplyPatches(Harmony harmony)
@@ -519,10 +464,10 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var operation = _active._hasPendingMediaOperation
-                ? _active._pendingMediaOperation : TvMediaDeltaMessage.Playlist;
-            var predictionId = _active._hasPendingMediaOperation
-                ? _active._pendingMediaPredictionId : Guid.Empty;
-            _active.PublishMediaDelta(operation, predictionId, true);
+                ? _active._pendingMediaOperation : TvStateOperations.Playlist;
+            var actionId = _active._hasPendingMediaOperation
+                ? _active._pendingMediaActionId : Guid.Empty;
+            _active.PublishMediaDelta(operation, actionId, true);
         }
 
         private static void PausePostfix() => _active?.OnScalarChanged(Pause);
@@ -531,9 +476,9 @@ namespace CardShopCoop.Modules.Tv
 
         private void OnMediaSourceChanged()
         {
-            var operation = _hasPendingMediaOperation ? _pendingMediaOperation : TvMediaDeltaMessage.Open;
-            var predictionId = _hasPendingMediaOperation ? _pendingMediaPredictionId : Guid.Empty;
-            PublishMediaDelta(operation, predictionId, true);
+            var operation = _hasPendingMediaOperation ? _pendingMediaOperation : TvStateOperations.Open;
+            var actionId = _hasPendingMediaOperation ? _pendingMediaActionId : Guid.Empty;
+            PublishMediaDelta(operation, actionId, true);
         }
 
         private void OnScalarChanged(byte operation)
@@ -627,7 +572,7 @@ namespace CardShopCoop.Modules.Tv
             }
 
             var pendingOperation = _pendingMediaOperation;
-            var pendingPredictionId = _pendingMediaPredictionId;
+            var pendingActionId = _pendingMediaActionId;
             CoopLog.Error("Host TV VideoPlayer failed: " + (message ?? "unknown error"));
             TvInterop.AbortSharedPlayback();
             AbortBarrier("host TV playback failed");
@@ -645,12 +590,9 @@ namespace CardShopCoop.Modules.Tv
             _hasHostState = _lastPowered;
             if (_context != null && _context.InGame && TvInterop.Present)
             {
-                _context.Broadcast(new TvPlaybackErrorDeltaMessage
-                {
-                    PredictionId = _hasPendingMediaOperation ? pendingPredictionId : Guid.Empty,
-                    Generation = _generation,
-                });
-                ClearPendingMediaOperation(pendingOperation, pendingPredictionId);
+                PublishState(TvStateOperations.Error,
+                    _hasPendingMediaOperation ? pendingActionId : Guid.Empty);
+                ClearPendingMediaOperation(pendingOperation, pendingActionId);
             }
         }
 

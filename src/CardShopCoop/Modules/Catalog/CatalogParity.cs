@@ -529,7 +529,7 @@ namespace CardShopCoop.Modules.Catalog
                 {
                     foreach (var kv in BepInEx.Bootstrap.Chainloader.PluginInfos)
                     {
-                        var meta = kv.Value != null ? kv.Value.Metadata : null;
+                        var meta = kv.Value?.Metadata;
                         if (meta == null)
                         {
                             continue;

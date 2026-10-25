@@ -19,7 +19,7 @@ namespace CardShopCoop.Api
             get;
         }
 
-        bool PredictionActive
+        bool ActionActive
         {
             get;
         }
@@ -31,12 +31,19 @@ namespace CardShopCoop.Api
         {
             get;
         }
-        Guid Predict(string scope, Action<Guid> send, Action apply, Action undo);
-        void Ack(Guid predictionId);
-        void AckOrApply(Guid predictionId, Action apply);
-        void Confirm(Guid predictionId, Action apply);
-        bool IsPending(Guid predictionId);
-        void Rollback(ICoopContext context, int connectionId, Guid predictionId);
+        Guid Submit(string scope, ActionMessage message, Action apply, Action undo);
+        void Ack(Guid actionId);
+        void AckOrApply(Guid actionId, Action apply);
+        void Confirm(Guid actionId, Action apply);
+        void ApplyAuthoritative(Guid actionId, Action apply);
+        bool IsPending(Guid actionId);
+        void Rollback(ICoopContext context, int connectionId, Guid actionId);
+        object GetExtendedInformation(Type informationType, object gameObject);
+        void SetExtendedInformation(Type informationType, object gameObject, object information);
+        bool RemoveExtendedInformation(Type informationType, object gameObject);
+        object GetGlobalInformation(Type informationType);
+        void SetGlobalInformation(Type informationType, object information);
+        bool RemoveGlobalInformation(Type informationType);
     }
 
     /// <summary>
@@ -60,7 +67,7 @@ namespace CardShopCoop.Api
         public static bool IsAvailable => Binding != null;
 
         /// <summary>The live session context, or null when not connected.</summary>
-        public static ICoopContext Context => Binding == null ? null : Binding.Context;
+        public static ICoopContext Context => Binding?.Context;
 
         /// <summary>Optional shared log source. CardShopCoopCommunity sets this at startup.</summary>
         public static ManualLogSource Log
@@ -104,8 +111,8 @@ namespace CardShopCoop.Api
         /// while the transport is still wanted. So do NOT dispose the handle from your plugin's
         /// <c>OnDestroy</c> - that is not an unload signal, and disposing there permanently
         /// removes the transport for the rest of the run. A transport's registration is
-        /// process-lifetime (the built-in IP backend is the reference); dispose the handle only
-        /// from code that deliberately removes a transport that is no longer wanted.
+        /// process-lifetime (the Steam transport is the reference implementation); dispose the
+        /// handle only from code that deliberately removes a transport that is no longer wanted.
         /// Only valid once CardShopCoopCommunity is loaded (declare a BepInDependency on
         /// dev.meepen.cardshopcoop, or guard with <see cref="IsAvailable"/>); otherwise this throws.
         /// </summary>
@@ -127,6 +134,111 @@ namespace CardShopCoop.Api
             }
 
             return binding.RegisterNetworkingBackend(backend);
+        }
+
+        /// <summary>
+        /// Returns the extended information of this type attached to the object, or null when none
+        /// is present or co-op is not loaded. <typeparamref name="TInfo"/> must be a concrete
+        /// <see cref="ExtendGameObjectInformation{T}"/> subclass whose owner type the identity
+        /// module replicates; any other type throws <see cref="ArgumentException"/>.
+        /// </summary>
+        internal static TInfo GetExtendedInformation<TInfo>(object gameObject) where TInfo : class
+        {
+            var binding = Binding;
+            if (binding == null || gameObject == null)
+            {
+                return null;
+            }
+
+            return binding.GetExtendedInformation(typeof(TInfo), gameObject) as TInfo;
+        }
+
+        /// <summary>
+        /// Stores/replaces extended information on the object. The host applies and broadcasts it;
+        /// a client forwards the request to the host and applies the host's echo, so a client's
+        /// <see cref="GetExtendedInformation{TInfo}"/> still returns the previous value until that
+        /// echo arrives.
+        ///
+        /// <typeparamref name="TInfo"/> must be the value's concrete type. Passing a base type
+        /// throws <see cref="ArgumentException"/>: the entry is keyed and serialized by the
+        /// declared type, so a derived value would lose its derived fields on every other peer.
+        /// </summary>
+        internal static void SetExtendedInformation<TInfo>(object gameObject, TInfo information)
+            where TInfo : class
+        {
+            if (gameObject == null)
+            {
+                throw new ArgumentNullException(nameof(gameObject));
+            }
+            if (information == null)
+            {
+                throw new ArgumentNullException(nameof(information));
+            }
+
+            RequireBinding().SetExtendedInformation(typeof(TInfo), gameObject, information);
+        }
+
+        /// <summary>
+        /// Removes one extended-information entry from the object. On a client this returns true
+        /// when the request was sent; the removal is applied on the host's echo. It throws
+        /// <see cref="ArgumentException"/> when <typeparamref name="TInfo"/> is not a supported
+        /// extended-information type.
+        /// </summary>
+        internal static bool RemoveExtendedInformation<TInfo>(object gameObject) where TInfo : class
+        {
+            if (gameObject == null)
+            {
+                throw new ArgumentNullException(nameof(gameObject));
+            }
+
+            return RequireBinding().RemoveExtendedInformation(typeof(TInfo), gameObject);
+        }
+
+        /// <summary>
+        /// Returns the session-wide value of this type, or null when it has not been set or co-op
+        /// is not loaded. <typeparamref name="TInfo"/> must be a class marked
+        /// <see cref="GlobalInformationAttribute"/>. Unlike a DTO, this is a typed value in the
+        /// shared store: the host applies and broadcasts it and a join baseline carries it.
+        /// </summary>
+        internal static TInfo GetGlobalInformation<TInfo>() where TInfo : class
+        {
+            var binding = Binding;
+            return binding?.GetGlobalInformation(typeof(TInfo)) as TInfo;
+        }
+
+        /// <summary>
+        /// Stores or replaces the session-wide value. The host applies and broadcasts it; a client
+        /// forwards the request and applies the host echo, so <see cref="GetGlobalInformation{TInfo}"/>
+        /// keeps returning the previous value until the echo arrives.
+        /// <typeparamref name="TInfo"/> must be the value's concrete type.
+        /// </summary>
+        internal static void SetGlobalInformation<TInfo>(TInfo information) where TInfo : class
+        {
+            if (information == null)
+            {
+                throw new ArgumentNullException(nameof(information));
+            }
+
+            RequireBinding().SetGlobalInformation(typeof(TInfo), information);
+        }
+
+        /// <summary>Removes the session-wide value. On a client this returns true when the request
+        /// was sent; the removal is applied on the host's echo.</summary>
+        internal static bool RemoveGlobalInformation<TInfo>() where TInfo : class
+            => RequireBinding().RemoveGlobalInformation(typeof(TInfo));
+
+        private static ICoopBinding RequireBinding()
+        {
+            var binding = Binding;
+            if (binding == null)
+            {
+                throw new InvalidOperationException(
+                    "CardShopCoopCommunity has not installed its API binding yet; call this after "
+                    + "the plugin has initialized (declare a BepInDependency on dev.meepen.cardshopcoop, "
+                    + "or guard with CoopApi.IsAvailable).");
+            }
+
+            return binding;
         }
     }
 }

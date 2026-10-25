@@ -1,4 +1,3 @@
-using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
@@ -16,12 +15,8 @@ namespace CardShopCoop.Modules.Expansion
     /// <summary>Host-authoritative expansion state. 0 = shop rooms, 1 = warehouse rooms,
     /// 2 = warehouse room unlock. Guests apply it directly; the host owns every mutation.</summary>
     [NetworkMessage]
-    public sealed class ExpansionDeltaMessage : IPredictedMessage
+    public sealed class ExpansionDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public byte Area;
         public int Count;
         public bool Unlocked;
@@ -30,12 +25,8 @@ namespace CardShopCoop.Modules.Expansion
     /// <summary>One client expansion purchase intent. The host validates and applies it, then
     /// notifies every peer. The client never mutates its own expansion state.</summary>
     [NetworkMessage]
-    public sealed class ExpansionPurchaseMessage : IPredictedMessage
+    public sealed class ExpansionPurchaseMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public byte Kind;
     }
 }

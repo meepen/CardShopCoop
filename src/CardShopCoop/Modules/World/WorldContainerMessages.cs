@@ -1,29 +1,8 @@
-using System;
 using System.Collections.Generic;
 using CardShopCoop.Net;
-using UnityEngine;
 
 namespace CardShopCoop.Modules.World
 {
-    [NetworkMessage]
-    public sealed class ContainerOpMessage : WorldMessage
-    {
-        public byte Op;
-        public byte Kind;
-        public byte Index;
-        public bool CanWorkerTake;
-        public List<CompactCardDataAmount> Cards = new();
-        public EItemType ItemType;
-        public ushort StorageId;
-        public Vector3 Position;
-        public Guid BoxNetworkId;
-        public bool IsBig;
-        public bool TurnedOn;
-        public bool IsPlayer;
-        public float Fill;
-        public int ClaimToken;
-    }
-
     [NetworkMessage]
     public sealed class ContainerStateMessage : WorldMessage
     {
@@ -35,28 +14,23 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class ContainerDeltaMessage : WorldMessage
     {
-        public int Key;
+        public InteractableObject Container;
         public ContainerRecord Record;
-        public bool HasBox;
-        public BoxNetworkState Box;
+        public InteractablePackagingBox Box;
         public bool TakeIntoHand;
         public bool ReleaseHold;
         public bool CompletePackCollection;
-        public byte PackIndex;
     }
 
     public struct ContainerRecord
     {
-        public string StableEntityId;
-        public byte Kind;
-        public byte Index;
+        public InteractableObject Container;
         public bool CanWorkerTake;
         public List<CompactCardDataAmount> Cards;
         public List<EItemType> StoredTypes;
         public bool Processing;
         public float Timer;
         public int OpenedCount;
-        public ushort StorageId;
         public int Count;
         public byte Flags;
         public List<float> Fills;
@@ -67,7 +41,7 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class ContainerPackClaimMessage : WorldMessage
     {
-        public byte Index;
+        public InteractableAutoPackOpener Container;
         public int ClaimToken;
         public List<CompactCardDataAmount> Cards = new();
     }

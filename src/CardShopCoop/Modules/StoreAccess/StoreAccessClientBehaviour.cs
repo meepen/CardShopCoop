@@ -1,27 +1,27 @@
-using System;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
-using CardShopCoop.Net;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.StoreAccess
 {
-    /// <summary>Guest access-sign intents and authoritative mesh/state application.</summary>
+    /// <summary>Guest access-sign intents and authoritative state application.</summary>
     [ClientBehaviour]
     public sealed class StoreAccessClientBehaviour : CoopBehaviour
     {
+        private const byte ShopSign = 0;
+        private const byte WarehouseSign = 1;
+        private const string ShopKey = "store-access:shop";
+        private const string WarehouseKey = "store-access:warehouse";
+
         private static StoreAccessClientBehaviour _active;
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
-        private bool _joined;
-        private StoreAccessStateMessage _pendingState;
-        // The latest authoritative delta whose values are already applied but whose visible sign
-        // could not be painted yet (the world/sign was still loading). See HandleDelta.
-        private StoreAccessDeltaMessage _pendingDelta;
 
         private void OnEnable()
         {
@@ -30,319 +30,228 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-
             _context = RuntimeContext;
-            var registered = false;
-            var lifecycle = false;
+            _active = this;
+            StoreAccessInterop.Reset();
+            CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
+            SceneManager.sceneLoaded += OnSceneLoaded;
+            _harmony = new Harmony("dev.meepen.cardshopcoop.store-access.client");
             try
             {
-                ResetSessionState();
-                StoreAccessInterop.Reset();
-                _context.Messages.RegisterAttributedHandlers(this);
-                registered = true;
-                _active = this;
-                CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-                SceneManager.sceneLoaded += OnSceneLoaded;
-                lifecycle = true;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.store-access.client");
                 _harmony.CreateClassProcessor(typeof(OpenSignPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(WarehouseSignPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(OpenSignReadyPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(WarehouseSignReadyPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(GuestDayStartedBlockPatch)).Patch();
             }
-            catch (Exception exception)
+            catch
             {
-                CoopPlugin.Log.LogError("Store access client initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
-                if (lifecycle)
-                {
-                    CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-                    SceneManager.sceneLoaded -= OnSceneLoaded;
-                }
-                if (registered)
-                {
-                    _context.Messages.UnregisterAttributedHandlers(this);
-                }
-
-
-                if (ReferenceEquals(_active, this))
-                {
-                    _active = null;
-                }
-
-
-                ResetSessionState();
-                StoreAccessInterop.Reset();
-                _context = null;
+                Shutdown();
                 throw;
             }
+
+            // A module re-enabled inside a live session can already have a stored value even when
+            // no sign-ready hook fires again. The normal join path is the global-information
+            // baseline itself; this only heals the re-enable case.
+            ApplyStoredState();
         }
 
-        [MessageHandler(typeof(StoreAccessStateMessage))]
-        private void HandleState(MessageContext context, StoreAccessStateMessage message)
+        /// <summary>The host's authoritative access flags. The store owns the baseline and the
+        /// wire; this handler only projects the value onto the local game state and signs. Because
+        /// the value implements <see cref="IActionValue"/>, the framework wraps this handler in
+        /// <see cref="ActionLedger"/> so a pending local toggle is retired on an accepted echo or
+        /// undone before a rejection re-anchor is applied.</summary>
+        [GlobalInformationHandler]
+        private void HandleState(InformationChange<StoreAccessState> change)
         {
             if (_shutdown)
             {
                 return;
             }
 
-            // The join baseline is superseded by any delta that already arrived.
-
-            _pendingState = message;
-            _pendingDelta = null;
-            TryApplyPending();
+            ApplyState(change.Current, change.Previous);
         }
 
-        [MessageHandler(typeof(StoreAccessDeltaMessage))]
-        private void HandleDelta(MessageContext context, StoreAccessDeltaMessage message)
+        private static void ApplyState(StoreAccessState state, StoreAccessState previous)
         {
-            if (_shutdown)
+            if (state == null)
             {
                 return;
             }
 
-            // ApplyAuthoritative: the host's absolute value always lands, and it is reconciled in
-            // layers so a newer local toggle still awaiting its own decision is undone and
-            // replayed instead of being stranded under this older state (a pending action owns
-            // the entity until it resolves). An empty or already-retired id just applies.
-            PredictionApi.ApplyAuthoritative(message.PredictionId,
-                () => ApplyDeltaAuthoritative(message));
+            var shopChanged = CPlayerData.m_IsShopOpen != state.IsShopOpen;
+            var warehouseChanged = CPlayerData.m_IsWarehouseDoorClosed
+                != state.IsWarehouseDoorClosed;
+            // Touch only the sign whose authoritative value moved. Both are touched for the
+            // first baseline, which repaints both surfaces. A sign with a pending local toggle is
+            // deliberately not touched by an unrelated update: that toggle owns the sign until
+            // its own echo or rollback settles it.
+            var shopTouched = previous == null || previous.IsShopOpen != state.IsShopOpen;
+            var warehouseTouched = previous == null
+                || previous.IsWarehouseDoorClosed != state.IsWarehouseDoorClosed;
+            CPlayerData.m_IsShopOpen = state.IsShopOpen;
+            CPlayerData.m_IsWarehouseDoorClosed = state.IsWarehouseDoorClosed;
+
+            // A first value is a baseline/reset: repaint without replaying an old swap. A
+            // rejection re-anchor always repaints without animating; the optimistic swap is
+            // already being undone by the ledger.
+            var animate = !state.Rejected && previous != null;
+            // A baseline or rejection must always repaint, even if a stale swap flag survived a
+            // sign disable/re-enable. Only the echo of a live local action may leave a running
+            // swap alone.
+            var forceRefresh = previous == null || state.Rejected;
+            if (shopTouched)
+            {
+                ApplyShopSign(shopChanged, animate, forceRefresh);
+            }
+
+            if (warehouseTouched)
+            {
+                ApplyWarehouseSign(warehouseChanged, animate, forceRefresh);
+            }
+
+            CoopPlugin.Log.LogInfo("[store-access] apply shop="
+                + (state.IsShopOpen ? "open" : "closed") + " warehouse="
+                + (state.IsWarehouseDoorClosed ? "closed" : "open")
+                + " action=" + state.ActionId + (state.Rejected ? " (rejection)" : "") + ".");
         }
 
-        /// <summary>Applies one authoritative delta: flags always move, visuals/pending handling
-        /// follow the same rules as before. Runs as the authoritative apply inside
-        /// <see cref="PredictionApi.ApplyAuthoritative(Guid, Action)"/>, so newer same-sign
-        /// predictions have already been undone and will be replayed on top of this state.</summary>
-        private void ApplyDeltaAuthoritative(StoreAccessDeltaMessage message)
+        private static void ApplyShopSign(bool changed, bool animate, bool forceRefresh)
         {
-            var shopChanged = message.HasShopOpen && CPlayerData.m_IsShopOpen != message.IsShopOpen;
-            var warehouseChanged = message.HasWarehouseDoorClosed
-                && CPlayerData.m_IsWarehouseDoorClosed != message.IsWarehouseDoorClosed;
-            if (message.HasShopOpen)
-            {
-                CPlayerData.m_IsShopOpen = message.IsShopOpen;
-            }
-
-            if (message.HasWarehouseDoorClosed)
-            {
-                CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
-            }
-
-            // The join baseline may still be waiting for the scene. A delta only carries one
-            // sign, so fold it into that pending state rather than dropping either update.
-
-            if (_pendingState != null)
-            {
-                if (message.HasShopOpen)
-                {
-                    _pendingState.IsShopOpen = message.IsShopOpen;
-                }
-
-
-                if (message.HasWarehouseDoorClosed)
-                {
-                    _pendingState.IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
-                }
-
-
-                _pendingState.Animate = false;
-                return;
-            }
-
-            if (_context != null && _context.InGame() && DeltaSignsReady(message))
-            {
-                ApplyDeltaVisuals(message, shopChanged, warehouseChanged);
-                _pendingDelta = null;
-                LogDelta("applied", message);
-            }
-            else
-            {
-                // The values are authoritative now, but the visible sign cannot be painted yet
-                // (the world/sign is still loading). Hold the delta so the ready hooks repaint
-                // it, instead of moving the flag and leaving the visible sign behind.
-                _pendingDelta = message;
-                LogDelta("held until the sign is ready", message);
-            }
-        }
-
-        private static void LogDelta(string action, StoreAccessDeltaMessage message)
-            => CoopPlugin.Log.LogInfo("[store-access] delta " + action + " shop="
-                + (message.HasShopOpen ? (message.IsShopOpen ? "open" : "closed") : "-")
-                + " warehouse=" + (message.HasWarehouseDoorClosed
-                    ? (message.IsWarehouseDoorClosed ? "closed" : "open") : "-") + ".");
-
-        /// <summary>True when every surface a delta carries can be resolved right now. The
-        /// warehouse access can live on the sign or, when the build/scene has no sign object, on
-        /// the unlock-room manager, exactly like the baseline apply path handles it.</summary>
-        private static bool DeltaSignsReady(StoreAccessDeltaMessage message)
-            => (!message.HasShopOpen || StoreAccessInterop.FindOpenSign() != null)
-                && (!message.HasWarehouseDoorClosed
-                    || StoreAccessInterop.FindWarehouseSign() != null
-                    || StoreAccessInterop.FindUnlockRoomManager() != null);
-
-        private void TryApplyPending()
-        {
-            if (_shutdown || _context == null || !_context.InGame())
+            var sign = StoreAccessInterop.FindOpenSign();
+            if (sign == null)
             {
                 return;
             }
 
-
-            if (_pendingState != null && StoreAccessInterop.IsSceneReady())
+            // A swap that this apply starts owns the visible face: its vanilla coroutine paints
+            // the mesh at the animation's midpoint. Repainting here would cut that swap in half
+            // and snap the sign around before the animation plays.
+            if (changed && animate && StoreAccessInterop.PlayOpenAnimation(sign))
             {
-                Apply(_pendingState);
-                _pendingState = null;
-                _pendingDelta = null;
+                return;
             }
 
-            if (_pendingDelta != null && DeltaSignsReady(_pendingDelta))
+            // A swap already in progress is the local player's own animation of this same value
+            // (their click toggled the flag before the host echo arrived). Leave it running. The
+            // coroutine reads the authoritative flag that was just written, so the face still
+            // lands on the right side. Outside a swap, repaint from the flag: authority must
+            // never leave a stale face behind after a sign disable/re-enable.
+            if (forceRefresh || changed || !StoreAccessInterop.IsOpenSwapping(sign))
             {
-                // Refresh only: the values were applied when the delta arrived, and animating a
-                // change that happened while the world was loading would replay it at the wrong
-                // moment.
-                if (_pendingDelta.HasShopOpen)
-                {
-                    StoreAccessInterop.RefreshOpenMesh(StoreAccessInterop.FindOpenSign());
-                }
-
-
-                if (_pendingDelta.HasWarehouseDoorClosed)
-                {
-                    var warehouseSign = StoreAccessInterop.FindWarehouseSign();
-                    if (warehouseSign != null)
-                    {
-                        StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
-                    }
-                    else
-                    {
-                        StoreAccessInterop.RefreshWarehouseAccess(
-                            SceneRef<UnlockRoomManager>.Get());
-                    }
-
-                }
-
-                LogDelta("painted onto the ready sign", _pendingDelta);
-                _pendingDelta = null;
+                StoreAccessInterop.RefreshOpenMesh(sign);
             }
         }
 
-        private static void Apply(StoreAccessStateMessage message)
+        private static void ApplyWarehouseSign(bool changed, bool animate, bool forceRefresh)
         {
-            CPlayerData.m_IsShopOpen = message.IsShopOpen;
-            CPlayerData.m_IsWarehouseDoorClosed = message.IsWarehouseDoorClosed;
-            var openSign = StoreAccessInterop.FindOpenSign();
-            if (!message.Animate || !StoreAccessInterop.PlayOpenAnimation(openSign))
+            var sign = StoreAccessInterop.FindWarehouseSign();
+            if (sign == null)
             {
-                StoreAccessInterop.RefreshOpenMesh(openSign);
+                // Some scenes surface the warehouse access through the room manager only.
+                StoreAccessInterop.RefreshWarehouseAccess(StoreAccessInterop.FindUnlockRoomManager());
+                return;
             }
 
-            var warehouseSign = StoreAccessInterop.FindWarehouseSign();
-            if (warehouseSign != null && (!message.Animate
-                || !StoreAccessInterop.PlayWarehouseAnimation(warehouseSign)))
+            // Same rule as the shop sign: a swap this apply starts paints itself, and a local
+            // swap of the same value must be allowed to finish.
+            if (changed && animate && StoreAccessInterop.PlayWarehouseAnimation(sign))
             {
-                StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
-            }
-            else if (warehouseSign == null)
-            {
-                StoreAccessInterop.RefreshWarehouseAccess(SceneRef<UnlockRoomManager>.Get());
+                return;
             }
 
+            if (forceRefresh || changed || !StoreAccessInterop.IsWarehouseSwapping(sign))
+            {
+                StoreAccessInterop.RefreshWarehouseMesh(sign);
+            }
         }
 
-        private static void ApplyDeltaVisuals(StoreAccessDeltaMessage message, bool shopChanged,
-            bool warehouseChanged)
+        /// <summary>Repaints the signs from the stored authoritative value without animating.
+        /// Used when a sign becomes available after the value was already applied.</summary>
+        private static void ApplyStoredState()
+            => ApplyState(Global<StoreAccessState>.Value, null);
+
+        /// <summary>A sign click is only meaningful once the host can accept its toggle and the
+        /// authoritative access value is present. Before that the client would flip its local
+        /// sign while the host stayed on the old side, and no later event would correct it.</summary>
+        internal bool CanToggleNow()
         {
-            if (message.HasShopOpen)
+            if (_shutdown || _context == null)
             {
-                var openSign = StoreAccessInterop.FindOpenSign();
-                if (!(shopChanged && message.Animate
-                    && StoreAccessInterop.PlayOpenAnimation(openSign)))
-                {
-                    // Repaint when the value moved (animation refused or not requested), and also
-                    // when the local value already matched: the visible sign may have missed an
-                    // earlier authoritative change, and a matching flag must not hide that. A
-                    // swap in progress is the local player's own animation of the same value, so
-                    // leave it alone.
-                    if (shopChanged || !StoreAccessInterop.IsOpenSwapping(openSign))
-                    {
-                        StoreAccessInterop.RefreshOpenMesh(openSign);
-                    }
-
-                }
+                return true;
             }
 
-            if (message.HasWarehouseDoorClosed)
+            var host = ((ICoopContext)_context).HostConnection;
+            if (host != null && host.State != ConnectionState.FullyJoined)
             {
-                var warehouseSign = StoreAccessInterop.FindWarehouseSign();
-                if (warehouseSign == null)
-                {
-                    // Some scenes surface the warehouse access through the room manager only,
-                    // exactly like the baseline apply path.
-                    StoreAccessInterop.RefreshWarehouseAccess(SceneRef<UnlockRoomManager>.Get());
-                }
-                else if (!(warehouseChanged && message.Animate
-                    && StoreAccessInterop.PlayWarehouseAnimation(warehouseSign)))
-                {
-                    if (warehouseChanged
-                        || !StoreAccessInterop.IsWarehouseSwapping(warehouseSign))
-                    {
-                        StoreAccessInterop.RefreshWarehouseMesh(warehouseSign);
-                    }
-
-                }
+                CoopPlugin.Log.LogInfo("[store-access] sign click ignored: host connection is "
+                    + host.State + ".");
+                return false;
             }
+
+            if (Global<StoreAccessState>.Value == null)
+            {
+                // The host seeds this value at session start and the join baseline carries it, so
+                // this only happens during the join window. Log it: a silently dropped click is
+                // exactly what made the missing tutorial baseline hard to diagnose.
+                CoopPlugin.Log.LogWarning("[store-access] sign click ignored: the host's access "
+                    + "state baseline has not arrived yet.");
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>The vanilla sign click already toggled the state and started its animation;
-        /// forward the intent so the host applies and echoes it. This is a post-hoc prediction
-        /// whose redo and undo are BOTH the toggle itself: a toggle is its own inverse, so the
-        /// layered rejection in PredictionApi composes correctly even when a rollback arrives
-        /// without an authoritative refresh. Captured absolute before/after values are not
-        /// inverses under that layering - with two toggles in flight, an older rejection replays
-        /// the newer prediction from authority and the newer rejection's absolute undo would
-        /// restore the older prediction's optimistic value. A prediction owns exactly ONE sign's
-        /// key, so an undo can never touch the other sign's in-flight toggle.</summary>
+        /// forward the intent so the host applies and echoes it. A toggle is its own inverse, so
+        /// the same operation is both the ledger redo and undo: this composes correctly under a
+        /// layered rejection and never restores a stale absolute value.</summary>
         private void ForwardToggle(byte which, bool before, bool after)
         {
-            if (_shutdown || !_joined || _context == null || !_context.InGame() || after == before)
+            if (_shutdown || _context == null || !_context.InGame() || after == before)
             {
                 return;
             }
 
-            // One prediction key per sign so an undo of one sign's prediction does not touch the
-            // other sign's in-flight toggle.
+            // No join callback: the guest's own connection to the host is the authoritative
+            // "gameplay traffic is allowed" signal. Before the FullyJoined ack the sign cannot
+            // drive a shared state change anyway.
+            var host = ((ICoopContext)_context).HostConnection;
+            if (host == null || host.State != ConnectionState.FullyJoined)
+            {
+                return;
+            }
 
-            var predictionKey = which == 0 ? "store-access:shop" : "store-access:warehouse";
-            PredictionApi.Predict(
-                predictionKey,
-                predictionId => _context.Send(1, new StoreAccessToggleMessage
+            // One ledger key per sign so an undo of one sign's toggle never touches the other.
+            var key = which == ShopSign ? ShopKey : WarehouseKey;
+            ActionLedger.Submit(
+                key,
+                actionId => _context.Send(host.Id, new StoreAccessToggleIntent
                 {
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     Which = which,
                 }),
                 () => ToggleLocal(which),
                 () => ToggleLocal(which));
         }
 
-        /// <summary>Flips one sign's live flag and repaints it. Both directions of a toggle
+        /// <summary>Flips one access flag and repaints its sign. Both directions of a toggle
         /// prediction use this: the host's intent is a toggle too, so this is the exact redo and
         /// the exact inverse.</summary>
         private static void ToggleLocal(byte which)
         {
-            if (which == 0)
+            if (which == ShopSign)
             {
-                ApplyLocal(0, !CPlayerData.m_IsShopOpen);
+                ApplyLocal(ShopSign, !CPlayerData.m_IsShopOpen);
                 return;
             }
 
-            ApplyLocal(1, !CPlayerData.m_IsWarehouseDoorClosed);
+            ApplyLocal(WarehouseSign, !CPlayerData.m_IsWarehouseDoorClosed);
         }
 
         private static void ApplyLocal(byte which, bool value)
         {
-            if (which == 0)
+            if (which == ShopSign)
             {
                 CPlayerData.m_IsShopOpen = value;
                 StoreAccessInterop.RefreshOpenMesh(StoreAccessInterop.FindOpenSign());
@@ -350,40 +259,24 @@ namespace CardShopCoop.Modules.StoreAccess
             }
 
             CPlayerData.m_IsWarehouseDoorClosed = value;
-            StoreAccessInterop.RefreshWarehouseMesh(StoreAccessInterop.FindWarehouseSign());
+            var sign = StoreAccessInterop.FindWarehouseSign();
+            if (sign != null)
+            {
+                StoreAccessInterop.RefreshWarehouseMesh(sign);
+            }
+            else
+            {
+                StoreAccessInterop.RefreshWarehouseAccess(
+                    StoreAccessInterop.FindUnlockRoomManager());
+            }
         }
 
-        private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _)
-            => TryApplyPending();
+        private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _) => ApplyStoredState();
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
         {
             StoreAccessInterop.Reset();
-            TryApplyPending();
-        }
-
-        [OnFullyJoined]
-        private void MarkJoined(PeerConnection _)
-        {
-            _joined = true;
-            TryApplyPending();
-        }
-
-        [OnClientDisconnected]
-        private void ForgetHost(PeerConnection connection, DisconnectInfo info)
-        {
-            if (connection?.Id == 1)
-            {
-                ResetSessionState();
-            }
-
-        }
-
-        private void ResetSessionState()
-        {
-            _joined = false;
-            _pendingState = null;
-            _pendingDelta = null;
+            ApplyStoredState();
         }
 
         internal void Shutdown()
@@ -393,9 +286,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
@@ -405,8 +296,6 @@ namespace CardShopCoop.Modules.StoreAccess
                 _active = null;
             }
 
-
-            ResetSessionState();
             StoreAccessInterop.Reset();
             _context = null;
         }
@@ -417,18 +306,23 @@ namespace CardShopCoop.Modules.StoreAccess
         private static class OpenSignPatch
         {
             // Let vanilla run so the sign plays its own animation; forward the result afterwards.
+            // Until the join state is ready, block the local flip instead of toggling a sign the
+            // host will never see.
             [HarmonyPrefix]
-            private static void Prefix(out bool __state)
-                => __state = CPlayerData.m_IsShopOpen;
+            private static bool Prefix(out bool __state)
+            {
+                __state = CPlayerData.m_IsShopOpen;
+                return _active == null || _active.CanToggleNow();
+            }
 
             [HarmonyPostfix]
             private static void Postfix(bool __state)
-                => _active?.ForwardToggle(0, __state, CPlayerData.m_IsShopOpen);
+                => _active?.ForwardToggle(ShopSign, __state, CPlayerData.m_IsShopOpen);
         }
 
-        /// <summary>Guest: the shop sign's day-start reset is host-authoritative - the host's
-        /// StoreAccess delta carries the closed state and this client applies it - so the guest
-        /// does not run the local sign/flag reset at the roll-over.</summary>
+        /// <summary>Guest: the shop sign's day-start reset is host-authoritative - the host
+        /// publishes the closed state through the access-sign value - so the guest does not run
+        /// the local sign/flag reset at the roll-over.</summary>
         [HarmonyPatch(typeof(InteractableOpenCloseSign), "OnDayStarted")]
         private static class GuestDayStartedBlockPatch
         {
@@ -440,26 +334,30 @@ namespace CardShopCoop.Modules.StoreAccess
         private static class WarehouseSignPatch
         {
             [HarmonyPrefix]
-            private static void Prefix(out bool __state)
-                => __state = CPlayerData.m_IsWarehouseDoorClosed;
+            private static bool Prefix(out bool __state)
+            {
+                __state = CPlayerData.m_IsWarehouseDoorClosed;
+                return _active == null || _active.CanToggleNow();
+            }
 
             [HarmonyPostfix]
             private static void Postfix(bool __state)
-                => _active?.ForwardToggle(1, __state, CPlayerData.m_IsWarehouseDoorClosed);
+                => _active?.ForwardToggle(WarehouseSign, __state,
+                    CPlayerData.m_IsWarehouseDoorClosed);
         }
 
         [HarmonyPatch(typeof(InteractableOpenCloseSign), "OnEnable")]
         private static class OpenSignReadyPatch
         {
             [HarmonyPostfix]
-            private static void Postfix() => _active?.TryApplyPending();
+            private static void Postfix() => ApplyStoredState();
         }
 
         [HarmonyPatch(typeof(InteractableWarehouseAllowEnterSign), "OnEnable")]
         private static class WarehouseSignReadyPatch
         {
             [HarmonyPostfix]
-            private static void Postfix() => _active?.TryApplyPending();
+            private static void Postfix() => ApplyStoredState();
         }
     }
 }

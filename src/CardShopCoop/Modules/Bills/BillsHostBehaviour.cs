@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -86,7 +86,7 @@ namespace CardShopCoop.Modules.Bills
             }
         }
 
-        [MessageHandler(typeof(BillPaymentMessage))]
+        [MessageHandler]
         private void HandlePayment(MessageContext context, BillPaymentMessage message)
         {
             if (!IsPeerMessage(context) || message == null)
@@ -158,7 +158,7 @@ namespace CardShopCoop.Modules.Bills
                         _forwardedRequester = 0;
                         if (accepted)
                         {
-                            BroadcastDelta(BuildDelta(message.BillType, message.PredictionId));
+                            BroadcastDelta(BuildDelta(message.BillType, message.ActionId));
                         }
                         else
                         {
@@ -220,11 +220,11 @@ namespace CardShopCoop.Modules.Bills
             };
         }
 
-        private static BillsDeltaMessage BuildDelta(byte billType, Guid predictionId)
+        private static BillsDeltaMessage BuildDelta(byte billType, Guid actionId)
         {
             var message = new BillsDeltaMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 BillType = billType,
                 All = billType == 0,
             };
@@ -263,9 +263,9 @@ namespace CardShopCoop.Modules.Bills
 
             active.SendRejectionState(context.Connection.Id, message);
 
-            if (message.PredictionId != Guid.Empty)
+            if (message.ActionId != Guid.Empty)
             {
-                PredictionApi.Rollback(active._context, context.Connection.Id, message.PredictionId);
+                ActionLedger.Rollback(active._context, context.Connection.Id, message.ActionId);
             }
         }
 
@@ -276,11 +276,11 @@ namespace CardShopCoop.Modules.Bills
                 return;
             }
 
-            var refresh = BuildDelta(0, message.PredictionId);
+            var refresh = BuildDelta(0, message.ActionId);
             CoopPlugin.Log.LogInfo("[bills] rejection refresh to conn " + peer
                 + " rent=" + refresh.Rent.AmountToPay + " electric=" + refresh.Electric.AmountToPay
                 + " employee=" + refresh.Employee.AmountToPay
-                + " pred=" + message.PredictionId + ".");
+                + " pred=" + message.ActionId + ".");
             _context.Send(peer, refresh);
         }
 

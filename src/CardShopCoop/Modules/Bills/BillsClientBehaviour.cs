@@ -1,6 +1,6 @@
 using System;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -77,7 +77,7 @@ namespace CardShopCoop.Modules.Bills
             }
         }
 
-        [MessageHandler(typeof(BillsStateMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, BillsStateMessage message)
         {
             if (_shutdown)
@@ -90,7 +90,7 @@ namespace CardShopCoop.Modules.Bills
             TryApplyPending();
         }
 
-        [MessageHandler(typeof(BillsDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext context, BillsDeltaMessage message)
         {
             if (_shutdown)
@@ -108,10 +108,10 @@ namespace CardShopCoop.Modules.Bills
             // every in-flight payment keeps owning its bills until its own decision arrives. An
             // accrued bill during the round trip still lands: authority is always applied.
 
-            PredictionApi.ApplyAuthoritative(message.PredictionId, () => ApplyDelta(message));
+            ActionLedger.ApplyAuthoritative(message.ActionId, () => ApplyDelta(message));
         }
 
-        [MessageHandler(typeof(BillPopupMessage))]
+        [MessageHandler]
         private void HandlePopup(MessageContext context, BillPopupMessage message)
         {
             if (_shutdown || !_context.InGame() || !BillsInterop.IsSceneReady())
@@ -199,7 +199,7 @@ namespace CardShopCoop.Modules.Bills
         /// panel and total update immediately), the intent is sent, and the host's accepted delta
         /// retires the prediction or its rollback adds the same captured values back. The redo and
         /// undo are relative deltas of the captured bills, so they stay exact inverses when a
-        /// rejection arrives without an authoritative refresh and PredictionApi has to layer it
+        /// rejection arrives without an authoritative refresh and ActionLedger has to layer it
         /// over other pending payments. The wallet is host-owned - the guest never queues a coin
         /// event - so the mirror only moves when the host's authoritative wallet snapshot arrives,
         /// and a rejection has nothing to refund.
@@ -238,11 +238,11 @@ namespace CardShopCoop.Modules.Bills
             ApplyPayment(billType, rent, electric, employee, refund: false);
             BillsInterop.Refresh(BillsInterop.FindScreen());
             SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
-            PredictionApi.Predict(
+            ActionLedger.Submit(
                 "bills",
-                predictionId => client._context.Send(1, new BillPaymentMessage
+                actionId => client._context.Send(1, new BillPaymentMessage
                 {
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     BillType = billType,
                 }),
                 () =>
@@ -280,7 +280,7 @@ namespace CardShopCoop.Modules.Bills
         /// <summary>Applies (or reverses) exactly the bill zeroing a payment performs. The
         /// vanilla <c>SetBill(type, 0, 0)</c> is mirrored as a relative subtraction of the values
         /// captured at payment time - identical to vanilla when nothing moved, but an exact
-        /// inverse under PredictionApi's layered rejection, where restoring a whole captured
+        /// inverse under ActionLedger's layered rejection, where restoring a whole captured
         /// snapshot would resurrect another still-pending payment's optimistic values when a
         /// rollback arrives without an authoritative refresh. Pay All clears all three bills;
         /// a single payment clears only the selected type, matching the vanilla presses.</summary>

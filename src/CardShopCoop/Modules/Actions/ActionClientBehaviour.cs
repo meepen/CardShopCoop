@@ -2,10 +2,10 @@ using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 
-namespace CardShopCoop.Modules.Prediction
+namespace CardShopCoop.Modules.Actions
 {
     [ClientBehaviour]
-    public sealed class PredictionClientBehaviour : CoopBehaviour
+    public sealed class ActionClientBehaviour : CoopBehaviour
     {
         private bool _shutdown;
 
@@ -17,13 +17,13 @@ namespace CardShopCoop.Modules.Prediction
             }
 
 
-            PredictionApi.Start();
+            ActionLedger.Start();
             RuntimeContext.Messages.RegisterAttributedHandlers(this);
         }
 
-        [MessageHandler(typeof(PredictionRollbackMessage))]
-        private void Rollback(MessageContext _, PredictionRollbackMessage message)
-            => PredictionApi.Rollback(message.PredictionId);
+        [MessageHandler]
+        private void Rollback(MessageContext _, ActionRollbackMessage message)
+            => ActionLedger.Rollback(message.ActionId);
 
         internal void Shutdown()
         {
@@ -35,7 +35,7 @@ namespace CardShopCoop.Modules.Prediction
 
             _shutdown = true;
             RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-            PredictionApi.Stop();
+            ActionLedger.Stop();
         }
 
         private void OnDestroy() => Shutdown();

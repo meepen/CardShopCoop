@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using CardShopCoop.Util;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -161,8 +162,45 @@ namespace CardShopCoop.Runtime
             _lastLookupScene = scene.handle;
             // Late session startup can happen after Awake/Init has already run. This is the only
             // compatibility fallback; a missing object is negatively cached for this scene.
-            _cached = UnityEngine.Object.FindObjectOfType<T>();
+            _cached = PreferLiveInstance(UnityEngine.Object.FindObjectOfType<T>());
             return _cached;
+        }
+
+        /// <summary>
+        /// Never let the game's fabricated <c>(singleton)T</c> copy stand in for a manager the scene
+        /// actually provides. The copy is only the right answer when no other instance exists at
+        /// all (CEventManager and friends are created exactly that way on purpose).
+        /// </summary>
+        private static T PreferLiveInstance(T candidate)
+        {
+            if (candidate == null)
+            {
+                return null;
+            }
+
+            var found = UnityEngine.Object.FindObjectsOfType(typeof(T));
+            T live = null;
+            T fabricated = null;
+            for (var i = 0; i < found.Length; i++)
+            {
+                if (!(found[i] is T other))
+                {
+                    continue;
+                }
+
+                if (SingletonLatchGuard.IsFabricatedSingleton(other))
+                {
+                    fabricated ??= other;
+                }
+                else if (live == null)
+                {
+                    live = other;
+                }
+            }
+
+            return live ?? (SingletonLatchGuard.IsFabricatedSingleton(candidate)
+                ? fabricated ?? candidate
+                : candidate);
         }
 
         private static void Set(T instance)
@@ -172,8 +210,21 @@ namespace CardShopCoop.Runtime
                 return;
             }
 
+            // The game's fallback copy wakes up between AddComponent and DontDestroyOnLoad, so at
+            // this moment it still looks like a scene object. Never let it displace a real manager
+            // this cache already holds.
+            if (SingletonLatchGuard.IsFabricatedSingleton(instance) && _cached != null
+                && !SingletonLatchGuard.IsFabricatedSingleton(_cached))
+            {
+                return;
+            }
+
             _cached = instance;
             _lastLookupScene = int.MinValue;
+            // The real scene manager just announced itself. If the game's own CSingleton cache
+            // holds an empty fabricated copy instead (created while this manager did not exist
+            // yet), put the real one back before anything reads the empty copy.
+            SingletonLatchGuard.RepairShadowedCache(instance);
         }
 
         private static void Unset(T instance)

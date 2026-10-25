@@ -1,8 +1,8 @@
-using System;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Modules.Presence;
+using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 
@@ -58,11 +58,9 @@ namespace CardShopCoop.Modules.World
         private sealed class FurnitureBoxUpCapture
         {
             internal InteractableObject Object;
-            internal string EntityId;
             internal Vector3 Position;
+            internal bool Scope;
         }
-
-        private bool _applyingFurniturePrediction;
 
         private void ApplyPredictedFurnitureBoxUp(InteractableObject obj)
         {
@@ -73,15 +71,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-
-            _applyingFurniturePrediction = true;
-            try
+            // The write scope is the one suppression signal observers use; the box-up patch
+            // asks ReentrancyGuard.Suppressed and skips this replay.
+            using (Writes.Enter())
             {
                 obj.BoxUpObject(false);
-            }
-            finally
-            {
-                _applyingFurniturePrediction = false;
+                WarehouseShelfInteraction.SetStoredBoxVisuals(obj, false);
             }
         }
 
@@ -92,26 +87,20 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-
-            _applyingFurniturePrediction = true;
-            try
+            // Reverse the prediction through the game's own place path. EmptyBoxShelf
+            // detaches the boxed object before the package tears down, so this removes
+            // only the predicted package and leaves the placed furniture (and therefore
+            // its placement identity) intact. Calling package.OnDestroyed() directly
+            // instead routes into InteractablePackagingBox_Shelf.OnDestroyed, which
+            // destroys m_BoxedObject, drops the furniture from ShelfManager and forgets
+            // its placement id, stranding the host's authoritative descriptor.
+            // PlaceBoxedObject also detaches the object's packaging-box reference, so the
+            // authoritative apply spawns a clean package rather than adopting the one that
+            // is already scheduled to disappear.
+            using (Writes.Enter())
             {
-                // Reverse the prediction through the game's own place path. EmptyBoxShelf
-                // detaches the boxed object before the package tears down, so this removes
-                // only the predicted package and leaves the placed furniture (and therefore
-                // its placement identity) intact. Calling package.OnDestroyed() directly
-                // instead routes into InteractablePackagingBox_Shelf.OnDestroyed, which
-                // destroys m_BoxedObject, drops the furniture from ShelfManager and forgets
-                // its placement id, stranding the host's authoritative descriptor.
-                // PlaceBoxedObject also detaches the object's packaging-box reference, so the
-                // authoritative apply spawns a clean package rather than adopting the one that
-                // is already scheduled to disappear.
                 PlacementInterop.PlaceBoxedObject(obj, obj.transform.position,
                     obj.transform.rotation);
-            }
-            finally
-            {
-                _applyingFurniturePrediction = false;
             }
         }
 
@@ -124,10 +113,11 @@ namespace CardShopCoop.Modules.World
             {
                 __state = null;
                 if (_instance == null || __instance == null || !holdBox
-                    || _instance._applyingFurniturePrediction)
+                    || ReentrancyGuard.SuppressedForLocalObservation(_instance))
                 {
-                    // Our own apply/replay drives BoxUpObject with holdBox:false; the host side
-                    // has no local player to forward.
+                    // Our own apply/replay drives BoxUpObject with holdBox:false and the write
+                    // scope/authority dispatch marks it; the host side has no local player to
+                    // forward.
                     return;
                 }
 
@@ -142,21 +132,26 @@ namespace CardShopCoop.Modules.World
                 // state before it validates the box-up request. This is local hold bookkeeping, not
                 // a game-state gate; the game still runs BoxUpObject.
                 _instance._placementHold?.LocalEnded(__instance);
-                if (!PlacementApi.TryMakeBoxableFurnitureEntityId(__instance,
-                    WorldMessageMetadata.FurnitureIdentityScope,
-                    out var entityId))
-                {
-                    CoopPlugin.Log.LogWarning("[box-furniture] box-up has no placement identity; type="
-                        + __instance.m_ObjectType + "; not forwarding.");
-                    return;
-                }
 
+                // Opening the write scope around the vanilla box-up keeps the package's
+                // StartHoldBox from sending a second, unauthorised pickup request. The box-up
+                // intent owns the hold; the host's GrantFurnitureHold is the authoritative grant.
+                _instance.Writes.Enter();
                 __state = new FurnitureBoxUpCapture
                 {
                     Object = __instance,
-                    EntityId = entityId,
                     Position = __instance.transform.position,
+                    Scope = true,
                 };
+            }
+
+            [HarmonyFinalizer]
+            private static void Finalizer(FurnitureBoxUpCapture __state)
+            {
+                if (__state?.Scope == true)
+                {
+                    _instance?.Writes.Exit();
+                }
             }
 
             [HarmonyPostfix]
@@ -168,22 +163,21 @@ namespace CardShopCoop.Modules.World
                 }
 
                 var obj = __state.Object;
-                // The client is the creator: the box the game just made gets its stable id here and
-                // the host binds its counterpart to the same id.
-                var package = obj.GetPackagingBoxShelf();
-                var boxId = package != null && _instance._boxNetworkInteraction != null
-                    ? _instance._boxNetworkInteraction.AssignClientCreated(package)
-                    : Guid.Empty;
+                // A warehouse shelf's stored boxes are batched from compartment matrices; hide
+                // them as soon as the shelf is boxed instead of leaving them drawn in mid-air.
+                WarehouseShelfInteraction.SetStoredBoxVisuals(obj, false);
+                // The package the game just created is a view of this furniture: it borrows the
+                // furniture's session Guid and never mints one. The intent only names the live
+                // furniture; the host boxes its own copy under the same furniture identity.
                 var intent = new FurnitureBoxUpRequestMessage
                 {
                     ObjectType = obj.m_ObjectType,
                     Position = __state.Position,
-                    StableEntityId = __state.EntityId,
-                    BoxNetworkId = boxId,
+                    Entity = obj,
                 };
                 // The game already boxed the furniture up; the prediction only records how to redo
                 // and undo that change through the game's own methods.
-                WorldPrediction.Predict(WorldPrediction.BoxesScope, intent,
+                WorldAction.Submit(WorldAction.BoxesScope, intent,
                     () => _instance.ApplyPredictedFurnitureBoxUp(obj),
                     () => _instance.UndoPredictedFurnitureBoxUp(obj));
             }
@@ -194,19 +188,19 @@ namespace CardShopCoop.Modules.World
             _playerBoxInteraction?.Reset();
         }
 
-        [MessageHandler(typeof(PlayerBoxPickupMessage))]
+        [MessageHandler]
         private void HandlePlayerBoxPickup(MessageContext context, PlayerBoxPickupMessage message)
         {
             ApplyPlayerBoxAction(message);
         }
 
-        [MessageHandler(typeof(PlayerBoxPlacementMessage))]
+        [MessageHandler]
         private void HandlePlayerBoxPlacement(MessageContext context, PlayerBoxPlacementMessage message)
         {
             ApplyPlayerBoxAction(message);
         }
 
-        [MessageHandler(typeof(PlayerBoxThrowMessage))]
+        [MessageHandler]
         private void HandlePlayerBoxThrow(MessageContext context, PlayerBoxThrowMessage message)
         {
             ApplyPlayerBoxAction(message);
@@ -243,7 +237,7 @@ namespace CardShopCoop.Modules.World
             // prediction. Applying it authoritatively would first undo the hold/move/throw and
             // replay it: the box re-lerps into the hand, or the throw is re-applied.
 
-            WorldPrediction.AckOrApply(message,
+            WorldAction.AckOrApply(message,
                 () => _playerBoxInteraction.ApplyIncoming(message));
             return true;
         }
@@ -256,8 +250,9 @@ namespace CardShopCoop.Modules.World
                 out PlayerBoxInteraction.LocalAction __state)
             {
                 // Capture only: the game decides whether a hold is valid (for example while the
-                // box is in its placement preview) and owns the mutation.
-                __state = _instance == null
+                // box is in its placement preview) and owns the mutation. A furniture box-up owns
+                // its own hold grant, so the nested StartHoldBox must not send a second request.
+                __state = _instance == null || ReentrancyGuard.SuppressedForLocalObservation(_instance)
                     ? default
                     : _instance.CapturePlayerBoxAction(__instance, isPlayer, false);
             }
@@ -266,7 +261,12 @@ namespace CardShopCoop.Modules.World
             private static void Postfix(InteractablePackagingBox __instance,
                 PlayerBoxInteraction.LocalAction __state)
             {
-                _instance?.PublishPlayerBoxPickup(__instance, __state);
+                if (_instance == null || ReentrancyGuard.SuppressedForLocalObservation(_instance))
+                {
+                    return;
+                }
+
+                _instance.PublishPlayerBoxPickup(__instance, __state);
             }
         }
 
@@ -356,15 +356,21 @@ namespace CardShopCoop.Modules.World
             }
 
             if (item == null || _boxNetworkInteraction == null
-                || !_boxNetworkInteraction.TryGetId(item, out var id))
+                || !_boxNetworkInteraction.TryGetId(item, out _))
             {
+                if (item != null)
+                {
+                    CoopPlugin.Log.LogWarning("[box-id] dropped item-box state for " + item.name
+                        + ": the live box has no network identity.");
+                }
+
                 return;
             }
 
             var compartment = item.m_ItemCompartment;
             SendClientIntent(new BoxStateRequestMessage
             {
-                BoxNetworkId = id,
+                Box = item,
                 IsBoxOpened = BoxNetworkInteraction.IsBoxOpen(item),
                 ContentsChanged = contentsChanged,
                 ItemType = compartment == null ? EItemType.None : compartment.GetItemType(),

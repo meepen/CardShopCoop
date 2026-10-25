@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using CardShopCoop.Net;
 using HarmonyLib;
 
@@ -7,39 +7,24 @@ namespace CardShopCoop.Modules.World
     public sealed partial class WorldClientBehaviour
     {
         private bool _cardDisplayApplying;
-        // A card-display baseline can arrive before the placement identities that name its
-        // shelves are bound, so unresolvable slots are held until the placement structure changes.
-        private readonly Dictionary<long, CardDisplayMessage> _pendingCardDisplay = new();
 
         private void InstallCardDisplayPatches()
         {
             _harmony.CreateClassProcessor(typeof(CardDisplayPlacePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CardDisplayRemovePatch)).Patch();
-            PlacementApi.StructureChanged += OnCardDisplayStructureChanged;
         }
 
         private void ShutdownCardDisplay()
         {
-            PlacementApi.StructureChanged -= OnCardDisplayStructureChanged;
-            _pendingCardDisplay.Clear();
+            _cardDisplayApplying = false;
         }
 
         internal void ResetCardDisplayState()
         {
-            // Dropping a retained message drops its prediction id with it; retire them so no
-            // prediction outlives the state it would have resolved.
-            foreach (var pending in _pendingCardDisplay.Values)
-            {
-                WorldPrediction.Ack(pending);
-            }
-
-            _pendingCardDisplay.Clear();
             _cardDisplayApplying = false;
         }
 
-        private void OnCardDisplayStructureChanged(int kind) => RetryPendingCardDisplay();
-
-        [MessageHandler(typeof(CardDisplayMessage))]
+        [MessageHandler]
         private void HandleCardDisplay(MessageContext context, CardDisplayMessage message)
         {
             if (_shutdown || message == null)
@@ -47,18 +32,17 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            if (message.Shelf == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[card-display] dropped state: the display shelf did not resolve to a live object.");
+                return;
+            }
+
             if (!CanApplyCardDisplay(message))
             {
-                // Retain the latest slot state until its shelf resolves. A superseded message must
-                // not leave its prediction pending forever: retire it before overwriting. (An
-                // already-retired id is a no-op.)
-                var key = CardDisplayKey(message);
-                if (_pendingCardDisplay.TryGetValue(key, out var replaced))
-                {
-                    WorldPrediction.Ack(replaced);
-                }
-
-                _pendingCardDisplay[key] = message;
+                CoopPlugin.Log.LogWarning("[card-display] dropped state: shelf="
+                    + message.Shelf.name + " has no compartment " + message.Compartment + ".");
                 return;
             }
 
@@ -66,47 +50,23 @@ namespace CardShopCoop.Modules.World
             // state. Matches() makes the apply idempotent for the actor, while a host state that
             // raced ahead of our request (or a remote delta) must still be applied - AckOrApply
             // would retire our id and leave the slot showing our optimistic card.
-            WorldPrediction.Confirm(message, () => ApplyCardDisplay(message));
+            WorldAction.Confirm(message, () => ApplyCardDisplay(message));
         }
 
-        private void RetryPendingCardDisplay()
-        {
-            if (_shutdown || _pendingCardDisplay.Count == 0)
-            {
-                return;
-            }
-
-            var pending = new List<CardDisplayMessage>(_pendingCardDisplay.Values);
-            for (var i = 0; i < pending.Count; i++)
-            {
-                var message = pending[i];
-                if (!CanApplyCardDisplay(message))
-                {
-                    continue;
-                }
-
-                _pendingCardDisplay.Remove(CardDisplayKey(message));
-                // Same as HandleCardDisplay: Confirm retires our prediction and still applies the
-                // host state, which Matches() makes idempotent after our own optimistic run.
-                WorldPrediction.Confirm(message, () => ApplyCardDisplay(message));
-            }
-        }
-
-        private static long CardDisplayKey(CardDisplayMessage message)
-            => ((long)message.ShelfKey << 32) ^ (uint)message.Compartment;
-
-        /// <summary>One prediction key per slot so a rejection on one slot cannot undo/replay an
-        /// in-flight change on another.</summary>
-        private static string CardDisplayPredictionKey(int shelfKey, int compartment)
-            => WorldPrediction.CardDisplayScope + ":" + shelfKey + ":" + compartment;
+        /// <summary>One prediction key per live slot so a rejection on one slot cannot undo/replay
+        /// an in-flight change on another.</summary>
+        private static string CardDisplayPredictionKey(CardShelf shelf, int compartment)
+            => WorldAction.CardDisplayScope + ":" + RuntimeHelpers.GetHashCode(shelf)
+                + ":" + compartment;
 
         private static bool CanApplyCardDisplay(CardDisplayMessage message)
-            => WorldCardDisplay.TryResolve(message.ShelfKey, message.Compartment, out _);
+            => WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment, out _);
 
         private void ApplyCardDisplay(CardDisplayMessage message)
         {
-            if (!WorldCardDisplay.TryResolve(message.ShelfKey, message.Compartment,
-                out var compartment))
+            if (message?.Shelf == null
+                || !WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
+                    out var compartment))
             {
                 return;
             }
@@ -148,13 +108,10 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (!WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+            if (!WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
             {
-                // No key means the host cannot resolve the slot, so the placement never leaves
-                // this peer. The usual cause is that the display shelf has no placement identity
-                // yet (its baseline bind missed, e.g. a runtime-registered modded object type).
                 CoopPlugin.Log.LogWarning(
-                    "[card-display] placement dropped: display shelf has no placement identity.");
+                    "[card-display] placement dropped: the compartment has no owning display shelf.");
                 return;
             }
 
@@ -166,15 +123,15 @@ namespace CardShopCoop.Modules.World
             }
 
             var grade = WorldCardDisplay.EncodedGradeOf(card);
-            CoopPlugin.Log.LogInfo("[card-display] forwarding placement shelf=" + shelfKey
+            CoopPlugin.Log.LogInfo("[card-display] forwarding placement shelf=" + shelf.name
                 + " compartment=" + index + " card=" + card.monsterType + ".");
             // The local game already placed the card, so the prediction has no local apply to run;
             // only a rejection needs to undo it. Predict records the post-hoc prediction
             // without re-running the game mutation the hook already observed.
-            WorldPrediction.Predict(CardDisplayPredictionKey(shelfKey, index),
+            WorldAction.Submit(CardDisplayPredictionKey(shelf, index),
                 new CardDisplayRequestMessage
                 {
-                    ShelfKey = shelfKey,
+                    Shelf = shelf,
                     Compartment = index,
                     Occupied = true,
                     Card = state,
@@ -197,10 +154,10 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (!WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+            if (!WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
             {
                 CoopPlugin.Log.LogWarning(
-                    "[card-display] removal dropped: display shelf has no placement identity.");
+                    "[card-display] removal dropped: the compartment has no owning display shelf.");
                 return;
             }
 
@@ -211,12 +168,12 @@ namespace CardShopCoop.Modules.World
             }
 
             var grade = WorldCardDisplay.EncodedGradeOf(card);
-            CoopPlugin.Log.LogInfo("[card-display] forwarding removal shelf=" + shelfKey
+            CoopPlugin.Log.LogInfo("[card-display] forwarding removal shelf=" + shelf.name
                 + " compartment=" + index + " card=" + card.monsterType + ".");
-            WorldPrediction.Predict(CardDisplayPredictionKey(shelfKey, index),
+            WorldAction.Submit(CardDisplayPredictionKey(shelf, index),
                 new CardDisplayRequestMessage
                 {
-                    ShelfKey = shelfKey,
+                    Shelf = shelf,
                     Compartment = index,
                     Occupied = false,
                     Card = state,

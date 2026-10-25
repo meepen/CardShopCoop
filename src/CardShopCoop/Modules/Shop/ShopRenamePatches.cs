@@ -79,14 +79,33 @@ namespace CardShopCoop.Modules.Shop
         private static class InputChangedPatch
         {
             [HarmonyPostfix]
-            private static void Postfix(string text) => Endpoint?.RenameInputChanged(text);
+            private static void Postfix(string text)
+            {
+                // The module's own repaint of the sign/input (a rename or draft applied from
+                // authority) can raise this callback. That text is not local typing, so it must
+                // not be forwarded as a new draft.
+                if (ReentrancyGuard.Suppressed(_endpoint))
+                {
+                    return;
+                }
+
+                Endpoint?.RenameInputChanged(text);
+            }
         }
 
         [HarmonyPatch(typeof(ShopRenamer), nameof(ShopRenamer.OnInputTextUpdated))]
         private static class InputUpdatedPatch
         {
             [HarmonyPostfix]
-            private static void Postfix(string text) => Endpoint?.RenameInputChanged(text);
+            private static void Postfix(string text)
+            {
+                if (ReentrancyGuard.Suppressed(_endpoint))
+                {
+                    return;
+                }
+
+                Endpoint?.RenameInputChanged(text);
+            }
         }
 
         [HarmonyPatch(typeof(ShopRenamer), nameof(ShopRenamer.OnPressConfirmShopName))]

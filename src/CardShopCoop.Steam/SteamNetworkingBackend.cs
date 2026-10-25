@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 using BepInEx;
 using BepInEx.Configuration;
 using CardShopCoop.Net;
-using CardShopCoop.Net.Connection;
+using CardShopCoop.Net.Datagrams;
 using CardShopCoop.Net.Networking;
 using CardShopCoop.Api;
 using UnityEngine;
@@ -14,18 +14,16 @@ using UnityEngine;
 namespace CardShopCoop.Steam
 {
     /// <summary>
-    /// The Steam transport as a networking backend: a Steam lobby plus its KCP-over-Steam-
-    /// Networking-Sockets bearer. It owns the Steamworks bridge, so no Steam type leaks any
+    /// The Steam transport as a networking backend: a Steam lobby plus its Steam Networking
+    /// Sockets datagram bearer. It owns the Steamworks bridge, so no Steam type leaks any
     /// further; the co-op window drives it through <see cref="INetworkingBackend"/> alone.
     ///
     /// Hosting and joining are ASYNC on Steam (lobby creation and entry complete through
     /// callbacks), so <see cref="Connect"/> returns its handle immediately and the outcome arrives
     /// through the bridge callbacks, addressed to that handle.
     /// </summary>
-    public sealed class SteamNetworkingBackend : INetworkingBackend
+    public sealed class SteamNetworkingBackend : INetworkingBackend, INetworkingBackendDiagnostics
     {
-        public const int IdBase = 1_000_000;
-
         private const string Section = "Steam";
 
         private readonly ISteamBridge _bridge;
@@ -33,9 +31,10 @@ namespace CardShopCoop.Steam
         private readonly object _gate = new();
         private readonly Dictionary<string, ulong> _lobbyIds = new(StringComparer.Ordinal);
 
-        private long _nextId;
-        private long _active;
-        private long _pending;
+        private ConnectionId _attempt;
+        private IBackendConnectCallbacks _callbacks;
+        private IDatagramTransport _datagrams;
+        private bool _live;
         private string _lobbyId = "";
         /// <summary>The lobby id WE are currently hosting, captured when the lobby goes live.
         /// Distinct from <see cref="_lobbyId"/>, which is only ever the join target the player
@@ -43,12 +42,6 @@ namespace CardShopCoop.Steam
         private ulong _hostedLobby;
         private volatile bool _busy;
         private volatile string _step;
-        private Action<ConnectionId, ConnectResult> _pendingResult;
-        private ICoopTransport _transport;
-        /// <summary>The transport the BRIDGE hands back and reports its callbacks with (the raw KCP
-        /// transport). <see cref="_transport"/> is that wrapped in <see cref="LagTransport"/>, so the
-        /// bridge's callbacks must be matched against THIS, not the wrapper.</summary>
-        private ICoopTransport _rawTransport;
         private bool _isHost;
 
         public SteamNetworkingBackend(ISteamBridge bridge)
@@ -63,33 +56,46 @@ namespace CardShopCoop.Steam
                 // invite can fail to reach a friend, and the raw id is the fallback they paste
                 // into the join box (or pass to +connect_lobby).
                 _hostedLobby = lobby;
-                Settle(new ConnectResult(true), liveFailure: false);
+                _live = true;
+                _busy = false;
+                Connected();
             };
             _bridge.OnConnectedToHost = transport =>
             {
-                if (ReferenceEquals(transport, _rawTransport))
+                if (ReferenceEquals(transport, _datagrams))
                 {
-                    Settle(new ConnectResult(true), liveFailure: false);
+                    _live = true;
+                    _busy = false;
+                    Connected();
                 }
             };
             _bridge.OnJoinFailed = (_, _, transport, error) =>
             {
-                if (ReferenceEquals(transport, _rawTransport))
+                if (ReferenceEquals(transport, _datagrams))
                 {
-                    Settle(new ConnectResult(false, error, true), liveFailure: true);
+                    Fail(error, retryable: true);
                 }
             };
             _bridge.OnSessionFailed = (transport, error) =>
             {
-                if (ReferenceEquals(transport, _rawTransport))
+                if (ReferenceEquals(transport, _datagrams))
                 {
-                    Settle(new ConnectResult(false, error), liveFailure: true);
+                    Fail(error, retryable: false);
                 }
             };
             // OnError is the bridge's catch-all and fires for UNRELATED, non-fatal conditions too -
             // notably "Steam lobby list failed" from a lobby-browser refresh. It must not be able to
-            // drop a live session, only to fail an attempt that is still pending.
-            _bridge.OnError = error => Settle(new ConnectResult(false, error), liveFailure: false);
+            // drop a live session, only to fail an attempt that is still connecting.
+            _bridge.OnError = error =>
+            {
+                if (_live)
+                {
+                    CoopPlugin.Log?.LogWarning("Steam (non-fatal): " + error);
+                    return;
+                }
+
+                Fail(error, retryable: false);
+            };
 
             // The player accepted a Steam invite from the overlay: hand the lobby id up as a join
             // request. The runtime decides whether a session can start and does the actual join.
@@ -108,18 +114,11 @@ namespace CardShopCoop.Steam
 
         public string DisplayName => "Steam";
 
-        public int ConnectionIdBase => IdBase;
-
         public ulong LocalUserId => _bridge.LocalSteamId;
 
         public string LocalUserName => _bridge.LocalPersonaName ?? "";
 
-        public ICoopTransport Transport => _transport;
-
         public event Action<INetworkingBackend, FieldValues> JoinRequested;
-        public event Action<ConnectionId, ICoopTransport> TransportChanged;
-        public event Action<ConnectionId, PeerConnection> PeerConnected;
-        public event Action<ConnectionId, string> Failed;
 
         public Task<BackendAvailability> GetAvailabilityAsync()
         {
@@ -211,54 +210,95 @@ namespace CardShopCoop.Steam
             {
                 new BackendField(FieldId.Lobby, "Steam lobby id", FieldKind.Text,
                     _lobbyId, required: true,
-                    tooltip: "The numeric Steam lobby id of the host you are joining."),
+                    tooltip: "The numeric Steam lobby id of the host you are joining.")
+                {
+                    Sensitive = true,
+                },
+            };
+        }
+
+        /// <summary>The support-report view of this backend. The hosted lobby id is listed but
+        /// marked sensitive: it is an invite credential, so a report must censor it completely.</summary>
+        public IReadOnlyList<BackendDiagnosticField> GetDiagnosticFields(ConnectMode mode)
+        {
+            if (mode == ConnectMode.Host)
+            {
+                var fields = new List<BackendDiagnosticField>
+                {
+                    new BackendDiagnosticField("Backend", Id),
+                    new BackendDiagnosticField("Lobby name", LobbyName),
+                    new BackendDiagnosticField("Players",
+                        MaxPlayers.ToString(CultureInfo.InvariantCulture)),
+                    new BackendDiagnosticField("List in public browser", Public ? "yes" : "no"),
+                    new BackendDiagnosticField("Lobby id", HostedLobbyId, sensitive: true),
+                };
+                return fields;
+            }
+
+            return new[]
+            {
+                new BackendDiagnosticField("Backend", Id),
+                new BackendDiagnosticField("Lobby id", _lobbyId, sensitive: true),
             };
         }
 
         // ------------------------------------------------------------------ connect / disconnect
 
-        public ConnectionId Connect(ConnectMode mode, FieldValues values,
-            Action<ConnectionId, ConnectResult> onResult)
+        public void Connect(ConnectionId attempt, ConnectMode mode, FieldValues values,
+            IBackendConnectCallbacks callbacks)
         {
-            var id = new ConnectionId(System.Threading.Interlocked.Increment(ref _nextId));
+            if (attempt.Value == 0)
+            {
+                throw new ArgumentException("A live connection attempt is required.", nameof(attempt));
+            }
+            if (callbacks == null)
+            {
+                throw new ArgumentNullException(nameof(callbacks));
+            }
+
             lock (_gate)
             {
-                _pending = id.Value;
-                _pendingResult = onResult;
+                _attempt = attempt;
+                _callbacks = callbacks;
+                _isHost = mode == ConnectMode.Host;
+                _live = false;
+                _hostedLobby = 0;
+                _datagrams = null;
             }
+
+            _step = _isHost ? "Creating Steam lobby\u2026" : "Entering Steam lobby\u2026";
+            _busy = true;
 
             try
             {
                 EnsureAvailable();
-                _isHost = mode == ConnectMode.Host;
-                var raw = _bridge.CreateTransport(_isHost);
-                var child = LagTransport.Wrap(raw);
-                child.PeerConnected += connection => PeerConnected?.Invoke(id, connection);
-                _rawTransport = raw;
-                _transport = child;
-                System.Threading.Interlocked.Exchange(ref _active, id.Value);
-                TransportChanged?.Invoke(id, child);
+
+                // The bearer is created before Host/Join so the runtime can start the reliable
+                // session immediately; the bridge binds the Steam sockets bearer once the lobby
+                // supplies the authorization context. The runtime owns the bearer from
+                // BearerReady on.
+                var bearer = _bridge.CreateDatagramTransport();
+                lock (_gate)
+                {
+                    _datagrams = bearer;
+                }
+
+                callbacks.BearerReady(attempt, bearer);
 
                 if (_isHost)
                 {
                     // See GetFields: the "List in browser" toggle is the lobby type.
-                    _step = "Creating Steam lobby\u2026";
-                    _busy = true;
                     _bridge.Host(Public, LobbyName, false, MaxPlayers);
                 }
                 else
                 {
-                    _step = "Entering Steam lobby\u2026";
-                    _busy = true;
                     _bridge.Join(ResolveLobby(values));
                 }
             }
             catch (Exception error)
             {
-                Settle(new ConnectResult(false, error.Message), liveFailure: false);
+                Fail(error.Message, retryable: false);
             }
-
-            return id;
         }
 
         private void EnsureAvailable()
@@ -282,24 +322,22 @@ namespace CardShopCoop.Steam
             throw new InvalidOperationException("Pick a lobby from the list first.");
         }
 
-        public void Disconnect(ConnectionId connection)
+        public void Disconnect(ConnectionId attempt)
         {
-            if (connection.Value == 0
-                || System.Threading.Interlocked.Read(ref _active) != connection.Value)
-            {
-                return;
-            }
-
-            System.Threading.Interlocked.Exchange(ref _active, 0);
-            _busy = false;
             lock (_gate)
             {
-                _pending = 0;
-                _pendingResult = null;
+                if (!_attempt.IsValid || _attempt != attempt)
+                {
+                    return;
+                }
+
+                _attempt = default;
+                _callbacks = null;
+                _datagrams = null;
+                _live = false;
             }
 
-            _rawTransport = null;
-            _transport = null;
+            _busy = false;
             _hostedLobby = 0;
             try
             {
@@ -307,9 +345,49 @@ namespace CardShopCoop.Steam
             }
             catch (Exception e) { CoopLog.Swallow(e); }
 
-            // Do NOT dispose the transport here: teardown runs on the pump thread via the group,
-            // triggered by TransportChanged. Disposing from this (main) thread races the pump.
-            TransportChanged?.Invoke(connection, null);
+            // Do NOT stop or dispose the bearer here. The runtime owns it and tears it down on the
+            // pump thread; this method only releases the backend-owned Steam lobby.
+        }
+
+        /// <summary>Reports a fully live attempt. The runtime ignores a callback whose attempt is no
+        /// longer current.</summary>
+        private void Connected()
+        {
+            IBackendConnectCallbacks callbacks;
+            ConnectionId attempt;
+            lock (_gate)
+            {
+                if (!_attempt.IsValid || _callbacks == null)
+                {
+                    return;
+                }
+
+                attempt = _attempt;
+                callbacks = _callbacks;
+            }
+
+            callbacks.Connected(attempt);
+        }
+
+        /// <summary>Reports a failed attempt to the runtime. The runtime ignores a callback whose
+        /// attempt is no longer current, and calls <see cref="Disconnect"/> for the current one.</summary>
+        private void Fail(string reason, bool retryable)
+        {
+            IBackendConnectCallbacks callbacks;
+            ConnectionId attempt;
+            lock (_gate)
+            {
+                if (!_attempt.IsValid || _callbacks == null)
+                {
+                    CoopPlugin.Log?.LogWarning("Steam: " + reason);
+                    return;
+                }
+
+                attempt = _attempt;
+                callbacks = _callbacks;
+            }
+
+            callbacks.Failed(attempt, reason, retryable);
         }
 
         // ------------------------------------------------------------------ presentation
@@ -391,51 +469,17 @@ namespace CardShopCoop.Steam
 
         private ConnectionInfo Describe()
         {
-            var active = System.Threading.Interlocked.Read(ref _active) != 0;
+            bool active;
+            lock (_gate)
+            {
+                active = _attempt.IsValid;
+            }
+
             var busy = _busy;
             var summary = busy ? _step
                 : !active ? "Not connected"
                 : _isHost ? "Hosting through Steam - use Invite friend" : "In session";
             return new ConnectionInfo(active, _isHost, summary, busy: busy);
-        }
-
-        /// <summary>Resolves the pending connect attempt. A failure that arrives with nothing pending
-        /// is only a live-session failure when the bridge says it is one (<paramref name="liveFailure"/>
-        /// - a join or host rejection); a lobby-browser or other incidental error just logs.</summary>
-        private void Settle(ConnectResult result, bool liveFailure)
-        {
-            Action<ConnectionId, ConnectResult> callback;
-            ConnectionId id;
-            lock (_gate)
-            {
-                if (_pending == 0 || _pendingResult == null)
-                {
-                    var active = new ConnectionId(System.Threading.Interlocked.Read(ref _active));
-                    if (!result.Success && active.IsValid)
-                    {
-                        if (liveFailure)
-                        {
-                            Failed?.Invoke(active, result.Error);
-                        }
-                        else
-                        {
-                            CoopPlugin.Log?.LogWarning("Steam (non-fatal): " + result.Error);
-                        }
-                    }
-
-                    return;
-                }
-
-                id = new ConnectionId(_pending);
-                callback = _pendingResult;
-                _pending = 0;
-                _pendingResult = null;
-            }
-
-            // The attempt is over, one way or the other: the header stops naming a step and the play
-            // button comes back. A failure is still reported - in the container's own body.
-            _busy = false;
-            callback?.Invoke(id, result);
         }
     }
 }

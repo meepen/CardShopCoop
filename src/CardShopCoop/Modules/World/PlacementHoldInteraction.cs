@@ -1,121 +1,31 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using CardShopCoop.Modules.Decoration;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
-using UnityEngine.Rendering;
 
 namespace CardShopCoop.Modules.World
 {
-    /// <summary>Stable identity for a placement hold. Placement objects use their placement key;
-    /// decorations use the host-assigned decoration id behind a high flag bit.</summary>
-    internal static class PlacementHoldKey
-    {
-        private const long DecorationFlag = 1L << 62;
-        private const long PendingDecorationFlag = 1L << 61;
-        private const int PendingTypeShift = 40;
-        private const int PendingConnectionShift = 32;
-
-        internal static bool TryGet(InteractableObject obj, out long key)
-        {
-            key = 0;
-            if (obj == null)
-            {
-                return false;
-            }
-
-            if (DecorationInterop.IsDecoration(obj))
-            {
-                if (DecorationInterop.TryGetHoldId(obj, out var decorationId) && decorationId > 0)
-                {
-                    key = DecorationFlag | decorationId;
-                    return true;
-                }
-
-                return TryGetPendingKey(obj, out key);
-            }
-
-            if (!PlacementApi.TryMakeObjectKey(PlacementInterop.FindKind(obj), obj,
-                out var placementKey))
-            {
-                return false;
-            }
-
-            key = placementKey;
-            return true;
-        }
-
-        /// <summary>A decoration taken from inventory has no host id until its placement intent is
-        /// accepted. The key is derived from the game's own per-object instance id plus the mover's
-        /// connection and the decoration type, so no allocation map is needed and every message of
-        /// one hold derives the identical key. Observers decode the type and render a standalone
-        /// ghost with no object to resolve.</summary>
-        private static bool TryGetPendingKey(InteractableObject obj, out long key)
-        {
-            key = 0;
-            var type = (long)obj.m_DecoObjectType;
-            if (type <= 0 || type >= (long)EDecoObject.MAX)
-            {
-                return false;
-            }
-
-            key = PendingDecorationFlag
-                | (type << PendingTypeShift)
-                | ((long)(CoopCore.LocalConnectionId & 0xFF) << PendingConnectionShift)
-                | (long)(uint)obj.GetInstanceID();
-            return true;
-        }
-
-        internal static bool IsPendingDecoration(long key) => (key & PendingDecorationFlag) != 0;
-
-        internal static bool TryGetPendingDecorationType(long key, out EDecoObject type)
-        {
-            type = (EDecoObject)((key >> PendingTypeShift) & 0xFF);
-            // MAX is a named member with no data entry; the prefab lookup indexes the list by
-            // value, so a malformed key must not reach it.
-            return type > EDecoObject.None && type < EDecoObject.MAX
-                && Enum.IsDefined(typeof(EDecoObject), type);
-        }
-
-        internal static InteractableObject Resolve(long key)
-        {
-            if ((key & DecorationFlag) != 0)
-            {
-                return DecorationInterop.TryResolveHoldId(key & ~DecorationFlag, out var decoration)
-                    ? decoration : null;
-            }
-
-            return PlacementApi.ResolveObjectByKey((int)key) as InteractableObject;
-        }
-    }
-
     /// <summary>
-    /// Tracks who is holding which placed object for placement. Only the hold edge is networked:
-    /// observers rebuild the vanilla move preview from the holder's already-streamed camera, so no
-    /// object pose is ever sent. The host grants the first hold for an object; a competing hold is
-    /// blocked at start or rolled back when the winning grant is observed.
+    /// Tracks who is holding which placed object for placement. Observers do not receive an object
+    /// pose or a validity flag: they put the real object into the same vanilla move state a local
+    /// player would, infer the target from the holder's camera, and let the object's own Update do
+    /// the lerp, snapping, and red/green evaluation. A per-hold copy of the game's preview model
+    /// renders the ghost, because the stock preview is a single global object.
     /// </summary>
     internal sealed class PlacementHoldInteraction
     {
         private const float PreviewDistance = 3f;
         private const float PreviewOffsetUp = -0.1f;
-
-        /// <summary>Vanilla's move raycast reaches <c>InteractionPlayerController.m_RayDistance * 1.5</c>.
-        /// Read the live field so a reach mod is mirrored; the vanilla default is 5.</summary>
         private const float DefaultRayDistance = 5f;
         private const float MoveRayReach = 1.5f;
-
-        private static readonly FieldInfo MovingObjectField =
-            AccessTools.Field(typeof(InteractableObject), "m_IsMovingObject");
-        private static readonly FieldInfo SnappingPosField =
-            AccessTools.Field(typeof(InteractableObject), "m_IsSnappingPos");
         private static readonly MethodInfo OnPlacedMovedObjectMethod =
             AccessTools.Method(typeof(InteractableObject), "OnPlacedMovedObject");
         private static readonly int ColorId = Shader.PropertyToID("_Color");
+        private static int _remotePreviewUpdates;
 
         private sealed class RemoteHold
         {
@@ -124,25 +34,54 @@ namespace CardShopCoop.Modules.World
             internal Material Material;
             internal int MoverConnectionId;
             internal int OriginalLayer;
-            internal ShelfMoveStateValidArea OriginalShelfMove;
-            /// <summary>The empty packaging box the object was unboxed from, hidden while the
-            /// ghost preview stands in for the piece.</summary>
+            internal bool OriginalValidAreaActive;
+            internal bool OriginalBoxColliderEnabled;
+            internal bool[] OriginalBoxColliderList;
             internal GameObject Package;
-            internal readonly List<Renderer> HiddenRenderers = new();
+            internal bool Valid;
+            internal bool StopSnap;
+            internal bool IsFlipped;
+            internal float RayDistance;
+            internal Vector3 CameraPosition;
+            internal Quaternion CameraRotation;
+            internal bool HasCamera;
+            internal bool AimUnavailableLogged;
         }
 
         private readonly bool _host;
         private readonly Action<INetMessage> _broadcast;
         private readonly Action<int, INetMessage> _send;
-        private readonly Dictionary<long, int> _holders = new();
-        private readonly Dictionary<long, RemoteHold> _remote = new();
+        private readonly Dictionary<InteractableObject, int> _holders =
+            new(PlacementObjectComparer.Instance);
+        private readonly Dictionary<InteractableObject, RemoteHold> _remote =
+            new(PlacementObjectComparer.Instance);
 
-        private long _localKey;
         private InteractableObject _localObject;
+        private bool _localBeginSent;
         private Vector3 _localBeforePosition;
         private Quaternion _localBeforeRotation;
         private Quaternion _localSentRotation;
+        private bool _localStopSnap;
+        private bool _localIsFlipped;
+        private int _remotePreviewCount;
+        private bool _savedStopSnap;
+        private bool _remoteUpdateActive;
         private static int _suppressedLocalStarts;
+
+        internal static bool SuppressGlobalPreview => _remotePreviewUpdates > 0;
+
+        internal static void BeginRemotePreviewUpdate() => _remotePreviewUpdates++;
+
+        internal static void EndRemotePreviewUpdate()
+        {
+            if (_remotePreviewUpdates > 0)
+            {
+                _remotePreviewUpdates--;
+            }
+        }
+
+        internal bool IsRemoteHold(InteractableObject obj)
+            => obj != null && _remote.ContainsKey(obj);
 
         internal PlacementHoldInteraction(bool host, Action<INetMessage> broadcast,
             Action<int, INetMessage> send)
@@ -154,8 +93,7 @@ namespace CardShopCoop.Modules.World
 
         /// <summary>A game-path apply drives StartMoveObject/PlaceMovedObject itself; the resulting
         /// move lifecycle is not a player hold. Callers wrap their apply with this scope so applies
-        /// never emit hold traffic or leave a hold behind (the World release path skips during a
-        /// prediction reconcile, so an apply that started a hold could never end it).</summary>
+        /// never emit hold traffic or leave a hold behind.</summary>
         internal static void BeginSuppressLocalStarts() => _suppressedLocalStarts++;
 
         internal static void EndSuppressLocalStarts()
@@ -170,15 +108,15 @@ namespace CardShopCoop.Modules.World
         /// blocked. Untracked objects keep vanilla behavior.</summary>
         internal bool IsAllowed(InteractableObject obj)
         {
-            if (obj == null || !PlacementHoldKey.TryGet(obj, out var key))
+            if (obj == null)
             {
                 return true;
             }
 
-            if (_holders.TryGetValue(key, out var mover) && !IsLocalMover(mover))
+            if (_holders.TryGetValue(obj, out var mover) && !IsLocalMover(mover))
             {
-                CoopPlugin.Log.LogInfo("[placement-hold] blocked key=" + key + " held by mover="
-                    + mover + ".");
+                CoopPlugin.Log.LogInfo("[placement-hold] blocked entity="
+                    + PlacementInterop.Describe(obj) + " held by mover=" + mover + ".");
                 return false;
             }
 
@@ -191,38 +129,54 @@ namespace CardShopCoop.Modules.World
         /// so this peer does not track (or later predict) a move it does not own.</summary>
         internal bool LocalStarted(InteractableObject obj)
         {
-            if (_suppressedLocalStarts > 0 || obj == null || _localKey != 0
-                || !PlacementHoldKey.TryGet(obj, out var key))
+            if (_suppressedLocalStarts > 0 || obj == null || _localObject != null)
             {
                 return false;
             }
 
-            _localKey = key;
             _localObject = obj;
             _localBeforePosition = obj.transform.position;
             _localBeforeRotation = obj.transform.rotation;
 
-            if (_holders.TryGetValue(key, out var mover) && !IsLocalMover(mover))
+            if (_holders.TryGetValue(obj, out var mover) && !IsLocalMover(mover))
             {
                 // Another player owns this object's hold. The game already entered move mode (this
                 // runs as a postfix), so unwind it through the game's own exit path rather than
                 // suppressing StartMoveObject; the single-writer hold table stays authoritative.
-                CoopPlugin.Log.LogInfo("[placement-hold] local start refused key=" + key
-                    + " held by mover=" + mover + ".");
+                CoopPlugin.Log.LogInfo("[placement-hold] local start refused entity="
+                    + PlacementInterop.Describe(obj) + " held by mover=" + mover + ".");
                 CancelLocalMove();
                 return false;
             }
 
-            CoopPlugin.Log.LogInfo("[placement-hold] local begin key=" + key + " host=" + _host + ".");
+            // The wire can only name an object the identity module has bound. An in-flight
+            // decoration has no placed object yet, so its hold is kept local and dropped from the
+            // network rather than inventing an identifier.
+            _localBeginSent = PlacementInterop.HasSharedIdentity(obj);
+            var message = BuildBeginMessage(obj, 0);
+            _localStopSnap = message.StopSnap;
+            _localIsFlipped = message.IsFlipped;
+            CoopPlugin.Log.LogInfo("[placement-hold] local begin entity="
+                + PlacementInterop.Describe(obj) + " shared=" + _localBeginSent + " host="
+                + _host + " stopSnap=" + _localStopSnap + " flipped=" + _localIsFlipped + ".");
 
-            if (_host)
+            if (_localBeginSent)
             {
-                _holders[key] = 0;
-                _broadcast(new PlacementHoldBeginMessage { HoldKey = key, MoverConnectionId = 0 });
+                if (_host)
+                {
+                    _holders[obj] = 0;
+                    message.MoverConnectionId = 0;
+                    _broadcast(message);
+                }
+                else
+                {
+                    _send(1, CreateBeginRequest(message));
+                }
             }
             else
             {
-                _send(1, new PlacementHoldBeginRequestMessage { HoldKey = key });
+                CoopPlugin.Log.LogWarning("[placement-hold] object has no shared identity yet; "
+                    + "dropping hold message for entity=" + PlacementInterop.Describe(obj) + ".");
             }
 
             // The mover may already have aimed the object (StartMoveObject orients some objects),
@@ -234,27 +188,41 @@ namespace CardShopCoop.Modules.World
 
         internal void LocalEnded(InteractableObject obj)
         {
-            if (_localKey == 0 || !ReferenceEquals(obj, _localObject))
+            if (_localObject == null || !ReferenceEquals(obj, _localObject))
             {
                 return;
             }
 
-            var key = _localKey;
-            _localKey = 0;
+            var ended = _localObject;
+            var shared = _localBeginSent;
             _localObject = null;
-            CoopPlugin.Log.LogInfo("[placement-hold] local end key=" + key + " host=" + _host + ".");
+            _localBeginSent = false;
+            _localStopSnap = false;
+            _localIsFlipped = false;
+            CoopPlugin.Log.LogInfo("[placement-hold] local end entity="
+                + PlacementInterop.Describe(ended) + " shared=" + shared + " host=" + _host + ".");
+            if (!shared)
+            {
+                return;
+            }
+
             if (_host)
             {
-                if (_holders.TryGetValue(key, out var mover) && mover == 0)
+                if (_holders.TryGetValue(ended, out var mover) && mover == 0)
                 {
-                    _holders.Remove(key);
+                    _holders.Remove(ended);
                 }
 
-                _broadcast(new PlacementHoldEndMessage { HoldKey = key });
+                _broadcast(new PlacementHoldEndMessage { Entity = ended });
             }
             else
             {
-                _send(1, new PlacementHoldEndRequestMessage { HoldKey = key });
+                _send(1, new PlacementHoldEndRequestMessage { Entity = ended });
+            }
+
+            if (_remote.Count > 0)
+            {
+                SetDashedLines(true);
             }
         }
 
@@ -262,7 +230,7 @@ namespace CardShopCoop.Modules.World
         /// actually changed the held object, and only then forwarded to observers.</summary>
         internal void LocalRotated(InteractableObject obj)
         {
-            if (_localKey == 0 || !ReferenceEquals(obj, _localObject))
+            if (_localObject == null || !ReferenceEquals(obj, _localObject))
             {
                 return;
             }
@@ -274,14 +242,50 @@ namespace CardShopCoop.Modules.World
             }
 
             _localSentRotation = rotation;
-            CoopPlugin.Log.LogInfo("[placement-hold] local rotate key=" + _localKey + " yaw="
+            CoopPlugin.Log.LogInfo("[placement-hold] local rotate entity="
+                + PlacementInterop.Describe(_localObject) + " yaw="
                 + rotation.eulerAngles.y.ToString("F1") + ".");
             PublishRotation(rotation);
         }
 
+        /// <summary>Flip is not a transform rotation for vertical decorations; publish the flip
+        /// state itself as well as any transform change.</summary>
+        internal void LocalFlipped(InteractableObject obj)
+        {
+            if (_localObject == null || !ReferenceEquals(obj, _localObject))
+            {
+                return;
+            }
+
+            _localIsFlipped = PlacementInterop.ReadIsFlipped(obj);
+            PublishState();
+            LocalRotated(obj);
+        }
+
+        /// <summary>Called after the local controller's Update. Sends a state change only when the
+        /// DisableSnap input actually changed while this peer owns a hold.</summary>
+        internal void LocalInputChanged()
+        {
+            if (_localObject == null || !_localBeginSent)
+            {
+                return;
+            }
+
+            var stopSnap = PlacementInterop.ReadStopSnap();
+            if (stopSnap == _localStopSnap)
+            {
+                return;
+            }
+
+            _localStopSnap = stopSnap;
+            CoopPlugin.Log.LogInfo("[placement-hold] local state entity="
+                + PlacementInterop.Describe(_localObject) + " stopSnap=" + stopSnap + ".");
+            PublishState();
+        }
+
         private void PublishRotation(Quaternion rotation)
         {
-            if (_localKey == 0)
+            if (_localObject == null || !_localBeginSent)
             {
                 return;
             }
@@ -290,7 +294,7 @@ namespace CardShopCoop.Modules.World
             {
                 _broadcast(new PlacementHoldRotationMessage
                 {
-                    HoldKey = _localKey,
+                    Entity = _localObject,
                     Rotation = rotation,
                 });
             }
@@ -298,8 +302,35 @@ namespace CardShopCoop.Modules.World
             {
                 _send(1, new PlacementHoldRotationRequestMessage
                 {
-                    HoldKey = _localKey,
+                    Entity = _localObject,
                     Rotation = rotation,
+                });
+            }
+        }
+
+        private void PublishState()
+        {
+            if (_localObject == null || !_localBeginSent)
+            {
+                return;
+            }
+
+            if (_host)
+            {
+                _broadcast(new PlacementHoldStateMessage
+                {
+                    Entity = _localObject,
+                    StopSnap = _localStopSnap,
+                    IsFlipped = _localIsFlipped,
+                });
+            }
+            else
+            {
+                _send(1, new PlacementHoldStateRequestMessage
+                {
+                    Entity = _localObject,
+                    StopSnap = _localStopSnap,
+                    IsFlipped = _localIsFlipped,
                 });
             }
         }
@@ -307,9 +338,16 @@ namespace CardShopCoop.Modules.World
         /// <summary>Applies a mover's rotation to its rendered ghost on an observer.</summary>
         internal void ApplyRotation(PlacementHoldRotationMessage message)
         {
-            if (message == null
-                || !_remote.TryGetValue(message.HoldKey, out var hold))
+            if (message == null || message.Entity == null)
             {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped rotation with no live entity.");
+                return;
+            }
+
+            if (!_remote.TryGetValue(message.Entity, out var hold))
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped rotation for an object that is "
+                    + "not held remotely: entity=" + PlacementInterop.Describe(message.Entity) + ".");
                 return;
             }
 
@@ -323,58 +361,91 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>Applies the mover's DisableSnap/flip inputs to the remote move state.</summary>
+        internal void ApplyState(PlacementHoldStateMessage message)
+        {
+            if (message == null || message.Entity == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped state with no live entity.");
+                return;
+            }
+
+            if (!_remote.TryGetValue(message.Entity, out var hold))
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped state for an object that is "
+                    + "not held remotely: entity=" + PlacementInterop.Describe(message.Entity) + ".");
+                return;
+            }
+
+            hold.StopSnap = message.StopSnap;
+            hold.IsFlipped = message.IsFlipped;
+            if (hold.Obj != null)
+            {
+                PlacementInterop.SetIsFlipped(hold.Obj, message.IsFlipped);
+            }
+        }
+
         /// <summary>True when <paramref name="connectionId"/> owns the hold for
-        /// <paramref name="key"/> (0 = the host), used to validate a rotate request.</summary>
-        internal bool IsHeldBy(long key, int connectionId)
-            => _holders.TryGetValue(key, out var mover) && mover == connectionId;
+        /// <paramref name="obj"/>, used to validate a rotate/state request.</summary>
+        internal bool IsHeldBy(InteractableObject obj, int connectionId)
+            => obj != null && _holders.TryGetValue(obj, out var mover) && mover == connectionId;
 
         /// <summary>Host authority: grants the hold to <paramref name="connectionId"/> when the
         /// object is free, returning the broadcast to send.</summary>
-        internal bool HostGrant(long key, int connectionId, out PlacementHoldBeginMessage granted)
+        internal bool HostGrant(InteractableObject obj, int connectionId,
+            PlacementHoldBeginMessage request, out PlacementHoldBeginMessage granted)
         {
             granted = null;
-            if (_holders.TryGetValue(key, out var existing) && existing != connectionId)
+            if (obj == null)
             {
                 return false;
             }
 
-            _holders[key] = connectionId;
+            if (_holders.TryGetValue(obj, out var existing) && existing != connectionId)
+            {
+                return false;
+            }
+
+            _holders[obj] = connectionId;
             granted = new PlacementHoldBeginMessage
             {
-                HoldKey = key,
+                Entity = obj,
                 MoverConnectionId = connectionId,
             };
+            CopyBeginState(request, granted);
             return true;
         }
 
-        internal bool HostRelease(long key, int connectionId)
+        internal bool HostRelease(InteractableObject obj, int connectionId)
         {
-            if (!_holders.TryGetValue(key, out var existing) || existing != connectionId)
+            if (obj == null || !_holders.TryGetValue(obj, out var existing)
+                || existing != connectionId)
             {
                 return false;
             }
 
-            _holders.Remove(key);
+            _holders.Remove(obj);
             return true;
         }
 
-        /// <summary>Ends the hold for <paramref name="key"/> when <paramref name="connectionId"/>
+        /// <summary>Ends the hold for <paramref name="obj"/> when <paramref name="connectionId"/>
         /// owns it, and tells the peers. Used when another action (boxing up) supersedes the hold.</summary>
-        internal bool EndIfHeldBy(long key, int connectionId)
+        internal bool EndIfHeldBy(InteractableObject obj, int connectionId)
         {
-            if (!_holders.TryGetValue(key, out var mover) || mover != connectionId)
+            if (obj == null || !_holders.TryGetValue(obj, out var mover)
+                || mover != connectionId)
             {
                 return false;
             }
 
-            ApplyEnd(key);
-            _broadcast(new PlacementHoldEndMessage { HoldKey = key });
+            ApplyEnd(obj);
+            _broadcast(new PlacementHoldEndMessage { Entity = obj });
             return true;
         }
 
-        /// <summary>Releases everything a disconnected peer held, appending each key to
+        /// <summary>Releases everything a disconnected peer held, appending each object to
         /// <paramref name="released"/> so the caller can broadcast the end.</summary>
-        internal void ReleaseMover(int connectionId, List<long> released)
+        internal void ReleaseMover(int connectionId, List<InteractableObject> released)
         {
             released.Clear();
             foreach (var pair in _holders)
@@ -390,22 +461,25 @@ namespace CardShopCoop.Modules.World
                 // Stop our local render of the disconnected peer's hold as well as telling the
                 // other peers; otherwise the ghost and the object's move state stick.
                 ApplyEnd(released[i]);
-                _broadcast(new PlacementHoldEndMessage { HoldKey = released[i] });
+                _broadcast(new PlacementHoldEndMessage { Entity = released[i] });
             }
         }
 
         internal void ApplyBegin(PlacementHoldBeginMessage message)
         {
-            if (message == null)
+            if (message == null || message.Entity == null)
             {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped begin with no live entity.");
                 return;
             }
 
-            var key = message.HoldKey;
+            var obj = message.Entity;
             var local = IsLocalMover(message.MoverConnectionId);
-            _holders[key] = message.MoverConnectionId;
-            CoopPlugin.Log.LogInfo("[placement-hold] begin key=" + key + " mover="
-                + message.MoverConnectionId + " local=" + local + ".");
+            _holders[obj] = message.MoverConnectionId;
+            CoopPlugin.Log.LogInfo("[placement-hold] begin entity="
+                + PlacementInterop.Describe(obj) + " mover=" + message.MoverConnectionId
+                + " local=" + local + " stopSnap=" + message.StopSnap
+                + " flipped=" + message.IsFlipped + ".");
 
             if (local)
             {
@@ -413,56 +487,50 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (_localKey == key)
+            if (ReferenceEquals(_localObject, obj))
             {
                 // We optimistically grabbed the same object; the host gave it to someone else.
-                CoopPlugin.Log.LogInfo("[placement-hold] losing race for key=" + key + ".");
+                CoopPlugin.Log.LogInfo("[placement-hold] losing race for entity="
+                    + PlacementInterop.Describe(obj) + ".");
                 CancelLocalMove();
             }
 
-            if (_remote.ContainsKey(key))
+            if (_remote.ContainsKey(obj))
             {
                 return;
             }
 
-            if (PlacementHoldKey.IsPendingDecoration(key))
+            if (!obj.GetIsMovingObject())
             {
-                // In-flight decoration taken from inventory: no object exists on this observer, so
-                // the key itself carries the decoration type and we render a standalone ghost.
-                if (!PlacementHoldKey.TryGetPendingDecorationType(key, out var pendingType))
-                {
-                    CoopPlugin.Log.LogWarning("[placement-hold] pending begin with undecodable "
-                        + "decoration type key=" + key + ".");
-                    return;
-                }
-
-                StartPendingGhost(key, pendingType, message.MoverConnectionId);
-                return;
-            }
-
-            var obj = PlacementHoldKey.Resolve(key);
-            if (obj != null && !obj.GetIsMovingObject())
-            {
-                StartRemote(obj, key, message.MoverConnectionId);
+                StartRemote(obj, message);
             }
             else
             {
-                CoopPlugin.Log.LogWarning("[placement-hold] could not start remote hold key=" + key
-                    + " object=" + (obj != null) + ".");
+                CoopPlugin.Log.LogWarning("[placement-hold] could not start remote hold entity="
+                    + PlacementInterop.Describe(obj) + " because it is already moving locally.");
             }
         }
 
-        internal void ApplyEnd(long key)
+        internal void ApplyEnd(InteractableObject obj)
         {
-            CoopPlugin.Log.LogInfo("[placement-hold] end key=" + key + ".");
-            _holders.Remove(key);
-            if (_remote.TryGetValue(key, out var hold))
+            if (obj == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped end with no live entity.");
+                return;
+            }
+
+            CoopPlugin.Log.LogInfo("[placement-hold] end entity="
+                + PlacementInterop.Describe(obj) + ".");
+            _holders.Remove(obj);
+            if (_remote.TryGetValue(obj, out var hold))
             {
                 StopRemote(hold);
-                _remote.Remove(key);
+                _remote.Remove(obj);
             }
         }
 
+        /// <summary>Maintenance only: the target and validity evaluation are driven by the game's
+        /// own Update through <see cref="BeginRemoteUpdate"/>.</summary>
         internal void Tick()
         {
             if (_remote.Count == 0)
@@ -470,92 +538,127 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var manager = PlacementInterop.FindShelfManager();
+            var stale = new List<InteractableObject>();
             foreach (var pair in _remote)
             {
                 var hold = pair.Value;
                 if (hold.Obj == null)
                 {
-                    // In-flight decoration: drive the standalone ghost from the holder's camera.
-                    // Pending pieces are always considered valid, so no snapping or validity read.
-                    if (hold.Ghost == null)
-                    {
-                        continue;
-                    }
-
-                    if (!PresenceApi.TryGetPeerCameraForHolder(hold.MoverConnectionId,
-                        out var ghostCameraPosition, out var ghostCameraRotation))
-                    {
-                        continue;
-                    }
-
-                    var ghostTarget = ghostCameraPosition
-                        + ghostCameraRotation * Vector3.forward * PreviewDistance
-                        + ghostCameraRotation * Vector3.up * PreviewOffsetUp;
-                    if (ghostTarget.y < 0f)
-                    {
-                        ghostTarget.y = 0f;
-                    }
-
-                    hold.Ghost.transform.position = ghostTarget;
-                    if (hold.Material != null && manager != null)
-                    {
-                        hold.Material.SetColor(ColorId, manager.m_PreviewMeshValidColor);
-                    }
-
+                    // The identity module destroyed the object while its hold was still mirrored.
+                    // Drop the ghost; the authoritative end message (if any) is now a no-op.
+                    CoopPlugin.Log.LogWarning("[placement-hold] remote hold lost its live entity; "
+                        + "releasing the ghost.");
+                    StopRemote(hold);
+                    stale.Add(pair.Key);
                     continue;
                 }
 
                 // Keep the empty packaging box hidden for as long as the piece is being moved,
                 // even if the box channel rebinds the object to a fresh package mid-hold.
                 HidePackage(hold);
+            }
 
-                if (!PresenceApi.TryGetPeerCameraForHolder(hold.MoverConnectionId, out var cameraPosition,
-                    out var cameraRotation))
-                {
-                    continue;
-                }
-
-                // Replicate the mover's own placement: vanilla raycasts from the crosshair and snaps
-                // the piece onto the surface it hits, falling back to three metres straight ahead only
-                // when nothing is in reach. Without this the observer's copy floated ahead of where the
-                // mover actually sees it (and poked through floors and windows).
-                ResolveMoveTarget(hold.Obj, cameraPosition, cameraRotation, out var target,
-                    out var normal);
-                if (target.y < 0f)
-                {
-                    target.y = 0f;
-                }
-
-                // The game's own move update snaps a valid placement to nearby snap points, which
-                // reads as lag on an observer that is not the one aiming. Keep it in free-lerp mode
-                // so it tracks the holder's camera every frame.
-                SnappingPosField?.SetValue(hold.Obj, false);
-                hold.Obj.SetTargetMovePosition(target, normal, null);
-                if (hold.Material != null && manager != null)
-                {
-                    hold.Material.SetColor(ColorId, PlacementInterop.ReadMoveValidity(hold.Obj)
-                        ? manager.m_PreviewMeshValidColor : manager.m_PreviewMeshInvalidColor);
-                }
+            for (var i = 0; i < stale.Count; i++)
+            {
+                _remote.Remove(stale[i]);
             }
         }
 
-        /// <summary>Resolves where a held object should sit for an observer from the holder's
-        /// streamed camera pose, mirroring <c>InteractionPlayerController.RaycastMovingObjectState</c>:
-        /// cast from the crosshair against the same layers vanilla uses and take the surface hit,
-        /// otherwise place the piece <see cref="PreviewDistance"/> ahead of the camera. The hit normal
-        /// only matters for wall-mounted (vertical) pieces; the free-lerp fallback passes the camera's
-        /// up vector like <c>SetMovePositionToCamera</c>.</summary>
+        /// <summary>Runs in the prefix of the remote object's Update. This is the same point where
+        /// the local player's controller would have set the target from its camera, so vanilla's
+        /// lerp, snapping, and validity all run on the fresh target in the same frame.</summary>
+        internal bool BeginRemoteUpdate(InteractableObject obj)
+        {
+            if (obj == null || !_remote.TryGetValue(obj, out var hold) || hold.Obj == null)
+            {
+                return false;
+            }
+
+            _savedStopSnap = PlacementInterop.ReadStopSnap();
+            _remoteUpdateActive = true;
+            PlacementInterop.SetStopSnap(hold.StopSnap);
+            BeginRemotePreviewUpdate();
+            UpdateRemoteAim(hold);
+            return true;
+        }
+
+        internal void EndRemoteUpdate()
+        {
+            if (!_remoteUpdateActive)
+            {
+                return;
+            }
+
+            _remoteUpdateActive = false;
+            PlacementInterop.SetStopSnap(_savedStopSnap);
+            EndRemotePreviewUpdate();
+        }
+
+        /// <summary>Runs after the remote object's own game Update. The game has now computed the
+        /// exact snapped pose and m_IsMovingObjectValidState; the preview is parented to that
+        /// object, so only the color needs the game result.</summary>
+        internal void ApplyRemoteUpdate(InteractableObject obj)
+        {
+            if (obj == null || !_remote.TryGetValue(obj, out var hold) || hold.Material == null)
+            {
+                return;
+            }
+
+            var valid = PlacementInterop.ReadMoveValidity(obj);
+            if (valid == hold.Valid)
+            {
+                return;
+            }
+
+            hold.Valid = valid;
+            CoopPlugin.Log.LogInfo("[placement-hold] remote valid entity="
+                + PlacementInterop.Describe(obj) + " valid=" + valid + ".");
+            SetPreviewColor(hold.Material, PlacementInterop.FindShelfManager(), valid);
+        }
+
+        private void UpdateRemoteAim(RemoteHold hold)
+        {
+            if (PresenceApi.TryGetLatestPeerCameraForHolder(hold.MoverConnectionId,
+                out var cameraPosition, out var cameraRotation))
+            {
+                hold.CameraPosition = cameraPosition;
+                hold.CameraRotation = cameraRotation;
+                hold.HasCamera = true;
+            }
+
+            if (!hold.HasCamera)
+            {
+                if (!hold.AimUnavailableLogged)
+                {
+                    hold.AimUnavailableLogged = true;
+                    CoopPlugin.Log.LogWarning("[placement-hold] no camera sample for mover="
+                        + hold.MoverConnectionId + " entity="
+                        + PlacementInterop.Describe(hold.Obj)
+                        + "; keeping the last inferred target.");
+                }
+                return;
+            }
+
+            ResolveMoveTarget(hold.Obj, hold.CameraPosition, hold.CameraRotation,
+                hold.RayDistance, out var target, out var normal);
+            if (target.y < 0f)
+            {
+                target.y = 0f;
+            }
+
+            hold.Obj.SetTargetMovePosition(target, normal, null);
+        }
+
         private static void ResolveMoveTarget(InteractableObject obj, Vector3 cameraPosition,
-            Quaternion cameraRotation, out Vector3 target, out Vector3 normal)
+            Quaternion cameraRotation, float rayDistance, out Vector3 target, out Vector3 normal)
         {
             var forward = cameraRotation * Vector3.forward;
             var up = cameraRotation * Vector3.up;
             var mask = obj != null && obj.m_IsDecorationVertical
                 ? LayerMask.GetMask("DecorationBlocker", "DecorationBlockerRaycast")
                 : LayerMask.GetMask("ShopModel", "Ground", "Glass", "Obstacles");
-            var reach = (SceneRef<InteractionPlayerController>.Get()?.m_RayDistance
-                ?? DefaultRayDistance) * MoveRayReach;
+            var reach = (float.IsNaN(rayDistance) || float.IsInfinity(rayDistance)
+                || rayDistance <= 0f ? DefaultRayDistance : rayDistance) * MoveRayReach;
             if (mask != 0 && Physics.Raycast(new Ray(cameraPosition, forward), out var hit,
                 reach, mask))
             {
@@ -564,8 +667,69 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            // Vanilla SetMovePositionToCamera only updates the target. Keeping the previous
+            // m_HitNormal matters for vertical pieces, whose Update derives their rotation from it.
             target = cameraPosition + forward * PreviewDistance + up * PreviewOffsetUp;
-            normal = up;
+            normal = PlacementInterop.ReadHitNormal(obj);
+        }
+
+        private static void SetPreviewColor(Material material, ShelfManager manager, bool valid)
+        {
+            if (material == null || manager == null || !material.HasProperty(ColorId))
+            {
+                return;
+            }
+
+            material.SetColor(ColorId, valid
+                ? manager.m_PreviewMeshValidColor : manager.m_PreviewMeshInvalidColor);
+        }
+
+        private static PlacementHoldBeginMessage BuildBeginMessage(InteractableObject obj, int mover)
+        {
+            var message = new PlacementHoldBeginMessage
+            {
+                Entity = obj,
+                MoverConnectionId = mover,
+                StopSnap = PlacementInterop.ReadStopSnap(),
+                IsFlipped = PlacementInterop.ReadIsFlipped(obj),
+                RayDistance = PlacementInterop.ReadLocalRayDistance(),
+            };
+            if (PlacementInterop.TryGetLocalCamera(out var position, out var rotation))
+            {
+                message.HasCamera = true;
+                message.CameraPosition = position;
+                message.CameraRotation = rotation;
+            }
+
+            return message;
+        }
+
+        private static PlacementHoldBeginRequestMessage CreateBeginRequest(
+            PlacementHoldBeginMessage source)
+        {
+            var request = new PlacementHoldBeginRequestMessage
+            {
+                Entity = source.Entity,
+                MoverConnectionId = 0,
+            };
+            CopyBeginState(source, request);
+            return request;
+        }
+
+        private static void CopyBeginState(PlacementHoldBeginMessage source,
+            PlacementHoldBeginMessage destination)
+        {
+            if (source == null || destination == null)
+            {
+                return;
+            }
+
+            destination.HasCamera = source.HasCamera;
+            destination.CameraPosition = source.CameraPosition;
+            destination.CameraRotation = source.CameraRotation;
+            destination.RayDistance = source.RayDistance;
+            destination.StopSnap = source.StopSnap;
+            destination.IsFlipped = source.IsFlipped;
         }
 
         internal void Reset()
@@ -577,40 +741,51 @@ namespace CardShopCoop.Modules.World
 
             _remote.Clear();
             _holders.Clear();
-            _localKey = 0;
             _localObject = null;
+            _localBeginSent = false;
             _localSentRotation = Quaternion.identity;
+            _localStopSnap = false;
+            _localIsFlipped = false;
+            _remotePreviewCount = 0;
+            SetDashedLines(false);
         }
 
         private static bool IsLocalMover(int connectionId)
             => connectionId == CoopCore.LocalConnectionId;
 
-        private void StartRemote(InteractableObject obj, long key, int moverConnectionId)
+        private void StartRemote(InteractableObject obj, PlacementHoldBeginMessage message)
         {
-            MovingObjectField?.SetValue(obj, true);
             var originalLayer = obj.gameObject.layer;
-            SetColliders(obj, false);
+            var validArea = obj.m_MoveStateValidArea;
+            var originalValidAreaActive = validArea != null && validArea.gameObject.activeSelf;
+            var originalBoxEnabled = obj.m_BoxCollider != null && obj.m_BoxCollider.enabled;
+            var originalList = CaptureColliderStates(obj);
+
+            // Mirror StartMoveObject's move-state transitions, minus local input/UI/sound.
+            PlacementInterop.WakeSettledBoxesAbove(obj);
+            PlacementInterop.SetMovingObject(obj, true);
+            PlacementInterop.SetMoveValidity(obj, false);
+            PlacementInterop.SetSnappingPos(obj, false);
+            PlacementInterop.ClearLastHitTransform(obj);
+            PlacementInterop.ClearVerticalPlacementState(obj);
+            PlacementInterop.SetOriginalLayer(obj, originalLayer);
+            obj.SetTargetMovePosition(obj.transform.position, PlacementInterop.ReadHitNormal(obj),
+                null);
             var ignoreRaycast = LayerMask.NameToLayer("Ignore Raycast");
             if (ignoreRaycast >= 0)
             {
                 obj.gameObject.layer = ignoreRaycast;
             }
 
-            // Hide the object's own meshes so the see-through ghost is the only representation,
-            // matching the mover's translucent preview instead of a solid object under a ghost.
-            var hidden = new List<Renderer>();
-            var renderers = obj.GetComponentsInChildren<Renderer>(true);
-            for (var i = 0; i < renderers.Length; i++)
+            SetColliders(obj, false);
+            PlacementInterop.SetStoredBoxShelfMoving(obj, true);
+            if (validArea != null)
             {
-                if (renderers[i] != null && renderers[i].enabled)
-                {
-                    renderers[i].enabled = false;
-                    hidden.Add(renderers[i]);
-                }
+                validArea.gameObject.SetActive(false);
             }
 
             // An unboxed object is still inactive (boxed) on observers until the placement delta
-            // arrives; activate it so the ghost parented to it is actually drawn.
+            // arrives; activate it so the preview parented to it is actually drawn.
             obj.gameObject.SetActive(true);
 
             // The piece was unboxed to move it, so the empty packaging box must not linger in the
@@ -624,108 +799,70 @@ namespace CardShopCoop.Modules.World
 
             var manager = PlacementInterop.FindShelfManager();
             var ghost = CreateGhost(obj, manager, out var material);
-            CoopPlugin.Log.LogInfo("[placement-hold] remote begin key=" + key + " mover="
-                + moverConnectionId + " ghost=" + (ghost != null) + " pickupMesh="
-                + (obj.m_PickupObjectMesh != null) + " material=" + (material != null)
-                + " package=" + (package != null) + ".");
             var hold = new RemoteHold
             {
                 Obj = obj,
                 Ghost = ghost,
                 Material = material,
-                MoverConnectionId = moverConnectionId,
+                MoverConnectionId = message.MoverConnectionId,
                 OriginalLayer = originalLayer,
-                OriginalShelfMove = obj.m_ShelfMoveStateValidArea,
+                OriginalValidAreaActive = originalValidAreaActive,
+                OriginalBoxColliderEnabled = originalBoxEnabled,
+                OriginalBoxColliderList = originalList,
                 Package = package != null ? package.gameObject : null,
+                StopSnap = message.StopSnap,
+                IsFlipped = message.IsFlipped,
+                RayDistance = message.RayDistance > 0f && !float.IsNaN(message.RayDistance)
+                    && !float.IsInfinity(message.RayDistance)
+                    ? message.RayDistance : DefaultRayDistance,
+                CameraPosition = message.CameraPosition,
+                CameraRotation = message.CameraRotation,
+                HasCamera = message.HasCamera,
             };
-            // Free-lerp on observers: the game snaps a valid handheld placement to nearby shelf
-            // snap points, which makes the remote copy sit still until the aim moves far enough.
-            obj.m_ShelfMoveStateValidArea = null;
-            hold.HiddenRenderers.AddRange(hidden);
-            _remote[key] = hold;
+            PlacementInterop.SetIsFlipped(obj, message.IsFlipped);
+            _remote[obj] = hold;
+            _remotePreviewCount++;
+            if (_remotePreviewCount == 1)
+            {
+                SetDashedLines(true);
+            }
+
+            CoopPlugin.Log.LogInfo("[placement-hold] remote begin entity="
+                + PlacementInterop.Describe(obj) + " mover=" + message.MoverConnectionId
+                + " preview=" + (ghost != null) + " material=" + (material != null)
+                + " pickupMesh=" + (obj.m_PickupObjectMesh != null)
+                + " package=" + (package != null) + " camera=" + message.HasCamera
+                + " stopSnap=" + message.StopSnap + " flipped=" + message.IsFlipped + ".");
         }
 
-        /// <summary>Renders an in-flight decoration that has not been placed yet, so no
-        /// <see cref="InteractableObject"/> exists on this observer. The decoration type from the
-        /// hold key selects the spawn prefab, which is only a temporary mesh donor: the standalone
-        /// ghost is then driven from the holder's camera by <see cref="Tick"/>.</summary>
-        private void StartPendingGhost(long key, EDecoObject type, int moverConnectionId)
-        {
-            var prefab = InventoryBase.GetSpawnDecoObjectPrefab(type);
-            if (prefab == null)
-            {
-                CoopPlugin.Log.LogWarning("[placement-hold] pending ghost could not be built type="
-                    + type + " (no prefab).");
-                return;
-            }
-
-            var manager = PlacementInterop.FindShelfManager();
-            GameObject ghost = null;
-            Material material = null;
-            var temp = UnityEngine.Object.Instantiate(prefab);
-            try
-            {
-                // The prefab instance is a mesh donor only; keep it out of the scene.
-                temp.gameObject.SetActive(false);
-                ghost = CreateGhostMesh(temp, manager, out material, out var anchor);
-                if (ghost != null)
-                {
-                    ghost.transform.position = anchor.position;
-                    ghost.transform.rotation = anchor.rotation;
-                }
-            }
-            finally
-            {
-                UnityEngine.Object.Destroy(temp.gameObject);
-            }
-
-            if (ghost == null)
-            {
-                CoopPlugin.Log.LogWarning("[placement-hold] pending ghost could not be built type="
-                    + type + ".");
-                return;
-            }
-
-            _remote[key] = new RemoteHold
-            {
-                Obj = null,
-                Ghost = ghost,
-                Material = material,
-                MoverConnectionId = moverConnectionId,
-            };
-            CoopPlugin.Log.LogInfo("[placement-hold] pending remote begin key=" + key + " type="
-                + type + " mover=" + moverConnectionId + " material=" + (material != null) + ".");
-        }
-
-        private static void StopRemote(RemoteHold hold)
+        private void StopRemote(RemoteHold hold)
         {
             if (hold.Obj != null)
             {
-                MovingObjectField?.SetValue(hold.Obj, false);
-                SnappingPosField?.SetValue(hold.Obj, false);
-                hold.Obj.m_ShelfMoveStateValidArea = hold.OriginalShelfMove;
+                PlacementInterop.SetMovingObject(hold.Obj, false);
+                PlacementInterop.SetSnappingPos(hold.Obj, false);
+                PlacementInterop.SetStoredBoxShelfMoving(hold.Obj, false);
                 hold.Obj.gameObject.layer = hold.OriginalLayer;
-                SetColliders(hold.Obj, true);
-                for (var i = 0; i < hold.HiddenRenderers.Count; i++)
+                RestoreColliders(hold.Obj, hold.OriginalBoxColliderEnabled,
+                    hold.OriginalBoxColliderList);
+                if (hold.Obj.m_MoveStateValidArea != null)
                 {
-                    if (hold.HiddenRenderers[i] != null)
-                    {
-                        hold.HiddenRenderers[i].enabled = true;
-                    }
+                    hold.Obj.m_MoveStateValidArea.gameObject.SetActive(
+                        hold.OriginalValidAreaActive);
                 }
 
-                hold.HiddenRenderers.Clear();
+                if (!hold.Obj.m_IsDecorationVertical)
+                {
+                    var position = hold.Obj.transform.position;
+                    position.y = 0f;
+                    hold.Obj.transform.position = position;
+                }
+
                 // Restore visibility from the object's *current* boxed state. Restoring the state
                 // captured when the hold began re-showed a piece that was boxed (or placed) during
                 // the hold, which left the furniture visible in the world while also boxed.
                 hold.Obj.gameObject.SetActive(!hold.Obj.GetIsBoxedUp());
-            }
 
-            // Bring the packaging box back only when the piece is boxed again; a placed piece has
-            // already retired its package through the placement/box channel. Prefer the object's
-            // current package in case it was re-boxed during the hold.
-            if (hold.Obj != null)
-            {
                 var boxed = hold.Obj.GetIsBoxedUp();
                 var current = hold.Obj.GetPackagingBoxShelf();
                 if (current != null)
@@ -750,6 +887,16 @@ namespace CardShopCoop.Modules.World
                 UnityEngine.Object.Destroy(hold.Material);
                 hold.Material = null;
             }
+
+            if (_remotePreviewCount > 0)
+            {
+                _remotePreviewCount--;
+            }
+
+            if (_remotePreviewCount == 0 && _localObject == null)
+            {
+                SetDashedLines(false);
+            }
         }
 
         private static void HidePackage(RemoteHold hold)
@@ -772,6 +919,23 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        private static bool[] CaptureColliderStates(InteractableObject obj)
+        {
+            if (obj.m_BoxColliderList == null)
+            {
+                return Array.Empty<bool>();
+            }
+
+            var states = new bool[obj.m_BoxColliderList.Count];
+            for (var i = 0; i < states.Length; i++)
+            {
+                states[i] = obj.m_BoxColliderList[i] != null
+                    && obj.m_BoxColliderList[i].enabled;
+            }
+
+            return states;
+        }
+
         private static void SetColliders(InteractableObject obj, bool enabled)
         {
             if (obj.m_BoxCollider != null)
@@ -788,13 +952,33 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        private static void RestoreColliders(InteractableObject obj, bool boxEnabled,
+            bool[] listStates)
+        {
+            if (obj.m_BoxCollider != null)
+            {
+                obj.m_BoxCollider.enabled = boxEnabled;
+            }
+
+            for (var i = 0; obj.m_BoxColliderList != null && i < obj.m_BoxColliderList.Count; i++)
+            {
+                if (obj.m_BoxColliderList[i] != null)
+                {
+                    obj.m_BoxColliderList[i].enabled =
+                        listStates != null && i < listStates.Length && listStates[i];
+                }
+            }
+        }
+
         private void CancelLocalMove()
         {
             var obj = _localObject;
             var position = _localBeforePosition;
             var rotation = _localBeforeRotation;
-            _localKey = 0;
             _localObject = null;
+            _localBeginSent = false;
+            _localStopSnap = false;
+            _localIsFlipped = false;
             if (obj == null)
             {
                 return;
@@ -821,112 +1005,101 @@ namespace CardShopCoop.Modules.World
                 body.position = position;
                 body.rotation = rotation;
             }
+
+            if (_remote.Count > 0)
+            {
+                SetDashedLines(true);
+            }
         }
 
         private static GameObject CreateGhost(InteractableObject obj, ShelfManager manager,
             out Material material)
         {
-            var ghost = CreateGhostMesh(obj, manager, out material, out var anchor);
-            if (ghost == null)
+            material = null;
+            if (obj == null || manager == null || manager.m_MoveObjectPreviewModel == null)
             {
+                CoopPlugin.Log.LogWarning("[placement-hold] cannot create preview: "
+                    + (manager == null ? "no ShelfManager" : "no preview model") + " entity="
+                    + PlacementInterop.Describe(obj) + ".");
                 return null;
             }
 
-            // Match the game's own move preview: place the ghost at the world pose of the pickup
-            // mesh (which can be nested under rotated/scaled children), then reparent to the
-            // object preserving world pose. Reading the mesh's local transform instead put the
-            // ghost in the wrong place, rotation and scale whenever it was not a direct child.
-            ghost.transform.position = anchor.position;
-            ghost.transform.rotation = anchor.rotation;
-            ghost.transform.SetParent(obj.transform, true);
-            return ghost;
-        }
-
-        /// <summary>Builds an unparented see-through ghost for <paramref name="source"/>'s pickup
-        /// mesh, sharing the mover's translucent preview material and renderer settings. Returns
-        /// null when the source has no usable mesh. <paramref name="anchor"/> is the pickup-mesh
-        /// transform whose world scale the ghost is sized to; the caller positions it.</summary>
-        private static GameObject CreateGhostMesh(InteractableObject source, ShelfManager manager,
-            out Material material, out Transform anchor)
-        {
-            material = null;
-            // The pickup mesh may sit under rotated/scaled children; fall back to the object's own
-            // MeshFilter when it is missing.
-            var sourceFilter = source.m_PickupObjectMesh;
-            if ((sourceFilter == null || sourceFilter.sharedMesh == null)
-                && source.TryGetComponent<MeshFilter>(out var own))
+            var sourceFilter = obj.m_PickupObjectMesh;
+            if (sourceFilter == null)
             {
-                sourceFilter = own;
+                sourceFilter = obj.GetComponentInChildren<MeshFilter>(true);
             }
 
-            var mesh = sourceFilter != null ? sourceFilter.sharedMesh : null;
+            var mesh = sourceFilter != null ? sourceFilter.mesh : null;
             if (mesh == null)
             {
-                anchor = null;
+                mesh = sourceFilter?.sharedMesh;
+            }
+
+            if (mesh == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] cannot create preview: no pickup mesh "
+                    + "on entity=" + PlacementInterop.Describe(obj) + ".");
                 return null;
             }
 
-            anchor = sourceFilter != null ? sourceFilter.transform : source.transform;
-            var ghost = new GameObject("CardShopCoop.PlacementGhost");
-            ghost.AddComponent<MeshFilter>().sharedMesh = mesh;
-            var renderer = ghost.AddComponent<MeshRenderer>();
-            var preview = manager != null ? manager.m_MoveObjectPreviewRenderer : null;
-            if (preview != null && preview.sharedMaterial != null)
+            var ghost = UnityEngine.Object.Instantiate(manager.m_MoveObjectPreviewModel.gameObject);
+            ghost.name = "CardShopCoop.PlacementPreview";
+            var filter = ghost.GetComponent<MeshFilter>();
+            if (filter == null)
             {
-                material = CreatePreviewMaterial(preview.sharedMaterial);
-                renderer.sharedMaterial = material;
+                filter = ghost.AddComponent<MeshFilter>();
             }
 
-            renderer.shadowCastingMode = ShadowCastingMode.Off;
-            renderer.receiveShadows = false;
-            renderer.sortingOrder = short.MaxValue;
+            var renderer = ghost.GetComponent<MeshRenderer>();
+            if (renderer == null)
+            {
+                renderer = ghost.AddComponent<MeshRenderer>();
+            }
+
+            filter.mesh = mesh;
+            var stock = renderer.sharedMaterial
+                ?? manager.m_MoveObjectPreviewRenderer?.sharedMaterial;
+            if (stock != null)
+            {
+                material = new Material(stock);
+                var slotCount = renderer.sharedMaterials != null
+                    && renderer.sharedMaterials.Length > 0
+                        ? renderer.sharedMaterials.Length : 1;
+                var materials = new Material[slotCount];
+                for (var i = 0; i < slotCount; i++)
+                {
+                    materials[i] = material;
+                }
+
+                renderer.sharedMaterials = materials;
+                SetPreviewColor(material, manager, false);
+            }
+            else
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] preview renderer has no stock material "
+                    + "for entity=" + PlacementInterop.Describe(obj) + ".");
+            }
+
+            renderer.enabled = true;
+            var anchor = sourceFilter != null ? sourceFilter.transform : obj.transform;
+            ghost.transform.SetParent(null, true);
+            ghost.transform.position = anchor.position;
+            ghost.transform.rotation = anchor.rotation;
             ghost.transform.localScale = anchor.lossyScale + Vector3.one * 0.001f;
+            ghost.transform.SetParent(obj.transform, true);
+            ghost.SetActive(true);
             return ghost;
         }
 
-        /// <summary>Builds the ghost's see-through material from the game's own move-preview
-        /// material. The stock preview draws in the geometry queue and is depth-tested
-        /// (<c>ZTest LEqual</c>, <c>ZWrite Off</c>), so a depth-writing window or door in front of
-        /// it still hides the ghost. Its shader exposes no <c>_ZTest</c>, so forcing depth off with
-        /// a material property cannot take effect; when that is the case this swaps in the engine's
-        /// built-in unlit overlay shader, which ignores depth, keeping the same flat translucent look
-        /// (the stock preview material carries no texture, only <c>_Color</c>). If no such shader is
-        /// present the stock material is kept so the ghost still renders, just depth-tested.</summary>
-        private static Material CreatePreviewMaterial(Material stock)
+        private static void SetDashedLines(bool visible)
         {
-            var material = new Material(stock);
-            if (material.HasProperty("_ZWrite"))
+            if (PlacementInterop.FindShelfManager() == null)
             {
-                material.SetFloat("_ZWrite", 0f);
+                return;
             }
 
-            if (material.HasProperty("_ZTest"))
-            {
-                material.SetFloat("_ZTest", (float)CompareFunction.Always);
-            }
-
-            if (!material.HasProperty("_ZTest"))
-            {
-                var alwaysOnTop = Shader.Find("Hidden/Internal-Colored")
-                    ?? Shader.Find("Sprites/Default");
-                if (alwaysOnTop != null)
-                {
-                    var color = material.HasProperty(ColorId) ? material.GetColor(ColorId) : Color.white;
-                    var replacement = new Material(alwaysOnTop);
-                    replacement.SetColor(ColorId, color);
-                    UnityEngine.Object.Destroy(material);
-                    material = replacement;
-                }
-                else
-                {
-                    CoopPlugin.Log.LogWarning("placement-hold: preview shader exposes no _ZTest and "
-                        + "no depth-ignoring shader was found, so the ghost may be occluded by "
-                        + "depth-writing glass.");
-                }
-            }
-
-            material.renderQueue = (int)RenderQueue.Overlay;
-            return material;
+            ShelfManager.SetAllDashedLineVisibility(visible);
         }
     }
 }

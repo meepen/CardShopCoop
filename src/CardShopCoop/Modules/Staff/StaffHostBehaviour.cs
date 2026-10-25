@@ -2,7 +2,8 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Npc;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -12,7 +13,7 @@ using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Staff
 {
-    /// <summary>Host validation and keyed worker operation publication.</summary>
+    /// <summary>Host validation and live-worker operation publication.</summary>
     [ServerBehaviour]
     public sealed class StaffHostBehaviour : CoopBehaviour
     {
@@ -23,12 +24,12 @@ namespace CardShopCoop.Modules.Staff
         }
 
         private static StaffHostBehaviour _active;
-        private readonly Dictionary<int, int> _leaseOwner = new();
-        private readonly Dictionary<int, WorkerIdentity> _identities = new();
+        private readonly Dictionary<Worker, int> _leaseOwner = new();
+        private readonly Dictionary<Worker, WorkerIdentity> _identities = new();
         private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
-        private Guid _intentPredictionId;
+        private Guid _intentActionId;
 
         /// <summary>How far a remote player may be from a worker to begin an interaction. Vanilla
         /// only opens the worker panel on a nearby click, so this generous bound rejects a
@@ -84,7 +85,7 @@ namespace CardShopCoop.Modules.Staff
             }
         }
 
-        [MessageHandler(typeof(StaffModuleIntentMessage))]
+        [MessageHandler]
         private void HandleIntent(MessageContext context, StaffModuleIntentMessage message)
         {
             if (!IsValidSender(context, message))
@@ -93,14 +94,15 @@ namespace CardShopCoop.Modules.Staff
             }
 
             var peerId = context.Connection.Id;
-            _intentPredictionId = message.PredictionId;
+            _intentActionId = message.ActionId;
             var accepted = false;
             try
             {
+                var worker = message.Worker;
                 switch (message.Kind)
                 {
                     case StaffIntentKind.Hire:
-                        accepted = HostHire(message.Index);
+                        accepted = HostHire(worker);
                         break;
                     case StaffIntentKind.Task:
                     case StaffIntentKind.Options:
@@ -108,33 +110,33 @@ namespace CardShopCoop.Modules.Staff
                         accepted = HostUpdate(message, peerId);
                         break;
                     case StaffIntentKind.Bonus:
-                        accepted = HostBonus(message.Index, peerId);
+                        accepted = HostBonus(worker, peerId);
                         break;
                     case StaffIntentKind.Fire:
-                        accepted = HostFire(message.Index, peerId);
+                        accepted = HostFire(worker, peerId);
                         break;
                     case StaffIntentKind.BeginInteraction:
-                        accepted = HostBeginInteraction(message.Index, peerId, message.Position);
+                        accepted = HostBeginInteraction(worker, peerId, message.Position);
                         break;
                     case StaffIntentKind.EndInteraction:
-                        accepted = HostEndInteraction(message.Index, peerId);
+                        accepted = HostEndInteraction(worker, peerId);
                         break;
                 }
             }
             finally
             {
-                _intentPredictionId = Guid.Empty;
+                _intentActionId = Guid.Empty;
             }
 
             if (!accepted)
             {
-                Reject(peerId, message.PredictionId);
+                Reject(peerId, message.ActionId);
             }
         }
 
         private bool IsValidSender(MessageContext context, StaffModuleIntentMessage message)
             => !_shutdown && _context.InGame() && context?.Connection != null
-                && IsJoinPhase(context.Connection.State) && message != null;
+                && IsJoinPhase(context.Connection.State) && message != null && message.Worker != null;
 
         private StaffModuleBaselineMessage BuildBaseline()
         {
@@ -143,37 +145,37 @@ namespace CardShopCoop.Modules.Staff
             var entries = StaffModuleInterop.CaptureAll(manager);
             for (var i = 0; i < entries.Count; i++)
             {
-                entries[i] = WithGeneration(i, entries[i]);
+                var entry = entries[i];
+                // Only an active worker has an identity the wire converter can serialize. An
+                // inactive slot has no live replicated entity, so it is not a reference message.
+                if (entry.Worker == null || !NpcHostBehaviour.IsNpcTracked(entry.Worker))
+                {
+                    continue;
+                }
+
+                baseline.Entries.Add(WithGeneration(entry.Worker, entry));
             }
 
-            baseline.Entries = entries;
             return baseline;
         }
 
-        private StaffModuleEntry WithGeneration(int index, StaffModuleEntry entry)
+        private StaffModuleEntry WithGeneration(Worker worker, StaffModuleEntry entry)
         {
-            entry.Generation = EnsureGeneration(index);
+            entry.Generation = EnsureGeneration(worker);
             return entry;
         }
 
-        private uint EnsureGeneration(int index)
+        private uint EnsureGeneration(Worker worker)
         {
-            if (!StaffModuleInterop.TryGetWorker(GetWorkerManager(), index, out var worker))
+            if (worker == null)
             {
-                return _identities.TryGetValue(index, out var missing) ? missing.Generation : 1u;
+                return 1u;
             }
 
-            if (!_identities.TryGetValue(index, out var identity)
-                || !ReferenceEquals(identity.Worker, worker))
+            if (!_identities.TryGetValue(worker, out var identity))
             {
-                var generation = identity == null ? 1u : identity.Generation + 1;
-                if (generation == 0)
-                {
-                    generation = 1;
-                }
-
-                identity = new WorkerIdentity { Worker = worker, Generation = generation };
-                _identities[index] = identity;
+                identity = new WorkerIdentity { Worker = worker, Generation = 1u };
+                _identities.Add(worker, identity);
             }
 
             return identity.Generation;
@@ -182,9 +184,10 @@ namespace CardShopCoop.Modules.Staff
         private WorkerManager GetWorkerManager()
             => SceneRef<WorkerManager>.Get();
 
-        private bool HostHire(int index)
+        private bool HostHire(Worker worker)
         {
             var manager = GetWorkerManager();
+            var index = worker?.m_WorkerIndex ?? -1;
             if (!StaffModuleInterop.IsAddressable(manager, index)
                 || CPlayerData.m_IsWorkerHired == null || index >= CPlayerData.m_IsWorkerHired.Count
                 || CPlayerData.GetIsWorkerHired(index))
@@ -229,13 +232,13 @@ namespace CardShopCoop.Modules.Staff
 
         private bool HostUpdate(StaffModuleIntentMessage message, int connectionId)
         {
-            if (!_leaseOwner.TryGetValue(message.Index, out var owner) || owner != connectionId)
+            var worker = message.Worker;
+            if (!_leaseOwner.TryGetValue(worker, out var owner) || owner != connectionId)
             {
                 return false;
             }
 
-            var manager = GetWorkerManager();
-            if (!StaffModuleInterop.IsValidWorker(manager, message.Index))
+            if (!StaffModuleInterop.IsValidWorker(worker))
             {
                 return false;
             }
@@ -254,8 +257,8 @@ namespace CardShopCoop.Modules.Staff
                 var accepted = ApplyTask(message);
                 if (accepted)
                 {
-                    PublishTask(StaffModuleInterop.GetWorkers(manager)[message.Index], true);
-                    HostEndInteraction(message.Index, connectionId);
+                    PublishTask(worker, true);
+                    HostEndInteraction(worker, connectionId);
                 }
 
                 return accepted;
@@ -271,8 +274,8 @@ namespace CardShopCoop.Modules.Staff
                 var accepted = ApplyTask(message);
                 if (accepted)
                 {
-                    PublishOptions(StaffModuleInterop.GetWorkers(manager)[message.Index], true);
-                    HostEndInteraction(message.Index, connectionId);
+                    PublishOptions(worker, true);
+                    HostEndInteraction(worker, connectionId);
                 }
 
                 return accepted;
@@ -280,7 +283,6 @@ namespace CardShopCoop.Modules.Staff
 
             if (message.Kind == StaffIntentKind.Pack)
             {
-                var worker = StaffModuleInterop.GetWorkers(manager)[message.Index];
                 var enabled = worker.GetCardPackItemTypeEnabledList();
                 if (message.PackChanges == null || message.PackChanges.Count > 64 || enabled == null)
                 {
@@ -305,9 +307,8 @@ namespace CardShopCoop.Modules.Staff
                 var accepted = ApplyTask(message);
                 if (accepted)
                 {
-                    PublishPackBatch(StaffModuleInterop.GetWorkers(manager)[message.Index],
-                        message.PackChanges, true);
-                    HostEndInteraction(message.Index, connectionId);
+                    PublishPackBatch(worker, message.PackChanges, true);
+                    HostEndInteraction(worker, connectionId);
                 }
 
                 return accepted;
@@ -318,12 +319,12 @@ namespace CardShopCoop.Modules.Staff
 
         private bool ApplyTask(StaffModuleIntentMessage message)
         {
-            if (!AreTasksValid(message))
+            if (!AreTasksValid(message) || message.Worker == null)
             {
                 return false;
             }
 
-            var worker = StaffModuleInterop.GetWorkers(GetWorkerManager())[message.Index];
+            var worker = message.Worker;
             worker.SetTask((EWorkerTask)message.PrimaryTask);
             worker.SetLastTask((EWorkerTask)message.WorkerTask);
             worker.SetSecondaryTask((EWorkerTask)message.SecondaryTask);
@@ -339,12 +340,13 @@ namespace CardShopCoop.Modules.Staff
         {
             if (!TryGetFinite(message.PriceMult, out var priceMult)
                 || !TryGetFinite(message.CardPriceMult, out var cardPriceMult)
-                || priceMult < 0f || priceMult > 10f || cardPriceMult < 0f || cardPriceMult > 10f)
+                || priceMult < 0f || priceMult > 10f || cardPriceMult < 0f || cardPriceMult > 10f
+                || message.Worker == null)
             {
                 return false;
             }
 
-            var worker = StaffModuleInterop.GetWorkers(GetWorkerManager())[message.Index];
+            var worker = message.Worker;
             worker.SetRestockShelfWithNoLabel(message.FillNoLabel);
             worker.UpdateSetPriceOption(message.RoundUpPrice, message.AvoidSetCardPrice,
                 Mathf.Clamp(priceMult, 0f, 10f));
@@ -353,23 +355,21 @@ namespace CardShopCoop.Modules.Staff
             return true;
         }
 
-        private bool HostBonus(int index, int connectionId)
+        private bool HostBonus(Worker worker, int connectionId)
         {
-            var manager = GetWorkerManager();
-            if (!StaffModuleInterop.IsValidWorker(manager, index)
-                || !_leaseOwner.TryGetValue(index, out var owner) || owner != connectionId)
+            if (!StaffModuleInterop.IsValidWorker(worker)
+                || !_leaseOwner.TryGetValue(worker, out var owner) || owner != connectionId)
             {
                 return false;
             }
 
-            var worker = StaffModuleInterop.GetWorkers(manager)[index];
             if (worker.GetBonusBoostedCount() >= 3 || worker.GetWorkerData() == null)
             {
                 return false;
             }
 
             var fee = worker.GetWorkerData().costPerDay;
-            if (!TrySpend(fee, ETransactionType.WorkerSalary, 0))
+            if (!TrySpend(fee, ETransactionType.WorkerSalary, worker.m_WorkerIndex))
             {
                 return false;
             }
@@ -380,17 +380,16 @@ namespace CardShopCoop.Modules.Staff
             return true;
         }
 
-        private bool HostFire(int index, int connectionId)
+        private bool HostFire(Worker worker, int connectionId)
         {
-            var manager = GetWorkerManager();
-            if (!StaffModuleInterop.IsValidWorker(manager, index)
-                || !_leaseOwner.TryGetValue(index, out var owner) || owner != connectionId)
+            if (!StaffModuleInterop.IsValidWorker(worker)
+                || !_leaseOwner.TryGetValue(worker, out var owner) || owner != connectionId)
             {
                 return false;
             }
 
-            StaffModuleInterop.GetWorkers(manager)[index].FireWorker();
-            HostEndInteraction(index, connectionId);
+            worker.FireWorker();
+            HostEndInteraction(worker, connectionId);
             return true;
         }
 
@@ -425,16 +424,14 @@ namespace CardShopCoop.Modules.Staff
             }
         }
 
-        private bool HostBeginInteraction(int index, int connectionId, Vector3 playerPosition)
+        private bool HostBeginInteraction(Worker worker, int connectionId, Vector3 playerPosition)
         {
-            var manager = GetWorkerManager();
-            if (!StaffModuleInterop.IsValidWorker(manager, index)
+            if (!StaffModuleInterop.IsValidWorker(worker)
                 || !StaffModuleInterop.IsFinite(playerPosition))
             {
                 return false;
             }
 
-            var worker = StaffModuleInterop.GetWorkers(manager)[index];
             if (connectionId != 0)
             {
                 // A remote interaction must come from a player actually standing at the worker,
@@ -449,7 +446,7 @@ namespace CardShopCoop.Modules.Staff
                 }
             }
 
-            if (_leaseOwner.TryGetValue(index, out var owner))
+            if (_leaseOwner.TryGetValue(worker, out var owner))
             {
                 return owner == connectionId;
             }
@@ -460,31 +457,31 @@ namespace CardShopCoop.Modules.Staff
             }
 
             worker.m_IsPausingAction = true;
-            _leaseOwner[index] = connectionId;
-            PublishInteraction(index, true, connectionId);
+            _leaseOwner[worker] = connectionId;
+            PublishInteraction(worker, true, connectionId);
             return true;
         }
 
-        private bool HostEndInteraction(int index, int connectionId)
+        private bool HostEndInteraction(Worker worker, int connectionId)
         {
-            if (!_leaseOwner.TryGetValue(index, out var owner) || owner != connectionId)
+            if (!_leaseOwner.TryGetValue(worker, out var owner) || owner != connectionId)
             {
                 return false;
             }
 
-            if (StaffModuleInterop.TryGetWorker(GetWorkerManager(), index, out var worker))
+            if (worker != null)
             {
                 worker.m_IsPausingAction = false;
             }
 
-            _leaseOwner.Remove(index);
-            PublishInteraction(index, false, 0);
+            _leaseOwner.Remove(worker);
+            PublishInteraction(worker, false, 0);
             return true;
         }
 
         private void HostReleaseConnection(int connectionId)
         {
-            var release = new List<int>();
+            var release = new List<Worker>();
             foreach (var pair in _leaseOwner)
             {
                 if (pair.Value == connectionId)
@@ -499,19 +496,19 @@ namespace CardShopCoop.Modules.Staff
             }
         }
 
-        private void PublishInteraction(int index, bool occupied, int grantedPeer)
+        private void PublishInteraction(Worker worker, bool occupied, int grantedPeer)
         {
-            if (_shutdown || !_context.InGame())
+            if (_shutdown || !_context.InGame() || worker == null)
             {
                 return;
             }
 
             var message = new StaffModuleDeltaMessage
             {
-                PredictionId = _intentPredictionId,
+                ActionId = _intentActionId,
                 Kind = StaffDeltaKind.Interaction,
-                Index = index,
-                Generation = EnsureGeneration(index),
+                Worker = worker,
+                Generation = EnsureGeneration(worker),
                 Granted = grantedPeer > 0,
                 Occupied = occupied,
             };
@@ -524,9 +521,9 @@ namespace CardShopCoop.Modules.Staff
                 _context.Send(grantedPeer, message);
                 _context.Relay(grantedPeer, new StaffModuleDeltaMessage
                 {
-                    PredictionId = message.PredictionId,
+                    ActionId = message.ActionId,
                     Kind = message.Kind,
-                    Index = message.Index,
+                    Worker = message.Worker,
                     Generation = message.Generation,
                     Granted = false,
                     Occupied = true,
@@ -537,19 +534,22 @@ namespace CardShopCoop.Modules.Staff
             _context.Broadcast(message);
         }
 
-        private void PublishWorkerBootstrap(int index)
+        private void PublishWorkerBootstrap(Worker worker)
         {
-            if (_shutdown || !_context.InGame() || !StaffModuleInterop.IsAddressable(GetWorkerManager(), index))
+            var manager = GetWorkerManager();
+            if (_shutdown || !_context.InGame() || worker == null
+                || !StaffModuleInterop.IsAddressable(manager, worker.m_WorkerIndex))
             {
                 return;
             }
 
-            var entry = WithGeneration(index, StaffModuleInterop.CaptureEntry(GetWorkerManager(), index));
+            var entry = WithGeneration(worker,
+                StaffModuleInterop.CaptureEntry(manager, worker.m_WorkerIndex));
             Broadcast(new StaffModuleDeltaMessage
             {
-                PredictionId = _intentPredictionId,
+                ActionId = _intentActionId,
                 Kind = entry.Hired ? StaffDeltaKind.Hired : StaffDeltaKind.Fired,
-                Index = index,
+                Worker = worker,
                 Generation = entry.Generation,
                 Hired = entry.Hired,
                 Bootstrap = entry.Hired ? entry : default,
@@ -558,19 +558,18 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishTask(Worker worker, bool force = false)
         {
-            var index = worker?.m_WorkerIndex ?? -1;
-            if (index < 0 || (!force && _intentPredictionId != Guid.Empty))
+            if (worker == null || (!force && _intentActionId != Guid.Empty))
             {
                 return;
             }
 
-            var entry = StaffModuleInterop.CaptureWorkerEntry(worker, index);
+            var entry = StaffModuleInterop.CaptureWorkerEntry(worker, worker.m_WorkerIndex);
             Broadcast(new StaffModuleDeltaMessage
             {
-                PredictionId = _intentPredictionId,
+                ActionId = _intentActionId,
                 Kind = StaffDeltaKind.Task,
-                Index = index,
-                Generation = EnsureGeneration(index),
+                Worker = worker,
+                Generation = EnsureGeneration(worker),
                 PrimaryTask = entry.PrimaryTask,
                 SecondaryTask = entry.SecondaryTask,
                 WorkerTask = entry.WorkerTask,
@@ -581,19 +580,18 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishOptions(Worker worker, bool force = false)
         {
-            var index = worker?.m_WorkerIndex ?? -1;
-            if (index < 0 || (!force && _intentPredictionId != Guid.Empty))
+            if (worker == null || (!force && _intentActionId != Guid.Empty))
             {
                 return;
             }
 
-            var entry = StaffModuleInterop.CaptureWorkerEntry(worker, index);
+            var entry = StaffModuleInterop.CaptureWorkerEntry(worker, worker.m_WorkerIndex);
             Broadcast(new StaffModuleDeltaMessage
             {
-                PredictionId = _intentPredictionId,
+                ActionId = _intentActionId,
                 Kind = StaffDeltaKind.Options,
-                Index = index,
-                Generation = EnsureGeneration(index),
+                Worker = worker,
+                Generation = EnsureGeneration(worker),
                 PrimaryTask = entry.PrimaryTask,
                 SecondaryTask = entry.SecondaryTask,
                 WorkerTask = entry.WorkerTask,
@@ -611,16 +609,15 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishPack(Worker worker, int packIndex, bool enabled, bool force = false)
         {
-            var index = worker?.m_WorkerIndex ?? -1;
-            if (index >= 0 && (force || _intentPredictionId == Guid.Empty))
+            if (worker != null && (force || _intentActionId == Guid.Empty))
             {
-                var entry = StaffModuleInterop.CaptureWorkerEntry(worker, index);
+                var entry = StaffModuleInterop.CaptureWorkerEntry(worker, worker.m_WorkerIndex);
                 Broadcast(new StaffModuleDeltaMessage
                 {
-                    PredictionId = _intentPredictionId,
+                    ActionId = _intentActionId,
                     Kind = StaffDeltaKind.Pack,
-                    Index = index,
-                    Generation = EnsureGeneration(index),
+                    Worker = worker,
+                    Generation = EnsureGeneration(worker),
                     PackIndex = packIndex,
                     PackEnabled = enabled,
                     PrimaryTask = entry.PrimaryTask,
@@ -634,8 +631,7 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishPackBatch(Worker worker, List<StaffPackChange> changes, bool force)
         {
-            var index = worker?.m_WorkerIndex ?? -1;
-            if (index < 0 || (!force && _intentPredictionId != Guid.Empty))
+            if (worker == null || (!force && _intentActionId != Guid.Empty))
             {
                 return;
             }
@@ -657,15 +653,14 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishBonus(Worker worker)
         {
-            var index = worker?.m_WorkerIndex ?? -1;
-            if (index >= 0)
+            if (worker != null)
             {
                 Broadcast(new StaffModuleDeltaMessage
                 {
-                    PredictionId = _intentPredictionId,
+                    ActionId = _intentActionId,
                     Kind = StaffDeltaKind.Bonus,
-                    Index = index,
-                    Generation = EnsureGeneration(index),
+                    Worker = worker,
+                    Generation = EnsureGeneration(worker),
                     BonusCount = (byte)Mathf.Clamp(worker.GetBonusBoostedCount(), 0, byte.MaxValue),
                     BonusBoosted = worker.m_IsBonusBoosted,
                 });
@@ -674,10 +669,9 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishExperience(Worker worker, EWorkerTask task)
         {
-            var index = worker?.m_WorkerIndex ?? -1;
-            if (index >= 0)
+            if (worker != null)
             {
-                var entry = StaffModuleInterop.CaptureWorkerEntry(worker, index);
+                var entry = StaffModuleInterop.CaptureWorkerEntry(worker, worker.m_WorkerIndex);
                 var taskIndex = (int)task;
                 if (entry.ExpList == null || taskIndex < 0 || taskIndex >= entry.ExpList.Count)
                 {
@@ -686,10 +680,10 @@ namespace CardShopCoop.Modules.Staff
 
                 Broadcast(new StaffModuleDeltaMessage
                 {
-                    PredictionId = _intentPredictionId,
+                    ActionId = _intentActionId,
                     Kind = StaffDeltaKind.Experience,
-                    Index = index,
-                    Generation = EnsureGeneration(index),
+                    Worker = worker,
+                    Generation = EnsureGeneration(worker),
                     ExperienceTask = (byte)task,
                     // ExperienceAmount is the resulting absolute value, not an increment.
                     ExperienceAmount = entry.ExpList[taskIndex],
@@ -699,15 +693,14 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishFired(Worker worker)
         {
-            var index = worker?.m_WorkerIndex ?? -1;
-            if (index >= 0)
+            if (worker != null)
             {
                 Broadcast(new StaffModuleDeltaMessage
                 {
-                    PredictionId = _intentPredictionId,
+                    ActionId = _intentActionId,
                     Kind = StaffDeltaKind.Fired,
-                    Index = index,
-                    Generation = EnsureGeneration(index),
+                    Worker = worker,
+                    Generation = EnsureGeneration(worker),
                     Hired = false,
                 });
             }
@@ -715,10 +708,13 @@ namespace CardShopCoop.Modules.Staff
 
         private void Broadcast(StaffModuleDeltaMessage message)
         {
-            if (!_shutdown && _context.InGame())
+            if (_shutdown || !_context.InGame() || message?.Worker == null
+                || !NpcHostBehaviour.IsNpcTracked(message.Worker))
             {
-                _context.Broadcast(message);
+                return;
             }
+
+            _context.Broadcast(message);
         }
 
         private static bool TryGetFinite(float value, out float result)
@@ -730,12 +726,13 @@ namespace CardShopCoop.Modules.Staff
         private void PublishBootstrapAll()
         {
             var manager = GetWorkerManager();
-            var count = manager?.m_WorkerDataList?.Count ?? 0;
-            for (var i = 0; i < Mathf.Min(count, StaffModuleInterop.MaxWorkers); i++)
+            var workers = StaffModuleInterop.GetWorkers(manager);
+            for (var i = 0; workers != null && i < Mathf.Min(workers.Count, StaffModuleInterop.MaxWorkers);
+                i++)
             {
                 if (StaffModuleInterop.IsHired(i))
                 {
-                    PublishWorkerBootstrap(i);
+                    PublishWorkerBootstrap(workers[i]);
                 }
             }
         }
@@ -747,9 +744,9 @@ namespace CardShopCoop.Modules.Staff
 
         private void ResetWorldState()
         {
-            foreach (var pair in _leaseOwner)
+            foreach (var worker in _leaseOwner.Keys)
             {
-                if (StaffModuleInterop.TryGetWorker(GetWorkerManager(), pair.Key, out var worker))
+                if (worker != null)
                 {
                     worker.m_IsPausingAction = false;
                 }
@@ -759,11 +756,11 @@ namespace CardShopCoop.Modules.Staff
             _identities.Clear();
         }
 
-        private void Reject(int connectionId, Guid predictionId)
+        private void Reject(int connectionId, Guid actionId)
         {
-            if (predictionId != Guid.Empty)
+            if (actionId != Guid.Empty)
             {
-                PredictionApi.Rollback(_context, connectionId, predictionId);
+                ActionLedger.Rollback(_context, connectionId, actionId);
             }
         }
 
@@ -796,7 +793,7 @@ namespace CardShopCoop.Modules.Staff
             [HarmonyPrefix]
             private static bool Prefix(Worker __instance)
                 => _active == null || _active._shutdown || __instance == null
-                    || _active.HostBeginInteraction(__instance.m_WorkerIndex, 0, default);
+                    || _active.HostBeginInteraction(__instance, 0, default);
         }
 
         [HarmonyPatch(typeof(Worker), nameof(Worker.OnPressStopInteract))]
@@ -807,11 +804,14 @@ namespace CardShopCoop.Modules.Staff
             {
                 if (_active != null && !_active._shutdown && __instance != null)
                 {
-                    _active.HostEndInteraction(__instance.m_WorkerIndex, 0);
+                    _active.HostEndInteraction(__instance, 0);
                 }
             }
         }
 
+        // The identity module binds and announces the worker's live identity in its own postfix.
+        // Run after it so the bootstrap delta can serialize the worker reference it names.
+        [HarmonyAfter("dev.meepen.cardshopcoop.gameobjectidentity.host")]
         [HarmonyPatch(typeof(Worker), "ActivateWorker")]
         private static class WorkerLifecyclePatch
         {
@@ -823,7 +823,7 @@ namespace CardShopCoop.Modules.Staff
                     return;
                 }
 
-                _active.PublishWorkerBootstrap(__instance.m_WorkerIndex);
+                _active.PublishWorkerBootstrap(__instance);
             }
         }
 
@@ -875,6 +875,7 @@ namespace CardShopCoop.Modules.Staff
             private static void Postfix(Worker __instance) => _active?.PublishFired(__instance);
         }
 
+        [HarmonyAfter("dev.meepen.cardshopcoop.gameobjectidentity.host")]
         [HarmonyPatch(typeof(WorkerManager), "Start")]
         private static class WorkerManagerStartPatch
         {

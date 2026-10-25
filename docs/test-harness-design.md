@@ -32,7 +32,7 @@ The guiding constraints:
 - Make a failure easy to debug: archive both instances' logs, and support attaching a managed
   debugger for triage.
 - Be usable both interactively on this dev machine and, eventually, in CI on a Windows runner.
-- Cover the mod's real risk surface: join handshake, world transfer, per-module sync, prediction
+- Cover the mod's real risk surface: join handshake, world transfer, per-module sync, action
   rollback, lag/jitter robustness, and regression tests tied to fixed bugs.
 
 ### Non-goals
@@ -303,7 +303,7 @@ a GPU or a virtual display — separate infrastructure work, its own milestone.
 - **Per-module sync (golden scenarios):** warehouse boxes, shelf label/item deltas, furniture
   place/move/box, register trade, card tables, workbench, NPC, etc. — one script per module,
   asserting host↔joiner convergence by **stable id**.
-- **Prediction/rollback:** force a rejection and assert the client reconciles to authority instead
+- **Action/rollback:** force a rejection and assert the client reconciles to authority instead
   of inverting a snapshot.
 - **Lag/jitter robustness:** replay the sync scripts under `ArtificialLagMs` / `JitterMs`.
 - **Cross-build:** only the *rejection* path (differing `EObjectType` catalog) is testable today.

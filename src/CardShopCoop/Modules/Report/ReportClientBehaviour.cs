@@ -1,10 +1,10 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Hud;
 using CardShopCoop.Modules.Register;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -190,14 +190,14 @@ namespace CardShopCoop.Modules.Report
             HudApi.SetEndOfDayPending(show, show ? EndOfDayPendingNotice : "");
         }
 
-        [MessageHandler(typeof(ReportStateMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, ReportStateMessage message)
         {
             _pendingState = message;
             TryApplyPendingState();
         }
 
-        [MessageHandler(typeof(ReportDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext context, ReportDeltaMessage message)
         {
             if (_shutdown)
@@ -205,7 +205,7 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            PredictionApi.AckOrApply(message.PredictionId,
+            ActionLedger.AckOrApply(message.ActionId,
                 () => ApplyState(ToState(message)));
         }
 
@@ -626,7 +626,7 @@ namespace CardShopCoop.Modules.Report
             ApplyNextDayWaitUi();
         }
 
-        [MessageHandler(typeof(ReportNextDayWaitMessage))]
+        [MessageHandler]
         private void HandleNextDayWait(MessageContext context, ReportNextDayWaitMessage message)
         {
             if (_shutdown)
@@ -719,20 +719,14 @@ namespace CardShopCoop.Modules.Report
                     .Replace("XXX", (CPlayerData.m_CurrentDay + 2).ToString());
             }
 
-            if (loading != null)
-            {
-                loading.SetActive(true);
-            }
+            loading?.SetActive(true);
 
             // Match DelayGoNextDay's own timings: the recap closed at the top, then the loading
             // overlay stays up while the host advances the day before it is hidden.
             yield return new WaitForSeconds(0.5f);
             yield return new WaitForSeconds(2.5f);
 
-            if (loading != null)
-            {
-                loading.SetActive(false);
-            }
+            loading?.SetActive(false);
 
             _rolloverCoroutine = null;
         }

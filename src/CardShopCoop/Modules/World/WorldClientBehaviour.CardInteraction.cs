@@ -1,4 +1,4 @@
-﻿using CardShopCoop.Net;
+using CardShopCoop.Net;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
@@ -30,50 +30,50 @@ namespace CardShopCoop.Modules.World
                 => _instance?._cardInteraction?.CommitClientCardBatch();
         }
 
-        [MessageHandler(typeof(MarketStateMessage))]
+        [MessageHandler]
         private void HandleMarketState(MessageContext context, MarketStateMessage message)
         {
             _cardInteraction.Market.ClientApplyOrBuffer(message, _context.InGame());
         }
 
-        [MessageHandler(typeof(CardDeltaMessage))]
+        [MessageHandler]
         private void HandleCardDelta(MessageContext context, CardDeltaMessage message)
         {
-            WorldPrediction.AckOrApply(message,
+            WorldAction.AckOrApply(message,
                 () => _cardInteraction.HandleCardDelta(context.ConnectionId, message));
         }
 
-        [MessageHandler(typeof(CardDeltaBatchMessage))]
+        [MessageHandler]
         private void HandleCardDeltaBatch(MessageContext context, CardDeltaBatchMessage message)
         {
-            WorldPrediction.AckOrApply(message,
+            WorldAction.AckOrApply(message,
                 () => _cardInteraction.HandleCardDeltaBatch(context.ConnectionId, message));
         }
 
-        [MessageHandler(typeof(GradedRemoveMessage))]
+        [MessageHandler]
         private void HandleGradedRemove(MessageContext context, GradedRemoveMessage message)
         {
-            WorldPrediction.AckOrApply(message,
+            WorldAction.AckOrApply(message,
                 () => _cardInteraction.HandleGradedRemove(context.ConnectionId, message));
         }
 
-        [MessageHandler(typeof(ContainerStateMessage))]
+        [MessageHandler]
         private void HandleContainerState(MessageContext context, ContainerStateMessage message)
         {
             _cardInteraction.Containers.ClientApplyState(message);
         }
 
-        [MessageHandler(typeof(ContainerPackClaimMessage))]
+        [MessageHandler]
         private void HandleContainerPackClaim(MessageContext context,
             ContainerPackClaimMessage message)
         {
             // Host-only answer to an accepted claim intent; the client's optimistic apply only set
             // CollectClaimed, and the authoritative apply re-establishes it with the host output.
-            WorldPrediction.Confirm(message,
+            WorldAction.Confirm(message,
                 () => _cardInteraction.Containers.ClientApplyPackClaim(message));
         }
 
-        [MessageHandler(typeof(ContainerDeltaMessage))]
+        [MessageHandler]
         private void HandleContainerDelta(MessageContext context, ContainerDeltaMessage message)
         {
             // The container module owns this delta's prediction lifecycle: a pack-insert echo

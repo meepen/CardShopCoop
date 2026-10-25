@@ -19,13 +19,11 @@ namespace CardShopCoop.SampleMod
         private void OnEnable()
         {
             _context = Context;
-            _context.Messages.RegisterAttributedHandlers(this);
             CoopLog.Info("[sample] client counter online");
         }
 
         private void OnDisable()
         {
-            _context?.Messages.UnregisterAttributedHandlers(this);
             _context = null;
         }
 
@@ -34,11 +32,15 @@ namespace CardShopCoop.SampleMod
             if (Input.GetKeyDown(KeyCode.K))
             {
                 CoopLog.Info("[sample] client sends an increment intent");
-                _context?.Send(1, new SampleIncrementIntent());
+                var host = _context.HostConnection;
+                if (host != null)
+                {
+                    _context.Send(host, new SampleIncrementIntent());
+                }
             }
         }
 
-        [MessageHandler(typeof(SampleCounterState))]
+        [MessageHandler]
         private void HandleState(CoopMessageContext context, SampleCounterState message)
         {
             _value = message.Value;

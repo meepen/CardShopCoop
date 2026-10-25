@@ -41,7 +41,25 @@ namespace CardShopCoop.Util
     /// lifecycle boundaries - singleton <c>Awake</c>/<c>OnEnable</c>, the game's scene-loaded
     /// handlers, and Unity's scene events - and clears only a latch whose cached instance is already
     /// dead. The game's next <c>Instance</c> access then resolves the live scene object exactly as
-    /// the public build does. Inert on the public build, which has no <c>isSet</c> field.
+    /// the public build does. The dead-latch half is necessarily inert on the public build, which
+    /// has no <c>isSet</c> field; the shadow repair below runs on both.
+    ///
+    /// The same guard also repairs the hazard every build's getter has:
+    /// <c>Instance</c> fabricates <c>(singleton)T</c> (a bare <c>AddComponent</c> object marked
+    /// DontDestroyOnLoad) whenever it is touched while no scene instance is resolvable, and that
+    /// empty copy shadows the real manager for the rest of the run - every serialized field on it is
+    /// null. A mod path that reads a game manager during a scene-load window does exactly that; the
+    /// shadow <c>RestockManager</c> has no prefabs or spawn locations, so delivery spawns throw and
+    /// no restock box ever appears. <see cref="RepairShadowedCache"/> swaps the game's cache back to
+    /// the scene manager as soon as that manager publishes itself through <c>SceneRef</c>, on every
+    /// build.
+    ///
+    /// The repair is deliberately narrow. A fabricated object is recognised by the name the game's
+    /// own getter gives it, but it is only replaced when the loaded scene owns a real instance of
+    /// the same manager. Some fabricated objects are the game's intended singleton - there is no
+    /// scene <c>CEventManager</c> in either build; the getter is how it is created - so a copy with
+    /// no scene-owned counterpart is left alone rather than "repaired" into a swap that would
+    /// discard live listeners.
     /// </summary>
     internal static class SingletonLatchGuard
     {
@@ -49,6 +67,7 @@ namespace CardShopCoop.Util
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
         private static readonly List<Latch> Latches = new();
+        private static readonly Dictionary<Type, Latch> LatchBySingletonType = new();
         private static readonly HashSet<MethodBase> Patched = new();
         private static bool _installed;
         private static bool _sweeping;
@@ -62,21 +81,31 @@ namespace CardShopCoop.Util
             _installed = true;
 
             CollectLatches();
-            if (Latches.Count == 0 || Latches[0].IsSet == null)
+            if (Latches.Count == 0)
             {
                 CoopPlugin.Log.LogInfo(
-                    "singleton latch guard: inactive (this build's CSingleton has no isSet latch)");
+                    "singleton latch guard: inactive (no CSingleton<T> types were found)");
                 return;
+            }
+
+            var latchBuild = false;
+            for (var i = 0; i < Latches.Count; i++)
+            {
+                latchBuild |= Latches[i].IsSet != null;
             }
 
             var harmony = new Harmony("dev.meepen.cardshopcoop.singleton-latch");
             var patchedMethods = 0;
             var failed = 0;
-            for (var i = 0; i < Latches.Count; i++)
+            if (latchBuild)
             {
-                patchedMethods += PatchDeclared(harmony, Latches[i].ComponentType, "Awake", ref failed);
-                patchedMethods += PatchDeclared(harmony, Latches[i].ComponentType, "OnEnable",
-                    ref failed);
+                for (var i = 0; i < Latches.Count; i++)
+                {
+                    patchedMethods += PatchDeclared(harmony, Latches[i].ComponentType, "Awake",
+                        ref failed);
+                    patchedMethods += PatchDeclared(harmony, Latches[i].ComponentType, "OnEnable",
+                        ref failed);
+                }
             }
 
             // The game's own scene-loaded handlers read latched singletons from their bodies. These
@@ -104,10 +133,16 @@ namespace CardShopCoop.Util
             SceneManager.sceneLoaded += OnSceneLoaded;
 
             Sweep("install");
-            CoopPlugin.Log.LogInfo("singleton latch guard: sweeping " + Latches.Count
-                + " CSingleton<T> latch(es) from " + patchedMethods + " lifecycle hook(s)"
+            RepairAll("install");
+            CoopPlugin.Log.LogInfo("singleton guard: " + Latches.Count
+                + " CSingleton<T> latch(es)"
+                + (latchBuild
+                    ? " with the isSet latch; repairing destroyed latches"
+                    : " on a build without the isSet latch")
+                + " and repairing empty (singleton) shadows from " + patchedMethods
+                + " lifecycle hook(s)"
                 + (failed == 0 ? "" : ", " + failed + " patch(es) failed")
-                + "; a destroyed latch is cleared before the game reads it");
+                + ".");
         }
 
         private static int PatchDeclared(Harmony harmony, Type type, string methodName, ref int failed)
@@ -145,9 +180,213 @@ namespace CardShopCoop.Util
             }
         }
 
-        private static void OnSceneUnloaded(Scene _) => Sweep("scene unloaded");
-        private static void OnSceneLoaded(Scene _, LoadSceneMode __) => Sweep("scene loaded");
+        private static void OnSceneUnloaded(Scene _)
+        {
+            Sweep("scene unloaded");
+            RepairAll("scene unloaded");
+        }
+
+        private static void OnSceneLoaded(Scene _, LoadSceneMode __)
+        {
+            Sweep("scene loaded");
+            RepairAll("scene loaded");
+        }
+
         private static void SweepPrefix() => Sweep("object init");
+
+        /// <summary>
+        /// A real scene manager of type <paramref name="live"/>'s own <c>CSingleton&lt;T&gt;</c>
+        /// reported itself through <see cref="SceneRef"/>. If the game's static cache currently
+        /// holds a fabricated <c>(singleton)T</c> copy instead, put the real manager back. This is
+        /// the repair for the empty-copy shadowing: the fabricated copy has no serialized
+        /// references (a <c>RestockManager</c> copy has no prefabs or spawn locations), so leaving
+        /// it cached breaks the game system for the rest of the run.
+        /// </summary>
+        internal static void RepairShadowedCache(Component live)
+        {
+            if (live == null)
+            {
+                return;
+            }
+
+            var singletonType = SingletonTypeOf(live.GetType());
+            if (singletonType == null || !LatchBySingletonType.TryGetValue(singletonType, out var latch))
+            {
+                return;
+            }
+
+            Repair(latch, live, "manager ready");
+        }
+
+        /// <summary>
+        /// Swap every cache that holds a fabricated copy for the live scene instance of the same
+        /// type. Only a scene-owned manager qualifies: a fabricated copy whose type the scene never
+        /// provides (CEventManager, TouchManager) is the game's intended singleton, not a shadow.
+        /// </summary>
+        private static void RepairAll(string site)
+        {
+            if (_sweeping)
+            {
+                return;
+            }
+
+            _sweeping = true;
+            try
+            {
+                for (var i = 0; i < Latches.Count; i++)
+                {
+                    var latch = Latches[i];
+                    try
+                    {
+                        if (latch.Instance == null
+                            || !IsFabricated(latch,
+                                latch.Instance.GetValue(null) as UnityEngine.Object))
+                        {
+                            continue;
+                        }
+
+                        var scene = FindSceneInstance(latch.ComponentType);
+                        if (scene != null)
+                        {
+                            Repair(latch, scene, site);
+                        }
+                    }
+                    catch (Exception error)
+                    {
+                        CoopLog.Swallow(error);
+                    }
+                }
+            }
+            finally
+            {
+                _sweeping = false;
+            }
+        }
+
+        private static void Repair(Latch latch, Component live, string site)
+        {
+            try
+            {
+                // Only ever replace a fabricated copy with a real (non-fabricated) manager, and
+                // only one the loaded scene owns: an app-level getter-created singleton such as
+                // CEventManager is live, not damage, and must never be swapped out.
+                if (live == null || live.gameObject == null || !live.gameObject.scene.IsValid()
+                    || live.gameObject.scene.name == "DontDestroyOnLoad"
+                    || IsFabricatedSingleton(live))
+                {
+                    return;
+                }
+
+                var cached = latch.Instance.GetValue(null) as UnityEngine.Object;
+                if (ReferenceEquals(cached, live) || !IsFabricated(latch, cached))
+                {
+                    return;
+                }
+
+                latch.Instance.SetValue(null, live);
+                if (latch.IsSet != null)
+                {
+                    // The 1.00 getter returns early while isSet is true; it must point at the real
+                    // manager now that the cache does.
+                    latch.IsSet.SetValue(null, true);
+                }
+
+                CoopLog.WarnOnce("singleton:shadow:" + latch.Name,
+                    "[singleton] the game had cached an empty (singleton)" + latch.Name
+                    + " created by CSingleton.Instance while no scene manager existed; replaced it "
+                    + "with the live scene manager during " + site + " and destroyed the empty copy. "
+                    + "That copy has no prefabs, spawn locations or UI references, so any system "
+                    + "reading it is broken until this repair.");
+
+                if (cached is Component stale && stale.gameObject != null)
+                {
+                    UnityEngine.Object.Destroy(stale.gameObject);
+                }
+            }
+            catch (Exception error)
+            {
+                CoopLog.Swallow(error);
+            }
+        }
+
+        /// <summary>True when <paramref name="value"/> is the object the game's own
+        /// <c>CSingleton&lt;T&gt;.Instance</c> fallback creates, identified by the name that getter
+        /// gives it (<c>(singleton)Full.Type.Name</c>). A fabricated object is not necessarily
+        /// broken: <c>CEventManager</c> is created that way on purpose and is the live dispatcher.
+        /// The repair therefore only replaces one when the loaded scene owns another instance of the
+        /// same manager, which is the case the game's getter itself would have preferred.</summary>
+        private static bool IsFabricated(Latch latch, UnityEngine.Object value)
+            => value is Component component && IsFabricatedSingleton(component);
+
+        /// <summary>
+        /// True when this component is the game's own <c>(singleton)T</c> fallback object. Works
+        /// even before the getter's <c>DontDestroyOnLoad</c> call moves it (an Awake/OnEnable hook
+        /// fires between <c>AddComponent</c> and that move).
+        /// </summary>
+        internal static bool IsFabricatedSingleton(Component instance)
+        {
+            if (instance == null || instance.gameObject == null)
+            {
+                return false;
+            }
+
+            var singletonType = SingletonTypeOf(instance.GetType());
+            return singletonType != null
+                && singletonType.GetGenericArguments().Length == 1
+                && string.Equals(instance.gameObject.name,
+                    "(singleton)" + singletonType.GetGenericArguments()[0],
+                    StringComparison.Ordinal);
+        }
+
+        /// <summary>Read the game's own cached instance for a <c>CSingleton&lt;T&gt;</c> component
+        /// type without calling its getter (which would fabricate one). Used by diagnostics to name
+        /// the manager the game actually resolved.</summary>
+        internal static bool TryGetCachedInstance(Type componentType, out Component instance)
+        {
+            instance = null;
+            var singletonType = SingletonTypeOf(componentType);
+            if (singletonType == null || !LatchBySingletonType.TryGetValue(singletonType, out var latch))
+            {
+                return false;
+            }
+
+            instance = latch.Instance?.GetValue(null) as Component;
+            return instance != null;
+        }
+
+        private static Component FindSceneInstance(Type componentType)
+        {
+            var found = UnityEngine.Object.FindObjectsOfType(componentType);
+            for (var i = 0; i < found.Length; i++)
+            {
+                if (found[i] is Component candidate && candidate.gameObject != null
+                    && !IsFabricatedSingleton(candidate))
+                {
+                    var scene = candidate.gameObject.scene;
+                    if (scene.IsValid() && scene.name != "DontDestroyOnLoad")
+                    {
+                        return candidate;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>The closed <c>CSingleton&lt;T&gt;</c> in <paramref name="type"/>'s base chain.</summary>
+        private static Type SingletonTypeOf(Type type)
+        {
+            for (var baseType = type?.BaseType; baseType != null; baseType = baseType.BaseType)
+            {
+                if (baseType.IsGenericType
+                    && baseType.GetGenericTypeDefinition() == typeof(CSingleton<>))
+                {
+                    return baseType;
+                }
+            }
+
+            return null;
+        }
 
         /// <summary>Clear every latch whose cached instance is dead. A live instance is left alone,
         /// including a DontDestroyOnLoad singleton such as Card3dUISpawner.</summary>
@@ -166,7 +405,7 @@ namespace CardShopCoop.Util
                     var latch = Latches[i];
                     try
                     {
-                        if (!(bool)latch.IsSet.GetValue(null))
+                        if (latch.IsSet == null || !(bool)latch.IsSet.GetValue(null))
                         {
                             continue;
                         }
@@ -246,7 +485,9 @@ namespace CardShopCoop.Util
 
                         if (seen.Add(b))
                         {
-                            Latches.Add(new Latch(b));
+                            var latch = new Latch(b);
+                            Latches.Add(latch);
+                            LatchBySingletonType[b] = latch;
                         }
                         break;
                     }

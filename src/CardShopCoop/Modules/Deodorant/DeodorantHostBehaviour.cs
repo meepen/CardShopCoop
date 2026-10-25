@@ -1,6 +1,5 @@
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Npc;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using UnityEngine;
@@ -54,7 +53,7 @@ namespace CardShopCoop.Modules.Deodorant
         }
         private void OnDestroy() => Shutdown();
 
-        [MessageHandler(typeof(HandheldSprayIntentMessage))]
+        [MessageHandler]
         private void Handle(MessageContext context, HandheldSprayIntentMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
@@ -66,30 +65,30 @@ namespace CardShopCoop.Modules.Deodorant
                 || !IsFinite(message.Position.z) || !IsFinite(message.Content)
                 || message.Content < 0f || message.Content > 1f)
             {
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
             if (!_context.PeerPresence.TryGet(context.Connection.Id, out var presence))
             {
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
             if (presence.Age > TimeSpan.FromSeconds(2) || presence.Hold != 2
                 || !HasDeodorant(presence.HoldTypes))
             {
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
             if (Vector3.Distance(presence.Position, message.Position) > 3.5f)
             {
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
 
             var manager = GetCustomerManager();
             if (manager == null)
             {
-                Reject(context, message.PredictionId);
+                Reject(context, message.ActionId);
                 return;
             }
             var customers = manager.GetCustomerList();
@@ -114,8 +113,7 @@ namespace CardShopCoop.Modules.Deodorant
 
                 states.Add(new DeodorantCustomerState
                 {
-                    Index = i,
-                    Generation = NpcHostBehaviour.GetCustomerGeneration(customer),
+                    Customer = customer,
                     IsSmelly = isSmelly,
                     SmellyMeter = meter,
                 });
@@ -123,7 +121,7 @@ namespace CardShopCoop.Modules.Deodorant
 
             _context.Broadcast(new HandheldSprayEventMessage
             {
-                PredictionId = message.PredictionId,
+                ActionId = message.ActionId,
                 Position = message.Position,
                 Content = message.Content,
                 Customers = states,
@@ -141,11 +139,11 @@ namespace CardShopCoop.Modules.Deodorant
                 && context.IsAuthenticated;
         }
 
-        private void Reject(MessageContext context, Guid predictionId)
+        private void Reject(MessageContext context, Guid actionId)
         {
-            if (predictionId != Guid.Empty && context?.Connection != null)
+            if (actionId != Guid.Empty && context?.Connection != null)
             {
-                PredictionApi.Rollback(_context, context.Connection.Id, predictionId);
+                ActionLedger.Rollback(_context, context.Connection.Id, actionId);
             }
         }
 

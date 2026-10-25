@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using BepInEx;
 using BepInEx.Bootstrap;
 using CardShopCoop.Api;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.ExtendedInformation;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Networking;
 using CardShopCoop.Net.Protocol;
@@ -38,6 +39,8 @@ namespace CardShopCoop.Runtime
 
         private ExternalCoopMods()
         {
+            // Built-in extended-information types (if any) are part of the handshake catalog too.
+            ExtendedInformationCatalog.RegisterAssembly(typeof(CoopPlugin).Assembly);
         }
 
         /// <summary>Assemblies integrated so far, for behaviour discovery. Does NOT trigger
@@ -81,7 +84,7 @@ namespace CardShopCoop.Runtime
                     }
 
                     var instance = info.Instance;
-                    var assembly = instance != null ? instance.GetType().Assembly : null;
+                    var assembly = instance?.GetType().Assembly;
                     if (assembly == null)
                     {
                         CoopPlugin.Log?.LogWarning("[api] '" + info.Metadata.GUID
@@ -171,6 +174,7 @@ namespace CardShopCoop.Runtime
                 }
 
                 ModuleCatalog.BindExternal(assemblyName);
+                ExtendedInformationCatalog.RegisterAssembly(assembly);
             }
             catch (Exception error)
             {
@@ -278,28 +282,49 @@ namespace CardShopCoop.Runtime
 
         // ---- ICoopBinding: the runtime half read by the public CoopApi facade ----
 
-        public ICoopContext Context => CoopCore.Instance == null ? null : CoopCore.Instance.LiveContext;
+        public ICoopContext Context => CoopCore.Instance?.LiveContext;
 
-        public bool PredictionActive => PredictionApi.IsActive;
-        public bool IsReconciling => PredictionApi.IsReconciling;
-        public bool IsApplying => PredictionApi.IsApplying;
+        public bool ActionActive => ActionLedger.IsActive;
+        public bool IsReconciling => ActionLedger.IsReconciling;
+        public bool IsApplying => ActionLedger.IsApplying;
 
-        public Guid Predict(string scope, Action<Guid> send, Action apply, Action undo)
-            => PredictionApi.Predict(scope, send, apply, undo);
+        public Guid Submit(string scope, ActionMessage message, Action apply, Action undo)
+            => ActionLedger.Submit(scope, message, apply, undo);
 
-        public void Ack(Guid predictionId)
-            => PredictionApi.Ack(predictionId);
+        public void Ack(Guid actionId)
+            => ActionLedger.Ack(actionId);
 
-        public void AckOrApply(Guid predictionId, Action apply)
-            => PredictionApi.AckOrApply(predictionId, apply);
+        public void AckOrApply(Guid actionId, Action apply)
+            => ActionLedger.AckOrApply(actionId, apply);
 
-        public void Confirm(Guid predictionId, Action apply)
-            => PredictionApi.Confirm(predictionId, apply);
+        public void Confirm(Guid actionId, Action apply)
+            => ActionLedger.Confirm(actionId, apply);
 
-        public bool IsPending(Guid predictionId) => PredictionApi.IsPending(predictionId);
+        public void ApplyAuthoritative(Guid actionId, Action apply)
+            => ActionLedger.ApplyAuthoritative(actionId, apply);
 
-        public void Rollback(ICoopContext context, int connectionId, Guid predictionId)
-            => PredictionApi.Rollback(context, connectionId, predictionId);
+        public bool IsPending(Guid actionId) => ActionLedger.IsPending(actionId);
+
+        public void Rollback(ICoopContext context, int connectionId, Guid actionId)
+            => ActionLedger.Rollback(context, connectionId, actionId);
+
+        public object GetExtendedInformation(Type informationType, object gameObject)
+            => ExtendedInformationModule.Get(informationType, gameObject);
+
+        public void SetExtendedInformation(Type informationType, object gameObject, object information)
+            => ExtendedInformationModule.Set(informationType, gameObject, information);
+
+        public bool RemoveExtendedInformation(Type informationType, object gameObject)
+            => ExtendedInformationModule.Remove(informationType, gameObject);
+
+        public object GetGlobalInformation(Type informationType)
+            => ExtendedInformationModule.GetGlobal(informationType);
+
+        public void SetGlobalInformation(Type informationType, object information)
+            => ExtendedInformationModule.SetGlobal(informationType, information);
+
+        public bool RemoveGlobalInformation(Type informationType)
+            => ExtendedInformationModule.RemoveGlobal(informationType);
 
         public IDisposable RegisterNetworkingBackend(INetworkingBackend backend)
             => NetworkingBackends.Register(backend);

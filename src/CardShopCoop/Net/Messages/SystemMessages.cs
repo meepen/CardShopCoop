@@ -41,6 +41,7 @@ namespace CardShopCoop.Net.Messages
         public ulong SteamId;
         public System.Collections.Generic.List<string> MessageCatalog = new();
         public byte[] MessageReliability = new byte[0];
+        public System.Collections.Generic.List<string> ExtendedInformationCatalog = new();
     }
 
     /// <summary>host -> client.</summary>
@@ -65,6 +66,7 @@ namespace CardShopCoop.Net.Messages
         public ulong SteamId;
         public System.Collections.Generic.List<string> MessageCatalog = new();
         public byte[] MessageReliability = new byte[0];
+        public System.Collections.Generic.List<string> ExtendedInformationCatalog = new();
     }
 
 }

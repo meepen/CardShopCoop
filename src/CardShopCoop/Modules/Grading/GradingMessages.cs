@@ -6,12 +6,8 @@ using CardShopCoop.Net;
 namespace CardShopCoop.Modules.Grading
 {
     [NetworkMessage]
-    public sealed class GradingOpMessage : IPredictedMessage
+    public sealed class GradingOpMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
 
         public byte ServiceLevel;
         public List<CardData> Cards = new();
@@ -31,12 +27,8 @@ namespace CardShopCoop.Modules.Grading
     }
 
     [NetworkMessage]
-    public sealed class GradingJobDeltaMessage : IPredictedMessage
+    public sealed class GradingJobDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
 
         public Guid Id;
         public bool Removed;

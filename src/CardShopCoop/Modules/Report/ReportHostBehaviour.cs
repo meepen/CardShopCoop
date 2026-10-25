@@ -148,7 +148,7 @@ namespace CardShopCoop.Modules.Report
         /// <summary>A guest is ready for the day to roll. The host records it and advances once
         /// every connected player has readied — or when the auto-continue deadline armed by the
         /// first readiness runs out, whichever comes first.</summary>
-        [MessageHandler(typeof(ReportNextDayReadyMessage))]
+        [MessageHandler]
         private void HandleNextDayReady(MessageContext context, ReportNextDayReadyMessage message)
         {
             if (_shutdown || _nextDayAdvancing || !_context.InGame() || context?.Connection == null)

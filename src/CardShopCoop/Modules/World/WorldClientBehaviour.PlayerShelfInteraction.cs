@@ -1,5 +1,5 @@
-﻿using CardShopCoop.Net;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Net;
+using CardShopCoop.Modules.Actions;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
@@ -19,23 +19,23 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(RemoveLabelPatch)).Patch();
         }
 
-        [MessageHandler(typeof(ShelfItemAddMessage))]
+        [MessageHandler]
         private void HandleShelfItemAdd(MessageContext context, ShelfItemAddMessage message)
         {
             // Our own optimistic placement already moved the real item, so acknowledging the
             // prediction keeps it in place instead of undoing and respawning it. Retiring it also
             // drops it from the derived pending-add count, so later deltas no longer treat it as
             // outstanding.
-            if (PredictionApi.IsPending(message.PredictionId))
+            if (ActionLedger.IsPending(message.ActionId))
             {
-                PredictionApi.Ack(message.PredictionId);
+                ActionLedger.Ack(message.ActionId);
                 return;
             }
 
             ApplyShelfAction(message);
         }
 
-        [MessageHandler(typeof(ShelfItemRemoveMessage))]
+        [MessageHandler]
         private void HandleShelfItemRemove(MessageContext context, ShelfItemRemoveMessage message)
         {
             ApplyShelfAction(message);
@@ -110,7 +110,7 @@ namespace CardShopCoop.Modules.World
             // the host's absolute (type, count); the host echoes that same inventory, and applying
             // ApplyIncoming for the actor would only re-derive it (respawning generic items through
             // ApplyState). A remote/host delta has no pending id and still applies.
-            WorldPrediction.AckOrApply(message,
+            WorldAction.AckOrApply(message,
                 () => _shelfInteraction.ApplyIncoming(message));
             return true;
         }

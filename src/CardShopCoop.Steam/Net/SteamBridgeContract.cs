@@ -1,4 +1,5 @@
 using System;
+using CardShopCoop.Net.Datagrams;
 
 namespace CardShopCoop.Net
 {
@@ -13,7 +14,7 @@ namespace CardShopCoop.Net
     /// <summary>
     /// Everything CoopCore and CoopUI are allowed to know about Steam. Every member is
     /// Steam-free BY CONSTRUCTION - ulong / string / bool / int / Action / Action&lt;ulong&gt;
-    /// / ICoopTransport - so the always-loaded types may reference
+    /// / IDatagramTransport - so the always-loaded types may reference
     /// this interface as freely as they like. The CLR resolves the implementing type only
     /// at runtime, and only on a build where it can actually load.
     ///
@@ -51,11 +52,10 @@ namespace CardShopCoop.Net
         /// friend is not known locally or Steam is unavailable.</summary>
         string FriendNickname(ulong steamId);
 
-        /// <summary>Build the unified KCP transport used for this Steam session. The
-        /// transport is created before Host/Join so Core can pump it immediately; the
-        /// bridge binds its Steam sockets bearer when the lobby lifecycle supplies the
-        /// host identity needed by that bearer.</summary>
-        ICoopTransport CreateTransport(bool isHost);
+        /// <summary>Build the datagram bearer used for this Steam session. The runtime creates the
+        /// reliable session around it and owns it; the bridge binds the Steam sockets bearer when
+        /// the lobby lifecycle supplies the host identity that bearer needs.</summary>
+        IDatagramTransport CreateDatagramTransport();
 
         void Host(bool isPublic, string lobbyName, bool hasPassword, int maxPlayers);
         long Join(ulong lobbyId);
@@ -82,27 +82,27 @@ namespace CardShopCoop.Net
             get; set;
         }
 
-        /// <summary>Client: we entered a lobby and the transport is already wired to its
-        /// owner. The ROLE CHECK IS THE SUBSCRIBER'S JOB - see CoopCore. The transport
+        /// <summary>Client: we entered a lobby and the bearer is already wired to its
+        /// owner. The ROLE CHECK IS THE SUBSCRIBER'S JOB - see CoopCore. The bearer
         /// argument identifies the session that produced this asynchronous callback.</summary>
-        Action<ICoopTransport> OnConnectedToHost
+        Action<IDatagramTransport> OnConnectedToHost
         {
             get; set;
         }
 
         /// <summary>Client: a current lobby join was rejected. The operation and
-        /// transport identify the exact attempt so a late callback cannot tear down a
+        /// bearer identify the exact attempt so a late callback cannot tear down a
         /// newer session.</summary>
-        Action<ulong, long, ICoopTransport, string> OnJoinFailed
+        Action<ulong, long, IDatagramTransport, string> OnJoinFailed
         {
             get; set;
         }
 
         /// <summary>A current Steam session failed before it became usable (for example,
-        /// asynchronous lobby creation or host bearer startup). The transport argument
+        /// asynchronous lobby creation or host bearer startup). The bearer argument
         /// identifies the exact session and prevents a late Steam callback from failing a
         /// newer one.</summary>
-        Action<ICoopTransport, string> OnSessionFailed
+        Action<IDatagramTransport, string> OnSessionFailed
         {
             get; set;
         }

@@ -17,8 +17,8 @@ namespace CardShopCoop.Net
     /// that must observe transport state (Start/Stop/Dispose/ActivateMessageIds) are marshalled
     /// onto the pump thread, keeping bearer and KCP state single-threaded.
     /// </summary>
-    public sealed class NetworkPump : ICoopTransport, ICoopHandshakeTransport, ICoopRelayTransport,
-        ICoopStartable
+    internal sealed class NetworkPump : ICoopTransport, ICoopHandshakeTransport, ICoopRelayTransport,
+        ICoopStartable, IWireFrameTransport
     {
         // Upper bound on how long the pump sleeps when no producer signals it. KCP
         // retransmission and pull-only bearers (Steam) rely on this cadence; every producer
@@ -274,6 +274,17 @@ namespace CardShopCoop.Net
         public bool TryDequeueIncoming(out InMsg message)
         {
             return _inner.TryDequeueIncoming(out message);
+        }
+
+        public bool TryDequeueWireFrame(out WireFrame frame)
+        {
+            if (_inner is IWireFrameTransport wire)
+            {
+                return wire.TryDequeueWireFrame(out frame);
+            }
+
+            frame = null;
+            return false;
         }
 
         public bool TryDequeueDisconnect(out ConnectionEvent disconnect)

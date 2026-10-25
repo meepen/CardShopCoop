@@ -1,7 +1,4 @@
 using CardShopCoop.Net.Datagrams;
-using CardShopCoop.Net.Kcp;
-using CardShopCoop.Net.Networking;
-using CardShopCoop.Steam;
 using CardShopCoop.Util;
 using System;
 using System.Collections.Concurrent;
@@ -287,8 +284,8 @@ namespace CardShopCoop.Net
     }
 
     /// <summary>
-    /// Deferred Steam datagram bearer used to keep transport creation ahead of lobby entry.
-    /// KCP is started by the connection provider immediately; the Steam sockets bearer is
+    /// Deferred Steam datagram bearer used to keep bearer creation ahead of lobby entry.
+    /// The runtime starts the reliable session immediately; the Steam sockets bearer is
     /// bound only once the lobby supplies the authorization context or owner identity.
     /// </summary>
     internal sealed class DeferredSteamDatagramTransport : IDatagramTransport
@@ -350,7 +347,7 @@ namespace CardShopCoop.Net
                 if (inner.MaxDatagramSize != MaxDatagramSize)
                 {
                     throw new ArgumentException(
-                        "Steam datagram bearer size does not match the KCP transport.", nameof(inner));
+                        "Steam datagram bearer size does not match the transport.", nameof(inner));
                 }
 
                 _inner = inner;
@@ -602,8 +599,8 @@ namespace CardShopCoop.Net
 
     /// <summary>
     /// The one and only <see cref="ISteamBridge"/> implementation. Steam identity and lobby
-    /// lifecycle remain entirely on this side of the Steam-free bridge; the returned transport
-    /// is the common KCP manager used by every backend.
+    /// lifecycle remain entirely on this side of the Steam-free bridge; the returned bearer
+    /// is the common Steam sockets datagram bearer.
     /// </summary>
     public sealed class SteamBridgeImpl : ISteamBridge
     {
@@ -614,7 +611,6 @@ namespace CardShopCoop.Net
         private readonly ConcurrentQueue<BridgeCallback> _callbacks = new();
         private readonly object _transportGate = new object();
         private DeferredSteamDatagramTransport _datagrams;
-        private ICoopTransport _tx;
         private long _transportGeneration;
         private SteamBridgePump _pump;
         private int _pendingCallbackCount;
@@ -650,7 +646,7 @@ namespace CardShopCoop.Net
         {
             get; set;
         }
-        public Action<ICoopTransport> OnConnectedToHost
+        public Action<IDatagramTransport> OnConnectedToHost
         {
             get; set;
         }
@@ -658,11 +654,11 @@ namespace CardShopCoop.Net
         {
             get; set;
         }
-        public Action<ulong, long, ICoopTransport, string> OnJoinFailed
+        public Action<ulong, long, IDatagramTransport, string> OnJoinFailed
         {
             get; set;
         }
-        public Action<ICoopTransport, string> OnSessionFailed
+        public Action<IDatagramTransport, string> OnSessionFailed
         {
             get; set;
         }
@@ -796,24 +792,20 @@ namespace CardShopCoop.Net
             catch (Exception e) { CoopLog.Swallow(e); return ""; }
         }
 
-        public ICoopTransport CreateTransport(bool isHost)
+        public IDatagramTransport CreateDatagramTransport()
         {
             lock (_transportGate)
             {
-                if (_tx != null)
+                if (_datagrams != null)
                 {
-                    throw new InvalidOperationException("Steam bridge already has an active transport.");
+                    throw new InvalidOperationException("Steam bridge already has an active bearer.");
                 }
 
                 var datagrams = new DeferredSteamDatagramTransport(
                     SteamDatagramTransport.DefaultMaxDatagramSize);
-                var transport = new KcpSessionManager(datagrams, isHost);
-                transport.SetConnectionIdBand(SteamNetworkingBackend.IdBase,
-                    SteamNetworkingBackend.IdBase + NetworkingBands.Size);
                 _datagrams = datagrams;
-                _tx = transport;
                 _transportGeneration++;
-                return transport;
+                return datagrams;
             }
         }
 
@@ -832,7 +824,6 @@ namespace CardShopCoop.Net
             lock (_transportGate)
             {
                 _transportGeneration++;
-                _tx = null;
                 _datagrams = null;
             }
 
@@ -849,7 +840,7 @@ namespace CardShopCoop.Net
             _lobby.OpenGameServers();
         }
 
-        private void BindHost(long generation, ICoopTransport transport,
+        private void BindHost(long generation, IDatagramTransport transport,
             DeferredSteamDatagramTransport datagrams, CSteamID lobby, long operation)
         {
             if (!IsCurrent(generation, transport, datagrams)
@@ -879,7 +870,7 @@ namespace CardShopCoop.Net
             OnLobbyLive?.Invoke(lobby.m_SteamID);
         }
 
-        private void BindClient(long generation, ICoopTransport transport,
+        private void BindClient(long generation, IDatagramTransport transport,
             DeferredSteamDatagramTransport datagrams, CSteamID lobby,
             CSteamID owner, long operation)
         {
@@ -915,7 +906,7 @@ namespace CardShopCoop.Net
             OnConnectedToHost?.Invoke(transport);
         }
 
-        private void FailHost(long generation, ICoopTransport transport,
+        private void FailHost(long generation, IDatagramTransport transport,
             DeferredSteamDatagramTransport datagrams, long operation, string error,
             bool notifyUi)
         {
@@ -938,7 +929,7 @@ namespace CardShopCoop.Net
             OnSessionFailed?.Invoke(transport, error);
         }
 
-        private void FailJoin(long generation, ICoopTransport transport,
+        private void FailJoin(long generation, IDatagramTransport transport,
             DeferredSteamDatagramTransport datagrams, CSteamID lobby,
             long operation, string error)
         {
@@ -958,22 +949,22 @@ namespace CardShopCoop.Net
             OnJoinFailed?.Invoke(lobby.m_SteamID, operation, transport, error);
         }
 
-        private void CaptureTransport(out long generation, out ICoopTransport transport)
+        private void CaptureTransport(out long generation, out IDatagramTransport transport)
         {
             lock (_transportGate)
             {
                 generation = _transportGeneration;
-                transport = _tx;
+                transport = _datagrams;
             }
         }
 
-        private bool IsCurrent(long generation, ICoopTransport transport,
+        private bool IsCurrent(long generation, IDatagramTransport transport,
             DeferredSteamDatagramTransport datagrams)
         {
             lock (_transportGate)
             {
                 return generation == _transportGeneration
-                    && ReferenceEquals(transport, _tx)
+                    && ReferenceEquals(transport, _datagrams)
                     && ReferenceEquals(datagrams, _datagrams);
             }
         }
@@ -983,7 +974,7 @@ namespace CardShopCoop.Net
             EnqueueCallback(new BridgeCallback(0, null, action));
         }
 
-        private void QueueSession(long generation, ICoopTransport transport, Action action)
+        private void QueueSession(long generation, IDatagramTransport transport, Action action)
         {
             EnqueueCallback(new BridgeCallback(generation, transport, action));
         }
@@ -1030,10 +1021,10 @@ namespace CardShopCoop.Net
         private readonly struct BridgeCallback
         {
             public readonly long Generation;
-            public readonly ICoopTransport Transport;
+            public readonly IDatagramTransport Transport;
             public readonly Action Action;
 
-            public BridgeCallback(long generation, ICoopTransport transport, Action action)
+            public BridgeCallback(long generation, IDatagramTransport transport, Action action)
             {
                 Generation = generation;
                 Transport = transport;

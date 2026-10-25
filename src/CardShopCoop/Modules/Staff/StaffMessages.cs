@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -31,15 +30,12 @@ namespace CardShopCoop.Modules.Staff
     }
 
     [NetworkMessage]
-    public sealed class StaffModuleIntentMessage : IPredictedMessage
+    public sealed class StaffModuleIntentMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
 
         public StaffIntentKind Kind;
-        public int Index;
+        /// <summary>The live worker the intent targets.</summary>
+        public Worker Worker;
         public Vector3 Position;
         public byte PrimaryTask;
         public byte SecondaryTask;
@@ -64,15 +60,12 @@ namespace CardShopCoop.Modules.Staff
     /// <summary>One keyed worker operation. Hired carries the one-worker bootstrap needed when
     /// a newly constructed worker is first shown to a client.</summary>
     [NetworkMessage]
-    public sealed class StaffModuleDeltaMessage : IPredictedMessage
+    public sealed class StaffModuleDeltaMessage : ActionMessage
     {
-        public Guid PredictionId
-        {
-            get; set;
-        }
 
         public StaffDeltaKind Kind;
-        public int Index;
+        /// <summary>The live worker this operation/state describes.</summary>
+        public Worker Worker;
         public uint Generation;
         public bool Hired;
         public StaffModuleEntry Bootstrap;
@@ -110,6 +103,8 @@ namespace CardShopCoop.Modules.Staff
 
     public struct StaffModuleEntry
     {
+        /// <summary>The live worker this entry describes. A null entry is logged and dropped.</summary>
+        public Worker Worker;
         public uint Generation;
         public bool Hired;
         public bool HasData;

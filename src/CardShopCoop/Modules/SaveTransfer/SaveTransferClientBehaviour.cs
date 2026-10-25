@@ -164,7 +164,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
         }
 
-        [MessageHandler(typeof(SaveChunkMessage))]
+        [MessageHandler]
         private void HandleSaveChunk(MessageContext _, SaveChunkMessage message)
         {
             if (!CanReceive() || _saveBuffer == null || _saveDone || message == null)
@@ -183,7 +183,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             SetStatus("Downloading host shop... " + (_saveBuffer.Length * 100 / _saveExpected) + "%");
         }
 
-        [MessageHandler(typeof(SaveDoneMessage))]
+        [MessageHandler]
         private void HandleSaveDone(MessageContext _, SaveDoneMessage message)
         {
             if (!CanReceive() || _saveBuffer == null || _saveDone || message == null)
@@ -217,7 +217,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
         }
 
-        [MessageHandler(typeof(BundleChunkMessage))]
+        [MessageHandler]
         private void HandleBundleChunk(MessageContext _, BundleChunkMessage message)
         {
             if (!CanReceive() || _bundleBuffer == null || !_saveDone || _worldRequested
@@ -240,7 +240,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
         }
 
-        [MessageHandler(typeof(BundleDoneMessage))]
+        [MessageHandler]
         private void HandleBundleDone(MessageContext _, BundleDoneMessage message)
         {
             if (!CanReceive() || !_saveDone || _pendingSave == null || _bundleBuffer == null

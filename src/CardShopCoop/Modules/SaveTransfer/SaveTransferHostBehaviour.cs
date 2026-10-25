@@ -366,7 +366,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
         }
 
-        [MessageHandler(typeof(TransferFailureMessage))]
+        [MessageHandler]
         private void HandleTransferFailure(MessageContext context, TransferFailureMessage message)
         {
             if (_shutdown || context?.Connection == null

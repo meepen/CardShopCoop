@@ -214,7 +214,7 @@ The current module is **table-state + match-lease sync only**:
   state and streams outcomes (shuffled deck order, draws, placements, damages, winner).
 - **Messages** (module conventions): a `PlayTableBattleBaselineMessage` once per joining peer,
   per-decision **intent** messages from the acting client (template:
-  `PlayTableMatchIntentMessage`), host **delta** messages with `IPredictedMessage` ids, and
+  `PlayTableMatchIntentMessage`), host **delta** messages with `ActionMessage` ids, and
   per-connection **filtered** hand/deck state (hidden info). Patch-version bump only.
 - **Opponent substitution**: for PvP, set the enemy `PlayCardSet.m_IsAIControlled = false` on
   the machine that does not own the seat, prefix-skip `EvaluateEnemyAI`, and drive the set via

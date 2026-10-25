@@ -10,7 +10,7 @@ namespace CardShopCoop.Modules.World
     public sealed partial class WorldHostBehaviour
     {
         private PlacementHoldInteraction _placementHold;
-        private readonly List<long> _releasedHolds = new();
+        private readonly List<InteractableObject> _releasedHolds = new();
 
         internal void InstallPlacementHold()
         {
@@ -18,6 +18,9 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(PlacementHoldStartPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlacementHoldRotatePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlacementHoldFlipPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PlacementHoldInputPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PlacementHoldRemoteValidityPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(PlacementHoldGlobalPreviewPatch)).Patch();
         }
 
         internal void ShutdownPlacementHold()
@@ -28,7 +31,7 @@ namespace CardShopCoop.Modules.World
 
         internal void TickPlacementHold() => _placementHold?.Tick();
 
-        [MessageHandler(typeof(PlacementHoldBeginRequestMessage))]
+        [MessageHandler]
         private void HandlePlacementHoldBegin(MessageContext context,
             PlacementHoldBeginRequestMessage message)
         {
@@ -38,16 +41,30 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (_placementHold.HostGrant(message.HoldKey, context.ConnectionId, out var granted))
+            if (message.Entity == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped begin request from connection="
+                    + context.ConnectionId + " with no live entity.");
+                return;
+            }
+
+            if (_placementHold.HostGrant(message.Entity, context.ConnectionId, message,
+                out var granted))
             {
                 // The host is an observer of a client's hold too, so render it here as well as
                 // broadcasting to the other peers.
                 _placementHold.ApplyBegin(granted);
                 _context.Broadcast(granted);
             }
+            else
+            {
+                CoopPlugin.Log.LogInfo("[placement-hold] begin request refused for entity="
+                    + PlacementInterop.Describe(message.Entity) + " connection="
+                    + context.ConnectionId + ".");
+            }
         }
 
-        [MessageHandler(typeof(PlacementHoldEndRequestMessage))]
+        [MessageHandler]
         private void HandlePlacementHoldEnd(MessageContext context,
             PlacementHoldEndRequestMessage message)
         {
@@ -57,12 +74,19 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (_placementHold.HostRelease(message.HoldKey, context.ConnectionId))
+            if (message.Entity == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped end request from connection="
+                    + context.ConnectionId + " with no live entity.");
+                return;
+            }
+
+            if (_placementHold.HostRelease(message.Entity, context.ConnectionId))
             {
                 // The host rendered this client's hold when it granted it, so it must stop that
                 // local render as well as telling the peers.
-                _placementHold.ApplyEnd(message.HoldKey);
-                _context.Broadcast(new PlacementHoldEndMessage { HoldKey = message.HoldKey });
+                _placementHold.ApplyEnd(message.Entity);
+                _context.Broadcast(new PlacementHoldEndMessage { Entity = message.Entity });
             }
         }
 
@@ -75,14 +99,28 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [MessageHandler(typeof(PlacementHoldRotationRequestMessage))]
+        [MessageHandler]
         private void HandlePlacementHoldRotation(MessageContext context,
             PlacementHoldRotationRequestMessage message)
         {
             if (message == null || _placementHold == null || !_context.InGame()
-                || !IsJoinPhaseSender(context)
-                || !_placementHold.IsHeldBy(message.HoldKey, context.ConnectionId))
+                || !IsJoinPhaseSender(context))
             {
+                return;
+            }
+
+            if (message.Entity == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped rotation request from "
+                    + "connection=" + context.ConnectionId + " with no live entity.");
+                return;
+            }
+
+            if (!_placementHold.IsHeldBy(message.Entity, context.ConnectionId))
+            {
+                CoopPlugin.Log.LogInfo("[placement-hold] ignored rotation for entity="
+                    + PlacementInterop.Describe(message.Entity) + " not held by connection="
+                    + context.ConnectionId + ".");
                 return;
             }
 
@@ -90,11 +128,46 @@ namespace CardShopCoop.Modules.World
             // accepted value to every observer.
             var rotation = new PlacementHoldRotationMessage
             {
-                HoldKey = message.HoldKey,
+                Entity = message.Entity,
                 Rotation = message.Rotation,
             };
             _placementHold.ApplyRotation(rotation);
             _context.Broadcast(rotation);
+        }
+
+        [MessageHandler]
+        private void HandlePlacementHoldState(MessageContext context,
+            PlacementHoldStateRequestMessage message)
+        {
+            if (message == null || _placementHold == null || !_context.InGame()
+                || !IsJoinPhaseSender(context))
+            {
+                return;
+            }
+
+            if (message.Entity == null)
+            {
+                CoopPlugin.Log.LogWarning("[placement-hold] dropped state request from "
+                    + "connection=" + context.ConnectionId + " with no live entity.");
+                return;
+            }
+
+            if (!_placementHold.IsHeldBy(message.Entity, context.ConnectionId))
+            {
+                CoopPlugin.Log.LogInfo("[placement-hold] ignored state for entity="
+                    + PlacementInterop.Describe(message.Entity) + " not held by connection="
+                    + context.ConnectionId + ".");
+                return;
+            }
+
+            var state = new PlacementHoldStateMessage
+            {
+                Entity = message.Entity,
+                StopSnap = message.StopSnap,
+                IsFlipped = message.IsFlipped,
+            };
+            _placementHold.ApplyState(state);
+            _context.Broadcast(state);
         }
 
         /// <summary>Observes the host entering placement move mode. Vanilla <c>StartMoveObject</c>
@@ -125,7 +198,44 @@ namespace CardShopCoop.Modules.World
         {
             [HarmonyPostfix]
             private static void Postfix(InteractableObject __instance)
-                => _instance?._placementHold?.LocalRotated(__instance);
+                => _instance?._placementHold?.LocalFlipped(__instance);
+        }
+
+        [HarmonyPatch(typeof(InteractionPlayerController), "Update")]
+        private static class PlacementHoldInputPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix()
+                => _instance?._placementHold?.LocalInputChanged();
+        }
+
+        [HarmonyPatch(typeof(InteractableObject), "Update")]
+        private static class PlacementHoldRemoteValidityPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractableObject __instance, out bool __state)
+                => __state = _instance?._placementHold?.BeginRemoteUpdate(__instance) == true;
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractableObject __instance)
+                => _instance?._placementHold?.ApplyRemoteUpdate(__instance);
+
+            [HarmonyFinalizer]
+            private static void Finalizer(bool __state)
+            {
+                if (__state)
+                {
+                    _instance?._placementHold?.EndRemoteUpdate();
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(ShelfManager), "SetMoveObjectPreviewModelValidState")]
+        private static class PlacementHoldGlobalPreviewPatch
+        {
+            [HarmonyPrefix]
+            private static bool Prefix()
+                => !PlacementHoldInteraction.SuppressGlobalPreview;
         }
     }
 }

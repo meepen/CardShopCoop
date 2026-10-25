@@ -68,7 +68,7 @@ namespace CardShopCoop.Modules.Tournament
             }
         }
 
-        [MessageHandler(typeof(TournamentStateMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, TournamentStateMessage message)
         {
             if (_shutdown)
@@ -80,7 +80,7 @@ namespace CardShopCoop.Modules.Tournament
             TryApplyPending();
         }
 
-        [MessageHandler(typeof(TournamentDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext context, TournamentDeltaMessage message)
         {
             if (_shutdown)
@@ -330,7 +330,7 @@ namespace CardShopCoop.Modules.Tournament
                     IsTournamentCustomer = message.PlayerIsTournamentCustomer,
                     IsTournamentWin = message.PlayerIsTournamentWin,
                     HasRegisteredTournamentResult = message.PlayerHasRegisteredResult,
-                    TournamentCustomerPlayTableIndex = message.PlayerTournamentCustomerPlayTableIndex,
+                    PlayTable = message.PlayerTournamentPlayTable,
                     TournamentWinCount = message.PlayerTournamentWinCount,
                     TournamentWinPoints = message.PlayerTournamentWinPoints,
                     TournamentPlacementIndex = message.PlayerTournamentPlacementIndex,

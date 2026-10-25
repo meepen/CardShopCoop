@@ -462,7 +462,7 @@ namespace CardShopCoop.Modules.SessionInput
             try
             {
                 var ipc = SceneRef<InteractionPlayerController>.Get();
-                var walker = ipc != null ? ipc.m_WalkerCtrl : null;
+                var walker = ipc?.m_WalkerCtrl;
                 if (walker == null)
                 {
                     ReleaseOwnedWalker();
@@ -513,7 +513,7 @@ namespace CardShopCoop.Modules.SessionInput
             try
             {
                 var ipc = SceneRef<InteractionPlayerController>.Get();
-                var walker = ipc != null ? ipc.m_WalkerCtrl : null;
+                var walker = ipc?.m_WalkerCtrl;
                 if (walker == null || _latchedWalker != walker)
                 {
                     ReleaseOwnedWalker();
@@ -556,10 +556,7 @@ namespace CardShopCoop.Modules.SessionInput
             var walker = _latchedWalker;
             try
             {
-                if (walker != null)
-                {
-                    walker.SetStopMovement(false);
-                }
+                walker?.SetStopMovement(false);
             }
             catch (Exception e)
             {

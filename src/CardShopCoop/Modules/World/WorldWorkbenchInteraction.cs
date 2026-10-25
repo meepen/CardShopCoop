@@ -80,11 +80,11 @@ namespace CardShopCoop.Modules.World
         /// <summary>Client: an absolute host state-set that resolves none of this peer's pending
         /// predictions has just landed (or is about to). Every snapshot captured before it is
         /// stale, so a later rejection of one of those predictions must not replay it.</summary>
-        internal void MarkAuthorityAdvanced(int index)
+        internal void MarkAuthorityAdvanced(InteractableWorkbench bench)
         {
-            // Keyed by the bench object, not its list index: the index is a live list position and
-            // shifts when furniture is placed or boxed up, which would advance the wrong epoch.
-            AdvanceAuthorityEpoch(GetBench(index));
+            // Keyed by the live bench object: a list index would shift when furniture is placed
+            // or boxed up and would advance the wrong epoch.
+            AdvanceAuthorityEpoch(bench);
         }
 
         private bool InGame() => _inGame == null || _inGame();
@@ -99,27 +99,11 @@ namespace CardShopCoop.Modules.World
             return sm == null ? null : PlacementApi.GetList(sm, KindWorkbench);
         }
 
-        internal static InteractableWorkbench GetBench(int index)
-        {
-            var list = Benches();
-            return list != null && index >= 0 && index < list.Count
-                ? list[index] as InteractableWorkbench
-                : null;
-        }
-
-        private static int IndexOf(InteractableWorkbench bench)
-        {
-            var list = Benches();
-            var idx = list?.IndexOf(bench) ?? -1;
-            return idx is >= 0 and < 250 ? idx : -1;
-        }
-
-        private WorkbenchStateMessage BuildState(int index, InteractableWorkbench bench)
+        private WorkbenchStateMessage BuildState(InteractableWorkbench bench)
         {
             var message = new WorkbenchStateMessage
             {
-                Index = (byte)index,
-                StableEntityId = WorldMessageMetadata.WorkbenchEntityId(index),
+                Bench = bench,
                 Bundling = IsBundling(bench),
                 SpawnItemType = GetSpawnType(bench),
             };
@@ -156,11 +140,11 @@ namespace CardShopCoop.Modules.World
             }
 
             var list = Benches();
-            for (var i = 0; list != null && i < list.Count && i < 250; i++)
+            for (var i = 0; list != null && i < list.Count; i++)
             {
                 if (list[i] is InteractableWorkbench bench)
                 {
-                    append(BuildState(i, bench));
+                    append(BuildState(bench));
                 }
             }
         }
@@ -207,20 +191,14 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var idx = IndexOf(bench);
-            if (idx < 0)
-            {
-                return;
-            }
-
-            _broadcast(BuildState(idx, bench));
+            _broadcast(BuildState(bench));
         }
 
         /// <summary>Host: apply a client's workbench edit to the authoritative list and republish
         /// the result. Only the edited types travel; the host's own concurrent edits to the same
         /// bench are preserved instead of being overwritten by the client's whole snapshot.
         /// Returns false when the bench cannot be resolved so the caller routes a miss through
-        /// <c>PredictionHost.Resolve</c> and rolls the client's prediction back, instead of
+        /// <c>ActionHost.Resolve</c> and rolls the client's prediction back, instead of
         /// reporting success and leaking the prediction for the rest of the session.</summary>
         internal bool HostApplyOp(WorkbenchOpMessage message)
         {
@@ -229,9 +207,11 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            var bench = GetBench(message.Index);
+            var bench = message.Bench;
             if (bench == null)
             {
+                CoopPlugin.Log.LogWarning(
+                    "[workbench] dropped op with no live bench object.");
                 return false;
             }
 
@@ -248,7 +228,7 @@ namespace CardShopCoop.Modules.World
                 && !IsRealItemType(message.SpawnItemType))
             {
                 CoopPlugin.Log.LogWarning("[workbench] rejected op with an invalid spawn type "
-                    + message.SpawnItemType + " on bench " + message.Index + ".");
+                    + message.SpawnItemType + " on bench " + bench.name + ".");
                 return false;
             }
 
@@ -257,7 +237,7 @@ namespace CardShopCoop.Modules.World
             if (removed != null && removed.Count > capacity)
             {
                 CoopPlugin.Log.LogWarning("[workbench] rejected op removing " + removed.Count
-                    + " types from a " + capacity + "-slot bench " + message.Index + ".");
+                    + " types from a " + capacity + "-slot bench " + bench.name + ".");
                 return false;
             }
 
@@ -266,7 +246,7 @@ namespace CardShopCoop.Modules.World
                 if (!IsRealItemType(removed[i]))
                 {
                     CoopPlugin.Log.LogWarning("[workbench] rejected op with an invalid removed type "
-                        + removed[i] + " on bench " + message.Index + ".");
+                        + removed[i] + " on bench " + bench.name + ".");
                     return false;
                 }
 
@@ -281,14 +261,14 @@ namespace CardShopCoop.Modules.World
             if (added != null && added.Count > capacity)
             {
                 CoopPlugin.Log.LogWarning("[workbench] rejected op adding " + added.Count
-                    + " types to a " + capacity + "-slot bench " + message.Index + ".");
+                    + " types to a " + capacity + "-slot bench " + bench.name + ".");
                 return false;
             }
 
             if (types.Count + (added?.Count ?? 0) > capacity)
             {
                 CoopPlugin.Log.LogWarning("[workbench] rejected op that would overfill bench "
-                    + message.Index + " (" + types.Count + "+" + (added?.Count ?? 0) + " > "
+                    + bench.name + " (" + types.Count + "+" + (added?.Count ?? 0) + " > "
                     + capacity + ").");
                 return false;
             }
@@ -298,7 +278,7 @@ namespace CardShopCoop.Modules.World
                 if (!IsRealItemType(added[i]))
                 {
                     CoopPlugin.Log.LogWarning("[workbench] rejected op with an invalid added type "
-                        + added[i] + " on bench " + message.Index + ".");
+                        + added[i] + " on bench " + bench.name + ".");
                     return false;
                 }
 
@@ -308,8 +288,8 @@ namespace CardShopCoop.Modules.World
             }
 
             SyncBench(bench, types, message.SpawnItemType, message.Bundling);
-            var state = BuildState(message.Index, bench);
-            state.PredictionId = message.PredictionId;
+            var state = BuildState(bench);
+            state.ActionId = message.ActionId;
             _broadcast?.Invoke(state);
             return true;
         }
@@ -325,16 +305,17 @@ namespace CardShopCoop.Modules.World
         /// for the bench state: it clears the mirrored bundling animation and republishes. The
         /// bundle box itself was already minted locally by the acting client, so no box is handed
         /// out here and nothing needs to be remembered for a rejoin.</summary>
-        internal bool HostCompleteBundle(int index)
+        internal bool HostCompleteBundle(InteractableWorkbench bench)
         {
             if (!_host)
             {
                 return false;
             }
 
-            var bench = GetBench(index);
             if (bench == null)
             {
+                CoopPlugin.Log.LogWarning(
+                    "[workbench] dropped bundle completion with no live bench object.");
                 return false;
             }
 
@@ -347,7 +328,7 @@ namespace CardShopCoop.Modules.World
             // The host's bench was showing the bundle started by the requesting client; stop it
             // on the game object itself before publishing, so the broadcast reads no bundling.
             HideBundlingAnimation(bench);
-            _broadcast?.Invoke(BuildState(index, bench));
+            _broadcast?.Invoke(BuildState(bench));
             return true;
         }
 
@@ -386,16 +367,9 @@ namespace CardShopCoop.Modules.World
             }
 
             HideBundlingAnimation(bench);
-            var idx = IndexOf(bench);
-            if (idx < 0)
-            {
-                return;
-            }
-
             _send?.Invoke(1, new WorkbenchBundleMessage
             {
-                StableEntityId = WorldMessageMetadata.WorkbenchEntityId(idx),
-                Index = (byte)idx,
+                Bench = bench,
             });
         }
 
@@ -407,12 +381,6 @@ namespace CardShopCoop.Modules.World
         private void ClientPublish(InteractableWorkbench bench, List<EItemType> before, bool force)
         {
             if (_host || bench == null || _send == null)
-            {
-                return;
-            }
-
-            var idx = IndexOf(bench);
-            if (idx < 0)
             {
                 return;
             }
@@ -430,10 +398,10 @@ namespace CardShopCoop.Modules.World
 
             var self = this;
             var epoch = AuthorityEpoch(bench);
-            WorldPrediction.Predict(WorldPrediction.WorkbenchScope,
+            WorldAction.Submit(WorldAction.WorkbenchScope,
                 new WorkbenchOpMessage
                 {
-                    Index = (byte)idx,
+                    Bench = bench,
                     AddedTypes = added,
                     RemovedTypes = removed,
                     SpawnItemType = GetSpawnType(bench),
@@ -473,9 +441,11 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var bench = GetBench(message.Index);
+            var bench = message.Bench;
             if (bench == null)
             {
+                CoopPlugin.Log.LogWarning(
+                    "[workbench] dropped state with no live bench object.");
                 return;
             }
 
@@ -486,15 +456,14 @@ namespace CardShopCoop.Modules.World
         /// edit, sent to the requester before the generic rollback so the client reconciles to
         /// authority instead of replaying a snapshot that has moved past it. The empty prediction
         /// id makes the requester apply it as a state-set, not consume a prediction with it.</summary>
-        internal WorkbenchStateMessage BuildRefresh(int index)
+        internal WorkbenchStateMessage BuildRefresh(InteractableWorkbench bench)
         {
             if (!_host)
             {
                 return null;
             }
 
-            var bench = GetBench(index);
-            return bench == null ? null : BuildState(index, bench);
+            return bench == null ? null : BuildState(bench);
         }
 
         // ---------------- game-state apply ----------------
@@ -763,10 +732,7 @@ namespace CardShopCoop.Modules.World
                     card.m_Card3dUI.SetVisibility(false);
                 }
 
-                if (anims[i] != null)
-                {
-                    anims[i].gameObject.SetActive(false);
-                }
+                anims[i]?.gameObject.SetActive(false);
             }
         }
 

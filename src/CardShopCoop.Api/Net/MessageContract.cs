@@ -32,7 +32,8 @@ namespace CardShopCoop.Net
         } = Protocol.Reliability.Reliable;
     }
 
-    /// <summary>Marks a method as the runtime handler for one registered message type.</summary>
+    /// <summary>Marks a method as the runtime handler for one registered message type. With the
+    /// parameterless form the message type is inferred from the handler signature.</summary>
     [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
     public sealed class MessageHandlerAttribute : Attribute
     {
@@ -41,6 +42,12 @@ namespace CardShopCoop.Net
             get;
         }
 
+        public MessageHandlerAttribute()
+        {
+        }
+
+        [Obsolete("Use the parameterless [MessageHandler] and put the message type in the handler "
+            + "signature.")]
         public MessageHandlerAttribute(Type messageType)
         {
             MessageType = messageType ?? throw new ArgumentNullException(nameof(messageType));

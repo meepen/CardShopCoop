@@ -42,10 +42,16 @@ namespace CardShopCoop.Modules.World
             _workbenchInteraction?.HostStorageChanged(bench);
         }
 
-        [MessageHandler(typeof(WorkbenchOpMessage))]
+        [MessageHandler]
         private void HandleWorkbenchOp(MessageContext context, WorkbenchOpMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context) && message != null)
+            if (message != null && message.Bench == null)
+            {
+                CoopPlugin.Log.LogWarning("[workbench] dropped op with no live bench object.");
+            }
+
+            if (_context.InGame() && IsJoinPhaseSender(context)
+                && message != null && message.Bench != null)
             {
                 ExecuteWorldCommand(context, message, () =>
             {
@@ -56,7 +62,7 @@ namespace CardShopCoop.Modules.World
 
                 // Refresh the failed edit with the bench's absolute authoritative state before the
                 // generic rollback, so the client reconciles instead of replaying its snapshot.
-                var refresh = _workbenchInteraction?.BuildRefresh(message.Index);
+                var refresh = _workbenchInteraction?.BuildRefresh(message.Bench);
                 if (refresh != null)
                 {
                     SendWorldTo(context.Connection.Id, refresh);
@@ -71,14 +77,21 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [MessageHandler(typeof(WorkbenchBundleMessage))]
+        [MessageHandler]
         private void HandleWorkbenchBundle(MessageContext context, WorkbenchBundleMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context) && message != null)
+            if (message != null && message.Bench == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[workbench] dropped bundle completion with no live bench object.");
+            }
+
+            if (_context.InGame() && IsJoinPhaseSender(context)
+                && message != null && message.Bench != null)
             {
                 ExecuteWorldCommand(context, message,
                     () => _workbenchInteraction != null
-                        && _workbenchInteraction.HostCompleteBundle(message.Index));
+                        && _workbenchInteraction.HostCompleteBundle(message.Bench));
             }
             else
             {

@@ -1,9 +1,11 @@
 namespace CardShopCoop.Modules.Shop
 {
     /// <summary>
-    /// The single player allowed to edit the shop name, plus their live draft text. The host owns
-    /// this state and broadcasts it; clients mirror it. Only the owner's drafts and confirm are
-    /// accepted, which makes the rename UI first-come-first-serve without making the host special.
+    /// The host's in-memory rename authority: the single player allowed to edit the shop name,
+    /// plus their live draft text. The host publishes this as <see cref="ShopRenameState"/> and
+    /// <see cref="ShopRenameDraftState"/>; clients read those global values rather than mirroring
+    /// this class. Only the owner's drafts and confirm are accepted, which makes the rename UI
+    /// first-come-first-serve without making the host special.
     ///
     /// A draft is deliberately separate from the canonical name in <see cref="ShopState"/>: it is
     /// painted on every shop sign and input display, but it never updates <c>CPlayerData.PlayerName</c>

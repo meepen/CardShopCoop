@@ -1,25 +1,27 @@
+using CardShopCoop.Api;
+
 namespace CardShopCoop.Modules.Shop
 {
+    /// <summary>
+    /// Presentation of the host-authoritative shop name. The authority is the session-wide
+    /// <see cref="ShopRenameState"/>; this class keeps no copy of it. It only projects that value
+    /// onto the game's own surfaces (<c>CPlayerData.PlayerName</c>, the shop sign and the rename
+    /// inputs), using the game's field as the pre-session fallback.
+    /// </summary>
     internal static class ShopState
     {
         internal const int MaxNameLength = 64;
-        private static string _canonicalName;
-        private static bool _unnamed;
 
-        internal static bool Unnamed => _unnamed;
+        /// <summary>Host-authoritative "the shop has no name yet". A host publishes it with the
+        /// session value; without one there is nothing authoritative to consult, so callers that
+        /// paint a sign before a session simply treat the shop as named.</summary>
+        internal static bool Unnamed => Global<ShopRenameState>.Value?.Unnamed == true;
 
         internal static void Reset()
         {
-            _canonicalName = null;
-            _unnamed = false;
             ShopRenameSession.Reset();
             ShopInterop.Reset();
         }
-
-        /// <summary>Host-authoritative "the shop has no name yet". While true, repainting the
-        /// canonical name must not put the "My Card Shop" placeholder on the blank tutorial
-        /// sign.</summary>
-        internal static void SetUnnamed(bool unnamed) => _unnamed = unnamed;
 
         /// <summary>Clamps live editor text to the same ceiling the committed name uses. Drafts
         /// are display-only, so empty and partially typed values are valid; only the length is
@@ -31,11 +33,12 @@ namespace CardShopCoop.Modules.Shop
         }
 
         /// <summary>Puts the last committed name back on every sign surface without consulting
-        /// <c>CPlayerData.PlayerName</c>, which may still hold the local editor's draft. An
-        /// unnamed shop keeps its blank tutorial sign instead of showing the placeholder.</summary>
+        /// <c>CPlayerData.PlayerName</c> as an authority, which may still hold the local editor's
+        /// draft. An unnamed shop keeps its blank tutorial sign instead of showing the
+        /// placeholder.</summary>
         internal static void RepaintCanonical()
         {
-            if (_unnamed)
+            if (Unnamed)
             {
                 // The tutorial sign is blank, but a just-cancelled draft may still be painted
                 // on it. Clear the presentation without writing the placeholder to the sign.
@@ -50,21 +53,31 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            if (TryNormalize(_canonicalName, out var name))
+            if (TryGetCanonical(out var name))
             {
                 Apply(name);
             }
         }
 
-        /// <summary>Reads only the committed cache - never <c>CPlayerData.PlayerName</c>, which is
-        /// the live draft while the local player is editing.</summary>
+        /// <summary>The committed name: the host-authoritative session value, or - before one
+        /// exists - the game's own field. While a rename UI is open that field holds the live draft
+        /// (vanilla ShopRenamer.OnInputChanged writes it), so it is not a name then.</summary>
         internal static bool TryGetCanonical(out string name)
-            => TryNormalize(_canonicalName, out name);
+        {
+            if (TryNormalize(Global<ShopRenameState>.Value?.Name, out name))
+            {
+                return true;
+            }
 
-        /// <summary>True when the committed cache still holds this exact name. A rename rollback
-        /// uses it to avoid restoring an old snapshot over a newer authoritative rename.</summary>
-        internal static bool IsCanonical(string name)
-            => TryNormalize(_canonicalName, out var current) && current == name;
+            return !ShopInterop.HasAnyOpenRenameScreen()
+                && TryNormalize(CPlayerData.GetPlayerName(), out name);
+        }
+
+        /// <summary>True when the name this peer currently paints is exactly this name. A rename
+        /// rollback uses it to avoid restoring an old snapshot over a newer rename that already
+        /// reached the local sign.</summary>
+        internal static bool IsPainted(string name)
+            => TryNormalize(CPlayerData.GetPlayerName(), out var current) && current == name;
 
         internal static bool TryNormalize(string proposed, out string canonical)
         {
@@ -87,29 +100,10 @@ namespace CardShopCoop.Modules.Shop
             return true;
         }
 
-        internal static bool TryGet(out string name)
-        {
-            if (TryNormalize(_canonicalName, out name))
-            {
-                return true;
-            }
-
-            if (!TryNormalize(CPlayerData.GetPlayerName(), out name))
-            {
-                name = null;
-                return false;
-            }
-
-            _canonicalName = name;
-            return true;
-        }
-
         /// <summary>Applies the canonical name. <paramref name="paintSign"/> false leaves the shop
         /// sign itself untouched, as vanilla does for an unnamed shop.</summary>
         internal static bool Apply(string name, bool paintSign = true)
         {
-            _canonicalName = name;
-            _unnamed = !paintSign;
             CPlayerData.PlayerName = name;
             // The renamer controller is inactive during normal play, but its text fields point at
             // the visible shop sign (and the rename inputs). Repaint through the scene instance so

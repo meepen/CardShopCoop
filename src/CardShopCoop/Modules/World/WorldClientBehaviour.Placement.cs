@@ -1,24 +1,23 @@
 using System;
-using System.Collections.Generic;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
+using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.World
 {
-    /// <summary>Guest-side placement mirror and predictive move sender.</summary>
+    /// <summary>Guest-side placement pose prediction and state apply. Placement creation and
+    /// removal are owned by the GameObjectIdentity module; this partial never builds or destroys a
+    /// placement entity.</summary>
     public sealed partial class WorldClientBehaviour
     {
         private const string PredictionScope = "placement";
-        private readonly PlacementPopulationState _placementPopulation = new();
-        private readonly Dictionary<int, PlacementDeltaMessage> _pendingDeltas = new();
         private PlacementBaselineMessage _latestBaseline;
         private InteractableObject _movingObject;
         private PlacementMoveEntry _movingBefore;
         private bool _identityReady;
-        private int _applyingState;
 
         internal bool IdentityReady => _identityReady;
 
@@ -29,23 +28,41 @@ namespace CardShopCoop.Modules.World
         {
             PlacementInterop.ProbeBetaSurface();
             SceneManager.sceneLoaded += OnPlacementSceneLoaded;
+            PlacementApi.StructureChanged += OnPlacementStateStructureChanged;
             InstallPlacementPatches();
         }
 
         internal void ShutdownPlacement()
         {
             SceneManager.sceneLoaded -= OnPlacementSceneLoaded;
-            _placementPopulation.Reset();
-            ClearPendingDeltas();
+            PlacementApi.StructureChanged -= OnPlacementStateStructureChanged;
             _latestBaseline = null;
             _identityReady = false;
             _movingObject = null;
             _movingBefore = null;
         }
 
-        [MessageHandler(typeof(PlacementBaselineMessage))]
+        /// <summary>The identity module created or bound a placement entity. A baseline that
+        /// arrived before the shelf manager existed is applied now; otherwise this is a no-op.</summary>
+        private static void OnPlacementStateStructureChanged(int _)
+        {
+            var client = _instance;
+            if (client == null || ReentrancyGuard.SuppressedForLocalObservation(client))
+            {
+                return;
+            }
+
+            client.ApplyLatestBaseline();
+        }
+
+        [MessageHandler]
         private void HandleBaseline(MessageContext _, PlacementBaselineMessage message)
         {
+            if (_shutdown || message == null)
+            {
+                return;
+            }
+
             _latestBaseline = message;
             ApplyLatestBaseline();
         }
@@ -61,42 +78,29 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            CoopPlugin.Log.LogInfo("[placement] fully connected; requesting a fresh baseline.");
+            CoopPlugin.Log.LogInfo("[placement] fully connected; requesting a fresh state baseline.");
             _context.Send(connection.Id, new PlacementBaselineRequestMessage());
         }
 
-        [MessageHandler(typeof(PlacementDeltaMessage))]
+        [MessageHandler]
         private void HandleDelta(MessageContext _, PlacementDeltaMessage message)
         {
-            if (_shutdown || message == null || message.Entity == null)
+            if (_shutdown || message == null || message.Entity == null
+                || message.Entity.Entity == null)
             {
+                CoopPlugin.Log.LogWarning("[placement] dropped delta with no live entity.");
                 return;
             }
 
             if (!TryApplyDelta(message))
             {
-                CoopPlugin.Log.LogInfo("[placement] defer delta op=" + message.Operation + " key="
-                    + message.Entity.Key + ".");
-                DeferDelta(message);
+                CoopPlugin.Log.LogWarning("[placement] dropped delta op=" + message.Operation
+                    + " entity=" + PlacementInterop.Describe(message.Entity.Entity) + ".");
+                return;
             }
-            else
-            {
-                // A later delta for the same entity can now be applied immediately (for example a
-                // boxed update arriving after its unboxed add was deferred); the older deferred
-                // delta is obsolete and would otherwise be replayed onto the freshly built object.
-                DiscardSupersededDelta(message.Entity.Key);
-                CoopPlugin.Log.LogInfo("[placement] applied delta op=" + message.Operation + " key="
-                    + message.Entity.Key + ".");
-            }
-        }
 
-        private void DiscardSupersededDelta(int key)
-        {
-            if (_pendingDeltas.TryGetValue(key, out var previous))
-            {
-                PredictionApi.Ack(previous.PredictionId);
-                _pendingDeltas.Remove(key);
-            }
+            CoopPlugin.Log.LogInfo("[placement] applied delta op=" + message.Operation
+                + " entity=" + PlacementInterop.Describe(message.Entity.Entity) + ".");
         }
 
         private void ApplyLatestBaseline()
@@ -106,127 +110,92 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            _applyingState++;
-            try
+            var moves = _latestBaseline.Moves;
+            var applied = 0;
+            var dropped = 0;
+            using (Writes.Enter())
             {
-                if (!_placementPopulation.Apply(_latestBaseline.Population))
+                for (var i = 0; moves != null && i < moves.Count; i++)
                 {
-                    return;
-                }
-
-                for (var i = 0; i < _latestBaseline.Moves.Count; i++)
-                {
-                    var move = _latestBaseline.Moves[i];
-                    if (PlacementMoveState.Apply(move, false))
+                    var move = moves[i];
+                    // A baseline entry is a state hint for an object this peer already holds. The
+                    // entity is a live reference; an entry whose object did not resolve is
+                    // dropped rather than retried under a stable id.
+                    if (move == null || move.Entity == null)
                     {
+                        CoopPlugin.Log.LogWarning("[placement] dropped baseline move with no live "
+                            + "entity at index=" + i + ".");
+                        dropped++;
                         continue;
                     }
 
-                    // A move is a binding hint, not identity: this peer's object lists can
-                    // legitimately be shorter than the host's (a transferred save or a
-                    // cross-build list difference), so a move naming an object this peer does
-                    // not have must not tear the session down. A later population refresh or
-                    // delta republishes the pose if the object ever exists here.
-                    CoopPlugin.Log.LogWarning("[placement] baseline move key="
-                        + (move == null ? -1 : move.Key) + " type="
-                        + (move == null ? -1 : move.Type) + " did not resolve; skipping.");
+                    if (!PlacementMoveState.Apply(move, false))
+                    {
+                        CoopPlugin.Log.LogWarning("[placement] dropped baseline move entity="
+                            + PlacementInterop.Describe(move.Entity) + " that could not be "
+                            + "applied.");
+                        dropped++;
+                        continue;
+                    }
+
+                    applied++;
                 }
 
                 _identityReady = true;
                 _latestBaseline = null;
             }
-            finally
-            {
-                _applyingState--;
-            }
 
-            ApplyPendingDeltas();
+            CoopPlugin.Log.LogInfo("[placement] baseline applied=" + applied + " dropped="
+                + dropped + ".");
             PlacementInterop.NotifyStructureChanged(-1);
         }
 
-        private void ApplyPendingDeltas()
-        {
-            if (!_identityReady)
-            {
-                return;
-            }
+        /// <summary>The identity module removed a placement entity. Release the local hold/move
+        /// state this peer kept for it before the game destroys the component.</summary>
+        internal static void OnPlacementObjectDestroyed(InteractableObject obj)
+            => _instance?.ForgetPlacementObject(obj);
 
-            var pending = new List<PlacementDeltaMessage>(_pendingDeltas.Values);
-            for (var i = 0; i < pending.Count; i++)
+        private void ForgetPlacementObject(InteractableObject obj)
+        {
+            _placementHold?.LocalEnded(obj);
+            if (ReferenceEquals(_movingObject, obj))
             {
-                if (TryApplyDelta(pending[i]))
-                {
-                    _pendingDeltas.Remove(pending[i].Entity.Key);
-                }
+                _movingObject = null;
+                _movingBefore = null;
             }
         }
 
-        /// <summary>Client: the box engine just bound the authoritative placement identity of a
-        /// boxed furniture object (its box descriptor arrived, or this peer's own predicted box
-        /// adopted it). Retry the deltas that were deferred while the key did not resolve, so the
-        /// local object takes the host's authoritative state.</summary>
-        internal static void RetryDeferredPlacementDeltas()
-            => _instance?.ApplyPendingDeltas();
-
         private bool TryApplyDelta(PlacementDeltaMessage message)
         {
-            if (PlacementInterop.FindShelfManager() == null)
+            if (message == null || message.Entity == null || message.Entity.Entity == null)
             {
                 return false;
             }
 
-            if (message.Operation != PlacementDeltaMessage.Remove && !_identityReady)
+            if (PlacementInterop.FindShelfManager() == null || !_identityReady)
             {
                 return false;
             }
 
-            if (message.Operation != PlacementDeltaMessage.Remove
-                && !CanResolveStableKey(message.Entity))
-            {
-                return false;
-            }
-
-            _applyingState++;
-            try
+            using (Writes.Enter())
             {
                 // The host applies the exact Move entry the guest sent and stamps the prediction
                 // id (a stale intent is rejected via a prediction rollback), so this delta confirms
                 // the move. Reconciling would snap the piece back to its pre-move pose first.
-                PredictionApi.AckOrApply(message.PredictionId, () =>
+                ActionLedger.AckOrApply(message.ActionId, () =>
                 {
                     if (!PlacementEntityState.Apply(message))
                     {
                         throw new InvalidOperationException(
-                            "placement delta could not be applied for key="
-                            + message.Entity.Key.ToString("X"));
+                            "placement delta could not be applied for entity="
+                            + PlacementInterop.Describe(message.Entity.Entity));
                     }
                 });
-            }
-            finally
-            {
-                _applyingState--;
             }
 
             PlacementInterop.NotifyStructureChanged(-1);
             return true;
         }
-
-        private void DeferDelta(PlacementDeltaMessage message)
-        {
-            var key = message.Entity.Key;
-            if (_pendingDeltas.TryGetValue(key, out var previous))
-            {
-                PredictionApi.Ack(previous.PredictionId);
-            }
-
-            _pendingDeltas[key] = message;
-        }
-
-        /// <summary>True when a delta names an object this peer already holds under the stable key
-        /// the host assigned. A key that does not resolve can only be applied after the box channel
-        /// binds the exact identity it names; there is no same-type or nearby adoption.</summary>
-        private static bool CanResolveStableKey(PlacementMoveEntry entry)
-            => entry != null && PlacementMoveState.ResolveObjectByKey(entry.Key) != null;
 
         /// <summary>Observe the game's own PlaceMovedObject after it ran. Vanilla only clears the
         /// moving flag and performs the place when its own validity check passed; an object still
@@ -242,7 +211,7 @@ namespace CardShopCoop.Modules.World
 
             // Our own apply/replay drives PlaceMovedObject through the game path; it must not
             // register a second prediction or release a hold that is already gone.
-            if (_applyingState != 0 || PredictionApi.IsReconciling)
+            if (ReentrancyGuard.SuppressedForLocalObservation(this))
             {
                 return;
             }
@@ -262,20 +231,16 @@ namespace CardShopCoop.Modules.World
 
             // The game already placed the object, so its settled state is the post-action state
             // (unboxed with the final pose); the prediction only records how to redo and undo it.
-            var after = PlacementEntityState.Capture(obj, _movingBefore.Key).ToEntry();
-            // A move must never carry the object type. Identity is the stable key the host bound at
-            // creation, and a coalesced object's local type is only the peer's equivalent: sending it
-            // would make the host reject the move (its object is the richer type) or, worse, let it
-            // restate the host's real one. NoType tells the host to settle whatever the key names.
-            after.Type = PlacementInterop.NoType;
+            // The live entity is the whole identity: no key or type is sent with the move.
+            var after = PlacementEntityState.Capture(obj).ToEntry();
             var before = _movingBefore;
             _movingObject = null;
             _movingBefore = null;
-            PredictionApi.Predict(
+            ActionLedger.Submit(
                 PredictionScope,
-                predictionId => _context.Send(1, new PlacementMoveIntentMessage
+                actionId => _context.Send(1, new PlacementMoveIntentMessage
                 {
-                    PredictionId = predictionId,
+                    ActionId = actionId,
                     Move = after,
                 }),
                 () => ApplyMovePrediction(after, true),
@@ -287,8 +252,7 @@ namespace CardShopCoop.Modules.World
         /// directions share the single game-path helper.</summary>
         private void ApplyMovePrediction(PlacementMoveEntry entry, bool settle)
         {
-            _applyingState++;
-            try
+            using (Writes.Enter())
             {
                 if (!PlacementMoveState.Apply(entry, settle) && settle)
                 {
@@ -296,72 +260,40 @@ namespace CardShopCoop.Modules.World
                         "predicted placement move could not be applied");
                 }
             }
-            finally
-            {
-                _applyingState--;
-            }
         }
 
         private void OnPlacementSceneLoaded(Scene _, LoadSceneMode __)
         {
+            // Unity dispatches the invocation list captured before a teardown, so a resolved
+            // client can still receive this after Shutdown. Do not touch anything then.
+            if (_shutdown)
+            {
+                return;
+            }
+
             _placementHold?.Reset();
-            _placementPopulation.Reset();
-            ClearPendingDeltas();
             _latestBaseline = null;
             _identityReady = false;
             _movingObject = null;
             _movingBefore = null;
-            PlacementIdentity.Reset();
-            _boxNetworkInteraction?.ClientInvalidateSceneSlots();
         }
 
+        /// <summary>Prediction/state hooks only. Creation and removal are installed by the
+        /// GameObjectIdentity module.</summary>
         private void InstallPlacementPatches()
         {
-            Patch(typeof(InteractableObject), "StartMoveObject", nameof(MoveStartPrefix),
+            PatchPlacementState(typeof(InteractableObject), "StartMoveObject", nameof(MoveStartPrefix),
                 nameof(MoveStartPostfix));
-            Patch(typeof(InteractableObject), "PlaceMovedObject", null,
+            PatchPlacementState(typeof(InteractableObject), "PlaceMovedObject", null,
                 nameof(MoveIntentPostfix));
-            Patch(typeof(InteractableObject), "OnDestroyed", null,
-                nameof(InteractableObjectDestroyedPostfix));
-
-            PatchInit(typeof(ShelfManager), "InitInteractableObject", typeof(InteractableObject));
-            PatchInit(typeof(ShelfManager), "InitDecoObject", typeof(InteractableObject));
-            PatchInit(typeof(ShelfManager), "InitShelf", typeof(Shelf));
-            PatchInit(typeof(ShelfManager), "InitWarehouseShelf", typeof(WarehouseShelf));
-            PatchInit(typeof(ShelfManager), "InitCardShelf", typeof(CardShelf));
-            PatchInit(typeof(ShelfManager), "InitCardItemCombiShelf", typeof(CardItemCombiShelf));
-            PatchInit(typeof(ShelfManager), "InitTournamentPrizeShelf", typeof(TournamentPrizeShelf));
-            PatchInit(typeof(ShelfManager), "InitPlayTable", typeof(InteractablePlayTable));
-            PatchInit(typeof(ShelfManager), "InitAutoCleanser", typeof(InteractableAutoCleanser));
-            PatchInit(typeof(ShelfManager), "InitAutoPackOpener", typeof(InteractableAutoPackOpener));
-            PatchInit(typeof(ShelfManager), "InitWorkbench", typeof(InteractableWorkbench));
-            PatchInit(typeof(ShelfManager), "InitBulkDonationBox", typeof(InteractableBulkDonationBox));
-            PatchInit(typeof(ShelfManager), "InitCardStorageShelf", typeof(InteractableCardStorageShelf));
-            PatchInit(typeof(ShelfManager), "InitTrashBin", typeof(InteractableTrashBin));
-            PatchInit(typeof(ShelfManager), "InitEmptyBoxStorage", typeof(InteractableEmptyBoxStorage));
-            PatchInit(typeof(ShelfManager), "InitCashierCounter", typeof(InteractableCashierCounter));
         }
 
-        private void PatchInit(Type target, string method, Type argument)
-        {
-            var original = AccessTools.Method(target, method, new[] { argument });
-            if (original == null)
-            {
-                CoopPlugin.Log.LogWarning("placement client init patch target missing: "
-                    + target.Name + "." + method);
-                return;
-            }
-
-            _harmony.Patch(original, postfix: new HarmonyMethod(
-                typeof(WorldClientBehaviour), nameof(ShelfInitPostfix)));
-        }
-
-        private void Patch(Type target, string method, string prefix, string postfix)
+        private void PatchPlacementState(Type target, string method, string prefix, string postfix)
         {
             var original = AccessTools.Method(target, method);
             if (original == null)
             {
-                CoopPlugin.Log.LogWarning("placement client patch target missing: "
+                CoopPlugin.Log.LogWarning("placement client state patch target missing: "
                     + target.Name + "." + method);
                 return;
             }
@@ -371,22 +303,22 @@ namespace CardShopCoop.Modules.World
                 postfix: postfix == null ? null : new HarmonyMethod(typeof(WorldClientBehaviour), postfix));
         }
 
-        /// <summary>Capture-only prefix: snapshot the pre-move pose while the object still owns its
-        /// placement identity. The game performs StartMoveObject in full; the postfix observes
+        /// <summary>Capture-only prefix: snapshot the pre-move pose while the object is still a live
+        /// placement entity. The game performs StartMoveObject in full; the postfix observes
         /// whether the move actually started and takes the hold.</summary>
         public static void MoveStartPrefix(InteractableObject __instance,
             out PlacementMoveEntry __state)
         {
             __state = null;
-            if (_instance == null || __instance == null || _instance._applyingState != 0)
+            if (_instance == null || __instance == null
+                || ReentrancyGuard.SuppressedForLocalObservation(_instance))
             {
                 return;
             }
 
-            if (PlacementApi.TryMakeObjectKey(PlacementInterop.FindKind(__instance), __instance,
-                out var key))
+            if (PlacementInterop.FindKind(__instance) >= 0)
             {
-                __state = PlacementEntityState.Capture(__instance, key).ToEntry();
+                __state = PlacementEntityState.Capture(__instance).ToEntry();
             }
         }
 
@@ -417,39 +349,5 @@ namespace CardShopCoop.Modules.World
 
         public static void MoveIntentPostfix(InteractableObject __instance)
             => _instance?.ObserveMoveIntent(__instance);
-
-        public static void ShelfInitPostfix()
-        {
-            // A placement apply can recreate an object through the game's package factory, which
-            // invokes this postfix from inside the new object's own Awake, before its fields are
-            // initialized. Re-entering the baseline/pending application there would pose (and
-            // re-box) a half-built object, so let the in-flight apply finish first.
-            if (_instance == null || _instance._applyingState != 0)
-            {
-                return;
-            }
-
-            _instance.ApplyLatestBaseline();
-            _instance.ApplyPendingDeltas();
-        }
-
-        public static void InteractableObjectDestroyedPostfix(InteractableObject __instance)
-        {
-            if (__instance != null)
-            {
-                _instance?._placementHold?.LocalEnded(__instance);
-                PlacementIdentity.Forget(__instance);
-            }
-        }
-
-        private void ClearPendingDeltas()
-        {
-            foreach (var delta in _pendingDeltas.Values)
-            {
-                PredictionApi.Ack(delta.PredictionId);
-            }
-
-            _pendingDeltas.Clear();
-        }
     }
 }

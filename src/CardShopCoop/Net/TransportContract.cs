@@ -6,7 +6,8 @@ using System.Collections.Generic;
 namespace CardShopCoop.Net
 {
     /// <summary>One received message, already reassembled and decoded from the wire.
-    /// Transports never expose partial frames to callers.</summary>
+    /// Transports never expose partial frames to callers. For transports using the raw-frame
+    /// seam, this value is produced on the Unity thread by the application codec.</summary>
     public struct InMsg
     {
         public PeerConnection Connection;
@@ -24,24 +25,51 @@ namespace CardShopCoop.Net
         }
     }
 
+    /// <summary>Why a peer connection ended, delivered with the transport's disconnect queue.</summary>
+    public sealed class ConnectionEvent
+    {
+        public PeerConnection Connection
+        {
+            get;
+        }
+
+        public DisconnectInfo Disconnect
+        {
+            get;
+        }
+
+        public ConnectionEvent(PeerConnection connection, DisconnectInfo disconnect = null)
+        {
+            Connection = connection ?? throw new ArgumentNullException(nameof(connection));
+            Disconnect = disconnect;
+        }
+    }
+
     /// <summary>
-    /// Transport contract shared by the LAN UDP/KCP transport and the Steam
-    /// KCP over Steam Networking Sockets transport.
-    /// Connection ids are small ints; 1 is always "the host" from a client's view.
+    /// Core-owned transport contract shared by the LAN UDP/KCP transport and the Steam
+    /// KCP over Steam Networking Sockets transport. Connection ids are small ints; 1 is always
+    /// "the host" from a client's view.
     ///
-    /// This lives in CardShopCoop.Api so a transport can be contributed by its own assembly: the
-    /// Steam transport is a separate plugin that references only this assembly.
+    /// This is NOT a third-party extension point. A contributed transport provides an
+    /// <see cref="Datagrams.IDatagramTransport"/> bearer through
+    /// <see cref="Networking.INetworkingBackend"/>; the runtime creates and owns this transport,
+    /// the peer identities, and the id bands.
     /// </summary>
     public interface ICoopTransport : IDisposable
     {
         /// <summary>
         /// Removes one decoded message and releases the transport's incoming-byte admission for
-        /// it. Callers must use this method instead of retaining a raw producer queue.
+        /// it. Callers must use this method instead of retaining a raw producer queue. When the
+        /// application codec resolves entity references, this method must be called on the Unity
+        /// main thread; transports that implement the core wire-frame seam keep JSON decode
+        /// there instead.
         /// </summary>
         bool TryDequeueIncoming(out InMsg message);
+
         /// <summary>Removes one peer-disconnect notification, if any. Replaces the old public queue
         /// property, which handed every caller the transport's own mutable internals.</summary>
         bool TryDequeueDisconnect(out ConnectionEvent disconnect);
+
         event Action<PeerConnection> PeerConnected;
 
         /// <summary>Activates compact message ids for an authenticated peer.</summary>
@@ -49,20 +77,27 @@ namespace CardShopCoop.Net
 
         /// <summary>Queues a message using its registered MessageDescriptor.Reliability.</summary>
         void Send(PeerConnection connection, INetMessage message);
+
         /// <summary>Queues a message for every peer using its registered MessageDescriptor.Reliability.</summary>
         void Broadcast(INetMessage message);
+
         int ConnectionCount
         {
             get;
         }
+
         double SecondsSinceLastRecv(PeerConnection connection);
+
         IReadOnlyList<PeerConnection> Connections
         {
             get;
         }
+
         void Kick(PeerConnection connection, DisconnectInfo info = null);
+
         /// <summary>Send a bounded protocol disconnect, then tear down the connection.</summary>
         void GracefulDisconnect(PeerConnection connection, DisconnectInfo info = null);
+
         void Stop();
 
         /// <summary>Advances one transport pump step. This runs on the dedicated network

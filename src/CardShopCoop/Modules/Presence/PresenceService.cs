@@ -363,6 +363,22 @@ namespace CardShopCoop.Modules.Presence
             return false;
         }
 
+        /// <summary>Latest camera sample of the holder, without the avatar interpolation delay.
+        /// Placement aims every game frame and relies on the game's own lerp/snap for smoothing.</summary>
+        internal bool TryGetLatestPeerCameraForHolder(int holderConnectionId, out Vector3 position,
+            out Quaternion rotation)
+        {
+            var avatarId = MapHolderToAvatarId(holderConnectionId);
+            if (avatarId != 0)
+            {
+                return _renderer.TryGetPlacementCameraLatest(avatarId, out position, out rotation);
+            }
+
+            position = default(Vector3);
+            rotation = Quaternion.identity;
+            return false;
+        }
+
         internal PresenceModelEntry EnsureLocalModel()
         {
             if (!_localModelReady)
@@ -732,7 +748,7 @@ namespace CardShopCoop.Modules.Presence
 
             _ipc = ipc;
             _playerTransform = ipc.m_WalkerCtrl != null ? ipc.m_WalkerCtrl.transform : ipc.transform;
-            _cameraTransform = ipc.m_Cam != null ? ipc.m_Cam.transform : null;
+            _cameraTransform = ipc.m_Cam?.transform;
             return _playerTransform;
         }
 

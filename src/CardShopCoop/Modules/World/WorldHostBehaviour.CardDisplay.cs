@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Net;
+using CardShopCoop.Runtime;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
@@ -15,7 +16,7 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(CardDisplayRemovePatch)).Patch();
         }
 
-        [MessageHandler(typeof(CardDisplayRequestMessage))]
+        [MessageHandler]
         private void HandleCardDisplayRequest(MessageContext context, CardDisplayRequestMessage message)
         {
             if (!_context.InGame() || !IsJoinPhaseSender(context) || message == null)
@@ -24,12 +25,22 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            if (message.Shelf == null)
+            {
+                CoopPlugin.Log.LogWarning("[card-display] dropped request: the display shelf did not "
+                    + "resolve to a live object.");
+                RejectWorldIntent(context, message);
+                return;
+            }
+
             var echo = default(CardDisplayMessage);
             var accepted = ExecuteWorldCommand(context, message, () =>
             {
-                if (!WorldCardDisplay.TryResolve(message.ShelfKey, message.Compartment,
+                if (!WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
                     out var compartment))
                 {
+                    CoopPlugin.Log.LogWarning("[card-display] dropped request: shelf="
+                        + message.Shelf.name + " has no compartment " + message.Compartment + ".");
                     return false;
                 }
 
@@ -49,7 +60,7 @@ namespace CardShopCoop.Modules.World
                                 message.EncodedGrade))
                         {
                             CoopPlugin.Log.LogWarning("[card-display] rejected removal shelf="
-                                + message.ShelfKey + " compartment=" + message.Compartment
+                                + message.Shelf.name + " compartment=" + message.Compartment
                                 + ": the slot does not hold the named card.");
                             return false;
                         }
@@ -89,8 +100,8 @@ namespace CardShopCoop.Modules.World
 
                 echo = new CardDisplayMessage
                 {
-                    PredictionId = message.PredictionId,
-                    ShelfKey = message.ShelfKey,
+                    ActionId = message.ActionId,
+                    Shelf = message.Shelf,
                     Compartment = message.Compartment,
                     Occupied = message.Occupied,
                     Card = message.Occupied ? message.Card : null,
@@ -112,7 +123,7 @@ namespace CardShopCoop.Modules.World
         private void PublishHostCardDisplay(InteractableCardCompartment compartment, bool occupied)
         {
             if (_shutdown || _cardDisplayApplying || compartment == null || !_context.InGame()
-                || !WorldCardDisplay.TryMakeKey(compartment, out var shelfKey, out var index))
+                || !WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
             {
                 return;
             }
@@ -121,7 +132,7 @@ namespace CardShopCoop.Modules.World
             var grade = occupied ? WorldCardDisplay.EncodedGradeOf(card) : -1;
             BroadcastWorld(new CardDisplayMessage
             {
-                ShelfKey = shelfKey,
+                Shelf = shelf,
                 Compartment = index,
                 Occupied = occupied,
                 Card = occupied ? WorldCardDisplay.ToState(card) : null,
@@ -136,9 +147,20 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            AppendCardDisplayShelves(append, ShelfManager.GetCardShelfList());
-            AppendCardDisplayShelves(append, ShelfManager.GetCardItemCombiShelfList());
-            AppendCardDisplayShelves(append, ShelfManager.GetTournamentPrizeShelfList());
+            // The game's ShelfManager getters tunnel through CSingleton<ShelfManager>.Instance, which
+            // fabricates an empty DontDestroyOnLoad manager when the scene has not produced one yet
+            // (a scene-load window). That empty copy then shadows the real manager and every card
+            // shelf lookup reads an empty list for the rest of the run. Resolve the scene object
+            // only; a missing manager means this baseline has nothing to append.
+            var manager = SceneRef<ShelfManager>.Get();
+            if (manager == null)
+            {
+                return;
+            }
+
+            AppendCardDisplayShelves(append, manager.m_CardShelfList);
+            AppendCardDisplayShelves(append, manager.m_CardItemCombiShelfList);
+            AppendCardDisplayShelves(append, manager.m_TournamentPrizeShelfList);
         }
 
         private static void AppendCardDisplayShelves<T>(Action<INetMessage> append,
@@ -148,12 +170,6 @@ namespace CardShopCoop.Modules.World
             {
                 var shelf = shelves[i];
                 if (shelf == null)
-                {
-                    continue;
-                }
-
-                var kind = PlacementInterop.FindKind(shelf);
-                if (kind < 0 || !PlacementApi.TryMakeObjectKey(kind, shelf, out var shelfKey))
                 {
                     continue;
                 }
@@ -170,7 +186,7 @@ namespace CardShopCoop.Modules.World
 
                     append(new CardDisplayMessage
                     {
-                        ShelfKey = shelfKey,
+                        Shelf = shelf,
                         Compartment = j,
                         Occupied = true,
                         Card = WorldCardDisplay.ToState(card),

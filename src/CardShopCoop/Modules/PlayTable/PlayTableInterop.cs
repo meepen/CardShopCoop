@@ -1,37 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
-using CardShopCoop.Modules.World;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.PlayTable
 {
-    /// <summary>The narrow boundary from table state into placement's stable identity registry.</summary>
-    internal static class PlayTablePlacementInterop
-    {
-        internal const int TableIdentityKind = 6;
-
-        internal static bool TryGetTableKey(InteractablePlayTable table, out int key)
-        {
-            key = 0;
-            if (table == null)
-            {
-                return false;
-            }
-
-            if (PlacementApi.TryMakeObjectKey(TableIdentityKind, table, out key))
-            {
-                return true;
-            }
-
-            CoopPlugin.Log.LogWarning("play-table: failed to resolve table key; table="
-                + table.name + " type=" + table.m_ObjectType);
-            return false;
-        }
-    }
-
     internal sealed class PlayTableSeatSnapshot
     {
         internal bool PlayerOccupied;
@@ -56,7 +31,7 @@ namespace CardShopCoop.Modules.PlayTable
             => SceneRef<ShelfManager>.Get();
 
         internal static List<InteractablePlayTable> Tables(ShelfManager manager)
-            => manager == null ? null : manager.m_PlayTableList;
+            => manager?.m_PlayTableList;
 
         internal static bool IsPlayerSeat(InteractablePlayTable table, int seat)
         {
@@ -65,18 +40,16 @@ namespace CardShopCoop.Modules.PlayTable
         }
 
         internal static bool IsRosterManaged(InteractablePlayTable table,
-            Func<int, bool> hasActiveMatch, Func<int, bool> hasLocalLaunch)
+            Func<InteractablePlayTable, bool> hasActiveMatch,
+            Func<InteractablePlayTable, bool> hasLocalLaunch)
         {
-            return table != null && PlayTablePlacementInterop.TryGetTableKey(table, out var key)
-                && (hasActiveMatch(key) || hasLocalLaunch(key));
+            return table != null && (hasActiveMatch(table) || hasLocalLaunch(table));
         }
 
         internal static bool IsLocalGameplayTable(InteractablePlayTable table,
-            Func<int, bool> hasLocalLaunch)
+            Func<InteractablePlayTable, bool> hasLocalLaunch)
         {
-            return table != null && (HasEnteredTable(table)
-                || (PlayTablePlacementInterop.TryGetTableKey(table, out var key)
-                    && hasLocalLaunch(key)));
+            return table != null && (HasEnteredTable(table) || hasLocalLaunch(table));
         }
 
         internal static bool HasEnteredTable(InteractablePlayTable table)
@@ -107,8 +80,8 @@ namespace CardShopCoop.Modules.PlayTable
         /// to read instead. This method therefore reproduces vanilla's exact selection using the
         /// same dot-product rule so the prediction targets the seat the game will actually seat.
         /// Once vanilla has seated the player, the seat is part of the table's shared
-        /// <c>m_IsSeatOccupied</c>/<c>m_IsPlayerSeat</c> state and every cross-peer message is
-        /// keyed by <c>TableKey</c>.
+        /// <c>m_IsSeatOccupied</c>/<c>m_IsPlayerSeat</c> state and every cross-peer message names
+        /// the live table object.
         /// </remarks>
         internal static bool TryGetClickedSeat(InteractablePlayTable table, out int seat)
         {

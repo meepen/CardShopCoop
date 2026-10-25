@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using CardShopCoop.Net;
 using HarmonyLib;
 
@@ -20,7 +19,6 @@ namespace CardShopCoop.Modules.World
                 _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
                 _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(StoredBoxRecordArrangePatch)).Patch();
             }
             else
             {
@@ -29,7 +27,7 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [MessageHandler(typeof(WarehouseStoreMessage))]
+        [MessageHandler]
         private void HandleWarehouseStore(MessageContext context, WarehouseStoreMessage message)
         {
             if (!_context.InGame() || !IsJoinPhaseSender(context))
@@ -40,27 +38,19 @@ namespace CardShopCoop.Modules.World
 
             ExecuteWorldCommand(context, message, () =>
             {
-                if (Warehouse == null)
+                if (Warehouse == null || message?.Shelf == null || message.Box == null)
                 {
-
+                    CoopPlugin.Log.LogWarning("[warehouse] dropped store: the shelf or box did not "
+                        + "resolve to a live object.");
                     return false;
                 }
 
-
-                if (!Warehouse.HostApplyStore(message, context.ConnectionId,
-                    response => SendWorldTo(context.ConnectionId, response)))
-                {
-                    return false;
-                }
-
-                // The box is on the shelf now, not carried: drop the mirrored hand hold so a
-                // later take re-attaches it to the avatar's carry anchor.
-                _playerBoxInteraction?.ReleaseRemoteHoldForBox(message.BoxNetworkId);
-                return true;
+                return Warehouse.HostApplyStore(message, context.ConnectionId,
+                    response => SendWorldTo(context.ConnectionId, response));
             });
         }
 
-        [MessageHandler(typeof(WarehouseTakeMessage))]
+        [MessageHandler]
         private void HandleWarehouseTake(MessageContext context, WarehouseTakeMessage message)
         {
             if (!_context.InGame() || !IsJoinPhaseSender(context))
@@ -71,12 +61,13 @@ namespace CardShopCoop.Modules.World
 
             ExecuteWorldCommand(context, message, () =>
             {
-                if (Warehouse == null)
+                if (Warehouse == null || message?.Source?.Shelf == null
+                    || message.CreatedBox == null)
                 {
-
+                    CoopPlugin.Log.LogWarning("[warehouse] dropped take: the source shelf or created "
+                        + "box descriptor did not resolve.");
                     return false;
                 }
-
 
                 return Warehouse.HostApplyTake(message, context.ConnectionId,
                     response => SendWorldTo(context.ConnectionId, response));
@@ -89,7 +80,7 @@ namespace CardShopCoop.Modules.World
         }
 
         private void NotifyStoredBoxRecordPopped(ShelfCompartment compartment, bool didPop,
-            WarehouseBoxState removed)
+            WarehouseShelfInteraction.WarehouseBoxFacts removed)
         {
             Warehouse?.OnStoredBoxRecordPopped(compartment, didPop, removed);
         }
@@ -107,10 +98,7 @@ namespace CardShopCoop.Modules.World
 
         /// <summary>Records backend: the box adds its own stored record from inside
         /// <c>OnFinishLerp</c>. Mark it for the span of that method so the AddStoredBoxRecord hook
-        /// binds the new record to exactly this box's network id - the store has already passed
-        /// every game gate by the time this runs, so a refused store can no longer strand an id.
-        /// The box instance is the hook argument; this method exists on both builds, but only the
-        /// records build actually adds a record here.</summary>
+        /// binds the new record to exactly this box's identity.</summary>
         [HarmonyPatch(typeof(InteractablePackagingBox_Item), "OnFinishLerp")]
         private static class BoxRecordStoreCompletePatch
         {
@@ -145,39 +133,19 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        /// <summary>The game re-sorts a compartment's stored records by amount; the positional id
-        /// list must follow the very same permutation or it drifts. The prefix snapshots the
-        /// records' values and the postfix replays the multiset permutation onto the id list.</summary>
-        [HarmonyPatch(typeof(ShelfCompartment), "ArrangeBoxItemBasedOnItemCount")]
-        private static class StoredBoxRecordArrangePatch
-        {
-            [HarmonyPrefix]
-            private static void Prefix(ShelfCompartment __instance,
-                out List<WarehouseShelfInteraction.StoredRecordKey> __state)
-            {
-                __state = _instance?.Warehouse?.CaptureRecordOrder(__instance);
-            }
-
-            [HarmonyPostfix]
-            private static void Postfix(ShelfCompartment __instance,
-                List<WarehouseShelfInteraction.StoredRecordKey> __state)
-            {
-                _instance?.Warehouse?.ApplyRecordOrder(__instance, __state);
-            }
-        }
-
         [HarmonyPatch(typeof(ShelfCompartment), "TryPopLastStoredBoxRecord")]
         private static class StoredBoxRecordPoppedPatch
         {
             [HarmonyPrefix]
-            private static void Prefix(ShelfCompartment __instance, out WarehouseBoxState __state)
+            private static void Prefix(ShelfCompartment __instance,
+                out WarehouseShelfInteraction.WarehouseBoxFacts __state)
             {
-                __state = _instance?.Warehouse?.CapturePoppedRecord(__instance);
+                __state = _instance?.Warehouse?.CapturePoppedRecord(__instance) ?? default;
             }
 
             [HarmonyPostfix]
             private static void Postfix(ShelfCompartment __instance, bool __result,
-                WarehouseBoxState __state)
+                WarehouseShelfInteraction.WarehouseBoxFacts __state)
             {
                 _instance?.NotifyStoredBoxRecordPopped(__instance, __result, __state);
             }
@@ -202,6 +170,5 @@ namespace CardShopCoop.Modules.World
                 _instance?.NotifyWarehouseBoxRemoved(__instance, __0);
             }
         }
-
     }
 }

@@ -6,7 +6,7 @@ reference; copied outside the repo it needs a `GamePath` pointing at a game inst
 plus a reference to `CardShopCoop.Api.dll` with copy-local off (never ship your own copy). It
 synchronises a shared counter:
 
-- **Client** press K → sends `SampleIncrementIntent` to the host (connection id 1).
+- **Client** press K → sends `SampleIncrementIntent` to the host connection.
 - **Host** press K → increments locally and broadcasts `SampleCounterState`.
 - **Host** applies a client intent, then broadcasts the authoritative value.
 - **Host** sends one baseline to each late joiner.

@@ -89,7 +89,7 @@ namespace CardShopCoop.Modules.SaveTransfer
         /// to None, the game's back-to-menu save was allowed and wrote the host's world into the
         /// guest's own slot 0 (observed on the Game Pass log as a native GameData_0 save right after
         /// Role became None). Keeping the latch while a session is live also preserves
-        /// <see cref="SaveTransferRuntime.CanWriteSave"/> and TryAdmitHostStart's
+        /// <see cref="CanWriteSave"/> and TryAdmitHostStart's
         /// "leave the joined shop before hosting" rule for the whole borrowed session.</summary>
         public static void ClearBorrowedWorldIfSafe(bool inGame)
         {

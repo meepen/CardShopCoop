@@ -17,6 +17,52 @@ namespace CardShopCoop.Modules.World
         /// walk an unbounded shelf list.</summary>
         internal const int MaxCompartments = 256;
 
+        /// <summary>Returns the live shelf that owns a display compartment plus the compartment's
+        /// index in that shelf's list. Both peers address the slot by those live values only.</summary>
+        internal static bool TryGetShelf(InteractableCardCompartment compartment, out CardShelf shelf,
+            out int compartmentIndex)
+        {
+            shelf = null;
+            compartmentIndex = -1;
+            if (compartment == null)
+            {
+                return false;
+            }
+
+            shelf = compartment.GetCardShelf();
+            var compartments = shelf?.GetCardCompartmentList();
+            if (compartments == null)
+            {
+                return false;
+            }
+
+            compartmentIndex = compartments.IndexOf(compartment);
+            return compartmentIndex >= 0 && compartmentIndex < MaxCompartments;
+        }
+
+        /// <summary>Resolves a compartment inside an already-live display shelf. A null shelf or an
+        /// out-of-range index is an unresolved entity, never a reason to search for a fallback.</summary>
+        internal static bool TryGetCompartment(CardShelf shelf, int compartmentIndex,
+            out InteractableCardCompartment compartment)
+        {
+            compartment = null;
+            if (shelf == null || compartmentIndex < 0 || compartmentIndex >= MaxCompartments)
+            {
+                return false;
+            }
+
+            var compartments = shelf.GetCardCompartmentList();
+            if (compartments == null || compartmentIndex >= compartments.Count)
+            {
+                return false;
+            }
+
+            compartment = compartments[compartmentIndex];
+            return compartment != null;
+        }
+
+        // Compatibility bridge for the Pricing module, whose own wire intent still carries a
+        // placement key. World card-display messages do not use these; they carry the live shelf.
         internal static bool TryMakeKey(InteractableCardCompartment compartment, out int shelfKey,
             out int compartmentIndex)
         {
@@ -53,20 +99,8 @@ namespace CardShopCoop.Modules.World
             out InteractableCardCompartment compartment)
         {
             compartment = null;
-            if (compartmentIndex < 0 || compartmentIndex >= MaxCompartments
-                || PlacementApi.ResolveObjectByKey(shelfKey) is not CardShelf shelf)
-            {
-                return false;
-            }
-
-            var compartments = shelf.GetCardCompartmentList();
-            if (compartments == null || compartmentIndex >= compartments.Count)
-            {
-                return false;
-            }
-
-            compartment = compartments[compartmentIndex];
-            return compartment != null;
+            return PlacementApi.ResolveObjectByKey(shelfKey) is CardShelf shelf
+                && TryGetCompartment(shelf, compartmentIndex, out compartment);
         }
 
         /// <summary>The card currently displayed in a slot, or null when the slot is empty or its
@@ -125,10 +159,7 @@ namespace CardShopCoop.Modules.World
             }
 
             compartment.DisableAllCard();
-            if (compartment.m_StoredCardList != null)
-            {
-                compartment.m_StoredCardList.Clear();
-            }
+            compartment.m_StoredCardList?.Clear();
 
             if (compartment.m_InteractablePriceTagList != null)
             {

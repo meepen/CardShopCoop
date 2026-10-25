@@ -104,11 +104,11 @@ namespace CardShopCoop.Modules.Catalog
         internal static bool HostApplyScannerLicense(bool publish, out bool changed)
             => CatalogHostBehaviour.ApplyScannerUnlock(publish, out changed);
 
-        internal static bool HostPublishProductLicense(RestockData data, Guid predictionId)
-            => CatalogHostBehaviour.PublishProductLicense(data, predictionId);
+        internal static bool HostPublishProductLicense(RestockData data, Guid actionId)
+            => CatalogHostBehaviour.PublishProductLicense(data, actionId);
 
-        internal static bool HostPublishScannerLicense(Guid predictionId)
-            => CatalogHostBehaviour.PublishScannerUnlock(predictionId);
+        internal static bool HostPublishScannerLicense(Guid actionId)
+            => CatalogHostBehaviour.PublishScannerUnlock(actionId);
 
         internal static void HostApplyProductEntitlementSideEffects(RestockData data)
             => CatalogHostBehaviour.ApplyProductEntitlementSideEffects(data);

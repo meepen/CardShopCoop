@@ -1,17 +1,19 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.World;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
+using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.PlayTable
 {
-    /// <summary>Host validation, vanilla table mutation, and keyed state publication.</summary>
+    /// <summary>Host validation, vanilla table mutation, and live-table state publication.</summary>
     [ServerBehaviour]
     public sealed class PlayTableHostBehaviour : CoopBehaviour
     {
@@ -19,8 +21,8 @@ namespace CardShopCoop.Modules.PlayTable
         private const int MaxSeats = 8;
 
         private static PlayTableHostBehaviour _active;
-        private readonly Dictionary<int, Reservation> _reservations = new();
-        private readonly Dictionary<int, PlayTableEntry> _knownVisuals = new();
+        private readonly Dictionary<InteractablePlayTable, Reservation> _reservations = new();
+        private readonly Dictionary<InteractablePlayTable, PlayTableEntry> _knownVisuals = new();
         private readonly HashSet<int> _fullyJoined = new();
         private CoopRuntimeContext _context;
         private Harmony _harmony;
@@ -30,7 +32,6 @@ namespace CardShopCoop.Modules.PlayTable
         private sealed class Reservation
         {
             internal PlayTableMatchEntry Match;
-            internal InteractablePlayTable Table;
             internal PlayTableSeatSnapshot SeatBefore;
         }
 
@@ -52,6 +53,18 @@ namespace CardShopCoop.Modules.PlayTable
             RefreshVisuals(false);
         }
 
+        /// <summary>Seeds every live table's move gate before this peer receives the table mirror.
+        /// A save load restores each table's player count after the scene's tables exist, so this
+        /// runs from the join handler instead of a pre-transport lifecycle hook.</summary>
+        private void PublishGameStates()
+        {
+            var tables = PlayTableInterop.Tables(PlayTableInterop.FindShelfManager());
+            for (var i = 0; tables != null && i < tables.Count; i++)
+            {
+                PublishGameState(tables[i]);
+            }
+        }
+
         [OnFullyJoined]
         private void SendJoinBaseline(PeerConnection connection)
         {
@@ -61,6 +74,9 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _fullyJoined.Add(connection.Id);
+            // The extended-information baseline is assembled independently: make sure every live
+            // table's move gate is stored before this peer starts acting on the table mirror.
+            PublishGameStates();
             SendBaseline(connection.Id);
         }
 
@@ -73,7 +89,7 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _fullyJoined.Remove(connection.Id);
-            var releases = new List<int>();
+            var releases = new List<InteractablePlayTable>();
             foreach (var pair in _reservations)
             {
                 if (pair.Value.Match.OwnerConn == connection.Id)
@@ -88,38 +104,56 @@ namespace CardShopCoop.Modules.PlayTable
             }
         }
 
-        [MessageHandler(typeof(PlayTableMatchIntentMessage))]
-        private void HandleMatchIntent(MessageContext messageContext,
-            PlayTableMatchIntentMessage request)
+        [MessageHandler]
+        private void HandleStartMatchIntent(MessageContext messageContext,
+            StartTableMatchIntent request)
         {
             if (!IsPeerMessage(messageContext) || request == null)
             {
                 return;
             }
 
-            var owner = messageContext.Connection.Id;
-            switch (request.Op)
-            {
-                case PlayTableMatchIntentMessage.OpStart:
-                    StartMatch(request, owner);
-                    break;
-                case PlayTableMatchIntentMessage.OpCancel:
-                    CancelMatch(request, owner);
-                    break;
-                case PlayTableMatchIntentMessage.OpStarted:
-                    MarkMatchStarted(request, owner);
-                    break;
-                case PlayTableMatchIntentMessage.OpRelease:
-                    ReleaseMatch(request, owner);
-                    break;
-                default:
-                    Reject(owner, request.PredictionId, "unknown match intent");
-                    break;
-            }
+            StartMatch(request, messageContext.Connection.Id);
         }
 
-        [MessageHandler(typeof(PlayTableIntentMessage))]
-        private void HandleTableIntent(MessageContext messageContext, PlayTableIntentMessage message)
+        [MessageHandler]
+        private void HandleCancelMatchIntent(MessageContext messageContext,
+            CancelTableMatchIntent request)
+        {
+            if (!IsPeerMessage(messageContext) || request == null)
+            {
+                return;
+            }
+
+            CancelMatch(request, messageContext.Connection.Id);
+        }
+
+        [MessageHandler]
+        private void HandleMatchStartedIntent(MessageContext messageContext,
+            MarkTableMatchStartedIntent request)
+        {
+            if (!IsPeerMessage(messageContext) || request == null)
+            {
+                return;
+            }
+
+            MarkMatchStarted(request, messageContext.Connection.Id);
+        }
+
+        [MessageHandler]
+        private void HandleReleaseMatchIntent(MessageContext messageContext,
+            ReleaseTableMatchIntent request)
+        {
+            if (!IsPeerMessage(messageContext) || request == null)
+            {
+                return;
+            }
+
+            ReleaseMatch(request, messageContext.Connection.Id);
+        }
+
+        [MessageHandler]
+        private void HandleKickTableIntent(MessageContext messageContext, KickTableIntent message)
         {
             if (!IsPeerMessage(messageContext) || message == null)
             {
@@ -127,96 +161,49 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             var owner = messageContext.Connection.Id;
-            if (message.Kind != PlayTableIntentMessage.IntentKindPlayTable
-                || (message.Action != PlayTableIntentMessage.IntentKickTable
-                    && message.Action != PlayTableIntentMessage.IntentBoxTable))
+            // The client names the live table it acted on. The identity converter already
+            // resolved it against the host's live placement list, so a stale table arrives null
+            // and is dropped instead of being matched by a list index or placement key.
+            var table = message.Table;
+            if (table == null)
             {
-                Reject(owner, message.PredictionId, "invalid table intent");
+                Reject(owner, message.ActionId, "table is not live");
                 return;
             }
 
-            // The client addresses the table by the stable placement key it received from the
-            // host. Resolve that key straight back to the live object; a list index would not
-            // survive a concurrent placement, and there is no index on the wire to fall back to.
-            var table = PlacementApi.ResolveObjectByKey(message.ObjectKey) as InteractablePlayTable;
-            if (table == null
-                || !PlayTablePlacementInterop.TryGetTableKey(table, out var computedKey)
-                || computedKey != message.ObjectKey)
+            if (table.GetIsTournamentPlayTable() || table.GetCurrentPlayerCount() <= 0
+                || _reservations.ContainsKey(table) || PlayTableInterop.HostPlayingAt(table)
+                || table.GetHasStartPlayerPlayCard())
             {
-                Reject(owner, message.PredictionId, "stale table identity");
+                // The requester's occupancy mirror can trail the host (a customer just finished,
+                // or another client already kicked the table). A host player's own live game also
+                // owns the table and must not be stopped from a guest's move. Re-anchor the
+                // requester to authority before the generic rollback so the undo does not
+                // resurrect stale occupancy and leave the table permanently unmovable. The gate
+                // is resent even when the host's stored value is unchanged: the requester's copy
+                // is the one that trailed.
+                PublishGameState(table, true);
+                SendTableState(owner, table, message.ActionId);
+                Reject(owner, message.ActionId,
+                    "table is not occupied by a kickable game");
                 return;
             }
 
-            if (message.Action == PlayTableIntentMessage.IntentKickTable)
-            {
-                if (table.GetIsTournamentPlayTable() || table.GetCurrentPlayerCount() <= 0
-                    || _reservations.ContainsKey(message.ObjectKey))
-                {
-                    Reject(owner, message.PredictionId,
-                        "table is not occupied by a kickable game");
-                    return;
-                }
-
-                _suppressStoppedVisual = true;
-                try
-                {
-                    PlayTableInterop.InvokeStopTableGame(table);
-                }
-                finally
-                {
-                    _suppressStoppedVisual = false;
-                }
-
-                NotifyTableChanged(table, message.PredictionId, true);
-                return;
-            }
-
-            if (table.GetIsBoxedUp() || table.GetCurrentPlayerCount() > 0
-                || _reservations.ContainsKey(message.ObjectKey)
-                || PlayTableInterop.HostPlayingAt(table))
-            {
-                Reject(owner, message.PredictionId,
-                    "occupied or reserved table cannot be boxed");
-                return;
-            }
-
-            if (table.GetTournamentPlayTableNumber() > 0)
-            {
-                Reject(owner, message.PredictionId,
-                    "tournament-numbered table cannot be boxed");
-                return;
-            }
-
-            // The client is the creator and carried the package's stable id. A non-fresh id means
-            // the client already bound a live box to it: adopting it would rebind that box, and
-            // minting a different id would desync the client's package. Reject the intent.
-            if (!WorldHostBehaviour.PushCreatedBoxId(message.BoxNetworkId))
-            {
-                Reject(owner, message.PredictionId, "package box id is not fresh");
-                return;
-            }
-
-            WorldHostBehaviour.Active?.SetNextMutationPrediction(message.PredictionId);
+            _suppressStoppedVisual = true;
             try
             {
-                table.BoxUpObject(true);
+                PlayTableInterop.InvokeStopTableGame(table);
             }
             finally
             {
-                WorldHostBehaviour.Active?.SetNextMutationPrediction(Guid.Empty);
+                _suppressStoppedVisual = false;
             }
 
-            if (!table.GetIsBoxedUp() || table.GetPackagingBoxShelf() == null)
-            {
-                // The push parked the client's id for a box the game did not produce; release it so
-                // a later, unrelated creation cannot bind to it. No-op once consumed.
-                WorldHostBehaviour.CancelCreatedBoxId(message.BoxNetworkId);
-                Reject(owner, message.PredictionId,
-                    "table boxing did not produce a package box");
-            }
+            NotifyTableChanged(table, message.ActionId, true);
         }
 
-        internal bool HasActiveMatch(int tableKey) => _reservations.ContainsKey(tableKey);
+        internal bool HasActiveMatch(InteractablePlayTable table)
+            => table != null && _reservations.ContainsKey(table);
 
         internal static bool IsPlacementMoveAllowed(InteractableObject obj)
         {
@@ -225,32 +212,30 @@ namespace CardShopCoop.Modules.PlayTable
                 return true;
             }
 
-            if (!PlayTablePlacementInterop.TryGetTableKey(table, out var key))
-            {
-                return false;
-            }
-
-            return (_active == null || !_active._reservations.ContainsKey(key))
+            return (_active == null || !_active._reservations.ContainsKey(table))
                 && table.GetCurrentPlayerCount() <= 0 && !PlayTableInterop.HostPlayingAt(table);
         }
 
-        private void StartMatch(PlayTableMatchIntentMessage request, int owner)
+        internal static bool IsBoxUpAllowed(InteractablePlayTable table)
+            => table != null && !table.GetIsBoxedUp() && table.GetCurrentPlayerCount() <= 0
+                && (_active == null || !_active._reservations.ContainsKey(table))
+                && !PlayTableInterop.HostPlayingAt(table)
+                && table.GetTournamentPlayTableNumber() <= 0;
+
+        private void StartMatch(StartTableMatchIntent request, int owner)
         {
-            // Bind the reservation to the stable placement key alone. The client's key was
-            // assigned by this host and returned to it, so a successful resolve plus a matching
-            // recomputed key proves the local object is the one the client meant.
-            var table = PlacementApi.ResolveObjectByKey(request.TableKey) as InteractablePlayTable;
-            if (table == null
-                || !PlayTablePlacementInterop.TryGetTableKey(table, out var computedKey)
-                || request.TableKey != computedKey)
+            // The request names the live table; the identity converter resolved it against this
+            // host's live placement list. A missing object is a stale table and is dropped.
+            var table = request.Table;
+            if (table == null)
             {
-                Reject(owner, request.PredictionId, "table key mismatch");
+                Reject(owner, request.ActionId, "table is not live");
                 return;
             }
 
-            if (_reservations.ContainsKey(request.TableKey))
+            if (_reservations.ContainsKey(table))
             {
-                Reject(owner, request.PredictionId, "table already reserved");
+                Reject(owner, request.ActionId, "table already reserved");
                 return;
             }
 
@@ -258,20 +243,20 @@ namespace CardShopCoop.Modules.PlayTable
             {
                 if (existing.Match.OwnerConn == owner)
                 {
-                    Reject(owner, request.PredictionId, "owner already has a match");
+                    Reject(owner, request.ActionId, "owner already has a match");
                     return;
                 }
 
                 if (existing.Match.MatchId == request.MatchId)
                 {
-                    Reject(owner, request.PredictionId, "match id is already active");
+                    Reject(owner, request.ActionId, "match id is already active");
                     return;
                 }
             }
 
             if (PlayTableInterop.HostPlayingAt(table) || request.Seat > 1)
             {
-                Reject(owner, request.PredictionId, "table or seat is unavailable");
+                Reject(owner, request.ActionId, "table or seat is unavailable");
                 return;
             }
 
@@ -286,7 +271,7 @@ namespace CardShopCoop.Modules.PlayTable
                 || occupied.Count <= customerSeat || !occupied[customerSeat]
                 || request.SideA != (request.Seat == 0))
             {
-                Reject(owner, request.PredictionId,
+                Reject(owner, request.ActionId,
                     "requested seat must be free and the customer seat occupied");
                 return;
             }
@@ -294,104 +279,108 @@ namespace CardShopCoop.Modules.PlayTable
             var maxDeck = GameInstance.GetMaxDeckCardCount();
             if (request.DeckCardCount < 1 || request.DeckCardCount > maxDeck)
             {
-                Reject(owner, request.PredictionId, "invalid deck size");
+                Reject(owner, request.ActionId, "invalid deck size");
                 return;
             }
 
             if (string.IsNullOrEmpty(request.MatchId) || request.MatchId.Length > 64)
             {
-                Reject(owner, request.PredictionId, "invalid match id");
+                Reject(owner, request.ActionId, "invalid match id");
                 return;
             }
 
             if (!PlayTableInterop.ReserveSeat(table, request.Seat, out var seatBefore))
             {
-                Reject(owner, request.PredictionId, "reservation race");
+                Reject(owner, request.ActionId, "reservation race");
                 return;
             }
 
             var reservation = new Reservation
             {
-                Table = table,
                 SeatBefore = seatBefore,
                 Match = new PlayTableMatchEntry
                 {
                     MatchId = request.MatchId,
                     OwnerConn = owner,
-                    TableKey = request.TableKey,
+                    Table = table,
                     Seat = request.Seat,
                     SideA = request.SideA,
                     Phase = PlayTableMatchEntry.StateReserved,
                 },
             };
-            _reservations.Add(request.TableKey, reservation);
-            NotifyTableChanged(table, request.PredictionId, false);
-            PublishMatchUpsert(reservation.Match, request.PredictionId);
+            _reservations.Add(table, reservation);
+            NotifyTableChanged(table, request.ActionId, false);
+            PublishMatchUpsert(reservation.Match, request.ActionId);
         }
 
-        private void CancelMatch(PlayTableMatchIntentMessage request, int owner)
+        private void CancelMatch(CancelTableMatchIntent request, int owner)
         {
-            if (!TryGetOwnedReservation(request, owner, out var reservation))
+            if (!TryGetOwnedReservation(request.Table, request.MatchId, owner, out var reservation))
             {
-                Reject(owner, request.PredictionId, "cancel is not authenticated");
+                Reject(owner, request.ActionId, "cancel is not authenticated");
                 return;
             }
 
-            Release(reservation.Match.TableKey, "cancelled", request.PredictionId);
+            Release(reservation.Match.Table, "cancelled", request.ActionId);
         }
 
-        private void MarkMatchStarted(PlayTableMatchIntentMessage request, int owner)
+        private void MarkMatchStarted(MarkTableMatchStartedIntent request, int owner)
         {
-            if (!TryGetOwnedReservation(request, owner, out var reservation))
+            if (!TryGetOwnedReservation(request.Table, request.MatchId, owner, out var reservation))
             {
-                Reject(owner, request.PredictionId, "match is not owned by sender");
+                Reject(owner, request.ActionId, "match is not owned by sender");
                 return;
             }
 
             reservation.Match.Phase = PlayTableMatchEntry.StateStarted;
-            PublishMatchUpsert(reservation.Match, request.PredictionId);
+            PublishMatchUpsert(reservation.Match, request.ActionId);
         }
 
-        private void ReleaseMatch(PlayTableMatchIntentMessage request, int owner)
+        private void ReleaseMatch(ReleaseTableMatchIntent request, int owner)
         {
-            if (!TryGetOwnedReservation(request, owner, out var reservation))
+            if (!TryGetOwnedReservation(request.Table, request.MatchId, owner, out var reservation))
             {
-                Reject(owner, request.PredictionId, "match release is not authenticated");
+                Reject(owner, request.ActionId, "match release is not authenticated");
                 return;
             }
 
-            Release(reservation.Match.TableKey, "gameplay-finished", request.PredictionId);
+            Release(reservation.Match.Table, "gameplay-finished", request.ActionId);
         }
 
-        private bool TryGetOwnedReservation(PlayTableMatchIntentMessage request, int owner,
+        private bool TryGetOwnedReservation(InteractablePlayTable table, string matchId, int owner,
             out Reservation reservation)
-            => _reservations.TryGetValue(request.TableKey, out reservation)
-                && reservation.Match.OwnerConn == owner
-                && reservation.Match.MatchId == request.MatchId;
-
-        private bool Release(int tableKey, string reason, Guid predictionId)
         {
-            if (!_reservations.TryGetValue(tableKey, out var reservation))
+            reservation = null;
+            return table != null
+                && _reservations.TryGetValue(table, out reservation)
+                && reservation.Match.OwnerConn == owner
+                && reservation.Match.MatchId == matchId;
+        }
+
+        private bool Release(InteractablePlayTable table, string reason, Guid actionId)
+        {
+            if (table == null || !_reservations.TryGetValue(table, out var reservation))
             {
                 return false;
             }
 
-            _reservations.Remove(tableKey);
-            PlayTableInterop.RestoreReservedSeat(reservation.Table, reservation.SeatBefore,
+            _reservations.Remove(table);
+            PlayTableInterop.RestoreReservedSeat(table, reservation.SeatBefore,
                 reservation.Match.Seat);
-            CoopPlugin.Log.LogInfo("play-table match released table=" + tableKey + " reason=" + reason);
-            NotifyTableChanged(reservation.Table, predictionId, false);
-            PublishMatchRelease(reservation.Match, predictionId);
+            CoopPlugin.Log.LogInfo("play-table match released table=" + table.name
+                + " reason=" + reason);
+            NotifyTableChanged(table, actionId, false);
+            PublishMatchRelease(reservation.Match, actionId);
             return true;
         }
 
-        private void Reject(int connectionId, Guid predictionId, string reason)
+        private void Reject(int connectionId, Guid actionId, string reason)
         {
             CoopPlugin.Log.LogWarning("play-table intent rejected for connection=" + connectionId
                 + ": " + reason);
-            if (predictionId != Guid.Empty)
+            if (actionId != Guid.Empty)
             {
-                PredictionApi.Rollback(_context, connectionId, predictionId);
+                ActionLedger.Rollback(_context, connectionId, actionId);
             }
         }
 
@@ -407,7 +396,10 @@ namespace CardShopCoop.Modules.PlayTable
             var count = Math.Min(tables.Count, MaxTables);
             for (var i = 0; i < count; i++)
             {
-                message.Tables.Add(BuildTableEntry(tables[i]));
+                if (tables[i] != null)
+                {
+                    message.Tables.Add(BuildTableEntry(tables[i]));
+                }
             }
 
             foreach (var reservation in _reservations.Values)
@@ -449,24 +441,38 @@ namespace CardShopCoop.Modules.PlayTable
             }
         }
 
-        private void NotifyTableChanged(InteractablePlayTable table, Guid predictionId,
-            bool force)
+        /// <summary>Sends one requester the live table state under a rejected action's id. The
+        /// client's reducer retires that action and folds authority instead of running its undo
+        /// against a snapshot the host has already moved past.</summary>
+        private void SendTableState(int connectionId, InteractablePlayTable table, Guid actionId)
         {
-            if (table == null || !PlayTablePlacementInterop.TryGetTableKey(table, out var key))
+            if (_shutdown || connectionId <= 0 || table == null || !_context.InGame())
             {
                 return;
             }
 
-            var current = BuildTableEntry(table);
-            if (!_knownVisuals.TryGetValue(key, out var old))
+            _context.Send(connectionId, CreateTableDelta(BuildTableEntry(table), actionId));
+        }
+
+        private void NotifyTableChanged(InteractablePlayTable table, Guid actionId,
+            bool force)
+        {
+            if (table == null)
             {
-                PublishVisual(CreateTableDelta(current, predictionId));
+                return;
+            }
+
+            PublishGameState(table);
+            var current = BuildTableEntry(table);
+            if (!_knownVisuals.TryGetValue(table, out var old))
+            {
+                PublishVisual(CreateTableDelta(current, actionId));
             }
             else
             {
                 if (force || old.Occupied != current.Occupied || old.Boxed != current.Boxed)
                 {
-                    PublishVisual(CreateTableDelta(current, predictionId));
+                    PublishVisual(CreateTableDelta(current, actionId));
                 }
                 else
                 {
@@ -476,9 +482,9 @@ namespace CardShopCoop.Modules.PlayTable
                         {
                             PublishVisual(new PlayTableVisualDeltaMessage
                             {
-                                PredictionId = predictionId,
+                                ActionId = actionId,
                                 Operation = PlayTableVisualDeltaMessage.SeatUpdate,
-                                TableKey = key,
+                                Table = table,
                                 Seat = (byte)seat,
                                 SeatState = CopySeat(current.Seats[seat]),
                             });
@@ -487,42 +493,78 @@ namespace CardShopCoop.Modules.PlayTable
                 }
             }
 
-            _knownVisuals[key] = current;
+            _knownVisuals[table] = current;
         }
 
-        private void NotifyTableRemoved(InteractablePlayTable table)
+        /// <summary>Publishes the vanilla move-gate fields as object-attached authority.
+        /// Extended information is keyed by the table's stable identity, so a guest reads the
+        /// host's real occupancy synchronously when the pickup input arrives, and the value rides
+        /// the join baseline with the table instead of depending on a visual delta arriving
+        /// first.</summary>
+        private void PublishGameState(InteractablePlayTable table, bool force = false)
         {
-            if (table == null || !PlayTablePlacementInterop.TryGetTableKey(table, out var key))
+            // A host has no peer before the bearer exists, so there is nothing to broadcast and
+            // CoopCore.Broadcast would throw. Lifecycle hooks can still run game code this early.
+            if (_shutdown || table == null || !_context.InGame()
+                || CoopCore.Instance?.Net == null
+                || !GameObjectIdentityApi.TryGetId(table, out _))
             {
                 return;
             }
 
-            Release(key, "table-removed", Guid.Empty);
-            if (_knownVisuals.Remove(key))
+            var playerCount = table.GetCurrentPlayerCount();
+            var isTournament = table.GetIsTournamentPlayTable();
+            var playerOccupied = PlayTableInterop.HostPlayingAt(table)
+                || table.GetHasStartPlayerPlayCard();
+            var current = table.GetExtendedInformation<PlayTableGameState>();
+            if (!force && current != null && current.PlayerCount == playerCount
+                && current.IsTournament == isTournament
+                && current.PlayerOccupied == playerOccupied)
+            {
+                return;
+            }
+
+            table.SetExtendedInformation(new PlayTableGameState
+            {
+                PlayerCount = playerCount,
+                IsTournament = isTournament,
+                PlayerOccupied = playerOccupied,
+            });
+        }
+
+        private void NotifyTableRemoved(InteractablePlayTable table)
+        {
+            if (table == null)
+            {
+                return;
+            }
+
+            Release(table, "table-removed", Guid.Empty);
+            if (_knownVisuals.Remove(table))
             {
                 PublishVisual(new PlayTableVisualDeltaMessage
                 {
                     Operation = PlayTableVisualDeltaMessage.TableRemove,
-                    TableKey = key,
+                    Table = table,
                 });
             }
         }
 
         private void RefreshVisuals(bool publish)
         {
-            var current = new Dictionary<int, PlayTableEntry>();
+            var current = new Dictionary<InteractablePlayTable, PlayTableEntry>();
             var tables = PlayTableInterop.Tables(PlayTableInterop.FindShelfManager());
             var count = Math.Min(tables?.Count ?? 0, MaxTables);
             for (var i = 0; tables != null && i < count; i++)
             {
                 var table = tables[i];
-                if (table != null && PlayTablePlacementInterop.TryGetTableKey(table, out var key))
+                if (table != null)
                 {
-                    current[key] = BuildTableEntry(table);
+                    current[table] = BuildTableEntry(table);
                 }
             }
 
-            var removed = new List<int>();
+            var removed = new List<InteractablePlayTable>();
             foreach (var pair in _knownVisuals)
             {
                 if (!current.ContainsKey(pair.Key))
@@ -538,7 +580,7 @@ namespace CardShopCoop.Modules.PlayTable
                     PublishVisual(new PlayTableVisualDeltaMessage
                     {
                         Operation = PlayTableVisualDeltaMessage.TableRemove,
-                        TableKey = removed[i],
+                        Table = removed[i],
                     });
                 }
 
@@ -556,36 +598,50 @@ namespace CardShopCoop.Modules.PlayTable
             }
         }
 
-        private void PublishMatchUpsert(PlayTableMatchEntry match, Guid predictionId)
+        private void PublishMatchUpsert(PlayTableMatchEntry match, Guid actionId)
         {
+            if (match?.Table == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "play-table: dropped match upsert with no live table object.");
+                return;
+            }
+
             _context.Broadcast(new PlayTableMatchDeltaMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Operation = PlayTableMatchDeltaMessage.Upsert,
                 MatchId = match.MatchId,
-                TableKey = match.TableKey,
+                Table = match.Table,
                 Match = CopyMatch(match),
             });
         }
 
-        private void PublishMatchRelease(PlayTableMatchEntry match, Guid predictionId)
+        private void PublishMatchRelease(PlayTableMatchEntry match, Guid actionId)
         {
+            if (match?.Table == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "play-table: dropped match release with no live table object.");
+                return;
+            }
+
             _context.Broadcast(new PlayTableMatchDeltaMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Operation = PlayTableMatchDeltaMessage.Release,
                 MatchId = match.MatchId,
-                TableKey = match.TableKey,
+                Table = match.Table,
             });
         }
 
         private static PlayTableVisualDeltaMessage CreateTableDelta(PlayTableEntry entry,
-            Guid predictionId)
+            Guid actionId)
             => new()
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Operation = PlayTableVisualDeltaMessage.TableUpsert,
-                TableKey = entry.TableKey,
+                Table = entry.Table,
                 Occupied = entry.Occupied,
                 Boxed = entry.Boxed,
                 Seats = CopySeats(entry.Seats),
@@ -595,10 +651,9 @@ namespace CardShopCoop.Modules.PlayTable
         {
             var sets = table?.m_TableGameItemSetList;
             var seats = Math.Min(sets?.Count ?? 0, MaxSeats);
-            PlayTablePlacementInterop.TryGetTableKey(table, out var key);
             var entry = new PlayTableEntry
             {
-                TableKey = key,
+                Table = table,
                 Occupied = table != null && table.GetCurrentPlayerCount() > 0,
                 Boxed = table != null && table.GetIsBoxedUp(),
             };
@@ -656,7 +711,7 @@ namespace CardShopCoop.Modules.PlayTable
             {
                 MatchId = source.MatchId,
                 OwnerConn = source.OwnerConn,
-                TableKey = source.TableKey,
+                Table = source.Table,
                 Seat = source.Seat,
                 SideA = source.SideA,
                 Phase = source.Phase,
@@ -691,6 +746,9 @@ namespace CardShopCoop.Modules.PlayTable
                 new HarmonyMethod(typeof(TableStoppedPatch), nameof(TableStoppedPatch.Postfix)));
             Patch(AccessTools.Method(typeof(InteractablePlayTable), "OnRightMouseButtonUp"), null,
                 new HarmonyMethod(typeof(TableChangedPatch), nameof(TableChangedPatch.Postfix)));
+            Patch(AccessTools.Method(typeof(InteractablePlayTable), "SetIsTournamentPlayTable"), null,
+                new HarmonyMethod(typeof(GameStateChangedPatch),
+                    nameof(GameStateChangedPatch.Postfix)));
         }
 
         private void Patch(System.Reflection.MethodInfo original, HarmonyMethod prefix,
@@ -717,6 +775,15 @@ namespace CardShopCoop.Modules.PlayTable
                 => _active?.RefreshVisuals(true);
         }
 
+        /// <summary>Only the move gate changes here; publishing a visual delta during Awake (the
+        /// game sets this flag while the table is still initialising) would announce a half-built
+        /// table.</summary>
+        private static class GameStateChangedPatch
+        {
+            internal static void Postfix(InteractablePlayTable __instance)
+                => _active?.PublishGameState(__instance);
+        }
+
         private static class TableRemovedPatch
         {
             internal static void Prefix(InteractablePlayTable __instance)
@@ -733,10 +800,7 @@ namespace CardShopCoop.Modules.PlayTable
                     return;
                 }
 
-                if (PlayTablePlacementInterop.TryGetTableKey(__instance, out var key))
-                {
-                    host.Release(key, "table-stopped", Guid.Empty);
-                }
+                host.Release(__instance, "table-stopped", Guid.Empty);
 
                 if (!host._suppressStoppedVisual)
                 {

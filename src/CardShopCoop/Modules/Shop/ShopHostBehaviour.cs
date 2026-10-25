@@ -1,11 +1,14 @@
 using System;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.Actions;
+using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Modules.Presence;
-using CardShopCoop.Modules.Prediction;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Shop
 {
@@ -27,74 +30,45 @@ namespace CardShopCoop.Modules.Shop
             }
 
             _context = RuntimeContext;
-            var handlersRegistered = false;
+            ShopRenameSession.Reset();
+            // A rename UI already open when the session starts has the live draft in
+            // CPlayerData; the canonical read below deliberately ignores it then.
+            if (!ShopState.TryGetCanonical(out _))
+            {
+                CoopPlugin.Log.LogWarning("Shop host started before a valid canonical shop name was loaded.");
+            }
+
+            ShopRenamePatches.SetEndpoint(this);
+            _harmony = new Harmony("dev.meepen.cardshopcoop.shop.host");
             try
             {
-                ShopRenameSession.Reset();
-                ShopState.SetUnnamed(CPlayerData.m_TutorialIndex == 0);
-                // A rename UI already open when the session starts has the live draft in
-                // CPlayerData; do not cache that as the canonical baseline.
-                if (!ShopState.TryGetCanonical(out _) && !ShopInterop.HasAnyOpenRenameScreen()
-                    && !ShopState.TryGet(out _))
-                {
-                    CoopPlugin.Log.LogWarning("Shop host started before a valid canonical shop name was loaded.");
-                }
-
-                _context.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
-                ShopRenamePatches.SetEndpoint(this);
-                _harmony = new Harmony("dev.meepen.cardshopcoop.shop.host");
                 ShopRenamePatches.Install(_harmony);
             }
-            catch (Exception exception)
+            catch
             {
-                CoopPlugin.Log.LogError("Shop host initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
-                ShopRenamePatches.ClearEndpoint(this);
-                if (handlersRegistered)
-                {
-                    _context.Messages.UnregisterAttributedHandlers(this);
-                }
-                ClearSessionState();
-                _context = null;
+                Shutdown();
                 throw;
             }
         }
 
-        [OnFullyJoined]
-        private void SendBaseline(PeerConnection connection)
+        /// <summary>The store owns the join baseline; seed it once after every behaviour's
+        /// OnEnable and before the transport starts. There is deliberately no join callback:
+        /// a late joiner receives this value in the generic extended-information baseline.</summary>
+        [OnSessionStarted]
+        private void SeedState()
         {
-            if (_shutdown || connection == null)
+            if (_shutdown || _context == null)
             {
                 return;
             }
 
-            var unnamed = CPlayerData.m_TutorialIndex == 0;
-            ShopState.SetUnnamed(unnamed);
-            var editing = _localEditing || ShopRenameSession.IsLocalOwner
-                || ShopInterop.HasAnyOpenRenameScreen();
-            var hasName = ShopState.TryGetCanonical(out var name)
-                || (!editing && ShopState.TryGet(out name));
-            if (hasName)
+            ExtendedInformationModule.SeedGlobal(typeof(ShopRenameState),
+                BuildRenameState(Guid.Empty, rejected: false, isRename: false,
+                    refreshUnnamed: true));
+            var draft = BuildDraftState();
+            if (draft != null)
             {
-                _context.Send(connection.Id, new ShopRenameDeltaMessage
-                {
-                    PredictionId = Guid.Empty,
-                    Name = name,
-                    Initial = true,
-                    Unnamed = unnamed,
-                });
-            }
-
-            _context.Send(connection.Id, BuildLockMessage(Guid.Empty));
-            if (ShopRenameSession.Draft != null)
-            {
-                _context.Send(connection.Id, new ShopRenameDraftMessage
-                {
-                    OwnerConn = ShopRenameSession.Owner,
-                    Text = ShopRenameSession.Draft,
-                });
+                ExtendedInformationModule.SeedGlobal(typeof(ShopRenameDraftState), draft);
             }
         }
 
@@ -111,15 +85,58 @@ namespace CardShopCoop.Modules.Shop
             ReleaseLock(connection.Id);
         }
 
-        [MessageHandler(typeof(ShopRenameLockRequestMessage))]
-        private void Handle(MessageContext context, ShopRenameLockRequestMessage message)
+        [IntentValidator]
+        private IntentValidation ValidateLock(CoopMessageContext context,
+            ShopRenameLockIntent message)
         {
-            if (!IsAuthenticatedSender(context) || message == null)
+            if (_shutdown || context?.Connection == null || message == null)
+            {
+                return IntentValidation.Deny("session is not active");
+            }
+
+            if (!context.IsAuthenticated)
+            {
+                return IntentValidation.Deny("player is not authenticated");
+            }
+
+            if (message.Op != ShopRenameLockOp.Acquire && message.Op != ShopRenameLockOp.Release)
+            {
+                return IntentValidation.Deny("unknown lock operation");
+            }
+
+            // Release is a session fact and must land across a loading scene. Acquire is gameplay
+            // traffic and waits for the peer's fully-joined acknowledgement.
+            if (message.Op == ShopRenameLockOp.Acquire
+                && context.Connection.State != ConnectionState.FullyJoined)
+            {
+                return IntentValidation.Deny("player is still joining");
+            }
+
+            return IntentValidation.Allow();
+        }
+
+        [IntentRejected]
+        private void LockRejected(CoopMessageContext context, ShopRenameLockIntent message,
+            string reason)
+        {
+            if (_shutdown || context?.Connection == null || message == null)
             {
                 return;
             }
 
-            var sender = context.Connection.Id;
+            CoopPlugin.Log.LogWarning("Shop rename lock intent rejected: " + reason);
+            PublishRenameState(message.ActionId, rejected: true, isRename: false);
+        }
+
+        [MessageHandler]
+        private void Handle(CoopMessageContext context, ShopRenameLockIntent message)
+        {
+            if (_shutdown || context?.Connection == null || message == null)
+            {
+                return;
+            }
+
+            var sender = context.ConnectionId;
             if (message.Op == ShopRenameLockOp.Release)
             {
                 if (ShopRenameSession.IsOwner(sender))
@@ -132,8 +149,6 @@ namespace CardShopCoop.Modules.Shop
 
             if (message.Op != ShopRenameLockOp.Acquire)
             {
-                CoopPlugin.Log.LogWarning("Shop rename lock intent had unknown op " + message.Op
-                    + " from peer " + sender + "; ignoring.");
                 return;
             }
 
@@ -141,11 +156,8 @@ namespace CardShopCoop.Modules.Shop
             {
                 // Do not hand out a game-scene UI lock while the host is loading. The release
                 // branch above still runs, so a lock opened before the load cannot stick.
-                SendLockState(sender, Guid.Empty);
-                if (message.PredictionId != Guid.Empty)
-                {
-                    PredictionApi.Rollback(_context, sender, message.PredictionId);
-                }
+                PublishRenameState(message.ActionId, rejected: true, isRename: false);
+                Reject(context, message.ActionId);
                 return;
             }
 
@@ -155,78 +167,65 @@ namespace CardShopCoop.Modules.Shop
                 ShopRenameSession.ApplyLock(sender, ownerName);
                 CoopPlugin.Log.LogInfo("Shop rename lock acquired by peer " + sender
                     + " (" + ownerName + ").");
-                _context.Broadcast(BuildLockMessage(message.PredictionId));
+                PublishRenameState(message.ActionId, rejected: false, isRename: false);
                 return;
             }
 
             if (ShopRenameSession.IsOwner(sender))
             {
                 // A repeated acquire (the UI was reopened before the release crossed) is a grant,
-                // not a denial: retire the new prediction with the current state.
-                _context.Send(sender, BuildLockMessage(message.PredictionId));
+                // not a denial: retire the new action with the current state.
+                PublishRenameState(message.ActionId, rejected: false, isRename: false);
                 return;
             }
 
             CoopPlugin.Log.LogDebug("Shop rename lock denied to peer " + sender
                 + "; held by peer " + ShopRenameSession.Owner + ".");
-            SendLockState(sender, Guid.Empty);
-            if (message.PredictionId != Guid.Empty)
-            {
-                PredictionApi.Rollback(_context, sender, message.PredictionId);
-            }
+            PublishRenameState(message.ActionId, rejected: true, isRename: false);
+            Reject(context, message.ActionId);
         }
 
-        [MessageHandler(typeof(ShopRenameDraftIntentMessage))]
-        private void Handle(MessageContext context, ShopRenameDraftIntentMessage message)
+        [IntentValidator]
+        private IntentValidation ValidateRename(CoopMessageContext context,
+            ShopRenameRequestIntent message)
         {
-            if (!IsAuthenticatedSender(context) || message == null)
+            if (_shutdown || context?.Connection == null || message == null)
             {
-                return;
+                return IntentValidation.Deny("session is not active");
             }
 
-            var sender = context.Connection.Id;
-            if (!ShopRenameSession.IsOwner(sender))
-            {
-                SendLockState(sender, Guid.Empty);
-                return;
-            }
-
-            var draft = ShopState.NormalizeDraft(message.Text);
-            ShopRenameSession.ApplyDraft(draft);
-            _context.Broadcast(new ShopRenameDraftMessage
-            {
-                OwnerConn = sender,
-                Text = draft,
-            });
+            return context.IsAuthenticated
+                ? IntentValidation.Allow()
+                : IntentValidation.Deny("player is not authenticated");
         }
 
-        [MessageHandler(typeof(ShopRenameRequestMessage))]
-        private void Handle(MessageContext context, ShopRenameRequestMessage message)
+        [IntentRejected]
+        private void RenameRejected(CoopMessageContext context, ShopRenameRequestIntent message,
+            string reason)
         {
-            if (!IsAuthenticatedSender(context) || message == null)
+            if (_shutdown || context?.Connection == null || message == null)
             {
                 return;
             }
 
-            var sender = context.Connection.Id;
+            CoopPlugin.Log.LogWarning("Shop rename intent rejected: " + reason);
+            PublishRenameState(message.ActionId, rejected: true, isRename: false);
+        }
+
+        [MessageHandler]
+        private void Handle(CoopMessageContext context, ShopRenameRequestIntent message)
+        {
+            if (_shutdown || context?.Connection == null || message == null)
+            {
+                return;
+            }
+
+            var sender = context.ConnectionId;
             if (!_context.InGame())
             {
                 // The host cannot apply a scene change while it is loading. Release the sender's
-                // lock and reject the proposal so the client rolls back instead of waiting.
-                try
-                {
-                    SendCanonicalState(sender);
-                }
-                catch (Exception stateError)
-                {
-                    CoopPlugin.Log.LogError("Could not send the canonical shop name during a "
-                        + "load: " + stateError);
-                }
-                finally
-                {
-                    ReleaseLock(sender);
-                }
-                Reject(context, message.PredictionId);
+                // lock and reject the proposal so the client reconciles instead of waiting.
+                RejectRename(context, message, releaseOwner: true);
                 return;
             }
 
@@ -234,19 +233,7 @@ namespace CardShopCoop.Modules.Shop
             {
                 CoopPlugin.Log.LogDebug("Shop rename rejected from peer " + sender
                     + " because it does not hold the edit lock.");
-                try
-                {
-                    SendLockState(sender, Guid.Empty);
-                    // Put the requester on the host's canonical name before the rollback, so a
-                    // stale optimistic snapshot cannot be re-applied over a newer accepted rename.
-                    SendCanonicalState(sender);
-                }
-                catch (Exception stateError)
-                {
-                    CoopPlugin.Log.LogError("Could not resync peer " + sender
-                        + " before rejecting its rename: " + stateError);
-                }
-                Reject(context, message.PredictionId);
+                RejectRename(context, message, releaseOwner: false);
                 return;
             }
 
@@ -254,28 +241,12 @@ namespace CardShopCoop.Modules.Shop
             {
                 CoopPlugin.Log.LogDebug("Shop rename rejected from peer " + sender
                     + ": invalid name.");
-                // The editor closed its UI on confirm. Put the canonical name back and release
-                // the lock so another player can try; the requester reconciles to the canonical
-                // state before the generic rollback.
-                try
-                {
-                    SendCanonicalState(sender);
-                }
-                catch (Exception stateError)
-                {
-                    CoopPlugin.Log.LogError("Could not send the canonical shop name before "
-                        + "rejecting peer " + sender + "'s rename: " + stateError);
-                }
-                finally
-                {
-                    ReleaseLock(sender);
-                }
-                Reject(context, message.PredictionId);
+                RejectRename(context, message, releaseOwner: true);
                 return;
             }
 
             var applied = false;
-            var broadcast = false;
+            var published = false;
             try
             {
                 if (!ShopState.Apply(name))
@@ -302,22 +273,22 @@ namespace CardShopCoop.Modules.Shop
                         + "name; continuing with the accepted rename: " + sideEffectError);
                 }
 
-                BroadcastRename(name, message.PredictionId);
-                broadcast = true;
+                PublishRenameCleared(message.ActionId, name);
+                published = true;
             }
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError("Shop rename failed while applying peer " + sender
                     + "'s name: " + error);
-                if (!broadcast)
+                if (!published)
                 {
                     // If the canonical name was already applied, do not roll the requester back
                     // to an older name; just give it authority. Only an apply failure is a
                     // genuine rejection.
-                    SendCanonicalState(sender);
+                    PublishRenameState(message.ActionId, rejected: !applied, isRename: false);
                     if (!applied)
                     {
-                        Reject(context, message.PredictionId);
+                        Reject(context, message.ActionId);
                     }
                 }
             }
@@ -325,38 +296,79 @@ namespace CardShopCoop.Modules.Shop
             {
                 // The lock must never survive a thrown handler: the router keeps the session
                 // and there is no timeout to recover it.
-                ReleaseLock(sender);
+                if (!published)
+                {
+                    ReleaseLock(sender);
+                }
             }
         }
 
-        /// <summary>A live authenticated peer. Game-scene availability is checked by each handler
-        /// that actually needs the shop scene, so a lock release still lands during a load.</summary>
-        private bool IsAuthenticatedSender(MessageContext context)
+        [MessageHandler]
+        private void Handle(CoopMessageContext context, ShopRenameDraftIntent message)
         {
-            return !_shutdown && _context != null && context?.Connection != null
-                && context.IsAuthenticated;
-        }
-
-        private void Reject(MessageContext context, Guid predictionId)
-        {
-            if (predictionId != Guid.Empty && context?.Connection != null)
-            {
-                PredictionApi.Rollback(_context, context.Connection.Id, predictionId);
-            }
-        }
-
-        private void BroadcastRename(string name, Guid predictionId)
-        {
-            if (_shutdown || _context == null)
+            if (_shutdown || context?.Connection == null || message == null
+                || !context.IsAuthenticated)
             {
                 return;
             }
 
-            _context.Broadcast(new ShopRenameDeltaMessage
+            var sender = context.ConnectionId;
+            if (!ShopRenameSession.IsOwner(sender))
             {
-                PredictionId = predictionId,
-                Name = name,
-            });
+                return;
+            }
+
+            var draft = ShopState.NormalizeDraft(message.Text);
+            ShopRenameSession.ApplyDraft(draft);
+            PublishDraft();
+        }
+
+        private void Reject(CoopMessageContext context, Guid actionId)
+        {
+            if (actionId != Guid.Empty && context?.Connection != null)
+            {
+                ActionLedger.Rollback(_context, context.ConnectionId, actionId);
+            }
+        }
+
+        private void RejectRename(CoopMessageContext context, ShopRenameRequestIntent message,
+            bool releaseOwner)
+        {
+            if (releaseOwner && ShopRenameSession.IsOwner(context.ConnectionId))
+            {
+                PublishLockCleared(message.ActionId, rejected: true);
+            }
+            else
+            {
+                PublishRenameState(message.ActionId, rejected: true, isRename: false);
+            }
+
+            Reject(context, message.ActionId);
+        }
+
+        /// <summary>Publishes the accepted rename and releases the lock in one state, so the
+        /// requester retires its rename action and applies the canonical name and owner together.
+        /// The name is passed in because the session value still holds the previous one until this
+        /// publish lands.</summary>
+        private void PublishRenameCleared(Guid actionId, string name)
+        {
+            ShopRenameSession.ClearOwner();
+            PublishRenameState(actionId, rejected: false, isRename: true, name: name,
+                unnamed: false);
+            PublishDraft();
+            ShopState.RepaintCanonical();
+            TryResumePendingTutorialOpen();
+        }
+
+        /// <summary>Releases the lock and publishes the canonical state. The rejected flag is used
+        /// when the release is the re-anchor for a refused rename or lock action.</summary>
+        private void PublishLockCleared(Guid actionId, bool rejected)
+        {
+            ShopRenameSession.ClearOwner();
+            PublishRenameState(actionId, rejected: rejected, isRename: false);
+            PublishDraft();
+            ShopState.RepaintCanonical();
+            TryResumePendingTutorialOpen();
         }
 
         private void ReleaseLock(int owner)
@@ -367,67 +379,93 @@ namespace CardShopCoop.Modules.Shop
             }
 
             // Clear first: the lock must not survive a failed sign repaint or broadcast.
-            ShopRenameSession.ClearOwner();
-            BroadcastLock(Guid.Empty);
-            try
-            {
-                ShopState.RepaintCanonical();
-            }
-            catch (Exception error)
-            {
-                CoopPlugin.Log.LogError("Shop rename lock released but the sign repaint failed: "
-                    + error);
-            }
-            TryResumePendingTutorialOpen();
+            PublishLockCleared(Guid.Empty, rejected: false);
         }
 
-        private ShopRenameLockMessage BuildLockMessage(Guid predictionId)
-            => new ShopRenameLockMessage
+        /// <summary>Builds the published state. <paramref name="name"/> is only supplied when the
+        /// caller already holds the new canonical name (an accepted rename); every other publish
+        /// reads it from the current session value, which keeps that value the only authority.
+        /// <paramref name="unnamed"/> defaults to the current state, with the host's tutorial index
+        /// as the pre-session answer; only a login/UI-open refresh or a committed rename changes
+        /// it.</summary>
+        private ShopRenameState BuildRenameState(Guid actionId, bool rejected, bool isRename,
+            string name = null, bool? unnamed = null, bool refreshUnnamed = false)
+        {
+            string canonical = null;
+            var hasName = name != null
+                ? ShopState.TryNormalize(name, out canonical)
+                : ShopState.TryGetCanonical(out canonical);
+            var unresolved = unnamed
+                ?? (refreshUnnamed
+                    ? CPlayerData.m_TutorialIndex == 0
+                    : Global<ShopRenameState>.Value?.Unnamed
+                        ?? (CPlayerData.m_TutorialIndex == 0));
+            return new ShopRenameState
             {
-                PredictionId = predictionId,
-                OwnerConn = ShopRenameSession.Owner,
-                OwnerName = ShopRenameSession.OwnerName,
-                Unnamed = ShopState.Unnamed,
+                Name = hasName ? canonical : null,
+                Unnamed = unresolved,
+                Owner = OwnerRef(ShopRenameSession.Owner),
+                IsRename = isRename,
+                ActionId = actionId,
+                Rejected = rejected,
             };
-
-        private void SendLockState(int peer, Guid predictionId)
-        {
-            if (_shutdown || _context == null)
-            {
-                return;
-            }
-
-            _context.Send(peer, BuildLockMessage(predictionId));
         }
 
-        private void BroadcastLock(Guid predictionId)
+        private void PublishRenameState(Guid actionId, bool rejected, bool isRename,
+            string name = null, bool? unnamed = null, bool refreshUnnamed = false)
         {
-            if (_shutdown || _context == null)
+            if (_shutdown || _context == null || CoopCore.Instance?.Net == null)
             {
                 return;
             }
 
-            _context.Broadcast(BuildLockMessage(predictionId));
+            Global<ShopRenameState>.Value = BuildRenameState(actionId, rejected, isRename, name,
+                unnamed, refreshUnnamed);
         }
 
-        /// <summary>The canonical name as a baseline (Initial suppresses tutorial side effects),
-        /// sent before a rejection rollback so the requester reconciles to authority. Only the
-        /// committed cache is sent - never <c>CPlayerData.PlayerName</c>, which is the live
-        /// draft while the host is editing.</summary>
-        private void SendCanonicalState(int peer)
+        private ShopRenameDraftState BuildDraftState()
         {
-            if (_shutdown || _context == null || !ShopState.TryGetCanonical(out var name))
+            if (!ShopRenameSession.HasOwner || ShopRenameSession.Draft == null)
+            {
+                return null;
+            }
+
+            return new ShopRenameDraftState
+            {
+                Owner = OwnerRef(ShopRenameSession.Owner),
+                Text = ShopRenameSession.Draft,
+            };
+        }
+
+        private void PublishDraft()
+        {
+            if (_shutdown || _context == null || CoopCore.Instance?.Net == null)
             {
                 return;
             }
 
-            _context.Send(peer, new ShopRenameDeltaMessage
+            var draft = BuildDraftState();
+            if (draft == null)
             {
-                PredictionId = Guid.Empty,
-                Name = name,
-                Initial = true,
-                Unnamed = ShopState.Unnamed,
-            });
+                if (Global<ShopRenameDraftState>.Value != null)
+                {
+                    Global<ShopRenameDraftState>.Value = null;
+                }
+                return;
+            }
+
+            Global<ShopRenameDraftState>.Value = draft;
+        }
+
+        private PlayerRef OwnerRef(int owner)
+        {
+            if (owner == ShopRenameSession.NoOwner)
+            {
+                return null;
+            }
+
+            return PresenceApi.ResolvePlayerRef(owner)
+                ?? new PlayerRef(owner, PeerDisplayName(owner), owner == 0, false);
         }
 
         private void ShowBusyNotice()
@@ -455,10 +493,6 @@ namespace CardShopCoop.Modules.Shop
                 return true;
             }
 
-            // The tutorial's "still unnamed" state is current at the moment the host opens the
-            // rename UI; carry it into the lock state so a release cannot paint the placeholder.
-            ShopState.SetUnnamed(CPlayerData.m_TutorialIndex == 0);
-
             if (ShopRenameSession.HasOwner && !ShopRenameSession.IsLocalOwner)
             {
                 if (showIntro)
@@ -474,7 +508,8 @@ namespace CardShopCoop.Modules.Shop
                 ShopRenameSession.ApplyLock(CoopCore.LocalConnectionId,
                     PeerDisplayName(CoopCore.LocalConnectionId));
                 CoopPlugin.Log.LogInfo("Shop rename lock acquired by the host.");
-                BroadcastLock(Guid.Empty);
+                PublishRenameState(Guid.Empty, rejected: false, isRename: false,
+                    refreshUnnamed: true);
             }
             return true;
         }
@@ -495,11 +530,7 @@ namespace CardShopCoop.Modules.Shop
 
             var draft = ShopState.NormalizeDraft(text);
             ShopRenameSession.ApplyDraft(draft);
-            _context.Broadcast(new ShopRenameDraftMessage
-            {
-                OwnerConn = CoopCore.LocalConnectionId,
-                Text = draft,
-            });
+            PublishDraft();
         }
 
         void IShopRenameEndpoint.ConfirmBegin() => _confirming = true;
@@ -540,7 +571,7 @@ namespace CardShopCoop.Modules.Shop
                 // the peer that confirms next.
                 ShopRenameSession.ApplyLock(CoopCore.LocalConnectionId,
                     PeerDisplayName(CoopCore.LocalConnectionId));
-                BroadcastLock(Guid.Empty);
+                PublishRenameState(Guid.Empty, rejected: false, isRename: false);
             }
 
             try
@@ -548,13 +579,14 @@ namespace CardShopCoop.Modules.Shop
                 if (ShopState.TryNormalize(CPlayerData.GetPlayerName(), out var name))
                 {
                     ShopState.Apply(name);
-                    BroadcastRename(name, Guid.Empty);
+                    PublishRenameCleared(Guid.Empty, name);
                 }
                 else
                 {
                     CoopPlugin.Log.LogDebug("Host confirmed an invalid shop name; keeping the "
                         + "canonical name.");
                     ShopState.RepaintCanonical();
+                    ReleaseLock(CoopCore.LocalConnectionId);
                 }
             }
             catch (Exception error)
@@ -568,10 +600,7 @@ namespace CardShopCoop.Modules.Shop
                 {
                     CoopPlugin.Log.LogError("Host could not restore the shop sign: " + repaintError);
                 }
-            }
-            finally
-            {
-                // The lock must not survive a thrown UI/game call.
+
                 ReleaseLock(CoopCore.LocalConnectionId);
             }
         }
@@ -643,7 +672,6 @@ namespace CardShopCoop.Modules.Shop
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             ShopRenamePatches.ClearEndpoint(this);
             _harmony?.UnpatchSelf();
             _harmony = null;

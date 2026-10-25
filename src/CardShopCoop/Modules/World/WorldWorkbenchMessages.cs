@@ -6,11 +6,13 @@ namespace CardShopCoop.Modules.World
     /// <summary>Host -> clients: authoritative state of one workbench - the bulk boxes stored on
     /// it and, while a bundle is running, the box tier it is producing. Sent for the join
     /// baseline and as a complete state-set after any change (never as a mutation). A non-empty
-    /// <see cref="WorldMessage.PredictionId"/> is the accepted client intent this state confirms.</summary>
+    /// <see cref="WorldMessage.ActionId"/> is the accepted client intent this state confirms.</summary>
     [NetworkMessage]
     public class WorkbenchStateMessage : WorldMessage
     {
-        public byte Index;
+        /// <summary>The live bench this state describes. A state whose bench no longer exists is
+        /// logged and dropped; there is no bench-index fallback on the wire.</summary>
+        public InteractableWorkbench Bench;
         public List<EItemType> StoredTypes = new();
         public EItemType SpawnItemType;
         public bool Bundling;
@@ -19,11 +21,12 @@ namespace CardShopCoop.Modules.World
     /// <summary>Client -> host: one workbench storage edit by the acting player. The host applies
     /// this delta to its own authoritative list and broadcasts the resulting state, so two players
     /// editing one bench at once can no longer overwrite (or duplicate) each other's item. The
-    /// inherited <see cref="WorldMessage.PredictionId"/> confirms the edit to the sender.</summary>
+    /// inherited <see cref="WorldMessage.ActionId"/> confirms the edit to the sender.</summary>
     [NetworkMessage]
     public sealed class WorkbenchOpMessage : WorldMessage
     {
-        public byte Index;
+        /// <summary>The live bench the acting player edited.</summary>
+        public InteractableWorkbench Bench;
         public List<EItemType> AddedTypes = new();
         public List<EItemType> RemovedTypes = new();
         public EItemType SpawnItemType;
@@ -36,6 +39,7 @@ namespace CardShopCoop.Modules.World
     [NetworkMessage]
     public sealed class WorkbenchBundleMessage : WorldMessage
     {
-        public byte Index;
+        /// <summary>The live bench whose bundle the acting player finished.</summary>
+        public InteractableWorkbench Bench;
     }
 }

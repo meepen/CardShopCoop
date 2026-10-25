@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -15,18 +14,14 @@ namespace CardShopCoop.Modules.PlayTable
 
     /// <summary>A table-level or single-seat visual change.</summary>
     [NetworkMessage]
-    public sealed class PlayTableVisualDeltaMessage : IPredictedMessage
+    public sealed class PlayTableVisualDeltaMessage : ActionMessage
     {
         public const byte TableUpsert = 1;
         public const byte TableRemove = 2;
         public const byte SeatUpdate = 3;
-
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public byte Operation;
-        public int TableKey;
+        /// <summary>The live table this visual state describes.</summary>
+        public InteractablePlayTable Table;
         public bool Occupied;
         public bool Boxed;
         public byte Seat = byte.MaxValue;
@@ -36,66 +31,68 @@ namespace CardShopCoop.Modules.PlayTable
 
     /// <summary>An accepted match lease upsert or release keyed by match identity.</summary>
     [NetworkMessage]
-    public sealed class PlayTableMatchDeltaMessage : IPredictedMessage
+    public sealed class PlayTableMatchDeltaMessage : ActionMessage
     {
         public const byte Upsert = 1;
         public const byte Release = 2;
-
-        public Guid PredictionId
-        {
-            get; set;
-        }
         public byte Operation;
         public string MatchId;
-        public int TableKey;
+        /// <summary>The live table the match lease belongs to.</summary>
+        public InteractablePlayTable Table;
         public PlayTableMatchEntry Match;
     }
 
-    /// <summary>A client request in the match lease lifecycle.</summary>
+    /// <summary>A client request to reserve the requested seat for a new match lease.</summary>
     [NetworkMessage]
-    public sealed class PlayTableMatchIntentMessage : IPredictedMessage
+    public sealed class StartTableMatchIntent : ActionMessage
     {
-        public const byte OpStart = 0;
-        public const byte OpCancel = 1;
-        public const byte OpStarted = 2;
-        public const byte OpRelease = 3;
-
-        public Guid PredictionId
-        {
-            get; set;
-        }
-        public byte Op;
         public string MatchId;
-        public int TableKey;
+        /// <summary>The live table this lease request targets.</summary>
+        public InteractablePlayTable Table;
         public byte Seat;
         public bool SideA;
         public int DeckCardCount;
     }
 
-    /// <summary>Stable-key table interaction sent before its local prediction.</summary>
+    /// <summary>A client request to drop its reserved lease before the match starts.</summary>
     [NetworkMessage]
-    public sealed class PlayTableIntentMessage : IPredictedMessage
+    public sealed class CancelTableMatchIntent : ActionMessage
     {
-        public const byte IntentKindPlayTable = 1;
-        public const byte IntentKickTable = 1;
-        public const byte IntentBoxTable = 2;
+        public string MatchId;
+        /// <summary>The live table the lease belongs to.</summary>
+        public InteractablePlayTable Table;
+    }
 
-        public Guid PredictionId
-        {
-            get; set;
-        }
-        public byte Kind = IntentKindPlayTable;
-        public byte Action;
-        /// <summary>The stable placement key of the table the action targets; never a list index.</summary>
-        public int ObjectKey;
-        /// <summary>The client assigns the boxed table package's stable id at its local box-up so the
-        /// host binds its counterpart to the same id instead of allocating.</summary>
-        public Guid BoxNetworkId;
+    /// <summary>A client notification that vanilla already entered the reserved game.</summary>
+    [NetworkMessage]
+    public sealed class MarkTableMatchStartedIntent : ActionMessage
+    {
+        public string MatchId;
+        /// <summary>The live table the lease belongs to.</summary>
+        public InteractablePlayTable Table;
+    }
+
+    /// <summary>A client request to release its lease after vanilla left the game.</summary>
+    [NetworkMessage]
+    public sealed class ReleaseTableMatchIntent : ActionMessage
+    {
+        public string MatchId;
+        /// <summary>The live table the lease belongs to.</summary>
+        public InteractablePlayTable Table;
+    }
+
+    /// <summary>A client request to stop an occupied table's game.</summary>
+    [NetworkMessage]
+    public sealed class KickTableIntent : ActionMessage
+    {
+        /// <summary>The live table the kick targets; never a list index or placement key.</summary>
+        public InteractablePlayTable Table;
     }
 
     public sealed class PlayTableEntry
     {
-        public int TableKey;
+        /// <summary>The live table this entry describes.</summary>
+        public InteractablePlayTable Table;
         public bool Occupied;
         public bool Boxed;
         public List<PlayTableSeatEntry> Seats = new();
@@ -118,7 +115,8 @@ namespace CardShopCoop.Modules.PlayTable
 
         public string MatchId;
         public int OwnerConn;
-        public int TableKey;
+        /// <summary>The live table this match lease occupies.</summary>
+        public InteractablePlayTable Table;
         public byte Seat;
         public bool SideA;
         public int Phase;

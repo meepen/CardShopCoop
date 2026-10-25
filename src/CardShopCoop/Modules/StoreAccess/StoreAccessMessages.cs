@@ -1,42 +1,17 @@
-using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.StoreAccess
 {
-    /// <summary>Host-owned physical access signs and their gameplay booleans.</summary>
+    /// <summary>
+    /// Client intent for one access sign. Zero is the shop open/closed sign; one is the warehouse
+    /// customer-entry sign. The host applies the vanilla click, then publishes the resulting
+    /// <see cref="StoreAccessState"/>; a denied or no-op click publishes the authoritative state
+    /// under this action id and rolls the client's optimistic toggle back.
+    /// </summary>
     [NetworkMessage]
-    public sealed class StoreAccessStateMessage : INetMessage
+    public sealed class StoreAccessToggleIntent : ActionMessage
     {
-        public bool Full = true;
-        public bool Animate;
-        public bool IsShopOpen;
-        public bool IsWarehouseDoorClosed;
-    }
-
-    [NetworkMessage]
-    public sealed class StoreAccessDeltaMessage : IPredictedMessage
-    {
-        public Guid PredictionId
-        {
-            get; set;
-        }
-        public bool HasShopOpen;
-        public bool IsShopOpen;
-        public bool HasWarehouseDoorClosed;
-        public bool IsWarehouseDoorClosed;
-        public bool Animate;
-    }
-
-    [NetworkMessage]
-    public sealed class StoreAccessToggleMessage : IPredictedMessage
-    {
-        public Guid PredictionId
-        {
-            get; set;
-        }
-        /// <summary>Zero is the shop sign; one is the warehouse customer-entry sign.</summary>
         public byte Which;
     }
-
 }

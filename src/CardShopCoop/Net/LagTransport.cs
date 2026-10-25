@@ -1,4 +1,5 @@
 using CardShopCoop.Net.Connection;
+using CardShopCoop.Runtime;
 using PeerConnection = CardShopCoop.Net.Connection.PeerConnection;
 using System;
 using System.Collections.Concurrent;
@@ -26,19 +27,19 @@ namespace CardShopCoop.Net
     /// artificial lag must not trip the peer-silence timeout, so those timers follow real
     /// wire receipt rather than delayed delivery.
     /// </summary>
-    public sealed class LagTransport : ICoopTransport, ICoopHandshakeTransport, ICoopRelayTransport,
-        ICoopStartable
+    internal sealed class LagTransport : ICoopTransport, ICoopHandshakeTransport, ICoopRelayTransport,
+        ICoopStartable, IWireFrameTransport
     {
         private struct Pending
         {
             public long ReleaseAt; // Stopwatch timestamp
-            public InMsg Message;
+            public WireFrame Frame;
             public int Bytes;
         }
 
         private struct ReadyMessage
         {
-            public InMsg Message;
+            public WireFrame Frame;
             public int Bytes;
         }
 
@@ -86,21 +87,40 @@ namespace CardShopCoop.Net
 
         public bool TryDequeueIncoming(out InMsg message)
         {
+            MainThreadGuard.RequireMainThread("lag transport message decoding");
+            // Transports that cannot hand us undecoded frames keep their old path; entity-bearing
+            // DTOs require a wire-frame transport so this decorator never re-encodes on the pump.
+            if (_inner is not IWireFrameTransport)
+            {
+                return _inner.TryDequeueIncoming(out message);
+            }
+
+            if (!TryDequeueWireFrame(out var frame))
+            {
+                message = default(InMsg);
+                return false;
+            }
+
+            return Msg.TryDecodeFrame(frame, out message);
+        }
+
+        public bool TryDequeueWireFrame(out WireFrame frame)
+        {
             lock (_incomingGate)
             {
                 if (!_incoming.TryDequeue(out var ready))
                 {
-                    message = default(InMsg);
+                    frame = null;
                     return false;
                 }
+
                 _incomingBytes -= ready.Bytes;
                 if (_incomingBytes < 0)
                 {
                     _incomingBytes = 0;
                 }
 
-
-                message = ready.Message;
+                frame = ready.Frame;
                 return true;
             }
         }
@@ -226,6 +246,10 @@ namespace CardShopCoop.Net
             // run first so this frame's
             // arrivals are considered for (possibly zero) delay before anything is released.
             _inner.PumpNetworkThread();
+            if (_inner is not IWireFrameTransport wire)
+            {
+                return;
+            }
 
             var lag = ClampMs(CoopPlugin.ArtificialLagMs != null ? CoopPlugin.ArtificialLagMs.Value : 0);
             var jitter = ClampMs(CoopPlugin.ArtificialJitterMs != null ? CoopPlugin.ArtificialJitterMs.Value : 0);
@@ -238,15 +262,15 @@ namespace CardShopCoop.Net
                 {
                     var pending = _delay.Dequeue();
                     _delayBytes = Math.Max(0, _delayBytes - pending.Bytes);
-                    EnqueueReady(pending.Message, pending.Bytes);
+                    EnqueueReady(pending.Frame, pending.Bytes);
                 }
 
                 _delayBytes = 0;
                 _overflowWarned = false;
 
-                while (_inner.TryDequeueIncoming(out var msg))
+                while (wire.TryDequeueWireFrame(out var frame))
                 {
-                    EnqueueReceived(msg);
+                    EnqueueReceived(frame, frame.EncodedBytes);
                 }
 
                 return;
@@ -254,15 +278,15 @@ namespace CardShopCoop.Net
 
             var now = Stopwatch.GetTimestamp();
 
-            while (_inner.TryDequeueIncoming(out var msg))
+            while (wire.TryDequeueWireFrame(out var frame))
             {
                 // Disconnect control is terminal, not gameplay traffic. Do not let the
                 // artificial receive delay keep a peer alive after the inner transport has
                 // already published its terminal event.
-                if (msg.Message is Messages.DisconnectMessage)
+                if (frame.Descriptor.MessageType == typeof(Messages.DisconnectMessage))
                 {
-                    DropDelayedConnection(msg.Connection);
-                    EnqueueReceived(msg);
+                    DropDelayedConnection(frame.Connection);
+                    EnqueueReceived(frame, frame.EncodedBytes);
                     continue;
                 }
                 if (_delay.Count >= MaxBufferedFrames || _delayBytes >= MaxBufferedBytes)
@@ -277,7 +301,7 @@ namespace CardShopCoop.Net
                             + MaxBufferedFrames + " frames - releasing the oldest frames without delay");
                     }
                     var released = _delay.Dequeue();
-                    EnqueueReady(released.Message, released.Bytes);
+                    EnqueueReady(released.Frame, released.Bytes);
                     _delayBytes = Math.Max(0, _delayBytes - released.Bytes);
                 }
                 var extra = jitter > 0 ? _random.Next(-jitter, jitter + 1) : 0;
@@ -287,20 +311,20 @@ namespace CardShopCoop.Net
                     delayMs = 0;
                 }
 
-                var messageBytes = EstimateBytes(msg);
+                var frameBytes = frame.EncodedBytes > 0 ? frame.EncodedBytes : frame.Frame.Length;
                 _delay.Enqueue(new Pending
                 {
                     ReleaseAt = now + (long)(delayMs * TicksPerMs),
-                    Message = msg,
-                    Bytes = messageBytes,
+                    Frame = frame,
+                    Bytes = frameBytes,
                 });
-                _delayBytes += messageBytes;
+                _delayBytes += frameBytes;
             }
 
             while (_delay.Count > 0 && _delay.Peek().ReleaseAt <= now)
             {
                 var released = _delay.Dequeue();
-                EnqueueReady(released.Message, released.Bytes);
+                EnqueueReady(released.Frame, released.Bytes);
                 _delayBytes = Math.Max(0, _delayBytes - released.Bytes);
             }
             if (_delay.Count < MaxBufferedFrames / 2 && _delayBytes < MaxBufferedBytes / 2)
@@ -309,17 +333,17 @@ namespace CardShopCoop.Net
             }
         }
 
-        private void EnqueueReceived(InMsg message)
+        private void EnqueueReceived(WireFrame frame, int bytes)
         {
-            EnqueueReady(message, EstimateBytes(message));
+            EnqueueReady(frame, bytes);
         }
 
-        private void EnqueueReady(InMsg message, int bytes)
+        private void EnqueueReady(WireFrame frame, int bytes)
         {
             lock (_incomingGate)
             {
-                var terminal = message.Message is Messages.DisconnectMessage
-                    || message.Message is Messages.ByeMessage;
+                var terminal = frame.Descriptor.MessageType == typeof(Messages.DisconnectMessage)
+                    || frame.Descriptor.MessageType == typeof(Messages.ByeMessage);
                 while (terminal && _incoming.Count > 0
                     && (_incoming.Count >= MaxBufferedFrames
                         || _incomingBytes > MaxBufferedBytes - bytes))
@@ -346,7 +370,7 @@ namespace CardShopCoop.Net
                     return;
                 }
 
-                _incoming.Enqueue(new ReadyMessage { Message = message, Bytes = bytes });
+                _incoming.Enqueue(new ReadyMessage { Frame = frame, Bytes = bytes });
                 _incomingBytes += bytes;
             }
         }
@@ -362,8 +386,8 @@ namespace CardShopCoop.Net
             while (_delay.Count > 0)
             {
                 var pending = _delay.Dequeue();
-                if (pending.Message.Connection == null
-                    || !ReferenceEquals(pending.Message.Connection, connection))
+                if (pending.Frame.Connection == null
+                    || !ReferenceEquals(pending.Frame.Connection, connection))
                 {
                     keep.Enqueue(pending);
                     continue;
@@ -384,11 +408,6 @@ namespace CardShopCoop.Net
             }
 
             return value > MaxDelayMs ? MaxDelayMs : value;
-        }
-
-        private static int EstimateBytes(InMsg message)
-        {
-            return message.Message == null ? Msg.MinimumFrameSize : NetMessageCodec.Encode(message.Message).Length;
         }
 
         public void Dispose()

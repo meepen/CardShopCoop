@@ -163,7 +163,7 @@ namespace CardShopCoop.Modules.Catalog
             return true;
         }
 
-        internal static bool PublishProductLicense(RestockData data, Guid predictionId)
+        internal static bool PublishProductLicense(RestockData data, Guid actionId)
         {
             if (_active == null || data == null)
             {
@@ -172,7 +172,7 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _active.BroadcastProductDelta(predictionId, data, true);
+            _active.BroadcastProductDelta(actionId, data, true);
             return true;
         }
 
@@ -236,7 +236,7 @@ namespace CardShopCoop.Modules.Catalog
             }
         }
 
-        internal static bool PublishScannerUnlock(Guid predictionId)
+        internal static bool PublishScannerUnlock(Guid actionId)
         {
             if (_active == null)
             {
@@ -245,7 +245,7 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _active.BroadcastScannerDelta(predictionId, true);
+            _active.BroadcastScannerDelta(actionId, true);
             return true;
         }
 
@@ -335,7 +335,7 @@ namespace CardShopCoop.Modules.Catalog
             return true;
         }
 
-        private void BroadcastProductDelta(Guid predictionId, RestockData data, bool unlocked)
+        private void BroadcastProductDelta(Guid actionId, RestockData data, bool unlocked)
         {
             if (_shutdown || !_context.InGame() || data == null)
             {
@@ -345,7 +345,7 @@ namespace CardShopCoop.Modules.Catalog
 
             _context.Broadcast(new CatalogLicenseDeltaMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Scanner = false,
                 Unlocked = unlocked,
                 ItemType = data.itemType,
@@ -354,7 +354,7 @@ namespace CardShopCoop.Modules.Catalog
             });
         }
 
-        private void BroadcastScannerDelta(Guid predictionId, bool unlocked)
+        private void BroadcastScannerDelta(Guid actionId, bool unlocked)
         {
             if (_shutdown || !_context.InGame())
             {
@@ -364,7 +364,7 @@ namespace CardShopCoop.Modules.Catalog
 
             _context.Broadcast(new CatalogLicenseDeltaMessage
             {
-                PredictionId = predictionId,
+                ActionId = actionId,
                 Scanner = true,
                 Unlocked = unlocked,
             });

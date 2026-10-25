@@ -264,7 +264,7 @@ namespace CardShopCoop.Runtime
                     mappedAll = false;
                 }
 
-                rebuilt.Add(cloneChild == null ? null : cloneChild.gameObject);
+                rebuilt.Add(cloneChild?.gameObject);
             }
 
             cloneObjects.Clear();

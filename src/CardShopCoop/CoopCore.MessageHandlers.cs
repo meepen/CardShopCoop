@@ -1,4 +1,5 @@
 using System;
+using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Net.Messages;
@@ -7,7 +8,7 @@ namespace CardShopCoop
 {
     public partial class CoopCore
     {
-        [MessageHandler(typeof(FullyJoinedMessage))]
+        [MessageHandler]
         private void HandleFullyJoinedMessage(MessageContext context, FullyJoinedMessage message)
         {
             if (Role != CoopRole.Host || context.Connection == null)
@@ -33,6 +34,8 @@ namespace CardShopCoop
 
             try
             {
+                // Identity existence must reach the client before any module state baseline.
+                GameObjectIdentityApi.SendJoinBaseline(context.Connection);
                 _runtime?.FullyJoined(context.Connection);
             }
             catch (Exception error)
@@ -50,7 +53,7 @@ namespace CardShopCoop
             }
         }
 
-        [MessageHandler(typeof(FullyJoinedAckMessage))]
+        [MessageHandler]
         private void HandleFullyJoinedAckMessage(MessageContext context, FullyJoinedAckMessage message)
         {
             if (Role != CoopRole.Client || context.Connection == null)
@@ -85,7 +88,7 @@ namespace CardShopCoop
             }
         }
 
-        [MessageHandler(typeof(DisconnectMessage))]
+        [MessageHandler]
         private void HandleDisconnectMessage(MessageContext context, DisconnectMessage message)
         {
             if (context.Connection == null)

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using BepInEx.Configuration;
+using CardShopCoop.Diagnostics;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Networking;
 using CardShopCoop.Modules.Catalog;
@@ -63,6 +64,7 @@ namespace CardShopCoop.UI
         private Vector2 _characterScroll;
         private Vector2 _settingsScroll;
         private Vector2 _hiddenScroll;
+        private string _diagnosticsStatus;
         private bool _characterSnapshotReady;
         private bool _characterFemale;
         private readonly List<string> _presetNames = new();
@@ -568,10 +570,10 @@ namespace CardShopCoop.UI
             GUILayout.EndHorizontal();
         }
 
-        /// <summary>The SETTINGS tab: appearance, live logging switches, and the artificial
-        /// latency test sliders. Every control writes straight to its ConfigEntry, which
-        /// persists to disk, so the tab is a front-end for the config file rather than a
-        /// second source of truth.</summary>
+        /// <summary>The SETTINGS tab: appearance, live logging switches, the artificial latency
+        /// test sliders, and the support-report copy button. Configuration controls write straight
+        /// to their ConfigEntry, which persists to disk, so the tab is a front-end for the config
+        /// file rather than a second source of truth.</summary>
         private void DrawSettings(CoopCore core)
         {
             GUILayout.Label("APPEARANCE", CoopTheme.SectionHeader);
@@ -596,12 +598,27 @@ namespace CardShopCoop.UI
             GUILayout.Label("LATENCY TESTING", CoopTheme.SectionHeader);
             DrawConfigIntSlider(CoopPlugin.ArtificialLagMs, 0, 2000, "Artificial lag");
             DrawConfigIntSlider(CoopPlugin.ArtificialJitterMs, 0, 1000, "Jitter");
-            GUILayout.Space(8f);
+            GUILayout.Space(16f);
 
-            // LabelDimWrap, not LabelDim: this line is wider than the panel, and a non-wrapping
-            // label would push the whole scroll content out horizontally instead of folding onto a
-            // second row.
-            GUILayout.Label("Settings are saved to BepInEx/config/dev.meepen.cardshopcoop.cfg.", CoopTheme.LabelDimWrap);
+            // Always draw the status control, even when empty: adding/removing a GUILayout
+            // control between the Layout and Repaint passes is what produces Mismatched LayoutGroup.
+            GUILayout.Label(_diagnosticsStatus ?? "", CoopTheme.LabelDimWrap);
+
+            // Discord only accepts one kind of paste at a time: report text in the message box, or
+            // files as attachments. Keep the two actions separate so the report lands in the
+            // rich-text field first, then the log file can be attached with a second paste.
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Copy Diagnostics", CoopTheme.ButtonSecondary))
+            {
+                DiagnosticsReport.TryCopyText(core, out _diagnosticsStatus);
+            }
+
+            if (GUILayout.Button("Copy Log File", CoopTheme.ButtonSecondary))
+            {
+                DiagnosticsReport.TryCopyLog(out _diagnosticsStatus);
+            }
+
+            GUILayout.EndHorizontal();
         }
 
         private static bool HiddenCategoryVisible()

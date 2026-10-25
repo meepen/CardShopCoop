@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -28,9 +28,6 @@ namespace CardShopCoop.Modules.World
         // Per-connection frozen identity manifests captured when each guest's save is written.
         // A later join never clobbers an earlier one, and each baseline reads only its own.
         private readonly Dictionary<int, WorldTransferManifest> _transferManifests = new();
-        private int _furniturePurchaseSpawnDepth;
-        private readonly Stack<InteractablePackagingBox_Shelf>
-            _pendingFurniturePurchaseBoxes = new();
 
         // Host intent ledger. Every accepted world intent's prediction id is recorded once, keyed
         // to the connection that sent it, so a resent intent cannot double-apply and a peer cannot
@@ -94,7 +91,8 @@ namespace CardShopCoop.Modules.World
             _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction, BroadcastWorld);
             _shelfInteraction = new ShelfInteraction(BroadcastWorld, () => _context.InGame());
             _warehouseShelfInteraction = new WarehouseShelfInteraction(true, BroadcastWorld,
-                SendWorldTo, _boxNetworkInteraction, _playerBoxInteraction);
+                SendWorldTo, _boxNetworkInteraction, _playerBoxInteraction,
+                () => _context.InGame());
             _cardInteraction = new WorldCardInteraction(_context, true, _boxNetworkInteraction,
                 _playerBoxInteraction)
             {
@@ -108,7 +106,6 @@ namespace CardShopCoop.Modules.World
             _cardInteraction.Containers.InGameProvider = _context.InGame;
             _harmony = new Harmony("dev.meepen.cardshopcoop.world.host");
             InstallBoxNetworkInteractionPatches();
-            _boxNetworkInteraction.RegisterHostSceneBoxes();
             InstallPlayerBoxInteractionPatches();
             InstallPlayerBoxPresenceHook();
             InstallPlayerShelfInteractionPatches();
@@ -144,8 +141,6 @@ namespace CardShopCoop.Modules.World
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             _context?.Messages.UnregisterAttributedHandlers(this);
             _nextBaselineId = 1;
-            _furniturePurchaseSpawnDepth = 0;
-            _pendingFurniturePurchaseBoxes.Clear();
             _transferManifests.Clear();
             _appliedPredictions.Clear();
             _predictionOwners.Clear();
@@ -173,6 +168,7 @@ namespace CardShopCoop.Modules.World
         {
             WorldMarketInteraction.InvalidateContentCache();
             _cardInteraction?.FlushWorldReady();
+            _warehouseShelfInteraction?.Reset();
         }
 
         internal static WorldCardInteraction ActiveCards => _instance?._cardInteraction;
@@ -187,41 +183,6 @@ namespace CardShopCoop.Modules.World
             return box != null && _instance?._boxNetworkInteraction != null
                 && _instance._boxNetworkInteraction.TryGetId(box, out boxNetworkId);
         }
-
-        /// <summary>Host: the next synchronously-created box binds to this creator-assigned id.
-        /// Used by an intent handler before it runs the game factory (empty-box take, furniture
-        /// box-up, play-table box-up). Returns false when the id is not fresh (already bound to a
-        /// live box or parked for another creation); the caller must reject the originating intent
-        /// rather than let the host mint a new id, which would desync the creator's pre-bound box.
-        /// An empty id is accepted: the host mints one.</summary>
-        internal static bool PushCreatedBoxId(Guid boxNetworkId)
-            => _instance?._boxNetworkInteraction?.PushHostCreatedId(boxNetworkId) == true;
-
-        /// <summary>Host: stage the creator-assigned ids for the delivery entry the purchase is
-        /// about to enqueue. The game's enqueue hook commits them to that entry, so no id outlives
-        /// the entry it belongs to. Returns false when any id is not fresh; the caller must reject
-        /// the originating intent rather than remint, which would desync the creator's boxes.</summary>
-        internal static bool StageCreatedBoxIds(IReadOnlyList<Guid> boxNetworkIds)
-            => _instance?._boxNetworkInteraction?.StageHostDeliveryIds(boxNetworkIds) == true;
-
-        /// <summary>Host: release a creator id parked for a creation that did not happen, so a
-        /// later, unrelated box cannot bind to it.</summary>
-        internal static void CancelCreatedBoxId(Guid boxNetworkId)
-            => _instance?._boxNetworkInteraction?.CancelHostCreatedId(boxNetworkId);
-
-        /// <summary>Host: drop ids staged for a delivery entry that was never enqueued, so a later
-        /// enqueue cannot commit them to an unrelated order.</summary>
-        internal static void CancelStagedDeliveryIds()
-            => _instance?._boxNetworkInteraction?.CancelStagedHostDeliveryIds();
-
-        /// <summary>Host: snapshot/restore the delivery-id mirror so a rolled-back game waiting
-        /// list also restores the ids bound to its entries.</summary>
-        internal static BoxNetworkInteraction.DeliveryQueueState CaptureDeliveryQueueState()
-            => _instance?._boxNetworkInteraction?.CaptureDeliveryQueueState();
-
-        internal static void RestoreDeliveryQueueState(
-            BoxNetworkInteraction.DeliveryQueueState state)
-            => _instance?._boxNetworkInteraction?.RestoreDeliveryQueueState(state);
 
         /// <summary>Authoritative open/closed flag of a carried box, read directly from the field
         /// so the whole open-close animation window reports the true state.</summary>
@@ -257,7 +218,7 @@ namespace CardShopCoop.Modules.World
 
             var manifest = new WorldTransferManifest();
             host._boxNetworkInteraction?.CaptureTransferManifest(manifest);
-            host._placementPopulation.CaptureTransferManifest(manifest);
+            host._placementSlots.CaptureTransferManifest(manifest);
             host._transferManifests[connectionId] = manifest;
             CoopPlugin.Log.LogInfo("[transfer] captured identity manifest for conn " + connectionId
                 + " (boxes=" + manifest.BoxSlotCount + ", placements=" + manifest.PlacementSlotCount
@@ -292,22 +253,22 @@ namespace CardShopCoop.Modules.World
                     + DescribeIntent(command) + ".");
                 if (_context != null && context?.Connection != null)
                 {
-                    PredictionHost.Reject(_context, context.ConnectionId,
-                        command?.PredictionId ?? Guid.Empty);
+                    ActionHost.Reject(_context, context.ConnectionId,
+                        command?.ActionId ?? Guid.Empty);
                 }
 
                 return false;
             }
 
             var connectionId = context.ConnectionId;
-            if (_predictionOwners.TryGetValue(command.PredictionId, out var owner))
+            if (_predictionOwners.TryGetValue(command.ActionId, out var owner))
             {
                 if (owner != connectionId)
                 {
                     CoopPlugin.Log.LogWarning("Rejected world intent naming another connection's "
                         + "prediction: " + DescribeIntent(command) + " owner=" + owner
                         + " sender=" + connectionId + ".");
-                    PredictionHost.Reject(_context, connectionId, command.PredictionId);
+                    ActionHost.Reject(_context, connectionId, command.ActionId);
                     return false;
                 }
 
@@ -319,14 +280,14 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            _predictionOwners[command.PredictionId] = connectionId;
+            _predictionOwners[command.ActionId] = connectionId;
             if (!_appliedPredictions.TryGetValue(connectionId, out var applied))
             {
                 applied = new AppliedIntentLedger();
                 _appliedPredictions[connectionId] = applied;
             }
 
-            applied.Add(command.PredictionId, evicted =>
+            applied.Add(command.ActionId, evicted =>
             {
                 if (_predictionOwners.TryGetValue(evicted, out var evictedOwner)
                     && evictedOwner == connectionId)
@@ -335,8 +296,8 @@ namespace CardShopCoop.Modules.World
                 }
             });
 
-            return PredictionHost.Resolve(_context, connectionId,
-                command.PredictionId, apply);
+            return ActionHost.Resolve(_context, connectionId,
+                command.ActionId, apply);
         }
 
         /// <summary>A peer left, so its applied-prediction ids can no longer be resent or named.
@@ -350,12 +311,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            foreach (var predictionId in applied.Ids)
+            foreach (var actionId in applied.Ids)
             {
-                if (_predictionOwners.TryGetValue(predictionId, out var owner)
+                if (_predictionOwners.TryGetValue(actionId, out var owner)
                     && owner == connection.Id)
                 {
-                    _predictionOwners.Remove(predictionId);
+                    _predictionOwners.Remove(actionId);
                 }
             }
 
@@ -365,7 +326,7 @@ namespace CardShopCoop.Modules.World
         internal void RejectWorldIntent(MessageContext context, WorldMessage command)
         {
             if (_context == null || context?.Connection == null
-                || command?.PredictionId == Guid.Empty)
+                || command?.ActionId == Guid.Empty)
             {
                 return;
             }
@@ -376,14 +337,13 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogWarning("Rejected world intent before host execution: "
                 + DescribeIntent(command) + " inGame=" + _context.InGame()
                 + " connState=" + context.Connection.State + ".");
-            PredictionHost.Reject(_context, context.ConnectionId, command.PredictionId);
+            ActionHost.Reject(_context, context.ConnectionId, command.ActionId);
         }
 
         private static string DescribeIntent(WorldMessage command)
             => command == null
                 ? "<null>"
-                : command.GetType().Name + " op=" + command.OperationKind
-                    + " entity=" + (command.StableEntityId ?? "<none>");
+                : command.GetType().Name;
 
         [OnFullyJoined]
         private void SendWarehouseBaseline(PeerConnection connection)
@@ -425,16 +385,12 @@ namespace CardShopCoop.Modules.World
             {
                 BaselineId = baselineId,
             });
-            var manifest = TransferManifestFor(connectionId);
-            _boxNetworkInteraction?.AppendBaselineMessages(manifest, message => SendWorldTo(
-                connectionId, message));
             // Carried boxes are not part of the box descriptor: a box a peer is already holding
             // would otherwise freeze at the transfer-time pose on the joiner instead of riding the
             // holder's avatar. Announce each hold after the descriptors that created the boxes.
             AppendPlayerBoxHoldBaseline(message => SendWorldTo(connectionId, message));
             _warehouseShelfInteraction?.AppendBaselineMessages(message => SendWorldTo(connectionId,
                 message));
-            SendWorldTo(connectionId, new BoxBaselineCompleteMessage());
             _cardInteraction?.AppendBaselineMessages(message => SendWorldTo(connectionId,
                 message));
             AppendWorkbenchBaseline(connectionId);
@@ -454,7 +410,6 @@ namespace CardShopCoop.Modules.World
             }
 
 
-            PrepareState(worldMessage);
             _context.Broadcast(worldMessage);
         }
 
@@ -467,7 +422,6 @@ namespace CardShopCoop.Modules.World
             }
 
 
-            PrepareState(worldMessage);
             _context.Send(connectionId, worldMessage);
         }
 
@@ -482,13 +436,7 @@ namespace CardShopCoop.Modules.World
             // Relay through the transport's broadcast admission so a peer that is still joining
             // is skipped rather than treated as a hard send failure.
 
-            PrepareState(worldMessage);
             _context.Relay(excludedConnectionId, worldMessage);
-        }
-
-        private void PrepareState(WorldMessage message)
-        {
-            message.StableEntityId ??= WorldMessageMetadata.StableEntityId(message);
         }
 
     }

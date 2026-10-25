@@ -100,7 +100,6 @@ namespace CardShopCoop.Modules.Npc
             _harmony.CreateClassProcessor(typeof(WorkerManagerStartPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(WorkerActivationPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(WorkerUpdatePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomizationPatch)).Patch();
             SuppressInitialPopulation(SceneRef<CustomerManager>.Get());
             SignalCustomerManagerReady();
             SignalWorkerManagerReady();
@@ -223,76 +222,161 @@ namespace CardShopCoop.Modules.Npc
             }
         }
 
-        [MessageHandler(typeof(NpcStateDeltaMessage))]
+        [MessageHandler]
         private void HandleState(MessageContext context, NpcStateDeltaMessage message)
         {
-            if (!_context.InGame() || !IsNpcSceneReady())
+            if (!TryToSnapshot(message, out var state))
             {
-                BufferPendingState(message);
                 return;
             }
 
-            ApplyStateDelta(message);
-        }
-
-        [MessageHandler(typeof(NpcIdentityDeltaMessage))]
-        private void HandleIdentity(MessageContext context, NpcIdentityDeltaMessage message)
-        {
-            if (!_context.InGame() || !IsNpcSceneReady())
+            if (!_context.InGame() || !IsSceneReady())
             {
-                BufferPendingIdentity(message);
+                BufferPendingState(state);
                 return;
             }
 
-            ApplyIdentity(message);
-            _pendingIdentities.Remove((message.Kind << 16) | message.Index);
-            ApplyPendingStates(message.Kind, message.Index, message.Identity);
+            ApplyNpcState(state);
         }
 
-        [MessageHandler(typeof(NpcBaselineMessage))]
-        private void HandleBaseline(MessageContext context, NpcBaselineMessage message)
-        {
-            _pendingBaseline = message;
-            CoopPlugin.Log.LogInfo("[npc] baseline received entries="
-                + (message == null || message.Entries == null ? -1 : message.Entries.Count)
-                + " capacity=" + (message == null ? -1 : message.CustomerCapacity)
-                + " inGame=" + _context.InGame() + " sceneReady=" + IsNpcSceneReady());
-            ApplyPendingBaseline();
-        }
-
-        [MessageHandler(typeof(NpcSpeechMessage))]
+        [MessageHandler]
         private void HandleSpeech(MessageContext context, NpcSpeechMessage message)
         {
+            if (message == null || message.Customer == null)
+            {
+                CoopPlugin.Log.LogWarning("Npc client: dropped speech bubble with no live customer");
+                return;
+            }
+
             ShowSpeech(message, _context.InGame());
         }
 
-        [MessageHandler(typeof(NpcMoneyPopupMessage))]
+        [MessageHandler]
         private void HandleMoney(MessageContext context, NpcMoneyPopupMessage message)
         {
+            if (message == null || message.Customer == null)
+            {
+                CoopPlugin.Log.LogWarning("Npc client: dropped money popup with no live customer");
+                return;
+            }
+
             ShowMoneyPopup(message, _context.InGame());
         }
 
-        private static bool IsNpcSceneReady()
+        /// <summary>Resolves a transient delta's live NPC into the internal snapshot. The wire
+        /// carries only the object; kind, pool index and incarnation come from the identity
+        /// module's existing helpers. A delta whose object no longer exists is dropped rather
+        /// than guessed at from stale identity fields.</summary>
+        private static bool TryToSnapshot(NpcStateDeltaMessage message, out NpcSnapshot snapshot)
+        {
+            snapshot = default;
+            if (message == null)
+            {
+                CoopPlugin.Log.LogWarning("Npc client: dropped state delta with no message body");
+                return false;
+            }
+
+            if (message.Customer != null)
+            {
+                if (!TryGetWireIdentity(message.Customer, out var index, out var identity))
+                {
+                    CoopPlugin.Log.LogWarning(
+                        "Npc client: dropped customer state delta for an unbound customer");
+                    return false;
+                }
+
+                snapshot = ToSnapshot(message, KindCustomer, index, identity);
+                return true;
+            }
+
+            if (message.Worker != null)
+            {
+                if (!TryGetWireIdentity(message.Worker, out var index, out var identity))
+                {
+                    CoopPlugin.Log.LogWarning(
+                        "Npc client: dropped worker state delta for an unbound worker");
+                    return false;
+                }
+
+                if (message.HoldBox != null
+                    && !WorldClientBehaviour.TryGetBoxId(message.HoldBox, out _))
+                {
+                    CoopPlugin.Log.LogWarning(
+                        "Npc client: dropped worker state delta for an unbound held box");
+                    return false;
+                }
+
+                snapshot = ToSnapshot(message, KindWorker, index, identity);
+                return true;
+            }
+
+            CoopPlugin.Log.LogWarning("Npc client: dropped state delta with no live NPC object");
+            return false;
+        }
+
+        private static NpcSnapshot ToSnapshot(NpcStateDeltaMessage message, byte kind, int index,
+            int identity)
+            => new()
+            {
+                Kind = kind,
+                Index = (ushort)index,
+                Identity = identity,
+                Position = message.Position,
+                Yaw = message.Yaw,
+                Speed = message.Speed,
+                Flags = message.Flags,
+                ActionSequence = message.ActionSequence,
+                ActionKind = message.ActionKind,
+                HoldBig = message.HoldBig,
+                HoldItemType = message.HoldItemType,
+                HoldBox = message.HoldBox,
+                HoldBoxNetworkId = HoldBoxId(message.HoldBox),
+                HoldBoxOpened = message.HoldBoxOpened,
+                HostTime = message.HostTime,
+            };
+
+        /// <summary>The live held box's bound stable identity, for the internal puppet/world
+        /// bookkeeping only. The wire carries the object, never this id.</summary>
+        private static Guid HoldBoxId(InteractablePackagingBox box)
+            => box != null && WorldClientBehaviour.TryGetBoxId(box, out var id) ? id : Guid.Empty;
+
+        internal static bool IsSceneReady()
         {
             return NpcInterop.CustomerManager?.GetCustomerList() != null
                 && NpcInterop.WorkerManager != null && NpcInterop.Workers != null;
         }
 
-        private void ApplyIdentity(NpcIdentityDeltaMessage message)
+        /// <summary>Client puppet primitive: materialize the visual body for one NPC incarnation
+        /// and apply its authoritative spawn pose. Identity binding stays with the identity
+        /// module; this returns the object that should be bound (or null when not ready).</summary>
+        internal static object SpawnPuppet(in NpcSnapshot snapshot)
+        {
+            var client = _active;
+            if (client == null || client._context == null || !client._context.InGame()
+                || !IsSceneReady() || snapshot.Identity <= 0
+                || string.IsNullOrEmpty(snapshot.CharName))
+            {
+                return null;
+            }
+
+            return client.SpawnPuppetCore(snapshot);
+        }
+
+        private object SpawnPuppetCore(in NpcSnapshot snapshot)
         {
             // Customers name themselves "Female<model>" / "Male<model>"; workers rely on the
             // explicit flag. Accept either source so a missing/incorrect flag cannot spawn a
             // female NPC from the male prefab.
-            var female = message.Female || HasFemaleNamePrefix(message.CharName);
-            if (message.Kind == KindCustomer)
+            var female = snapshot.Female || HasFemaleNamePrefix(snapshot.CharName);
+            if (snapshot.Kind == KindCustomer)
             {
                 using (Util.PerfProbe.Sample("module.npc.identity.capacity"))
                 {
-                    EnsureCustomerCapacity(message.Index, female);
+                    EnsureCustomerCapacity(snapshot.Index, female);
                 }
             }
 
-            var key = (message.Kind << 16) | message.Index;
+            var key = (snapshot.Kind << 16) | snapshot.Index;
             if (!_puppets.TryGetValue(key, out var puppet))
             {
                 puppet = new Puppet();
@@ -304,39 +388,139 @@ namespace CardShopCoop.Modules.Npc
             // gender and character name, so a same-look reincarnation can reuse it. Rebuilding
             // here re-instantiated and fully re-dressed the character on every customer spawn
             // (~7 ms each) even though nothing visible changed.
-            var reusedIncarnation = puppet.HasIdentity && puppet.Identity != message.Identity
-                && SameDressedLook(puppet, message.Kind, female, message.CharName);
+            var reusedIncarnation = puppet.HasIdentity && puppet.Identity != snapshot.Identity
+                && SameDressedLook(puppet, snapshot.Kind, female, snapshot.CharName);
 
-            if (puppet.HasIdentity && puppet.Identity != message.Identity && !reusedIncarnation)
+            if (puppet.HasIdentity && puppet.Identity != snapshot.Identity && !reusedIncarnation)
             {
                 using (Util.PerfProbe.Sample("module.npc.identity.destroy"))
                 {
-                    ClearPendingIdentity(puppet);
-                    ParkOrDestroyVisual(puppet);
-
-                    puppet.Go = null;
-                    puppet.Custom = null;
-                    puppet.CharName = "";
-                    puppet.Identity = 0;
-                    puppet.HasIdentity = false;
-                    puppet.BufCount = 0;
-                    puppet.GrabSequence = UnsetActionSequence;
+                    ClearPuppetLook(puppet);
                 }
             }
 
-            puppet.Kind = message.Kind;
+            puppet.Kind = snapshot.Kind;
 
             if (reusedIncarnation)
             {
-                ResetPuppetForIncarnation(puppet, message);
+                ResetPuppetForIncarnation(puppet, snapshot.Position, snapshot.Index);
             }
 
-            SetPendingIdentity(puppet, message.Identity, female);
             using (Util.PerfProbe.Sample("module.npc.identity.redress"))
             {
-                Redress(puppet, message.CharName, message.Position, female,
-                    message.Kind, message.Index);
+                Redress(puppet, snapshot.CharName, snapshot.Position, female, snapshot.Kind,
+                    snapshot.Index, snapshot.Identity);
             }
+
+            ApplyNpcState(snapshot);
+            return GetPuppetEntity(puppet);
+        }
+
+        /// <summary>Detach an outgoing visual from its slot and blank every look-bound reference.
+        /// The identity module retires the old object's binding separately.</summary>
+        private void ClearPuppetLook(Puppet puppet)
+        {
+            ParkOrDestroyVisual(puppet);
+            puppet.Go = null;
+            puppet.Custom = null;
+            puppet.CharName = "";
+            puppet.Identity = 0;
+            puppet.HasIdentity = false;
+            puppet.BufCount = 0;
+            puppet.GrabSequence = UnsetActionSequence;
+        }
+
+        private static object GetPuppetEntity(Puppet puppet)
+        {
+            if (puppet == null)
+            {
+                return null;
+            }
+
+            if (puppet.Customer != null)
+            {
+                return puppet.Customer;
+            }
+
+            return puppet.Go?.GetComponent<Worker>();
+        }
+
+        /// <summary>The object currently bound for this NPC slot, if any. Used by the identity
+        /// module to unbind a replaced visual before binding the new incarnation.</summary>
+        internal static bool TryGetPuppetEntity(byte kind, ushort index, out object entity)
+        {
+            entity = null;
+            var client = _active;
+            if (client == null)
+            {
+                return false;
+            }
+
+            var key = (kind << 16) | index;
+            if (!client._puppets.TryGetValue(key, out var puppet))
+            {
+                return false;
+            }
+
+            entity = GetPuppetEntity(puppet);
+            return entity != null;
+        }
+
+        /// <summary>Client puppet primitive: retire the visual body and any borrowed real carrier
+        /// for one NPC incarnation. The identity module owns the cache unbind.</summary>
+        internal static bool DespawnPuppet(object entity)
+        {
+            var client = _active;
+            if (client == null || entity == null)
+            {
+                return false;
+            }
+
+            return client.DespawnPuppetCore(entity);
+        }
+
+        private bool DespawnPuppetCore(object entity)
+        {
+            foreach (var pair in _puppets)
+            {
+                var puppet = pair.Value;
+                if (puppet == null || !puppet.HasIdentity)
+                {
+                    continue;
+                }
+
+                if ((entity is Customer customer && ReferenceEquals(puppet.Customer, customer))
+                    || (entity is Worker worker && puppet.Go != null
+                        && ReferenceEquals(puppet.Go.GetComponent<Worker>(), worker)))
+                {
+                    RemovePuppet((byte)(pair.Key >> 16), (ushort)(pair.Key & 0xffff),
+                        puppet.Identity);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void RemovePuppet(byte kind, ushort index, int identity)
+        {
+            if (kind == KindCustomer && _existing.TryGetValue(index, out var existing)
+                && existing != null && existing.Generation == identity)
+            {
+                DetachExistingCustomer(index, existing.Customer);
+            }
+
+            _pendingStates.Remove(new NpcDeltaKey(kind, index, identity));
+
+            var key = (kind << 16) | index;
+            if (!_puppets.TryGetValue(key, out var puppet)
+                || (puppet.HasIdentity && puppet.Identity != identity))
+            {
+                return;
+            }
+
+            ParkOrDestroyVisual(puppet);
+            _puppets.Remove(key);
         }
 
         /// <summary>Customers encode their gender in the model name ("Female3"/"Male7"); the
@@ -350,8 +534,7 @@ namespace CardShopCoop.Modules.Npc
         /// re-resolves the preset and destroys/replaces each hair and apparel slot), so the
         /// actual NPC object carries the synced look. Borrowers then reuse the dressed NPC
         /// directly instead of cloning a lookalike. A member already wearing the name is left
-        /// untouched - no re-dress churn on repeat visits. Runs under Redress's _dressing
-        /// guard.</summary>
+        /// untouched - no re-dress churn on repeat visits.</summary>
         private static void DressRealCustomer(ushort index, string charName)
         {
             if (string.IsNullOrEmpty(charName))
@@ -389,14 +572,14 @@ namespace CardShopCoop.Modules.Npc
         /// <summary>Reuse a clone for a new incarnation of the same-looking pooled NPC: reset
         /// the per-visit motion and animation state and snap it to the host's spawn point,
         /// matching what <see cref="Spawn"/> establishes for a fresh clone.</summary>
-        private void ResetPuppetForIncarnation(Puppet p, NpcIdentityDeltaMessage message)
+        private void ResetPuppetForIncarnation(Puppet p, Vector3 position, ushort index)
         {
             ReleaseWorkerBoxProp(p);
-            ResetPuppetIncarnationState(p, message.Position);
+            ResetPuppetIncarnationState(p, position);
             if (p.Go != null)
             {
-                p.Go.transform.position = message.Position;
-                p.Go.SetActive(!IsPuppetSuppressed(message.Kind, message.Index));
+                p.Go.transform.position = position;
+                p.Go.SetActive(!IsPuppetSuppressed(p.Kind, index));
             }
         }
 
@@ -430,29 +613,13 @@ namespace CardShopCoop.Modules.Npc
                 && (!_existing.TryGetValue(index, out var existing) || !existing.KeepPuppetVisible);
         }
 
-        private void BufferPendingIdentity(NpcIdentityDeltaMessage message)
+        /// <summary>Commit the incarnation a puppet now wears. Appearance is already applied by
+        /// the time this runs; the identity module binds the object afterwards.</summary>
+        private static void CommitPuppetIdentity(Puppet puppet, int identity, bool female)
         {
-            var key = (message.Kind << 16) | message.Index;
-            _pendingIdentities[key] = message;
-        }
-
-        private static void ClearPendingIdentity(Puppet puppet)
-        {
-            puppet.PendingIdentity = 0;
-        }
-
-        private static void SetPendingIdentity(Puppet puppet, int identity, bool female)
-        {
-            puppet.PendingIdentity = identity;
-            puppet.PendingFemale = female;
-        }
-
-        private static void CommitIdentity(Puppet puppet)
-        {
-            puppet.Identity = puppet.PendingIdentity;
+            puppet.Identity = identity;
             puppet.HasIdentity = true;
-            puppet.Female = puppet.PendingFemale;
-            puppet.PendingIdentity = 0;
+            puppet.Female = female;
         }
 
         private void SignalCustomerManagerReady()
@@ -463,8 +630,6 @@ namespace CardShopCoop.Modules.Npc
             }
 
             _customerManagerReady.Raise();
-            ApplyPendingBaseline();
-            ApplyPendingIdentities();
             _customerPoolChanged.Raise();
         }
 
@@ -476,88 +641,6 @@ namespace CardShopCoop.Modules.Npc
             }
 
             _workerManagerReady.Raise();
-            ApplyPendingBaseline();
-            ApplyPendingIdentities();
-
-        }
-
-        private void ApplyPendingBaseline()
-        {
-            if (_pendingBaseline == null || !_context.InGame() || !IsNpcSceneReady())
-            {
-                return;
-            }
-
-            var baseline = _pendingBaseline;
-            CoopPlugin.Log.LogInfo("[npc] baseline applying entries=" + baseline.Entries.Count
-                + " capacity=" + baseline.CustomerCapacity
-                + " females=" + (baseline.CustomerFemales == null ? -1
-                    : baseline.CustomerFemales.Count));
-            EnsureCustomerCapacity(baseline.CustomerCapacity, baseline.CustomerFemales);
-
-            var seen = new HashSet<int>();
-            for (var i = 0; i < baseline.Entries.Count; i++)
-            {
-                var entry = baseline.Entries[i];
-                seen.Add((entry.Kind << 16) | entry.Index);
-            }
-
-            RemovePuppetsAbsentFromBaseline(seen);
-            foreach (var puppet in _puppets.Values)
-            {
-                puppet.BufCount = 0;
-            }
-            foreach (var mirror in _existing.Values)
-            {
-                mirror.BufCount = 0;
-            }
-            ApplyEntries(baseline.HostTime, baseline.Entries);
-            _pendingBaseline = null;
-            ApplyPendingIdentities();
-            ApplyPendingStates();
-            CoopPlugin.Log.LogInfo("[npc] baseline applied puppets=" + _puppets.Count
-                + " mirrors=" + _existing.Count);
-        }
-
-        private void RemovePuppetsAbsentFromBaseline(HashSet<int> seen)
-        {
-            var stale = new List<int>();
-            foreach (var pair in _puppets)
-            {
-                if (seen.Contains(pair.Key))
-                {
-                    continue;
-                }
-
-                ClearPendingIdentity(pair.Value);
-                ReleaseWorkerBoxProp(pair.Value);
-                DestroyPuppetObject(pair.Value);
-                _pendingIdentities.Remove(pair.Key);
-                stale.Add(pair.Key);
-            }
-
-            for (var i = 0; i < stale.Count; i++)
-            {
-                _puppets.Remove(stale[i]);
-            }
-        }
-
-        private void ApplyPendingIdentities()
-        {
-            if (!_context.InGame() || !IsNpcSceneReady() || _pendingIdentities.Count == 0)
-            {
-                return;
-            }
-
-            var pending = new List<NpcIdentityDeltaMessage>(_pendingIdentities.Values);
-            for (var i = 0; i < pending.Count; i++)
-            {
-                var message = pending[i];
-                ApplyIdentity(message);
-                var key = (message.Kind << 16) | message.Index;
-                _pendingIdentities.Remove(key);
-                ApplyPendingStates(message.Kind, message.Index, message.Identity);
-            }
         }
 
         [HarmonyPatch(typeof(CustomerManager), "Update")]
@@ -659,21 +742,6 @@ namespace CardShopCoop.Modules.Npc
             private static bool Prefix() => _active == null;
         }
 
-        [HarmonyPatch(typeof(CC.CharacterCustomization), "Initialize")]
-        private static class CustomizationPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix()
-            {
-                if (_active == null || _active._shutdown || _active._dressing)
-                {
-                    return;
-                }
-
-                _active.ApplyPendingBaseline();
-                _active.ApplyPendingIdentities();
-            }
-        }
         private const byte KindCustomer = 0;
         private const byte KindWorker = 1;
 
@@ -747,7 +815,7 @@ namespace CardShopCoop.Modules.Npc
         {
             foreach (var mirror in _existing.Values)
             {
-                DeactivateCustomerRoot(mirror == null ? null : mirror.Customer);
+                DeactivateCustomerRoot(mirror?.Customer);
             }
             _existing.Clear();
             ClearPuppets();
@@ -1190,8 +1258,6 @@ namespace CardShopCoop.Modules.Npc
             public Guid AppliedHeldBoxNetworkId;
             public bool HoldBig;
             public EItemType HoldItemType;
-            public int PendingIdentity;
-            public bool PendingFemale;
             // Last ActionSequence applied to this puppet's animator. int.MinValue means the
             // first state packet for the incarnation adopts the sequence without firing.
             public int GrabSequence = UnsetActionSequence;
@@ -1289,10 +1355,7 @@ namespace CardShopCoop.Modules.Npc
         }
 
         private readonly Dictionary<int, Puppet> _puppets = new();
-        private NpcBaselineMessage _pendingBaseline;
-        private readonly Dictionary<int, NpcIdentityDeltaMessage> _pendingIdentities = new();
-        private readonly Dictionary<NpcDeltaKey, NpcStateDeltaMessage> _pendingStates = new();
-        private bool _dressing;
+        private readonly Dictionary<NpcDeltaKey, NpcSnapshot> _pendingStates = new();
         private float _now;
         private float _clockOffset;
         private bool _clockInit;
@@ -1327,10 +1390,7 @@ namespace CardShopCoop.Modules.Npc
                 HoldBox = p.HoldBox,
                 FromLiveSource = p.VisualFromLive,
             };
-            if (p.Go != null)
-            {
-                p.Go.SetActive(false);
-            }
+            p.Go?.SetActive(false);
 
             ReleaseWorkerBoxProp(p);
 
@@ -1592,35 +1652,13 @@ namespace CardShopCoop.Modules.Npc
             // Also clear ids that no longer have a Puppet wrapper (for example, a failed spawn
             // destroyed by Unity between two lifecycle callbacks).
             _puppetRoots.Clear();
-            _pendingBaseline = null;
-            _pendingIdentities.Clear();
             _pendingStates.Clear();
-            _dressing = false;
             SuppressedCustomer.Clear();
             _clockInit = false;
         }
 
-        private Transform ResolveCustomerAnchor(ushort index, int identity)
-        {
-            var key = (KindCustomer << 16) | index;
-            if (_existing.TryGetValue(index, out var existing)
-                && existing.Generation == identity && existing.Customer != null)
-            {
-                return existing.Customer.transform;
-            }
-
-            if (_puppets.TryGetValue(key, out var puppet)
-                && puppet.HasIdentity && puppet.Identity == identity && puppet.Go != null)
-            {
-                return puppet.Go.transform;
-            }
-
-            return null;
-        }
-
-        /// <summary>Client-only: show a host-selected customer speech bubble over the
-        /// corresponding visible representation. Missing puppets are intentionally ignored;
-        /// speech is cosmetic and should not keep stale references alive.</summary>
+        /// <summary>Client-only: show a host-selected customer speech bubble over the live
+        /// customer the message carries. The handler has already dropped a message without one.</summary>
         public void ShowSpeech(NpcSpeechMessage message, bool inGame)
         {
             if (!inGame)
@@ -1628,23 +1666,17 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            var anchor = ResolveCustomerAnchor(message.Index, message.Identity);
-            if (anchor == null)
-            {
-                return;
-            }
-
             var spawner = SceneRef<PricePopupSpawner>.Get();
             if (spawner == null)
             {
                 return;
             }
 
-            spawner.ShowTextPopup(message.Text, message.OffsetUp, anchor);
+            spawner.ShowTextPopup(message.Text, message.OffsetUp, message.Customer.transform);
         }
 
-        /// <summary>Mirrors the host's green add-money popup on the matching puppet or
-        /// mirror.</summary>
+        /// <summary>Mirrors the host's green add-money popup on the live customer the message
+        /// carries. The handler has already dropped a message without one.</summary>
         public void ShowMoneyPopup(NpcMoneyPopupMessage message, bool inGame)
         {
             if (!inGame)
@@ -1652,19 +1684,13 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            var anchor = ResolveCustomerAnchor(message.Index, message.Identity);
-            if (anchor == null)
-            {
-                return;
-            }
-
             var spawner = SceneRef<PricePopupSpawner>.Get();
             if (spawner == null)
             {
                 return;
             }
 
-            spawner.ShowPricePopup(message.Amount, message.OffsetUp, anchor);
+            spawner.ShowPricePopup(message.Amount, message.OffsetUp, message.Customer.transform);
         }
 
         /// <summary>The GameObject instance id of a customer root. Native activation
@@ -1850,12 +1876,6 @@ namespace CardShopCoop.Modules.Npc
             }
 
             var key = (KindCustomer << 16) | index;
-            if (_active._pendingIdentities.TryGetValue(key, out var pendingIdentity))
-            {
-                generation = pendingIdentity.Identity;
-                return generation > 0;
-            }
-
             if (!_active._puppets.TryGetValue(key, out var puppet) || !puppet.HasIdentity)
             {
                 return false;
@@ -1863,6 +1883,97 @@ namespace CardShopCoop.Modules.Npc
 
             generation = puppet.Identity;
             return generation > 0;
+        }
+
+        internal static bool TryGetWireIdentity(Customer customer, out int index, out int identity)
+        {
+            index = -1;
+            identity = 0;
+            if (_active == null || customer == null)
+            {
+                return false;
+            }
+
+            // The wire may carry a puppet clone (not a pooled manager member) when a customer
+            // field is serialized from the presentation object; resolve it from its slot first.
+            foreach (var pair in _active._puppets)
+            {
+                var puppet = pair.Value;
+                if (puppet != null && puppet.HasIdentity
+                    && ReferenceEquals(puppet.Customer, customer))
+                {
+                    index = (int)(pair.Key & 0xffff);
+                    identity = puppet.Identity;
+                    return identity > 0;
+                }
+            }
+
+            return NpcInterop.TryGetCustomerIndex(customer, out index)
+                && TryGetCustomerGeneration(index, out identity);
+        }
+
+        internal static bool TryGetWireIdentity(Worker worker, out int index, out int identity)
+        {
+            index = worker == null ? -1 : worker.m_WorkerIndex;
+            identity = 0;
+            if (_active == null || worker == null || index < 0)
+            {
+                return false;
+            }
+
+            var key = (KindWorker << 16) | index;
+            if (!_active._puppets.TryGetValue(key, out var puppet) || !puppet.HasIdentity)
+            {
+                return false;
+            }
+
+            identity = puppet.Identity;
+            return identity > 0;
+        }
+
+        internal static bool TryResolveCustomer(int index, int identity, out Customer customer)
+        {
+            customer = null;
+            if (_active == null || index < 0 || identity <= 0)
+            {
+                return false;
+            }
+
+            if (_active._existing.TryGetValue(index, out var existing) && existing != null
+                && existing.Generation == identity)
+            {
+                customer = existing.Customer;
+                return customer != null;
+            }
+
+            var key = (KindCustomer << 16) | index;
+            if (!_active._puppets.TryGetValue(key, out var puppet) || !puppet.HasIdentity
+                || puppet.Identity != identity)
+            {
+                return false;
+            }
+
+            customer = puppet.Customer;
+            return customer != null;
+        }
+
+        internal static bool TryResolveWorker(int index, int identity, out Worker worker)
+        {
+            worker = null;
+            if (_active == null || index < 0 || identity <= 0)
+            {
+                return false;
+            }
+
+            var key = (KindWorker << 16) | index;
+            if (!_active._puppets.TryGetValue(key, out var puppet) || !puppet.HasIdentity
+                || puppet.Identity != identity || puppet.Go == null)
+            {
+                return false;
+            }
+
+            worker = puppet.Go.GetComponent<Worker>();
+            return worker != null;
         }
 
         private bool IsExistingCustomer(int index, Customer customer)
@@ -1875,7 +1986,10 @@ namespace CardShopCoop.Modules.Npc
         /// an authoritative host list index also exists locally. The factory is present in both
         /// supported game baselines and appends in index order while leaving the new carrier
         /// inactive. New capacity is tracked immediately so vanilla cannot expose an extra native
-        /// customer beside its synchronized puppet.</summary>
+        /// customer beside its synchronized puppet. The slot is also reconciled to the host's
+        /// authoritative gender: the 1.00 and 1.02 builds bake the same pool bodies in a different
+        /// order, so an index can name a male customer on the host and a female body on the guest
+        /// (whose preset table then falls back to the default model).</summary>
         private static void EnsureCustomerCapacity(int index, bool female)
         {
             var manager = NpcInterop.CustomerManager;
@@ -1889,158 +2003,122 @@ namespace CardShopCoop.Modules.Npc
                 grew = true;
             }
 
+            EnsureCustomerSlotGender(customers, index, female);
+
             if (grew)
             {
-                // Runtime pool growth must announce itself exactly like the batch overload.
-                // Client modules hold state that could not be applied until this slot existed
-                // (trade/register carriers, deodorant state) and apply it from these events; a
-                // silently grown slot left that state stranded. A customer's identity can reach
-                // the host's incremental scan after its counter trade offer, so this is the only
-                // signal the guest gets that the slot its offer refers to now exists.
+                // Runtime pool growth must announce itself so client modules holding state for
+                // this slot (trade/register carriers, deodorant state) can apply it. A customer's
+                // identity can reach the host's incremental scan after its counter trade offer, so
+                // this is the only signal the guest gets that the slot its offer refers to exists.
                 _customerPoolChanged.Raise();
                 _pendingCapacityChanged.Add(index);
             }
         }
 
-        private static void EnsureCustomerCapacity(int capacity, List<bool> females)
+        /// <summary>Keeps the local pool index authoritative for the host's customer. Both
+        /// supported pools contain the same bodies, but 1.00 and 1.02 order the male and female
+        /// entries differently, so the body at a host index can be the opposite gender. Swap it
+        /// with a free body of the authoritative gender before the identity is dressed; the old
+        /// body moves to that free slot and is reconciled if the host ever uses it. Never move a
+        /// body an active register/trade carrier is borrowing.</summary>
+        private static void EnsureCustomerSlotGender(List<Customer> customers, int index, bool female)
         {
-            var manager = NpcInterop.CustomerManager;
-            var customers = manager?.GetCustomerList();
-            var grew = false;
-            while (customers.Count < capacity)
+            var slot = customers[index];
+            if (slot == null || slot.m_IsFemale == female)
             {
-                var index = customers.Count;
-                var customer = manager.GetNewCustomerPrefab(females[index]);
-
-                _active.TrackNativeRoot(customer.gameObject);
-                if (customer.gameObject.activeSelf)
-                {
-                    customer.gameObject.SetActive(false);
-                }
-
-                grew = true;
+                return;
             }
 
-            if (grew)
+            if (slot.gameObject.activeSelf || SuppressedCustomer.Contains(index)
+                || (_active != null && _active._existing.ContainsKey(index)))
             {
+                CoopPlugin.Log.LogError("npc: customer slot " + index
+                    + " is in use but has the wrong gender; cannot reconcile.");
+                return;
+            }
+
+            for (var i = 0; i < customers.Count; i++)
+            {
+                var candidate = customers[i];
+                if (candidate == null || candidate.m_IsFemale != female
+                    || candidate.gameObject.activeSelf
+                    || SuppressedCustomer.Contains(i)
+                    || (_active != null && _active._existing.ContainsKey(i))
+                    || HasCustomerIdentity(i))
+                {
+                    continue;
+                }
+
+                // Keep customers[index], and the matching child order, pointed at the body the
+                // host's index names: identity resolution, the register carrier and every state
+                // delta address the slot by this index.
+                customers[index] = candidate;
+                customers[i] = slot;
+                candidate.transform.SetSiblingIndex(index);
+                slot.transform.SetSiblingIndex(i);
                 _customerPoolChanged.Raise();
-                _pendingCapacityChanged.Add(capacity - 1);
+                CoopPlugin.Log.LogInfo("npc: slot " + index + " swapped to a "
+                    + (female ? "female" : "male") + " body from slot " + i + ".");
+                return;
             }
+
+            CoopPlugin.Log.LogError("npc: no free " + (female ? "female" : "male")
+                + " customer body for slot " + index + "; the carrier will resolve the wrong model.");
         }
 
-        private void BufferPendingState(NpcStateDeltaMessage message)
+        /// <summary>A pool index that already has an incarnation must keep its body: moving it
+        /// would silently reskin the customer that index already represents. Only unbound slots
+        /// that are not materialized yet are interchangeable.</summary>
+        private static bool HasCustomerIdentity(int index)
         {
-            _pendingStates[new NpcDeltaKey(message.Kind, message.Index, message.Identity)] = message;
-        }
-
-        private bool HasMatchingIdentity(NpcStateDeltaMessage message)
-        {
-            if (message.Kind == KindCustomer
-                && TryGetCustomerGeneration(message.Index, out var generation))
+            if (_active == null)
             {
-                return generation == message.Identity;
+                return false;
             }
 
-            var key = (message.Kind << 16) | message.Index;
-            return _puppets.TryGetValue(key, out var puppet) && puppet.HasIdentity
-                && puppet.Identity == message.Identity;
+            var key = (KindCustomer << 16) | index;
+            return _active._puppets.TryGetValue(key, out var puppet) && puppet.HasIdentity;
         }
 
-        private void ApplyPendingStates()
+        private void BufferPendingState(in NpcSnapshot state)
         {
-            if (_pendingStates.Count == 0)
+            _pendingStates[new NpcDeltaKey(state.Kind, state.Index, state.Identity)] = state;
+        }
+
+        /// <summary>Apply the newest transient pose buffered for an incarnation that the identity
+        /// module just materialized.</summary>
+        internal static void ApplyPendingState(byte kind, ushort index, int identity)
+        {
+            var client = _active;
+            if (client == null)
             {
                 return;
             }
 
-            var pending = new List<NpcStateDeltaMessage>(_pendingStates.Values);
-            for (var i = 0; i < pending.Count; i++)
-            {
-                ApplyStateDelta(pending[i]);
-            }
-        }
-
-        private void ApplyPendingStates(byte kind, ushort index, int identity)
-        {
             var key = new NpcDeltaKey(kind, index, identity);
-            if (_pendingStates.TryGetValue(key, out var state))
-            {
-                ApplyStateDelta(state);
-            }
-        }
-
-        private void ApplyStateDelta(NpcStateDeltaMessage message)
-        {
-            var key = new NpcDeltaKey(message.Kind, message.Index, message.Identity);
-            if (!message.Active)
-            {
-                _pendingStates.Remove(key);
-                RemoveEntity(message.Kind, message.Index, message.Identity);
-                return;
-            }
-
-            if (!HasMatchingIdentity(message))
-            {
-                BufferPendingState(message);
-                return;
-            }
-
-            ApplyEntries(message.HostTime, new List<NpcEntry>
-            {
-                new NpcEntry
-                {
-                    Kind = message.Kind,
-                    Index = message.Index,
-                    Identity = message.Identity,
-                    Position = message.Position,
-                    Yaw = message.Yaw,
-                    Speed = message.Speed,
-                    Flags = message.Flags,
-                    ActionSequence = message.ActionSequence,
-                    ActionKind = message.ActionKind,
-                    HoldBig = message.HoldBig,
-                    HoldItemType = message.HoldItemType,
-                    HoldBoxNetworkId = message.HoldBoxNetworkId,
-                    HoldBoxOpened = message.HoldBoxOpened,
-                }
-            });
-            _pendingStates.Remove(key);
-        }
-
-        private void RemoveEntity(byte kind, ushort index, int identity)
-        {
-            var identityKey = (kind << 16) | index;
-            if (_pendingIdentities.TryGetValue(identityKey, out var pendingIdentity)
-                && pendingIdentity.Identity == identity)
-            {
-                _pendingIdentities.Remove(identityKey);
-            }
-
-            if (kind == KindCustomer && _existing.TryGetValue(index, out var existing)
-                && existing.Generation == identity)
-            {
-                DetachExistingCustomer((int)index, existing.Customer);
-            }
-
-            var key = identityKey;
-            if (!_puppets.TryGetValue(key, out var puppet)
-                || (puppet.HasIdentity && puppet.Identity != identity))
+            if (!client._pendingStates.TryGetValue(key, out var state))
             {
                 return;
             }
 
-            ParkOrDestroyVisual(puppet);
-            _puppets.Remove(key);
+            client._pendingStates.Remove(key);
+            client.ApplyNpcState(state);
         }
 
-        /// <summary>Client only. Apply one received NPC state update.</summary>
-        private void ApplyEntries(float hostTime, IList<NpcEntry> entries)
+        /// <summary>Apply one authoritative pose. State never creates an NPC; a pose whose
+        /// incarnation is not materialized yet is retained until the identity lifecycle creates
+        /// it.</summary>
+        private bool ApplyNpcState(in NpcSnapshot state)
         {
-            var count = entries.Count;
+            var kind = state.Kind;
+            var index = state.Index;
+            var identity = state.Identity;
+            var key = (kind << 16) | index;
 
             // map host time onto the local timeline; low-pass the offset so per-packet
             // network jitter cannot corrupt snapshot spacing (snap on init / big jumps)
-            var rawOffset = _now - hostTime;
+            var rawOffset = _now - state.HostTime;
             if (!_clockInit || Mathf.Abs(rawOffset - _clockOffset) > 1f)
             {
                 _clockOffset = rawOffset;
@@ -2051,201 +2129,100 @@ namespace CardShopCoop.Modules.Npc
                 _clockOffset += 0.1f * (rawOffset - _clockOffset);
             }
 
-            var snapTime = hostTime + _clockOffset;
-
-            for (var n = 0; n < count; n++)
+            var snap = new Snap
             {
-                var ent = entries[n];
-                var kind = ent.Kind;
-                var index = ent.Index;
-                var identity = ent.Identity;
-                var hasName = ent.HasName;
-                var charName = ent.CharName;
-                // State-only entries carry no gender at all, so `ent.Female` defaults to false.
-                // Treating that as authoritative and comparing it against the puppet's real
-                // gender destroyed every female puppet on each state update (its Female flag
-                // never matched the default). Only a name-bearing baseline/identity entry can
-                // assert gender, and customers encode it in the name as well.
-                var female = ent.Female || (hasName && HasFemaleNamePrefix(charName));
-                var pos = ent.Position;
-                var yaw = ent.Yaw;
-                var speed = ent.Speed;
-                var flags = (NpcFlags)ent.Flags;
-                var actionSequence = ent.ActionSequence;
-                var actionKind = ent.ActionKind;
-                var key = (kind << 16) | index;
-                if (kind == KindCustomer && _existing.TryGetValue(index, out var existingMirror)
-                    && existingMirror.Generation == identity)
+                Pos = state.Position,
+                Yaw = state.Yaw,
+                Speed = state.Speed,
+                Flags = (NpcFlags)state.Flags,
+                Time = state.HostTime + _clockOffset,
+            };
+
+            if (kind == KindCustomer && _existing.TryGetValue(index, out var mirror)
+                && mirror != null && mirror.Generation == identity)
+            {
+                mirror.BufHead = (mirror.BufHead + 1) & 3;
+                mirror.Buf[mirror.BufHead] = snap;
+                if (mirror.BufCount < 4)
                 {
-                    var existing = existingMirror;
-                    if (existing != null)
+                    mirror.BufCount++;
+                }
+                mirror.Flags = (NpcFlags)state.Flags;
+                if (mirror.Customer != null)
+                {
+                    ApplyActionTrigger(mirror.Customer.m_Anim, kind, state.ActionKind,
+                        state.ActionSequence, ref mirror.GrabSequence);
+                }
+
+                // A pooled customer is the interaction carrier. Keep its visual puppet alive and
+                // fed with the same snapshot even while the carrier is on screen, so handing the
+                // customer back (register sale finish, trade end) reveals a ready puppet instead
+                // of a hole that the client has to rebuild from scratch.
+                _puppets.TryGetValue(key, out var visual);
+                if (visual == null || visual.Go == null || !visual.HasIdentity
+                    || visual.Identity != identity)
+                {
+                    // The identity lifecycle owns the body for another (or a not-yet-created)
+                    // incarnation; a pose must not rebuild or relabel it.
+                    mirror.PuppetReadyNotified = false;
+                }
+                else
+                {
+                    visual.Flags = (NpcFlags)state.Flags;
+                    visual.BufHead = (visual.BufHead + 1) & 3;
+                    visual.Buf[visual.BufHead] = snap;
+                    if (visual.BufCount < 4)
                     {
-                        existing.BufHead = (existing.BufHead + 1) & 3;
-                        existing.Buf[existing.BufHead] = new Snap
-                        {
-                            Pos = pos,
-                            Yaw = yaw,
-                            Speed = speed,
-                            Flags = flags,
-                            Time = snapTime
-                        };
-                        if (existing.BufCount < 4)
-                        {
-                            existing.BufCount++;
-                        }
-                        existing.Flags = flags;
-                        if (existing.Customer != null)
-                        {
-                            ApplyActionTrigger(existing.Customer.m_Anim, kind, actionKind,
-                                actionSequence, ref existing.GrabSequence);
-                        }
-
-                        // A pooled customer is the interaction carrier. Keep its visual puppet
-                        // alive and fed with the same snapshot even while the carrier is on
-                        // screen, so handing the customer back (register sale finish, trade end)
-                        // reveals a ready puppet instead of a hole that the client has to rebuild
-                        // from scratch - the puppet must not age out while it is hidden.
-                        //
-                        // This branch runs INSTEAD of the normal puppet-creation path below, so
-                        // a customer whose first snapshot arrives while it is ALREADY borrowed
-                        // (a register carrier claimed before any named snapshot spawned its
-                        // puppet) would otherwise never get one at all: on release the real
-                        // carrier is hidden and nothing is revealed until the next name-bearing
-                        // refresh rebuilds a puppet, leaving the customer invisible for seconds.
-                        // Ensure a hidden puppet exists here so the handoff always has a body.
-                        var visualKey = (KindCustomer << 16) | index;
-                        _puppets.TryGetValue(visualKey, out var visual);
-                        if (visual == null || visual.Go == null)
-                        {
-                            existing.PuppetReadyNotified = false;
-                        }
-                        if (visual != null && visual.HasIdentity
-                            && (visual.Identity != identity
-                                || (hasName && visual.Female != female)))
-                        {
-                            // This list slot was reused by a newer pooled customer: drop the
-                            // stale body so it is rebuilt for this identity, exactly as the
-                            // normal path does.
-                            ClearPendingIdentity(visual);
-                            _active.ParkOrDestroyVisual(visual);
-
-                            visual.Go = null;
-                            visual.CharName = "";
-                            visual.Identity = 0;
-                            visual.HasIdentity = false;
-                            visual.BufCount = 0;
-                            visual.GrabSequence = UnsetActionSequence;
-                            existing.PuppetReadyNotified = false;
-                        }
-                        if (visual == null || visual.Go == null)
-                        {
-                            if (hasName)
-                            {
-                                if (visual == null)
-                                {
-                                    visual = new Puppet();
-                                    _puppets[visualKey] = visual;
-                                }
-                                visual.Kind = KindCustomer;
-                                SetPendingIdentity(visual, identity, female);
-                                Redress(visual, charName, pos, female, KindCustomer, index);
-                            }
-                        }
-                        if (visual != null)
-                        {
-                            visual.Flags = flags;
-                            visual.BufHead = (visual.BufHead + 1) & 3;
-                            visual.Buf[visual.BufHead] = new Snap
-                            {
-                                Pos = pos,
-                                Yaw = yaw,
-                                Speed = speed,
-                                Flags = flags,
-                                Time = snapTime
-                            };
-                            if (visual.BufCount < 4)
-                            {
-                                visual.BufCount++;
-                            }
-                            ApplyActionTrigger(visual.Anim, kind, actionKind, actionSequence,
-                                ref visual.GrabSequence);
-                            // Register carriers render the real customer, so their puppet stays
-                            // hidden (still alive and buffered) until DetachExistingCustomer shows
-                            // it; trade carriers keep the puppet visible.
-                            visual.Go?.SetActive(existing.KeepPuppetVisible);
-                            if (existing.KeepPuppetVisible && visual.Go != null
-                                && !existing.PuppetReadyNotified)
-                            {
-                                existing.PuppetReadyNotified = true;
-                                ExistingCustomerPuppetReady?.Invoke(index, identity,
-                                    existing.Customer);
-                            }
-                        }
+                        visual.BufCount++;
                     }
-                    continue;
-                }
-                // the register carrier renders this customer for real (with clickable cash);
-                // do not also paint an inert clone over it
-                if (!_puppets.TryGetValue(key, out var p))
-                {
-                    p = new Puppet();
-                    _puppets[key] = p;
-                }
-
-                var identityChanged = p.HasIdentity
-                    && (p.Identity != identity || (hasName && p.Female != female));
-                if (identityChanged)
-                {
-                    ClearPendingIdentity(p);
-                    _active.ParkOrDestroyVisual(p);
-
-                    p.Go = null;
-                    p.CharName = "";
-                    p.Identity = 0;
-                    p.HasIdentity = false;
-                    p.BufCount = 0;
-                    p.GrabSequence = UnsetActionSequence;
-                }
-                p.Kind = kind;
-
-                if (hasName)
-                {
-                    SetPendingIdentity(p, identity, female);
-                    Redress(p, charName, pos, female, kind, index);
+                    ApplyActionTrigger(visual.Anim, kind, state.ActionKind,
+                        state.ActionSequence, ref visual.GrabSequence);
+                    // Register carriers render the real customer, so their puppet stays hidden
+                    // (still alive and buffered) until DetachExistingCustomer shows it; trade
+                    // carriers keep the puppet visible.
+                    visual.Go?.SetActive(mirror.KeepPuppetVisible);
+                    if (mirror.KeepPuppetVisible && visual.Go != null
+                        && !mirror.PuppetReadyNotified)
+                    {
+                        mirror.PuppetReadyNotified = true;
+                        ExistingCustomerPuppetReady?.Invoke(index, identity, mirror.Customer);
+                    }
                 }
 
-                // A pool adoption inside Redress calls ResetPuppetIncarnationState, which
-                // intentionally clears hold state for a new incarnation; assigning the current
-                // packet's hold state after the dress keeps it from being wiped.
-                if (kind == KindWorker)
-                {
-                    p.HoldBig = ent.HoldBig;
-                    p.HoldItemType = ent.HoldItemType;
-                    p.HoldBoxNetworkId = ent.HoldBoxNetworkId;
-                    p.HoldBoxOpened = ent.HoldBoxOpened;
-                }
-
-                p.BufHead = (p.BufHead + 1) & 3;
-                p.Buf[p.BufHead] = new Snap
-                {
-                    Pos = pos,
-                    Yaw = yaw,
-                    Speed = speed,
-                    Flags = flags,
-                    Time = snapTime,
-                };
-                if (p.BufCount < 4)
-                {
-                    p.BufCount++;
-                }
-
-                p.Flags = flags;
-                ApplyActionTrigger(p.Anim, kind, actionKind, actionSequence, ref p.GrabSequence);
-                if (kind == KindCustomer && SuppressedCustomer.Contains(index) && p.Go != null)
-                {
-                    p.Go.SetActive(false);
-                }
+                return true;
             }
+
+            if (!_puppets.TryGetValue(key, out var puppet) || !puppet.HasIdentity
+                || puppet.Identity != identity)
+            {
+                BufferPendingState(state);
+                return false;
+            }
+
+            if (kind == KindWorker)
+            {
+                puppet.HoldBig = state.HoldBig;
+                puppet.HoldItemType = state.HoldItemType;
+                puppet.HoldBoxNetworkId = state.HoldBoxNetworkId;
+                puppet.HoldBoxOpened = state.HoldBoxOpened;
+            }
+
+            puppet.BufHead = (puppet.BufHead + 1) & 3;
+            puppet.Buf[puppet.BufHead] = snap;
+            if (puppet.BufCount < 4)
+            {
+                puppet.BufCount++;
+            }
+
+            puppet.Flags = (NpcFlags)state.Flags;
+            ApplyActionTrigger(puppet.Anim, kind, state.ActionKind, state.ActionSequence,
+                ref puppet.GrabSequence);
+            if (kind == KindCustomer && SuppressedCustomer.Contains(index) && puppet.Go != null)
+            {
+                puppet.Go.SetActive(false);
+            }
+
+            return true;
         }
 
         /// <summary>Fires an NPC action animation once per authoritative sequence change. The
@@ -2315,41 +2292,31 @@ namespace CardShopCoop.Modules.Npc
         /// hair/apparel for the new name). Full respawn only when there is no clone yet
         /// or the male/female prefab no longer matches.</summary>
         private void Redress(Puppet puppet, string charName, Vector3 pos, bool female, byte kind,
-            ushort index)
+            ushort index, int identity)
         {
-            _dressing = true;
-            try
+            // The look belongs to the real NPC, and this is the one chokepoint every look
+            // application flows through (spawn identity, join baseline, re-dress): whenever
+            // a customer puppet is dressed, the real pooled customer for that index is
+            // dressed in place with the same authoritative name. Borrowers (the register)
+            // then reuse an already-dressed NPC instead of cloning a lookalike. A member
+            // already wearing the name is left untouched; on a real change the game's own
+            // setHair/setApparel destroy and replace each slot.
+            if (kind == KindCustomer)
             {
-                // The look belongs to the real NPC, and this is the one chokepoint every look
-                // application flows through (spawn identity, join baseline, re-dress): whenever
-                // a customer puppet is dressed, the real pooled customer for that index is
-                // dressed in place with the same authoritative name. Borrowers (the register)
-                // then reuse an already-dressed NPC instead of cloning a lookalike. A member
-                // already wearing the name is left untouched; on a real change the game's own
-                // setHair/setApparel destroy and replace each slot.
-                if (kind == KindCustomer)
-                {
-                    DressRealCustomer(index, charName);
-                }
+                DressRealCustomer(index, charName);
+            }
 
-                ReDress(puppet, charName, pos, female, kind, index);
-            }
-            finally
-            {
-                _dressing = false;
-            }
+            ReDress(puppet, charName, pos, female, kind, index, identity);
         }
 
         private void ReDress(Puppet p, string charName, Vector3 pos, bool female, byte kind,
-            ushort index)
+            ushort index, int identity)
         {
             var genderChanged = p.Go != null && p.Female != female;
             if (p.Go == null || p.Custom == null || genderChanged)
             {
-                var pendingIdentity = p.PendingIdentity;
                 if (p.Go != null)
                 {
-                    ClearPendingIdentity(p);
                     ParkOrDestroyVisual(p);
                     p.Go = null;
                     p.CharName = "";
@@ -2358,9 +2325,7 @@ namespace CardShopCoop.Modules.Npc
                 }
 
                 p.Kind = kind;
-                SetPendingIdentity(p, pendingIdentity, female);
-                Spawn(p, charName, pos, female, kind, index);
-                CommitIdentity(p);
+                Spawn(p, charName, pos, female, kind, index, identity);
                 return;
             }
 
@@ -2369,7 +2334,7 @@ namespace CardShopCoop.Modules.Npc
                 // Already wearing this exact look; only the incarnation advanced. Skip the
                 // JSON round-trip and hair/apparel mesh rebuild inside
                 // CharacterCustomization.Initialize(), which is otherwise unconditional.
-                CommitIdentity(p);
+                CommitPuppetIdentity(p, identity, female);
                 return;
             }
 
@@ -2394,8 +2359,7 @@ namespace CardShopCoop.Modules.Npc
                 ApplyVisual(p, pooled, charName, pos);
                 ResetPuppetIncarnationState(p, pos);
                 SeedWorkerUi(p, index);
-                CommitSpawnTail(p, charName, pos);
-                CommitIdentity(p);
+                CommitSpawnTail(p, charName, pos, identity, female);
                 return;
             }
 
@@ -2403,7 +2367,7 @@ namespace CardShopCoop.Modules.Npc
             p.CharName = charName;
             p.Female = female;
             p.Go.name = "CoopNpc_" + charName;
-            CommitIdentity(p);
+            CommitPuppetIdentity(p, identity, female);
         }
 
         /// <summary>Client only. Interpolate puppets; despawn ones the host stopped sending.</summary>
@@ -2692,7 +2656,8 @@ namespace CardShopCoop.Modules.Npc
             return worker != null && worker.m_IsFemale == female ? worker : null;
         }
 
-        private void Spawn(Puppet p, string charName, Vector3 pos, bool femaleHint, byte kind, ushort index)
+        private void Spawn(Puppet p, string charName, Vector3 pos, bool femaleHint, byte kind,
+            ushort index, int identity)
         {
             var female = femaleHint;
             p.Female = female;
@@ -2749,8 +2714,8 @@ namespace CardShopCoop.Modules.Npc
                         var prefab = female ? customerManager.m_CustomerFemalePrefab
                             : customerManager.m_CustomerPrefab;
                         prefabObject = prefab.gameObject;
-                        sourceCustom = prefab != null ? prefab.m_CharacterCustom : null;
-                        sourceRoot = prefab != null ? prefab.transform : null;
+                        sourceCustom = prefab?.m_CharacterCustom;
+                        sourceRoot = prefab?.transform;
                     }
                 }
             }
@@ -2777,7 +2742,7 @@ namespace CardShopCoop.Modules.Npc
                 ApplyVisual(p, pooled, charName, pos);
                 ResetPuppetIncarnationState(p, pos);
                 SeedWorkerUi(p, index);
-                CommitSpawnTail(p, charName, pos);
+                CommitSpawnTail(p, charName, pos, identity, female);
                 return;
             }
 
@@ -2947,7 +2912,7 @@ namespace CardShopCoop.Modules.Npc
                 // hierarchy; GetComponentInChildren alone can select the wrong one.
                 p.Anim = worker != null && worker.m_Anim != null
                     ? worker.m_Anim : clone.GetComponentInChildren<Animator>(true);
-                CommitSpawnTail(p, charName, pos);
+                CommitSpawnTail(p, charName, pos, identity, female);
             }
         }
 
@@ -2969,9 +2934,12 @@ namespace CardShopCoop.Modules.Npc
         /// name is committed only when the clone actually wears the look (the caller has already
         /// set Custom.CharacterName); leaving it unset on a failed dress makes the next
         /// name-bearing packet ReDress instead of accepting a stale model.</summary>
-        private void CommitSpawnTail(Puppet p, string charName, Vector3 pos)
+        private void CommitSpawnTail(Puppet p, string charName, Vector3 pos, int identity,
+            bool female)
         {
             p.CharName = charName;
+            p.Female = female;
+            CommitPuppetIdentity(p, identity, female);
             p.PrevRenderedPos = pos;
             p.RenderYaw = 0f;
             p.AnimSpeed = 0f;

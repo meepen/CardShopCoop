@@ -3,7 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
-using CardShopCoop.Modules.Prediction;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
@@ -95,7 +95,7 @@ namespace CardShopCoop.Modules.Settings
             _context.Send(connection.Id, BuildFullState());
         }
 
-        [MessageHandler(typeof(SettingsOpMessage))]
+        [MessageHandler]
         private void HandleOperation(MessageContext context, SettingsOpMessage message)
         {
             if (!IsFullyJoinedSender(context))
@@ -114,9 +114,9 @@ namespace CardShopCoop.Modules.Settings
             {
                 CoopPlugin.Log.LogWarning("Settings: rejected malformed authenticated operation from "
                     + context.Connection.Id + ": " + reason);
-                if (message.PredictionId != Guid.Empty)
+                if (message.ActionId != Guid.Empty)
                 {
-                    PredictionApi.Rollback(_context, context.Connection.Id, message.PredictionId);
+                    ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
                 }
 
 
@@ -128,7 +128,7 @@ namespace CardShopCoop.Modules.Settings
                 case OpGameEvent:
                     CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)message.Index;
                     CPlayerData.m_PendingGameEventExpansionType = message.Expansion;
-                    BroadcastMutation(4, -1, message.PredictionId);
+                    BroadcastGameEvent(message.ActionId);
                     break;
                 case OpGameEventFee:
                     _applyingRemote = true;
@@ -142,49 +142,48 @@ namespace CardShopCoop.Modules.Settings
                         _applyingRemote = false;
                     }
 
-                    BroadcastMutation(5, message.Index, message.PredictionId);
+                    BroadcastGameEventFee((EGameEventFormat)message.Index, message.ActionId);
                     break;
                 case OpCashier:
                     {
-                        // The intent addresses its counter by stable placement key. Resolve it straight
-                        // back to the live object and recheck the key; a list index would not survive a
-                        // concurrent placement, and there is no index on the wire to fall back to.
-                        var counter = SettingsInterop.ResolveCashier(message.CashierKey);
+                        // The intent names the live counter. A null means the entity is not live on
+                        // this peer; log and drop instead of resolving any fallback identity.
+                        var counter = message.Cashier;
                         if (counter == null)
                         {
-                            CoopPlugin.Log.LogWarning("Settings: stale cashier key " + message.CashierKey
-                                + " from connection " + context.Connection.Id + ".");
-                            if (message.PredictionId != Guid.Empty)
+                            CoopPlugin.Log.LogWarning("Settings: dropped cashier intent with no live "
+                                + "counter from connection " + context.Connection.Id + ".");
+                            if (message.ActionId != Guid.Empty)
                             {
-                                PredictionApi.Rollback(_context, context.Connection.Id,
-                                    message.PredictionId);
+                                ActionLedger.Rollback(_context, context.Connection.Id,
+                                    message.ActionId);
                             }
 
                             return;
                         }
 
                         ApplyCashier(counter, message.CashierFlags);
-                        PublishCashier(counter, "cashier intent", message.PredictionId);
+                        PublishCashier(counter, "cashier intent", message.ActionId);
                         break;
                     }
                 case OpTableNumber:
                     {
-                        var table = SettingsInterop.ResolveTable(message.TableKey);
+                        var table = message.Table;
                         if (table == null)
                         {
-                            CoopPlugin.Log.LogWarning("Settings: stale table key " + message.TableKey
-                                + " from connection " + context.Connection.Id + ".");
-                            if (message.PredictionId != Guid.Empty)
+                            CoopPlugin.Log.LogWarning("Settings: dropped table intent with no live "
+                                + "table from connection " + context.Connection.Id + ".");
+                            if (message.ActionId != Guid.Empty)
                             {
-                                PredictionApi.Rollback(_context, context.Connection.Id,
-                                    message.PredictionId);
+                                ActionLedger.Rollback(_context, context.Connection.Id,
+                                    message.ActionId);
                             }
 
                             return;
                         }
 
                         ApplyTableNumber(table, message.TableNumber);
-                        PublishTable(table, "table number intent", message.PredictionId);
+                        PublishTable(table, "table number intent", message.ActionId);
                         break;
                     }
                 default:
@@ -256,8 +255,8 @@ namespace CardShopCoop.Modules.Settings
                     return reason == null;
 
                 case OpCashier:
-                    // The key resolves against the live placement registry in HandleOperation; here
-                    // only the payload's own range is checked.
+                    // The live object is checked in HandleOperation; here only the payload's own
+                    // range is checked.
                     if ((message.CashierFlags & ~3) != 0)
                     {
                         reason = "cashier flags contain unknown bits";
@@ -342,14 +341,53 @@ namespace CardShopCoop.Modules.Settings
             return state == ConnectionState.Transferring || state == ConnectionState.FullyJoined;
         }
 
-        private void BroadcastMutation(byte kind, int index, Guid predictionId = default)
+        private void Broadcast(SettingsStateMessage message)
         {
             if (_shutdown || !_context.InGame())
             {
                 return;
             }
 
-            _context.Broadcast(BuildMutation(kind, index, predictionId));
+            _context.Broadcast(message);
+        }
+
+        private void BroadcastGameEvent(Guid actionId)
+        {
+            Broadcast(new SettingsStateMessage
+            {
+                Full = false,
+                ActionId = actionId,
+                Index = 4,
+                GameEventFormat = (int)CPlayerData.m_GameEventFormat,
+                PendingGameEventFormat = (int)CPlayerData.m_PendingGameEventFormat,
+                GameEventExpansion = CPlayerData.m_GameEventExpansionType,
+                PendingGameEventExpansion = CPlayerData.m_PendingGameEventExpansionType,
+            });
+        }
+
+        private void BroadcastGameEventFee(EGameEventFormat format, Guid actionId)
+        {
+            var index = (int)format;
+            var fees = CPlayerData.m_SetGameEventPriceList;
+            var message = new SettingsStateMessage
+            {
+                Full = false,
+                ActionId = actionId,
+                Index = 5,
+                ItemIndex = index,
+                GameEventPriceCount = Math.Min(fees?.Count ?? 0, MaxWireListCount),
+            };
+            if (fees != null && index >= 0 && index < fees.Count)
+            {
+                message.GameEventPrices.Add(fees[index]);
+            }
+
+            if (index >= message.GameEventPriceCount)
+            {
+                message.Tombstone = true;
+            }
+
+            Broadcast(message);
         }
 
         private static SettingsStateMessage BuildFullState()
@@ -374,106 +412,39 @@ namespace CardShopCoop.Modules.Settings
                 message.GameEventPrices.Add(fees[i]);
             }
 
-            CopyCashiers(message.CashierFlags, message.CashierKeys);
-            CopyTables(message.TableNumbers, message.TableKeys);
+            CopyCashiers(message.CashierFlags, message.Cashiers);
+            CopyTables(message.TableNumbers, message.Tables);
             return message;
         }
 
-        /// <summary>Builds one authoritative partial mutation. <paramref name="target"/> is the
-        /// keyed element for fee mutations (the price-list index) and the stable placement key for
-        /// cashier/table mutations.</summary>
-        private static SettingsStateMessage BuildMutation(int index, int target,
-            Guid predictionId = default)
+        /// <summary>Serializes the baseline cashier flags alongside each live counter. The client
+        /// applies each flag to the object it names, so a host/client list-order divergence cannot
+        /// land a flag on the wrong counter.</summary>
+        private static void CopyCashiers(List<byte> destination,
+            List<InteractableCashierCounter> counters)
         {
-            var message = new SettingsStateMessage
+            var list = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
+            for (var i = 0; list != null && i < Mathf.Min(list.Count, 255); i++)
             {
-                Full = false,
-                PredictionId = predictionId,
-                Index = index,
-            };
-            if (index == 4)
-            {
-                message.GameEventFormat = (int)CPlayerData.m_GameEventFormat;
-                message.PendingGameEventFormat = (int)CPlayerData.m_PendingGameEventFormat;
-                message.GameEventExpansion = CPlayerData.m_GameEventExpansionType;
-                message.PendingGameEventExpansion = CPlayerData.m_PendingGameEventExpansionType;
-            }
-            else if (index == 5)
-            {
-                message.ItemIndex = target;
-                var fees = CPlayerData.m_SetGameEventPriceList;
-                message.GameEventPriceCount = Math.Min(fees?.Count ?? 0, MaxWireListCount);
-                if (fees != null && target >= 0 && target < fees.Count)
-                {
-                    message.GameEventPrices.Add(fees[target]);
-                }
-            }
-            else if (index == 6)
-            {
-                message.CashierKey = target;
-                message.CashierCount = Math.Min(
-                    SettingsInterop.FindShelfManager()?.m_CashierCounterList?.Count ?? 0,
-                    MaxWireListCount);
-                var counter = SettingsInterop.ResolveCashier(target);
-                if (counter != null)
-                {
-                    message.CashierFlags.Add((byte)((counter.CanCheckout() ? 1 : 0)
-                        | (counter.CanTradeCard() ? 2 : 0)));
-                }
-            }
-            else if (index == 7)
-            {
-                message.TableKey = target;
-                message.TableCount = Math.Min(
-                    SettingsInterop.FindShelfManager()?.m_PlayTableList?.Count ?? 0,
-                    MaxWireListCount);
-                var table = SettingsInterop.ResolveTable(target);
-                if (table != null)
-                {
-                    message.TableNumbers.Add((byte)Mathf.Clamp(
-                        table.GetTournamentPlayTableNumber(), 0, 255));
-                }
-            }
-
-            if (index == 5 && target >= 0 && target >= message.GameEventPriceCount)
-            {
-                message.Tombstone = true;
-            }
-
-            return message;
-        }
-
-        /// <summary>Serializes the baseline cashier flags alongside each element's stable placement
-        /// key. The client applies by key, so a host/client list-order divergence at join cannot land
-        /// a flag on the wrong counter. An element without identity is stamped 0 (never a valid
-        /// key): the client then applies that entry to nothing rather than guessing at a position.</summary>
-        private static void CopyCashiers(List<byte> destination, List<int> keys)
-        {
-            var counters = SettingsInterop.FindShelfManager()?.m_CashierCounterList;
-            for (var i = 0; counters != null && i < Mathf.Min(counters.Count, 255); i++)
-            {
-                var flags = (byte)3;
-                if (counters[i] != null)
-                {
-                    flags = (byte)((counters[i].CanCheckout() ? 1 : 0)
-                        | (counters[i].CanTradeCard() ? 2 : 0));
-                }
-
+                var counter = list[i];
+                var flags = (byte)((counter != null && counter.CanCheckout() ? 1 : 0)
+                    | (counter != null && counter.CanTradeCard() ? 2 : 0));
                 destination.Add(flags);
-                keys.Add(SettingsInterop.TryGetCashierKey(counters[i], out var key) ? key : 0);
+                counters.Add(counter);
             }
         }
 
-        /// <summary>Serializes the baseline table numbers alongside each table's stable placement
-        /// key, mirroring <see cref="CopyCashiers"/>.</summary>
-        private static void CopyTables(List<byte> destination, List<int> keys)
+        /// <summary>Serializes the baseline table numbers alongside each live play table, mirroring
+        /// <see cref="CopyCashiers"/>.</summary>
+        private static void CopyTables(List<byte> destination, List<InteractablePlayTable> tables)
         {
-            var tables = SettingsInterop.FindShelfManager()?.m_PlayTableList;
-            for (var i = 0; tables != null && i < Mathf.Min(tables.Count, 255); i++)
+            var list = SettingsInterop.FindShelfManager()?.m_PlayTableList;
+            for (var i = 0; list != null && i < Mathf.Min(list.Count, 255); i++)
             {
-                var number = tables[i] == null ? 0 : tables[i].GetTournamentPlayTableNumber();
+                var table = list[i];
+                var number = table == null ? 0 : table.GetTournamentPlayTableNumber();
                 destination.Add((byte)Mathf.Clamp(number, 0, 255));
-                keys.Add(SettingsInterop.TryGetTableKey(tables[i], out var key) ? key : 0);
+                tables.Add(table);
             }
         }
 
@@ -506,7 +477,7 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            _active.BroadcastMutation(4, -1, Guid.Empty);
+            _active.BroadcastGameEvent(Guid.Empty);
         }
 
         private static void BroadcastGameEventFee(EGameEventFormat format)
@@ -516,7 +487,7 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            _active.BroadcastMutation(5, (int)format, Guid.Empty);
+            _active.BroadcastGameEventFee(format, Guid.Empty);
         }
 
         private static void BroadcastCashier(InteractableCashierCounter counter)
@@ -540,29 +511,51 @@ namespace CardShopCoop.Modules.Settings
         }
 
         private void PublishCashier(InteractableCashierCounter counter, string source,
-            Guid predictionId = default)
+            Guid actionId = default)
         {
-            if (counter == null || !SettingsInterop.TryGetCashierKey(counter, out var key))
+            if (counter == null)
             {
-                CoopPlugin.Log.LogWarning("Settings host: " + source
-                    + " could not resolve a stable cashier identity");
+                CoopPlugin.Log.LogWarning("Settings host: " + source + " has no live counter.");
                 return;
             }
 
-            BroadcastMutation(6, key, predictionId);
+            var message = new SettingsStateMessage
+            {
+                Full = false,
+                ActionId = actionId,
+                Index = 6,
+                Cashier = counter,
+                CashierCount = Math.Min(
+                    SettingsInterop.FindShelfManager()?.m_CashierCounterList?.Count ?? 0,
+                    MaxWireListCount),
+            };
+            message.CashierFlags.Add((byte)((counter.CanCheckout() ? 1 : 0)
+                | (counter.CanTradeCard() ? 2 : 0)));
+            Broadcast(message);
         }
 
         private void PublishTable(InteractablePlayTable table, string source,
-            Guid predictionId = default)
+            Guid actionId = default)
         {
-            if (table == null || !SettingsInterop.TryGetTableKey(table, out var key))
+            if (table == null)
             {
-                CoopPlugin.Log.LogWarning("Settings host: " + source
-                    + " could not resolve a stable table identity");
+                CoopPlugin.Log.LogWarning("Settings host: " + source + " has no live table.");
                 return;
             }
 
-            BroadcastMutation(7, key, predictionId);
+            var message = new SettingsStateMessage
+            {
+                Full = false,
+                ActionId = actionId,
+                Index = 7,
+                Table = table,
+                TableCount = Math.Min(
+                    SettingsInterop.FindShelfManager()?.m_PlayTableList?.Count ?? 0,
+                    MaxWireListCount),
+            };
+            message.TableNumbers.Add((byte)Mathf.Clamp(
+                table.GetTournamentPlayTableNumber(), 0, 255));
+            Broadcast(message);
         }
 
         [HarmonyPatch(typeof(SetGameEventFormatScreen), "OnPressConfirmBtn")]
