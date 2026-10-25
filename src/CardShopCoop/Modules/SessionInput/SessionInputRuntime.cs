@@ -299,7 +299,18 @@ namespace CardShopCoop.Modules.SessionInput
                 return;
             }
 
-            if (_windowModalRequested && !HasAnyOwner(VanillaModalOwners))
+            // A vanilla modal (pause, cheat menu) owns the cursor and UI mode while it is open.
+            // When the co-op window closes underneath it, releasing our owned modal would hide
+            // the cursor and leave the still-visible pause menu without mouse focus. Keep our
+            // claim alive until the vanilla owner closes, then the next reconcile releases it.
+            if (HasAnyOwner(VanillaModalOwners))
+            {
+                if (_windowModalRequested)
+                {
+                    AcquireWindowModal();
+                }
+            }
+            else if (_windowModalRequested)
             {
                 AcquireWindowModal();
             }
