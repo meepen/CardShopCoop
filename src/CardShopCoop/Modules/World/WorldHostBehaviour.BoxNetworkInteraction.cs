@@ -216,24 +216,18 @@ namespace CardShopCoop.Modules.World
                     // rejected outright, so one peer can never rewrite a box another peer is
                     // carrying.
                     var held = _boxNetworkInteraction.IsBeingHeld(item);
-                    if (message.ContentsChanged)
+                    var holder = 0;
+                    var mirrored = _playerBoxInteraction != null
+                        && _playerBoxInteraction.TryGetRemoteHolder(boxId, out holder);
+                    var heldByOther = held || (mirrored && holder != context.ConnectionId);
+                    if (message.ContentsChanged && heldByOther)
                     {
-                        var holder = 0;
-                        var mirrored = _playerBoxInteraction != null
-                            && _playerBoxInteraction.TryGetRemoteHolder(boxId, out holder);
-                        var accepted = mirrored
-                            ? holder == context.ConnectionId
-                            : held || BoxNetworkInteraction.IsBoxOpen(item);
-                        if (!accepted)
-                        {
-                            CoopPlugin.Log.LogWarning("[box-id] rejected box state request name="
-                                + item.name + " from conn="
-                                + context.ConnectionId + ": the sender does not hold the box (isHeld="
-                                + held + " open=" + BoxNetworkInteraction.IsBoxOpen(item)
-                                + " mirroredHolder="
-                                + (mirrored ? holder.ToString() : "none") + ").");
-                            return false;
-                        }
+                        CoopPlugin.Log.LogWarning("[box-id] rejected box state request id="
+                            + boxId + " name=" + item.name + " from conn="
+                            + context.ConnectionId + ": another player holds the box (isHeld="
+                            + held + " mirroredHolder="
+                            + (mirrored ? holder.ToString() : "none") + ").");
+                        return false;
                     }
 
                     // Validates the client's contents payload against IsValidItem/MaxItemCount

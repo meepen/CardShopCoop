@@ -416,6 +416,47 @@ namespace CardShopCoop.Modules.World
             ReadSparseFloatsInto(message.AverageItemCostList, CPlayerData.m_AverageItemCostList, ModdedAvgCost, "average item cost");
             ApplyModdedCards(message.ModdedCards);
 
+            try
+            {
+                var restockMgr = SceneRef<RestockManager>.Get();
+                if (restockMgr != null)
+                {
+                    restockMgr.m_GeneratedMarketPriceList = CPlayerData.m_GeneratedMarketPriceList;
+                    restockMgr.m_GenCardMarketPriceList = CPlayerData.m_GenCardMarketPriceList;
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var priceChangeMgr = SceneRef<PriceChangeManager>.Get();
+                if (priceChangeMgr != null)
+                {
+                    priceChangeMgr.m_SetGameEventPriceList = CPlayerData.m_SetGameEventPriceList;
+                    priceChangeMgr.m_GameEventPricePercentChangeList = CPlayerData.m_GameEventPricePercentChangeList;
+                }
+            }
+            catch
+            {
+            }
+
+            Pricing.PricingClientBehaviour.RefreshAllShelfPriceTags();
+
+            try
+            {
+                var checkPrice = SceneRef<CheckPriceScreen>.Get();
+                if (checkPrice != null && checkPrice.IsScreenOpened())
+                {
+                    AccessTools.Method(typeof(CheckPriceScreen), "EvaluateItemPanelUI")?.Invoke(checkPrice, null);
+                    AccessTools.Method(typeof(CheckPriceScreen), "EvaluateCardPanelUI")?.Invoke(checkPrice, null);
+                }
+            }
+            catch
+            {
+            }
+
             // History is derived from the current percents, not independent state: the host's
             // day roll appended each table's post-roll value, so replaying the same vanilla
             // append after applying the snapshot reproduces the host history exactly. EPL's
@@ -502,24 +543,40 @@ namespace CardShopCoop.Modules.World
         private static void ReadSparseFloatsInto(List<MarketSparseEntry> entries, List<float> list,
             Action<int, float> moddedWrite, string what)
         {
+            if (entries == null)
+            {
+                return;
+            }
+
             for (var k = 0; k < entries.Count; k++)
             {
-                var i = (int)entries[k].ItemType;
-                var v = entries[k].Value;
-                if (RoutesToEpl(i))
+                try
                 {
-                    moddedWrite(i, v);
-                    continue;
+                    var i = (int)entries[k].ItemType;
+                    var v = entries[k].Value;
+                    if (RoutesToEpl(i))
+                    {
+                        moddedWrite(i, v);
+                    }
+                    else if (list != null)
+                    {
+                        WriteRawItem(list, i, v, what);
+                    }
                 }
-                WriteRawItem(list, i, v, what);
+                catch
+                {
+                }
             }
         }
 
         private static void ReadPercentsInto(List<MarketPercentEntry> entries, List<float> list)
         {
-            for (var i = 0; i < list.Count; i++)
+            if (list != null)
             {
-                list[i] = 0f; // absent = no change rolled
+                for (var i = 0; i < list.Count; i++)
+                {
+                    list[i] = 0f; // absent = no change rolled
+                }
             }
 
             if (EplMarketBridge())
@@ -529,19 +586,38 @@ namespace CardShopCoop.Modules.World
                 var modded = EplModdedItemTypes();
                 for (var k = 0; k < modded.Count; k++)
                 {
-                    EplSetFloat(modded[k], s_eplPctChange, 0f);
+                    try
+                    {
+                        EplSetFloat(modded[k], s_eplPctChange, 0f);
+                    }
+                    catch
+                    {
+                    }
                 }
             }
+            if (entries == null)
+            {
+                return;
+            }
+
             for (var k = 0; k < entries.Count; k++)
             {
-                var i = (int)entries[k].ItemType;
-                var v = entries[k].Percent / 100f;
-                if (RoutesToEpl(i))
+                try
                 {
-                    EplSetFloat(i, s_eplPctChange, v);
-                    continue;
+                    var i = (int)entries[k].ItemType;
+                    var v = entries[k].Percent / 100f;
+                    if (RoutesToEpl(i))
+                    {
+                        EplSetFloat(i, s_eplPctChange, v);
+                    }
+                    else if (list != null)
+                    {
+                        WriteRawItem(list, i, v, "item percent change");
+                    }
                 }
-                WriteRawItem(list, i, v, "item percent change");
+                catch
+                {
+                }
             }
         }
 
@@ -579,24 +655,138 @@ namespace CardShopCoop.Modules.World
         /// <summary>Host: move pending modded-card values into the snapshot.</summary>
         private static void FillModdedCards(List<MarketModdedCardEntry> out_list)
         {
-            if (s_modCardPending.Count == 0)
+            var seen = new HashSet<long>();
+            if (s_modCardPending.Count > 0)
             {
-                return;
+                foreach (var kv in s_modCardPending)
+                {
+                    var p = kv.Value;
+                    seen.Add(kv.Key);
+                    out_list.Add(new MarketModdedCardEntry
+                    {
+                        Expansion = p.Expansion,
+                        Index = p.Index,
+                        IsDestiny = p.IsDestiny,
+                        HasPercent = p.HasPercent,
+                        Percent = p.Percent,
+                        Base = p.Base,
+                        HasBase = p.HasBase,
+                    });
+                }
             }
 
-            foreach (var kv in s_modCardPending)
+            try
             {
-                var p = kv.Value;
-                out_list.Add(new MarketModdedCardEntry
+                foreach (ECardExpansionType exp in Enum.GetValues(typeof(ECardExpansionType)))
                 {
-                    Expansion = p.Expansion,
-                    Index = p.Index,
-                    IsDestiny = p.IsDestiny,
-                    HasPercent = p.HasPercent,
-                    Percent = p.Percent,
-                    Base = p.Base,
-                    HasBase = p.HasBase,
-                });
+                    if (IsVanillaCardExpansion(exp) || (int)exp == -1 || (int)exp == 8)
+                    {
+                        continue;
+                    }
+
+                    var eplPrices = GetEplCardMarketPrices(exp);
+                    if (eplPrices != null)
+                    {
+                        for (var i = 0; i < eplPrices.Count; i++)
+                        {
+                            var mp = eplPrices[i];
+                            if (mp != null)
+                            {
+                                var key = ModCardKey(exp, i, false);
+                                if (!seen.Contains(key))
+                                {
+                                    out_list.Add(new MarketModdedCardEntry
+                                    {
+                                        Expansion = exp,
+                                        Index = i,
+                                        IsDestiny = false,
+                                        HasPercent = true,
+                                        Percent = mp.pricePercentChangeList,
+                                        Base = mp.generatedMarketPrice,
+                                        HasBase = true,
+                                    });
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    List<EMonsterType> shown = null;
+                    try
+                    {
+                        shown = InventoryBase.GetShownMonsterList(exp);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (shown == null || shown.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    var perMonster = 1;
+                    try
+                    {
+                        perMonster = CPlayerData.GetCardAmountPerMonsterType(exp, true);
+                    }
+                    catch
+                    {
+                    }
+
+                    var total = shown.Count * perMonster;
+                    for (var j = 0; j < total; j++)
+                    {
+                        var key = ModCardKey(exp, j, false);
+                        if (seen.Contains(key))
+                        {
+                            continue;
+                        }
+
+                        var pct = 0f;
+                        var basePrice = 0f;
+                        var hasPct = false;
+                        var hasBase = false;
+                        try
+                        {
+                            pct = CPlayerData.GetCardPricePercentChange(j, exp, false);
+                            hasPct = true;
+                        }
+                        catch
+                        {
+                        }
+                        try
+                        {
+                            basePrice = CPlayerData.GetCardMarketPrice(j, exp, false, 0);
+                            if (basePrice > 0f)
+                            {
+                                hasBase = true;
+                            }
+                        }
+                        catch
+                        {
+                        }
+
+                        if (hasPct || hasBase)
+                        {
+                            out_list.Add(new MarketModdedCardEntry
+                            {
+                                Expansion = exp,
+                                Index = j,
+                                IsDestiny = false,
+                                HasPercent = hasPct,
+                                Percent = pct,
+                                Base = basePrice,
+                                HasBase = hasBase,
+                            });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                CoopPlugin.Log.LogWarning("FillModdedCards baseline walk error: " + ex.Message);
             }
             // The pending map is cleared by the host tick only AFTER a successful broadcast:
             // BuildState must not consume it, or a failed send would lose those deltas.
@@ -611,18 +801,48 @@ namespace CardShopCoop.Modules.World
             for (var i = 0; i < entries.Count; i++)
             {
                 var e = entries[i];
+                var eplPrices = GetEplCardMarketPrices(e.Expansion);
+                if (eplPrices != null && e.Index >= 0 && e.Index < eplPrices.Count)
+                {
+                    var mp = eplPrices[e.Index];
+                    if (mp != null)
+                    {
+                        if (e.HasPercent)
+                        {
+                            mp.pricePercentChangeList = e.Percent;
+                        }
+                        if (e.HasBase)
+                        {
+                            mp.generatedMarketPrice = e.Base;
+                        }
+                        continue;
+                    }
+                }
+
                 if (e.HasPercent)
                 {
-                    var current = CPlayerData.GetCardPricePercentChange(e.Index, e.Expansion, e.IsDestiny);
-                    var delta = e.Percent - current;
-                    if (delta != 0f)
+                    try
                     {
-                        CPlayerData.AddCardPricePercentChange(e.Index, e.Expansion, e.IsDestiny, delta);
+                        var current = CPlayerData.GetCardPricePercentChange(e.Index, e.Expansion, e.IsDestiny);
+                        var delta = e.Percent - current;
+                        if (delta != 0f)
+                        {
+                            CPlayerData.AddCardPricePercentChange(e.Index, e.Expansion, e.IsDestiny, delta);
+                        }
+                    }
+                    catch
+                    {
                     }
                 }
                 if (e.HasBase)
                 {
-                    CPlayerData.SetCardGeneratedMarketPrice(e.Index, e.Expansion, e.IsDestiny, e.Base);
+                    try
+                    {
+                        CPlayerData.SetCardGeneratedMarketPrice(e.Index, e.Expansion, e.IsDestiny, e.Base);
+                    }
+                    catch
+                    {
+                    }
                 }
             }
         }
@@ -667,30 +887,39 @@ namespace CardShopCoop.Modules.World
         private static bool s_eplProbed;
         private static object s_eplSaveMgr;    // EplServices.SaveDataManager (created once, never reassigned)
         private static MethodInfo s_eplTryGet; // TryGetSaveData<EItemType, ItemSaveData>(key, out data)
+        private static MethodInfo s_eplCardTryGet;
+        private static PropertyInfo s_eplCardMarketListProp;
+        private static MethodInfo s_eplResolve;
         private static PropertyInfo s_eplAssetsProp, s_eplItemLibProp, s_eplItemDataProp;
         private static PropertyInfo s_eplGenMarket, s_eplGenCost, s_eplPctChange, s_eplAvgCost;
 
         private static bool EplMarketBridge()
         {
-            if (!s_eplProbed)
+            if (s_eplTryGet != null && s_eplSaveMgr != null)
             {
-                s_eplProbed = true;
-                try
+                return true;
+            }
+
+            try
+            {
+                // assembly-qualified bind first, app-domain type walk only if it misses -
+                // see Util.ModParity.ResolveType for why the walk is worth avoiding
+                const string EplAsm = "EnhancedPrefabLoader";
+                var t = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.EplRuntimeData", EplAsm);
+                var save = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.Models.SaveData.ItemSaveData", EplAsm);
+                var cardSave = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.Models.SaveData.CardExpansionSaveData", EplAsm);
+                var resolver = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.Utils.ItemTypeResolver", EplAsm);
+                const BindingFlags F = BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+                s_eplAssetsProp = t?.GetProperty("Assets", F);
+                var assets = s_eplAssetsProp?.GetValue(null);
+                s_eplItemLibProp = assets?.GetType().GetProperty("ItemLibrary", F);
+                var lib = assets == null ? null : s_eplItemLibProp?.GetValue(assets);
+                s_eplItemDataProp = lib?.GetType().GetProperty("ItemData", F);
+                var services = t?.GetProperty("Services", F)?.GetValue(null);
+                s_eplSaveMgr = services?.GetType().GetProperty("SaveDataManager", F)?.GetValue(services);
+                if (s_eplSaveMgr != null)
                 {
-                    // assembly-qualified bind first, app-domain type walk only if it misses -
-                    // see Util.ModParity.ResolveType for why the walk is worth avoiding
-                    const string EplAsm = "EnhancedPrefabLoader";
-                    var t = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.EplRuntimeData", EplAsm);
-                    var save = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.Models.SaveData.ItemSaveData", EplAsm);
-                    const BindingFlags F = BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-                    s_eplAssetsProp = t?.GetProperty("Assets", F);
-                    var assets = s_eplAssetsProp?.GetValue(null);
-                    s_eplItemLibProp = assets?.GetType().GetProperty("ItemLibrary", F);
-                    var lib = assets == null ? null : s_eplItemLibProp?.GetValue(assets);
-                    s_eplItemDataProp = lib?.GetType().GetProperty("ItemData", F);
-                    var services = t?.GetProperty("Services", F)?.GetValue(null);
-                    s_eplSaveMgr = services?.GetType().GetProperty("SaveDataManager", F)?.GetValue(services);
-                    if (s_eplSaveMgr != null && save != null)
+                    if (save != null)
                     {
                         foreach (var m in s_eplSaveMgr.GetType().GetMethods(F))
                         {
@@ -702,24 +931,62 @@ namespace CardShopCoop.Modules.World
                         }
                     }
 
-                    s_eplGenMarket = save?.GetProperty("GeneratedMarketPrice", F);
-                    s_eplGenCost = save?.GetProperty("GeneratedCostPrice", F);
-                    s_eplPctChange = save?.GetProperty("ItemPriceChangePercent", F);
-                    s_eplAvgCost = save?.GetProperty("AverageItemCost", F);
+                    if (cardSave != null)
+                    {
+                        foreach (var m in s_eplSaveMgr.GetType().GetMethods(F))
+                        {
+                            if (m.Name == "TryGetSaveData" && m.GetGenericArguments().Length == 2)
+                            {
+                                s_eplCardTryGet = m.MakeGenericMethod(typeof(ECardExpansionType), cardSave);
+                                break;
+                            }
+                        }
+                        s_eplCardMarketListProp = cardSave.GetProperty("CardMarketPriceList", F);
+                    }
                 }
-                catch (Exception e) { CoopLog.Swallow(e); }
-                if (s_eplTryGet == null || s_eplItemDataProp == null || s_eplGenMarket == null
-                    || s_eplGenCost == null || s_eplPctChange == null || s_eplAvgCost == null)
+
+                s_eplGenMarket = save?.GetProperty("GeneratedMarketPrice", F);
+                s_eplGenCost = save?.GetProperty("GeneratedCostPrice", F);
+                s_eplPctChange = save?.GetProperty("ItemPriceChangePercent", F);
+                s_eplAvgCost = save?.GetProperty("AverageItemCost", F);
+                if (resolver != null)
                 {
-                    s_eplTryGet = null; // all-or-nothing: half a bridge would desync the lists
-                    CoopPlugin.Log.LogInfo("EPL market bridge inactive (EPL absent or its internals changed) - vanilla market only");
-                }
-                else
-                {
-                    CoopPlugin.Log.LogInfo("EPL market bridge active (modded item market data syncs)");
+                    s_eplResolve = resolver.GetMethod("Resolve", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(int) }, null);
                 }
             }
-            return s_eplTryGet != null;
+            catch (Exception e) { CoopLog.Swallow(e); }
+
+            if (s_eplTryGet != null && s_eplItemDataProp != null && s_eplGenMarket != null
+                && s_eplGenCost != null && s_eplPctChange != null && s_eplAvgCost != null)
+            {
+                if (!s_eplProbed)
+                {
+                    s_eplProbed = true;
+                    CoopPlugin.Log.LogInfo("EPL market bridge active (modded item market data syncs)");
+                }
+                return true;
+            }
+
+            return false;
+        }
+
+        internal static List<MarketPrice> GetEplCardMarketPrices(ECardExpansionType expansion)
+        {
+            if (!EplMarketBridge() || s_eplCardTryGet == null || s_eplCardMarketListProp == null || s_eplSaveMgr == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var args = new object[] { expansion, null };
+                if ((bool)s_eplCardTryGet.Invoke(s_eplSaveMgr, args) && args[1] != null)
+                {
+                    return s_eplCardMarketListProp.GetValue(args[1], null) as List<MarketPrice>;
+                }
+            }
+            catch (Exception e) { CoopLog.Swallow(e); }
+            return null;
         }
 
         // With the bridge active the raw list is authoritative only below the woven
@@ -781,71 +1048,147 @@ namespace CardShopCoop.Modules.World
         /// carries, and any member absent here is not evidence it is vanilla.</summary>
         private static List<int> EplModdedItemTypes()
         {
-            // The EPL registry is fixed after content registration. Populate once and only
-            // invalidate from explicit scene/content/session lifecycle hooks.
-            if (s_eplModdedCache != null)
+            if (s_eplModdedCache != null && s_eplModdedCache.Count > 0)
             {
                 return s_eplModdedCache;
             }
 
-            var result = new List<int>();
+            var set = new HashSet<int>();
             if (EplMarketBridge())
             {
                 try
                 {
-                    var assets = s_eplAssetsProp.GetValue(null);
-                    var lib = assets == null ? null : s_eplItemLibProp.GetValue(assets);
-                    var dict = lib == null ? null : s_eplItemDataProp.GetValue(lib) as System.Collections.IDictionary;
+                    var assets = s_eplAssetsProp?.GetValue(null);
+                    var lib = assets == null ? null : s_eplItemLibProp?.GetValue(assets);
+                    var dict = lib == null ? null : s_eplItemDataProp?.GetValue(lib) as System.Collections.IDictionary;
                     if (dict != null)
                     {
                         foreach (var key in dict.Keys)
                         {
-                            result.Add(Convert.ToInt32(key));
+                            set.Add(Convert.ToInt32(key));
                         }
                     }
                 }
                 catch (Exception e) { CoopLog.Swallow(e); }
             }
-            s_eplModdedCache = result;
+
+            try
+            {
+                foreach (EItemType value in Enum.GetValues(typeof(EItemType)))
+                {
+                    var num = (int)value;
+                    if (num > 130 && num != -1)
+                    {
+                        set.Add(num);
+                    }
+                }
+            }
+            catch (Exception e) { CoopLog.Swallow(e); }
+
+            var result = new List<int>(set);
+            if (result.Count > 0)
+            {
+                s_eplModdedCache = result;
+            }
             return result;
+        }
+
+        private static EItemType ResolveItemType(int itemType)
+        {
+            if (itemType >= 130 && itemType < 200000 && s_eplResolve != null)
+            {
+                try
+                {
+                    return (EItemType)s_eplResolve.Invoke(null, new object[] { itemType });
+                }
+                catch
+                {
+                }
+            }
+            return (EItemType)itemType;
         }
 
         private static object EplSaveData(int itemType)
         {
-            var args = new object[] { (EItemType)itemType, null };
-            if (!(bool)s_eplTryGet.Invoke(s_eplSaveMgr, args))
+            if (!EplMarketBridge() || s_eplTryGet == null || s_eplSaveMgr == null)
             {
-
-                throw new InvalidOperationException("EPL has no market row for item " + itemType + ".");
+                return null;
             }
 
-
-            return args[1];
+            try
+            {
+                var resolved = ResolveItemType(itemType);
+                var args = new object[] { resolved, null };
+                if ((bool)s_eplTryGet.Invoke(s_eplSaveMgr, args))
+                {
+                    return args[1];
+                }
+            }
+            catch
+            {
+            }
+            return null;
         }
 
         private static float EplGetFloat(int itemType, PropertyInfo field)
         {
-            var d = EplSaveData(itemType);
-            return d == null ? 0f : (float)field.GetValue(d, null);
+            if (field == null)
+            {
+                return 0f;
+            }
+
+            try
+            {
+                var d = EplSaveData(itemType);
+                if (d != null)
+                {
+                    var v = field.GetValue(d, null);
+                    return v != null ? Convert.ToSingle(v) : 0f;
+                }
+            }
+            catch
+            {
+            }
+            return 0f;
         }
 
         private static void EplSetFloat(int itemType, PropertyInfo field, float value)
         {
-            var d = EplSaveData(itemType);
-            field.SetValue(d, value, null);
+            if (field == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var d = EplSaveData(itemType);
+                if (d != null)
+                {
+                    field.SetValue(d, value, null);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private static List<KeyValuePair<int, float>> CollectModded(List<int> modded, PropertyInfo field)
         {
-            var vals = new List<KeyValuePair<int, float>>(modded.Count);
-            if (field != null)
+            var vals = new List<KeyValuePair<int, float>>();
+            if (field != null && modded != null)
             {
                 for (var k = 0; k < modded.Count; k++)
                 {
-                    var v = EplGetFloat(modded[k], field);
-                    if (v != 0f)
+                    try
                     {
-                        vals.Add(new KeyValuePair<int, float>(modded[k], v));
+                        var v = EplGetFloat(modded[k], field);
+                        if (v != 0f)
+                        {
+                            vals.Add(new KeyValuePair<int, float>(modded[k], v));
+                        }
+                    }
+                    catch
+                    {
                     }
                 }
             }

@@ -261,7 +261,10 @@ namespace CardShopCoop.Modules.Purchasing
             {
                 var index = indexes != null && i < indexes.Count ? indexes[i] : -1;
                 var count = counts != null && i < counts.Count ? counts[i] : -1;
-                lines.Add(PurchasingInterop.RestockLine(index, count));
+                if (index >= 0 && count > 0)
+                {
+                    lines.Add(PurchasingInterop.RestockLine(index, count));
+                }
             }
 
             return BuildPending(new RestockPurchaseIntent

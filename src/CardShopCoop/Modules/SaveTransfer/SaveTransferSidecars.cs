@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using UnityEngine;
 
@@ -72,6 +73,71 @@ namespace CardShopCoop.Modules.SaveTransfer
             var rootPath = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar);
             var threshold = sinceUtc.AddSeconds(-FreshnessSlackSeconds);
+
+            try
+            {
+                var rootFiles = Directory.GetFiles(rootPath, "*", SearchOption.TopDirectoryOnly);
+                for (var r = 0; r < rootFiles.Length; r++)
+                {
+                    var file = rootFiles[r];
+                    var fileName = Path.GetFileName(file);
+                    if (fileName.StartsWith("savedGames_Release", StringComparison.OrdinalIgnoreCase)
+                        || fileName.EndsWith(".log", StringComparison.OrdinalIgnoreCase)
+                        || fileName.IndexOf("enum_values", StringComparison.OrdinalIgnoreCase) >= 0
+                        || !IsFresh(file, threshold))
+                    {
+                        continue;
+                    }
+
+                    if (result.Files.Count >= MaxFiles)
+                    {
+                        AddWarning("more than " + MaxFiles + " files were written; the rest were not"
+                            + " considered", warningDetails);
+                        result.Complete = false;
+                        break;
+                    }
+
+                    var relative = GetRelativePath(rootPath, file);
+                    try
+                    {
+                        var length = new FileInfo(file).Length;
+                        if (length > MaxFileBytes)
+                        {
+                            SkipFile(relative, "is " + length + " bytes; the per-file limit is "
+                                + MaxFileBytes + " bytes", warningDetails);
+                            result.Complete = false;
+                            continue;
+                        }
+                        if (length < 0 || result.RawBytes + length > MaxAggregateRawBytes)
+                        {
+                            SkipFile(relative, "would exceed the aggregate raw limit of "
+                                + MaxAggregateRawBytes + " bytes", warningDetails);
+                            result.Complete = false;
+                            continue;
+                        }
+
+                        var data = ReadStableFile(file, (int)length);
+                        if (data == null)
+                        {
+                            SkipFile(relative, "changed while it was being read", warningDetails);
+                            result.Complete = false;
+                            continue;
+                        }
+
+                        result.Files.Add(new SaveTransferFile(relative, data));
+                        result.RawBytes += data.Length;
+                    }
+                    catch (Exception error)
+                    {
+                        SkipFile(relative, "could not be read: " + error.Message, warningDetails);
+                        result.Complete = false;
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                CoopLog.Swallow(error);
+            }
 
             string[] directories;
             try

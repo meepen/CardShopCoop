@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Grading;
@@ -9,6 +10,7 @@ using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Pricing
 {
@@ -131,6 +133,7 @@ namespace CardShopCoop.Modules.Pricing
 
             QueueItemDelta(message.ActionId, message.ItemType,
                 PricingInterop.ReadItem(message.ItemType));
+            PricingClientBehaviour.RefreshAllShelfPriceTags();
         }
 
         [MessageHandler]
@@ -188,6 +191,7 @@ namespace CardShopCoop.Modules.Pricing
             GradingApi.Remember(canonical);
             _cards[key] = new OwnedCardState { Card = canonical, Price = actual };
             QueueCardDelta(message.ActionId, canonical, actual, false);
+            PricingClientBehaviour.RefreshAllShelfPriceTags();
         }
 
         private static string Describe(CardData card)
@@ -226,6 +230,7 @@ namespace CardShopCoop.Modules.Pricing
 
 
             QueueItemDelta(Guid.Empty, type, PricingInterop.ReadItem(type));
+            PricingClientBehaviour.RefreshAllShelfPriceTags();
         }
 
         private void CaptureCardSetterLocal(CardData card, float requestedPrice)
@@ -252,6 +257,7 @@ namespace CardShopCoop.Modules.Pricing
                 Price = ResolveCardPrice(canonical, requestedPrice),
             };
             QueueCardDelta(Guid.Empty, canonical, _cards[key].Price, false);
+            PricingClientBehaviour.RefreshAllShelfPriceTags();
         }
 
         private void ObserveInventoryMutation(CardData card)
@@ -456,54 +462,127 @@ namespace CardShopCoop.Modules.Pricing
 
         private void HydrateOwnedCards()
         {
-            for (var expansion = ECardExpansionType.Tetramon;
-                expansion <= ECardExpansionType.Ascension; expansion++)
+            foreach (ECardExpansionType expansion in Enum.GetValues(typeof(ECardExpansionType)))
             {
-                if (expansion == ECardExpansionType.FoodieGO)
+                if (expansion == ECardExpansionType.None
+                    || expansion == ECardExpansionType.FoodieGO
+                    || expansion == ECardExpansionType.MAX)
                 {
                     continue;
                 }
-
 
                 var dimensions = expansion == ECardExpansionType.Ghost ? 2 : 1;
                 for (var dimension = 0; dimension < dimensions; dimension++)
                 {
                     var isDestiny = dimension != 0;
-                    var shown = InventoryBase.GetShownMonsterList(expansion);
-                    var owned = CPlayerData.GetCardCollectedList(expansion, isDestiny);
+                    List<EMonsterType> shown;
+                    List<int> owned;
+                    try
+                    {
+                        shown = InventoryBase.GetShownMonsterList(expansion);
+                        owned = CPlayerData.GetCardCollectedList(expansion, isDestiny);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
                     if (shown == null || owned == null)
                     {
                         continue;
                     }
 
+                    int amount;
+                    try
+                    {
+                        amount = CPlayerData.GetCardAmountPerMonsterType(expansion);
+                    }
+                    catch
+                    {
+                        amount = 12;
+                    }
 
-                    var amount = CPlayerData.GetCardAmountPerMonsterType(expansion);
                     for (var i = 0; i < shown.Count * amount && i < owned.Count; i++)
                     {
                         if (owned[i] > 0)
                         {
-
-                            RememberOwnedCard(CPlayerData.GetCardData(i, expansion, isDestiny));
+                            try
+                            {
+                                RememberOwnedCard(CPlayerData.GetCardData(i, expansion, isDestiny));
+                            }
+                            catch
+                            {
+                            }
                         }
-
                     }
                 }
             }
 
             var graded = CPlayerData.m_GradedCardInventoryList;
-            if (graded == null)
+            if (graded != null)
             {
-                return;
+                for (var i = 0; i < graded.Count; i++)
+                {
+                    if (graded[i] != null && graded[i].amount > 0)
+                    {
+                        RememberOwnedCard(CPlayerData.GetGradedCardData(graded[i]));
+                    }
+                }
             }
 
-
-            for (var i = 0; i < graded.Count; i++)
+            try
             {
-                if (graded[i] != null && graded[i].amount > 0)
+                var mgr = CSingleton<ShelfManager>.Instance ?? ShelfManager.m_Instance;
+                if (mgr == null)
                 {
-                    RememberOwnedCard(CPlayerData.GetGradedCardData(graded[i]));
+                    return;
                 }
 
+                if (mgr.m_CardShelfList != null)
+                {
+                    for (var i = 0; i < mgr.m_CardShelfList.Count; i++)
+                    {
+                        var compartments = mgr.m_CardShelfList[i]?.GetCardCompartmentList();
+                        if (compartments == null)
+                        {
+                            continue;
+                        }
+
+                        for (var j = 0; j < compartments.Count; j++)
+                        {
+                            var card = WorldCardDisplay.Read(compartments[j]);
+                            if (card != null && card.monsterType != EMonsterType.None)
+                            {
+                                RememberOwnedCard(card);
+                            }
+                        }
+                    }
+                }
+
+                if (mgr.m_CardItemCombiShelfList != null)
+                {
+                    for (var i = 0; i < mgr.m_CardItemCombiShelfList.Count; i++)
+                    {
+                        var compartments = mgr.m_CardItemCombiShelfList[i]?.GetCardCompartmentList();
+                        if (compartments == null)
+                        {
+                            continue;
+                        }
+
+                        for (var j = 0; j < compartments.Count; j++)
+                        {
+                            var card = WorldCardDisplay.Read(compartments[j]);
+                            if (card != null && card.monsterType != EMonsterType.None)
+                            {
+                                RememberOwnedCard(card);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                CoopLog.Swallow(ex);
             }
         }
 

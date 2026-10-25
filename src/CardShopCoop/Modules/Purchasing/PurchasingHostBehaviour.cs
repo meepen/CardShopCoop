@@ -23,9 +23,9 @@ namespace CardShopCoop.Modules.Purchasing
     [ServerBehaviour]
     public sealed class PurchasingHostBehaviour : CoopBehaviour
     {
-        private const int MaxLines = 64;
+        private const int MaxLines = 512;
         private const int MaxBoxesPerLine = 100;
-        private const int MaxTotalBoxes = 1000;
+        private const int MaxTotalBoxes = 2500;
         private const float ScannerUnlockPrice = 12000f;
         private static readonly System.Reflection.FieldInfo PendingRestockBoxes =
             AccessTools.Field(typeof(RestockManager), "m_SpawnBoxItemWaitingList");

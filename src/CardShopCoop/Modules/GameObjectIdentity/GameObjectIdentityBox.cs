@@ -798,6 +798,13 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             {
                 DetachStoredBoxForTeardown(box);
                 box.OnDestroyed();
+                // OnDestroyed schedules the GameObject destroy for the end of the frame. Disable
+                // it now so the dead box cannot be clicked or cast a shadow for that frame.
+                if (box.gameObject != null)
+                {
+                    box.gameObject.SetActive(false);
+                    UnityEngine.Object.Destroy(box.gameObject);
+                }
             }
             finally
             {

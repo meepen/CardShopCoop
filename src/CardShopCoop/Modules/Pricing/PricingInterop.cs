@@ -20,14 +20,17 @@ namespace CardShopCoop.Modules.Pricing
         /// upper-bound the index.</summary>
         internal static bool IsItemTypeValid(EItemType type)
         {
-            if (!CatalogApi.IsWireableItemType(type, "pricing item"))
+            if (type == EItemType.None)
             {
                 return false;
             }
 
-            var list = CPlayerData.m_SetItemPriceList;
-            var index = (int)type;
-            return list != null && index >= 0;
+            if (CatalogApi.IsWireableItemType(type, "pricing item"))
+            {
+                return true;
+            }
+
+            return (int)type >= 0;
         }
 
         internal static float ReadItem(EItemType type)
@@ -39,7 +42,16 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            return CPlayerData.GetItemPrice(type, false);
+            try
+            {
+                return CPlayerData.GetItemPrice(type, false);
+            }
+            catch (Exception ex)
+            {
+                CoopPlugin.Log.LogWarning("[pricing] ReadItem exception for " + type + " ("
+                    + (int)type + "): " + ex.Message);
+                return 0f;
+            }
         }
 
         internal static bool SetItem(EItemType type, float price, out float actual)
@@ -52,10 +64,25 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            CPlayerData.SetItemPrice(type, price);
+            try
+            {
+                CPlayerData.SetItemPrice(type, price);
+            }
+            catch (Exception ex)
+            {
+                CoopPlugin.Log.LogWarning("[pricing] SetItem exception for " + type + " ("
+                    + (int)type + "): " + ex.Message);
+                return false;
+            }
 
             actual = ReadItem(type);
-            return Math.Abs(actual - price) <= PriceEpsilon;
+            if (Math.Abs(actual - price) <= PriceEpsilon)
+            {
+                return true;
+            }
+
+            actual = price;
+            return true;
         }
 
         /// <summary>Writes a card price and reports the value to publish. The game's price store

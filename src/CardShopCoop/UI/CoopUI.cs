@@ -22,8 +22,14 @@ namespace CardShopCoop.UI
     /// Presentation is driven by <see cref="CoopTheme"/> (cozy card-shop paper + teal).</summary>
     public class CoopUI
     {
-        public bool Visible = true;
+        public bool Visible;
         public static bool TextFieldFocused;
+
+        public void OpenCharacterTab()
+        {
+            _tab = CoopTab.Character;
+            Visible = true;
+        }
 
         private Rect _win = new(24f, 96f, 400f, 10f);
         private int _fpsShown = -1;
@@ -315,7 +321,7 @@ namespace CardShopCoop.UI
             if (_versionWithFps == null || fps != _fpsShown)
             {
                 _fpsShown = fps;
-                _versionWithFps = "v" + CoopPlugin.Version + "   " + fps + " FPS";
+                _versionWithFps = "V " + CoopPlugin.Version + "   " + fps + " FPS";
             }
             CoopTheme.DrawWindowChrome(new Rect(0f, 0f, _win.width, _win.height),
                 CoopPlugin.Name.ToUpperInvariant(), _versionWithFps);
@@ -499,7 +505,10 @@ namespace CardShopCoop.UI
             TextFieldFocused = focused != null && focused.StartsWith("coop_");
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
-            GUILayout.Label(ToggleHintText(), CoopTheme.LabelDim);
+            if (GUILayout.Button("CHIUDI FINESTRA DEBUG (ESC)", CoopTheme.ButtonSecondary, GUILayout.Height(26f), GUILayout.Width(220f)))
+            {
+                Visible = false;
+            }
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
             GUI.DragWindow(new Rect(0f, 0f, 10000f, 20f));
@@ -2063,7 +2072,7 @@ namespace CardShopCoop.UI
                 return;
             }
 
-            var text = "Host version: " + (string.IsNullOrEmpty(plugin) ? "?" : "v" + plugin);
+            var text = "Host version: " + (string.IsNullOrEmpty(plugin) ? "?" : "V " + plugin);
             if (!string.IsNullOrEmpty(game))
             {
                 text += "   game " + game;
@@ -2127,7 +2136,7 @@ namespace CardShopCoop.UI
             var parts = new List<string>(2);
             if (!string.IsNullOrEmpty(version))
             {
-                parts.Add(SafeLabel("v" + version));
+                parts.Add(SafeLabel("V " + version));
             }
             if (!string.IsNullOrEmpty(game))
             {
