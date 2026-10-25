@@ -180,7 +180,9 @@ namespace CardShopCoop.UI
                 y += 22f;
 
                 var fieldActions = FieldActions(backend, mode, field.Id).ToList();
-                var inputWidth = fieldActions.Count > 0 ? 310f : ColumnWidth;
+                var inputWidth = Mathf.Max(160f, ColumnWidth
+                    - 70f
+                    - (fieldActions.Count > 0 ? fieldActions.Count * 140f + 10f : 0f));
                 var input = NativeCoopUi.Input(parent, field.Label, x, y, inputWidth, 40f,
                     18f, Limit(field), ContentType(field));
                 input.text = values[field.Id] ?? "";
@@ -191,7 +193,10 @@ namespace CardShopCoop.UI
                     backend.Configure(values);
                 });
 
-                var actionX = x + inputWidth + 10f;
+                var actionX = x + inputWidth + 6f;
+                NativeCoopUi.Button(parent, "Paste", NativeCoopUi.Grey,
+                    () => Paste(input, field, values, backend, hint), actionX, y, 64f, 40f, 15f);
+                actionX += 70f;
                 for (var i = 0; i < fieldActions.Count; i++)
                 {
                     var action = fieldActions[i];
@@ -277,6 +282,37 @@ namespace CardShopCoop.UI
             => backend.Actions.Where(action => action.Field == null
                 && (action.Mode == null || action.Mode == mode)
                 && action.Phase != ActionPhase.BeforeStart);
+
+        private static void Paste(TMP_InputField input, BackendField field, FieldValues values,
+            INetworkingBackend backend, Action<string> hint)
+        {
+            string clipboard;
+            try
+            {
+                clipboard = GUIUtility.systemCopyBuffer;
+            }
+            catch (Exception error)
+            {
+                hint("Could not read the clipboard: " + error.Message);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(clipboard))
+            {
+                hint("The clipboard is empty.");
+                return;
+            }
+
+            if (field.Kind != FieldKind.Password)
+            {
+                clipboard = clipboard.Trim();
+            }
+            input.text = clipboard;
+            values[field.Id] = input.text;
+            backend.Configure(values);
+            input.caretPosition = input.text.Length;
+            hint("Pasted into " + field.Label + ".");
+        }
 
         private static int Limit(BackendField field)
             => field.Kind == FieldKind.Port || field.Kind == FieldKind.Number
