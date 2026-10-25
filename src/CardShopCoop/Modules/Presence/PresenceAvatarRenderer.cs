@@ -244,7 +244,7 @@ namespace CardShopCoop.Modules.Presence
             }
         }
 
-        private static void ApplyCharacterData(CC.CharacterCustomization custom,
+        internal static void ApplyCharacterData(CC.CharacterCustomization custom,
             CC.CC_CharacterData data)
         {
             AlignWardrobeToTables(custom, data);
@@ -367,7 +367,7 @@ namespace CardShopCoop.Modules.Presence
             }
         }
 
-        private static void ClearEmptyWardrobeSlots(CC.CharacterCustomization custom, CC.CC_CharacterData data)
+        internal static void ClearEmptyWardrobeSlots(CC.CharacterCustomization custom, CC.CC_CharacterData data)
         {
             if (custom == null || data == null)
             {

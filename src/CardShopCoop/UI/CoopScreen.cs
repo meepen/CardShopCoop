@@ -91,20 +91,6 @@ namespace CardShopCoop.UI
 
         private static GameObject _confirmGrp;
 
-        private static CoopButton _charGenderBtn;
-
-        private static TextMeshProUGUI _charPresetText;
-
-        private static CoopButton _charPreviewBtn;
-
-        private static CoopButton _charUndoBtn;
-
-        private static CoopButton _charRedoBtn;
-
-        private static int _presetIndex = 0;
-
-        private static bool _previewActive = false;
-
         private static TextMeshProUGUI _playersHead;
 
         private static TextMeshProUGUI _status;
@@ -268,11 +254,6 @@ namespace CardShopCoop.UI
             IsOpen = false;
             _currentTab = ScreenTab.Session;
             Unsubscribe();
-            if (_previewActive)
-            {
-                _previewActive = false;
-                PresenceApi.SetCharacterPreview(active: false);
-            }
             PopNav();
             if (_root != null)
             {
@@ -314,11 +295,6 @@ namespace CardShopCoop.UI
             IsOpen = false;
             _currentTab = ScreenTab.Session;
             Unsubscribe();
-            if (_previewActive)
-            {
-                _previewActive = false;
-                PresenceApi.SetCharacterPreview(active: false);
-            }
             if (_root != null)
             {
                 _root.SetActive(false);
@@ -384,6 +360,7 @@ namespace CardShopCoop.UI
             {
                 CoopPlugin.Log?.LogWarning("coop: close controller navigation failed: " + ex.Message);
             }
+            CoopCharacterEditor.Shutdown();
             if (_root != null)
             {
                 UnityEngine.Object.Destroy(_root);
@@ -540,11 +517,6 @@ namespace CardShopCoop.UI
             {
                 _tabAdvancedBtn.SetStyle(tab == ScreenTab.Advanced ? NativeCoopUi.Purple : NativeCoopUi.Grey);
             }
-            if (tab != ScreenTab.Character && _previewActive)
-            {
-                _previewActive = false;
-                PresenceApi.SetCharacterPreview(active: false);
-            }
             switch (tab)
             {
                 case ScreenTab.Advanced:
@@ -636,28 +608,7 @@ namespace CardShopCoop.UI
             RectTransform charRt = NativeCoopUi.Node(p, "Character", 0f, 0f, 1040f, 980f);
             _charGrp = charRt.gameObject;
             _charGrp.SetActive(false);
-            NativeCoopUi.Text(charRt, "Character & 3D Avatar Customization", 28f, 40f, 180f, 960f, 36f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
-            NativeCoopUi.Text(charRt, "Avatar Model / Gender:", 22f, 40f, 230f, 400f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _charGenderBtn = NativeCoopUi.Button(charRt, "Male", NativeCoopUi.Blue, OnToggleCharGender, 460f, 230f, 300f, 40f, 20f);
-            NativeCoopUi.Text(charRt, "Switch between the male and female base body.", 17f, 40f, 272f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Text(charRt, "Quick Presets:", 22f, 40f, 310f, 240f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Button(charRt, "< Prev", NativeCoopUi.Blue, OnCharPrevPreset, 300f, 310f, 90f, 40f, 20f);
-            _charPresetText = NativeCoopUi.Text(charRt, "Default", 20f, 400f, 310f, 260f, 40f, Color.yellow, TextAlignmentOptions.Center, wrap: false, title: false);
-            NativeCoopUi.Button(charRt, "Next >", NativeCoopUi.Blue, OnCharNextPreset, 670f, 310f, 90f, 40f, 20f);
-            NativeCoopUi.Button(charRt, "Apply", NativeCoopUi.Green, OnCharApplyPreset, 770f, 310f, 120f, 40f, 20f);
-            NativeCoopUi.Text(charRt, "Apply a face, hair and clothing preset.", 17f, 40f, 352f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Text(charRt, "In-Game 3D Preview:", 22f, 40f, 390f, 400f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _charPreviewBtn = NativeCoopUi.Button(charRt, "PREVIEW: OFF", NativeCoopUi.Orange, OnToggleCharPreview, 460f, 390f, 300f, 40f, 20f);
-            NativeCoopUi.Text(charRt, "Show the 3D avatar in front of the camera while configuring.", 17f, 40f, 432f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Text(charRt, "Change History:", 22f, 40f, 470f, 300f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _charUndoBtn = NativeCoopUi.Button(charRt, "Undo", NativeCoopUi.Blue, OnCharUndo, 360f, 470f, 180f, 40f, 20f);
-            _charRedoBtn = NativeCoopUi.Button(charRt, "Redo", NativeCoopUi.Blue, OnCharRedo, 560f, 470f, 180f, 40f, 20f);
-            NativeCoopUi.Text(charRt, "Undo or redo your latest appearance changes.", 17f, 40f, 512f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            RectTransform wellRt = NativeCoopUi.Node(charRt, "CharWell", 40f, 560f, 960f, 160f);
-            NativeCoopUi.Panel(wellRt, 0f, 0f, 960f, 160f, NativeCoopUi.WellFill, 2.6f);
-            NativeCoopUi.Text(wellRt, "Full Appearance & Wardrobe Editor", 22f, 20f, 16f, 920f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Text(wellRt, "Open every hairstyle, hair color, outfit, skin tone and face slider.", 17f, 20f, 52f, 920f, 28f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Button(wellRt, "Open Full Editor (Hair / Clothes / Colors)", NativeCoopUi.Purple, OnOpenFullCustomizer, 20f, 92f, 560f, 52f, 22f);
+            CoopCharacterEditor.Build(charRt, Hint);
         }
 
         private static void BuildStatus(Transform parent)
@@ -1054,194 +1005,7 @@ namespace CardShopCoop.UI
             Hint(message);
         }
 
-        private const string CharacterUnavailable =
-            "Start or join a co-op session to edit your avatar.";
+        private static void RefreshCharacter() => CoopCharacterEditor.Refresh();
 
-        private static void OnToggleCharGender()
-        {
-            var model = PresenceApi.GetLocalPlayerModel();
-            if (model == null)
-            {
-                Hint(CharacterUnavailable);
-                return;
-            }
-
-            bool female = model.Female;
-            PresenceApi.SetLocalPlayerModel(!female, 0);
-            RefreshCharacter();
-            Hint("Avatar model: " + (!female ? "Female" : "Male"));
-        }
-
-        private static void OnCharPrevPreset()
-        {
-            if (PresenceApi.GetLocalPlayerModel() == null)
-            {
-                Hint(CharacterUnavailable);
-                return;
-            }
-
-            List<string> localPresetNames = PresenceApi.GetLocalPresetNames();
-            if (localPresetNames.Count != 0)
-            {
-                _presetIndex = (_presetIndex - 1 + localPresetNames.Count) % localPresetNames.Count;
-                if (_charPresetText != null)
-                {
-                    _charPresetText.text = localPresetNames[_presetIndex];
-                }
-            }
-        }
-
-        private static void OnCharNextPreset()
-        {
-            if (PresenceApi.GetLocalPlayerModel() == null)
-            {
-                Hint(CharacterUnavailable);
-                return;
-            }
-
-            List<string> localPresetNames = PresenceApi.GetLocalPresetNames();
-            if (localPresetNames.Count != 0)
-            {
-                _presetIndex = (_presetIndex + 1) % localPresetNames.Count;
-                if (_charPresetText != null)
-                {
-                    _charPresetText.text = localPresetNames[_presetIndex];
-                }
-            }
-        }
-
-        private static void OnCharApplyPreset()
-        {
-            if (PresenceApi.GetLocalPlayerModel() == null)
-            {
-                Hint(CharacterUnavailable);
-                return;
-            }
-
-            List<string> localPresetNames = PresenceApi.GetLocalPresetNames();
-            if (localPresetNames.Count != 0 && _presetIndex >= 0 && _presetIndex < localPresetNames.Count)
-            {
-                PresenceApi.ApplyLocalPreset(localPresetNames[_presetIndex]);
-                RefreshCharacter();
-                Hint("Applied preset: " + localPresetNames[_presetIndex]);
-            }
-        }
-
-        private static void OnToggleCharPreview()
-        {
-            if (PresenceApi.GetLocalPlayerModel() == null)
-            {
-                Hint(CharacterUnavailable);
-                return;
-            }
-
-            _previewActive = !_previewActive;
-            PresenceApi.SetCharacterPreview(_previewActive);
-            if (_charPreviewBtn != null)
-            {
-                _charPreviewBtn.SetLabel(_previewActive ? "PREVIEW: ON" : "PREVIEW: OFF");
-                _charPreviewBtn.SetStyle(_previewActive ? NativeCoopUi.Green : NativeCoopUi.Orange);
-            }
-            Hint("3D preview: " + (_previewActive ? "ON" : "OFF"));
-        }
-
-        private static void OnCharUndo()
-        {
-            if (PresenceApi.GetLocalPlayerModel() == null)
-            {
-                Hint(CharacterUnavailable);
-                return;
-            }
-
-            if (PresenceApi.UndoPlayerModel())
-            {
-                RefreshCharacter();
-                Hint("Change undone.");
-            }
-            else
-            {
-                Hint("Nothing to undo.");
-            }
-        }
-
-        private static void OnCharRedo()
-        {
-            if (PresenceApi.GetLocalPlayerModel() == null)
-            {
-                Hint(CharacterUnavailable);
-                return;
-            }
-
-            if (PresenceApi.RedoPlayerModel())
-            {
-                RefreshCharacter();
-                Hint("Change redone.");
-            }
-            else
-            {
-                Hint("Nothing to redo.");
-            }
-        }
-
-        private static void OnOpenFullCustomizer()
-        {
-            if (PresenceApi.GetLocalPlayerModel() == null)
-            {
-                Hint(CharacterUnavailable);
-                return;
-            }
-
-            PresenceApi.SetCharacterPreview(active: true);
-            _previewActive = true;
-            CoopCore.Instance?.OpenCharacterCustomizer();
-        }
-
-        private static void RefreshCharacter()
-        {
-            PresenceModelEntry localPlayerModel = PresenceApi.GetLocalPlayerModel();
-            if (localPlayerModel == null)
-            {
-                if (_charGenderBtn != null)
-                {
-                    _charGenderBtn.SetLabel("Unavailable");
-                    _charGenderBtn.SetStyle(NativeCoopUi.Grey);
-                }
-                _charPreviewBtn?.Show(false);
-                _charUndoBtn?.Show(false);
-                _charRedoBtn?.Show(false);
-                if (_charPresetText != null)
-                {
-                    _charPresetText.text = "—";
-                }
-                return;
-            }
-
-            if (_charGenderBtn != null)
-            {
-                _charGenderBtn.Show(true);
-                _charGenderBtn.SetLabel(localPlayerModel.Female ? "Female" : "Male");
-                _charGenderBtn.SetStyle(localPlayerModel.Female ? NativeCoopUi.Purple : NativeCoopUi.Blue);
-            }
-            _charPreviewBtn?.Show(true);
-            _charUndoBtn?.Show(true);
-            _charRedoBtn?.Show(true);
-            List<string> localPresetNames = PresenceApi.GetLocalPresetNames();
-            if (localPresetNames.Count > 0)
-            {
-                if (_presetIndex < 0 || _presetIndex >= localPresetNames.Count)
-                {
-                    _presetIndex = 0;
-                }
-                if (_charPresetText != null)
-                {
-                    _charPresetText.text = localPresetNames[_presetIndex];
-                }
-            }
-            if (_charPreviewBtn != null)
-            {
-                _charPreviewBtn.SetLabel(_previewActive ? "PREVIEW: ON" : "PREVIEW: OFF");
-                _charPreviewBtn.SetStyle(_previewActive ? NativeCoopUi.Green : NativeCoopUi.Orange);
-            }
-        }
     }
 }
