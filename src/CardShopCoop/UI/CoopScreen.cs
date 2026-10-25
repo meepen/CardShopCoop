@@ -937,6 +937,7 @@ namespace CardShopCoop.UI
             {
                 CoopPlugin.AllowNsfw.Value = allowed;
             }
+            CoopCharacterEditor.SettingsChanged();
             RefreshAdvanced();
             Hint("NSFW appearances: " + (allowed ? "ENABLED" : "DISABLED"));
         }

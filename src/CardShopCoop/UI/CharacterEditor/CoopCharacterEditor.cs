@@ -69,6 +69,7 @@ namespace CardShopCoop.UI
         private bool _built;
         private bool _subscribed;
         private bool _quittingSubscribed;
+        private bool _settingsDirty;
         private int _sceneHandle = int.MinValue;
         private Page _page = Page.Face;
         private readonly Dictionary<Page, float> _scrollPositions = new();
@@ -124,6 +125,17 @@ namespace CardShopCoop.UI
             if (_current != null && _current.isActiveAndEnabled)
             {
                 _current.RefreshAll();
+            }
+        }
+
+        /// <summary>Marks a settings change that can affect the local model (NSFW) even when the
+        /// Character tab is currently hidden, so the next open refreshes instead of showing a stale
+        /// preview.</summary>
+        internal static void SettingsChanged()
+        {
+            if (_current != null)
+            {
+                _current._settingsDirty = true;
             }
         }
 
@@ -461,6 +473,13 @@ namespace CardShopCoop.UI
             else if (_serviceBackend)
             {
                 _backend.RefreshModel();
+            }
+
+            if (_settingsDirty && _backend != null && !_serviceBackend)
+            {
+                _settingsDirty = false;
+                _backend.RefreshModel();
+                _lastPreviewSignature = null;
             }
 
             var model = _backend.Model;
