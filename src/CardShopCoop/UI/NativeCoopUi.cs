@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using BepInEx.Logging;
+using CardShopCoop.Api;
 using HarmonyLib;
 using I2.Loc;
 using TMPro;
@@ -85,8 +86,10 @@ namespace CardShopCoop.UI
                 _noWarn.SetValue(instance, true);
                 return result;
             }
-            catch
+            catch (Exception ex)
             {
+                CoopLog.WarnOnce("coop.ui.tmp-mute",
+                    "coop: could not mute TMP warnings for UI cloning: " + ex.Message);
                 _noWarn = null;
                 return true;
             }
@@ -106,8 +109,10 @@ namespace CardShopCoop.UI
                     _noWarn.SetValue(instance, false);
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                CoopLog.WarnOnce("coop.ui.tmp-unmute",
+                    "coop: could not restore TMP warnings after UI cloning: " + ex.Message);
             }
         }
 
@@ -383,8 +388,10 @@ namespace CardShopCoop.UI
             {
                 SoundManager.GenericLightTap(1f, 1f);
             }
-            catch
+            catch (Exception ex)
             {
+                CoopLog.WarnOnce("coop.ui.tap",
+                    "coop: UI tap sound failed: " + ex.Message);
             }
         }
 

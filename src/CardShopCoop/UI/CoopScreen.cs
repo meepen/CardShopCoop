@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using BepInEx.Logging;
 using CardShopCoop.Modules.Presence;
+using CardShopCoop.Net;
 using CardShopCoop.Net.Networking;
+using CardShopCoop.Runtime;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Events;
@@ -45,6 +47,7 @@ namespace CardShopCoop.UI
         private static float _hintUntil;
 
         private static string _hint = "";
+        private static string _localIp;
 
         private static int _scene = -1;
 
@@ -192,7 +195,7 @@ namespace CardShopCoop.UI
             }
             else
             {
-                CGameManager instance = CGameManager.m_Instance;
+                var instance = SceneRef<CGameManager>.Get();
                 if (instance == null || !instance.m_IsGameLevel || !CoopMenus.InShop)
                 {
                     return false;
@@ -353,14 +356,7 @@ namespace CardShopCoop.UI
             {
                 return false;
             }
-            try
-            {
-                return InputManager.GetKeyDownAction((EGameAction)61);
-            }
-            catch
-            {
-                return false;
-            }
+            return InputManager.GetKeyDownAction(EGameAction.MenuBack);
         }
 
         internal static void Destroy()
@@ -369,14 +365,16 @@ namespace CardShopCoop.UI
             {
                 PopNav();
             }
-            catch
+            catch (Exception ex)
             {
+                CoopPlugin.Log?.LogWarning("coop: close controller navigation failed: " + ex.Message);
             }
             if (_root != null)
             {
                 UnityEngine.Object.Destroy(_root);
             }
             _root = null;
+            _localIp = null;
             NativeCoopUi.Shutdown();
         }
 
@@ -739,7 +737,7 @@ namespace CardShopCoop.UI
                 {
                     rowList = list
                 });
-                ext.m_CtrlBtnXChangeMethodList.Add((ECtrlBtnXChangeMethod)0);
+                ext.m_CtrlBtnXChangeMethodList.Add(ECtrlBtnXChangeMethod.Normal);
             }
         }
 
@@ -774,7 +772,7 @@ namespace CardShopCoop.UI
         {
             bool flag = CoopCore.Role != CoopRole.None;
             NativeCoopUi.Set(_title, "Join Co-op");
-            NativeCoopUi.Set(_sub, flag ? "Connecting to shop..." : ("Logged in as: " + XboxIntegration.Gamertag));
+            NativeCoopUi.Set(_sub, flag ? "Connecting to shop..." : ("Logged in as: " + PlayerName));
             if (_joinDirect != null)
             {
                 _joinDirect.Show(!flag);
@@ -806,9 +804,9 @@ namespace CardShopCoop.UI
             bool inShop = CoopMenus.InShop;
             string text = flag ? "Hosting Co-op" : (flag2 ? "Co-op Session" : "Host Co-op");
             NativeCoopUi.Set(_title, text);
-            NativeCoopUi.Set(_sub, flag ? "Friends can join using Direct IP, Xbox Game Bar, or Steam." : (flag2 ? "Playing in host's shop." : (inShop ? ("Logged in as: " + XboxIntegration.Gamertag + " | Host your shop for friends.") : "Load or start your shop first to host.")));
+            NativeCoopUi.Set(_sub, flag ? "Friends can join using Direct IP, Xbox Game Bar, or Steam." : (flag2 ? "Playing in host's shop." : (inShop ? ("Logged in as: " + PlayerName + " | Host your shop for friends.") : "Load or start your shop first to host.")));
             int num = ParsePort(_hostPort);
-            string localIP = XboxIntegration.LocalIP;
+            string localIP = LocalIP;
             NativeCoopUi.Set(_idLine, "Your Local IP: " + localIP + ":" + num);
             bool flag3 = !flag && !flag2 && inShop;
             NativeCoopUi.Show(_hostDirectGrp, flag3);
@@ -931,6 +929,35 @@ namespace CardShopCoop.UI
             return CoopPlugin.Port.Value;
         }
 
+        private static string PlayerName
+        {
+            get
+            {
+                var name = CoopCore.Instance?.EffectivePlayerName;
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    name = CoopPlugin.PlayerName?.Value;
+                }
+
+                return string.IsNullOrWhiteSpace(name) ? "Player" : name;
+            }
+        }
+
+        private static string LocalIP
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(_localIp))
+                {
+                    return _localIp;
+                }
+
+                var ip = NetHelpers.LocalIPv4ForGateway() ?? NetHelpers.LocalIPv4();
+                _localIp = string.IsNullOrEmpty(ip) ? "127.0.0.1" : ip;
+                return _localIp;
+            }
+        }
+
         private static void OnPaste()
         {
             string text = (GUIUtility.systemCopyBuffer ?? "").Trim();
@@ -964,7 +991,7 @@ namespace CardShopCoop.UI
         private static void OnCopy()
         {
             int num = ParsePort(_hostPort);
-            GUIUtility.systemCopyBuffer = XboxIntegration.LocalIP + ":" + num;
+            GUIUtility.systemCopyBuffer = LocalIP + ":" + num;
             Hint("Host IP:Port (" + GUIUtility.systemCopyBuffer + ") copied to clipboard! Share it in Xbox App / Game Bar.");
         }
 

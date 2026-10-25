@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using BepInEx.Logging;
+using CardShopCoop.Api;
+using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Events;
@@ -46,6 +48,8 @@ namespace CardShopCoop.UI
 
         private static readonly FieldInfo DecoModeField = AccessTools.Field(typeof(InteractionPlayerController), "m_IsDecoScreenMode");
 
+        private const float DefaultMenuBottom = -490f;
+
         private static Harmony _harmony;
 
         internal static bool TitleReady
@@ -83,7 +87,7 @@ namespace CardShopCoop.UI
         {
             get
             {
-                CGameManager instance = CGameManager.m_Instance;
+                var instance = SceneRef<CGameManager>.Get();
                 if (instance != null)
                 {
                     return !instance.m_IsGameLevel;
@@ -96,7 +100,7 @@ namespace CardShopCoop.UI
         {
             get
             {
-                CGameManager instance = CGameManager.m_Instance;
+                var instance = SceneRef<CGameManager>.Get();
                 if (instance != null)
                 {
                     return instance.m_IsGameLevel;
@@ -289,8 +293,10 @@ namespace CardShopCoop.UI
             {
                 return f != null && (bool)f.GetValue(o);
             }
-            catch
+            catch (Exception ex)
             {
+                CoopLog.WarnOnce("coop.menus.flag." + (f?.Name ?? "unknown"),
+                    "coop: could not read UI field " + (f?.Name ?? "<null>") + ": " + ex.Message);
                 return false;
             }
         }
@@ -627,10 +633,12 @@ namespace CardShopCoop.UI
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                CoopLog.WarnOnce("coop.menus.bottom",
+                    "coop: could not measure the menu bottom: " + ex.Message);
             }
-            return -490f;
+            return DefaultMenuBottom;
         }
     }
 }
