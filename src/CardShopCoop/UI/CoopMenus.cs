@@ -149,7 +149,11 @@ namespace CardShopCoop.UI
             }
         }
 
-        private static void TitleStartPrefix(TitleScreen __instance) => _title = __instance;
+        private static void TitleStartPrefix(TitleScreen __instance)
+        {
+            _title = __instance;
+            CoopCharacterPrefabPreloader.EnsureStarted();
+        }
 
         private static void TitleStartPostfix(TitleScreen __instance)
             => InjectTitleGuarded(__instance);

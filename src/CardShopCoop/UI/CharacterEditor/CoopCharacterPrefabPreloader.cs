@@ -1,21 +1,24 @@
 using System;
+using System.Collections;
 using CardShopCoop.Modules.Presence;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.UI
 {
     /// <summary>
     /// Resolves the game's full character prefab once, as early as the title screen, so the
-    /// character tab never has to wait for it and never falls back to CC_Dummy on a build that
-    /// packages the prefab in Resources.
+    /// character tab never has to wait for it and never falls back to CC_Dummy.
     ///
     /// <para>The public build exposes the full prefab through Resources (its ResourceManager
     /// contains <c>female_combined_hp variant</c>/<c>male_combined_hp variant</c>). The Unity 6
-    /// build packages the same prefab in the shop scene's shared assets instead, where Unity's
-    /// public Resources API cannot reach it before that scene loads; that build continues to use
-    /// the live CustomerManager clone once a world exists.</para>
+    /// build packages the same prefab in the shop scene's shared assets instead. For that build
+    /// the preloader loads the shop scene additively without activating it, reads the prefab
+    /// assets from the loaded scene data, then synchronously reloads the title scene. Reloading
+    /// the already-running title scene is what releases Unity's stalled additive operation; the
+    /// cached prefab is a static asset reference and survives the reload.</para>
     /// </summary>
-    internal sealed class CoopCharacterPrefabPreloader
+    internal sealed class CoopCharacterPrefabPreloader : MonoBehaviour
     {
         private static readonly string[] FemalePrefabNames =
         {
@@ -36,6 +39,7 @@ namespace CardShopCoop.UI
         private static GameObject _male;
         private static bool _started;
         private static bool _notifiedFull;
+        private static bool _sharedAssetsPreloadStarted;
 
         /// <summary>Raised on the main thread when the preload resolved a full prefab. The editor
         /// refreshes from this event, so it never polls for the preload.</summary>
@@ -65,15 +69,70 @@ namespace CardShopCoop.UI
             {
                 FindLoadedPrefabs();
             }
+            if (_female == null || _male == null)
+            {
+                StartSharedAssetsPreload();
+            }
 
             CoopPlugin.Log?.LogInfo("co-op character editor preload: female="
                 + (_female != null) + " male=" + (_male != null) + ".");
             NotifyIfFull();
         }
 
-        /// <summary>Only notify when the full body first becomes available. A title-screen
-        /// preload that found none is retried on later calls; notifying on every retry would make
-        /// the editor's refresh rebuild the preview recursively.</summary>
+        private static void StartSharedAssetsPreload()
+        {
+            if (_sharedAssetsPreloadStarted)
+            {
+                return;
+            }
+
+            var sceneName = Application.CanStreamedLevelBeLoaded("StartOptimized")
+                ? "StartOptimized"
+                : Application.CanStreamedLevelBeLoaded("Start") ? "Start" : null;
+            if (sceneName == null)
+            {
+                return;
+            }
+
+            _sharedAssetsPreloadStarted = true;
+            var host = new GameObject("CoopCharacterPrefabPreloader");
+            UnityEngine.Object.DontDestroyOnLoad(host);
+            host.AddComponent<CoopCharacterPrefabPreloader>().StartCoroutine(
+                PreloadSharedAssets(sceneName));
+        }
+
+        private static IEnumerator PreloadSharedAssets(string sceneName)
+        {
+            CoopPlugin.Log?.LogInfo("co-op character editor: loading " + sceneName
+                + " additively to reach the shared character assets.");
+            var operation = SceneManager.LoadSceneAsync(sceneName, LoadSceneMode.Additive);
+            if (operation == null)
+            {
+                CoopPlugin.Log?.LogWarning("co-op character editor: could not load the shop "
+                    + "scene for character assets.");
+                yield break;
+            }
+
+            operation.allowSceneActivation = false;
+            while (operation.progress < 0.9f)
+            {
+                yield return null;
+            }
+
+            // These are loaded prefab assets, not scene instances: reading them here works while
+            // the scene is still held at the activation boundary.
+            FindLoadedPrefabs();
+            CoopPlugin.Log?.LogInfo("co-op character editor: shared-assets preload found female="
+                + (_female != null) + " male=" + (_male != null) + ".");
+
+            // A stalled additive AsyncOperation blocks every later scene load, including the
+            // game's own Start button. A synchronous title reload is the one operation that
+            // releases the stalled load without activating the shop scene.
+            SceneManager.LoadScene("Title");
+            yield return null;
+            NotifyIfFull();
+        }
+
         private static void NotifyIfFull()
         {
             if (!HasAny || _notifiedFull)
@@ -82,11 +141,6 @@ namespace CardShopCoop.UI
             }
 
             _notifiedFull = true;
-            Notify();
-        }
-
-        private static void Notify()
-        {
             try
             {
                 Completed?.Invoke();
