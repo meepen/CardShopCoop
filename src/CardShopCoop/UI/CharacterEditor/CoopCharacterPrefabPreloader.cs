@@ -35,6 +35,7 @@ namespace CardShopCoop.UI
         private static GameObject _female;
         private static GameObject _male;
         private static bool _started;
+        private static bool _notifiedFull;
 
         /// <summary>Raised on the main thread when the preload resolved a full prefab. The editor
         /// refreshes from this event, so it never polls for the preload.</summary>
@@ -52,7 +53,7 @@ namespace CardShopCoop.UI
                     // character prefab in memory even though this build has no Resources path for
                     // it. Re-scan once per caller rather than keeping a permanent dummy.
                     FindLoadedPrefabs();
-                    Notify();
+                    NotifyIfFull();
                 }
                 return;
             }
@@ -67,6 +68,20 @@ namespace CardShopCoop.UI
 
             CoopPlugin.Log?.LogInfo("co-op character editor preload: female="
                 + (_female != null) + " male=" + (_male != null) + ".");
+            NotifyIfFull();
+        }
+
+        /// <summary>Only notify when the full body first becomes available. A title-screen
+        /// preload that found none is retried on later calls; notifying on every retry would make
+        /// the editor's refresh rebuild the preview recursively.</summary>
+        private static void NotifyIfFull()
+        {
+            if (!HasAny || _notifiedFull)
+            {
+                return;
+            }
+
+            _notifiedFull = true;
             Notify();
         }
 
