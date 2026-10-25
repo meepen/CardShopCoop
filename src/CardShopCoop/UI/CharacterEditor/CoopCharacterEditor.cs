@@ -207,9 +207,9 @@ namespace CardShopCoop.UI
                 548f, 156f, 34f, 18f);
             _redoButton = NativeCoopUi.Button(panel, "Redo", NativeCoopUi.Blue, OnRedo, 188f,
                 548f, 156f, 34f, 18f);
-            NativeCoopUi.Text(panel, "Drag / right stick: move  |  Wheel / triggers: zoom", 14f,
-                16f, 588f, 328f, 18f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false,
-                title: false);
+            NativeCoopUi.Text(panel, "Drag / right stick: orbit  |  Wheel / triggers: zoom",
+                14f, 16f, 588f, 328f, 18f, NativeCoopUi.Dim, TextAlignmentOptions.Left,
+                wrap: false, title: false);
         }
 
         private void BuildPageTabs()

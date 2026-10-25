@@ -42,6 +42,8 @@ namespace CardShopCoop.UI
         private int _modelIndex;
         private PresenceModelEntry _model;
         private Vector2 _pan;
+        private float _yaw;
+        private float _pitch;
         private float _zoom = 1f;
 
         internal RenderTexture Texture => _texture;
@@ -92,10 +94,23 @@ namespace CardShopCoop.UI
             ApplyView();
         }
 
-        /// <summary>Applies an analog-stick pan using the current frame's unscaled time.</summary>
-        internal void PanStick(Vector2 stick, float unscaledDeltaTime)
+        /// <summary>Orbits the preview around the character using a pointer delta.</summary>
+        internal void Orbit(Vector2 delta)
         {
-            Pan(stick * (500f * unscaledDeltaTime));
+            if (_camera == null)
+            {
+                return;
+            }
+
+            _yaw = Mathf.Repeat(_yaw - delta.x * 0.35f, 360f);
+            _pitch = Mathf.Clamp(_pitch + delta.y * 0.2f, -35f, 35f);
+            ApplyView();
+        }
+
+        /// <summary>Applies an analog-stick orbit using the current frame's unscaled time.</summary>
+        internal void OrbitStick(Vector2 stick, float unscaledDeltaTime)
+        {
+            Orbit(stick * (140f * unscaledDeltaTime));
         }
 
         /// <summary>Positive values zoom in; negative values zoom out.</summary>
@@ -113,6 +128,8 @@ namespace CardShopCoop.UI
         internal void Recenter()
         {
             _pan = Vector2.zero;
+            _yaw = 0f;
+            _pitch = 0f;
             _zoom = 1f;
             ApplyView();
         }
@@ -126,7 +143,9 @@ namespace CardShopCoop.UI
 
             var distance = BaseCameraDistance / _zoom;
             var target = new Vector3(_pan.x, BaseTargetHeight + _pan.y, 0f);
-            var cameraPosition = new Vector3(_pan.x, BaseCameraHeight + _pan.y * 0.7f, distance);
+            var offset = Quaternion.Euler(_pitch, _yaw, 0f)
+                * new Vector3(0f, BaseCameraHeight - BaseTargetHeight, distance);
+            var cameraPosition = target + offset;
             _camera.transform.localPosition = cameraPosition;
             _camera.transform.localRotation = Quaternion.LookRotation(
                 target - cameraPosition, Vector3.up);

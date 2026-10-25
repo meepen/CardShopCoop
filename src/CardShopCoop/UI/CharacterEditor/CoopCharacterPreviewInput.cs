@@ -24,7 +24,14 @@ namespace CardShopCoop.UI
 
         public void OnDrag(PointerEventData eventData)
         {
-            Preview?.Pan(eventData.delta);
+            if (eventData.button == PointerEventData.InputButton.Right)
+            {
+                Preview?.Pan(eventData.delta);
+            }
+            else
+            {
+                Preview?.Orbit(eventData.delta);
+            }
         }
 
         public void OnEndDrag(PointerEventData eventData)
@@ -49,7 +56,7 @@ namespace CardShopCoop.UI
             var stick = gamepad.rightStick.ReadValue();
             if (stick.sqrMagnitude > 0.01f)
             {
-                Preview.PanStick(stick, Time.unscaledDeltaTime);
+                Preview.OrbitStick(stick, Time.unscaledDeltaTime);
             }
 
             var zoom = gamepad.rightTrigger.ReadValue() - gamepad.leftTrigger.ReadValue();
