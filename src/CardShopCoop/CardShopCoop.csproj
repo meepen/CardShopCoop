@@ -92,6 +92,10 @@
       <HintPath>$(ManagedPath)\UnityEngine.JSONSerializeModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="Unity.InputSystem">
+      <HintPath>$(ManagedPath)\Unity.InputSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="System.IO.Compression" />
     <Reference Include="Newtonsoft.Json">
       <HintPath>$(ManagedPath)\Newtonsoft.Json.dll</HintPath>

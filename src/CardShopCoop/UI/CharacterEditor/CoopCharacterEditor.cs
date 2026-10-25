@@ -68,7 +68,6 @@ namespace CardShopCoop.UI
         private bool _serviceBackend;
         private bool _built;
         private bool _subscribed;
-        private bool _nsfwSelfChange;
         private bool _quittingSubscribed;
         private int _sceneHandle = int.MinValue;
         private Page _page = Page.Face;
@@ -85,7 +84,6 @@ namespace CardShopCoop.UI
         private TextMeshProUGUI _statusText;
         private TextMeshProUGUI _hintText;
         private CoopButton _genderButton;
-        private CoopButton _nsfwButton;
         private CoopButton _undoButton;
         private CoopButton _redoButton;
         private readonly CoopButton[] _pageButtons = new CoopButton[PageOrder.Length];
@@ -180,20 +178,26 @@ namespace CardShopCoop.UI
             previewRect.SetParent(panel, false);
             NativeCoopUi.TopLeft(previewRect, 16f, 42f, 328f, 430f);
             _previewImage = previewObject.GetComponent<RawImage>();
-            _previewImage.raycastTarget = false;
+            _previewImage.raycastTarget = true;
             _previewImage.color = Color.white;
+            var previewInput = previewObject.AddComponent<CoopCharacterPreviewInput>();
+            previewInput.Preview = _preview;
+            previewInput.Recenter = OnRecenter;
 
             _modelText = NativeCoopUi.Text(panel, "Model -", 16f, 16f, 478f, 328f, 22f,
                 NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
 
             _genderButton = NativeCoopUi.Button(panel, "Gender: Female", NativeCoopUi.Purple,
                 OnToggleGender, 16f, 504f, 156f, 38f, 18f);
-            _nsfwButton = NativeCoopUi.Button(panel, "NSFW: OFF", NativeCoopUi.Orange,
-                OnToggleNsfw, 188f, 504f, 156f, 38f, 18f);
+            NativeCoopUi.Button(panel, "Recenter", NativeCoopUi.Blue, OnRecenter, 188f, 504f,
+                156f, 38f, 18f);
             _undoButton = NativeCoopUi.Button(panel, "Undo", NativeCoopUi.Blue, OnUndo, 16f,
                 548f, 156f, 34f, 18f);
             _redoButton = NativeCoopUi.Button(panel, "Redo", NativeCoopUi.Blue, OnRedo, 188f,
                 548f, 156f, 34f, 18f);
+            NativeCoopUi.Text(panel, "Drag / right stick: move  |  Wheel / triggers: zoom", 14f,
+                16f, 588f, 328f, 18f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false,
+                title: false);
         }
 
         private void BuildPageTabs()
@@ -406,7 +410,7 @@ namespace CardShopCoop.UI
 
         private void OnNsfwSettingChanged(object sender, EventArgs args)
         {
-            if (!_built || !isActiveAndEnabled || _nsfwSelfChange)
+            if (!_built || !isActiveAndEnabled)
             {
                 return;
             }
@@ -486,13 +490,6 @@ namespace CardShopCoop.UI
                 _genderButton.SetLabel(female ? "Gender: Female" : "Gender: Male");
                 _genderButton.SetStyle(female ? NativeCoopUi.Purple : NativeCoopUi.Blue);
                 _genderButton.SetInteractable(editable);
-            }
-            if (_nsfwButton != null)
-            {
-                var allowed = CoopPlugin.AllowNsfw.Value;
-                _nsfwButton.SetLabel(allowed ? "NSFW: ON" : "NSFW: OFF");
-                _nsfwButton.SetStyle(allowed ? NativeCoopUi.Green : NativeCoopUi.Orange);
-                _nsfwButton.SetInteractable(available);
             }
             _undoButton?.SetInteractable(editable && _backend.CanUndo);
             _redoButton?.SetInteractable(editable && _backend.CanRedo);
@@ -1025,26 +1022,10 @@ namespace CardShopCoop.UI
             Hint("Avatar model: " + (!female ? "Female" : "Male"));
         }
 
-        private void OnToggleNsfw()
+        private void OnRecenter()
         {
-            if (_backend == null || !_backend.Available)
-            {
-                return;
-            }
-
-            var allowed = !CoopPlugin.AllowNsfw.Value;
-            _nsfwSelfChange = true;
-            try
-            {
-                _backend.SetNsfw(allowed);
-            }
-            finally
-            {
-                _nsfwSelfChange = false;
-            }
-            _backend.Save();
-            RefreshAll();
-            Hint("NSFW appearances: " + (allowed ? "ON" : "OFF"));
+            _preview?.Recenter();
+            _hint?.Invoke("Preview recentered.");
         }
 
         private void OnUndo()

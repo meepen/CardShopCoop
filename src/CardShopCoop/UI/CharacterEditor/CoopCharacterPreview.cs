@@ -22,6 +22,9 @@ namespace CardShopCoop.UI
         private const int PreviewLayer = 31;
         private const int TextureWidth = 512;
         private const int TextureHeight = 640;
+        private const float BaseCameraDistance = 4.2f;
+        private const float BaseCameraHeight = 1.3f;
+        private const float BaseTargetHeight = 1.1f;
 
         private const string DummyPrefabName = "CC_Dummy";
 
@@ -38,6 +41,8 @@ namespace CardShopCoop.UI
         private bool _visible;
         private int _modelIndex;
         private PresenceModelEntry _model;
+        private Vector2 _pan;
+        private float _zoom = 1f;
 
         internal RenderTexture Texture => _texture;
 
@@ -70,6 +75,61 @@ namespace CardShopCoop.UI
             {
                 _camera.enabled = visible;
             }
+        }
+
+        /// <summary>Moves the preview camera by a pointer delta in screen pixels.</summary>
+        internal void Pan(Vector2 delta)
+        {
+            if (_camera == null)
+            {
+                return;
+            }
+
+            var sensitivity = 0.003f / Mathf.Max(0.55f, _zoom);
+            _pan += new Vector2(-delta.x, delta.y) * sensitivity;
+            _pan.x = Mathf.Clamp(_pan.x, -1.2f, 1.2f);
+            _pan.y = Mathf.Clamp(_pan.y, -0.8f, 0.8f);
+            ApplyView();
+        }
+
+        /// <summary>Applies an analog-stick pan using the current frame's unscaled time.</summary>
+        internal void PanStick(Vector2 stick, float unscaledDeltaTime)
+        {
+            Pan(stick * (500f * unscaledDeltaTime));
+        }
+
+        /// <summary>Positive values zoom in; negative values zoom out.</summary>
+        internal void Zoom(float delta)
+        {
+            if (_camera == null || Mathf.Approximately(delta, 0f))
+            {
+                return;
+            }
+
+            _zoom = Mathf.Clamp(_zoom * (1f + delta), 0.55f, 2.5f);
+            ApplyView();
+        }
+
+        internal void Recenter()
+        {
+            _pan = Vector2.zero;
+            _zoom = 1f;
+            ApplyView();
+        }
+
+        private void ApplyView()
+        {
+            if (_camera == null)
+            {
+                return;
+            }
+
+            var distance = BaseCameraDistance / _zoom;
+            var target = new Vector3(_pan.x, BaseTargetHeight + _pan.y, 0f);
+            var cameraPosition = new Vector3(_pan.x, BaseCameraHeight + _pan.y * 0.7f, distance);
+            _camera.transform.localPosition = cameraPosition;
+            _camera.transform.localRotation = Quaternion.LookRotation(
+                target - cameraPosition, Vector3.up);
         }
 
         /// <summary>Points the preview at a model. The body is rebuilt only when the gender (or
@@ -282,10 +342,8 @@ namespace CardShopCoop.UI
             var cameraObject = new GameObject("PreviewCamera", typeof(Camera));
             cameraObject.layer = PreviewLayer;
             cameraObject.transform.SetParent(_stage.transform, false);
-            cameraObject.transform.localPosition = new Vector3(0f, 1.3f, 4.2f);
-            cameraObject.transform.localRotation = Quaternion.LookRotation(
-                new Vector3(0f, 1.1f, 0f) - cameraObject.transform.localPosition, Vector3.up);
             _camera = cameraObject.GetComponent<Camera>();
+            ApplyView();
             _camera.enabled = false;
             _camera.clearFlags = CameraClearFlags.SolidColor;
             _camera.backgroundColor = new Color(0.07f, 0.05f, 0.1f, 1f);

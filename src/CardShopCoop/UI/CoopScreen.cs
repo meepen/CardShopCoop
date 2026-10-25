@@ -105,6 +105,8 @@ namespace CardShopCoop.UI
 
         private static CoopButton _crossplayBtn;
 
+        private static CoopButton _nsfwBtn;
+
         private static TMP_InputField _advNameInput;
 
         internal static void Toggle()
@@ -590,12 +592,15 @@ namespace CardShopCoop.UI
             NativeCoopUi.Text(advRt, "Crossplay (Steam <-> Xbox Game Pass):", 22f, 40f, 230f, 540f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
             _crossplayBtn = NativeCoopUi.Button(advRt, CoopPlugin.AllowCrossBuildJoin.Value ? "ENABLED" : "DISABLED", CoopPlugin.AllowCrossBuildJoin.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleCrossplay, 620f, 230f, 220f, 40f, 20f);
             NativeCoopUi.Text(advRt, "Enables connection between Steam (Unity 2021) and Xbox App (Unity 6).", 17f, 40f, 272f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Text(advRt, "Custom Display Name:", 22f, 40f, 320f, 320f, 42f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            _advNameInput = NativeCoopUi.Input(advRt, "Name", 370f, 320f, 280f, 42f, 20f, 24, TMP_InputField.ContentType.Standard);
+            NativeCoopUi.Text(advRt, "NSFW Appearance:", 22f, 40f, 320f, 420f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
+            _nsfwBtn = NativeCoopUi.Button(advRt, CoopPlugin.AllowNsfw.Value ? "ENABLED" : "DISABLED", CoopPlugin.AllowNsfw.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleNsfw, 620f, 320f, 220f, 40f, 20f);
+            NativeCoopUi.Text(advRt, "Allow nude/NSFW appearances. When off, the Character tab hides the Nude options.", 17f, 40f, 362f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            NativeCoopUi.Text(advRt, "Custom Display Name:", 22f, 40f, 410f, 320f, 42f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
+            _advNameInput = NativeCoopUi.Input(advRt, "Name", 370f, 410f, 280f, 42f, 20f, 24, TMP_InputField.ContentType.Standard);
             _advNameInput.text = CoopPlugin.NameOverride.Value ? CoopPlugin.PlayerName.Value : "";
             _advNameInput.onEndEdit.AddListener(OnNameCommitted);
-            NativeCoopUi.Text(advRt, "Leave empty to use your platform name (Xbox Gamertag / Steam). Saved when you leave the field.", 17f, 40f, 362f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            RectTransform diagRt = NativeCoopUi.Node(advRt, "DiagWell", 40f, 430f, 960f, 140f);
+            NativeCoopUi.Text(advRt, "Leave empty to use your platform name (Xbox Gamertag / Steam). Saved when you leave the field.", 17f, 40f, 452f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            RectTransform diagRt = NativeCoopUi.Node(advRt, "DiagWell", 40f, 500f, 960f, 140f);
             NativeCoopUi.Panel(diagRt, 0f, 0f, 960f, 140f, NativeCoopUi.WellFill, 2.6f);
             NativeCoopUi.Text(diagRt, "Diagnostic Tools", 20f, 20f, 12f, 920f, 32f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
             NativeCoopUi.Button(diagRt, "Copy Diagnostics", NativeCoopUi.Grey, OnCopyDiagnostics, 20f, 50f, 300f, 48f, 20f);
@@ -804,6 +809,12 @@ namespace CardShopCoop.UI
                 _crossplayBtn.SetLabel(value ? "ENABLED" : "DISABLED");
                 _crossplayBtn.SetStyle(value ? NativeCoopUi.Green : NativeCoopUi.Orange);
             }
+            if (_nsfwBtn != null && CoopPlugin.AllowNsfw != null)
+            {
+                bool value = CoopPlugin.AllowNsfw.Value;
+                _nsfwBtn.SetLabel(value ? "ENABLED" : "DISABLED");
+                _nsfwBtn.SetStyle(value ? NativeCoopUi.Green : NativeCoopUi.Orange);
+            }
         }
 
         private static void SetPlayer(int i, string name, string info, int conn)
@@ -908,6 +919,26 @@ namespace CardShopCoop.UI
                 RefreshAdvanced();
                 Hint("Crossplay (Steam <-> Xbox): " + (CoopPlugin.AllowCrossBuildJoin.Value ? "ENABLED" : "DISABLED"));
             }
+        }
+
+        private static void OnToggleNsfw()
+        {
+            if (CoopPlugin.AllowNsfw == null)
+            {
+                return;
+            }
+
+            bool allowed = !CoopPlugin.AllowNsfw.Value;
+            if (PresenceService.Active != null)
+            {
+                PresenceApi.SetNsfwAllowed(allowed);
+            }
+            else
+            {
+                CoopPlugin.AllowNsfw.Value = allowed;
+            }
+            RefreshAdvanced();
+            Hint("NSFW appearances: " + (allowed ? "ENABLED" : "DISABLED"));
         }
 
         private static void OnNameCommitted(string _) => CommitName();
