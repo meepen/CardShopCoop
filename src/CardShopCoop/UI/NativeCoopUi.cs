@@ -453,7 +453,7 @@ namespace CardShopCoop.UI
         /// the whole row as the click target. Kept separate from <see cref="Button"/> because a
         /// toggle is not an action - it owns a boolean, and drawing it as a button invited the
         /// enabled/disabled colouring that made it look like "Copy password" next to it.</summary>
-        internal static Button Checkbox(Transform parent, bool isOn, string label, float x, float y,
+        internal static void Checkbox(Transform parent, bool isOn, string label, float x, float y,
             float width, float height, float textPx, UnityAction onClick)
         {
             const float BoxSize = 26f;
@@ -485,7 +485,6 @@ namespace CardShopCoop.UI
 
             Text(parent, label, textPx, x + BoxSize + 12f, y, width - BoxSize - 12f, height,
                 Color.white, TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
-            return button;
         }
 
         internal static RectTransform Node(Transform parent, string name, float x, float y, float w, float h)

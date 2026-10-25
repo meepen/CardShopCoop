@@ -1,17 +1,14 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
 using BepInEx.Logging;
 using CardShopCoop.Api;
 using CardShopCoop.Diagnostics;
 using CardShopCoop.Modules.Presence;
-using CardShopCoop.Net;
 using CardShopCoop.Net.Networking;
 using CardShopCoop.Runtime;
 using TMPro;
 using UnityEngine;
-using UnityEngine.Events;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
@@ -39,6 +36,23 @@ namespace CardShopCoop.UI
             Advanced
         }
 
+        /// <summary>Sub-views of the in-game hosting container. Hosting owns the transport
+        /// controls; Players owns the roster, so neither one covers the other up.</summary>
+        private enum SessionPane
+        {
+            Hosting,
+            Players
+        }
+
+        /// <summary>Which builder last filled the session form area. Changing builders (for
+        /// example a pre-host form becoming the hosting pane) must clear the cached signature.</summary>
+        private enum HostFormMode
+        {
+            None,
+            Form,
+            Hosting
+        }
+
         /// <summary>The connection forms' scrolling viewport. The backend sections are stacked top
         /// to bottom inside <see cref="Content"/>; their height comes from what each section
         /// actually draws, and <see cref="Bar"/> appears only when that exceeds the viewport.</summary>
@@ -62,6 +76,8 @@ namespace CardShopCoop.UI
         private const float ScrollbarWidth = 12f;
         private const float ScrollbarGap = 6f;
         private const float FormContentWidth = FormWidth - ScrollbarWidth - ScrollbarGap;
+        private const float PlayersPaneHeight = 520f;
+        private const float ClientPlayersY = 360f;
 
         internal static bool IsOpen;
 
@@ -103,7 +119,15 @@ namespace CardShopCoop.UI
 
         private static GameObject _hostLiveRoot;
 
-        private static bool _hostFormsLive;
+        private static CoopButton _hostingTabBtn;
+
+        private static CoopButton _playersTabBtn;
+
+        private static RectTransform _playersPane;
+
+        private static SessionPane _sessionPane = SessionPane.Hosting;
+
+        private static HostFormMode _hostFormMode = HostFormMode.None;
 
         private static GameObject _charGrp;
 
@@ -277,6 +301,8 @@ namespace CardShopCoop.UI
             CancelResetDefaults();
             IsOpen = false;
             _currentTab = ScreenTab.Session;
+            _sessionPane = SessionPane.Hosting;
+            _hostFormMode = HostFormMode.None;
             Unsubscribe();
             PopNav();
             if (_root != null)
@@ -318,6 +344,8 @@ namespace CardShopCoop.UI
             CancelResetDefaults();
             IsOpen = false;
             _currentTab = ScreenTab.Session;
+            _sessionPane = SessionPane.Hosting;
+            _hostFormMode = HostFormMode.None;
             Unsubscribe();
             if (_root != null)
             {
@@ -375,6 +403,8 @@ namespace CardShopCoop.UI
         internal static void Destroy()
         {
             CancelResetDefaults();
+            _sessionPane = SessionPane.Hosting;
+            _hostFormMode = HostFormMode.None;
             Unsubscribe();
             try
             {
@@ -563,6 +593,17 @@ namespace CardShopCoop.UI
             NativeCoopUi.Show(_advancedGrp, on: false);
             NativeCoopUi.Show(_charGrp, on: false);
             NativeCoopUi.Show(_statusGrp, on: true);
+            // Coming back to the session tab after an arbitrary interval: rebuild from the live
+            // state rather than trusting a cached form/content signature captured before a
+            // session may have started or stopped.
+            if (_hostForm != null)
+            {
+                _hostForm.Signature = null;
+            }
+            if (_joinForm != null)
+            {
+                _joinForm.Signature = null;
+            }
             bool atTitle = CoopMenus.AtTitle;
             NativeCoopUi.Show(_joinGrp, atTitle);
             NativeCoopUi.Show(_sessGrp, !atTitle);
@@ -574,6 +615,9 @@ namespace CardShopCoop.UI
             {
                 RefreshSession();
             }
+            // The status well is hidden on the other tabs, so a change that arrived while one of
+            // them was open was deliberately not drawn. Draw the current status on the way back in.
+            RefreshStatus();
         }
 
         private static void BuildJoin(Transform p)
@@ -591,12 +635,24 @@ namespace CardShopCoop.UI
             _hostLiveRoot = NativeCoopUi.Node(sessRt, "LiveBackend", FormX, FormY,
                 FormWidth, 200f).gameObject;
             _hostLiveRoot.SetActive(false);
-            _playersHead = NativeCoopUi.Text(sessRt, "Players", 26f, 40f, 360f, 700f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
+
+            // Two sub-tabs at the top of the in-game session container. They stay hidden until the
+            // player is actually hosting; the pre-host form and the client view keep the full
+            // container to themselves.
+            _hostingTabBtn = NativeCoopUi.Button(sessRt, "Hosting", NativeCoopUi.Purple,
+                () => ShowSessionPane(SessionPane.Hosting), 40f, 166f, 470f, 30f, 17f);
+            _playersTabBtn = NativeCoopUi.Button(sessRt, "Players", NativeCoopUi.Grey,
+                () => ShowSessionPane(SessionPane.Players), 522f, 166f, 470f, 30f, 17f);
+            _hostingTabBtn?.Show(false);
+            _playersTabBtn?.Show(false);
+
+            _playersPane = NativeCoopUi.Node(sessRt, "PlayersPane", 40f, 360f, 960f, 520f);
+            _playersHead = NativeCoopUi.Text(_playersPane, "Players", 26f, 0f, 0f, 700f, 34f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
             for (int i = 0; i < 8; i++)
             {
                 int index = i;
                 PlayerRow playerRow = new PlayerRow();
-                RectTransform rowRt = NativeCoopUi.Node(sessRt, "Player" + i, 40f, 400f + (float)i * 40f, 960f, 36f);
+                RectTransform rowRt = NativeCoopUi.Node(_playersPane, "Player" + i, 0f, 40f + (float)i * 40f, 960f, 36f);
                 playerRow.Grp = rowRt.gameObject;
                 NativeCoopUi.Panel(rowRt, 0f, 0f, 960f, 36f, NativeCoopUi.RowFill, 4f);
                 playerRow.Name = NativeCoopUi.Text(rowRt, "", 22f, 20f, 0f, 500f, 36f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
@@ -717,7 +773,8 @@ namespace CardShopCoop.UI
             NativeCoopUi.Set(_sub, connecting
                 ? "Connecting to shop..."
                 : "Logged in as: " + PlayerName);
-            RefreshBackendForms(_joinForm, ConnectMode.Join);
+            ShowSessionTabs(on: false);
+            RefreshBackendForms(_joinForm, ConnectMode.Join, hosting: false);
             _cancel?.Show(connecting);
         }
 
@@ -737,60 +794,144 @@ namespace CardShopCoop.UI
                         ? "Logged in as: " + PlayerName + " | Host your shop for friends."
                         : "Load or start your shop first to host.");
 
+            // Choose the pane BEFORE styling the tabs: entering the hosting view resets to
+            // Hosting below, and the active-tab colour must match the content drawn this frame.
+            if (hosting && inShop && _hostFormMode != HostFormMode.Hosting)
+            {
+                _sessionPane = SessionPane.Hosting;
+            }
+            ShowSessionTabs(hosting && inShop);
+
             if (none || !inShop)
             {
-                if (_hostFormsLive)
-                {
-                    _hostFormsLive = false;
-                    _hostForm.Signature = null;
-                }
+                SetHostFormMode(HostFormMode.Form);
                 NativeCoopUi.Show(_hostLiveRoot, on: false);
-                RefreshBackendForms(_hostForm, ConnectMode.Host);
-                NativeCoopUi.Show(_playersHead, on: false);
-                for (var i = 0; i < Players.Length; i++)
-                {
-                    NativeCoopUi.Show(Players[i].Grp, on: false);
-                    Players[i].Conn = -1;
-                }
+                ClearPlayers();
+                RefreshBackendForms(_hostForm, ConnectMode.Host, hosting: false);
                 _cancel?.Show(on: false);
                 return;
             }
 
-            _hostFormsLive = true;
-            _hostForm.Signature = null;
+            if (hosting)
+            {
+                if (_hostFormMode != HostFormMode.Hosting)
+                {
+                    // Entering the hosting view (first host, or back from a non-shop state):
+                    // start on Hosting so the fresh session's transport state is visible.
+                    SetHostFormMode(HostFormMode.Hosting);
+                    _sessionPane = SessionPane.Hosting;
+                }
+
+                NativeCoopUi.Show(_hostLiveRoot, on: false);
+                if (_sessionPane == SessionPane.Hosting)
+                {
+                    NativeCoopUi.Show(_hostForm.Root, on: true);
+                    // Keep the roster count on the Players tab current even while it is hidden.
+                    RefreshPlayers(show: false, kick: true, top: FormY);
+                    RefreshBackendForms(_hostForm, ConnectMode.Host, hosting: true);
+                }
+                else
+                {
+                    NativeCoopUi.Show(_hostForm.Root, on: false);
+                    // A few pixels below the sub-tab row, so the roster heading does not sit under
+                    // the tabs' visual bounds.
+                    RefreshPlayers(show: true, kick: true, top: FormY + 8f);
+                }
+
+                _cancel?.Show(on: false);
+                return;
+            }
+
+            // Client in the shop: one live transport plus the roster, with no hosting controls.
+            SetHostFormMode(HostFormMode.None);
             NativeCoopUi.Show(_hostForm.Root, on: false);
             NativeCoopUi.Show(_hostLiveRoot, on: true);
             ClearChildren(_hostLiveRoot);
-            CoopBackendOptions.BuildLive(_hostLiveRoot.transform, Hint);
-            NativeCoopUi.Show(_playersHead, on: true);
+            CoopBackendOptions.BuildLive(_hostLiveRoot.transform, FormWidth);
+            RefreshPlayers(show: true, kick: false, top: ClientPlayersY);
+            _cancel?.Show(on: false);
+        }
 
+        private static void SetHostFormMode(HostFormMode mode)
+        {
+            if (_hostFormMode == mode)
+            {
+                return;
+            }
+
+            _hostFormMode = mode;
+            _hostForm.Signature = null;
+        }
+
+        private static void ShowSessionPane(SessionPane pane)
+        {
+            _sessionPane = pane;
+            if (IsOpen)
+            {
+                RefreshSession();
+            }
+        }
+
+        private static void ShowSessionTabs(bool on)
+        {
+            _hostingTabBtn?.Show(on);
+            _playersTabBtn?.Show(on);
+            if (!on)
+            {
+                return;
+            }
+
+            _hostingTabBtn?.SetStyle(_sessionPane == SessionPane.Hosting
+                ? NativeCoopUi.Purple : NativeCoopUi.Grey);
+            _playersTabBtn?.SetStyle(_sessionPane == SessionPane.Players
+                ? NativeCoopUi.Purple : NativeCoopUi.Grey);
+        }
+
+        private static void RefreshPlayers(bool show, bool kick, float top)
+        {
             IReadOnlyList<PresencePlayer> sessionPlayers = PresenceApi.SessionPlayers;
             int count = 0;
             if (sessionPlayers != null)
             {
-                for (int i = 0; i < sessionPlayers.Count; i++)
+                for (int i = 0; i < sessionPlayers.Count && count < Players.Length; i++)
                 {
-                    if (count >= 8)
-                    {
-                        break;
-                    }
                     PresencePlayer presencePlayer = sessionPlayers[i];
                     string name = presencePlayer.Name + (presencePlayer.IsSelf ? " (you)" : "");
                     string info = presencePlayer.IsHost ? "Host" : ("Player #" + presencePlayer.Id);
-                    SetPlayer(count++, name, info, (hosting && !presencePlayer.IsSelf)
+                    SetPlayer(count++, name, info, (kick && !presencePlayer.IsSelf)
                         ? presencePlayer.Id : (-1));
                 }
             }
-            for (int j = count; j < 8; j++)
+            for (int j = count; j < Players.Length; j++)
             {
                 NativeCoopUi.Show(Players[j].Grp, on: false);
                 Players[j].Conn = -1;
             }
-            NativeCoopUi.Set(_playersHead, count > 0 ? ("Players (" + count + ")") : "Players");
-            _cancel?.Show(on: false);
+            string header = count > 0 ? "Players (" + count + ")" : "Players";
+            NativeCoopUi.Set(_playersHead, header);
+            _playersTabBtn?.SetLabel(header);
+            if (show)
+            {
+                NativeCoopUi.TopLeft(_playersPane, FormX, top, FormWidth, PlayersPaneHeight);
+                NativeCoopUi.Show(_playersPane, on: true);
+            }
+            else
+            {
+                NativeCoopUi.Show(_playersPane, on: false);
+            }
         }
 
-        private static void RefreshBackendForms(FormArea area, ConnectMode mode)
+        private static void ClearPlayers()
+        {
+            NativeCoopUi.Show(_playersPane, on: false);
+            for (var i = 0; i < Players.Length; i++)
+            {
+                NativeCoopUi.Show(Players[i].Grp, on: false);
+                Players[i].Conn = -1;
+            }
+        }
+
+        private static void RefreshBackendForms(FormArea area, ConnectMode mode, bool hosting)
         {
             if (area == null)
             {
@@ -810,8 +951,9 @@ namespace CardShopCoop.UI
             area.Signature = next;
             ClearChildren(area.Content.gameObject);
             NativeCoopUi.Show(area.Root, on: true);
-            var height = CoopBackendOptions.Build(area.Content, mode, FormContentWidth, Hint,
-                Refresh);
+            var height = hosting
+                ? CoopBackendOptions.BuildHosting(area.Content, FormContentWidth, Hint, Refresh)
+                : CoopBackendOptions.Build(area.Content, mode, FormContentWidth, Hint, Refresh);
             var contentHeight = Mathf.Max(FormHeight, height + 8f);
             area.Content.sizeDelta = new Vector2(0f, contentHeight);
             Canvas.ForceUpdateCanvases();

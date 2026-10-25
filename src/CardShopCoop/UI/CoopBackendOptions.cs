@@ -13,7 +13,6 @@ namespace CardShopCoop.UI
     /// come from <see cref="INetworkingBackend"/>.</summary>
     internal static class CoopBackendOptions
     {
-        private const float LiveHeaderWidth = 460f;
         private const float SectionPadding = 20f;
         private const float SectionGap = 12f;
         private const float SectionTitleHeight = 36f;
@@ -46,17 +45,18 @@ namespace CardShopCoop.UI
                 var info = backend.ConnectionInfo;
                 text.Append('|').Append(backend.Id).Append(':').Append(backend.DisplayName)
                     .Append(':').Append(info.Active).Append(':').Append(info.IsHost)
-                    .Append(':').Append(info.Busy);
+                    .Append(':').Append(info.Busy).Append(':').Append(info.Summary)
+                    .Append(':').Append(info.Warning).Append(':').Append((int)info.ForwardState);
                 var fields = backend.GetFields(mode);
                 var values = ValuesFor(backend, mode, fields);
                 foreach (var field in fields)
                 {
                     text.Append('|').Append((int)field.Id).Append(':').Append(field.Kind)
                         .Append(':').Append(field.Label).Append(':').Append(field.Required);
-                    // A toggle draws its own value ("[x] On"), so flipping one changes what the
-                    // window must show and has to invalidate the form. TEXT values are
-                    // deliberately excluded: they draw from the live TMP_InputField, and including
-                    // them would rebuild (and destroy the focused field) while the player types.
+                    // A toggle draws its own checked state, so flipping one changes what the window
+                    // must show and has to invalidate the form. TEXT values are deliberately
+                    // excluded: they draw from the live TMP_InputField, and including them would
+                    // rebuild (and destroy the focused field) while the player types.
                     if (field.Kind == FieldKind.Toggle)
                     {
                         text.Append(':').Append(values.GetBool(field.Id) ? '1' : '0');
@@ -113,7 +113,52 @@ namespace CardShopCoop.UI
             return y;
         }
 
-        internal static float BuildLive(Transform parent, Action<string> hint)
+        /// <summary>The HOSTING pane: every backend on one scrollable stack. Active transports
+        /// show their status, copy/invite actions and their own stop control; inactive transports
+        /// keep their host form, so a host can add a second transport without leaving the session.
+        /// </summary>
+        internal static float BuildHosting(Transform parent, float width, Action<string> hint,
+            Action rebuild)
+        {
+            var core = CoopCore.Instance;
+            if (core == null)
+            {
+                return 0f;
+            }
+
+            var y = SectionPadding;
+            NativeCoopUi.Button(parent, "Stop all hosting", NativeCoopUi.Orange,
+                () => core.Disconnect(), SectionPadding, y, 320f, 46f, 18f);
+            y += 46f + SectionGap;
+
+            var backends = core.Backends;
+            for (var i = 0; i < backends.Count; i++)
+            {
+                var backend = backends[i];
+                var info = backend.ConnectionInfo;
+                if (info.Active || info.Busy)
+                {
+                    y += BuildLiveBackend(parent, backend, info, width, y,
+                        () => core.StopHosting(backend), "Stop " + backend.DisplayName);
+                }
+                else
+                {
+                    y += BuildBackend(parent, backend, ConnectMode.Host, width, y, hint, rebuild,
+                        "Not hosting on this transport.");
+                }
+
+                if (i < backends.Count - 1)
+                {
+                    y += SectionGap;
+                }
+            }
+
+            return y;
+        }
+
+        /// <summary>The CLIENT live view: the single transport carrying the session, with the
+        /// leave/stop control. A host uses <see cref="BuildHosting"/> so every transport is shown.</summary>
+        internal static float BuildLive(Transform parent, float width)
         {
             var core = CoopCore.Instance;
             if (core == null)
@@ -143,21 +188,45 @@ namespace CardShopCoop.UI
                 return 30f;
             }
 
+            UnityEngine.Events.UnityAction stop = info.IsHost
+                ? (UnityEngine.Events.UnityAction)(() => core.StopHosting(active))
+                : () => core.Disconnect();
+            return BuildLiveBackend(parent, active, info, width, 0f, stop,
+                info.IsHost ? "Stop " + active.DisplayName : "Leave shop");
+        }
+
+        /// <summary>One active transport's status and controls, laid out as a full-width section.</summary>
+        private static float BuildLiveBackend(Transform parent, INetworkingBackend backend,
+            ConnectionInfo info, float width, float top,
+            UnityEngine.Events.UnityAction stop, string stopLabel)
+        {
             var mode = info.IsHost ? ConnectMode.Host : ConnectMode.Join;
-            NativeCoopUi.Text(parent, active.DisplayName, 24f, 0f, 0f, LiveHeaderWidth, 32f,
+            var hasWarning = !string.IsNullOrEmpty(info.Warning);
+            var height = SectionPadding * 2f + SectionTitleHeight + 26f
+                + (hasWarning ? 44f : 0f) + StartRowStep;
+
+            NativeCoopUi.Flat(parent, 0f, top, width, height, NativeCoopUi.PanelEdge);
+            NativeCoopUi.Flat(parent, 2f, top + 2f, width - 4f, height - 4f,
+                NativeCoopUi.PanelFill);
+
+            var x = SectionPadding;
+            var innerWidth = width - SectionPadding * 2f;
+            var y = top + SectionPadding;
+            NativeCoopUi.Text(parent, backend.DisplayName, 24f, x, y, innerWidth, 32f,
                 NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
-            NativeCoopUi.Text(parent, info.Summary ?? "", 18f, 0f, 36f, 900f, 26f,
+            y += SectionTitleHeight;
+            NativeCoopUi.Text(parent, info.Summary ?? "", 18f, x, y, innerWidth, 26f,
                 Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
-            var y = 66f;
-            if (!string.IsNullOrEmpty(info.Warning))
+            y += 26f;
+            if (hasWarning)
             {
-                NativeCoopUi.Text(parent, info.Warning, 16f, 0f, y, 900f, 40f,
-                    NativeCoopUi.Bad, TextAlignmentOptions.Left, wrap: true, title: false);
-                y = 108f;
+                NativeCoopUi.Text(parent, info.Warning, 16f, x, y, innerWidth, 40f,
+                    NativeCoopUi.Bad, TextAlignmentOptions.TopLeft, wrap: true, title: false);
+                y += 44f;
             }
 
-            var actionX = 0f;
-            foreach (var action in LiveActions(active, mode))
+            var actionX = x;
+            foreach (var action in LiveActions(backend, mode))
             {
                 var button = NativeCoopUi.Button(parent, action.Label,
                     action.Enabled ? NativeCoopUi.Blue : NativeCoopUi.Grey,
@@ -166,26 +235,25 @@ namespace CardShopCoop.UI
                 actionX += 210f;
             }
 
-            UnityEngine.Events.UnityAction stop = info.IsHost
-                ? (UnityEngine.Events.UnityAction)(() => core.StopHosting(active))
-                : () => core.Disconnect();
-            NativeCoopUi.Button(parent, info.IsHost ? "Stop hosting" : "Leave shop",
-                NativeCoopUi.Orange, stop, actionX, y, 200f, 40f, 16f);
-            return y + 50f;
+            NativeCoopUi.Button(parent, stopLabel, NativeCoopUi.Orange, stop, actionX, y,
+                200f, 40f, 16f);
+            return height;
         }
 
         private static float BuildBackend(Transform parent, INetworkingBackend backend,
-            ConnectMode mode, float width, float top, Action<string> hint, Action rebuild)
+            ConnectMode mode, float width, float top, Action<string> hint, Action rebuild,
+            string status = null)
         {
             var fields = backend.GetFields(mode);
             var values = ValuesFor(backend, mode, fields);
             var info = backend.ConnectionInfo;
             var panelActions = PanelActions(backend, mode).ToList();
+            var hasStatus = !string.IsNullOrEmpty(status);
 
             // The section's height is its own content's height, computed the same way the rows
             // below advance. Nothing is padded to a fixed column size, so adding a backend stacks
             // under the previous one and adding a field grows that section only.
-            var height = SectionPadding * 2f + SectionTitleHeight;
+            var height = SectionPadding * 2f + SectionTitleHeight + (hasStatus ? 26f : 0f);
             for (var i = 0; i < fields.Count; i++)
             {
                 height += fields[i].Kind == FieldKind.Toggle ? ToggleRowStep : FieldRowStep;
@@ -204,6 +272,12 @@ namespace CardShopCoop.UI
             NativeCoopUi.Text(parent, backend.DisplayName, 24f, x, y, innerWidth, 32f,
                 NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
             y += SectionTitleHeight;
+            if (hasStatus)
+            {
+                NativeCoopUi.Text(parent, status, 18f, x, y, innerWidth, 26f,
+                    NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+                y += 26f;
+            }
 
             foreach (var field in fields)
             {
@@ -242,7 +316,7 @@ namespace CardShopCoop.UI
                 NativeCoopUi.Button(parent, "Paste", NativeCoopUi.Grey,
                     () => Paste(input, field, values, backend, hint), actionX, y, PasteWidth, 40f,
                     15f);
-                actionX += 70f;
+                actionX += 6f + PasteWidth;
                 for (var i = 0; i < fieldActions.Count; i++)
                 {
                     var action = fieldActions[i];
@@ -260,7 +334,11 @@ namespace CardShopCoop.UI
                 + backend.DisplayName;
             var start = NativeCoopUi.Button(parent, startLabel, NativeCoopUi.Green,
                 () => Start(backend, mode, values, hint), x, y, 320f, 46f, 18f);
-            start.SetInteractable(!info.Busy);
+            // A host may start ANOTHER transport while already hosting, so Role.Host stays
+            // startable here; a client that is already connecting is not. Active/Busy backends are
+            // represented by their live section instead of this form.
+            start.SetInteractable(!info.Busy && !info.Active
+                && (CoopCore.Role == CoopRole.None || CoopCore.Role == CoopRole.Host));
             y += StartRowStep;
 
             foreach (var action in panelActions)
@@ -361,9 +439,7 @@ namespace CardShopCoop.UI
         }
 
         private static int Limit(BackendField field)
-            => field.Kind == FieldKind.Port || field.Kind == FieldKind.Number
-                ? 6
-                : field.Kind == FieldKind.Password ? 128 : 128;
+            => field.Kind == FieldKind.Port || field.Kind == FieldKind.Number ? 6 : 128;
 
         private static TMP_InputField.ContentType ContentType(BackendField field)
             => field.Kind == FieldKind.Password
