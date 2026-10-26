@@ -210,22 +210,26 @@ namespace CardShopCoop.Modules.World
                         return false;
                     }
 
-                    // A box's contents are rewritten by the player acting on it: the holder when
-                    // one is mirrored, or whoever takes an item out of (or puts one into) an open
-                    // box on the floor. A contents change to a box another peer is holding stays
-                    // rejected outright, so one peer can never rewrite a box another peer is
-                    // carrying.
+                    // A box's contents are rewritten by the player acting on it: the holder whose
+                    // hand mirrors this box, or any player using an open box that nobody carries
+                    // (an open box on the floor). The host's replica also reports itself as held
+                    // for a mirrored remote hold, so the holder must be resolved through the mirror
+                    // rather than the local hold flag; the flag only distinguishes "free box" from
+                    // "box in somebody's hand". A box the host itself carries belongs to the host,
+                    // so a client can never rewrite it.
                     var held = _boxNetworkInteraction.IsBeingHeld(item);
                     var holder = 0;
                     var mirrored = _playerBoxInteraction != null
                         && _playerBoxInteraction.TryGetRemoteHolder(boxId, out holder);
-                    var heldByOther = held || (mirrored && holder != context.ConnectionId);
-                    if (message.ContentsChanged && heldByOther)
+                    var open = BoxNetworkInteraction.IsBoxOpen(item);
+                    var requesterHolds = mirrored && holder == context.ConnectionId;
+                    var freeOpenBox = !held && open;
+                    if (message.ContentsChanged && !requesterHolds && !freeOpenBox)
                     {
                         CoopPlugin.Log.LogWarning("[box-id] rejected box state request id="
                             + boxId + " name=" + item.name + " from conn="
-                            + context.ConnectionId + ": another player holds the box (isHeld="
-                            + held + " mirroredHolder="
+                            + context.ConnectionId + ": the sender is not the box holder (isHeld="
+                            + held + " open=" + open + " mirroredHolder="
                             + (mirrored ? holder.ToString() : "none") + ").");
                         return false;
                     }
