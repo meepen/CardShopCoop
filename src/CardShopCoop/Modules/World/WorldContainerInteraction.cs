@@ -1482,11 +1482,11 @@ namespace CardShopCoop.Modules.World
         {
             if (_cachedContainerScreen == null)
             {
-                _cachedContainerScreen = UnityEngine.Object.FindObjectOfType<BulkDonationBoxUIScreen>();
+                _cachedContainerScreen = UnityEngine.Object.FindFirstObjectByType<BulkDonationBoxUIScreen>();
             }
             if (_cachedAmountModal == null)
             {
-                _cachedAmountModal = UnityEngine.Object.FindObjectOfType<BulkDonationBoxPlusMinusScreen>();
+                _cachedAmountModal = UnityEngine.Object.FindFirstObjectByType<BulkDonationBoxPlusMinusScreen>();
             }
         }
 

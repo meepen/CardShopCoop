@@ -162,7 +162,7 @@ namespace CardShopCoop.Runtime
             _lastLookupScene = scene.handle;
             // Late session startup can happen after Awake/Init has already run. This is the only
             // compatibility fallback; a missing object is negatively cached for this scene.
-            _cached = PreferLiveInstance(UnityEngine.Object.FindObjectOfType<T>());
+            _cached = PreferLiveInstance(UnityEngine.Object.FindFirstObjectByType<T>());
             return _cached;
         }
 
@@ -178,16 +178,12 @@ namespace CardShopCoop.Runtime
                 return null;
             }
 
-            var found = UnityEngine.Object.FindObjectsOfType(typeof(T));
+            var found = UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.InstanceID);
             T live = null;
             T fabricated = null;
             for (var i = 0; i < found.Length; i++)
             {
-                if (!(found[i] is T other))
-                {
-                    continue;
-                }
-
+                var other = found[i];
                 if (SingletonLatchGuard.IsFabricatedSingleton(other))
                 {
                     fabricated ??= other;

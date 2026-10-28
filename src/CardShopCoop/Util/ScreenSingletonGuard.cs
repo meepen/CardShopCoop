@@ -91,7 +91,7 @@ namespace CardShopCoop.Util
             var fields = GetFields(screenType);
             var instance = fields.Instance?.GetValue(null) as Component;
             var isSet = fields.IsSet == null ? (bool?)null : (bool)fields.IsSet.GetValue(null);
-            var live = UnityEngine.Object.FindObjectOfType(screenType) as Component;
+            var live = UnityEngine.Object.FindFirstObjectByType(screenType) as Component;
 
             // Unity's == null is true for a destroyed object, which is exactly the latched state.
             if (isSet == true && instance == null)

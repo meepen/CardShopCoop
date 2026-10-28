@@ -356,7 +356,7 @@ namespace CardShopCoop.Util
 
         private static Component FindSceneInstance(Type componentType)
         {
-            var found = UnityEngine.Object.FindObjectsOfType(componentType);
+            var found = UnityEngine.Object.FindObjectsByType(componentType, FindObjectsSortMode.InstanceID);
             for (var i = 0; i < found.Length; i++)
             {
                 if (found[i] is Component candidate && candidate.gameObject != null

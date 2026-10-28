@@ -492,12 +492,12 @@ namespace CardShopCoop.Diagnostics
             }
         }
 
-        /// <summary>One scene scan for every entity count. Calling FindObjectsOfType once per type
+        /// <summary>One scene scan for every entity count. Calling FindObjectsByType once per type
         /// would scan the whole shop 20+ times and turn a support button into a visible hitch.</summary>
         private static EntityCounts CountEntities()
         {
             var counts = new EntityCounts();
-            var behaviours = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>();
+            var behaviours = UnityEngine.Object.FindObjectsByType<MonoBehaviour>(FindObjectsSortMode.None);
             for (var i = 0; i < behaviours.Length; i++)
             {
                 var behaviour = behaviours[i];

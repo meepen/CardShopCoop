@@ -442,7 +442,7 @@ namespace CardShopCoop.UI
             {
                 coopButton.Label.enableAutoSizing = false;
                 coopButton.Label.fontSize = textPx / num;
-                coopButton.Label.enableWordWrapping = false;
+                coopButton.Label.textWrappingMode = TextWrappingModes.NoWrap;
                 coopButton.Label.overflowMode = TextOverflowModes.Overflow;
                 coopButton.Label.alignment = TextAlignmentOptions.Center;
             }
@@ -615,7 +615,7 @@ namespace CardShopCoop.UI
             label.fontSize = size;
             label.color = color;
             label.alignment = align;
-            label.enableWordWrapping = wrap;
+            label.textWrappingMode = wrap ? TextWrappingModes.Normal : TextWrappingModes.NoWrap;
             if (!wrap)
             {
                 label.overflowMode = TextOverflowModes.Ellipsis;

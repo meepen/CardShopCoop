@@ -10,17 +10,12 @@ using UnityEngine;
 namespace CardShopCoop.Modules.Decoration
 {
     /// <summary>
-    /// The two supported game builds keep the same decoration concepts but this module must not
-    /// rely on Unity 6-only scene lookup APIs or private game members. Required surfaces are
-    /// resolved once here and missing surfaces fail module initialization loudly.
+    /// The two supported game builds keep the same decoration concepts, so the module's required
+    /// game surfaces are resolved once here and a missing surface fails module initialization
+    /// loudly.
     /// </summary>
     internal static class DecorationInterop
     {
-        private static readonly MethodInfo FindObjectsWithInactive = typeof(UnityEngine.Object).GetMethod(
-            "FindObjectsOfType", new[] { typeof(Type), typeof(bool) });
-        private static readonly MethodInfo FindObjects = typeof(UnityEngine.Object).GetMethod(
-            "FindObjectsOfType", new[] { typeof(Type) });
-
         private static readonly FieldInfo FiWall = ReflectionSurface.RequiredField(
             typeof(CPlayerData), "m_EquippedWallDecoIndex");
         private static readonly FieldInfo FiWallB = ReflectionSurface.RequiredField(
@@ -861,19 +856,7 @@ namespace CardShopCoop.Modules.Decoration
             => SceneRef<ShelfManager>.Get() != null && SceneRef<InventoryBase>.Get() != null;
 
         private static object FindFirst(Type type)
-        {
-            var method = FindObjectsWithInactive ?? FindObjects;
-            if (method == null)
-            {
-                throw new MissingMethodException("Unity Object.FindObjectsOfType is unavailable.");
-            }
-
-            var args = method == FindObjectsWithInactive
-                ? new object[] { type, true }
-                : new object[] { type };
-            var found = method.Invoke(null, args) as Array;
-            return found == null || found.Length == 0 ? null : found.GetValue(0);
-        }
+            => UnityEngine.Object.FindFirstObjectByType(type, UnityEngine.FindObjectsInactive.Include);
 
         internal static void RefreshUi()
         {

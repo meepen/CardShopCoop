@@ -58,13 +58,13 @@ namespace CardShopCoop.Modules.Staff
         private sealed class InteractScreenCache : Cached<WorkerInteractUIScreen>
         {
             protected override WorkerInteractUIScreen GetRawValue()
-                => FindObjectOfType<WorkerInteractUIScreen>(true);
+                => FindFirstObjectByType<WorkerInteractUIScreen>(UnityEngine.FindObjectsInactive.Include);
         }
 
         private sealed class HireScreenCache : Cached<HireWorkerScreen>
         {
             protected override HireWorkerScreen GetRawValue()
-                => FindObjectOfType<HireWorkerScreen>(true);
+                => FindFirstObjectByType<HireWorkerScreen>(UnityEngine.FindObjectsInactive.Include);
         }
 
         private readonly InteractScreenCache _interactScreenCache = new();
