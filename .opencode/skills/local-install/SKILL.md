@@ -12,18 +12,20 @@ only apply here.
 ## Installs
 
 - **Real game install** (`GamePath`): `Z:\SteamLibrary\steamapps\common\TCG Card Shop Simulator`
-  — the Steam **public** branch (buildid `25381942`), currently game `1.02` on Unity
-  `2021.3.38f1` (the legacy build). `Directory.Build.user.props` pins `GamePath` to it, so a plain
-  `-p:Deploy=true` build deploys here and nowhere else. This is the only Deploy target.
+  — the Steam **public** branch (buildid `26249007`), currently game `1.03` on Unity
+  `6000.0.66f2` (Unity 6, record backend). `Directory.Build.user.props` pins `GamePath` to it, so a
+  plain `-p:Deploy=true` build deploys here and nowhere else. This is the default Deploy target.
 - **Game Pass install**: `Z:\XboxApps\TCG Card Shop Simulator\Content`
-  — the Xbox / Game Pass (GDK, packaged MSIX) copy, game `1.00` on Unity `6000.0.66f2` (the Unity 6
-  build). `Z:\XboxApps` is this drive's Xbox game root (see `Z:\.GamingRoot`); the installed
+  — the Xbox / Game Pass (GDK, packaged MSIX) copy, game `1.04` on Unity `6000.0.66f2` (the same
+  Unity 6 codebase plus the Xbox `GA.Gamecore*` types). `Z:\XboxApps` is this drive's Xbox game
+  root (see `Z:\.GamingRoot`); the installed
   package `OPNEONGAMES.TCGCardShopSimulator_1.1.4.0_x64__19j6by82ahhzr` is junctioned to `Content`
   from `C:\Program Files\WindowsApps\...`, so writing under `Content` writes the live install. The
   package is full-trust and unvirtualized (`runFullTrust`, `unvirtualizedResources`,
   `FileSystemWriteVirtualization=disabled`), so it takes the same Doorstop + BepInEx layout as the
-  Steam install. It is **not a build target** — it holds a hand-synced mirror of the Steam
-  install's mod set (Doorstop + `BepInEx\core`, `patchers`, `config`, `plugins`).
+  Steam install. It is **not the default build target**; deploy to it explicitly with
+  `-p:DeployPath` (see below). It holds a hand-synced mirror of the Steam install's mod set
+  (Doorstop + `BepInEx\core`, `patchers`, `config`, `plugins`).
 - **Mirrored copy**: `C:\Sandbox\meep\New_Box\drive\Z\SteamLibrary\steamapps\common\TCG Card Shop Simulator`.
   A separate copy that mirrors the real install whenever a file is missing. It carries
   `DONT-USE.TXT` markers and must **never** be deployed to or written to.
@@ -78,10 +80,11 @@ only apply here.
 
 ## Test setup
 
-- The live test pair is a **single-build** one: host & client = `1.02` on the Steam install.
-- The Game Pass install is a second, **different-build** copy (`1.00` / Unity 6). It is modded
-  identically to the Steam install, but third-party mods built for the legacy build may not load on
-  Unity 6, and it is not part of the `1.02` test pair.
+- The live test pair is a **single-build** one: host & client = `1.03` on the Steam install.
+- The Game Pass install is a second, **different-build** copy (`1.04` / Unity 6). It is modded
+  identically to the Steam install, but the two builds differ in content/enum values, so a
+  cross-build join is normally refused even with `AllowCrossBuildJoin` on; it is not part of the
+  `1.03` test pair.
 
 ## Decompiled baselines on this machine
 
@@ -93,21 +96,22 @@ machine. Present here:
 | `decompiled\0.70.3` | pre-1.0 |
 | `decompiled\1.00` | the 1.0 release (`Application.version` is exactly `1.00`), Unity 6000.0.66f2 |
 | `decompiled\1.00-newrender` | the `1.0newrender` beta |
-| `decompiled\1.00-gamepass` | **the installed Xbox / Game Pass 1.00 build** (Unity 6000.0.66f2) — same lineage as `1.00` but adds the `GA\Gamecore*` Xbox namespace and drops `GradedCardOpeningSequence` |
+| `decompiled\1.00-gamepass` | historical Game Pass 1.00 build (Unity 6000.0.66f2) — same lineage as `1.00` but adds the `GA\Gamecore*` Xbox namespace and drops `GradedCardOpeningSequence` |
 | `decompiled\1.0` | a 1.0-era build |
-| `decompiled\1.0-25119539`, `decompiled\1.0-25314665` | intermediate builds of the public branch |
-| `decompiled\1.0-25315983` | **the public/default branch** (Steam buildid `25315983`) |
-| `decompiled\1.01`, `decompiled\1.02` | later public-branch builds; `1.02` is the installed Steam build (no `GA\`) |
+| `decompiled\1.0-25119539`, `decompiled\1.0-25314665` | intermediate builds of the old public branch |
+| `decompiled\1.0-25315983` | historical public 2021.3 build (no longer supported) |
+| `decompiled\1.01`, `decompiled\1.02` | historical public 2021.3 builds (no longer supported) |
+| `decompiled\1.03` | **the installed Steam 1.03 build** (Steam buildid `26249007`), Unity 6000.0.66f2, record backend |
+| `decompiled\1.04-gamepass` | **the installed Xbox / Game Pass 1.04 build**, same codebase plus `GA\Gamecore*` |
 | `decompiled\EnhancedPrefabLoader`, `decompiled\PhoneOverhaul` | third-party mod sources kept for reference |
 | `decompiled-grading\` | Grading Overhaul reference output |
 
 The two builds the plugin must support, and which of the above maps to each:
-- public/default legacy (Unity 2021.3.38f1, no `StoredBoxRecord`, live-box warehouse) →
-  `decompiled\1.0-25315983`
-- `1.00` beta (Unity 6000.0.66f2, `StoredBoxRecord` warehouse) → `decompiled\1.00`
+- public/default (game `1.03`, Unity 6000.0.66f2, record backend) → `decompiled\1.03`
+- Xbox / Game Pass (game `1.04`, Unity 6000.0.66f2, record backend) → `decompiled\1.04-gamepass`
 
-The installed Steam build is `1.02` (Steam buildid `25381942`), decompiled at `decompiled\1.02`
-(639 files, matches the live install). The installed Game Pass build is `1.00` / Unity 6,
-decompiled at `decompiled\1.00-gamepass`. The Game Pass build ships a 4 KB **stub**
+The installed Steam build is `1.03` (Steam buildid `26249007`), decompiled at `decompiled\1.03`.
+The installed Game Pass build is `1.04`, decompiled at `decompiled\1.04-gamepass`. Both are Unity 6
+and use the record backend; the 2021.3 baselines above are historical only. The Game Pass build ships a 4 KB **stub**
 `com.rlabrecque.steamworks.net` (no real Steamworks types) — see the Steam isolation in
 `Net/ISteamBridge.cs`.

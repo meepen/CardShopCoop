@@ -99,6 +99,10 @@ namespace CardShopCoop.Modules.Actions
         /// <summary>Submits a typed action message to the host. The framework allocates the
         /// action id and fills it in on the message; no raw send closure is involved.</summary>
         internal static Guid Submit(string key, ActionMessage message, Action apply, Action undo)
+            => Submit(key, message, apply, undo, null);
+
+        internal static Guid Submit(string key, ActionMessage message, Action apply, Action undo,
+            Action rejected)
         {
             if (message == null)
             {
@@ -123,7 +127,7 @@ namespace CardShopCoop.Modules.Actions
                 {
                     message.ActionId = actionId;
                     context.Send(host, message);
-                }, apply, undo, null);
+                }, apply, undo, rejected);
         }
 
         /// <summary>Submits an action message using its own apply/undo overrides and the entity
@@ -501,7 +505,50 @@ namespace CardShopCoop.Modules.Actions
             }
 
 
-            context.Send(connectionId, new ActionRollbackMessage { ActionId = actionId });
+            try
+            {
+                context.Send(connectionId, new ActionRollbackMessage
+                {
+                    ActionId = actionId,
+                    Undo = true,
+                });
+            }
+            catch (Exception error)
+            {
+                // The peer is normally already disconnecting when its send path rejects this
+                // courtesy notification. A failure here must not escape a message-rejection
+                // handler and turn a keep-the-session rejection into a dispatch disconnect.
+                CoopPlugin.Log.LogWarning("action rollback could not be sent for conn "
+                    + connectionId + " id=" + actionId + ": " + error.Message);
+            }
+        }
+
+        /// <summary>Host side: the action was applied, but its handler failed before publishing
+        /// authority. Tell the client to retire the optimistic action without undoing it.</summary>
+        public static void Accept(ICoopContext context, int connectionId, Guid actionId)
+        {
+            if (actionId == Guid.Empty)
+            {
+                return;
+            }
+            if (context == null)
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
+
+            try
+            {
+                context.Send(connectionId, new ActionRollbackMessage
+                {
+                    ActionId = actionId,
+                    Undo = false,
+                });
+            }
+            catch (Exception error)
+            {
+                CoopPlugin.Log.LogWarning("action acknowledgement could not be sent for conn "
+                    + connectionId + " id=" + actionId + ": " + error.Message);
+            }
         }
 
         public static void Rollback(ICoopContext context, int connectionId, Guid actionId)

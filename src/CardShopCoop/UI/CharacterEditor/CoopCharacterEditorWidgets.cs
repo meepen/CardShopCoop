@@ -106,6 +106,7 @@ namespace CardShopCoop.UI
                 var commit = slider.gameObject.AddComponent<CoopSliderCommit>();
                 commit.Commit = onCommit;
             }
+            AttachSliderNav(slider, onCommit);
 
             y += RowHeight + 2f;
             return slider;
@@ -140,6 +141,7 @@ namespace CardShopCoop.UI
                 button.targetGraphic = outer;
                 button.transition = Selectable.Transition.None;
                 button.onClick.AddListener(() => onClick());
+                NativeCoopUi.NavFor(outer.gameObject, button, null);
             }
             return inner;
         }
@@ -190,6 +192,57 @@ namespace CardShopCoop.UI
             slider.navigation = new Navigation { mode = Navigation.Mode.None };
             slider.SetValueWithoutNotify(Mathf.Clamp(value, min, max));
             return slider;
+        }
+
+        /// <summary>Lets the controller adjust a horizontal slider with left/right while keeping the
+        /// mouse drag path untouched. ControllerButton requires a Button for IsActive()/confirm, so
+        /// the slider gets a zero-size, no-op confirm button; the real actions are the left/right
+        /// events. This is deliberately not an overlay: adding one would swallow slider dragging.</summary>
+        internal static void AttachSliderNav(Slider slider, Action onCommit)
+        {
+            if (slider == null)
+            {
+                return;
+            }
+
+            var confirmRoot = NativeCoopUi.Node(slider.transform, "ControllerConfirm", 0f, 0f, 0f, 0f);
+            var confirm = confirmRoot.gameObject.AddComponent<Button>();
+            confirm.transition = Selectable.Transition.None;
+            confirm.navigation = new Navigation { mode = Navigation.Mode.None };
+
+            var ctrl = NativeCoopUi.NavFor(slider.gameObject, confirm, null);
+            if (ctrl == null)
+            {
+                return;
+            }
+
+            var step = Mathf.Max(0.01f, (slider.maxValue - slider.minValue) / 20f);
+            if (ctrl.m_OnPressLeftEvent == null)
+            {
+                ctrl.m_OnPressLeftEvent = new UnityEvent();
+            }
+            if (ctrl.m_OnPressRightEvent == null)
+            {
+                ctrl.m_OnPressRightEvent = new UnityEvent();
+            }
+            ctrl.m_OnPressLeftEvent.AddListener(() => AdjustSlider(slider, -step, onCommit));
+            ctrl.m_OnPressRightEvent.AddListener(() => AdjustSlider(slider, step, onCommit));
+        }
+
+        private static void AdjustSlider(Slider slider, float delta, Action onCommit)
+        {
+            if (slider == null)
+            {
+                return;
+            }
+
+            var next = Mathf.Clamp(slider.value + delta, slider.minValue, slider.maxValue);
+            if (Mathf.Approximately(next, slider.value))
+            {
+                return;
+            }
+            slider.value = next;
+            onCommit?.Invoke();
         }
 
         internal static void ShutdownTextures()
@@ -269,9 +322,8 @@ namespace CardShopCoop.UI
         }
     }
 
-    /// <summary>A compact HSV picker (saturation/value square + hue strip) built from UGUI graphics.
-    /// The old IMGUI editor used the same two-panel model; this keeps the same freedom without a
-    /// single IMGUI call.</summary>
+    /// <summary>A compact HSV picker (saturation/value square + hue strip) built from UGUI
+    /// graphics, keeping the same two-panel model without any immediate-mode drawing.</summary>
     internal sealed class CoopColorPicker
     {
         private const float SvWidth = 160f;
@@ -284,6 +336,7 @@ namespace CardShopCoop.UI
 
         private RawImage _svImage;
         private RawImage _hueImage;
+        private Slider _valueSlider;
         private RectTransform _svMarker;
         private RectTransform _hueMarker;
         private Image _swatch;
@@ -340,8 +393,71 @@ namespace CardShopCoop.UI
             };
             hueArea.Released = () => _onCommit?.Invoke();
 
+            AttachNav(_svImage, hue: false);
+            AttachNav(_hueImage, hue: true);
+
+            // The SV square's vertical axis is the only HSV component left without a directional
+            // controller event, so expose it as a normal slider too. It shares _value with the
+            // square and is kept in sync in Apply/SetColor.
+            NativeCoopUi.Text(parent, "Value", 16f, 0f, y + SvHeight + 4f, 146f, 20f,
+                NativeCoopUi.Dim, TextAlignmentOptions.MidlineLeft, wrap: false, title: false);
+            _valueSlider = CoopCharacterEditorWidgets.BuildSlider(parent, 150f,
+                y + SvHeight + 4f, SvWidth + HueWidth + 16f, 20f, 0f, 1f, _value);
+            _valueSlider.onValueChanged.AddListener(next =>
+            {
+                _value = Mathf.Clamp01(next);
+                Apply();
+            });
+            var valueCommit = _valueSlider.gameObject.AddComponent<CoopSliderCommit>();
+            valueCommit.Commit = _onCommit;
+            CoopCharacterEditorWidgets.AttachSliderNav(_valueSlider, _onCommit);
+
             SetColor(color);
-            y += SvHeight + 8f;
+            y += SvHeight + 8f + 26f;
+        }
+
+        /// <summary>Lets a controller step the saturation (SV square) or hue (strip) with
+        /// left/right while the pointer path remains untouched. The SV value axis is exposed as a
+        /// normal slider below the square, so all three HSV components are controller-reachable.</summary>
+        private void AttachNav(RawImage area, bool hue)
+        {
+            if (area == null)
+            {
+                return;
+            }
+
+            var confirmRoot = NativeCoopUi.Node(area.transform, "ControllerConfirm", 0f, 0f, 0f, 0f);
+            var confirm = confirmRoot.gameObject.AddComponent<Button>();
+            confirm.transition = Selectable.Transition.None;
+            confirm.navigation = new Navigation { mode = Navigation.Mode.None };
+
+            var ctrl = NativeCoopUi.NavFor(area.gameObject, confirm, null);
+            if (ctrl == null)
+            {
+                return;
+            }
+
+            ctrl.m_CanScrollerSlide = false;
+            ctrl.m_OnPressLeftEvent ??= new UnityEvent();
+            ctrl.m_OnPressRightEvent ??= new UnityEvent();
+            ctrl.m_OnPressLeftEvent.AddListener(() => StepNav(hue, -0.05f));
+            ctrl.m_OnPressRightEvent.AddListener(() => StepNav(hue, 0.05f));
+        }
+
+        private void StepNav(bool hue, float delta)
+        {
+            if (hue)
+            {
+                _hue = Mathf.Clamp01(_hue + delta);
+                RebuildSvTexture(_hue);
+            }
+            else
+            {
+                _saturation = Mathf.Clamp01(_saturation + delta);
+            }
+
+            Apply();
+            _onCommit?.Invoke();
         }
 
         internal void SetColor(Color color)
@@ -349,6 +465,10 @@ namespace CardShopCoop.UI
             Color.RGBToHSV(color, out _hue, out _saturation, out _value);
             RebuildSvTexture(_hue);
             UpdateMarkers();
+            if (_valueSlider != null)
+            {
+                _valueSlider.SetValueWithoutNotify(_value);
+            }
             if (_swatch != null)
             {
                 _swatch.color = color;
@@ -363,6 +483,10 @@ namespace CardShopCoop.UI
         {
             var color = Color.HSVToRGB(_hue, _saturation, _value);
             UpdateMarkers();
+            if (_valueSlider != null)
+            {
+                _valueSlider.SetValueWithoutNotify(_value);
+            }
             if (_swatch != null)
             {
                 _swatch.color = color;

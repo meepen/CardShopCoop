@@ -62,8 +62,8 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             harmony.CreateClassProcessor(typeof(BoxLifecycleHooks.CardBoxDestroyedPatch)).Patch();
             harmony.CreateClassProcessor(typeof(BoxLifecycleHooks.FurnitureBoxDestroyedPatch)).Patch();
 
-            // Record-backed 1.00 warehouse takes use this factory, which does not exist on the
-            // legacy live-box build. Resolve it at runtime so the single DLL stays loadable.
+            // Warehouse takes use this factory. Resolve it at runtime so a future build that
+            // moves or renames it degrades to the normal create hook instead of failing to load.
             var recordTakeFactory = AccessTools.Method(typeof(RestockManager),
                 "SpawnPackageBoxItemAtTransform");
             if (recordTakeFactory != null)
@@ -341,6 +341,17 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             }
         }
 
+        /// <summary>Drops the live box object while keeping its Guid and extended information.
+        /// Used when the box becomes a stored warehouse record (the record keeps the same id), so
+        /// taking it again replays the information onto the new live box.</summary>
+        internal static void DetachBox(InteractablePackagingBox box)
+        {
+            if (box != null)
+            {
+                GameObjectIdentityApi.Detach(box);
+            }
+        }
+
         internal static void BindClientBox(Guid id, InteractablePackagingBox box)
         {
             if (id == Guid.Empty || box == null)
@@ -427,7 +438,17 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
             var id = capture.Id;
             var wasStored = capture.WasStored;
-            GameObjectIdentityApi.Unbind(box);
+            if (wasStored)
+            {
+                // The warehouse record keeps this Guid and owns the representation. Preserve the
+                // extended information so the next take rebinds it to the new live box.
+                DetachBox(box);
+            }
+            else
+            {
+                GameObjectIdentityApi.Unbind(box);
+            }
+
             CoopPlugin.Log.LogInfo("[box-id] host box destroyed id=" + id + " name="
                 + (capture.Name ?? "<destroyed>") + " stored=" + wasStored + ".");
             if (wasStored)
@@ -1037,9 +1058,9 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 if (box is InteractablePackagingBox_Item storedItem
                     && BoxNetworkInteraction.IsStoredBox(storedItem))
                 {
-                    // A stored warehouse box is a value in a compartment on the record backend and
-                    // an authoritative entry on the live backend; the warehouse channel owns it.
-                    // Sweeping it here would destroy the box the host baseline is about to bind.
+                    // A stored warehouse box is a value in a compartment; the warehouse channel
+                    // owns it. Sweeping it here would destroy the box the host baseline is about
+                    // to bind.
                     continue;
                 }
 
@@ -1213,7 +1234,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
             if (box is InteractablePackagingBox_Item item && item.m_IsStored)
             {
-                // The warehouse channel carries the stored box; the live-box baseline must not
+                // The warehouse channel carries the stored box; the box baseline must not
                 // materialize a second physical representation of it.
                 return false;
             }

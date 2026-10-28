@@ -184,6 +184,49 @@ namespace CardShopCoop.Runtime
             return RebuildCollections(clone, source, sourceRoot, cloneRoot);
         }
 
+        /// <summary>Returns a cloned prefab to an uninitialized state: generated hair/apparel
+        /// children are destroyed and the private runtime collections are cleared. Used when a
+        /// model template is extracted from a scene so the preview can initialize it from the
+        /// wardrobe tables instead of inheriting a scene instance's dressed state.</summary>
+        internal static void ResetForTemplate(CC.CharacterCustomization custom)
+        {
+            if (custom == null)
+            {
+                return;
+            }
+
+            ResetCollectionImmediate(custom, HairObjectsField);
+            ResetCollectionImmediate(custom, ApparelObjectsField);
+            custom.m_HasInit = false;
+            custom.Autoload = false;
+        }
+
+        private static void ResetCollectionImmediate(CC.CharacterCustomization custom,
+            FieldInfo field)
+        {
+            if (custom == null || field == null)
+            {
+                return;
+            }
+
+            var objects = field.GetValue(custom) as IList;
+            if (objects == null)
+            {
+                field.SetValue(custom, new List<GameObject>());
+                return;
+            }
+
+            for (var i = 0; i < objects.Count; i++)
+            {
+                if (objects[i] is GameObject generated && generated != null
+                    && generated.transform.IsChildOf(custom.transform))
+                {
+                    Object.DestroyImmediate(generated);
+                }
+            }
+            objects.Clear();
+        }
+
         /// <summary>Drops every generated wardrobe object the clone references and clears the
         /// lists so the game's from-scratch initialize can rebuild them at table size.</summary>
         private static void ResetCollections(CC.CharacterCustomization custom)
@@ -208,7 +251,11 @@ namespace CardShopCoop.Runtime
 
             for (var i = 0; i < objects.Count; i++)
             {
-                if (objects[i] is GameObject generated && generated != null)
+                // A cloned scene object can inherit non-serialized collection entries that point
+                // at the SOURCE instance's children. Never destroy those; only children that
+                // belong to this clone are ours to remove.
+                if (objects[i] is GameObject generated && generated != null
+                    && generated.transform.IsChildOf(custom.transform))
                 {
                     Object.Destroy(generated);
                 }

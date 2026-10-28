@@ -90,6 +90,8 @@ namespace CardShopCoop.UI
         private static int _hintGeneration;
         private static bool _eventsSubscribed;
 
+        private static bool _virtualKeyboardBackOwned;
+
         private static int _scene = -1;
 
         private static ScreenTab _currentTab = ScreenTab.Session;
@@ -153,6 +155,14 @@ namespace CardShopCoop.UI
         private static CoopButton _back;
 
         private static CoopButton _creditsBtn;
+
+        private static CoopButton _confirmResetBtn;
+
+        private static CoopButton _confirmCancelBtn;
+
+        private static CoopButton _creditsDiscordBtn;
+
+        private static CoopButton _creditsCloseBtn;
 
         private static CoopButton _crossplayBtn;
 
@@ -309,6 +319,7 @@ namespace CardShopCoop.UI
             _currentTab = ScreenTab.Session;
             _sessionPane = SessionPane.Hosting;
             _hostFormMode = HostFormMode.None;
+            _virtualKeyboardBackOwned = false;
             Unsubscribe();
             PopNav();
             if (_root != null)
@@ -323,15 +334,9 @@ namespace CardShopCoop.UI
                     PauseScreen.CloseScreen();
                 }
             }
-            else if (CoopCore.InGameplayScene())
-            {
-                InteractionPlayerController val = Live<InteractionPlayerController>.Get();
-                if (val != null && !CoopMenus.PauseOpen)
-                {
-                    val.ExitUIMode();
-                    val.HideCursor();
-                }
-            }
+            // The window never touches the cursor. SessionInputRuntime releases the UI-mode flag
+            // and gameplay input on the next reconcile; the title/pause cursor state is preserved.
+            CoopCharacterPrefabPreloader.ReleaseEditorLease();
         }
 
         internal static bool CloseFromPause()
@@ -353,11 +358,13 @@ namespace CardShopCoop.UI
             _currentTab = ScreenTab.Session;
             _sessionPane = SessionPane.Hosting;
             _hostFormMode = HostFormMode.None;
+            _virtualKeyboardBackOwned = false;
             Unsubscribe();
             if (_root != null)
             {
                 _root.SetActive(false);
             }
+            CoopCharacterPrefabPreloader.ReleaseEditorLease();
         }
 
         internal static void Tick()
@@ -376,6 +383,7 @@ namespace CardShopCoop.UI
             {
                 return;
             }
+            TrackVirtualKeyboardBack();
             if (_creditsGrp != null && _creditsGrp.activeSelf)
             {
                 if (Input.GetKeyDown(KeyCode.Escape) || ControllerBack())
@@ -405,12 +413,41 @@ namespace CardShopCoop.UI
             }
         }
 
+        /// <summary>A controller-opened text field puts the game's virtual keyboard on top as its own
+        /// controller screen. Remember that it owned a MenuBack press until the button is released,
+        /// so the same press cannot also close/switch the co-op screen if the keyboard closes
+        /// before this screen's Tick runs that frame.</summary>
+        private static void TrackVirtualKeyboardBack()
+        {
+            if (GameInstance.m_IsVirtualKeyboardActive)
+            {
+                _virtualKeyboardBackOwned = true;
+                return;
+            }
+            if (_virtualKeyboardBackOwned && !InputManager.GetKeyHoldAction(EGameAction.MenuBack))
+            {
+                _virtualKeyboardBackOwned = false;
+            }
+        }
+
         private static bool ControllerBack()
         {
             InputManager val = Live<InputManager>.Get();
-            if (val == null || !val.m_IsControllerActive)
+            if (val == null || !val.m_IsControllerActive || _virtualKeyboardBackOwned)
             {
                 return false;
+            }
+            // A child screen (the virtual keyboard opened by a text field) registers its own
+            // ControllerScreenUIExtension. While it is on top, MenuBack belongs to that screen;
+            // handling it here as well would close/switch the co-op screen under the keyboard.
+            if (_navPushed)
+            {
+                ControllerScreenUIExtManager manager = Live<ControllerScreenUIExtManager>.Get();
+                if (manager != null
+                    && !ReferenceEquals(manager.m_CurrentCtrlScreenUIExt, _nav))
+                {
+                    return false;
+                }
             }
             return InputManager.GetKeyDownAction(EGameAction.MenuBack);
         }
@@ -420,6 +457,7 @@ namespace CardShopCoop.UI
             CancelResetDefaults();
             _sessionPane = SessionPane.Hosting;
             _hostFormMode = HostFormMode.None;
+            _virtualKeyboardBackOwned = false;
             Unsubscribe();
             try
             {
@@ -448,7 +486,10 @@ namespace CardShopCoop.UI
             {
                 _nav.m_StartControllerButton = StartButton();
                 _nav.m_StartControllerButtonAlt = _back?.Ctrl;
-                _nav.m_CloseScreenBtn = CoopMenus.AtTitle ? null : _back?.Btn;
+                // Tick owns MenuBack so tab/overlay handling happens in one place. If the game's
+                // extension also invoked the Back button here, one MenuBack press would run both
+                // handlers and close twice.
+                _nav.m_CloseScreenBtn = null;
                 ControllerScreenUIExtManager.OnOpenScreen(_nav);
                 _navPushed = true;
             }
@@ -568,10 +609,10 @@ namespace CardShopCoop.UI
                 "This resets the co-op options and your display name to their defaults.",
                 18f, 30f, 84f, 640f, 60f, Color.white, TextAlignmentOptions.Left,
                 wrap: true, title: false);
-            NativeCoopUi.Button(box, "Reset", NativeCoopUi.Orange, ConfirmResetDefaults,
-                30f, 190f, 220f, 50f, 22f);
-            NativeCoopUi.Button(box, "Cancel", NativeCoopUi.Grey, CancelResetDefaults,
-                270f, 190f, 220f, 50f, 22f);
+            _confirmResetBtn = NativeCoopUi.Button(box, "Reset", NativeCoopUi.Orange,
+                ConfirmResetDefaults, 30f, 190f, 220f, 50f, 22f);
+            _confirmCancelBtn = NativeCoopUi.Button(box, "Cancel", NativeCoopUi.Grey,
+                CancelResetDefaults, 270f, 190f, 220f, 50f, 22f);
             _confirmGrp.SetActive(false);
         }
 
@@ -605,10 +646,10 @@ namespace CardShopCoop.UI
                 wrap: true, title: false);
             NativeCoopUi.Text(box, DiscordUrl, 16f, 32f, 466f, 696f, 24f,
                 NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
-            NativeCoopUi.Button(box, "Discord", NativeCoopUi.Blue, OpenDiscord,
-                32f, 516f, 240f, 52f, 20f);
-            NativeCoopUi.Button(box, "Close", NativeCoopUi.Grey, CloseCredits,
-                286f, 516f, 240f, 52f, 20f);
+            _creditsDiscordBtn = NativeCoopUi.Button(box, "Discord", NativeCoopUi.Blue,
+                OpenDiscord, 32f, 516f, 240f, 52f, 20f);
+            _creditsCloseBtn = NativeCoopUi.Button(box, "Close", NativeCoopUi.Grey,
+                CloseCredits, 286f, 516f, 240f, 52f, 20f);
             _creditsGrp.SetActive(false);
         }
 
@@ -648,6 +689,7 @@ namespace CardShopCoop.UI
                     NativeCoopUi.Show(_statusGrp, on: false);
                     NativeCoopUi.Show(_advancedGrp, on: true);
                     RefreshAdvanced();
+                    RebuildNav();
                     return;
                 case ScreenTab.Character:
                     NativeCoopUi.Show(_joinGrp, on: false);
@@ -656,6 +698,7 @@ namespace CardShopCoop.UI
                     NativeCoopUi.Show(_statusGrp, on: false);
                     NativeCoopUi.Show(_charGrp, on: true);
                     RefreshCharacter();
+                    RebuildNav();
                     return;
             }
             NativeCoopUi.Show(_advancedGrp, on: false);
@@ -686,6 +729,7 @@ namespace CardShopCoop.UI
             // The status well is hidden on the other tabs, so a change that arrived while one of
             // them was open was deliberately not drawn. Draw the current status on the way back in.
             RefreshStatus();
+            RebuildNav();
         }
 
         private static void BuildJoin(Transform p)
@@ -738,7 +782,7 @@ namespace CardShopCoop.UI
             NativeCoopUi.Text(advRt, "Advanced Co-op Configuration", 28f, 40f, 180f, 960f, 36f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
             NativeCoopUi.Text(advRt, "Crossplay (Steam <-> Xbox Game Pass):", 22f, 40f, 230f, 540f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
             _crossplayBtn = NativeCoopUi.Button(advRt, CoopPlugin.AllowCrossBuildJoin.Value ? "ENABLED" : "DISABLED", CoopPlugin.AllowCrossBuildJoin.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleCrossplay, 620f, 230f, 220f, 40f, 20f);
-            NativeCoopUi.Text(advRt, "Enables connection between Steam (Unity 2021) and Xbox App (Unity 6).", 17f, 40f, 272f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            NativeCoopUi.Text(advRt, "Enables connection between Steam (1.03) and Xbox / Game Pass (1.04).", 17f, 40f, 272f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
             NativeCoopUi.Text(advRt, "NSFW Appearance:", 22f, 40f, 320f, 420f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
             _nsfwBtn = NativeCoopUi.Button(advRt, CoopPlugin.AllowNsfw.Value ? "ENABLED" : "DISABLED", CoopPlugin.AllowNsfw.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleNsfw, 620f, 320f, 220f, 40f, 20f);
             NativeCoopUi.Text(advRt, "Allow nude/NSFW appearances. When off, the Character tab hides the Nude options.", 17f, 40f, 362f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
@@ -760,7 +804,8 @@ namespace CardShopCoop.UI
             RectTransform charRt = NativeCoopUi.Node(p, "Character", 0f, 0f, 1040f, 980f);
             _charGrp = charRt.gameObject;
             _charGrp.SetActive(false);
-            CoopCharacterPrefabPreloader.EnsureStarted();
+            // The character model is loaded only when the Character tab is actually enabled,
+            // not when the co-op window is built.
             CoopCharacterEditor.Build(charRt, Hint);
         }
 
@@ -778,34 +823,377 @@ namespace CardShopCoop.UI
             _nav = _root.AddComponent<ControllerScreenUIExtension>();
             _nav.m_ControllerBtnColumnList = new List<ControllerBtnList>();
             _nav.m_CtrlBtnXChangeMethodList = new List<ECtrlBtnXChangeMethod>();
-            if (_tabSessionBtn != null && _tabCharBtn != null && _tabAdvancedBtn != null)
+            // Rows are vertical lists of controls. Keeping left/right inside the current row is what
+            // makes left/right safe for the character editor's sliders: they adjust on the press,
+            // and the selection stays on the slider instead of jumping to the next row. Up/down is
+            // still the way to change rows.
+            _nav.m_LoopWithinRowOnly = true;
+            RebuildNav();
+        }
+
+        /// <summary>Rebuilds the controller-navigation rows from the controls that are actually live
+        /// right now. Backend forms, the players roster, and the character editor all create and
+        /// destroy controls at runtime, so a fixed row list could never cover them. Controls are
+        /// grouped into rows by their world-space Y (the same visual line), then ordered left to
+        /// right; rows are ordered top to bottom. Call this after any activation/rebuild, never from
+        /// an update loop.</summary>
+        internal static void RebuildNav()
+        {
+            if (_nav == null)
             {
-                Row(_nav, _tabSessionBtn.Ctrl, _tabCharBtn.Ctrl, _tabAdvancedBtn.Ctrl);
+                return;
             }
-            if (_back != null)
+            if (_nav.m_ControllerBtnColumnList == null)
             {
-                Row(_nav, _back.Ctrl);
+                _nav.m_ControllerBtnColumnList = new List<ControllerBtnList>();
+            }
+            if (_nav.m_CtrlBtnXChangeMethodList == null)
+            {
+                _nav.m_CtrlBtnXChangeMethodList = new List<ECtrlBtnXChangeMethod>();
+            }
+            _nav.m_ControllerBtnColumnList.Clear();
+            _nav.m_CtrlBtnXChangeMethodList.Clear();
+
+            // A modal owns the controller while it is open. Register only its live controls and
+            // prefer the safe dismiss action so a controller cannot confirm a destructive reset by
+            // accident.
+            if (_confirmGrp != null && _confirmGrp.activeSelf)
+            {
+                AppendContentRows(_confirmGrp);
+                PreferNav(_confirmCancelBtn?.Ctrl);
+                SyncNavSelection();
+                return;
+            }
+            if (_creditsGrp != null && _creditsGrp.activeSelf)
+            {
+                AppendContentRows(_creditsGrp);
+                PreferNav(_creditsCloseBtn?.Ctrl);
+                SyncNavSelection();
+                return;
+            }
+
+            var tabs = new List<ControllerButton>();
+            AddVisibleControl(tabs, _tabSessionBtn);
+            AddVisibleControl(tabs, _tabCharBtn);
+            AddVisibleControl(tabs, _tabAdvancedBtn);
+            AddNavRow(tabs);
+
+            AppendContentRows(VisibleContentGroup());
+
+            var footer = new List<ControllerButton>();
+            AddVisibleControl(footer, _cancel);
+            AddVisibleControl(footer, _creditsBtn);
+            AddVisibleControl(footer, _back);
+            AddNavRow(footer);
+
+            SyncNavSelection();
+        }
+
+        private static GameObject VisibleContentGroup()
+        {
+            if (_currentTab == ScreenTab.Advanced)
+            {
+                return _advancedGrp;
+            }
+            if (_currentTab == ScreenTab.Character)
+            {
+                return _charGrp;
+            }
+            return CoopMenus.AtTitle ? _joinGrp : _sessGrp;
+        }
+
+        private static void AppendContentRows(GameObject group)
+        {
+            if (group == null || !group.activeInHierarchy)
+            {
+                return;
+            }
+
+            ControllerButton[] found = group.GetComponentsInChildren<ControllerButton>(true);
+            var controls = new List<ControllerButton>();
+            for (int i = 0; i < found.Length; i++)
+            {
+                ControllerButton ctrl = found[i];
+                if (IsNavigable(ctrl) && !controls.Contains(ctrl))
+                {
+                    controls.Add(ctrl);
+                }
+            }
+            AppendRowsByY(controls);
+        }
+
+        private sealed class NavRowBand
+        {
+            internal float Y;
+
+            internal readonly List<ControllerButton> Controls = new List<ControllerButton>();
+        }
+
+        private static void AppendRowsByY(List<ControllerButton> controls)
+        {
+            if (controls == null || controls.Count == 0)
+            {
+                return;
+            }
+
+            var bands = new List<NavRowBand>();
+            for (int i = 0; i < controls.Count; i++)
+            {
+                ControllerButton ctrl = controls[i];
+                RectTransform rt = ctrl.transform as RectTransform;
+                if (rt == null)
+                {
+                    continue;
+                }
+
+                float y = NavCenter(ctrl).y;
+                NavRowBand band = null;
+                for (int j = 0; j < bands.Count; j++)
+                {
+                    if (Mathf.Abs(bands[j].Y - y) <= 8f)
+                    {
+                        band = bands[j];
+                        break;
+                    }
+                }
+                if (band == null)
+                {
+                    band = new NavRowBand { Y = y };
+                    bands.Add(band);
+                }
+                band.Controls.Add(ctrl);
+            }
+
+            bands.Sort((a, b) => b.Y.CompareTo(a.Y));
+            for (int i = 0; i < bands.Count; i++)
+            {
+                NavRowBand band = bands[i];
+                if (band.Controls.Count == 0)
+                {
+                    continue;
+                }
+                band.Controls.Sort((a, b) => NavX(a).CompareTo(NavX(b)));
+                AddNavRow(band.Controls);
             }
         }
 
-        private static void Row(ControllerScreenUIExtension ext, params ControllerButton[] buttons)
+        private static float NavX(ControllerButton ctrl) => NavCenter(ctrl).x;
+
+        /// <summary>The visual centre of a control in world space. transform.position is the pivot,
+        /// which differs per widget (buttons are centre-pivoted, inputs and checkbox rows are
+        /// top-left-pivoted), so grouping on it would split one visual line into several rows.</summary>
+        private static Vector2 NavCenter(ControllerButton ctrl)
         {
-            List<ControllerButton> list = new List<ControllerButton>();
-            for (int i = 0; i < buttons.Length; i++)
+            RectTransform rt = ctrl.transform as RectTransform;
+            if (rt == null)
             {
-                if (buttons[i] != null)
+                return Vector2.zero;
+            }
+            Vector3 center = rt.TransformPoint(rt.rect.center);
+            return new Vector2(center.x, center.y);
+        }
+
+        private static bool IsNavigable(ControllerButton ctrl)
+        {
+            // IsActive() dereferences these collections unconditionally, and OnPressConfirm()
+            // dereferences m_Button when there is no virtual keyboard. Filtering here means a row
+            // can never contain a control that would NRE the game's navigation loop.
+            if (ctrl == null)
+            {
+                return false;
+            }
+            if (!ctrl.gameObject.activeInHierarchy)
+            {
+                return false;
+            }
+            if (ctrl.m_OverlayButton == null || ctrl.m_OverlayButtonHighlight == null)
+            {
+                CoopLog.WarnOnce("coop.ui.nav.overlay-lists",
+                    "coop: controller navigation skipped a control with missing overlay lists: "
+                    + ctrl.name);
+                return false;
+            }
+            if (ctrl.m_EnableVirtualKeyboard)
+            {
+                return true;
+            }
+            if (ctrl.m_Button != null && ctrl.m_Button.interactable)
+            {
+                return true;
+            }
+            // The game invokes the first active overlay button directly and never checks
+            // interactable, so only expose live overlay actions.
+            for (int i = 0; i < ctrl.m_OverlayButton.Count; i++)
+            {
+                Button overlay = ctrl.m_OverlayButton[i];
+                if (overlay != null && overlay.gameObject.activeInHierarchy && overlay.interactable)
                 {
-                    list.Add(buttons[i]);
+                    return true;
                 }
             }
-            if (list.Count > 0)
+            return false;
+        }
+
+        private static void AddVisibleControl(List<ControllerButton> row, CoopButton button)
+        {
+            if (button == null || button.Go == null || !button.Go.activeInHierarchy)
             {
-                ext.m_ControllerBtnColumnList.Add(new ControllerBtnList
-                {
-                    rowList = list
-                });
-                ext.m_CtrlBtnXChangeMethodList.Add(ECtrlBtnXChangeMethod.Normal);
+                return;
             }
+            if (IsNavigable(button.Ctrl) && !row.Contains(button.Ctrl))
+            {
+                row.Add(button.Ctrl);
+            }
+        }
+
+        private static void AddNavRow(List<ControllerButton> row)
+        {
+            if (_nav == null || row == null || row.Count == 0)
+            {
+                return;
+            }
+            _nav.m_ControllerBtnColumnList.Add(new ControllerBtnList
+            {
+                rowList = row
+            });
+            _nav.m_CtrlBtnXChangeMethodList.Add(ECtrlBtnXChangeMethod.Normal);
+        }
+
+        private static void PreferNav(ControllerButton preferred)
+        {
+            if (_nav == null || preferred == null)
+            {
+                return;
+            }
+
+            for (int y = 0; y < _nav.m_ControllerBtnColumnList.Count; y++)
+            {
+                List<ControllerButton> row = _nav.m_ControllerBtnColumnList[y].rowList;
+                int index = row.IndexOf(preferred);
+                if (index < 0)
+                {
+                    continue;
+                }
+
+                if (index != 0)
+                {
+                    row.RemoveAt(index);
+                    row.Insert(0, preferred);
+                }
+                _nav.m_CurrentCtrlBtnYIndex = y;
+                _nav.m_CurrentCtrlBtnXIndex = 0;
+                if (_navPushed)
+                {
+                    ControllerButton current = _nav.m_CurrentControllerButton;
+                    if (current != null && !ReferenceEquals(current, preferred))
+                    {
+                        current.OnSelectionDeactivate();
+                    }
+                    _nav.m_CurrentControllerButton = preferred;
+                    ControllerScreenUIExtManager manager =
+                        Live<ControllerScreenUIExtManager>.Get();
+                    if (manager != null
+                        && ReferenceEquals(manager.m_CurrentCtrlScreenUIExt, _nav)
+                        && manager.m_IsControllerActive)
+                    {
+                        preferred.OnSelectionActive();
+                    }
+                }
+                return;
+            }
+        }
+
+        private static void SyncNavSelection()
+        {
+            int rowCount = _nav.m_ControllerBtnColumnList.Count;
+            if (rowCount == 0)
+            {
+                _nav.m_CurrentCtrlBtnXIndex = 0;
+                _nav.m_CurrentCtrlBtnYIndex = 0;
+                return;
+            }
+
+            ControllerButton current = _nav.m_CurrentControllerButton;
+            int currentY = -1;
+            int currentX = -1;
+            if (current != null)
+            {
+                for (int y = 0; y < rowCount && currentY < 0; y++)
+                {
+                    List<ControllerButton> row = _nav.m_ControllerBtnColumnList[y].rowList;
+                    for (int x = 0; x < row.Count; x++)
+                    {
+                        if (ReferenceEquals(row[x], current))
+                        {
+                            currentY = y;
+                            currentX = x;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (currentY >= 0)
+            {
+                // The selected control survived; keep the indices pointing at its new position
+                // after rows were re-sorted.
+                _nav.m_CurrentCtrlBtnYIndex = currentY;
+                _nav.m_CurrentCtrlBtnXIndex = currentX;
+                return;
+            }
+
+            int nextY = Mathf.Clamp(_nav.m_CurrentCtrlBtnYIndex, 0, rowCount - 1);
+            int columnCount = _nav.m_ControllerBtnColumnList[nextY].rowList.Count;
+            _nav.m_CurrentCtrlBtnYIndex = nextY;
+            _nav.m_CurrentCtrlBtnXIndex = Mathf.Clamp(_nav.m_CurrentCtrlBtnXIndex, 0,
+                Mathf.Max(0, columnCount - 1));
+            if (!_navPushed)
+            {
+                return;
+            }
+
+            // The previously selected control was hidden or is about to be destroyed by a form or
+            // character-page rebuild. Reselect now: Destroy() is deferred to the end of the frame,
+            // so this moves the game's selector highlight off the doomed button before it dies.
+            ControllerButton target = _nav.m_ControllerBtnColumnList[nextY].rowList[
+                _nav.m_CurrentCtrlBtnXIndex];
+            if (ReferenceEquals(current, target))
+            {
+                return;
+            }
+            if (current != null)
+            {
+                current.OnSelectionDeactivate();
+            }
+            _nav.m_CurrentControllerButton = target;
+
+            ControllerScreenUIExtManager manager = Live<ControllerScreenUIExtManager>.Get();
+            if (manager == null || !ReferenceEquals(manager.m_CurrentCtrlScreenUIExt, _nav))
+            {
+                return;
+            }
+            if (manager.m_IsControllerActive)
+            {
+                target.OnSelectionActive();
+            }
+            else
+            {
+                // The controller is idle (mouse was used), so OnSelectionActive would decline to
+                // touch the selector. Keep its rect under a live control so a later rebuild cannot
+                // destroy it along with the old button.
+                ReparentControllerSelector(manager, target.transform);
+            }
+        }
+
+        private static void ReparentControllerSelector(ControllerScreenUIExtManager manager,
+            Transform target)
+        {
+            ControllerSelectorUIGrp selector = manager.m_ControllerSelectorUIGrp;
+            if (selector == null || selector.m_Rect == null || target == null)
+            {
+                return;
+            }
+            selector.m_Rect.SetParent(target, false);
         }
 
         private static void Refresh()
@@ -813,11 +1201,13 @@ namespace CardShopCoop.UI
             if (_currentTab == ScreenTab.Advanced)
             {
                 RefreshAdvanced();
+                RebuildNav();
                 return;
             }
             if (_currentTab == ScreenTab.Character)
             {
                 RefreshCharacter();
+                RebuildNav();
                 return;
             }
             bool atTitle = CoopMenus.AtTitle;
@@ -832,6 +1222,7 @@ namespace CardShopCoop.UI
                 RefreshSession();
             }
             RefreshStatus();
+            RebuildNav();
         }
 
         private static void RefreshJoin()
@@ -844,6 +1235,7 @@ namespace CardShopCoop.UI
             ShowSessionTabs(on: false);
             RefreshBackendForms(_joinForm, ConnectMode.Join, hosting: false);
             _cancel?.Show(connecting);
+            RebuildNav();
         }
 
         private static void RefreshSession()
@@ -877,6 +1269,7 @@ namespace CardShopCoop.UI
                 ClearPlayers();
                 RefreshBackendForms(_hostForm, ConnectMode.Host, hosting: false);
                 _cancel?.Show(on: false);
+                RebuildNav();
                 return;
             }
 
@@ -907,6 +1300,7 @@ namespace CardShopCoop.UI
                 }
 
                 _cancel?.Show(on: false);
+                RebuildNav();
                 return;
             }
 
@@ -918,6 +1312,7 @@ namespace CardShopCoop.UI
             CoopBackendOptions.BuildLive(_hostLiveRoot.transform, FormWidth);
             RefreshPlayers(show: true, kick: false, top: ClientPlayersY);
             _cancel?.Show(on: false);
+            RebuildNav();
         }
 
         private static void SetHostFormMode(HostFormMode mode)
@@ -937,6 +1332,7 @@ namespace CardShopCoop.UI
             if (IsOpen)
             {
                 RefreshSession();
+                RebuildNav();
             }
         }
 
@@ -1307,6 +1703,7 @@ namespace CardShopCoop.UI
 
             _confirmGrp.SetActive(true);
             _confirmGrp.transform.SetAsLastSibling();
+            RebuildNav();
         }
 
         private static void CancelResetDefaults()
@@ -1315,6 +1712,7 @@ namespace CardShopCoop.UI
             {
                 _confirmGrp.SetActive(false);
             }
+            RebuildNav();
         }
 
         private static void ConfirmResetDefaults()
@@ -1348,6 +1746,13 @@ namespace CardShopCoop.UI
             {
                 CoopPlugin.NameOverride.Value = false;
             }
+            if (CoopPlugin.AllowNsfw != null)
+            {
+                CoopPlugin.AllowNsfw.Value = false;
+            }
+            // Presence may own the effective value while a session is live; route the reset
+            // through the same setter the toggle uses so the character editor and avatars refresh.
+            PresenceApi.SetNsfwAllowed(false);
             if (_advNameInput != null)
             {
                 _advNameInput.text = "";
@@ -1355,6 +1760,7 @@ namespace CardShopCoop.UI
             CoopBackendOptions.ResetValues();
             RefreshAdvanced();
             Hint("Advanced settings reset to default values.");
+            RebuildNav();
         }
 
         private static void ShowCredits()
@@ -1366,6 +1772,7 @@ namespace CardShopCoop.UI
 
             _creditsGrp.SetActive(true);
             _creditsGrp.transform.SetAsLastSibling();
+            RebuildNav();
         }
 
         private static void CloseCredits()
@@ -1374,6 +1781,7 @@ namespace CardShopCoop.UI
             {
                 _creditsGrp.SetActive(false);
             }
+            RebuildNav();
         }
 
         private static void OpenDiscord()

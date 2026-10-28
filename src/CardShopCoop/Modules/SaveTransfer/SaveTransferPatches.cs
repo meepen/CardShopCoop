@@ -33,13 +33,13 @@ namespace CardShopCoop.Modules.SaveTransfer
             TryPatch(harmony, typeof(WorkerManager), "SaveWorkerData",
                 prefix: new HarmonyMethod(typeof(SaveTransferPatches), nameof(WorkerSaveGuardPrefix)));
 
-            // UpdateSlot did not exist in the legacy build. Resolve its target from the game
-            // assembly instead of naming a beta-only method in a typed reference.
+            // Resolve UpdateSlot reflectively. Both live builds have it; the null branch is for a
+            // future build that moves it, and degrades to "no slot guard" instead of a failed patch.
             var updateSlot = SaveTransferInterop.UpdateSlotMethod;
             if (updateSlot == null)
             {
                 CoopPlugin.Log.LogInfo(
-                    "SaveTransfer: reflected SaveLoadGameSlotSelectScreen.UpdateSlot is absent; legacy save UI needs no guard");
+                    "SaveTransfer: reflected SaveLoadGameSlotSelectScreen.UpdateSlot is absent; no slot guard is needed");
             }
             else
             {

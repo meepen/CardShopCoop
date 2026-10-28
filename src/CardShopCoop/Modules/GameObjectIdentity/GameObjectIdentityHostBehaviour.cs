@@ -21,7 +21,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         {
             _context = RuntimeContext;
             Active = this;
-            _context.Messages.RegisterAttributedHandlers(this);
             _harmony = new Harmony("dev.meepen.cardshopcoop.gameobjectidentity.host");
             GameObjectIdentityHostHooks.Install(_harmony);
         }
@@ -35,7 +34,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
             _harmony?.UnpatchSelf();
             _harmony = null;
-            _context?.Messages.UnregisterAttributedHandlers(this);
             _context = null;
         }
 

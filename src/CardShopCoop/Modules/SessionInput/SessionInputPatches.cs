@@ -15,12 +15,6 @@ namespace CardShopCoop.Modules.SessionInput
             TryPatch(harmony, typeof(CMF.CameraMouseInput), "GetVerticalCameraInput",
                 prefix: new HarmonyMethod(typeof(SessionInputPatches), nameof(CameraInputPrefix)));
 
-            // MouseCursorLock runs its own raw-input loop and can relock the cursor after
-            // InteractionPlayerController.ShowCursor(). Guard only that exact loop while the
-            // co-op window owns the visible input surface.
-            TryPatch(harmony, typeof(CMF.MouseCursorLock), "Update",
-                prefix: new HarmonyMethod(typeof(SessionInputPatches), nameof(MouseCursorLockPrefix)));
-
             TryPatch(harmony, typeof(PauseScreen), "OpenScreen",
                 prefix: new HarmonyMethod(typeof(SessionInputPatches), nameof(PauseOpenPrefix)),
                 postfix: new HarmonyMethod(typeof(SessionInputPatches), nameof(PauseOpenPostfix)));
@@ -50,13 +44,6 @@ namespace CardShopCoop.Modules.SessionInput
 
             __result = 0f;
             return false;
-        }
-
-        internal static bool MouseCursorLockPrefix()
-        {
-            return !SessionInputRuntime.WindowBlocksInput
-                && !SessionInputRuntime.PauseMenuOpen()
-                && !SessionInputRuntime.CheatMenuFreezeActive();
         }
 
         internal static void PauseOpenPostfix()

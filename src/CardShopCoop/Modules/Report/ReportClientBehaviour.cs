@@ -143,9 +143,8 @@ namespace CardShopCoop.Modules.Report
 
         private void PatchScreenReadiness()
         {
-            // Awake was added to this screen in the beta build. Resolve it dynamically so the
-            // legacy build remains loadable while still providing a precise UI-ready signal where
-            // the screen exposes one.
+            // Resolve Awake dynamically so a build that omits it still loads, while providing a
+            // precise UI-ready signal wherever the screen exposes one.
             var awake = AccessTools.Method(typeof(EndOfDayReportScreen), "Awake");
             if (awake != null)
             {

@@ -222,7 +222,7 @@ namespace CardShopCoop.Modules.Catalog
                     return t;
                 }
             }
-            catch (Exception e) { CoopLog.Swallow(e); /* a lookup must never throw into a handshake, a probe or OnGUI */ }
+            catch (Exception e) { CoopLog.Swallow(e); /* a lookup must never throw into a handshake, a probe or the UI */ }
             try
             {
                 return AccessTools.TypeByName(typeName);
@@ -521,7 +521,7 @@ namespace CardShopCoop.Modules.Catalog
                     _eplLoaded = true;
                     break;
                 }
-                catch (Exception e) { CoopLog.Swallow(e); /* a probe must never throw into a handshake or into OnGUI */ }
+                catch (Exception e) { CoopLog.Swallow(e); /* a probe must never throw into a handshake or into the UI */ }
             }
             if (!_eplLoaded)
             {
@@ -564,8 +564,8 @@ namespace CardShopCoop.Modules.Catalog
 
         /// <summary>True while a registry a previous build installed over the player's own is
         /// still on disk (the marker exists) AND this process actually loads a registry. Cheap
-        /// File.Exists on purpose - there's no caching to go stale after a restore. CoopUI reads
-        /// this to offer the one-click restore; nothing in the join path consults it.
+        /// File.Exists on purpose - there's no caching to go stale after a restore. The co-op
+        /// screen reads this to offer the one-click restore; nothing in the join path consults it.
         ///
         /// The !EplLoaded() short-circuit: the marker sits beside enum_values.json in LocalLow
         /// and outlives an EPL uninstall exactly like the registry does, so on a game that loads
@@ -592,7 +592,7 @@ namespace CardShopCoop.Modules.Catalog
         /// the backup over enum_values.json, and clears the marker. The game reads the registry
         /// once at startup, so the caller MUST tell the player to RESTART the game before loading
         /// solo saves. With no backup, nothing is changed and the marker is cleared so a stale
-        /// prompt cannot latch. CoopUI calls this by name.</summary>
+        /// prompt cannot latch. The co-op screen calls this by name.</summary>
         public static bool RestoreEnumBackup(out string message)
         {
             var p = EnumFilePath();

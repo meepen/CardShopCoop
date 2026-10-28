@@ -31,6 +31,8 @@ namespace CardShopCoop.Runtime
         private static Dictionary<string, ConfigEntry<bool>> _entries;
         private static List<string> _known;
         private static ConfigFile _config;
+        private static readonly HashSet<string> ExternalModules =
+            new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>The module a behaviour type belongs to. A type from an external mod belongs to
         /// that mod's assembly (one enable/disable checkbox per integrating mod, regardless of the
@@ -113,10 +115,54 @@ namespace CardShopCoop.Runtime
 
                 _entries[module] = _config.Bind(Section, module, true,
                     "Enable the external co-op mod '" + module + "'. Applies after rejoining.");
+                ExternalModules.Add(module);
                 if (_known != null && !_known.Contains(module))
                 {
                     _known.Add(module);
                     _known.Sort(StringComparer.OrdinalIgnoreCase);
+                }
+            }
+        }
+
+        /// <summary>Removes the checkbox/config entry created for an external mod whose integration
+        /// failed. Without this a refused assembly still appears as an empty module.</summary>
+        internal static void UnbindExternal(string module)
+        {
+            if (string.IsNullOrEmpty(module) || string.Equals(module, CoreModule,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            lock (Gate)
+            {
+                // Only remove an entry this catalog created for an external assembly. An external
+                // assembly name that collides with a built-in module (World, Pricing, ...) must not
+                // delete that module's checkbox when its integration fails.
+                if (!ExternalModules.Remove(module))
+                {
+                    return;
+                }
+
+                ConfigEntry<bool> entry = null;
+                if (_entries != null)
+                {
+                    _entries.TryGetValue(module, out entry);
+                    _entries.Remove(module);
+                }
+                _known?.Remove(module);
+
+                if (entry != null && _config != null)
+                {
+                    try
+                    {
+                        _config.Remove(entry.Definition);
+                    }
+                    catch (Exception error)
+                    {
+                        CoopPlugin.Log?.LogWarning("could not remove the module config entry for '"
+                            + module + "': " + error.Message);
+                    }
                 }
             }
         }

@@ -14,17 +14,9 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (WarehouseShelfInteraction.UsesRecords)
-            {
-                _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
-            }
-            else
-            {
-                _harmony.CreateClassProcessor(typeof(BoxAddedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(BoxRemovedPatch)).Patch();
-            }
+            _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
         }
 
         [MessageHandler]
@@ -85,17 +77,6 @@ namespace CardShopCoop.Modules.World
             Warehouse?.OnStoredBoxRecordPopped(compartment, didPop, removed);
         }
 
-        private void NotifyWarehouseBoxAdded(ShelfCompartment compartment)
-        {
-            Warehouse?.OnBoxAdded(compartment);
-        }
-
-        private void NotifyWarehouseBoxRemoved(ShelfCompartment compartment,
-            InteractablePackagingBox_Item box)
-        {
-            Warehouse?.OnBoxRemoved(compartment, box);
-        }
-
         /// <summary>Records backend: the box adds its own stored record from inside
         /// <c>OnFinishLerp</c>. Mark it for the span of that method so the AddStoredBoxRecord hook
         /// binds the new record to exactly this box's identity.</summary>
@@ -151,24 +132,5 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [HarmonyPatch(typeof(ShelfCompartment), "AddBox")]
-        private static class BoxAddedPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(ShelfCompartment __instance)
-            {
-                _instance?.NotifyWarehouseBoxAdded(__instance);
-            }
-        }
-
-        [HarmonyPatch(typeof(ShelfCompartment), "RemoveBox")]
-        private static class BoxRemovedPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(ShelfCompartment __instance, InteractablePackagingBox_Item __0)
-            {
-                _instance?.NotifyWarehouseBoxRemoved(__instance, __0);
-            }
-        }
     }
 }

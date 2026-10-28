@@ -43,6 +43,8 @@ namespace CardShopCoop.Modules.Staff
         /// postfix. Null means the action was not observable and must not be predicted.</summary>
         private sealed class StaffAction
         {
+            /// <summary>The live worker the action targets. Null for a hire, which addresses the
+            /// save-data slot in <see cref="Index"/> instead of a live entity.</summary>
             public Worker Worker;
             /// <summary>Local prediction/correlation key, never a wire field.</summary>
             public int Index;
@@ -293,12 +295,25 @@ namespace CardShopCoop.Modules.Staff
                 return;
             }
 
-            var index = worker.m_WorkerIndex;
+            ApplyEntry(worker.m_WorkerIndex, entry);
+        }
+
+        /// <summary>Applies one manager slot. The slot index is authoritative, so a hire
+        /// prediction can restore the save-data entry before any live worker is replicated.</summary>
+        private void ApplyEntry(int index, StaffModuleEntry entry)
+        {
+            if (index < 0)
+            {
+                CoopPlugin.Log.LogWarning("[staff] client dropped worker entry with no slot index.");
+                return;
+            }
+
+            var worker = entry.Worker;
             // Prediction snapshots (CaptureEntry/CaptureWorkerEntry) leave Generation at its
             // default 0 because they describe only worker data. Never overwrite the tracked
             // generation with that default: doing so makes every later Task/Options/Bonus/
             // Experience delta for the worker fail the generation check and defer forever.
-            if (entry.Generation != 0)
+            if (entry.Generation != 0 && worker != null)
             {
                 _workerGenerations[worker] = entry.Generation;
             }
@@ -317,7 +332,11 @@ namespace CardShopCoop.Modules.Staff
                 saved[index] = data;
                 StaffModuleInterop.ApplyEntryToSave(entry, data);
                 StaffModuleInterop.RefreshWorkerUi(index, data);
-                StaffModuleInterop.ApplyEntryToWorker(worker, entry);
+                if (worker != null)
+                {
+                    StaffModuleInterop.ApplyEntryToWorker(worker, entry);
+                }
+
                 RefreshInteractScreen(_interactScreenCache.Get(), index);
             }
 
@@ -588,13 +607,21 @@ namespace CardShopCoop.Modules.Staff
                 && !ActionLedger.IsReconciling;
 
         /// <summary>Capture-only prefix for a local hire: snapshot the manager slot before vanilla
-        /// OnPressHireButton spends the wallet and activates the worker. The postfix registers one
-        /// post-hoc Hire prediction only when the game really hired.</summary>
+        /// OnPressHireButton spends the wallet and activates the worker. A hire addresses a
+        /// save-data slot by index, not a live entity: an un-hired worker has no replicated
+        /// identity yet. The postfix registers one post-hoc Hire prediction only when the game
+        /// really hired.</summary>
         private StaffAction BeginHireAction(HireWorkerPanelUI panel)
         {
-            if (!CanObserve() || panel == null || StaffModuleInterop.PanelIsHired == null
+            if (!CanObserve())
+            {
+                return null;
+            }
+
+            if (panel == null || StaffModuleInterop.PanelIsHired == null
                 || StaffModuleInterop.PanelIndex == null)
             {
+                CoopPlugin.Log.LogWarning("[staff] hire panel is not addressable; not forwarding.");
                 return null;
             }
 
@@ -605,32 +632,23 @@ namespace CardShopCoop.Modules.Staff
 
             var index = (int)StaffModuleInterop.PanelIndex.GetValue(panel);
             var manager = StaffModuleInterop.FindWorkerManager();
-            var spend = manager != null && manager.m_WorkerDataList != null
-                && index >= 0 && index < manager.m_WorkerDataList.Count
-                && manager.m_WorkerDataList[index] != null
-                ? manager.m_WorkerDataList[index].hiringCost : 0f;
-            // The intent names the live scene worker. An un-hired slot has no replicated identity
-            // yet, so it cannot be addressed over the wire; log and skip the prediction.
-            var workers = StaffModuleInterop.GetWorkers(manager);
-            var worker = workers != null && index >= 0 && index < workers.Count
-                ? workers[index] : null;
-            if (worker == null || !NpcClientBehaviour.TryGetWireIdentity(worker, out _, out _))
+            if (!StaffModuleInterop.IsAddressable(manager, index)
+                || manager.m_WorkerDataList[index] == null)
             {
-                CoopPlugin.Log.LogWarning("[staff] hire target index=" + index
-                    + " has no live replicated worker; not forwarding.");
+                CoopPlugin.Log.LogWarning("[staff] hire slot index=" + index
+                    + " is not addressable; not forwarding.");
                 return null;
             }
 
             return new StaffAction
             {
-                Worker = worker,
                 Index = index,
                 Before = CaptureManagerEntry(index),
-                Spend = spend,
+                Spend = manager.m_WorkerDataList[index].hiringCost,
                 Message = new StaffModuleIntentMessage
                 {
                     Kind = StaffIntentKind.Hire,
-                    Worker = worker,
+                    Index = index,
                 },
             };
         }
@@ -657,14 +675,14 @@ namespace CardShopCoop.Modules.Staff
                 {
                     // Replay re-hires through the module path, which does not spend, so mirror the
                     // wallet debit the host owns for this hire.
-                    ApplyEntry(predicted);
+                    ApplyEntry(index, predicted);
                     Charge(spend);
                 },
                 () =>
                 {
                     // The vanilla OnPressHireButton already debited the guest's mirror (the Hud
                     // observer was suppressed), so a rejection must refund it.
-                    ApplyEntry(before);
+                    ApplyEntry(index, before);
                     Refund(spend);
                 });
             _context.SetStatusLine?.Invoke("hired - starting work at the host's shop", 4f);

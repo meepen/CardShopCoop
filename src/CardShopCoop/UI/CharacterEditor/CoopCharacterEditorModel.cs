@@ -32,31 +32,9 @@ namespace CardShopCoop.UI
                 };
         }
 
-        internal static bool HasGenderPresets(CC.CharacterCustomization customization, bool female)
-        {
-            var presets = customization?.Presets?.Presets;
-            if (presets == null)
-            {
-                return false;
-            }
-
-            var prefix = female ? "Female" : "Male";
-            for (var i = 0; i < presets.Count; i++)
-            {
-                var preset = presets[i];
-                if (preset != null && !string.IsNullOrEmpty(preset.CharacterName)
-                    && preset.CharacterName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
         internal static bool IsEditable(CC.CharacterCustomization customization, bool female)
         {
-            if (customization == null || customization.StoredCharacterData == null
-                || !HasGenderPresets(customization, female))
+            if (customization == null || customization.StoredCharacterData == null)
             {
                 return false;
             }

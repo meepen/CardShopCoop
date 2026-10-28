@@ -38,7 +38,7 @@ namespace CardShopCoop.Modules.Catalog
         private const int UnwireableItemLogIntervalMs = 60000;
 
         /// <summary>
-        /// A complete catalog license snapshot.  The raw list is only the legacy game's part of
+        /// A complete catalog license snapshot.  The raw list is only the base game's part of
         /// the catalog; EnhancedPrefabLoader virtual rows are kept in Bits and are restored
         /// through the optional save-data surface below.  Keeping this type here prevents the
         /// purchasing module from ever referencing an EPL-only type.
@@ -301,7 +301,7 @@ namespace CardShopCoop.Modules.Catalog
 
                 // The game has no public relock method.  EPL stores virtual unlocks in its
                 // private ItemSaveData records, so change that record by reflection.  This is
-                // deliberately optional: a legacy build simply has no virtual rows.
+                // deliberately optional: a process without EPL simply has no virtual rows.
                 return SetEplVirtualLicense(index, false);
             }
             catch (Exception error)
@@ -396,7 +396,7 @@ namespace CardShopCoop.Modules.Catalog
                 changed.Add(bit);
             }
 
-            // SetLicense handles the game's row accessors.  Restore the complete legacy list as
+            // SetLicense handles the game's row accessors.  Restore the complete raw list as
             // well, including its length, because CGameData serializes this exact list.
             raw.Clear();
             raw.AddRange(state.RawBits);

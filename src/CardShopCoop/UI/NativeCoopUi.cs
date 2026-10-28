@@ -379,11 +379,11 @@ namespace CardShopCoop.UI
                 }
                 coopButton.Btn.interactable = true;
             }
-            coopButton.Ctrl = go.GetComponent<ControllerButton>();
-            if (coopButton.Ctrl != null && coopButton.Btn != null)
-            {
-                coopButton.Ctrl.m_Button = coopButton.Btn;
-            }
+            // Every cloned/restyled control is controller-selectable, including the ones created
+            // long after the screen's nav rows were built (backend forms). NavFor is idempotent,
+            // so a ControllerButton copied from the vanilla template is reused rather than added
+            // twice. RebuildNav() then discovers it from the live hierarchy.
+            coopButton.Ctrl = NavFor(go, coopButton.Btn, null);
             return coopButton;
         }
 
@@ -470,6 +470,7 @@ namespace CardShopCoop.UI
             {
                 button.onClick.AddListener(onClick);
             }
+            NavFor(hit.gameObject, button, null);
 
             float boxY = y + (height - BoxSize) * 0.5f;
             Flat(parent, x, boxY, BoxSize, BoxSize, isOn ? Purple.Highlight : Dim);
@@ -692,6 +693,7 @@ namespace CardShopCoop.UI
             field.caretWidth = 3;
             field.selectionColor = new Color(0.62f, 0.38f, 0.96f, 0.45f);
             field.richText = false;
+            NavFor(go, null, field);
             go.SetActive(true);
             return field;
         }
@@ -741,27 +743,58 @@ namespace CardShopCoop.UI
 
         internal static ControllerButton NavFor(GameObject go, Button button, TMP_InputField keyboard)
         {
+            if (go == null)
+            {
+                return null;
+            }
+
+            ControllerButton ctrl = go.GetComponent<ControllerButton>();
+            bool added = ctrl == null;
             bool activeSelf = go.activeSelf;
-            if (activeSelf)
+            if (added && activeSelf)
             {
                 go.SetActive(false);
             }
-            ControllerButton ctrl = go.AddComponent<ControllerButton>();
-            ctrl.m_OverlayButton = new List<Button>();
-            ctrl.m_OverlayButtonHighlight = new List<GameObject>();
-            ctrl.m_Button = button;
-            ctrl.m_RectTransformOffsetMultiplier = 0f;
+            if (added)
+            {
+                ctrl = go.AddComponent<ControllerButton>();
+                ctrl.m_RectTransformOffsetMultiplier = 0f;
+            }
+            EnsureNavLists(ctrl);
+            if (button != null)
+            {
+                ctrl.m_Button = button;
+            }
             if (keyboard != null)
             {
                 ctrl.m_EnableVirtualKeyboard = true;
                 ctrl.m_InitVirtualKeyboardWithInputString = true;
                 ctrl.m_VirtualKeyboardInputText = keyboard;
             }
-            if (activeSelf)
+            if (added && activeSelf)
             {
                 go.SetActive(true);
             }
             return ctrl;
+        }
+
+        /// <summary>IsActive() and the controller overlay iterate these lists unconditionally.
+        /// Components cloned from the vanilla button template may predate our setup, so fill in
+        /// missing lists before the component can be selected.</summary>
+        private static void EnsureNavLists(ControllerButton ctrl)
+        {
+            if (ctrl == null)
+            {
+                return;
+            }
+            if (ctrl.m_OverlayButton == null)
+            {
+                ctrl.m_OverlayButton = new List<Button>();
+            }
+            if (ctrl.m_OverlayButtonHighlight == null)
+            {
+                ctrl.m_OverlayButtonHighlight = new List<GameObject>();
+            }
         }
     }
 }

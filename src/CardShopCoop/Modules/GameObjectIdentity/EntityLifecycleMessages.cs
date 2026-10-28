@@ -146,9 +146,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
     {
         public long BaselineId;
         public bool Complete = true;
-        /// <summary>Host warehouse backend capability. The guest interprets the transferred save's
-        /// stored boxes with the host's backend, never its own local probe.</summary>
-        public bool HostUsesRecordWarehouse;
         public List<EntityDescriptor> Entries = new();
     }
 }

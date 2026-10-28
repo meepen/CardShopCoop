@@ -2,7 +2,7 @@
 
 CardShopCoopCommunity is the marketed name of the `CardShopCoop` BepInEx 5 / Harmony
 plugin for **TCG Card Shop Simulator**, a Unity
-2021.3 Mono game. The mod references the game's managed assemblies at build time and
+6000.0 Mono game. The mod references the game's managed assemblies at build time and
 patches game behavior at runtime. The game's logic is in `Assembly-CSharp.dll`.
 
 ## Versioning and wire compatibility
@@ -24,14 +24,18 @@ patch included - requires both players to update together.
 
 The mod must work on **both** live game builds from one DLL:
 
-- **The public/default branch** is the legacy build (Unity 2021.3.38f1, Steam buildid `25315983`).
-  It has **no** `StoredBoxRecord`/`PackageBoxCandidate`/animation-instancing, and warehouse storage
-  is live `InteractablePackagingBox_Item` objects (the "live backend").
-- **The `1.00` / `1.0newrender` beta** is Unity 6000.0.66f2 and stores warehouse boxes as
-  `StoredBoxRecord`s (the "record backend").
+- **The public/default branch** is game `1.03` on Unity `6000.0.66f2` (Steam buildid `26249007`).
+  It is the 1.00 codebase: warehouse storage is `StoredBoxRecord`s (the "record backend"), and it
+  carries the `GA.*` platform layer, animation instancing and the `StartOptimized` shop scene.
+- **The Xbox / Game Pass build** is game `1.04` on Unity `6000.0.66f2`; it is the same codebase
+  plus the Xbox `GA.Gamecore*` platform types. It also uses the record backend.
 
-Anything present in only one of them must be reached by reflection (`WarehouseBoxSync.Probe` is the
-house pattern), never a direct reference, or the DLL will fail to load or run on the other build.
+Both live builds are Unity 6. The old Unity 2021 compatibility branches (the Resources character
+prefab path, `TMP_Text.enableWordWrapping`, the live-box warehouse backend) are gone; do not
+reintroduce them. Platform differences that remain - the Game Pass Steamworks stub,
+`GA.Gamecore*`, entitlement behaviour - must still be reached by reflection (`WarehouseBoxSync.Probe`
+is the house pattern), never by a direct reference that exists on only one platform, or the DLL will
+fail to load or run on the other.
 
 `CHANGELOG.md` is maintained in the repository as the player-facing release record. Add a
 section for every release using a version heading and a short, plain-language summary in the

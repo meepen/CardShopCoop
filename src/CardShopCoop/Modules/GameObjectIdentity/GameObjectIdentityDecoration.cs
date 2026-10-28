@@ -393,6 +393,31 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             };
         }
 
+        /// <summary>Applies a same-id authoritative decoration descriptor to an object this peer
+        /// already has. A move keeps the live object (and its extended information); only the pose
+        /// is authoritative. Returns false when the object is not the same decoration type, in
+        /// which case the caller retires and recreates it.</summary>
+        internal static bool ApplyClientDescriptor(InteractableObject obj,
+            DecorationEntityDescriptor descriptor)
+        {
+            if (obj == null || descriptor == null || !DecorationInterop.IsDecoration(obj))
+            {
+                return false;
+            }
+
+            var current = DecorationInterop.ReadPose(obj);
+            if (current.DecorationType != descriptor.DecorationType)
+            {
+                CoopPlugin.Log.LogWarning("[identity] decoration " + descriptor.Id
+                    + " changed type from " + current.DecorationType + " to "
+                    + descriptor.DecorationType + "; replacing the live object.");
+                return false;
+            }
+
+            DecorationInterop.ApplyPose(obj, ToPose(descriptor));
+            return true;
+        }
+
         internal static bool TryCreate(EntityDescriptor descriptor, out object entity)
         {
             entity = null;

@@ -46,11 +46,40 @@ namespace CardShopCoop.Util
                 CoopPlugin.Log.LogWarning("[loading] patch failed for LoadingScreen.OpenScreen: "
                     + error.Message);
             }
+
+            // The character preload holds a shop-scene AsyncOperation at Unity's 0.9 boundary.
+            // Its additive activation must not be mistaken for the player entering a shop:
+            // CGameManager would create default save data, set m_IsGameLevel, and mark
+            // m_InitLoaded so the next Continue skips its save. The preloader only suppresses the
+            // exact activation it owns; every ordinary Single load is untouched.
+            var levelFinished = AccessTools.Method(typeof(CGameManager), "OnLevelFinishedLoading");
+            if (levelFinished == null)
+            {
+                CoopPlugin.Log.LogWarning(
+                    "[loading] probe target missing: CGameManager.OnLevelFinishedLoading");
+            }
+            else
+            {
+                try
+                {
+                    harmony.Patch(levelFinished,
+                        prefix: new HarmonyMethod(typeof(UI.CoopCharacterPrefabPreloader),
+                            nameof(UI.CoopCharacterPrefabPreloader.SuppressPreloadLevelLoad)));
+                }
+                catch (Exception error)
+                {
+                    CoopPlugin.Log.LogWarning(
+                        "[loading] preload level-guard patch failed: " + error.Message);
+                }
+            }
         }
 
         private static void ReportLoadingScreenOpen()
         {
             CoopCore.NotifyGameLoadingStarted();
+            // The player has committed to a load. A preload held at 0.9 blocks every later scene
+            // load, so it must be released before the game calls LoadSceneAsync two seconds later.
+            UI.CoopCharacterPrefabPreloader.OnGameLoadCommitted();
         }
     }
 }

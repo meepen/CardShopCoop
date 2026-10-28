@@ -5,7 +5,7 @@ namespace CardShopCoop.Modules.Hud
 {
     /// <summary>
     /// Read-only presentation surface for the co-op UI. Network and game-time modules update
-    /// this state; the IMGUI owner only reads it and remains responsible for drawing.
+    /// this state; the native co-op screen only reads it and remains responsible for drawing.
     /// </summary>
     internal static class HudPresentationState
     {

@@ -17,25 +17,38 @@ namespace CardShopCoop.UI
     {
         internal CoopCharacterPreview Preview;
         internal Action Recenter;
+        private bool _panning;
 
         public void OnBeginDrag(PointerEventData eventData)
         {
+            // Latch the mode for the whole drag. The event's button can still describe the
+            // previous press when a left drag follows a right drag, so use the live button state.
+            var mouse = Mouse.current;
+            _panning = mouse != null
+                ? mouse.rightButton.isPressed
+                : eventData.button == PointerEventData.InputButton.Right;
         }
 
         public void OnDrag(PointerEventData eventData)
         {
-            if (eventData.button == PointerEventData.InputButton.Right)
+            if (Preview == null)
             {
-                Preview?.Pan(eventData.delta);
+                return;
+            }
+
+            if (_panning)
+            {
+                Preview.Pan(eventData.delta);
             }
             else
             {
-                Preview?.Orbit(eventData.delta);
+                Preview.Orbit(eventData.delta);
             }
         }
 
         public void OnEndDrag(PointerEventData eventData)
         {
+            _panning = false;
         }
 
         public void OnScroll(PointerEventData eventData)

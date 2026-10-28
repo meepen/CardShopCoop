@@ -18,17 +18,9 @@ namespace CardShopCoop.Modules.World
             _harmony.CreateClassProcessor(typeof(WarehouseTakeObservePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(WarehouseShelfOpenVisualPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(WarehouseShelfPlacedVisualPatch)).Patch();
-            if (WarehouseShelfInteraction.UsesRecords)
-            {
-                _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
-            }
-            else
-            {
-                _harmony.CreateClassProcessor(typeof(BoxAddedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(BoxRemovedPatch)).Patch();
-            }
+            _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
+            _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
         }
 
         [MessageHandler]
@@ -56,7 +48,7 @@ namespace CardShopCoop.Modules.World
                 if (pending)
                 {
                     // Our own accepted store. Apply it idempotently: the game already added the
-                    // record/live box, and the host may have canonicalised its order.
+                    // record, and the host may have canonicalised its order.
                     WorldAction.Confirm(message, () => Warehouse.ClientApplyDelta(message));
                     Warehouse.CompleteMutation(message.ActionId);
                 }
@@ -89,17 +81,6 @@ namespace CardShopCoop.Modules.World
             WarehouseShelfInteraction.WarehouseBoxFacts removed)
         {
             Warehouse?.OnStoredBoxRecordPopped(compartment, didPop, removed);
-        }
-
-        private void NotifyWarehouseBoxAdded(ShelfCompartment compartment)
-        {
-            Warehouse?.OnBoxAdded(compartment);
-        }
-
-        private void NotifyWarehouseBoxRemoved(ShelfCompartment compartment,
-            InteractablePackagingBox_Item box)
-        {
-            Warehouse?.OnBoxRemoved(compartment, box);
         }
 
         /// <summary>Records backend: the box adds its own stored record from inside
@@ -223,24 +204,5 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        [HarmonyPatch(typeof(ShelfCompartment), "AddBox")]
-        private static class BoxAddedPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(ShelfCompartment __instance)
-            {
-                _instance?.NotifyWarehouseBoxAdded(__instance);
-            }
-        }
-
-        [HarmonyPatch(typeof(ShelfCompartment), "RemoveBox")]
-        private static class BoxRemovedPatch
-        {
-            [HarmonyPostfix]
-            private static void Postfix(ShelfCompartment __instance, InteractablePackagingBox_Item __0)
-            {
-                _instance?.NotifyWarehouseBoxRemoved(__instance, __0);
-            }
-        }
     }
 }

@@ -91,7 +91,6 @@ namespace CardShopCoop.Modules.World
             ActionLedger.ActionSettled -= WorldCardInteraction.OnActionSettled;
             _cardInteraction?.Shutdown();
             _cardInteraction = null;
-            HostUsesRecordWarehouse = false;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             _context.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_instance, this))
@@ -203,17 +202,6 @@ namespace CardShopCoop.Modules.World
 
         internal static bool IsKnownPackagingBox(InteractablePackagingBox box)
             => _instance?._boxNetworkInteraction?.IsKnownBox(box) == true;
-
-        /// <summary>Host warehouse backend as announced by the identity baseline. A guest must
-        /// interpret the transferred save's stored boxes with the host's backend, not its own
-        /// local capability probe.</summary>
-        internal static bool HostUsesRecordWarehouse
-        {
-            get; private set;
-        }
-
-        internal static void SetHostWarehouseBackend(bool usesRecords)
-            => HostUsesRecordWarehouse = usesRecords;
 
         /// <summary>Client: a worker is carrying this world box. Retire the real object from its
         /// warehouse slot; the Npc worker prop draws the carried box.</summary>

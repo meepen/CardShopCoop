@@ -117,7 +117,16 @@ namespace CardShopCoop.Net
             internal int ReasonIndex;
         }
 
+        private sealed class PendingIntentRegistrations
+        {
+            internal readonly List<IntentValidatorRegistration> Validators = new();
+            internal readonly List<IntentRejectionRegistration> Rejections = new();
+        }
+
         private readonly List<TargetRegistration> _targetRegistrations = new();
+        // Every target that committed successfully, including behaviours with only extended-
+        // information handlers or intent validators and no message handler.
+        private readonly List<object> _registeredTargets = new();
         // Message type -> the behaviour that owns its handler, so Dispatch can mark the
         // authoritative apply on that behaviour (OnApply + handler) without every module keeping
         // a suppression flag. Only attributed module handlers appear here; an external handler
@@ -168,9 +177,9 @@ namespace CardShopCoop.Net
             // rather than a duplicate-handler failure.
             lock (_targetLock)
             {
-                for (var i = 0; i < _targetRegistrations.Count; i++)
+                for (var i = 0; i < _registeredTargets.Count; i++)
                 {
-                    if (ReferenceEquals(_targetRegistrations[i].Target, target))
+                    if (ReferenceEquals(_registeredTargets[i], target))
                     {
                         return;
                     }
@@ -187,6 +196,7 @@ namespace CardShopCoop.Net
                 | BindingFlags.Public | BindingFlags.NonPublic);
             var pending = new List<ProtocolHandlerRegistration>();
             var pendingTypes = new HashSet<Type>();
+            var pendingOwners = new Dictionary<Type, CoopBehaviour>();
             for (var i = 0; i < methods.Length; i++)
             {
                 var method = methods[i];
@@ -267,10 +277,8 @@ namespace CardShopCoop.Net
                     == typeof(CoopMessageContext);
                 if (target is CoopBehaviour handlerOwner)
                 {
-                    lock (_targetLock)
-                    {
-                        _handlerOwners[messageType] = handlerOwner;
-                    }
+                    // Publish owner marks only after the registry accepts the whole batch.
+                    pendingOwners[messageType] = handlerOwner;
                 }
 
                 pending.Add(new ProtocolHandlerRegistration(messageType,
@@ -293,30 +301,101 @@ namespace CardShopCoop.Net
 
             var pendingInformationHandlers =
                 ExtendedInformationModule.CollectAttributedHandlers(target);
+            // Validate every validator/rejection signature before anything is committed.
+            var pendingIntents = CollectIntentRegistrations(target);
 
-            if (pending.Count == 0)
+            IProtocolRegistration handlerRegistration = null;
+            try
             {
-                ExtendedInformationModule.CommitAttributedHandlers(pendingInformationHandlers);
-                RegisterIntentValidators(target);
-                return;
-            }
-
-            var owner = coreOwner
-                ? ProtocolRegistry.CoreOwner
-                : ProtocolRegistry.CreateOwner(
-                    "handlers:" + target.GetType().Assembly.GetName().Name);
-            lock (_targetLock)
-            {
-                var registration = ProtocolRegistry.Default.RegisterHandlers(pending, owner);
-                _targetRegistrations.Add(new TargetRegistration
+                if (pending.Count > 0)
                 {
-                    Target = target,
-                    Registration = registration,
-                });
-            }
+                    var owner = coreOwner
+                        ? ProtocolRegistry.CoreOwner
+                        : ProtocolRegistry.CreateOwner(
+                            "handlers:" + target.GetType().Assembly.GetName().Name);
+                    lock (_targetLock)
+                    {
+                        handlerRegistration = ProtocolRegistry.Default.RegisterHandlers(
+                            pending, owner);
+                    }
+                }
 
-            ExtendedInformationModule.CommitAttributedHandlers(pendingInformationHandlers);
-            RegisterIntentValidators(target);
+                lock (_targetLock)
+                {
+                    foreach (var pair in pendingOwners)
+                    {
+                        _handlerOwners[pair.Key] = pair.Value;
+                    }
+                    if (handlerRegistration != null)
+                    {
+                        _targetRegistrations.Add(new TargetRegistration
+                        {
+                            Target = target,
+                            Registration = handlerRegistration,
+                        });
+                    }
+                    CommitIntentRegistrationsLocked(pendingIntents);
+                    _registeredTargets.Add(target);
+                }
+
+                ExtendedInformationModule.CommitAttributedHandlers(pendingInformationHandlers);
+            }
+            catch
+            {
+                // The registry accepted the batch but a later commit failed (or one of the
+                // commitments itself threw). Put every side of the registration back.
+                if (handlerRegistration != null)
+                {
+                    try
+                    {
+                        handlerRegistration.Dispose();
+                    }
+                    catch (Exception cleanupError)
+                    {
+                        CoopPlugin.Log?.LogWarning("handler registration rollback failed: "
+                            + cleanupError.Message);
+                    }
+                }
+
+                lock (_targetLock)
+                {
+                    foreach (var pair in pendingOwners)
+                    {
+                        if (_handlerOwners.TryGetValue(pair.Key, out var current)
+                            && ReferenceEquals(current, target))
+                        {
+                            _handlerOwners.Remove(pair.Key);
+                        }
+                    }
+                    for (var i = _targetRegistrations.Count - 1; i >= 0; i--)
+                    {
+                        if (ReferenceEquals(_targetRegistrations[i].Target, target))
+                        {
+                            _targetRegistrations.RemoveAt(i);
+                        }
+                    }
+                    RemoveIntentTargets(_intentValidators, target);
+                    RemoveIntentTargets(_intentRejections, target);
+                    for (var i = _registeredTargets.Count - 1; i >= 0; i--)
+                    {
+                        if (ReferenceEquals(_registeredTargets[i], target))
+                        {
+                            _registeredTargets.RemoveAt(i);
+                        }
+                    }
+                }
+
+                try
+                {
+                    ExtendedInformationModule.UnregisterAttributedHandlers(target);
+                }
+                catch (Exception cleanupError)
+                {
+                    CoopPlugin.Log?.LogWarning("extended-information registration rollback "
+                        + "failed: " + cleanupError.Message);
+                }
+                throw;
+            }
         }
 
         internal void RegisterIntentValidators(object target)
@@ -326,6 +405,16 @@ namespace CardShopCoop.Net
                 throw new ArgumentNullException(nameof(target));
             }
 
+            var pending = CollectIntentRegistrations(target);
+            lock (_targetLock)
+            {
+                CommitIntentRegistrationsLocked(pending);
+            }
+        }
+
+        private static PendingIntentRegistrations CollectIntentRegistrations(object target)
+        {
+            var pending = new PendingIntentRegistrations();
             var methods = target.GetType().GetMethods(BindingFlags.Instance
                 | BindingFlags.Public | BindingFlags.NonPublic);
             for (var i = 0; i < methods.Length; i++)
@@ -333,21 +422,27 @@ namespace CardShopCoop.Net
                 var method = methods[i];
                 if (method.GetCustomAttribute<IntentValidatorAttribute>() != null)
                 {
-                    var registration = CreateIntentValidator(method, target);
-                    lock (_targetLock)
-                    {
-                        AddIntentValidator(registration);
-                    }
+                    pending.Validators.Add(CreateIntentValidator(method, target));
                 }
 
                 if (method.GetCustomAttribute<IntentRejectedAttribute>() != null)
                 {
-                    var registration = CreateIntentRejection(method, target);
-                    lock (_targetLock)
-                    {
-                        AddIntentRejection(registration);
-                    }
+                    pending.Rejections.Add(CreateIntentRejection(method, target));
                 }
+            }
+
+            return pending;
+        }
+
+        private void CommitIntentRegistrationsLocked(PendingIntentRegistrations pending)
+        {
+            for (var i = 0; i < pending.Validators.Count; i++)
+            {
+                AddIntentValidator(pending.Validators[i]);
+            }
+            for (var i = 0; i < pending.Rejections.Count; i++)
+            {
+                AddIntentRejection(pending.Rejections[i]);
             }
         }
 
@@ -709,6 +804,14 @@ namespace CardShopCoop.Net
                 {
                     _handlerOwners.Remove(staleOwners[i]);
                 }
+
+                for (var i = _registeredTargets.Count - 1; i >= 0; i--)
+                {
+                    if (ReferenceEquals(_registeredTargets[i], target))
+                    {
+                        _registeredTargets.RemoveAt(i);
+                    }
+                }
             }
 
             if (registrations == null)
@@ -809,6 +912,7 @@ namespace CardShopCoop.Net
 
             var timing = PerfProbe.StartHandlerMetric();
             var completed = false;
+            var actionApplied = false;
             var hostAction = CoopCore.Role == CoopRole.Host && message is ActionMessage;
             var owner = HandlerOwner(message);
             if (hostAction)
@@ -826,6 +930,7 @@ namespace CardShopCoop.Net
                 if (hostAction)
                 {
                     ((ActionMessage)message).OnApply();
+                    actionApplied = true;
                 }
 
                 handler.Invoke(context, message);
@@ -843,14 +948,32 @@ namespace CardShopCoop.Net
                     CoopPlugin.Log.LogError("reliable handler failed for " + typeName
                         + " on connection " + context.ConnectionId
                         + "; discarding the message and keeping the session: " + error);
-                    RollbackAction(context, message);
+                    if (hostAction && actionApplied)
+                    {
+                        // The host applied the action; only the publication failed. Do not ask the
+                        // client to undo a change the host kept; retire the optimistic action and
+                        // let the module's next authoritative publish reconcile any missing
+                        // host-computed fields.
+                        AcceptAppliedAction(context, message);
+                    }
+                    else
+                    {
+                        RollbackAction(context, message);
+                    }
                     RaiseHandlerFailed(new HandlerFailure(descriptor, context, error));
                     return DispatchOutcome.HandlerFailed;
                 }
 
                 CoopPlugin.Log.LogWarning("transient handler failed for " + typeName
                     + " on connection " + context.ConnectionId + "; dropping message: " + error);
-                RollbackAction(context, message);
+                if (hostAction && actionApplied)
+                {
+                    AcceptAppliedAction(context, message);
+                }
+                else
+                {
+                    RollbackAction(context, message);
+                }
                 return DispatchOutcome.HandlerFailed;
             }
             finally
@@ -909,6 +1032,21 @@ namespace CardShopCoop.Net
             if (live != null)
             {
                 ActionLedger.Rollback(live, context.ConnectionId, action.ActionId);
+            }
+        }
+
+        private static void AcceptAppliedAction(MessageContext context, INetMessage message)
+        {
+            if (CoopCore.Role != CoopRole.Host || context == null
+                || message is not ActionMessage action || action.ActionId == Guid.Empty)
+            {
+                return;
+            }
+
+            var live = CoopCore.Instance?.LiveContext;
+            if (live != null)
+            {
+                ActionLedger.Accept(live, context.ConnectionId, action.ActionId);
             }
         }
 

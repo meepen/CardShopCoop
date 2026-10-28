@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using CardShopCoop.Modules.Presence;
 using TMPro;
 using UnityEngine;
+using UnityEngine.Events;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
@@ -103,6 +104,7 @@ namespace CardShopCoop.UI
                 return _current.gameObject;
             }
 
+            CoopPlugin.Log?.LogInfo("co-op character editor: Build");
             var root = NativeCoopUi.Node(parent, "CharacterEditor", 0f, 0f, RootWidth, RootHeight);
             var backgroundRect = NativeCoopUi.Node(root, "CharacterEditorBackground", 0f, 172f,
                 RootWidth, 710f);
@@ -111,7 +113,10 @@ namespace CardShopCoop.UI
             {
                 background.sprite = NativeCoopUi.White;
             }
-            background.color = NativeCoopUi.PanelFill;
+            // The editor sits inside the co-op panel. An opaque fill covered the panel's rounded
+            // border; a translucent shade blends with it while still separating the controls.
+            var fill = NativeCoopUi.PanelFill;
+            background.color = new Color(fill.r, fill.g, fill.b, 0.35f);
             background.raycastTarget = true;
 
             var editor = root.gameObject.AddComponent<CoopCharacterEditor>();
@@ -295,6 +300,7 @@ namespace CardShopCoop.UI
 
         private void OnEnable()
         {
+            CoopPlugin.Log?.LogInfo("co-op character editor: OnEnable built=" + _built);
             if (!_built)
             {
                 return;
@@ -309,9 +315,9 @@ namespace CardShopCoop.UI
                 _sceneHandle = scene;
                 if (_backend != null && !_serviceBackend)
                 {
-                    // Re-read the persisted model after a scene change. This also upgrades a
-                    // title-screen CC_Dummy preview once the game world (and its real character
-                    // prefab) has loaded. Same-scene tab switches keep the undo history.
+                    // Re-read the persisted model after a scene change so a newly available real
+                    // character prefab replaces the previous preview. Same-scene tab switches keep
+                    // the undo history.
                     _backend.RefreshModel();
                 }
             }
@@ -334,6 +340,8 @@ namespace CardShopCoop.UI
 
             Save();
             _preview?.Show(false);
+            _preview?.ReleaseModel();
+            CoopCharacterPrefabPreloader.ReleaseEditorLease();
             Unsubscribe();
         }
 
@@ -417,6 +425,10 @@ namespace CardShopCoop.UI
             }
 
             _lastPreviewSignature = null;
+            // The local backend's Ensure() builds the body once. When the real prefab arrives
+            // after the editor was opened, refresh the backend so it calls SetModel again; the
+            // preview then has no body and creates the real one.
+            _backend?.RefreshModel();
             RefreshAll();
         }
 
@@ -523,20 +535,17 @@ namespace CardShopCoop.UI
             {
                 if (!available)
                 {
-                    _statusText.color = NativeCoopUi.Bad;
-                    _statusText.text = "Character editor unavailable: no preview body could be "
-                        + "built on this screen.";
+                    _statusText.color = CoopCharacterPrefabPreloader.HasAny
+                        ? NativeCoopUi.Bad : NativeCoopUi.Dim;
+                    _statusText.text = CoopCharacterPrefabPreloader.HasAny
+                        ? "Character editor unavailable: the character model could not be built."
+                        : "Loading the character model...";
                 }
                 else if (!editable)
                 {
-                    _statusText.color = NativeCoopUi.Gold;
-                    _statusText.text = "Limited wardrobe data: your saved character is safe. Open "
-                        + "this tab in a loaded game once to unlock every option.";
-                }
-                else if (_preview.Limited)
-                {
-                    _statusText.color = NativeCoopUi.Gold;
-                    _statusText.text = "Limited preview body; the saved character is untouched.";
+                    _statusText.color = NativeCoopUi.Bad;
+                    _statusText.text = "Character editor unavailable: the character model has no "
+                        + "editable wardrobe.";
                 }
                 else
                 {
@@ -636,17 +645,17 @@ namespace CardShopCoop.UI
             {
                 CoopCharacterEditorWidgets.Section(_content, ref y, "CHARACTER EDITOR");
                 CoopCharacterEditorWidgets.Note(_content, ref y,
-                    "A preview body could not be built on this screen. Start or load a game once, "
-                    + "then reopen this tab. Your saved character has not been changed.", 76f);
+                    CoopCharacterPrefabPreloader.HasAny
+                        ? "The character model could not be built on this screen. Your saved "
+                            + "character has not been changed."
+                        : "Loading the character model...", 76f);
             }
             else if (!_backend.Editable)
             {
-                CoopCharacterEditorWidgets.Section(_content, ref y, "LIMITED PREVIEW");
+                CoopCharacterEditorWidgets.Section(_content, ref y, "CHARACTER EDITOR");
                 CoopCharacterEditorWidgets.Note(_content, ref y,
-                    "This screen has only the game's limited character dummy loaded, so the full "
-                    + "wardrobe cannot be read or written here. The saved character is untouched. "
-                    + "Open this tab once in a loaded game; the full editor stays available at the "
-                    + "title screen afterward.", 96f);
+                    "The character model has no editable wardrobe on this screen. Your saved "
+                    + "character has not been changed.", 76f);
             }
             else
             {
@@ -689,6 +698,70 @@ namespace CardShopCoop.UI
             }
             _scroll.verticalNormalizedPosition = normalized;
             RefreshPageTabs();
+            // The page's controls are new objects; the co-op screen owns the controller row list,
+            // so let it rediscover this page instead of leaving nav rows pointing at destroyed
+            // widgets. No-op until the screen has created its navigation extension.
+            CoopScreen.RebuildNav();
+            AttachScrollOnSelect();
+        }
+
+        /// <summary>Scrolls a controller-selected control into view. ControllerButton raises this
+        /// event when the game's selector moves, so this is event-driven rather than a frame poll.</summary>
+        private void AttachScrollOnSelect()
+        {
+            if (_content == null)
+            {
+                return;
+            }
+
+            ControllerButton[] buttons = _content.GetComponentsInChildren<ControllerButton>(true);
+            for (var i = 0; i < buttons.Length; i++)
+            {
+                ControllerButton ctrl = buttons[i];
+                if (ctrl == null)
+                {
+                    continue;
+                }
+                if (ctrl.m_OnSelectedEvent == null)
+                {
+                    ctrl.m_OnSelectedEvent = new UnityEvent();
+                }
+                ControllerButton captured = ctrl;
+                ctrl.m_OnSelectedEvent.AddListener(
+                    () => ScrollControlIntoView(captured.transform as RectTransform));
+            }
+        }
+
+        private void ScrollControlIntoView(RectTransform target)
+        {
+            if (_scroll == null || _content == null || _viewport == null || target == null)
+            {
+                return;
+            }
+
+            var contentHeight = _content.rect.height;
+            var viewportHeight = _viewport.rect.height;
+            var scrollable = contentHeight - viewportHeight;
+            if (scrollable <= 1f)
+            {
+                return;
+            }
+
+            Bounds bounds = RectTransformUtility.CalculateRelativeRectTransformBounds(
+                _viewport, target);
+            Rect view = _viewport.rect;
+            var scrollY = _content.anchoredPosition.y;
+            if (bounds.max.y > view.yMax)
+            {
+                scrollY -= bounds.max.y - view.yMax;
+            }
+            else if (bounds.min.y < view.yMin)
+            {
+                scrollY += view.yMin - bounds.min.y;
+            }
+
+            scrollY = Mathf.Clamp(scrollY, 0f, scrollable);
+            _scroll.verticalNormalizedPosition = 1f - scrollY / scrollable;
         }
 
         private void BuildFacePage(ref float y)

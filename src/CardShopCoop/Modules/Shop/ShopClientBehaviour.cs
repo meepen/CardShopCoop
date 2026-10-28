@@ -462,7 +462,8 @@ namespace CardShopCoop.Modules.Shop
                 RenameLockScope,
                 new ShopRenameLockIntent { Op = ShopRenameLockOp.Acquire },
                 OpenPendingRenameUi,
-                CancelPendingRenameUi);
+                CancelPendingRenameUi,
+                ShowBusyNotice);
             if (actionId == Guid.Empty)
             {
                 // The request never left this peer; do not hold a pending open that only a
@@ -518,7 +519,8 @@ namespace CardShopCoop.Modules.Shop
                 RenameLockScope,
                 new ShopRenameLockIntent { Op = ShopRenameLockOp.Acquire },
                 () => { },
-                AbandonLocalEdit);
+                AbandonLocalEdit,
+                ShowBusyNotice);
             if (actionId == Guid.Empty)
             {
                 // We lost the lock and cannot ask for it back; close the dead editor instead of

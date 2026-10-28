@@ -79,7 +79,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             {
                 BaselineId = 1,
                 Complete = true,
-                HostUsesRecordWarehouse = WarehouseShelfInteraction.UsesRecords,
                 Entries = entries,
             });
         }

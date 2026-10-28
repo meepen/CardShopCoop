@@ -4,8 +4,8 @@ using UnityEngine;
 namespace CardShopCoop.Modules.DebugTools
 {
     /// <summary>
-    /// Reflection-only boundary for CheatManager. The legacy game does not expose that type,
-    /// so this module must not put a CheatManager token in the plugin's type references.
+    /// Reflection-only boundary for CheatManager. Not every game build exposes that type, so this
+    /// module must not put a CheatManager token in the plugin's type references.
     /// </summary>
     internal static class DebugToolsRuntime
     {

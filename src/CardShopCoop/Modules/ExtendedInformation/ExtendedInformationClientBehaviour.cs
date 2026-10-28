@@ -13,12 +13,10 @@ namespace CardShopCoop.Modules.ExtendedInformation
         private void OnEnable()
         {
             _context = RuntimeContext;
-            _context.Messages.RegisterAttributedHandlers(this);
         }
 
         private void OnDisable()
         {
-            _context?.Messages.UnregisterAttributedHandlers(this);
             _context = null;
         }
 

@@ -242,7 +242,6 @@ namespace CardShopCoop
         private CoopRuntimeContext _liveRuntimeContext;
         private CoopRuntimeBehaviour _runtime;
         private PersistentRuntimeBehaviour _persistentRuntime;
-        private UI.CoopUI _ui;
         private readonly MessageRouter _messageRouter = new();
         private readonly MainThreadDispatcher _dispatcher = new();
         private bool _shutdownCompleted;
@@ -332,7 +331,6 @@ namespace CardShopCoop
                     new DisconnectInfo("world transfer failed: " + reason, false,
                         "transfer_failed", true, ConnectionState.Transferring)));
 
-            _ui = new UI.CoopUI();
             UI.CoopMenus.Init();
             _persistentRuntime = gameObject.AddComponent<PersistentRuntimeBehaviour>();
             _persistentRuntime.InitializePersistent(new CoopRuntimeContext(
@@ -708,10 +706,9 @@ namespace CardShopCoop
                 // Title screen. A load in flight (Title -> shop) is equally unsafe, and its
                 // destination is a shop rather than the menu.
                 CoopPlugin.Log.LogInfo("declining an inbound join request - not at the title screen");
-                UI.CoopAlert.Show(
-                    "Join from the main menu to accept this invite.",
-                    "Return to the Title screen (Back to menu), then ask your friend to invite you again.",
-                    header: "CO-OP INVITE");
+                ShowError("CO-OP INVITE",
+                    "Join from the main menu to accept this invite. Return to the Title screen "
+                    + "(Back to menu), then ask your friend to invite you again.");
                 return;
             }
 
@@ -729,12 +726,9 @@ namespace CardShopCoop
             {
                 CoopPlugin.Log.LogInfo("ignoring an inbound join request - already in a session");
                 var hosting = Role == CoopRole.Host;
-                UI.CoopAlert.Show(
-                    hosting ? "You're already hosting a co-op session."
-                        : "You're already in a co-op session.",
-                    hosting ? "Stop hosting before accepting a friend's invite."
-                        : "Leave the session before accepting a friend's invite.",
-                    header: "CO-OP INVITE");
+                ShowError("CO-OP INVITE", hosting
+                    ? "You're already hosting a co-op session. Stop hosting before accepting a friend's invite."
+                    : "You're already in a co-op session. Leave the session before accepting a friend's invite.");
                 return;
             }
 
@@ -1749,14 +1743,39 @@ namespace CardShopCoop
             }
         }
 
-        private void Send(int connectionId, INetMessage message)
+        private static readonly HashSet<Type> WarnedNonActionMessages = new();
+
+        /// <summary>Submits a client ActionMessage through the action ledger. A message that
+        /// overrides neither OnApply nor OnUndo is still a plain message: warn once (a public
+        /// integration can easily misread the optional-override contract) and let it send
+        /// untracked instead of throwing on the gameplay path.</summary>
+        private bool TrySubmitClientAction(INetMessage message)
         {
-            if (Role == CoopRole.Client && ActionLedger.IsActive && message is ActionMessage action
-                && action.ActionId == Guid.Empty && ActionLedger.IsAction(action))
+            if (Role != CoopRole.Client || !ActionLedger.IsActive
+                || message is not ActionMessage action || action.ActionId != Guid.Empty)
+            {
+                return false;
+            }
+            if (ActionLedger.IsAction(action))
             {
                 // The action id is allocated and recorded before the message leaves, so a plain
                 // module only has to send the command.
                 ActionLedger.Submit(action);
+                return true;
+            }
+            if (WarnedNonActionMessages.Add(action.GetType()))
+            {
+                CoopPlugin.Log.LogWarning("ActionMessage "
+                    + action.GetType().FullName + " overrides neither OnApply nor OnUndo; sending "
+                    + "it as an ordinary message (no action id, no rollback).");
+            }
+            return false;
+        }
+
+        private void Send(int connectionId, INetMessage message)
+        {
+            if (TrySubmitClientAction(message))
+            {
                 return;
             }
 
@@ -1774,10 +1793,8 @@ namespace CardShopCoop
 
         private void Broadcast(INetMessage message)
         {
-            if (Role == CoopRole.Client && ActionLedger.IsActive && message is ActionMessage action
-                && action.ActionId == Guid.Empty && ActionLedger.IsAction(action))
+            if (TrySubmitClientAction(message))
             {
-                ActionLedger.Submit(action);
                 return;
             }
 
@@ -1988,14 +2005,11 @@ namespace CardShopCoop
 
             CheckJoinAttempts();
 
-            if (_ui != null && _ui.Visible && Input.GetKeyDown(KeyCode.Escape))
-            {
-                _ui.Visible = false;
-            }
             UI.CoopScreen.Tick();
-            SessionInputRuntime.SetWindowModal((_ui.Visible || UI.CoopScreen.IsOpen) && InGameplayScene());
+            UI.CoopHud.Tick();
+            SessionInputRuntime.SetWindowModal(UI.CoopScreen.IsOpen && InGameplayScene());
             if (Role != CoopRole.None && Input.GetKeyDown(CoopPlugin.EmoteKey.Value)
-                && !UI.CoopUI.TextFieldFocused && !NativeTextInputFocused())
+                && !NativeTextInputFocused())
             {
                 SendEmote();
             }
@@ -2389,10 +2403,20 @@ namespace CardShopCoop
             HudApi.SetStatusLine(StatusLine, 8f);
         }
 
+        /// <summary>Publishes a failure/notice through the native co-op status/error surface.
+        /// The line is also logged so support still has it.</summary>
+        private void ShowError(string header, string detail)
+        {
+            var text = string.IsNullOrEmpty(detail) ? header : header + ": " + detail;
+            ErrorLine = text;
+            SetStatus(header);
+            CoopPlugin.Log.LogWarning("coop: " + text);
+        }
+
         /// <summary>Raised by the router on the main thread when a reliable handler threw and its
         /// message was discarded. The session is still up, so the player is told rather than being
-        /// disconnected: the alert names the message and the exception, and repeating the same
-        /// failure bumps its count instead of stacking popups.</summary>
+        /// disconnected: the status/error surface names the message and the exception, and a
+        /// repeat replaces the same line instead of stacking popups.</summary>
         private void OnHandlerFailed(HandlerFailure failure)
         {
             if (failure == null)
@@ -2404,9 +2428,9 @@ namespace CardShopCoop
             var detail = (failure.WireName ?? "<unknown>") + " from connection "
                 + (failure.Context?.ConnectionId ?? 0) + ": "
                 + (error == null ? "unknown error" : error.GetType().Name + ": " + error.Message);
-            UI.CoopAlert.Show(
-                "A co-op message could not be processed and was skipped. The session continues.",
-                detail);
+            ShowError("CO-OP ERROR",
+                "A co-op message could not be processed and was skipped. The session continues. "
+                + detail);
         }
 
         private void RememberDisconnect(DisconnectInfo detail)
@@ -2477,12 +2501,12 @@ namespace CardShopCoop
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
-            if (scene.name == "Title")
+            if (mode == LoadSceneMode.Additive)
             {
-                // The character tab needs the game's full body, and on the public build that is
-                // a Resources asset. Warm it on the title screen instead of making the first
-                // Character-tab open incur the load (and instead of falling back to CC_Dummy).
-                UI.CoopCharacterPrefabPreloader.EnsureStarted();
+                // Only the character-prefab preload loads a scene additively. It is not the
+                // player's world: it must not reset world/identity state, and it must never make
+                // an active session look like the player reloaded their shop.
+                return;
             }
 
             _worldReady = false;
@@ -2744,30 +2768,10 @@ namespace CardShopCoop
             Net = null;
         }
 
-        private void OnGUI()
-        {
-            using (Util.PerfProbe.Sample("core.ongui"))
-            {
-                _ui.Draw(this, Net);
-            }
-        }
-
-        public void ToggleLegacyUI()
-        {
-            if (_ui != null)
-            {
-                _ui.Visible = !_ui.Visible;
-            }
-        }
-
-        public void OpenCharacterCustomizer()
-        {
-            _ui?.OpenCharacterTab();
-        }
-
         private void OnDestroy()
         {
             UI.CoopMenus.Shutdown();
+            UI.CoopHud.Destroy();
             UI.CoopScreen.Destroy();
             _messageRouter.HandlerFailed -= OnHandlerFailed;
             SceneManager.sceneLoaded -= OnSceneLoaded;

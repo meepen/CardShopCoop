@@ -35,6 +35,16 @@ namespace CardShopCoop.Modules.Pricing
         private static readonly FieldInfo FiCardCompartment = AccessTools.Field(
             typeof(InteractableCardPriceTag), "m_CardCompartment");
 
+        /// <summary>Drops every registered view. The module unpatches OnDisable before the shop
+        /// scene is torn down, so without this the static maps would retain destroyed tags for the
+        /// rest of the process.</summary>
+        internal static void Clear()
+        {
+            Indexed.Clear();
+            ByItem.Clear();
+            ByCard.Clear();
+        }
+
         /// <summary>One-time registration for tags that were already active before the pricing
         /// patches were installed (a host that starts a session in an already-loaded shop). New
         /// tags register through OnEnable; this is not a recurring scan.</summary>

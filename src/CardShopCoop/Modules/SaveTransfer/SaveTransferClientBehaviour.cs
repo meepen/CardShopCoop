@@ -156,8 +156,15 @@ namespace CardShopCoop.Modules.SaveTransfer
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
-            if (SaveTransferRuntime.ClientReloading && !string.Equals(scene.name, "Title",
-                StringComparison.Ordinal))
+            if (mode == LoadSceneMode.Additive)
+            {
+                // The character-prefab preload loads the shop scene additively. It is not the
+                // borrowed world, so it must never satisfy the join.
+                return;
+            }
+
+            if (SaveTransferRuntime.ClientReloading && string.Equals(scene.name,
+                SaveTransferStorage.StartSceneName(), StringComparison.Ordinal))
             {
                 _worldArrived = true;
                 _reloadStartedAt = Time.realtimeSinceStartup;

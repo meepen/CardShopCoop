@@ -521,6 +521,7 @@ namespace CardShopCoop.Modules.Pricing
 
             PricingDisplay.Clear();
             PriceTagRegistry.RefreshAll();
+            PriceTagRegistry.Clear();
 
             _context = null;
         }

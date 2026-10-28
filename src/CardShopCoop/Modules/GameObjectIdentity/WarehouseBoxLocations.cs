@@ -92,7 +92,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             _nextSequence = 0;
         }
 
-        /// <summary>Monotonic insertion order for tie-breaking the canonical (1.02) record sort.</summary>
+        /// <summary>Monotonic insertion order for tie-breaking the canonical record sort.</summary>
         internal static long NextSequence() => ++_nextSequence;
 
         internal static long SequenceOf(Guid id)
@@ -254,7 +254,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 else if (entry.Sequence == 0)
                 {
                     // A record that predates the identity module (a save load) gets a monotonic
-                    // insertion sequence in list order. Ties then sort newest-first, the 1.02 rule.
+                    // insertion sequence in list order. Ties then sort newest-first, the record rule.
                     entry.Sequence = NextSequence();
                 }
 
@@ -288,8 +288,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 return false;
             }
 
-            // The record backend's ordered list is authoritative when it has an entry at this slot;
-            // the live backend keeps no order here and reads the compartment's live list.
+            // The record order is authoritative when it has an entry at this slot.
             if (CompartmentOrder.TryGetValue(CompartmentKey(shelf, compartmentIndex),
                     out var order) && slot < order.Count && order[slot] != Guid.Empty)
             {
@@ -297,9 +296,8 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 return true;
             }
 
-            // A live-box compartment is the authoritative order; the registry location index is
-            // only a hint. Read the slot from the game object next (the game may have arranged it
-            // after the registry recorded the slot).
+            // Fall back to a live representation's position; the registry location index is only
+            // a hint. The game may have arranged it after the registry recorded the slot.
             ShelfCompartment compartment = null;
             var storage = shelf.GetStorageCompartmentList();
             for (var i = 0; storage != null && i < storage.Count; i++)

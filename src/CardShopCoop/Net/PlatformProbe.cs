@@ -21,8 +21,8 @@ namespace CardShopCoop.Net
     ///
     /// So: nothing in this file may EVER name a Steamworks type. No `using Steamworks;`,
     /// no CSteamID, not even in a generic argument. Deleting that using statement from
-    /// CoopCore.cs and CoopUI.cs is what turns "did I miss a reference?" into a compiler
-    /// error, and this file is what lets those two compile without it.
+    /// CoopCore.cs is what turns "did I miss a reference?" into a compiler error, and this file
+    /// is what lets that assembly compile without it.
     ///
     /// Everything Steam-typed lives behind a bridge interface implemented in the Steam
     /// transport assembly, which is allowed to fail to load. This file never names it - the
@@ -243,13 +243,17 @@ namespace CardShopCoop.Net
         private static int _gpState; // 0 = unknown, 1 = Game Pass, 2 = not
 
         /// <summary>
-        /// LAST-RESORT save-backend tiebreak: does the game assembly contain a Gamecore
-        /// (Xbox Game Save / wgs) type? Derived from the GAME, not from our dll
-        /// environment, which is what makes it legitimate where SteamworksPresent is not.
-        /// Verified absent on the Steam build (zero hits for "Gamecore" across the whole
-        /// 608-file decompile), so a match means Game Pass. SUBSTRING match on purpose:
-        /// the exact Game Pass type name is community hearsay and we have no Game Pass
-        /// assembly to check it against. Cached; never throws.
+        /// LAST-RESORT save-backend tiebreak: does this build write saves through the native
+        /// platform store? The game answers this itself with
+        /// <c>GA.PlatformManager.UseNativeSaves()</c> (Steam -> false, Game Pass/consoles ->
+        /// true); that is always preferred. Before <c>GA.PlatformManager.Instance</c> exists the
+        /// exact <c>GA.GamecorePlatformManager</c> type is the discriminator - the same type the
+        /// Xbox identity chain already trusts.
+        ///
+        /// Never match on the substring "Gamecore": the Steam 1.03 build ships an empty
+        /// <c>GA.GameCoreNativePlugin</c> whose name matches case-insensitively, and that false
+        /// positive re-enables the stale in-memory-world fallback in SaveTransfer. Cached;
+        /// never throws.
         ///
         /// Only consult this when <see cref="TrySampleSaveCounter"/> returns false.
         /// </summary>
@@ -274,36 +278,32 @@ namespace CardShopCoop.Net
                 return false;
             }
 
-            Type[] types;
-            // a partially-loadable assembly still tells us what we need: walk .Types and
-            // skip the nulls rather than giving up on the whole probe
+            // The game's own answer. It is authoritative whenever the manager is alive.
             try
             {
-                types = asm.GetTypes();
-            }
-            catch (ReflectionTypeLoadException e) { types = e.Types; }
-            catch (Exception e) { CoopLog.Swallow(e); return false; }
-            if (types == null)
-            {
-                return false;
-            }
-
-            foreach (var t in types)
-            {
-                if (t == null)
+                var managerType = asm.GetType("GA.PlatformManager", false);
+                if (managerType != null)
                 {
-                    continue;
-                }
-
-                try
-                {
-                    if (t.Name.IndexOf("Gamecore", StringComparison.OrdinalIgnoreCase) >= 0)
+                    var instanceProperty = managerType.GetProperty("Instance",
+                        BindingFlags.Public | BindingFlags.Static);
+                    var useNativeSaves = managerType.GetMethod("UseNativeSaves",
+                        BindingFlags.Public | BindingFlags.Instance);
+                    var instance = instanceProperty?.GetValue(null);
+                    if (instance != null && useNativeSaves != null)
                     {
-                        return true;
+                        return (bool)useNativeSaves.Invoke(instance, null);
                     }
+
+                    // Before Instance exists (startup), only the Game Pass implementation
+                    // discriminates. Steam carries GA.PlatformManager with no Gamecore manager.
+                    return asm.GetType("GA.GamecorePlatformManager", false) != null;
                 }
-                catch (Exception e) { CoopLog.Swallow(e); }
             }
+            catch (Exception e)
+            {
+                CoopLog.Swallow(e);
+            }
+
             return false;
         }
 
@@ -425,10 +425,10 @@ namespace CardShopCoop.Net
             {
                 int i, c;
                 var counter = TrySampleSaveCounter(out i, out c);
-                return (GamePassBuild ? "Xbox containers (Game Pass)" : "local files")
+                return (GamePassBuild ? "native platform store (Game Pass/console)" : "local files")
                      + (counter
                         ? " [save-completion counter available]"
-                        : " [save-completion counter UNAVAILABLE - unknown build, falling back to the Gamecore type probe]");
+                        : " [save-completion counter UNAVAILABLE - unknown build, using the game's UseNativeSaves answer]");
             }
         }
     }

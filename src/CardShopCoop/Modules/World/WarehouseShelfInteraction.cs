@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Modules.GameObjectIdentity;
+using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
@@ -12,11 +13,12 @@ using UnityEngine;
 namespace CardShopCoop.Modules.World
 {
     /// <summary>
-    /// Owns warehouse box storage for the World module. A live warehouse entry is a Unity
-    /// <see cref="InteractablePackagingBox"/>; a stored entry is a value in a
-    /// <see cref="ShelfCompartment"/> and has no live object. The identity module owns the
-    /// Guid/location registry that names entries on the wire; this class owns only compartment
-    /// state, prediction ordering, and the game apply paths.
+    /// Owns warehouse box storage for the World module. Both live builds are record-backed: a
+    /// stored entry is a StoredBoxRecord in a <see cref="ShelfCompartment"/>. A live
+    /// <see cref="InteractablePackagingBox"/> is only a representation (held, carried, or a take
+    /// replica), never the stored truth. The identity module owns the Guid/location registry that
+    /// names entries on the wire; this class owns compartment state, prediction ordering, and the
+    /// game apply paths.
     /// </summary>
     internal sealed class WarehouseShelfInteraction
     {
@@ -24,7 +26,6 @@ namespace CardShopCoop.Modules.World
 
         private static bool _probed;
         private static bool _usesRecords;
-        private static bool _usesLiveBoxes;
         private static Type _recordType;
         private static Type _recordItemType;
         private static MethodInfo _recordCount;
@@ -129,25 +130,7 @@ namespace CardShopCoop.Modules.World
         internal static bool Available()
         {
             Probe();
-            return _usesRecords || _usesLiveBoxes;
-        }
-
-        internal static bool UsesRecords
-        {
-            get
-            {
-                Probe();
-                return _usesRecords;
-            }
-        }
-
-        internal static bool UsesLiveBoxes
-        {
-            get
-            {
-                Probe();
-                return _usesLiveBoxes;
-            }
+            return _usesRecords;
         }
 
         internal void Reset()
@@ -213,7 +196,7 @@ namespace CardShopCoop.Modules.World
         /// record object.</summary>
         internal void BeginLocalRecordStore(InteractablePackagingBox_Item box)
         {
-            _currentStoreBox = _usesRecords ? box : null;
+            _currentStoreBox = box;
             if (_currentStoreBox != null)
             {
                 CoopPlugin.Log.LogInfo("[warehouse] record store begin box=" + box.name);
@@ -242,8 +225,8 @@ namespace CardShopCoop.Modules.World
             }
             if (compartment != null && IsWarehouse(compartment))
             {
-                // 1.00's own OnFinishLerp arranges records with an unstable sort; re-assert the
-                // 1.02 comparator here so both backends agree on the top and insertion slot.
+                // Vanilla's OnFinishLerp arranges records with an unstable sort; re-assert the
+                // canonical comparator here so both peers agree on the top and insertion slot.
                 CanonicalizeRecords(compartment);
             }
         }
@@ -349,8 +332,8 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            // The popped entry no longer names a shelf location. The created box owns the identity
-            // when the game reused the stored live object (live backend) or a fresh one otherwise.
+            // The popped entry no longer names a shelf location; the created live box owns the
+            // identity from here on.
             WarehouseBoxLocations.ClearLocation(capture.SourceId);
             var sourceRef = MakeRef(capture.Shelf, capture.CompartmentIndex, capture.SourceId,
                 capture.SourceSlot);
@@ -385,15 +368,9 @@ namespace CardShopCoop.Modules.World
 
         private bool DidClientTakeHappen(WarehouseTakeCapture capture)
         {
-            if (_usesRecords)
-            {
-                return RecordCount(capture.Compartment) < capture.RecordCount;
-            }
-
-            var held = _playerBox?.LocalHeldBox;
-            return held != null
-                && (ReferenceEquals(held, capture.PreviousTop)
-                    || (_boxes.TryGetId(held, out var heldId) && heldId == capture.SourceId));
+            // The record list is the only storage truth. A take always pops the top record, so a
+            // lower count is proof the game's own click path consumed the entry.
+            return RecordCount(capture.Compartment) < capture.RecordCount;
         }
 
         /// <summary>Client: a worker is carrying world box <paramref name="boxNetworkId"/>. Detach
@@ -451,7 +428,7 @@ namespace CardShopCoop.Modules.World
         /// authoritative applies are handled by their own paths.</summary>
         internal void OnStoredBoxRecordAdded(ShelfCompartment compartment)
         {
-            if (!_usesRecords || compartment == null || !IsWarehouse(compartment)
+            if (compartment == null || !IsWarehouse(compartment)
                 || _hostApplyingCommand || _applyingRemote || ActionLedger.IsReconciling)
             {
                 return;
@@ -536,7 +513,7 @@ namespace CardShopCoop.Modules.World
                 () => SendStorePrediction(CompartmentKey(shelf, compartmentIndex), epoch, shelf,
                     compartmentIndex, sourceRef, facts, liveBox, snapshot),
                 () => UndoStore(CompartmentKey(shelf, compartmentIndex), epoch, shelf,
-                    compartmentIndex, sourceRef, facts, liveBox, snapshot));
+                    compartmentIndex, sourceRef, facts, snapshot));
         }
 
         /// <summary>The recorded facts at the top of the compartment, read before the game pops
@@ -606,132 +583,6 @@ namespace CardShopCoop.Modules.World
             });
         }
 
-        /// <summary>Live backend: the game added a live box to a compartment.</summary>
-        internal void OnBoxAdded(ShelfCompartment compartment)
-        {
-            if (!_usesLiveBoxes || compartment == null || !IsWarehouse(compartment)
-                || _hostApplyingCommand || _applyingRemote || ActionLedger.IsReconciling)
-            {
-                return;
-            }
-
-            var box = GetLastBoxOrNull(compartment);
-            if (box?.m_ItemCompartment == null
-                || !TryGetAddress(compartment, out var shelf, out var compartmentIndex))
-            {
-                return;
-            }
-
-            if (!_host && WorldClientBehaviour.IsPreloadHeld)
-            {
-                return;
-            }
-
-            if (!InGame())
-            {
-                return;
-            }
-
-            var id = _host
-                ? _boxes.EnsureWarehouseHostId(box)
-                : (_boxes.TryGetId(box, out var known) ? known
-                    : WorldClientBehaviour.AssignCreatedBoxId(box));
-            if (id == Guid.Empty)
-            {
-                CoopPlugin.Log.LogWarning("[warehouse] added live box has no identity; not syncing.");
-                return;
-            }
-
-            var slot = LiveSlotOf(compartment, box);
-            WarehouseBoxLocations.RegisterLive(id, box, shelf, compartmentIndex, slot);
-            var facts = DescribeLiveBox(box);
-            if (!facts.IsValid)
-            {
-                return;
-            }
-
-            var sourceRef = MakeRef(shelf, compartmentIndex, id, slot);
-            if (_host)
-            {
-                BroadcastDelta(new WarehouseDeltaMessage
-                {
-                    IsStore = true,
-                    Ref = sourceRef,
-                    ItemType = facts.ItemType,
-                    Amount = facts.Amount,
-                    IsBig = facts.IsBig,
-                    Box = box,
-                });
-                return;
-            }
-
-            var key = CompartmentKey(shelf, compartmentIndex);
-            var epoch = EpochOf(key);
-            EnqueueMutation(key,
-                () => SendStorePrediction(key, epoch, shelf, compartmentIndex, sourceRef, facts, box,
-                    null),
-                () => UndoStore(key, epoch, shelf, compartmentIndex, sourceRef, facts, box, null));
-        }
-
-        /// <summary>Live backend host: a live box left a compartment. The removed object itself
-        /// continues as the player/worker's live representation (same id), so the delta still names
-        /// it and observers keep their replica. The record backend uses the value-only form because
-        /// its respawn creates a fresh live box.</summary>
-        internal void OnBoxRemoved(ShelfCompartment compartment, InteractablePackagingBox_Item box)
-        {
-            if (!_host || !_usesLiveBoxes || compartment == null || !IsWarehouse(compartment)
-                || _hostApplyingCommand || _applyingRemote || !InGame() || box == null)
-            {
-                return;
-            }
-
-            if (!_boxes.TryGetId(box, out var id) || id == Guid.Empty)
-            {
-                id = _boxes.EnsureWarehouseHostId(box);
-                if (id == Guid.Empty)
-                {
-                    return;
-                }
-            }
-
-            var shelf = compartment.GetWarehouseShelf();
-            if (shelf == null)
-            {
-                return;
-            }
-
-            var compartmentIndex = compartment.GetIndex();
-            var facts = DescribeLiveBox(box);
-            WarehouseBoxLocations.ClearLocation(id);
-            if (!facts.IsValid)
-            {
-                return;
-            }
-
-            var localTake = ReferenceEquals(_playerBox?.LocalHeldBox, box);
-            CoopPlugin.Log.LogInfo("[warehouse] live remove id=" + id + " shelf="
-                + compartmentIndex + " localTake=" + localTake + ".");
-            BroadcastDelta(new WarehouseDeltaMessage
-            {
-                IsStore = false,
-                Ref = MakeRef(shelf, compartmentIndex, id, -1),
-                ItemType = facts.ItemType,
-                Amount = facts.Amount,
-                IsBig = facts.IsBig,
-                // Live backend: the removed object itself continues as the worker/player's live
-                // representation (same id), so observers keep their replica. The record backend
-                // sends the value-only form because its respawn creates a fresh live box.
-                Box = box,
-            });
-
-            if (localTake)
-            {
-                // The hold broadcast raced the removal. Re-announce it now that observers remove
-                // the top entry first, so the taken box attaches to this avatar.
-                _playerBox?.PublishHostHeld(box, id);
-            }
-        }
-
         /// <summary>Host: applies a client store. On any refusal the requester receives the
         /// authoritative compartment state before the generic rollback.</summary>
         internal bool HostApplyStore(WarehouseStoreMessage message, int connectionId,
@@ -780,17 +631,9 @@ namespace CardShopCoop.Modules.World
                 try
                 {
                     _hostApplyingCommand = true;
-                    if (_usesRecords)
-                    {
-                        accepted = ApplyRecordStore(compartment, message.Shelf,
-                            message.CompartmentIndex, boxNetworkId, message.ItemType,
-                            message.Amount, message.IsBig);
-                    }
-                    else
-                    {
-                        accepted = ApplyLiveStore(compartment, message.Shelf,
-                            message.CompartmentIndex, boxNetworkId, storeBox);
-                    }
+                    accepted = ApplyRecordStore(compartment, message.Shelf,
+                        message.CompartmentIndex, boxNetworkId, message.ItemType,
+                        message.Amount, message.IsBig);
                 }
                 catch (Exception e)
                 {
@@ -816,19 +659,18 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            var slot = _usesRecords
-                ? SlotOf(boxNetworkId)
-                : LiveSlotOf(compartment, message.Box as InteractablePackagingBox_Item);
-            var liveBox = _usesRecords ? null : message.Box;
             BroadcastDelta(new WarehouseDeltaMessage
             {
                 ActionId = message.ActionId,
                 IsStore = true,
-                Ref = MakeRef(message.Shelf, message.CompartmentIndex, boxNetworkId, slot),
+                Ref = MakeRef(message.Shelf, message.CompartmentIndex, boxNetworkId,
+                    SlotOf(boxNetworkId)),
                 ItemType = message.ItemType,
                 Amount = message.Amount,
                 IsBig = message.IsBig,
-                Box = liveBox,
+                // Records have no live storage object; the take respawn's EntityAdded owns the
+                // representation on the observing peer.
+                Box = null,
             });
             return true;
         }
@@ -863,31 +705,11 @@ namespace CardShopCoop.Modules.World
             {
                 _playerBox?.ReleaseRemoteHoldForBox(item);
                 _playerBox?.ReleaseHeldObject(item);
-                BoxIdentityLifecycle.ForgetBox(item);
+                // The stored record keeps this id; preserve the box's extended information.
+                BoxIdentityLifecycle.DetachBox(item);
                 _boxes.DestroyWithoutNotification(item);
             }
 
-            return true;
-        }
-
-        private bool ApplyLiveStore(ShelfCompartment compartment, WarehouseShelf shelf,
-            int compartmentIndex, Guid id, InteractablePackagingBox_Item box)
-        {
-            var stored = compartment.GetInteractablePackagingBoxList();
-            if (stored == null || !stored.Contains(box))
-            {
-                _playerBox?.DetachMirroredHold(box, id);
-                _playerBox?.ReleaseHeldObject(box);
-                RemoveListedBox(compartment, id, box);
-                if (!StoreLiveBox(compartment, box))
-                {
-                    return false;
-                }
-            }
-
-            _boxes.BindStoredLiveBox(id, box);
-            WarehouseBoxLocations.RegisterLive(id, box, shelf, compartmentIndex,
-                LiveSlotOf(compartment, box));
             return true;
         }
 
@@ -1001,51 +823,19 @@ namespace CardShopCoop.Modules.World
         private bool TryPopTopEntry(ShelfCompartment compartment, out WarehouseBoxFacts facts)
         {
             facts = default;
-            if (_usesRecords)
-            {
-                var count = RecordCount(compartment);
-                if (count == 0 || !TryReadRecord(compartment, count - 1, out facts))
-                {
-                    return false;
-                }
-
-                var args = new object[] { null };
-                if (!(bool)_recordPop.Invoke(compartment, args))
-                {
-                    return false;
-                }
-
-                CanonicalizeRecords(compartment);
-                return true;
-            }
-
-            var box = GetLastBoxOrNull(compartment);
-            if (box?.m_ItemCompartment == null)
-            {
-                facts = default;
-                return false;
-            }
-
-            if (!box.CanPickup())
-            {
-                box.StopLerpToTransform();
-            }
-
-            facts = DescribeLiveBox(box);
-            if (!facts.IsValid)
+            var count = RecordCount(compartment);
+            if (count == 0 || !TryReadRecord(compartment, count - 1, out facts))
             {
                 return false;
             }
 
-            var id = _boxes.TryGetId(box, out var known) ? known : Guid.Empty;
-            compartment.RemoveBox(box);
-            if (id != Guid.Empty)
+            var args = new object[] { null };
+            if (!(bool)_recordPop.Invoke(compartment, args))
             {
-                WarehouseBoxLocations.ClearLocation(id);
-                BoxIdentityLifecycle.ForgetBox(box);
+                return false;
             }
 
-            _boxes.DestroyWithoutNotification(box);
+            CanonicalizeRecords(compartment);
             return true;
         }
 
@@ -1065,8 +855,9 @@ namespace CardShopCoop.Modules.World
 
             if (message.Compartments.Count == 0)
             {
-                CoopPlugin.Log.LogWarning("[warehouse] ignored an empty authoritative state; "
-                    + "an empty list is not an authoritative clear.");
+                // The host's full state contains every warehouse compartment it has. An empty
+                // list is an authoritative clear, not a no-op.
+                ClearAllWarehouseState();
                 return;
             }
 
@@ -1085,6 +876,14 @@ namespace CardShopCoop.Modules.World
                         + " compartment " + (entry?.CompartmentIndex ?? -1)
                         + " is not loaded yet.");
                     _deferredStates.Add(message);
+                    return;
+                }
+
+                if (!ValidateAuthoritativeCompartment(entry))
+                {
+                    CoopPlugin.Log.LogError("[warehouse] authoritative compartment state for shelf "
+                        + entry.Shelf.name + " compartment " + entry.CompartmentIndex
+                        + " is malformed; refusing the whole state.");
                     return;
                 }
             }
@@ -1110,122 +909,121 @@ namespace CardShopCoop.Modules.World
             {
                 return;
             }
+            entry.Boxes ??= new List<WarehouseBoxEntry>();
 
-            if (entry.ItemType == EItemType.None && entry.Boxes.Count > 0)
+            var keepIds = IncomingBoxIds(entry.Boxes);
+            ClearLiveBoxes(compartment, null, keepIds);
+            ClearStoredRecords(compartment, keepIds);
+            var ids = new List<Guid>(entry.Boxes.Count);
+            for (var i = 0; i < entry.Boxes.Count; i++)
             {
-                CoopPlugin.Log.LogError("[warehouse] authoritative header has no ItemType for "
-                    + "shelf " + entry.Shelf.name + " compartment " + entry.CompartmentIndex
-                    + "; the compartment state is refused rather than inferred from its entries.");
-                return;
+                var box = entry.Boxes[i];
+                if (box == null || box.Amount <= 0)
+                {
+                    continue;
+                }
+
+                // ValidateAuthoritativeCompartment already guaranteed a unique, non-empty id.
+                var id = box.Ref.Identity;
+                AddRecord(compartment, entry.ItemType, box.Amount, entry.IsBig);
+                ids.Add(id);
             }
 
-            if (_usesRecords)
+            WarehouseBoxLocations.SetCompartmentOrder(entry.Shelf, entry.CompartmentIndex,
+                ids, true);
+            CanonicalizeRecords(compartment);
+            if (ids.Count == 0)
             {
-                ClearLiveBoxes(compartment);
-                ClearStoredRecords(compartment);
-                var ids = new List<Guid>(entry.Boxes.Count);
-                for (var i = 0; i < entry.Boxes.Count; i++)
-                {
-                    var box = entry.Boxes[i];
-                    if (box == null || box.Amount <= 0)
-                    {
-                        continue;
-                    }
-
-                    var id = box.Ref?.Identity ?? Guid.Empty;
-                    if (id == Guid.Empty || ids.Contains(id))
-                    {
-                        id = Guid.NewGuid();
-                    }
-
-                    AddRecord(compartment, entry.ItemType, box.Amount, entry.IsBig);
-                    ids.Add(id);
-                }
-
-                WarehouseBoxLocations.SetCompartmentOrder(entry.Shelf, entry.CompartmentIndex,
-                    ids, true);
-                CanonicalizeRecords(compartment);
-                if (ids.Count == 0)
-                {
-                    compartment.SetCompartmentBoxType(entry.IsBig);
-                    if (entry.ItemType != EItemType.None)
-                    {
-                        compartment.SetCompartmentItemType(entry.ItemType);
-                    }
-                }
-            }
-            else
-            {
-                var reuse = new Dictionary<Guid, InteractablePackagingBox_Item>();
-                for (var i = 0; i < entry.Boxes.Count; i++)
-                {
-                    var candidate = entry.Boxes[i];
-                    var candidateId = candidate?.Ref?.Identity ?? Guid.Empty;
-                    if (candidateId == Guid.Empty)
-                    {
-                        continue;
-                    }
-
-                    var live = candidate.Box;
-                    if (live == null && _boxes.TryGetBox(candidateId, out var known))
-                    {
-                        live = known;
-                    }
-
-                    if (live is InteractablePackagingBox_Item item)
-                    {
-                        reuse[candidateId] = item;
-                    }
-                }
-
-                ClearLiveBoxes(compartment, reuse);
-                for (var i = 0; i < entry.Boxes.Count; i++)
-                {
-                    var box = entry.Boxes[i];
-                    if (box == null || box.Amount <= 0)
-                    {
-                        continue;
-                    }
-
-                    var id = box.Ref?.Identity ?? Guid.Empty;
-                    if (id == Guid.Empty)
-                    {
-                        id = Guid.NewGuid();
-                    }
-
-                    InteractablePackagingBox_Item spawned;
-                    if (reuse.TryGetValue(id, out var reused) && reused != null
-                        && (reused.m_IsStored || StoreLiveBox(compartment, reused)))
-                    {
-                        spawned = reused;
-                    }
-                    else if (!StoreLiveBox(compartment, entry.ItemType, box.Amount, entry.IsBig,
-                                 out spawned))
-                    {
-                        CoopPlugin.Log.LogWarning("[warehouse] baseline could not materialize "
-                            + entry.ItemType + " x" + box.Amount + " on shelf "
-                            + entry.Shelf.name + " compartment " + entry.CompartmentIndex + ".");
-                        continue;
-                    }
-
-                    _boxes.BindStoredLiveBox(id, spawned);
-                    WarehouseBoxLocations.RegisterLive(id, spawned, entry.Shelf,
-                        entry.CompartmentIndex, i);
-                }
-
-                if (entry.Boxes.Count == 0)
-                {
-                    compartment.SetCompartmentBoxType(entry.IsBig);
-                    if (entry.ItemType != EItemType.None)
-                    {
-                        compartment.SetCompartmentItemType(entry.ItemType);
-                    }
-                }
+                // The authoritative header is the whole truth for an empty compartment,
+                // including None; keep an old item type/price tag from surviving a clear.
+                compartment.SetCompartmentBoxType(entry.IsBig);
+                compartment.SetCompartmentItemType(entry.ItemType);
             }
 
             var key = CompartmentKey(entry.Shelf, entry.CompartmentIndex);
             BumpEpoch(key);
             AbandonMutation(key);
+        }
+
+        /// <summary>An authoritative empty state means the host has no warehouse contents. Clear
+        /// every local compartment instead of leaving stale boxes behind.</summary>
+        private void ClearAllWarehouseState()
+        {
+            var compartments = GetWarehouseCompartments();
+            _applyingRemote = true;
+            try
+            {
+                for (var i = 0; i < compartments.Count; i++)
+                {
+                    var compartment = compartments[i];
+                    var shelf = compartment.GetWarehouseShelf();
+                    if (shelf == null)
+                    {
+                        continue;
+                    }
+
+                    // No keep set: this is a permanent clear, so the live-object information goes
+                    // with the boxes.
+                    ClearLiveBoxes(compartment);
+                    ClearStoredRecords(compartment);
+
+                    WarehouseBoxLocations.SetCompartmentOrder(shelf, compartment.GetIndex(),
+                        new List<Guid>(), true);
+                    compartment.SetCompartmentBoxType(false);
+                    compartment.SetCompartmentItemType(EItemType.None);
+                    var key = CompartmentKey(shelf, compartment.GetIndex());
+                    BumpEpoch(key);
+                    AbandonMutation(key);
+                }
+            }
+            finally
+            {
+                _applyingRemote = false;
+            }
+        }
+
+        /// <summary>Host state is trusted, but it must be internally addressable: a compartment
+        /// with boxes needs a header, and every entry needs a unique non-empty identity. Refuse a
+        /// malformed state instead of inventing a Guid the host has never seen.</summary>
+        private static bool ValidateAuthoritativeCompartment(WarehouseCompartmentState entry)
+        {
+            if (entry == null)
+            {
+                return false;
+            }
+            if (entry.Boxes == null)
+            {
+                return true;
+            }
+            if (entry.ItemType == EItemType.None && entry.Boxes.Count > 0)
+            {
+                CoopPlugin.Log.LogError("[warehouse] authoritative header has no ItemType for "
+                    + "shelf " + (entry.Shelf == null ? "<unresolved>" : entry.Shelf.name)
+                    + " compartment " + entry.CompartmentIndex + ".");
+                return false;
+            }
+
+            var ids = new HashSet<Guid>();
+            for (var i = 0; i < entry.Boxes.Count; i++)
+            {
+                var box = entry.Boxes[i];
+                if (box == null || box.Amount <= 0)
+                {
+                    continue;
+                }
+
+                var id = box.Ref?.Identity ?? Guid.Empty;
+                if (id == Guid.Empty || !ids.Add(id))
+                {
+                    CoopPlugin.Log.LogError("[warehouse] authoritative entry "
+                        + (id == Guid.Empty ? "has no identity" : "repeats identity " + id)
+                        + " on shelf " + (entry.Shelf == null ? "<unresolved>" : entry.Shelf.name)
+                        + " compartment " + entry.CompartmentIndex + ".");
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         internal void ClientApplyDelta(WarehouseDeltaMessage message)
@@ -1266,7 +1064,7 @@ namespace CardShopCoop.Modules.World
                 if (message.IsStore)
                 {
                     ApplyStoreValues(message.Ref.Shelf, message.Ref.CompartmentIndex, id,
-                        message.ItemType, message.Amount, message.IsBig, message.Box);
+                        message.ItemType, message.Amount, message.IsBig);
                 }
                 else
                 {
@@ -1281,7 +1079,7 @@ namespace CardShopCoop.Modules.World
         }
 
         private bool ApplyStoreValues(WarehouseShelf shelf, int compartmentIndex, Guid id,
-            EItemType itemType, int amount, bool isBig, InteractablePackagingBox liveBox)
+            EItemType itemType, int amount, bool isBig)
         {
             var compartment = ResolveCompartment(shelf, compartmentIndex);
             if (compartment == null || id == Guid.Empty)
@@ -1291,70 +1089,33 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            if (_usesRecords)
+            if (!HasStoredEntry(shelf, compartmentIndex, id))
             {
-                if (!HasStoredEntry(shelf, compartmentIndex, id))
+                AddRecord(compartment, itemType, amount, isBig);
+                WarehouseBoxLocations.AppendStored(id, shelf, compartmentIndex,
+                    WarehouseBoxLocations.NextSequence());
+                CanonicalizeRecords(compartment);
+            }
+
+            // The authoritative store replaces any live replica on this backend.
+            if (_boxes.TryGetBox(id, out var replica)
+                && replica is InteractablePackagingBox_Item item)
+            {
+                _playerBox?.DetachMirroredHold(item, id);
+                _playerBox?.ReleaseHeldObject(item);
+                if (!_host)
                 {
-                    AddRecord(compartment, itemType, amount, isBig);
-                    WarehouseBoxLocations.AppendStored(id, shelf, compartmentIndex,
-                        WarehouseBoxLocations.NextSequence());
-                    CanonicalizeRecords(compartment);
+                    _boxes.ClientConvertToStoredRecord(id);
                 }
-
-                // The authoritative store replaces any live replica on this backend.
-                if (_boxes.TryGetBox(id, out var replica)
-                    && replica is InteractablePackagingBox_Item item)
+                else
                 {
-                    _playerBox?.DetachMirroredHold(item, id);
-                    _playerBox?.ReleaseHeldObject(item);
-                    if (!_host)
-                    {
-                        _boxes.ClientConvertToStoredRecord(id);
-                    }
-                    else
-                    {
-                        BoxIdentityLifecycle.ForgetBox(item);
-                        _boxes.DestroyWithoutNotification(item);
-                    }
+                    // The stored record keeps this id; preserve the box's extended
+                    // information across the representation change.
+                    BoxIdentityLifecycle.DetachBox(item);
+                    _boxes.DestroyWithoutNotification(item);
                 }
-
-                return true;
             }
 
-            var existing = FindLiveBox(compartment, id);
-            if (existing != null)
-            {
-                WarehouseBoxLocations.RegisterLive(id, existing, shelf, compartmentIndex,
-                    LiveSlotOf(compartment, existing));
-                return true;
-            }
-
-            if (liveBox is InteractablePackagingBox_Item itemBox)
-            {
-                _playerBox?.DetachMirroredHold(itemBox, id);
-                _playerBox?.ReleaseHeldObject(itemBox);
-                RemoveListedBox(compartment, id, itemBox);
-                if (!StoreLiveBox(compartment, itemBox)
-                    && !StoreLiveBox(compartment, itemType, amount, isBig, out itemBox))
-                {
-                    return false;
-                }
-
-                _boxes.BindStoredLiveBox(id, itemBox);
-                WarehouseBoxLocations.RegisterLive(id, itemBox, shelf, compartmentIndex,
-                    LiveSlotOf(compartment, itemBox));
-                _playerBox?.ReleaseRemoteHoldForBox(itemBox);
-                return true;
-            }
-
-            if (!StoreLiveBox(compartment, itemType, amount, isBig, out var spawned))
-            {
-                return false;
-            }
-
-            _boxes.BindStoredLiveBox(id, spawned);
-            WarehouseBoxLocations.RegisterLive(id, spawned, shelf, compartmentIndex,
-                LiveSlotOf(compartment, spawned));
             return true;
         }
 
@@ -1362,114 +1123,84 @@ namespace CardShopCoop.Modules.World
             int compartmentIndex, Guid id, InteractablePackagingBox heldBox,
             EItemType itemType, int amount, bool isBig)
         {
-            if (_usesRecords)
+            var count = RecordCount(compartment);
+            if (count == 0)
             {
-                var count = RecordCount(compartment);
-                if (count == 0)
+                // The wire converter registers an unknown store identity at its wire location
+                // before the handler adds the record. A take can therefore arrive while the
+                // registry knows the id but the game record list is empty (the store delta never
+                // added it). Treat the take as authoritative: materialize the removed live box
+                // from the delta facts instead of leaving a registry-only ghost.
+                if (id != Guid.Empty && IsValidBox(itemType, amount)
+                    && !_boxes.TryGetBox(id, out _))
                 {
-                    // The wire converter registers an unknown store identity at its wire location
-                    // before the handler adds the record. A take can therefore arrive while the
-                    // registry knows the id but the game record list is empty (the store delta
-                    // never added it). Treat the take as authoritative: materialize the removed
-                    // live box from the delta facts instead of leaving a registry-only ghost.
-                    if (id != Guid.Empty && IsValidBox(itemType, amount)
-                        && !_boxes.TryGetBox(id, out _))
+                    WarehouseBoxLocations.ClearLocation(id);
+                    var removed = _boxes.MaterializeWarehouseStored(itemType, amount, isBig);
+                    if (removed != null)
                     {
-                        WarehouseBoxLocations.ClearLocation(id);
-                        var removed = _boxes.MaterializeWarehouseStored(itemType, amount, isBig);
-                        if (removed != null)
-                        {
-                            BoxIdentityLifecycle.BindClientBox(id, removed);
-                            removed.m_IsStored = false;
-                            if (heldBox != null)
-                            {
-                                BoxNetworkInteraction.ApplyPose(removed,
-                                    heldBox.transform.position, heldBox.transform.rotation);
-                            }
-
-                            CoopPlugin.Log.LogInfo("[warehouse] materialized registry-only take id="
-                                + id + " type=" + itemType + " amount=" + amount + ".");
-                        }
-                    }
-
-                    return;
-                }
-
-                var topId = GetStoredId(shelf, compartmentIndex, count - 1);
-                if (id != Guid.Empty && topId != Guid.Empty && id != topId)
-                {
-                    // A take is always a top pop. A different id means this peer's view was stale;
-                    // the authoritative top still leaves, so log and keep top semantics.
-                    CoopPlugin.Log.LogWarning("[warehouse] take delta named id=" + id
-                        + " but the top entry is id=" + topId + "; popping the authoritative top.");
-                }
-
-                var args = new object[] { null };
-                if (!(bool)_recordPop.Invoke(compartment, args))
-                {
-                    return;
-                }
-
-                CanonicalizeRecords(compartment);
-
-                // The host may be on the live backend: its removed box continues as a live
-                // representation (a player's hand or a worker's carry), but this record-backed
-                // peer has no live object for the id. Materialize one and bind the same id so the
-                // following pickup/throw/worker snapshot can resolve it. A record-backed host
-                // announces the respawn as an EntityAdded; that then adopts this object instead of
-                // creating a duplicate.
-                if (id != Guid.Empty && !_boxes.TryGetBox(id, out _)
-                    && IsValidBox(itemType, amount))
-                {
-                    var replica = _boxes.MaterializeWarehouseStored(itemType, amount, isBig);
-                    if (replica != null)
-                    {
-                        BoxIdentityLifecycle.BindClientBox(id, replica);
-                        replica.m_IsStored = false;
-                        WarehouseBoxLocations.ClearLocation(id);
+                        // This is the peer's copy of a box the host has just taken. Bind it as a
+                        // stored-live identity (physics off, stale binding replaced), not as a
+                        // free physics box, while leaving m_IsStored false so the host's
+                        // stored-hold guard still accepts the follow-up pickup.
+                        _boxes.BindStoredLiveBox(id, removed);
+                        removed.m_IsStored = false;
                         if (heldBox != null)
                         {
-                            BoxNetworkInteraction.ApplyPose(replica, heldBox.transform.position,
-                                heldBox.transform.rotation);
+                            BoxNetworkInteraction.ApplyPose(removed,
+                                heldBox.transform.position, heldBox.transform.rotation);
                         }
 
-                        CoopPlugin.Log.LogInfo("[warehouse] materialized live take id=" + id
-                            + " type=" + itemType + " amount=" + amount + ".");
+                        CoopPlugin.Log.LogInfo("[warehouse] materialized registry-only take id="
+                            + id + " type=" + itemType + " amount=" + amount + ".");
                     }
                 }
 
                 return;
             }
 
-            var stored = FindStoredLiveBox(compartment, id);
-            if (stored == null)
+            var topId = GetStoredId(shelf, compartmentIndex, count - 1);
+            if (id != Guid.Empty && topId != Guid.Empty && id != topId)
             {
-                CoopPlugin.Log.LogWarning("[warehouse] take delta for id=" + id
-                    + " had no stored live box on this peer.");
+                // A take is always a top pop. A different id means this peer's view was stale;
+                // the authoritative top still leaves, so log and keep top semantics.
+                CoopPlugin.Log.LogWarning("[warehouse] take delta named id=" + id
+                    + " but the top entry is id=" + topId + "; popping the authoritative top.");
+            }
+
+            var args = new object[] { null };
+            if (!(bool)_recordPop.Invoke(compartment, args))
+            {
                 return;
             }
 
-            var storedId = _boxes.TryGetId(stored, out var known) ? known : id;
-            var keep = heldBox != null && _boxes.TryGetId(heldBox, out var heldId)
-                && heldId == storedId;
-            compartment.RemoveBox(stored);
-            if (keep)
-            {
-                // The same identity is the representation the observer will keep using; it is no
-                // longer a stored entry, so it has no shelf location.
-                BoxIdentityLifecycle.BindClientBox(storedId, stored);
-                stored.m_IsStored = false;
-                WarehouseBoxLocations.RegisterLive(storedId, stored, null, -1, -1);
-                return;
-            }
+            CanonicalizeRecords(compartment);
 
-            BoxIdentityLifecycle.ForgetBox(stored);
-            _boxes.DestroyWithoutNotification(stored);
-            WarehouseBoxLocations.Forget(storedId);
+            // The host's take respawns a live box and announces it as EntityAdded. Materialize a
+            // local replica now and bind the same id so a following pickup/throw/worker snapshot
+            // can resolve it; the EntityAdded then adopts this object instead of duplicating it.
+            if (id != Guid.Empty && !_boxes.TryGetBox(id, out _)
+                && IsValidBox(itemType, amount))
+            {
+                var replica = _boxes.MaterializeWarehouseStored(itemType, amount, isBig);
+                if (replica != null)
+                {
+                    _boxes.BindStoredLiveBox(id, replica);
+                    replica.m_IsStored = false;
+                    WarehouseBoxLocations.ClearLocation(id);
+                    if (heldBox != null)
+                    {
+                        BoxNetworkInteraction.ApplyPose(replica, heldBox.transform.position,
+                            heldBox.transform.rotation);
+                    }
+
+                    CoopPlugin.Log.LogInfo("[warehouse] materialized live take id=" + id
+                        + " type=" + itemType + " amount=" + amount + ".");
+                }
+            }
         }
 
         private void RemoveStoredRecordById(WarehouseShelf shelf, int compartmentIndex,
-            ShelfCompartment compartment, Guid id)
+            ShelfCompartment compartment, Guid id, Guid keepId = default(Guid))
         {
             var count = RecordCount(compartment);
             var ids = WarehouseBoxLocations.EnsureCompartmentSize(shelf, compartmentIndex, count);
@@ -1481,7 +1212,7 @@ namespace CardShopCoop.Modules.World
 
             var entries = CaptureStoredEntries(compartment, shelf, compartmentIndex, ids);
             entries.RemoveAt(index);
-            RebuildStoredRecords(compartment, shelf, compartmentIndex, entries);
+            RebuildStoredRecords(compartment, shelf, compartmentIndex, entries, keepId);
         }
 
         private void OnMutationRejected(long key)
@@ -1490,26 +1221,10 @@ namespace CardShopCoop.Modules.World
             _applyingRemote = true;
             try
             {
-                if (_queuedMutations.TryGetValue(key, out var queue))
-                {
-                    // These local actions already ran the game path but were never sent. Undo them
-                    // in reverse order so a generic rejection restores the pre-action compartment
-                    // state; they are never replayed as followers.
-                    var pending = queue.ToArray();
-                    for (var i = pending.Length - 1; i >= 0; i--)
-                    {
-                        try
-                        {
-                            pending[i].Cancel?.Invoke();
-                        }
-                        catch (Exception error)
-                        {
-                            CoopPlugin.Log.LogWarning("[warehouse] cancelling a dependent queued "
-                                + "mutation failed: " + error);
-                        }
-                    }
-                }
-
+                // These local actions already ran the game path but were never sent. Undo them
+                // in reverse order so a generic rejection restores the pre-action compartment
+                // state; they are never replayed as followers.
+                CancelQueuedMutations(key);
                 DropQueuedMutations(key);
                 if (_inFlightMutations.TryGetValue(key, out var mutation))
                 {
@@ -1618,16 +1333,47 @@ namespace CardShopCoop.Modules.World
 
         private void AbandonMutation(long key)
         {
+            // The authoritative state has already replaced this compartment. Cancel the local
+            // effects of actions that were never sent; their epoch-guarded undo is a no-op after
+            // the state's BumpEpoch.
+            CancelQueuedMutations(key);
+
             if (_inFlightMutations.TryGetValue(key, out var mutation)
                 && mutation.ActionId != Guid.Empty)
             {
                 _predictionCompartments.Remove(mutation.ActionId);
-                ActionLedger.Ack(mutation.ActionId);
+                // Retire through the ledger instead of Ack: a trailing generic rollback must not
+                // invert the authority that just replaced this compartment. ApplyAuthoritative
+                // runs the action's epoch-guarded undo and settles any newer ledger action on the
+                // key; an already-retired id is simply applied as a no-op.
+                ActionLedger.ApplyAuthoritative(mutation.ActionId, () => { });
             }
 
             _inFlightPrediction.Remove(key);
             _inFlightMutations.Remove(key);
             _queuedMutations.Remove(key);
+        }
+
+        private void CancelQueuedMutations(long key)
+        {
+            if (!_queuedMutations.TryGetValue(key, out var queue) || queue.Count == 0)
+            {
+                return;
+            }
+
+            var pending = queue.ToArray();
+            for (var i = pending.Length - 1; i >= 0; i--)
+            {
+                try
+                {
+                    pending[i].Cancel?.Invoke();
+                }
+                catch (Exception error)
+                {
+                    CoopPlugin.Log.LogWarning("[warehouse] cancelling a dependent queued "
+                        + "mutation failed: " + error);
+                }
+            }
         }
 
         private void AbandonAllMutations()
@@ -1663,7 +1409,7 @@ namespace CardShopCoop.Modules.World
         {
             var payload = liveBox;
             var temporary = false;
-            if (payload == null && _usesRecords)
+            if (payload == null)
             {
                 // The game destroys a record-store's live box immediately. A queued store's intent
                 // is sent later, so materialize a short-lived payload solely to name the identity on
@@ -1696,8 +1442,8 @@ namespace CardShopCoop.Modules.World
             {
                 return WorldAction.Submit(PredictionScope(key), intent,
                     () => ApplyStoreValues(shelf, compartmentIndex, sourceRef.Identity,
-                        facts.ItemType, facts.Amount, facts.IsBig, liveBox),
-                    () => UndoStore(key, epoch, shelf, compartmentIndex, sourceRef, facts, liveBox,
+                        facts.ItemType, facts.Amount, facts.IsBig),
+                    () => UndoStore(key, epoch, shelf, compartmentIndex, sourceRef, facts,
                         snapshot),
                     () => OnMutationRejected(key));
             }
@@ -1726,7 +1472,7 @@ namespace CardShopCoop.Modules.World
         }
 
         private void UndoStore(long key, long epoch, WarehouseShelf shelf, int compartmentIndex,
-            WarehouseShelfBoxRef sourceRef, WarehouseBoxFacts facts, InteractablePackagingBox liveBox,
+            WarehouseShelfBoxRef sourceRef, WarehouseBoxFacts facts,
             WarehouseCompartmentState snapshot)
         {
             if (EpochOf(key) != epoch)
@@ -1740,23 +1486,14 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (_usesRecords)
+            if (snapshot != null)
             {
-                if (snapshot != null)
-                {
-                    RebuildFromSnapshot(compartment, snapshot);
-                }
-                else
-                {
-                    RemoveStoredRecordById(shelf, compartmentIndex, compartment,
-                        sourceRef.Identity);
-                }
+                RebuildFromSnapshot(compartment, snapshot, sourceRef.Identity);
             }
-            else if (FindStoredLiveBox(compartment, sourceRef.Identity) is { } stored)
+            else
             {
-                compartment.RemoveBox(stored);
-                stored.m_IsStored = false;
-                WarehouseBoxLocations.ClearLocation(sourceRef.Identity);
+                RemoveStoredRecordById(shelf, compartmentIndex, compartment,
+                    sourceRef.Identity, sourceRef.Identity);
             }
 
             if (!_boxes.ClientEnsureWarehouseTake(sourceRef.Identity, facts.ItemType, facts.Amount,
@@ -1787,72 +1524,36 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            if (_usesRecords && HasStoredEntry(shelf, compartmentIndex, sourceRef.Identity))
-            {
-                return;
-            }
-
-            if (!_usesRecords && FindLiveBox(compartment, sourceRef.Identity) != null)
+            if (HasStoredEntry(shelf, compartmentIndex, sourceRef.Identity))
             {
                 return;
             }
 
             var createdId = createdBox is PackagingBoxEntityDescriptor descriptor
                 ? descriptor.BoxNetworkId : Guid.Empty;
-            if (_usesRecords)
+            if (held != null && _boxes.TryGetId(held, out var heldId) && heldId == createdId
+                && !BoxNetworkInteraction.IsStoredBox(held))
             {
-                if (held != null && _boxes.TryGetId(held, out var heldId) && heldId == createdId
-                    && !BoxNetworkInteraction.IsStoredBox(held))
-                {
-                    _playerBox?.ReleaseHeldObject(held);
-                    BoxIdentityLifecycle.ForgetBox(held);
-                    _boxes.DestroyWithoutNotification(held);
-                }
-
-                AddRecord(compartment, facts.ItemType, facts.Amount, facts.IsBig);
-                // The game appended the restored record. Give any pre-existing records their ids
-                // first, then align the restored id with the append before the canonical sort.
-                WarehouseBoxLocations.EnsureCompartmentSize(shelf, compartmentIndex,
-                    Math.Max(0, RecordCount(compartment) - 1));
-                var ids = new List<Guid>();
-                WarehouseBoxLocations.CopyCompartmentOrder(shelf, compartmentIndex, ids);
-                ids.Add(sourceRef.Identity);
-                WarehouseBoxLocations.SetCompartmentOrder(shelf, compartmentIndex, ids, false);
-                CanonicalizeRecords(compartment);
-                return;
+                _playerBox?.ReleaseHeldObject(held);
+                // The restored record keeps the id; preserve the logical box's information.
+                BoxIdentityLifecycle.DetachBox(held);
+                _boxes.DestroyWithoutNotification(held);
             }
 
-            var stored = _boxes.TryGetBox(sourceRef.Identity, out var live)
-                ? live as InteractablePackagingBox_Item : null;
-            if (stored == null && held is InteractablePackagingBox_Item heldItem)
-            {
-                stored = heldItem;
-            }
-
-            if (stored == null
-                && !_boxes.ClientEnsureWarehouseTake(sourceRef.Identity, facts.ItemType,
-                    facts.Amount, facts.IsBig, out stored))
-            {
-                CoopPlugin.Log.LogWarning("[warehouse] take rollback could not restore id="
-                    + sourceRef.Identity + ".");
-                return;
-            }
-
-            _playerBox?.ReleaseLocalHold(sourceRef.Identity);
-            if (!StoreLiveBox(compartment, stored))
-            {
-                CoopPlugin.Log.LogWarning("[warehouse] take rollback could not re-store id="
-                    + sourceRef.Identity + ".");
-                return;
-            }
-
-            _boxes.BindStoredLiveBox(sourceRef.Identity, stored);
-            WarehouseBoxLocations.RegisterLive(sourceRef.Identity, stored, shelf, compartmentIndex,
-                LiveSlotOf(compartment, stored));
+            AddRecord(compartment, facts.ItemType, facts.Amount, facts.IsBig);
+            // The game appended the restored record. Give any pre-existing records their ids
+            // first, then align the restored id with the append before the canonical sort.
+            WarehouseBoxLocations.EnsureCompartmentSize(shelf, compartmentIndex,
+                Math.Max(0, RecordCount(compartment) - 1));
+            var ids = new List<Guid>();
+            WarehouseBoxLocations.CopyCompartmentOrder(shelf, compartmentIndex, ids);
+            ids.Add(sourceRef.Identity);
+            WarehouseBoxLocations.SetCompartmentOrder(shelf, compartmentIndex, ids, false);
+            CanonicalizeRecords(compartment);
         }
 
         private void RebuildFromSnapshot(ShelfCompartment compartment,
-            WarehouseCompartmentState snapshot)
+            WarehouseCompartmentState snapshot, Guid keepId = default(Guid))
         {
             var shelf = snapshot.Shelf ?? compartment.GetWarehouseShelf();
             if (shelf == null)
@@ -1860,7 +1561,14 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            ClearStoredRecords(compartment);
+            var keep = IncomingBoxIds(snapshot.Boxes);
+            if (keepId != Guid.Empty)
+            {
+                // A store rollback returns this id to the hand; the record was only a temporary
+                // representation, so its extended information must survive the record teardown.
+                keep.Add(keepId);
+            }
+            ClearStoredRecords(compartment, keep);
             var ids = new List<Guid>(snapshot.Boxes.Count);
             for (var i = 0; i < snapshot.Boxes.Count; i++)
             {
@@ -1873,7 +1581,7 @@ namespace CardShopCoop.Modules.World
                 var id = entry.Ref?.Identity ?? Guid.Empty;
                 if (id == Guid.Empty)
                 {
-                    id = Guid.NewGuid();
+                    continue;
                 }
 
                 AddRecord(compartment, snapshot.ItemType, entry.Amount, snapshot.IsBig);
@@ -1898,43 +1606,20 @@ namespace CardShopCoop.Modules.World
                 CompartmentIndex = compartment.GetIndex(),
             };
             TryGetHeader(compartment, out state.ItemType, out state.IsBig);
-            if (_usesRecords)
+            var count = RecordCount(compartment);
+            var ids = WarehouseBoxLocations.EnsureCompartmentSize(shelf,
+                state.CompartmentIndex, count);
+            for (var i = 0; i < count; i++)
             {
-                var count = RecordCount(compartment);
-                var ids = WarehouseBoxLocations.EnsureCompartmentSize(shelf,
-                    state.CompartmentIndex, count);
-                for (var i = 0; i < count; i++)
-                {
-                    if (!TryReadRecord(compartment, i, out var facts))
-                    {
-                        continue;
-                    }
-
-                    state.Boxes.Add(new WarehouseBoxEntry
-                    {
-                        Ref = MakeRef(shelf, state.CompartmentIndex, ids[i], i),
-                        Amount = facts.Amount,
-                    });
-                }
-
-                return state;
-            }
-
-            var boxes = compartment.GetInteractablePackagingBoxList();
-            for (var i = 0; boxes != null && i < boxes.Count; i++)
-            {
-                var box = boxes[i];
-                if (box?.m_ItemCompartment == null)
+                if (!TryReadRecord(compartment, i, out var facts))
                 {
                     continue;
                 }
 
-                var id = _boxes.TryGetId(box, out var known) ? known : Guid.Empty;
                 state.Boxes.Add(new WarehouseBoxEntry
                 {
-                    Ref = MakeRef(shelf, state.CompartmentIndex, id, i),
-                    Amount = box.m_ItemCompartment.GetItemCount(),
-                    Box = box,
+                    Ref = MakeRef(shelf, state.CompartmentIndex, ids[i], i),
+                    Amount = facts.Amount,
                 });
             }
 
@@ -1954,61 +1639,27 @@ namespace CardShopCoop.Modules.World
                 Shelf = shelf,
                 CompartmentIndex = compartment.GetIndex(),
             };
-            if (_usesRecords)
-            {
-                // The baseline must publish the same order the peer will canonicalize to.
-                CanonicalizeRecords(compartment);
-            }
-
+            // The baseline must publish the same order the peer will canonicalize to.
+            CanonicalizeRecords(compartment);
             TryGetHeader(compartment, out state.ItemType, out state.IsBig);
 
-            if (_usesRecords)
+            var count = RecordCount(compartment);
+            var ids = WarehouseBoxLocations.EnsureCompartmentSize(shelf,
+                state.CompartmentIndex, count);
+            for (var i = 0; i < count; i++)
             {
-                var count = RecordCount(compartment);
-                var ids = WarehouseBoxLocations.EnsureCompartmentSize(shelf,
-                    state.CompartmentIndex, count);
-                for (var i = 0; i < count; i++)
-                {
-                    if (!TryReadRecord(compartment, i, out var facts))
-                    {
-                        continue;
-                    }
-
-                    var id = ids[i];
-                    var live = _boxes.TryGetBox(id, out var liveBox) ? liveBox : null;
-                    state.Boxes.Add(new WarehouseBoxEntry
-                    {
-                        Ref = MakeRef(shelf, state.CompartmentIndex, id, i),
-                        Amount = facts.Amount,
-                        Box = live,
-                    });
-                }
-
-                return state;
-            }
-
-            var boxes = compartment.GetInteractablePackagingBoxList();
-            for (var i = 0; boxes != null && i < boxes.Count; i++)
-            {
-                var box = boxes[i];
-                if (box?.m_ItemCompartment == null)
+                if (!TryReadRecord(compartment, i, out var facts))
                 {
                     continue;
                 }
 
-                var id = _host ? _boxes.EnsureWarehouseHostId(box)
-                    : (_boxes.TryGetId(box, out var known) ? known : Guid.Empty);
-                if (id == Guid.Empty)
-                {
-                    continue;
-                }
-
-                WarehouseBoxLocations.RegisterLive(id, box, shelf, state.CompartmentIndex, i);
+                var id = ids[i];
+                var live = _boxes.TryGetBox(id, out var liveBox) ? liveBox : null;
                 state.Boxes.Add(new WarehouseBoxEntry
                 {
                     Ref = MakeRef(shelf, state.CompartmentIndex, id, i),
-                    Amount = box.m_ItemCompartment.GetItemCount(),
-                    Box = box,
+                    Amount = facts.Amount,
+                    Box = live,
                 });
             }
 
@@ -2077,66 +1728,35 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            if (_usesRecords)
-            {
-                var count = RecordCount(compartment);
-                if (count == 0 || !TryReadRecord(compartment, count - 1, out facts))
-                {
-                    return false;
-                }
-
-                var ids = WarehouseBoxLocations.EnsureCompartmentSize(shelf,
-                    compartment.GetIndex(), count);
-                slot = count - 1;
-                id = ids[slot];
-                live = _boxes.TryGetBox(id, out var recordBox) ? recordBox : null;
-                return true;
-            }
-
-            var box = GetLastBoxOrNull(compartment);
-            if (box?.m_ItemCompartment == null)
+            var count = RecordCount(compartment);
+            if (count == 0 || !TryReadRecord(compartment, count - 1, out facts))
             {
                 return false;
             }
 
-            facts = DescribeLiveBox(box);
-            slot = LiveSlotOf(compartment, box);
-            live = box;
-            id = _boxes.TryGetId(box, out var liveId) ? liveId : Guid.Empty;
-            return facts.IsValid;
+            var ids = WarehouseBoxLocations.EnsureCompartmentSize(shelf,
+                compartment.GetIndex(), count);
+            slot = count - 1;
+            id = ids[slot];
+            live = _boxes.TryGetBox(id, out var recordBox) ? recordBox : null;
+            return true;
         }
 
         private bool TryGetHeader(ShelfCompartment compartment, out EItemType itemType,
             out bool isBig)
         {
             itemType = compartment.GetItemType();
-            if (_usesRecords)
+            var count = RecordCount(compartment);
+            for (var i = 0; i < count; i++)
             {
-                var count = RecordCount(compartment);
-                for (var i = 0; i < count; i++)
+                if (!TryReadRecord(compartment, i, out var first))
                 {
-                    if (!TryReadRecord(compartment, i, out var first))
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    itemType = first.ItemType;
-                    isBig = first.IsBig;
-                    return true;
-                }
-            }
-            else
-            {
-                var boxes = compartment.GetInteractablePackagingBoxList();
-                for (var i = 0; boxes != null && i < boxes.Count; i++)
-                {
-                    if (boxes[i]?.m_ItemCompartment != null)
-                    {
-                        itemType = boxes[i].m_ItemCompartment.GetItemType();
-                        isBig = boxes[i].m_IsBigBox;
-                        return true;
-                    }
-                }
+                itemType = first.ItemType;
+                isBig = first.IsBig;
+                return true;
             }
 
             isBig = ReflectCompartmentIsBig(compartment);
@@ -2156,11 +1776,11 @@ namespace CardShopCoop.Modules.World
             return false;
         }
 
-        /// <summary>Records backend: rebuild the compartment list in the 1.02 order (amount
+        /// <summary>Records backend: rebuild the compartment list in the canonical order (amount
         /// descending, newer insertion first on ties) and publish the matching location slots.</summary>
         private void CanonicalizeRecords(ShelfCompartment compartment, bool immediate = true)
         {
-            if (!_usesRecords || compartment == null)
+            if (compartment == null)
             {
                 return;
             }
@@ -2230,7 +1850,7 @@ namespace CardShopCoop.Modules.World
         /// must remove those matrices or the stored boxes keep rendering in mid-air.</summary>
         internal static void SetStoredBoxVisuals(InteractableObject obj, bool visible)
         {
-            if (!_usesRecords || obj is not WarehouseShelf shelf)
+            if (obj is not WarehouseShelf shelf)
             {
                 return;
             }
@@ -2251,6 +1871,19 @@ namespace CardShopCoop.Modules.World
                 else
                 {
                     HideRecordVisuals(compartment);
+                }
+
+                // Waiting boxes are live children of the compartment, not records in the batcher.
+                // Vanilla deactivates them with the furniture; this peer's copy is not parented,
+                // so it must be toggled explicitly or it keeps rendering in mid-air.
+                var waiting = new List<InteractablePackagingBox_Item>();
+                AddWaitingBoxes(compartment, waiting);
+                for (var w = 0; w < waiting.Count; w++)
+                {
+                    if (waiting[w] != null)
+                    {
+                        waiting[w].gameObject.SetActive(visible);
+                    }
                 }
             }
         }
@@ -2315,8 +1948,16 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private void ClearStoredRecords(ShelfCompartment compartment)
+        private void ClearStoredRecords(ShelfCompartment compartment,
+            ICollection<Guid> keepIds = null)
         {
+            var shelf = compartment.GetWarehouseShelf();
+            var compartmentIndex = compartment.GetIndex();
+            var count = RecordCount(compartment);
+            var ids = shelf != null && count > 0
+                ? WarehouseBoxLocations.EnsureCompartmentSize(shelf, compartmentIndex, count)
+                : null;
+
             while (RecordCount(compartment) > 0)
             {
                 var args = new object[] { null };
@@ -2326,13 +1967,48 @@ namespace CardShopCoop.Modules.World
                         "Warehouse record storage could not be cleared.");
                 }
             }
+
+            // A stored record has no live object to unbind, so its extended information must be
+            // retired here when the record is permanently gone. keepIds covers the records the
+            // incoming authoritative state still names (a representation transition).
+            if (ids == null)
+            {
+                return;
+            }
+            // The location table can retain more order entries than this compartment currently
+            // holds; only the first count slots belong to the records just popped.
+            var captured = Math.Min(count, ids.Count);
+            for (var i = 0; i < captured; i++)
+            {
+                var id = ids[i];
+                if (id == Guid.Empty || (keepIds != null && keepIds.Contains(id)))
+                {
+                    continue;
+                }
+
+                // A live representation may exist outside this compartment (the box is in a
+                // player's hand or a worker is carrying it). That is the same logical box, not a
+                // permanent removal, so keep its information.
+                if (GameObjectIdentityApi.TryResolve(GameObjectId.Box(id), out _))
+                {
+                    continue;
+                }
+
+                ExtendedInformationModule.OnEntityRemoved(GameObjectId.Box(id),
+                    EntityRemovalMode.Destroy);
+            }
         }
 
         private void RebuildStoredRecords(ShelfCompartment compartment, WarehouseShelf shelf,
-            int compartmentIndex, List<WarehouseBoxEntry> entries)
+            int compartmentIndex, List<WarehouseBoxEntry> entries, Guid keepId = default(Guid))
         {
             TryGetHeader(compartment, out var itemType, out var isBig);
-            ClearStoredRecords(compartment);
+            var keep = IncomingBoxIds(entries);
+            if (keepId != Guid.Empty)
+            {
+                keep.Add(keepId);
+            }
+            ClearStoredRecords(compartment, keep);
             var ids = new List<Guid>(entries.Count);
             for (var i = 0; i < entries.Count; i++)
             {
@@ -2345,7 +2021,7 @@ namespace CardShopCoop.Modules.World
                 var id = entry.Ref?.Identity ?? Guid.Empty;
                 if (id == Guid.Empty)
                 {
-                    id = Guid.NewGuid();
+                    continue;
                 }
 
                 AddRecord(compartment, itemType, entry.Amount, isBig);
@@ -2377,16 +2053,72 @@ namespace CardShopCoop.Modules.World
             return entries;
         }
 
-        private void ClearLiveBoxes(ShelfCompartment compartment,
-            IReadOnlyDictionary<Guid, InteractablePackagingBox_Item> reuse = null)
+        /// <summary>The ids an authoritative compartment state names. A live box with one of
+        /// these ids is being replaced by a record (or a different live representation), so its
+        /// identity and extended information must survive the teardown.</summary>
+        private static HashSet<Guid> IncomingBoxIds(IReadOnlyList<WarehouseBoxEntry> boxes)
         {
-            var existing = compartment.GetInteractablePackagingBoxList();
-            if (existing == null)
+            var ids = new HashSet<Guid>();
+            if (boxes == null)
+            {
+                return ids;
+            }
+
+            for (var i = 0; i < boxes.Count; i++)
+            {
+                var id = boxes[i]?.Ref?.Identity ?? Guid.Empty;
+                if (id != Guid.Empty)
+                {
+                    ids.Add(id);
+                }
+            }
+
+            return ids;
+        }
+
+        /// <summary>
+        /// 1.03 keeps a box that was taken from a stored record as a live "waiting box" inside its
+        /// compartment: <c>m_IsStored</c> is true, it is parented to the compartment, and it is
+        /// deliberately NOT added to <c>m_InteractablePackagingBoxList</c>. Every sweep that only
+        /// walks that list therefore misses it. This is the one resolver for those boxes.
+        /// </summary>
+        private static void AddWaitingBoxes(ShelfCompartment compartment,
+            List<InteractablePackagingBox_Item> into)
+        {
+            if (compartment == null || into == null)
             {
                 return;
             }
 
-            var copy = new List<InteractablePackagingBox_Item>(existing);
+            var all = RestockManager.GetItemPackagingBoxList();
+            for (var i = 0; all != null && i < all.Count; i++)
+            {
+                var box = all[i];
+                if (box == null || !box.m_IsStored
+                    || !ReferenceEquals(box.GetBoxStoredCompartment(), compartment))
+                {
+                    continue;
+                }
+
+                if (!into.Contains(box))
+                {
+                    into.Add(box);
+                }
+            }
+        }
+
+        private void ClearLiveBoxes(ShelfCompartment compartment,
+            IReadOnlyDictionary<Guid, InteractablePackagingBox_Item> reuse = null,
+            ICollection<Guid> keepIds = null)
+        {
+            var listed = compartment.GetInteractablePackagingBoxList();
+            if (listed == null)
+            {
+                return;
+            }
+
+            var copy = new List<InteractablePackagingBox_Item>(listed);
+            AddWaitingBoxes(compartment, copy);
             for (var i = 0; i < copy.Count; i++)
             {
                 var box = copy[i];
@@ -2403,7 +2135,7 @@ namespace CardShopCoop.Modules.World
                     WarehouseBoxLocations.ClearLocation(id);
                 }
 
-                if (existing.Contains(box))
+                if (listed.Contains(box))
                 {
                     compartment.RemoveBox(box);
                 }
@@ -2413,6 +2145,22 @@ namespace CardShopCoop.Modules.World
                 {
                     // The authoritative state names this exact object; keep it for the rebuild
                     // instead of destroying and materializing a replacement.
+                    continue;
+                }
+
+                if (keepIds != null && id != Guid.Empty && keepIds.Contains(id))
+                {
+                    // The state represents the same logical box (usually as a stored record).
+                    // Drop only the live object; the id and its extended information survive.
+                    if (_host)
+                    {
+                        BoxIdentityLifecycle.DetachBox(box);
+                        _boxes.DestroyWithoutNotification(box);
+                    }
+                    else
+                    {
+                        _boxes.ClientDetachPhysical(id, box);
+                    }
                     continue;
                 }
 
@@ -2428,80 +2176,6 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private void RemoveListedBox(ShelfCompartment compartment, Guid boxNetworkId,
-            InteractablePackagingBox_Item bound)
-        {
-            var boxes = compartment?.GetInteractablePackagingBoxList();
-            if (boxes == null)
-            {
-                return;
-            }
-
-            for (var i = boxes.Count - 1; i >= 0; i--)
-            {
-                var entry = boxes[i];
-                if (entry == null)
-                {
-                    continue;
-                }
-
-                if (ReferenceEquals(entry, bound)
-                    || (_boxes.TryGetId(entry, out var listedId) && listedId == boxNetworkId))
-                {
-                    compartment.RemoveBox(entry);
-                }
-            }
-        }
-
-        private InteractablePackagingBox_Item FindLiveBox(ShelfCompartment compartment, Guid id)
-        {
-            if (_boxes.TryGetBox(id, out var box) && box is InteractablePackagingBox_Item item)
-            {
-                var stored = compartment.GetInteractablePackagingBoxList();
-                if (stored != null && stored.Contains(item))
-                {
-                    return item;
-                }
-            }
-
-            var boxes = compartment.GetInteractablePackagingBoxList();
-            for (var i = 0; boxes != null && i < boxes.Count; i++)
-            {
-                if (boxes[i] != null && _boxes.TryGetId(boxes[i], out var listedId)
-                    && listedId == id)
-                {
-                    return boxes[i];
-                }
-            }
-
-            return null;
-        }
-
-        private InteractablePackagingBox_Item FindStoredLiveBox(ShelfCompartment compartment,
-            Guid id)
-        {
-            var found = FindLiveBox(compartment, id);
-            if (found != null)
-            {
-                return found;
-            }
-
-            var top = GetLastBoxOrNull(compartment);
-            if (top == null)
-            {
-                return null;
-            }
-
-            if (id == Guid.Empty
-                || (_boxes.TryGetId(top, out var topId) && topId == id)
-                || !_boxes.TryGetId(top, out _))
-            {
-                return top;
-            }
-
-            return null;
-        }
-
         private bool HasStoredEntry(WarehouseShelf shelf, int compartmentIndex, Guid id)
         {
             if (id == Guid.Empty)
@@ -2509,39 +2183,24 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            if (_usesRecords)
+            // A location entry is not proof that the game record exists: the wire converter
+            // pre-registers unknown store ids. The record list is the authoritative store
+            // membership on this backend.
+            var compartment = ResolveCompartment(shelf, compartmentIndex);
+            if (compartment == null)
             {
-                // A location entry is not proof that the game record exists: the wire converter
-                // pre-registers unknown store ids. The record list is the authoritative store
-                // membership on this backend; without this check a store delta was treated as
-                // already present and never added a record.
-                var compartment = ResolveCompartment(shelf, compartmentIndex);
-                if (compartment == null)
-                {
-                    return false;
-                }
-
-                var count = RecordCount(compartment);
-                if (count == 0)
-                {
-                    return false;
-                }
-
-                var records = WarehouseBoxLocations.EnsureCompartmentSize(shelf, compartmentIndex,
-                    count);
-                return records.Contains(id);
+                return false;
             }
 
-            if (WarehouseBoxLocations.TryGetLocation(id, out var location)
-                && location.HasStoredLocation && ReferenceEquals(location.Shelf, shelf)
-                && location.CompartmentIndex == compartmentIndex)
+            var count = RecordCount(compartment);
+            if (count == 0)
             {
-                return true;
+                return false;
             }
 
-            var ids = new List<Guid>();
-            WarehouseBoxLocations.CopyCompartmentOrder(shelf, compartmentIndex, ids);
-            return ids.Contains(id);
+            var records = WarehouseBoxLocations.EnsureCompartmentSize(shelf, compartmentIndex,
+                count);
+            return records.Contains(id);
         }
 
         private bool IsShelvedElsewhere(WarehouseShelf shelf, int compartmentIndex, Guid id,
@@ -2563,25 +2222,6 @@ namespace CardShopCoop.Modules.World
             }
 
             return false;
-        }
-
-        private int LiveSlotOf(ShelfCompartment compartment, InteractablePackagingBox box)
-        {
-            var boxes = compartment?.GetInteractablePackagingBoxList();
-            if (boxes == null)
-            {
-                return -1;
-            }
-
-            for (var i = 0; i < boxes.Count; i++)
-            {
-                if (ReferenceEquals(boxes[i], box))
-                {
-                    return i;
-                }
-            }
-
-            return -1;
         }
 
         private int SlotOf(Guid id)
@@ -2767,44 +2407,6 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        private bool StoreLiveBox(ShelfCompartment compartment, EItemType type, int amount,
-            bool isBig, out InteractablePackagingBox_Item stored)
-        {
-            stored = _boxes.MaterializeWarehouseStored(type, amount, isBig);
-            if (stored == null)
-            {
-                CoopPlugin.Log.LogWarning("Could not materialize an authoritative warehouse box (type="
-                    + type + " amount=" + amount + "); skipping the store.");
-                return false;
-            }
-
-            stored.SetPhysicsEnabled(false);
-            stored.DispenseItem(false, compartment);
-            if (!stored.m_IsStored)
-            {
-                _boxes.DestroyWithoutNotification(stored);
-                stored = null;
-                CoopPlugin.Log.LogWarning("Materialized warehouse box was not stored; skipping.");
-                return false;
-            }
-
-            return true;
-        }
-
-        private static bool StoreLiveBox(ShelfCompartment compartment,
-            InteractablePackagingBox_Item box)
-        {
-            if (box == null)
-            {
-                return false;
-            }
-
-            box.StopLerpToTransform();
-            box.SetPhysicsEnabled(false);
-            box.DispenseItem(false, compartment);
-            return box.m_IsStored;
-        }
-
         private static bool AddRecord(ShelfCompartment compartment, EItemType type, int amount,
             bool isBig)
         {
@@ -2841,25 +2443,12 @@ namespace CardShopCoop.Modules.World
             return facts.IsValid;
         }
 
-        private static InteractablePackagingBox_Item GetLastBoxOrNull(
-            ShelfCompartment compartment)
-        {
-            if (compartment == null)
-            {
-                return null;
-            }
-
-            var boxes = compartment.GetInteractablePackagingBoxList();
-            return boxes == null || boxes.Count == 0 ? null : boxes[boxes.Count - 1];
-        }
-
         private bool CanStore(ShelfCompartment compartment, EItemType itemType, int amount,
             bool isBig)
         {
-            return _usesRecords || _usesLiveBoxes
-                ? WouldVanillaStore(compartment, itemType, amount, isBig)
-                    && IsWarehouse(compartment) && amount <= MaxWarehouseAmount
-                : false;
+            return _usesRecords
+                && WouldVanillaStore(compartment, itemType, amount, isBig)
+                && IsWarehouse(compartment) && amount <= MaxWarehouseAmount;
         }
 
         private static bool WouldVanillaStore(ShelfCompartment compartment, EItemType itemType,
@@ -3014,23 +2603,14 @@ namespace CardShopCoop.Modules.World
                 && _recordPop != null && _recordAdd != null && _recordItem != null
                 && _recordAmount != null && _recordBig != null && _recordItemType != null
                 && _recordList != null;
-            _usesLiveBoxes = AccessTools.Method(typeof(ShelfCompartment),
-                "GetInteractablePackagingBoxList") != null
-                && AccessTools.Method(typeof(ShelfCompartment), "GetLastInteractablePackagingBox") != null
-                && AccessTools.Method(typeof(ShelfCompartment), "AddBox") != null
-                && AccessTools.Method(typeof(ShelfCompartment), "RemoveBox") != null
-                && AccessTools.Method(typeof(WarehouseShelf), "GetStorageCompartmentList") != null;
             if (_usesRecords)
             {
                 CoopPlugin.Log.LogInfo("World warehouse uses record-backed storage.");
             }
-            else if (_recordType == null && _usesLiveBoxes)
-            {
-                CoopPlugin.Log.LogInfo("World warehouse uses live-box storage.");
-            }
             else
             {
-                CoopPlugin.Log.LogError("World warehouse disabled: its storage surface is incomplete.");
+                CoopPlugin.Log.LogError("World warehouse disabled: the record storage surface is "
+                    + "missing. Both live game builds use records; this DLL needs updating.");
             }
         }
     }

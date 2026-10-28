@@ -22,8 +22,8 @@ namespace CardShopCoop.Modules.SaveTransfer
             "m_SaveLoadSlotPanelUIList", All);
 
         // Static CSingleton<T> properties are declared on the closed generic base, not on the
-        // screen type itself. The generic exists in both builds; IsSet is optional and is absent
-        // from the legacy base, so only the reflected beta surface is used when available.
+        // screen type itself. IsSet is resolved reflectively so a build whose base omits it still
+        // loads; both live builds expose it.
         private static readonly Type _singletonType = SaveScreenType == null
             ? null
             : typeof(CSingleton<>).MakeGenericType(SaveScreenType);
@@ -64,8 +64,8 @@ namespace CardShopCoop.Modules.SaveTransfer
         {
             if (_screenIsSet == null)
             {
-                // The legacy build has no IsSet property. UpdateSlot is absent there as well,
-                // but the conservative fallback remains valid if a future legacy patch adds it.
+                // Both live builds expose IsSet. A build without it degrades to "not set", which
+                // is the conservative answer for a UI-shape probe.
                 return false;
             }
 

@@ -1,3 +1,4 @@
+using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 
@@ -58,10 +59,13 @@ namespace CardShopCoop.Modules.Register
         public double Value;
 
         /// <summary>True when the local card payment zeroed the checkout total and queued the
-        /// card income. A mismatched card amount leaves the total untouched and queues nothing.</summary>
+        /// card income. A mismatched card amount leaves the total untouched and queues nothing.
+        /// Local state on the pending action: it tracks whether undo still owes the wallet a
+        /// reversal, so a no-op replay cannot cause a double reversal. Not serialized.</summary>
+        [NonSerialized]
         public bool WalletApplied;
 
-        public override void OnApply() => RegisterActions.CardPayment(Counter, Value);
+        public override void OnApply() => WalletApplied = RegisterActions.CardPayment(Counter, Value);
 
         public override void OnUndo() => RegisterClientBehaviour.Active?.UndoCardPayment(this);
     }
@@ -86,7 +90,13 @@ namespace CardShopCoop.Modules.Register
         public double Paid;
         public double Change;
 
-        public override void OnApply() => RegisterActions.Complete(Counter);
+        /// <summary>True when the local completion queued the checkout's coin event. Local state on
+        /// the pending action: it tracks whether undo still owes the wallet a reversal, so a no-op
+        /// replay or a follower undo cannot reverse the same income twice. Not serialized.</summary>
+        [NonSerialized]
+        public bool WalletApplied;
+
+        public override void OnApply() => WalletApplied = RegisterActions.Complete(Counter);
 
         public override void OnUndo() => RegisterClientBehaviour.Active?.UndoComplete(this);
     }

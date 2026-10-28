@@ -1303,18 +1303,23 @@ namespace CardShopCoop.Modules.World
 
         private static void AddOne(ShelfCompartment compartment, EItemType itemType)
         {
-            var meshData = InventoryBase.GetItemMeshData(itemType);
-            if (meshData == null)
+            var item = Runtime.ItemVisuals.Spawn(itemType, compartment.m_StoredItemListGrp);
+            if (item == null)
             {
                 return;
             }
 
-            var item = ItemSpawnManager.GetItem(compartment.m_StoredItemListGrp);
-            item.SetMesh(meshData.mesh, meshData.material, itemType, meshData.meshSecondary,
-                meshData.materialSecondary, meshData.materialList);
-            item.gameObject.SetActive(true);
             compartment.AddItem(item, addToFront: false);
             PositionStored(compartment);
+
+            // 1.03 caches half-visibility and only re-applies it when the shelf's near/far state
+            // changes. A remote add into a far/facing shelf therefore leaves the new mesh fully
+            // visible until the local player moves.
+            var shelf = compartment.GetShelf();
+            if (shelf != null)
+            {
+                compartment.ApplyHalfVisibility(shelf.m_IsHalfVisible);
+            }
         }
 
         private static void RemoveOne(ShelfCompartment compartment)

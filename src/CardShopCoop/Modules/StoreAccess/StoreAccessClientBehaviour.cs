@@ -82,33 +82,22 @@ namespace CardShopCoop.Modules.StoreAccess
             var shopChanged = CPlayerData.m_IsShopOpen != state.IsShopOpen;
             var warehouseChanged = CPlayerData.m_IsWarehouseDoorClosed
                 != state.IsWarehouseDoorClosed;
-            // Touch only the sign whose authoritative value moved. Both are touched for the
-            // first baseline, which repaints both surfaces. A sign with a pending local toggle is
-            // deliberately not touched by an unrelated update: that toggle owns the sign until
-            // its own echo or rollback settles it.
-            var shopTouched = previous == null || previous.IsShopOpen != state.IsShopOpen;
-            var warehouseTouched = previous == null
-                || previous.IsWarehouseDoorClosed != state.IsWarehouseDoorClosed;
             CPlayerData.m_IsShopOpen = state.IsShopOpen;
             CPlayerData.m_IsWarehouseDoorClosed = state.IsWarehouseDoorClosed;
 
             // A first value is a baseline/reset: repaint without replaying an old swap. A
             // rejection re-anchor always repaints without animating; the optimistic swap is
-            // already being undone by the ledger.
+            // already being undone by the ledger. A baseline or rejection must always repaint,
+            // even if a stale swap flag survived a sign disable/re-enable.
             var animate = !state.Rejected && previous != null;
-            // A baseline or rejection must always repaint, even if a stale swap flag survived a
-            // sign disable/re-enable. Only the echo of a live local action may leave a running
-            // swap alone.
             var forceRefresh = previous == null || state.Rejected;
-            if (shopTouched)
-            {
-                ApplyShopSign(shopChanged, animate, forceRefresh);
-            }
 
-            if (warehouseTouched)
-            {
-                ApplyWarehouseSign(warehouseChanged, animate, forceRefresh);
-            }
+            // Repaint both surfaces on every authoritative state. The repaint is idempotent and
+            // cheap, and it guarantees the faces cannot stay inverted after a first toggle, a
+            // rejection where previous == state, or a stale local swap. A running local swap is
+            // still allowed to finish (Apply*Sign skips it unless authority actually changed).
+            ApplyShopSign(shopChanged, animate, forceRefresh);
+            ApplyWarehouseSign(warehouseChanged, animate, forceRefresh);
 
             CoopPlugin.Log.LogInfo("[store-access] apply shop="
                 + (state.IsShopOpen ? "open" : "closed") + " warehouse="
@@ -137,6 +126,10 @@ namespace CardShopCoop.Modules.StoreAccess
             // coroutine reads the authoritative flag that was just written, so the face still
             // lands on the right side. Outside a swap, repaint from the flag: authority must
             // never leave a stale face behind after a sign disable/re-enable.
+            // A rejection re-anchor must repaint even when the pending undo already touched the
+            // sign: the undo flips from the local value, while this repaint projects the host's
+            // absolute value onto the face. This also heals a first toggle whose local swap was
+            // interrupted or never started.
             if (forceRefresh || changed || !StoreAccessInterop.IsOpenSwapping(sign))
             {
                 StoreAccessInterop.RefreshOpenMesh(sign);

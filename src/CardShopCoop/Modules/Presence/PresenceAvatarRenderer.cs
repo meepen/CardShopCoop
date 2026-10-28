@@ -730,7 +730,7 @@ namespace CardShopCoop.Modules.Presence
 
         /// <summary>Allows one fresh template attempt after the user reopens the character tab.
         /// A persistent failure is logged and latched by <see cref="GetEditorCustomization"/>;
-        /// retrying it on every OnGUI pass is what blanked the window.</summary>
+        /// retrying it on every UI rebuild is what blanked the window.</summary>
         internal void ResetEditorFailure()
         {
             _editorFailed = false;
@@ -746,7 +746,7 @@ namespace CardShopCoop.Modules.Presence
             if (_editorFailed && _editorFailedFemale == female)
             {
                 // Already failed for this gender. Rebuilding it every UI pass would throw from
-                // OnGUI and blank the window; the tab re-open (ResetEditorFailure) retries.
+                // the UI build and blank the window; the tab re-open (ResetEditorFailure) retries.
                 return null;
             }
 
@@ -1655,8 +1655,7 @@ namespace CardShopCoop.Modules.Presence
                     if (meshData != null)
                     {
                         var item = ItemSpawnManager.GetItem(av.Go.transform);
-                        item.SetMesh(meshData.mesh, meshData.material, (EItemType)packIndex,
-                            meshData.meshSecondary, meshData.materialSecondary, meshData.materialList);
+                        Runtime.ItemVisuals.Apply(item, (EItemType)packIndex);
                         item.transform.localPosition = new Vector3(0f, 1.15f, 0.4f);
                         item.transform.localRotation = Quaternion.Euler(35f, 0f, 0f);
                         item.gameObject.SetActive(true);
@@ -1925,8 +1924,7 @@ namespace CardShopCoop.Modules.Presence
                                 }
 
                                 var item = ItemSpawnManager.GetItem(av.Go.transform);
-                                item.SetMesh(meshData.mesh, meshData.material, (EItemType)av.HoldTypes[i],
-                                    meshData.meshSecondary, meshData.materialSecondary, meshData.materialList);
+                                Runtime.ItemVisuals.Apply(item, (EItemType)av.HoldTypes[i]);
                                 // a carried pile: outward from the chest, each tucked behind
                                 // the previous with a slight rise and lean - not a totem pole
                                 item.transform.localPosition = new Vector3(0f, 1.04f + 0.018f * i, 0.36f + 0.055f * i);
@@ -2336,7 +2334,7 @@ namespace CardShopCoop.Modules.Presence
             tmp.alignment = TMPro.TextAlignmentOptions.Center;
             tmp.fontSize = 1.8f;
             tmp.color = color;
-            Util.UnityCompat.SetWordWrapping(tmp, false);
+            tmp.textWrappingMode = TMPro.TextWrappingModes.NoWrap;
             tmp.overflowMode = TMPro.TextOverflowModes.Overflow;
             tmp.rectTransform.sizeDelta = new Vector2(4f, 1f);
             if (_tagFont == null)

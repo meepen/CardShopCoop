@@ -47,14 +47,39 @@ namespace CardShopCoop.Modules.Light
             ApplySwitchModels(isActive);
         }
 
+        private static readonly int LightStateProperty = Shader.PropertyToID("_LightState");
+
         private static void ApplySwitchModels(bool isActive)
         {
+            // The two live builds render the switch differently:
+            //   1.03 Steam  - toggle the on/off model GameObjects (vanilla OnMouseButtonUp).
+            //   1.04 Xbox   - rotate the on-model and drive _LightState on the off-model.
+            // GamePassBuild is the same discriminator PlatformProbe already uses for the save
+            // backend, and the material-property check keeps this safe if the visuals converge.
+            var usesMaterialState = Net.PlatformProbe.GamePassBuild;
             var switches = Resources.FindObjectsOfTypeAll<InteractableLightSwitch>();
             for (var i = 0; i < switches.Length; i++)
             {
                 var lightSwitch = switches[i];
                 if (lightSwitch == null || !lightSwitch.gameObject.scene.IsValid())
                 {
+                    continue;
+                }
+
+                var offRenderer = lightSwitch.m_SwitchOffModel != null
+                    ? lightSwitch.m_SwitchOffModel.GetComponentInChildren<MeshRenderer>(true)
+                    : null;
+                if (usesMaterialState && offRenderer != null
+                    && offRenderer.sharedMaterial != null
+                    && offRenderer.sharedMaterial.HasProperty(LightStateProperty))
+                {
+                    if (lightSwitch.m_SwitchOnModel != null)
+                    {
+                        lightSwitch.m_SwitchOnModel.transform.rotation =
+                            Quaternion.Euler(isActive ? -9f : 9f, 0f, 0f);
+                    }
+
+                    offRenderer.material.SetFloat(LightStateProperty, isActive ? 1f : 0f);
                     continue;
                 }
 

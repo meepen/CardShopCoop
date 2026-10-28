@@ -940,7 +940,8 @@ namespace CardShopCoop.Modules.World
 
             if (TryGetBox(id, out var box))
             {
-                BoxIdentityLifecycle.ForgetBox(box);
+                // The record keeps the id; preserve the logical box's extended information.
+                BoxIdentityLifecycle.DetachBox(box);
                 DestroyWithoutNotification(box);
             }
         }
@@ -954,7 +955,8 @@ namespace CardShopCoop.Modules.World
 
             if (!_host && TryGetBox(id, out var previous) && !ReferenceEquals(previous, box))
             {
-                BoxIdentityLifecycle.ForgetBox(previous);
+                // Same logical box, new live representation; keep its information.
+                BoxIdentityLifecycle.DetachBox(previous);
                 DestroyWithoutNotification(previous);
             }
 
@@ -975,7 +977,8 @@ namespace CardShopCoop.Modules.World
         {
             if (id != Guid.Empty && TryGetBox(id, out var box))
             {
-                BoxIdentityLifecycle.ForgetBox(box);
+                // The take's new live box keeps the id; preserve the information.
+                BoxIdentityLifecycle.DetachBox(box);
             }
         }
 
@@ -1055,6 +1058,19 @@ namespace CardShopCoop.Modules.World
             }
 
             BoxIdentityLifecycle.ForgetBox(box);
+            DestroyWithoutNotification(box);
+        }
+
+        /// <summary>Client: drops a live representation whose id the authoritative state still
+        /// names (a stored record), so the identity and its extended information survive.</summary>
+        internal void ClientDetachPhysical(Guid id, InteractablePackagingBox box)
+        {
+            if (_host || id == Guid.Empty || box == null)
+            {
+                return;
+            }
+
+            BoxIdentityLifecycle.DetachBox(box);
             DestroyWithoutNotification(box);
         }
 

@@ -8,8 +8,8 @@ using CardShopCoop.Modules.Economy;
 
 namespace CardShopCoop.Modules.Expansion
 {
-    /// <summary>Runtime-discovered expansion UI and scene access. No Unity 6-only lookup API is
-    /// used, so the same DLL can find inactive screens on the legacy build.</summary>
+    /// <summary>Runtime-discovered expansion UI and scene access. Uses the shared lookup surface
+    /// so the same DLL finds inactive screens on both live Unity 6 builds.</summary>
     internal static class ExpansionInterop
     {
         /// <summary>Expansion-local handle for the shared Economy reservation. Vanilla remains

@@ -238,7 +238,7 @@ namespace CardShopCoop.Steam
                 var fields = new List<BackendDiagnosticField>
                 {
                     new BackendDiagnosticField("Backend", Id),
-                    new BackendDiagnosticField("Lobby name", LobbyName),
+                    new BackendDiagnosticField("Lobby name", LobbyName, sensitive: true),
                     new BackendDiagnosticField("Players",
                         MaxPlayers.ToString(CultureInfo.InvariantCulture)),
                     new BackendDiagnosticField("List in public browser", Public ? "yes" : "no"),

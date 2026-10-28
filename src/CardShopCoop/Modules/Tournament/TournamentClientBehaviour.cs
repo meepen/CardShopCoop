@@ -451,6 +451,34 @@ namespace CardShopCoop.Modules.Tournament
             TryPatch(harmony, typeof(CustomerManager), "Init", nameof(ReadinessPostfix));
             TryPatch(harmony, typeof(TournamentPairingScreen), "Awake", nameof(ReadinessPostfix));
             TryBlockDayStarted(harmony, typeof(TournamentPrizeShelf));
+
+            // 1.03 added a host-side repair that rewrites the finished-round counter and can clear
+            // the player's tournament flags. A guest's NPC puppets carry no tournament state, so
+            // running it here clobbers the host-mirrored header. The host owns this repair.
+            TryPatchPrefix(harmony, typeof(CustomerManager),
+                "ValidateTournamentFinishedCustomerAmount", nameof(BlockHostTournamentRepair));
+        }
+
+        private static void TryPatchPrefix(Harmony harmony, Type type, string method, string prefix)
+        {
+            try
+            {
+                var original = AccessTools.Method(type, method);
+                if (original == null)
+                {
+                    CoopPlugin.Log.LogWarning("Tournament client patch target missing: " + type.Name
+                        + "." + method);
+                    return;
+                }
+
+                harmony.Patch(original,
+                    prefix: new HarmonyMethod(typeof(TournamentClientBehaviour), prefix));
+            }
+            catch (Exception exception)
+            {
+                CoopPlugin.Log.LogWarning("Tournament client patch failed " + type.Name + "."
+                    + method + ": " + exception.Message);
+            }
         }
 
         private static void TryPatch(Harmony harmony, Type type, string method,
@@ -505,6 +533,12 @@ namespace CardShopCoop.Modules.Tournament
         /// (the host's tournament pushes drive RefreshBoards), so the guest does not run its own
         /// local screen/mesh coroutine at the roll-over.</summary>
         private static bool BlockDayStartedPrefix() => false;
+
+        /// <summary>Guest: the 1.03 finished-round repair rewrites host-owned counters from the
+        /// local customer puppets (which carry no tournament state) and can clear the mirrored
+        /// player flags. The host owns it; the guest only consumes the host's header/bracket.</summary>
+        private static bool BlockHostTournamentRepair()
+            => _active == null || _active._shutdown;
 
         private static bool ScheduleBlockPrefix()
         {

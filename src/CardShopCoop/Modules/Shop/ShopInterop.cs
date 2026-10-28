@@ -7,7 +7,7 @@ using UnityEngine.SceneManagement;
 
 namespace CardShopCoop.Modules.Shop
 {
-    /// <summary>Scene lookup boundary for both the Unity 2021 and Unity 6 runtimes.</summary>
+    /// <summary>Scene lookup boundary for both live Unity 6 builds (Steam and Game Pass).</summary>
     internal static class ShopInterop
     {
         // The renamer deactivates its own GameObject after the shop is named (and on load once
@@ -257,8 +257,8 @@ namespace CardShopCoop.Modules.Shop
         }
 
         /// <summary>Replays the side effects that vanilla performs when the tutorial shop is
-        /// named. The event type was added only by the Unity 6 build, so it is deliberately
-        /// resolved and constructed without a hard reference to keep the legacy DLL loadable.</summary>
+        /// named. The event is resolved and constructed without a hard reference so a build that
+        /// moves or omits it still loads and falls back cleanly.</summary>
         internal static bool ApplyRemoteInitialNamingSideEffects()
         {
             var renamers = FindRenamers();

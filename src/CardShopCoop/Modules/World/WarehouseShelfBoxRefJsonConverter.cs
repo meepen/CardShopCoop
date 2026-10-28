@@ -32,36 +32,16 @@ namespace CardShopCoop.Modules.World
                 reference.ShelfIdentity = shelfIdentity;
             }
             if (id == Guid.Empty && reference.Shelf != null && reference.CompartmentIndex >= 0
-                && reference.Slot >= 0)
+                && reference.Slot >= 0
+                && WarehouseBoxLocations.TryGetId(reference.Shelf, reference.CompartmentIndex,
+                    reference.Slot, out var locatedId))
             {
-                if (!WarehouseBoxLocations.TryGetId(reference.Shelf, reference.CompartmentIndex,
-                        reference.Slot, out id) || id == Guid.Empty)
-                {
-                    // A live box at a known slot is named by its bound identity; a stored record is
-                    // minted once and then reused from the location registry.
-                    id = Guid.NewGuid();
-                    WarehouseBoxLocations.RegisterStored(id, reference.Shelf,
-                        reference.CompartmentIndex, reference.Slot,
-                        WarehouseBoxLocations.NextSequence());
-                }
+                // A live box at a known slot is named by its already-bound identity. Never mint
+                // or register an identity from the serializer: the sender must own creation, and
+                // an empty identity is a valid source hint for a legacy stored entry.
+                id = locatedId;
             }
-
-            if (id == Guid.Empty)
-            {
-                id = Guid.NewGuid();
-                reference.Identity = id;
-                if (reference.Shelf != null && reference.CompartmentIndex >= 0
-                    && reference.Slot >= 0)
-                {
-                    WarehouseBoxLocations.RegisterStored(id, reference.Shelf,
-                        reference.CompartmentIndex, reference.Slot,
-                        WarehouseBoxLocations.NextSequence());
-                }
-            }
-            else
-            {
-                reference.Identity = id;
-            }
+            reference.Identity = id;
 
             writer.WriteStartObject();
             writer.WritePropertyName("shelf");
@@ -82,7 +62,7 @@ namespace CardShopCoop.Modules.World
             writer.WritePropertyName("slot");
             writer.WriteValue(reference.Slot);
             writer.WritePropertyName("id");
-            writer.WriteValue(id.ToString("D"));
+            writer.WriteValue(id == Guid.Empty ? "" : id.ToString("D"));
             writer.WriteEndObject();
         }
 
@@ -142,15 +122,8 @@ namespace CardShopCoop.Modules.World
                 }
             }
 
-            if (reference.Identity == Guid.Empty)
-            {
-                reference.Identity = Guid.NewGuid();
-                CoopPlugin.Log?.LogWarning("[warehouse] wire reference had no identity; minting "
-                    + reference.Identity + " for shelf="
-                    + (reference.Shelf == null ? "<unresolved>" : reference.Shelf.name)
-                    + " compartment=" + reference.CompartmentIndex + " slot=" + reference.Slot + ".");
-            }
-            else if (!WarehouseBoxLocations.Contains(reference.Identity))
+            if (reference.Identity != Guid.Empty
+                && !WarehouseBoxLocations.Contains(reference.Identity))
             {
                 // Keep the reference; a later authoritative state may teach the registry its
                 // location. The handler defers the message rather than silently dropping it.
@@ -161,14 +134,10 @@ namespace CardShopCoop.Modules.World
                     + reference.Slot + "); the message will be deferred.");
             }
 
-            if (reference.Shelf != null && reference.CompartmentIndex >= 0 && reference.Slot >= 0
-                && !WarehouseBoxLocations.TryGetLocation(reference.Identity, out _))
-            {
-                WarehouseBoxLocations.RegisterStored(reference.Identity, reference.Shelf,
-                    reference.CompartmentIndex, reference.Slot,
-                    WarehouseBoxLocations.NextSequence());
-            }
-
+            // Do not register a location here. The authoritative state/apply path teaches the
+            // registry; a serializer must not mutate session identity as a side effect. An empty
+            // identity is preserved as a source hint (legacy stored entries); state entries are
+            // validated as addressable before they are applied.
             return reference;
         }
 

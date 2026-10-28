@@ -721,6 +721,7 @@ namespace CardShopCoop.Modules.Pricing
             _pendingCardDeltas.Clear();
             PricingDisplay.Clear();
             PriceTagRegistry.RefreshAll();
+            PriceTagRegistry.Clear();
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

@@ -42,11 +42,12 @@ namespace CardShopCoop.Modules.Register
             }
 
             ReverseWallet(CheckoutWalletDelta(message.Value, 0d));
+            message.WalletApplied = false;
         }
 
         internal void UndoComplete(RegisterCompleteIntent message)
         {
-            if (message == null)
+            if (message == null || !message.WalletApplied)
             {
                 return;
             }
@@ -54,7 +55,10 @@ namespace CardShopCoop.Modules.Register
             // The message carries the exact paid/change pair the local OnPressSpaceBar used, so
             // this reverses the coin event even when the action is undone as a follower of an
             // earlier authority. The register state itself is restored by the re-anchor render.
+            // Clearing the flag makes undo/redo a true inverse pair: a replay that no-ops leaves it
+            // false, so a later rejection cannot reverse the same income a second time.
             ReverseWallet(CheckoutWalletDelta(message.Paid, message.Change));
+            message.WalletApplied = false;
         }
 
         /// <summary>The signed wallet delta vanilla's completed checkout queues: the shop's net

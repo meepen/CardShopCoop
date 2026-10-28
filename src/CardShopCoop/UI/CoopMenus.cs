@@ -152,7 +152,6 @@ namespace CardShopCoop.UI
         private static void TitleStartPrefix(TitleScreen __instance)
         {
             _title = __instance;
-            CoopCharacterPrefabPreloader.EnsureStarted();
         }
 
         private static void TitleStartPostfix(TitleScreen __instance)
@@ -161,14 +160,14 @@ namespace CardShopCoop.UI
         /// <summary>The title screen opens its controller screen at the end of Start. That is the
         /// event that makes its buttons addressable, so this is where the co-op button is injected
         /// on builds where Start's postfix runs before the controller layout is ready.</summary>
-        private static void ControllerScreenOpenPostfix(ControllerScreenUIExtension extension)
+        private static void ControllerScreenOpenPostfix(ControllerScreenUIExtension ctrlScreenUIExt)
         {
-            if (extension == null)
+            if (ctrlScreenUIExt == null)
             {
                 return;
             }
 
-            var title = extension.GetComponentInParent<TitleScreen>() ?? _title;
+            var title = ctrlScreenUIExt.GetComponentInParent<TitleScreen>() ?? _title;
             if (title == null)
             {
                 return;
@@ -186,7 +185,6 @@ namespace CardShopCoop.UI
             }
 
             _title = title;
-            CoopCharacterPrefabPreloader.EnsureStarted();
             try
             {
                 InjectTitle(title);
@@ -371,7 +369,7 @@ namespace CardShopCoop.UI
                 ManualLogSource log = CoopPlugin.Log;
                 if (log != null)
                 {
-                    log.LogWarning("coop: title screen buttons not found; use F10 to join.");
+                    log.LogWarning("coop: title screen buttons not found; the co-op UI could not be injected.");
                 }
                 return;
             }
@@ -420,7 +418,7 @@ namespace CardShopCoop.UI
                 ManualLogSource log = CoopPlugin.Log;
                 if (log != null)
                 {
-                    log.LogWarning("coop: pause menu buttons not found; use F10 for co-op.");
+                    log.LogWarning("coop: pause menu buttons not found; the co-op UI could not be injected.");
                 }
                 _pause = p;
                 return;

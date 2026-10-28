@@ -296,8 +296,8 @@ namespace CardShopCoop.Modules.Purchasing
 
         internal static bool IsFurnitureAvailable(EObjectType objectType)
         {
-            // The legacy branch has no GA.PlatformManager. Absence is the compatibility path;
-            // when the beta surface exists, failing to read it must fail closed.
+            // Absence of GA.PlatformManager is a future-build compatibility path. On every
+            // supported build the surface exists, so failing to read it must fail closed.
             if (PlatformManagerType == null)
             {
                 return true;

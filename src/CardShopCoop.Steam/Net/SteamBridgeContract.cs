@@ -12,7 +12,7 @@ namespace CardShopCoop.Net
     }
 
     /// <summary>
-    /// Everything CoopCore and CoopUI are allowed to know about Steam. Every member is
+    /// Everything CoopCore and the co-op UI are allowed to know about Steam. Every member is
     /// Steam-free BY CONSTRUCTION - ulong / string / bool / int / Action / Action&lt;ulong&gt;
     /// / IDatagramTransport - so the always-loaded types may reference
     /// this interface as freely as they like. The CLR resolves the implementing type only

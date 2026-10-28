@@ -34,8 +34,11 @@ namespace CardShopCoop.Modules.Staff
     {
 
         public StaffIntentKind Kind;
-        /// <summary>The live worker the intent targets.</summary>
+        /// <summary>The live worker the intent targets. Null for <see cref="StaffIntentKind.Hire"/>,
+        /// which selects a save-data slot that has no live worker yet.</summary>
         public Worker Worker;
+        /// <summary>The save-data slot a <see cref="StaffIntentKind.Hire"/> selects.</summary>
+        public int Index;
         public Vector3 Position;
         public byte PrimaryTask;
         public byte SecondaryTask;

@@ -21,7 +21,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         {
             _context = RuntimeContext;
             Active = this;
-            _context.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
         }
@@ -36,7 +35,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             _pending.Clear();
-            _context?.Messages.UnregisterAttributedHandlers(this);
             _context = null;
         }
 

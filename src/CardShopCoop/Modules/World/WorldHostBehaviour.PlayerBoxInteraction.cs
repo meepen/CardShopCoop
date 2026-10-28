@@ -852,8 +852,7 @@ namespace CardShopCoop.Modules.World
 
         /// <summary>Announces a host hold that was not covered by the normal pickup capture: a
         /// box-up hold the game applied before the package had a network id, or a warehouse take
-        /// whose pickup had to be re-announced after its shelf-removal delta (the live backend
-        /// starts the hold before the game removes the box from the compartment). The host is
+        /// whose pickup had to be re-announced after its shelf-removal delta. The host is
         /// already holding the box locally; observers just need the pickup to attach it to the
         /// host's avatar.</summary>
         internal void PublishHostHeld(InteractablePackagingBox box, Guid boxNetworkId)

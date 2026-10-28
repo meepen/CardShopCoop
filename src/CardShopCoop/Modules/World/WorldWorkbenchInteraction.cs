@@ -610,7 +610,13 @@ namespace CardShopCoop.Modules.World
             var slot = bench.m_PosList != null && slotIndex >= 0 && slotIndex < bench.m_PosList.Count
                 ? bench.m_PosList[slotIndex]
                 : bench.transform;
-            bench.AddItem(SpawnItem(type, slot), addToFront: true);
+            var item = SpawnItem(type, slot);
+            if (item == null)
+            {
+                return;
+            }
+
+            bench.AddItem(item, addToFront: true);
         }
 
         /// <summary>The bench's current stored types in list order (null slots read as None).</summary>
@@ -695,11 +701,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var meshData = InventoryBase.GetItemMeshData(spawnType);
-            if (bench.m_JankBoxSkinMesh != null)
-            {
-                bench.m_JankBoxSkinMesh.material = meshData.material;
-            }
+            Runtime.ItemVisuals.ApplyJankBoxSkin(bench.m_JankBoxSkinMesh, spawnType);
 
             if (bench.m_JankBoxAnim != null)
             {
@@ -738,15 +740,6 @@ namespace CardShopCoop.Modules.World
 
         /// <summary>The game's own save-load recipe for materializing an Item by type.</summary>
         internal static Item SpawnItem(EItemType itemType, Transform parent)
-        {
-            var meshData = InventoryBase.GetItemMeshData(itemType);
-            var item = ItemSpawnManager.GetItem(parent);
-            item.SetMesh(meshData.mesh, meshData.material, itemType,
-                meshData.meshSecondary, meshData.materialSecondary);
-            item.transform.localPosition = Vector3.zero;
-            item.transform.localRotation = Quaternion.identity;
-            item.gameObject.SetActive(true);
-            return item;
-        }
+            => Runtime.ItemVisuals.Spawn(itemType, parent);
     }
 }

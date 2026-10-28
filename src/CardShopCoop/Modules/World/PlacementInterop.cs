@@ -417,9 +417,9 @@ namespace CardShopCoop.Modules.World
             FiVerticalSnapIndex?.SetValue(obj, -1);
         }
 
-        /// <summary>Beta only: the warehouse's stored-box batcher must know the shelf is moving so
-        /// it rebuilds its batched matrices against the moving transform. No-op on the live-box
-        /// backend, where the type does not exist.</summary>
+        /// <summary>The warehouse's stored-box batcher must know the shelf is moving so it rebuilds
+        /// its batched matrices against the moving transform. Resolved by name; a build without the
+        /// batcher degrades to no-op.</summary>
         internal static void SetStoredBoxShelfMoving(InteractableObject obj, bool moving)
         {
             if (obj == null)

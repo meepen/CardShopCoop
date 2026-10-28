@@ -95,12 +95,12 @@ Warehouse state is deliberately split between a live entity and a stored value:
   `WarehouseShelf`, the `CompartmentIndex`, and a slot hint.
 - `WarehouseCompartmentState` carries `ItemType` and `IsBig` once for the whole compartment.
   `WarehouseBoxEntry.Amount` is the mutable value; `WarehouseBoxEntry.Box` is only an optional live
-  representation and is null for record-backed entries.
+  representation and is null for stored entries.
 - `WarehouseStoreMessage` requires a live shelf and live box. `WarehouseTakeMessage.Source` names the
   stored top entry and `WarehouseTakeMessage.CreatedBox` is the allowed creation payload for the
   local live box.
-- `WarehouseDeltaMessage` is authoritative state, not an intent, and its `Box` may be null for a
-  record-backed or worker take.
+- `WarehouseDeltaMessage` is authoritative state, not an intent, and its `Box` is null for a
+  record store and may be null for a worker take.
 
 `WarehouseShelfBoxRef` has no public Guid property. `WarehouseShelfBoxRefJsonConverter` serializes
 the live shelf through the entity converter plus the ints, and internally reads/writes the Guid from
@@ -114,9 +114,9 @@ It stores identity/location only, never item contents. `GameObjectIdentityCache`
 live object/identity cache; stored entries are never bound there. An unresolved shelf reference is
 deferred and retried on the world-ready/placement-structure signals.
 
-The record backend keeps stored values as game records. After every baseline, store, remote apply,
-or take it re-runs the 1.02 amount-descending canonical order (newest insertion first on ties) so
-the top entry and insertion slot match the live-box backend. Takes are always top pops.
+Both live builds keep stored values as game records. After every baseline, store, remote apply, or
+take the module re-runs the canonical amount-descending order (newest insertion first on ties) so
+both peers agree on the top entry and insertion slot. Takes are always top pops.
 
 ## Extended information
 

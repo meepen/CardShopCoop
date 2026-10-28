@@ -320,6 +320,11 @@ namespace CardShopCoop.Modules.Tournament
                 nameof(DayStartedPostfix));
             TryPatch(harmony, typeof(CustomerManager), "OnCustomerFinishTournamentRound", null,
                 nameof(BracketChangedPostfix));
+            // 1.03's ValidateTournamentFinishedCustomerAmount can repair the finished-round
+            // counter outside OnCustomerFinishTournamentRound. Republish after it so guests do not
+            // keep a stale finished count/cell until the next round or day.
+            TryPatch(harmony, typeof(CustomerManager),
+                "ValidateTournamentFinishedCustomerAmount", null, nameof(BracketChangedPostfix));
         }
 
         private static void TryPatch(Harmony harmony, Type type, string method, string prefix,

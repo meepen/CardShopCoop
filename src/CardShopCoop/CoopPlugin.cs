@@ -46,7 +46,6 @@ namespace CardShopCoop
         public static ConfigEntry<float> SendRateHz;
         public static ConfigEntry<bool> AvatarsEnabled;
         public static ConfigEntry<bool> AllowNsfw;
-        public static ConfigEntry<KeyCode> UiToggleKey;
         public static ConfigEntry<KeyCode> EmoteKey;
         public static ConfigEntry<int> ClientWorldSlot;
         public static ConfigEntry<float> ServeReach;
@@ -117,9 +116,6 @@ namespace CardShopCoop
                 "Show the other player as a walking character in your shop.");
             AllowNsfw = Config.Bind("Player", "AllowNsfw", false,
                 "Allow nude/NSFW character appearances. When off, new characters get a random clothed preset, the Nude wardrobe option is hidden, and fully nude players are shown in the game's random clothed customer look. When on, you may choose Nude and you will see other players who chose it.");
-            UiToggleKey = Config.Bind("Keys", "UiToggleKey", KeyCode.None,
-                "Toggles the co-op window. (Disabled by default; use in-game buttons).");
-
             EmoteKey = Config.Bind("Keys", "EmoteKey", KeyCode.G,
                 "Sends a wave emote that pops above your avatar.");
             ClientWorldSlot = Config.Bind("Network", "ClientWorldSlot", -100,
@@ -146,11 +142,11 @@ namespace CardShopCoop
                 "TESTING ONLY - NOT FOR PLAYERS. Makes the game answer \"yes\" to every store entitlement (the Game Pass deluxe and pre-order bonuses: their furniture and their coins), as if this account owned them. It exists so the deluxe-only object types can be tested on a build that does not have them. It changes only what the furniture shop offers; it grants nothing else. Off by default, and hidden from the window on purpose.");
 
             // Bind this option wherever the deluxe/pre-order gate it forces actually exists, i.e.
-            // wherever GA.PlatformManager is present. That is the Unity 6 / 1.00 builds - the Steam
-            // 1.00 beta AND the Xbox/Game Pass build - NOT the legacy public build, which has no
-            // PlatformManager at all. GA.PlatformManager alone is NOT the Game Pass discriminator
-            // (GA.GamecoreUserManager is); see PlatformProbe. The hidden menu draws the option only
-            // when it is bound, so it stays off builds with no such gate.
+            // wherever GA.PlatformManager is present. Every supported build now carries it (the
+            // Steam 1.03 public build and the Game Pass build). GA.PlatformManager alone is NOT
+            // the Game Pass discriminator (GA.GamecoreUserManager is); see PlatformProbe. The
+            // hidden menu draws the option only when it is bound, so it stays off any future
+            // build without such a gate.
             if (Type.GetType("GA.PlatformManager, Assembly-CSharp") != null)
             {
                 ForceDeluxeFurniture = Config.Bind("Hidden", "ForceDeluxeFurniture", false,
@@ -219,9 +215,7 @@ namespace CardShopCoop
             // the LogError above is the whole story otherwise.
             if (coreLoaded)
             {
-                Log.LogInfo(UiToggleKey.Value == KeyCode.None
-                    ? $"{Name} {Version} loaded. Open the co-op UI from the title or pause menu."
-                    : $"{Name} {Version} loaded. Press {UiToggleKey.Value} in-game to open the co-op window.");
+                Log.LogInfo($"{Name} {Version} loaded. Open the co-op UI from the title or pause menu.");
             }
         }
 

@@ -117,16 +117,20 @@ namespace CardShopCoop.Modules.Register
             ApplyOnHost(cash.OnMouseButtonUp);
         }
 
-        internal static void CardPayment(InteractableCashierCounter counter, double value)
+        /// <summary>Applies a card payment. Returns true when the card amount matched, so vanilla
+        /// zeroed the checkout total and queued its coin event; a mismatched amount leaves the total
+        /// and the wallet untouched.</summary>
+        internal static bool CardPayment(InteractableCashierCounter counter, double value)
         {
             if (counter == null
                 || counter.m_CashierCounterState != ECashierCounterState.GivingChange
                 || !RegisterInterop.IsUsingCard(counter))
             {
-                return;
+                return false;
             }
 
             ApplyOnHost(() => counter.EvaluateCreditCard(value));
+            return RegisterInterop.Total(counter) <= 0.0001d;
         }
 
         internal static void Change(InteractableCashierCounter counter, int slot, bool isCoin,
@@ -151,15 +155,19 @@ namespace CardShopCoop.Modules.Register
             });
         }
 
-        internal static void Complete(InteractableCashierCounter counter)
+        /// <summary>Completes a checkout. Returns true when vanilla actually finished it (the change
+        /// was ready), so it zeroed the checkout total and queued its coin event; a press that
+        /// leaves the change unfinished touched neither the total nor the wallet.</summary>
+        internal static bool Complete(InteractableCashierCounter counter)
         {
             if (counter == null
                 || counter.m_CashierCounterState != ECashierCounterState.GivingChange)
             {
-                return;
+                return false;
             }
 
             ApplyOnHost(counter.OnPressSpaceBar);
+            return RegisterInterop.Total(counter) <= 0.0001d;
         }
     }
 }

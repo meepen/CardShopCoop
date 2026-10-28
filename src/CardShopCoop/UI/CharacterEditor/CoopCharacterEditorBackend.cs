@@ -107,8 +107,7 @@ namespace CardShopCoop.UI
 
                 var model = Model;
                 var customization = EnsureCustomization();
-                return model != null && CoopCharacterEditorModel.HasGenderPresets(customization,
-                    model.Female);
+                return model != null && customization != null;
             }
         }
 
@@ -594,8 +593,8 @@ namespace CardShopCoop.UI
             _preview.SetModel(_model);
             if (!Editable)
             {
-                // A limited title-screen body (CC_Dummy) only draws the preview. Never capture
-                // from it: it has fewer wardrobe slots and would truncate the saved model.
+                // The real body has not been built yet (or has no dressable wardrobe). Never
+                // capture from an uninitialized preview; the Completed event retries this.
                 return;
             }
 

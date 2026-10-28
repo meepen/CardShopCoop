@@ -2917,29 +2917,19 @@ namespace CardShopCoop.Modules.World
         /// <summary>The game's own save-load recipe for materializing an Item by type.</summary>
         private static Item SpawnItem(EItemType itemType, Transform parent, float contentFill = -1f)
         {
-            Item item = null;
-            try
+            var item = Runtime.ItemVisuals.Spawn(itemType, parent);
+            if (item == null)
             {
-                var meshData = InventoryBase.GetItemMeshData(itemType);
-                item = ItemSpawnManager.GetItem(parent);
-                item.SetMesh(meshData.mesh, meshData.material, itemType,
-                    meshData.meshSecondary, meshData.materialSecondary);
-                item.transform.localPosition = Vector3.zero;
-                item.transform.localRotation = Quaternion.identity;
-                if (contentFill >= 0f)
-                {
-                    item.SetContentFill(contentFill);
-                }
+                throw new InvalidOperationException(
+                    "No ItemMeshData for " + itemType + "; the container item cannot be spawned.");
+            }
 
-                item.gameObject.SetActive(true);
-                return item;
-            }
-            catch (Exception e)
+            if (contentFill >= 0f)
             {
-                CoopPlugin.Log.LogWarning($"WorldContainerInteraction spawn {itemType}: {e.Message}");
-                item?.DisableItem();
-                throw;
+                item.SetContentFill(contentFill);
             }
+
+            return item;
         }
 
         /// <summary>Deep-copies a compact-card list. <see cref="CompactCardDataAmount"/> is a

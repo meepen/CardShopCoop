@@ -367,41 +367,20 @@ namespace CardShopCoop.Modules.SessionInput
                     ReleaseOwnedWindowModal();
                 }
 
-                if (_ownsWindowModal)
+                if (!_ownsWindowModal)
                 {
-                    // An unrelated game transition may have called ExitUIMode while the
-                    // co-op window stayed visible. Reassert our owned mode before presenting
-                    // the window; this path also remains safe after a rapid reopen.
-                    if (!controller.IsInUIMode())
-                    {
-                        controller.EnterUIMode();
-                    }
-                }
-                else
-                {
-                    // A different game screen may already own UI mode. It owns the cursor in
-                    // that case; only claim the mode when it is genuinely available.
-                    if (controller.IsInUIMode())
-                    {
-                        _windowModalController = null;
-                        // Do not take ownership from that screen, but the co-op window is still
-                        // visible and must remain usable while the existing modal is active.
-                        controller.ShowCursor();
-                        return;
-                    }
-
-                    controller.EnterUIMode();
                     _windowModalController = controller;
                     _ownsWindowModal = true;
                     SetOwner(ModalOwner.Window, true);
-                    CoopPlugin.Log.LogInfo(
-                        "Co-op window opened: entering game UI mode to block gameplay input");
+                    CoopPlugin.Log.LogInfo("Co-op window opened: blocking gameplay input "
+                        + "(the cursor is left exactly as the game set it up)");
                 }
 
-                // Reapply the presentation from the central owner on every requested update.
-                // This is what keeps a visible IMGUI window usable after a vanilla modal closes,
-                // without making PauseScreen or CheatManager release state they do not own.
-                controller.ShowCursor();
+                // Deliberately no cursor/UI-mode calls at all. The window opens over the title
+                // screen or an already-open pause menu, so the cursor and its lock state are
+                // already correct. Gameplay input is blocked by the camera-input prefix and the
+                // walker stop, which never touch the cursor.
+                controller.ResetMousePress();
             }
             catch (Exception e)
             {
@@ -438,19 +417,10 @@ namespace CardShopCoop.Modules.SessionInput
                             controller.m_CameraController.SetRotationAngles(x, y);
                         }
 
-                        controller.HideCursor();
+                        // Deliberately no cursor/UI-mode calls: closing the window must not
+                        // capture or hide the cursor, and it never changed UI mode either.
                         CameraLerpField?.SetValue(controller, false);
-                        UiModeField.SetValue(controller, false);
                         controller.ResetMousePress();
-                    }
-                    else
-                    {
-                        // Required builds have the field. Keep a loud fallback for a future
-                        // game update rather than silently leaving the controller modal.
-                        CoopPlugin.Log.LogWarning(
-                            "SessionInput: InteractionPlayerController.m_IsInUIMode not found; "
-                            + "using vanilla ExitUIMode");
-                        controller.ExitUIMode();
                     }
 
                     CoopPlugin.Log.LogInfo("Co-op window closed: restoring gameplay input");

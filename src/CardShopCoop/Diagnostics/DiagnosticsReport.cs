@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using BepInEx;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Modules.Shop;
@@ -75,9 +76,10 @@ namespace CardShopCoop.Diagnostics
             try
             {
                 ClipboardWriter.SetTextAndFiles(null, new[] { logPath });
-                message = "Log file copied: " + Path.GetFileName(logPath)
-                    + ". Paste into Discord to attach it.";
-                CoopPlugin.Log?.LogInfo("diagnostics log file copied: " + Path.GetFileName(logPath));
+                message = "Raw log file copied: " + Path.GetFileName(logPath)
+                    + ". It can contain player names and addresses; paste it only where appropriate.";
+                CoopPlugin.Log?.LogInfo("diagnostics raw log file copied: "
+                    + Path.GetFileName(logPath));
                 return true;
             }
             catch (Exception error)
@@ -99,11 +101,28 @@ namespace CardShopCoop.Diagnostics
                 return false;
             }
 
+            CleanupOldDiagnosticsFiles();
+
             var logPath = FindLogFile();
+            string redactedLogPath = null;
+            if (!string.IsNullOrEmpty(logPath))
+            {
+                try
+                {
+                    redactedLogPath = WriteRedactedLog(logPath, core);
+                }
+                catch (Exception error)
+                {
+                    // Never fall back to the raw log: it contains player names and endpoints.
+                    CoopPlugin.Log?.LogWarning("diagnostics log redaction failed; the bundle will "
+                        + "contain the report only: " + error.Message);
+                }
+            }
+
             string reportPath;
             try
             {
-                var report = Build(core, logPath);
+                var report = Build(core, redactedLogPath);
                 reportPath = Path.Combine(Path.GetTempPath(),
                     "CardShopCoop_Diagnostics_"
                     + System.Diagnostics.Process.GetCurrentProcess().Id + ".md");
@@ -117,18 +136,18 @@ namespace CardShopCoop.Diagnostics
             }
 
             var files = new List<string> { reportPath };
-            if (!string.IsNullOrEmpty(logPath))
+            if (!string.IsNullOrEmpty(redactedLogPath))
             {
-                files.Add(logPath);
+                files.Add(redactedLogPath);
             }
 
             try
             {
                 ClipboardWriter.SetTextAndFiles(null, files);
-                message = "Diagnostics copied: " + Path.GetFileName(reportPath)
-                    + (string.IsNullOrEmpty(logPath)
-                        ? " (log file not found)."
-                        : " and " + Path.GetFileName(logPath) + ".");
+                message = "Diagnostics copied (redacted): " + Path.GetFileName(reportPath)
+                    + (string.IsNullOrEmpty(redactedLogPath)
+                        ? " (log file not found or could not be redacted)."
+                        : " and " + Path.GetFileName(redactedLogPath) + ".");
                 CoopPlugin.Log?.LogInfo("diagnostics bundle copied: " + files.Count + " files");
                 return true;
             }
@@ -165,6 +184,107 @@ namespace CardShopCoop.Diagnostics
                     + error.Message);
                 return null;
             }
+        }
+
+        private const string DiagnosticsFilePrefix = "CardShopCoop_Diagnostics_";
+
+        /// <summary>Removes reports from earlier runs. The current report/log must stay on disk
+        /// while it is on the clipboard, so cleanup is deferred to the next bundle action.</summary>
+        private static void CleanupOldDiagnosticsFiles()
+        {
+            try
+            {
+                var cutoff = DateTime.UtcNow.AddDays(-1);
+                var files = Directory.GetFiles(Path.GetTempPath(), DiagnosticsFilePrefix + "*");
+                for (var i = 0; i < files.Length; i++)
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(files[i]) < cutoff)
+                        {
+                            File.Delete(files[i]);
+                        }
+                    }
+                    catch (Exception error)
+                    {
+                        CoopPlugin.Log?.LogWarning("diagnostics could not remove an old temp file: "
+                            + error.Message);
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                CoopPlugin.Log?.LogWarning("diagnostics temp cleanup failed: " + error.Message);
+            }
+        }
+
+        /// <summary>Writes the log copy attached to a support bundle with player names, shop/lobby
+        /// names, user paths, addresses and Steam ids removed. The raw log is never attached to a
+        /// bundle; it remains available through the explicit Copy Log File action.</summary>
+        private static string WriteRedactedLog(string logPath, CoopCore core)
+        {
+            var text = File.ReadAllText(logPath);
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddRedactionName(names, core?.EffectivePlayerName);
+            var players = PresenceApi.SessionPlayers;
+            for (var i = 0; i < players.Count; i++)
+            {
+                AddRedactionName(names, players[i].Name);
+            }
+            if (ShopApi.TryGetShopName(out var shopName))
+            {
+                AddRedactionName(names, shopName);
+            }
+
+            var hostBackends = ActiveBackends(core, hosts: true);
+            for (var i = 0; i < hostBackends.Count; i++)
+            {
+                var fields = DiagnosticFields(hostBackends[i], ConnectMode.Host);
+                for (var j = 0; j < fields.Count; j++)
+                {
+                    var field = fields[j];
+                    if (field != null && field.Key != null
+                        && field.Key.IndexOf("lobby name", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        AddRedactionName(names, field.Value);
+                    }
+                }
+            }
+
+            var ordered = new List<string>(names);
+            ordered.Sort((left, right) => right.Length.CompareTo(left.Length));
+            for (var i = 0; i < ordered.Count; i++)
+            {
+                text = Regex.Replace(text, Regex.Escape(ordered[i]), "[redacted]",
+                    RegexOptions.IgnoreCase);
+            }
+
+            text = Regex.Replace(text, @"(?i)([A-Z]:\\Users\\)[^\\\s]+", "$1[user]");
+            text = Regex.Replace(text, @"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b", "[address]");
+            text = Regex.Replace(text, @"\b7656119\d{10}\b", "[steamid]");
+
+            var path = Path.Combine(Path.GetTempPath(), DiagnosticsFilePrefix
+                + System.Diagnostics.Process.GetCurrentProcess().Id + ".log");
+            File.WriteAllText(path, text, new UTF8Encoding(false));
+            return path;
+        }
+
+        private static void AddRedactionName(HashSet<string> names, string name)
+        {
+            name = name == null ? null : name.Trim();
+            if (string.IsNullOrEmpty(name) || name.Length < 3)
+            {
+                return;
+            }
+            if (name.Equals("Shop", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("My Shop", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Host", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Client", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Player", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            names.Add(name);
         }
 
         internal static string Build(CoopCore core) => Build(core, FindLogFile());
@@ -349,6 +469,8 @@ namespace CardShopCoop.Diagnostics
                 CPlayerData.m_EmptyBoxStorageSaveDataList?.Count ?? 0);
             AppendCount(other, "Bulk donation boxes", live.BulkDonationBoxes,
                 CPlayerData.m_BulkDonationSaveDataList?.Count ?? 0);
+            AppendCount(other, "Food bowls (saved)",
+                CPlayerData.m_FoodBowlSaveDataList?.Count ?? 0);
             AppendCount(other, "Trash bins", live.TrashBins);
             AppendCount(other, "Cards - 3D", live.Cards);
             AppendCount(other, "Price tags", live.PriceTags);
@@ -576,10 +698,8 @@ namespace CardShopCoop.Diagnostics
         private static void AppendShopDetails(StringBuilder text)
         {
             text.Append("## Shop Details\n\n");
-            var shopName = ShopApi.TryGetShopName(out var name) ? name : "unnamed";
-
+            // The player-chosen shop name is deliberately omitted from a public support report.
             var summary = new StringBuilder();
-            AppendPair(summary, "Shop", shopName);
             AppendPair(summary, "Money",
                 CPlayerData.m_CoinAmountDouble.ToString("0.##", CultureInfo.InvariantCulture));
             AppendPair(summary, "Total earned",
@@ -865,6 +985,7 @@ namespace CardShopCoop.Diagnostics
             return lowered.Contains("password")
                 || lowered.Contains("passcode")
                 || lowered.Contains("lobby id")
+                || lowered.Contains("lobby name")
                 || lowered.Contains("host address")
                 || lowered.Contains("public address")
                 || lowered.Contains("public endpoint")

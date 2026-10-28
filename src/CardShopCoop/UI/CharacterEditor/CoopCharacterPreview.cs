@@ -3,6 +3,7 @@ using CardShopCoop.Modules.Presence;
 using CardShopCoop.Runtime;
 using Newtonsoft.Json;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace CardShopCoop.UI
 {
@@ -11,11 +12,10 @@ namespace CardShopCoop.UI
     /// character editor. The stage lives far away from the shop on an otherwise unused layer so
     /// the preview is independent of the player, the main camera, and an active co-op session.
     ///
-    /// <para>The body is built from the game's own <c>Resources</c> character prefab when the build
-    /// packages one. On builds that only stream the character prefab with the shop scene, the
-    /// preview falls back to a customer clone (in game) or the game's small CC_Dummy prefab (title
-    /// screen before a world has ever loaded). A limited body never writes back to the saved model;
-    /// see <see cref="Limited"/>.</para>
+    /// <para>The body is built from the real character prefab the preloader keeps alive in a
+    /// DontDestroyOnLoad template. There is no fallback body and no limited mode: until that
+    /// template exists the editor shows a loading state, and a malformed template is logged and
+    /// refused rather than substituted.</para>
     /// </summary>
     internal sealed class CoopCharacterPreview
     {
@@ -26,37 +26,37 @@ namespace CardShopCoop.UI
         private const float BaseCameraHeight = 1.3f;
         private const float BaseTargetHeight = 1.1f;
 
-        private const string DummyPrefabName = "CC_Dummy";
-
         private GameObject _stage;
         private Camera _camera;
         private RenderTexture _texture;
         private GameObject _body;
         private CC.CharacterCustomization _customization;
         private bool _bodyFemale;
-        private bool _bodyFromCustomer;
-        private CC.CharacterCustomization _customerSourceCustom;
-        private Transform _customerSourceRoot;
-        private bool _limited;
         private bool _visible;
         private int _modelIndex;
         private PresenceModelEntry _model;
-        private Vector2 _pan;
+        private Vector3 _pan;
         private float _yaw;
         private float _pitch;
         private float _zoom = 1f;
+        private bool _renderSettingsCaptured;
+        private AmbientMode _renderAmbientMode;
+        private Color _renderAmbientLight;
+        private Color _renderAmbientSky;
+        private Color _renderAmbientEquator;
+        private Color _renderAmbientGround;
+        private float _renderAmbientIntensity;
+        private SphericalHarmonicsL2 _renderAmbientProbe;
+        private Light _renderSun;
+        private bool _lightingLogged;
+        private Light _keyLight;
+        private SphericalHarmonicsL2 _previewAmbient;
 
         internal RenderTexture Texture => _texture;
 
         internal CC.CharacterCustomization Customization => _customization;
 
         internal bool Available => _customization != null;
-
-        /// <summary>True when the current body does not have the game's real gender presets (the
-        /// title-screen CC_Dummy fallback). A limited body can draw a preview, but it must never be
-        /// captured back into the saved model, or opening the editor before a world has loaded
-        /// would truncate the player's full wardrobe.</summary>
-        internal bool Limited => _limited || _customization == null;
 
         internal PresenceModelEntry Model => _model;
 
@@ -88,9 +88,11 @@ namespace CardShopCoop.UI
             }
 
             var sensitivity = 0.003f / Mathf.Max(0.55f, _zoom);
-            _pan += new Vector2(-delta.x, delta.y) * sensitivity;
-            _pan.x = Mathf.Clamp(_pan.x, -1.2f, 1.2f);
-            _pan.y = Mathf.Clamp(_pan.y, -0.8f, 0.8f);
+            // Pan in the camera's current screen plane, not in world X/Y, so right-dragging
+            // keeps following the view after the preview has been orbited or pitched.
+            _pan += (-_camera.transform.right * delta.x
+                - _camera.transform.up * delta.y) * sensitivity;
+            _pan = Vector3.ClampMagnitude(_pan, 1.6f);
             ApplyView();
         }
 
@@ -102,7 +104,7 @@ namespace CardShopCoop.UI
                 return;
             }
 
-            _yaw = Mathf.Repeat(_yaw - delta.x * 0.35f, 360f);
+            _yaw = Mathf.Repeat(_yaw + delta.x * 0.35f, 360f);
             _pitch = Mathf.Clamp(_pitch + delta.y * 0.2f, -35f, 35f);
             ApplyView();
         }
@@ -127,7 +129,7 @@ namespace CardShopCoop.UI
 
         internal void Recenter()
         {
-            _pan = Vector2.zero;
+            _pan = Vector3.zero;
             _yaw = 0f;
             _pitch = 0f;
             _zoom = 1f;
@@ -142,7 +144,7 @@ namespace CardShopCoop.UI
             }
 
             var distance = BaseCameraDistance / _zoom;
-            var target = new Vector3(_pan.x, BaseTargetHeight + _pan.y, 0f);
+            var target = new Vector3(0f, BaseTargetHeight, 0f) + _pan;
             var offset = Quaternion.Euler(_pitch, _yaw, 0f)
                 * new Vector3(0f, BaseCameraHeight - BaseTargetHeight, distance);
             var cameraPosition = target + offset;
@@ -160,8 +162,7 @@ namespace CardShopCoop.UI
                 return;
             }
 
-            if (_body == null || _bodyFemale != model.Female
-                || _limited && HasBetterSource(model.Female))
+            if (_body == null || _bodyFemale != model.Female)
             {
                 CreateBody(model.Female, model.ModelIndex, model);
             }
@@ -171,6 +172,36 @@ namespace CardShopCoop.UI
                 model.Female, model.ModelIndex);
             ApplyModel();
             RefreshLayers();
+            var applied = _body != null
+                ? _body.GetComponentInChildren<SkinnedMeshRenderer>(true) : null;
+            if (_body != null && _stage != null)
+            {
+                var renderers = _body.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+                var summary = "";
+                for (var i = 0; i < renderers.Length && i < 8; i++)
+                {
+                    var renderer = renderers[i];
+                    var material = renderer != null ? renderer.sharedMaterial : null;
+                    summary += " [" + (renderer != null ? renderer.name : "<null>")
+                        + " on=" + (renderer != null && renderer.enabled)
+                        + " shadow=" + (renderer != null ? renderer.shadowCastingMode.ToString() : "-")
+                        + " probe=" + (renderer != null ? renderer.lightProbeUsage.ToString() : "-")
+                        + " mat=" + (material != null ? material.name : "<null>") + "]";
+                }
+                CoopPlugin.Log?.LogInfo("co-op character editor: body renderers="
+                    + renderers.Length + summary);
+            }
+            var appliedMaterial = applied != null ? applied.sharedMaterial : null;
+            CoopPlugin.Log?.LogInfo("co-op character editor: model applied material="
+                + (appliedMaterial != null ? appliedMaterial.name : "<null>")
+                + " skinTexture=" + (appliedMaterial != null
+                    && appliedMaterial.HasProperty("_Skin_Texture")
+                    && appliedMaterial.GetTexture("_Skin_Texture") != null
+                    ? appliedMaterial.GetTexture("_Skin_Texture").name : "<none>")
+                + " enabled=" + (applied != null && applied.enabled)
+                + " layer=" + (applied != null ? applied.gameObject.layer : -1)
+                + " json=" + (string.IsNullOrEmpty(model.CustomizationJson) ? 0
+                    : model.CustomizationJson.Length));
         }
 
         /// <summary>Rebuilds the body for a gender change and initializes it with the base preset.
@@ -307,10 +338,51 @@ namespace CardShopCoop.UI
                     transforms[i].gameObject.layer = PreviewLayer;
                 }
             }
+
+            // The stage is deliberately far away from the world, so there are no baked light
+            // probes or reflection probes anywhere near it. The game's character shaders are
+            // SH/probe lit; leaving probe usage on makes them sample an empty probe set and
+            // render black. Use the preview's own studio ambient instead.
+            var renderers = _body.GetComponentsInChildren<Renderer>(true);
+            for (var i = 0; i < renderers.Length; i++)
+            {
+                var renderer = renderers[i];
+                if (renderer == null)
+                {
+                    continue;
+                }
+                renderer.lightProbeUsage = LightProbeUsage.Off;
+                renderer.reflectionProbeUsage = ReflectionProbeUsage.Off;
+                if (renderer is SkinnedMeshRenderer skinned)
+                {
+                    skinned.updateWhenOffscreen = true;
+                }
+
+                // CharacterCustomization keeps shadow-only duplicates of every body part. In the
+                // preview they would draw as a black silhouette over the real lit body, because
+                // the preview camera has no shadow pass. Draw the body, never its shadow proxy.
+                if (renderer.shadowCastingMode == ShadowCastingMode.ShadowsOnly
+                    || renderer.name.IndexOf("_Shadow", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    renderer.enabled = false;
+                }
+            }
+        }
+
+        /// <summary>Drops the current body but keeps the stage/texture. Used when the Character
+        /// tab is left and the temporary model lease is released.</summary>
+        internal void ReleaseModel()
+        {
+            DestroyBody();
+            _model = null;
+            _modelIndex = 0;
         }
 
         internal void Destroy()
         {
+            Camera.onPreRender -= OnPreviewCameraPreRender;
+            Camera.onPostRender -= OnPreviewCameraPostRender;
+            RestoreRenderSettings();
             if (_camera != null)
             {
                 _camera.enabled = false;
@@ -371,19 +443,142 @@ namespace CardShopCoop.UI
             _camera.nearClipPlane = 0.05f;
             _camera.farClipPlane = 10f;
             _camera.depth = -100f;
-            _camera.allowHDR = false;
+            _camera.allowHDR = true;
             _camera.allowMSAA = true;
             _camera.useOcclusionCulling = false;
+            // The character shader is a forward Shader Graph material. Do not let the player's
+            // deferred quality tier force a deferred pass it cannot draw.
+            _camera.renderingPath = RenderingPath.Forward;
             _camera.targetTexture = _texture;
 
-            AddLight("KeyLight", new Vector3(20f, 155f, 0f), new Color(1f, 0.96f, 0.9f), 1.15f);
-            AddLight("FillLight", new Vector3(8f, -35f, 0f), new Color(0.72f, 0.82f, 1f), 0.55f);
-            AddLight("RimLight", new Vector3(5f, 55f, 0f), new Color(1f, 0.86f, 0.95f), 0.7f);
+            _keyLight = AddLight("KeyLight", new Vector3(20f, 155f, 0f),
+                new Color(1f, 0.95f, 0.88f), 1.55f, LightRenderMode.ForcePixel);
+            AddLight("FillLight", new Vector3(10f, 215f, 0f),
+                new Color(0.72f, 0.82f, 1f), 0.55f, LightRenderMode.ForceVertex);
+            AddLight("RimLight", new Vector3(5f, 55f, 0f),
+                new Color(1f, 0.86f, 0.95f), 0.85f, LightRenderMode.ForceVertex);
+            AddPointLight("PreviewFill", new Vector3(0f, 1.4f, -2.4f), Color.white, 1.8f, 9f);
 
+            CoopPlugin.Log?.LogInfo("co-op character editor: preview camera path="
+                + _camera.renderingPath + " actual=" + _camera.actualRenderingPath
+                + " pipeline=" + (GraphicsSettings.currentRenderPipeline != null
+                    ? GraphicsSettings.currentRenderPipeline.GetType().FullName : "builtin"));
+            _previewAmbient = BuildPreviewAmbient();
+            Camera.onPreRender += OnPreviewCameraPreRender;
+            Camera.onPostRender += OnPreviewCameraPostRender;
             _camera.enabled = _visible;
         }
 
-        private void AddLight(string name, Vector3 euler, Color color, float intensity)
+        /// <summary>
+        /// The preview stage is isolated 9000 units from the world, so the active scene's baked
+        /// light probes never reach it and the game's character shaders (which are SH/probe lit)
+        /// sample an empty probe set. Apply the preview's own studio probe only for the preview
+        /// camera's render, then restore the scene's lighting in the post-render callback so the
+        /// world behind the editor is never relit.
+        /// </summary>
+        private void OnPreviewCameraPreRender(Camera camera)
+        {
+            if (_camera == null || !ReferenceEquals(camera, _camera))
+            {
+                return;
+            }
+            if (_renderSettingsCaptured)
+            {
+                return;
+            }
+
+            _renderAmbientMode = RenderSettings.ambientMode;
+            _renderAmbientLight = RenderSettings.ambientLight;
+            _renderAmbientSky = RenderSettings.ambientSkyColor;
+            _renderAmbientEquator = RenderSettings.ambientEquatorColor;
+            _renderAmbientGround = RenderSettings.ambientGroundColor;
+            _renderAmbientIntensity = RenderSettings.ambientIntensity;
+            _renderAmbientProbe = RenderSettings.ambientProbe;
+            _renderSun = RenderSettings.sun;
+            _renderSettingsCaptured = true;
+
+            RenderSettings.ambientMode = AmbientMode.Custom;
+            RenderSettings.ambientProbe = BuildPreviewAmbient();
+            RenderSettings.ambientIntensity = 1f;
+            // The built-in forward main light is only guaranteed to be the scene sun. The preview
+            // stage is isolated from the game's lighting, so hand it the preview key light.
+            RenderSettings.sun = _keyLight != null ? _keyLight : _renderSun;
+            if (!_lightingLogged)
+            {
+                _lightingLogged = true;
+                LogPreviewLighting();
+            }
+        }
+
+        private void OnPreviewCameraPostRender(Camera camera)
+        {
+            if (_camera == null || !ReferenceEquals(camera, _camera))
+            {
+                return;
+            }
+            RestoreRenderSettings();
+        }
+
+        /// <summary>
+        /// The character shaders are SH-lit. A flat ambient colour gives no shape, so build a small
+        /// studio probe: cool fill from everywhere, a warm key from the front-left/above and a
+        /// cool rim from behind. This is the preview's own baked lighting, independent of the
+        /// active scene's light probes (which are 9000 units away and therefore useless).
+        /// </summary>
+        private static SphericalHarmonicsL2 BuildPreviewAmbient()
+        {
+            var probe = new SphericalHarmonicsL2();
+            probe.AddAmbientLight(new Color(0.17f, 0.19f, 0.24f));
+            probe.AddDirectionalLight(new Vector3(-0.4f, 0.6f, 0.8f).normalized,
+                new Color(1f, 0.94f, 0.88f), 0.95f);
+            probe.AddDirectionalLight(new Vector3(0.5f, 0.3f, -0.9f).normalized,
+                new Color(0.72f, 0.82f, 1f), 0.4f);
+            return probe;
+        }
+
+        private void RestoreRenderSettings()
+        {
+            if (!_renderSettingsCaptured)
+            {
+                return;
+            }
+
+            RenderSettings.ambientMode = _renderAmbientMode;
+            RenderSettings.ambientLight = _renderAmbientLight;
+            RenderSettings.ambientSkyColor = _renderAmbientSky;
+            RenderSettings.ambientEquatorColor = _renderAmbientEquator;
+            RenderSettings.ambientGroundColor = _renderAmbientGround;
+            RenderSettings.ambientIntensity = _renderAmbientIntensity;
+            RenderSettings.ambientProbe = _renderAmbientProbe;
+            RenderSettings.sun = _renderSun;
+            _renderSettingsCaptured = false;
+        }
+
+        private void LogPreviewLighting()
+        {
+            var lights = _stage != null
+                ? _stage.GetComponentsInChildren<Light>(true) : Array.Empty<Light>();
+            var summary = "";
+            for (var i = 0; i < lights.Length; i++)
+            {
+                var light = lights[i];
+                if (light == null)
+                {
+                    continue;
+                }
+                summary += " [" + light.name + " " + light.type + " mode=" + light.renderMode
+                    + " intensity=" + light.intensity + " mask=" + light.cullingMask
+                    + " enabled=" + light.enabled + "/" + light.gameObject.activeInHierarchy + "]";
+            }
+            CoopPlugin.Log?.LogInfo("co-op character editor: preview lighting ambientMode="
+                + RenderSettings.ambientMode + " ambient=" + RenderSettings.ambientLight
+                + " intensity=" + RenderSettings.ambientIntensity
+                + " sun=" + (RenderSettings.sun != null ? RenderSettings.sun.name : "<none>")
+                + summary);
+        }
+
+        private Light AddLight(string name, Vector3 euler, Color color, float intensity,
+            LightRenderMode renderMode)
         {
             var lightObject = new GameObject(name, typeof(Light));
             lightObject.layer = PreviewLayer;
@@ -394,39 +589,52 @@ namespace CardShopCoop.UI
             light.color = color;
             light.intensity = intensity;
             light.shadows = LightShadows.None;
+            light.renderMode = renderMode;
+            light.cullingMask = 1 << PreviewLayer;
+            return light;
+        }
+
+        private void AddPointLight(string name, Vector3 position, Color color, float intensity,
+            float range)
+        {
+            var lightObject = new GameObject(name, typeof(Light));
+            lightObject.layer = PreviewLayer;
+            lightObject.transform.SetParent(_stage.transform, false);
+            lightObject.transform.localPosition = position;
+            var light = lightObject.GetComponent<Light>();
+            light.type = LightType.Point;
+            light.color = color;
+            light.intensity = intensity;
+            light.range = range;
+            light.shadows = LightShadows.None;
+            light.renderMode = LightRenderMode.ForceVertex;
             light.cullingMask = 1 << PreviewLayer;
         }
 
         private void CreateBody(bool female, int modelIndex, PresenceModelEntry model)
         {
+            CoopPlugin.Log?.LogInfo("co-op character editor: CreateBody female=" + female
+                + " hasAny=" + CoopCharacterPrefabPreloader.HasAny);
             DestroyBody();
             CoopCharacterPrefabPreloader.EnsureStarted();
 
-            if (CoopCharacterPrefabPreloader.TryGet(female, out var preloaded)
-                && CreateFromPrefab(preloaded, "preloaded", isDummy: false, female, modelIndex))
+            if (!CoopCharacterPrefabPreloader.TryGet(female, out var preloaded))
             {
+                // The preload is still running (or did not resolve). Keep the preview empty and
+                // let the Completed event rebuild it; never substitute a dummy or a customer.
+                CoopPlugin.Log?.LogInfo("co-op character editor: waiting for the real character "
+                    + "prefab (" + (female ? "female" : "male") + ").");
                 return;
             }
 
-            if (CreateFromCustomer(female, modelIndex))
+            if (!CreateFromPrefab(preloaded, "preloaded", female, modelIndex))
             {
-                return;
+                CoopPlugin.Log?.LogError("co-op character editor: the real character prefab could "
+                    + "not be built for the " + (female ? "female" : "male") + " preview.");
             }
-
-            var dummy = Resources.Load<GameObject>(DummyPrefabName);
-            if (dummy != null
-                && CreateFromPrefab(dummy, DummyPrefabName, isDummy: true, female, modelIndex))
-            {
-                CoopPlugin.Log?.LogWarning("co-op character editor: using the limited CC_Dummy "
-                    + "preview body; the full character prefab is not available on this screen.");
-                return;
-            }
-
-            CoopPlugin.Log?.LogError("co-op character editor: no usable character prefab was found "
-                + "for the " + (female ? "female" : "male") + " preview.");
         }
 
-        private bool CreateFromPrefab(GameObject prefab, string label, bool isDummy, bool female,
+        private bool CreateFromPrefab(GameObject prefab, string label, bool female,
             int modelIndex)
         {
             if (prefab == null)
@@ -453,6 +661,15 @@ namespace CardShopCoop.UI
                     return false;
                 }
 
+                if (customization.MaterialsStorage == null)
+                {
+                    // Without the game's SharedMaterials the wardrobe cannot assign textures;
+                    // refuse to show a black body rather than pretending it is a successful load.
+                    CoopPlugin.Log?.LogError("co-op character editor: prefab '" + label
+                        + "' has no SharedMaterials; refusing to render an untextured body.");
+                    return false;
+                }
+
                 customization.Autoload = false;
                 customization.CharacterName = CharacterName(female,
                     CoopCharacterEditorModel.ClampModelIndex(customization, female, modelIndex));
@@ -469,130 +686,27 @@ namespace CardShopCoop.UI
                 _body = clone;
                 _customization = customization;
                 _bodyFemale = female;
-                _bodyFromCustomer = false;
-                _customerSourceCustom = null;
-                _customerSourceRoot = null;
-                _limited = isDummy || !HasGenderPresets(customization, female);
                 ConfigureAnimator();
                 RefreshLayers();
+                var diagnostic = _body.GetComponentInChildren<SkinnedMeshRenderer>(true);
+                var diagnosticMaterial = diagnostic != null ? diagnostic.sharedMaterial : null;
+                CoopPlugin.Log?.LogInfo("co-op character editor: preview body built from '"
+                    + label + "' (female=" + female + ") material="
+                    + (diagnosticMaterial != null ? diagnosticMaterial.name : "<null>")
+                    + " shader=" + (diagnosticMaterial != null && diagnosticMaterial.shader != null
+                        ? diagnosticMaterial.shader.name : "<null>")
+                    + " skinTexture=" + (diagnosticMaterial != null
+                        && diagnosticMaterial.HasProperty("_Skin_Texture")
+                        && diagnosticMaterial.GetTexture("_Skin_Texture") != null
+                        ? diagnosticMaterial.GetTexture("_Skin_Texture").name : "<none>")
+                    + " lights=" + (_stage != null
+                        ? _stage.GetComponentsInChildren<Light>(true).Length : 0));
                 return true;
             }
             catch (Exception error)
             {
                 CoopPlugin.Log?.LogError("co-op character editor: preview body from '" + label
                     + "' failed: " + error);
-                if (clone != null)
-                {
-                    clone.SetActive(false);
-                    UnityEngine.Object.Destroy(clone);
-                }
-                _body = null;
-                _customization = null;
-                return false;
-            }
-            finally
-            {
-                if (holder != null)
-                {
-                    UnityEngine.Object.Destroy(holder);
-                }
-            }
-        }
-
-        private bool CreateFromCustomer(bool female, int modelIndex)
-        {
-            var customers = SceneRef<CustomerManager>.Get();
-            if (customers == null)
-            {
-                return false;
-            }
-
-            var source = CharacterClone.FindCustomerSource(customers, female);
-            if (source == null)
-            {
-                return false;
-            }
-
-            GameObject holder = null;
-            GameObject clone = null;
-            try
-            {
-                var sourceCustom = source.m_CharacterCustom;
-                holder = new GameObject("CoopCharacterEditorHolder_tmp");
-                holder.SetActive(false);
-                clone = UnityEngine.Object.Instantiate(source.gameObject, holder.transform);
-                clone.AddComponent<CoopOwnedVisual>();
-                clone.transform.SetParent(_stage.transform, false);
-                clone.SetActive(true);
-                UnityEngine.Object.Destroy(holder);
-                holder = null;
-
-                var customer = clone.GetComponent<Customer>();
-                HideCustomerProps(customer);
-                var customization = customer != null
-                    ? customer.m_CharacterCustom
-                    : clone.GetComponentInChildren<CC.CharacterCustomization>(true);
-                if (customization == null || customization.Presets == null
-                    || customization.Presets.Presets == null
-                    || customization.Presets.Presets.Count == 0)
-                {
-                    clone.SetActive(false);
-                    UnityEngine.Object.Destroy(clone);
-                    return false;
-                }
-
-                CharacterClone.PrepareForDressing(customization, sourceCustom, source.transform,
-                    clone.transform, CharacterName(female,
-                        CoopCharacterEditorModel.ClampModelIndex(customization, female,
-                            modelIndex)), "co-op character editor preview");
-
-                foreach (var behaviour in clone.GetComponentsInChildren<MonoBehaviour>(true))
-                {
-                    if (behaviour == null)
-                    {
-                        continue;
-                    }
-
-                    var typeName = behaviour.GetType().Name;
-                    if (typeName == "CopyPose" || typeName == "BlendshapeManager"
-                        || typeName == "ScaleCharacter" || typeName == "CharacterCustomization"
-                        || typeName == "TransformBone" || typeName == "MipBiasAdjust")
-                    {
-                        continue;
-                    }
-
-                    UnityEngine.Object.DestroyImmediate(behaviour);
-                }
-                foreach (var collider in clone.GetComponentsInChildren<Collider>(true))
-                {
-                    UnityEngine.Object.DestroyImmediate(collider);
-                }
-                foreach (var body in clone.GetComponentsInChildren<Rigidbody>(true))
-                {
-                    UnityEngine.Object.DestroyImmediate(body);
-                }
-
-                clone.transform.localPosition = Vector3.zero;
-                clone.transform.localRotation = Quaternion.identity;
-                clone.transform.localScale = Vector3.one;
-                clone.name = "CoopCharacterEditorBody";
-                clone.SetActive(true);
-
-                _body = clone;
-                _customization = customization;
-                _bodyFemale = female;
-                _bodyFromCustomer = true;
-                _customerSourceCustom = sourceCustom;
-                _customerSourceRoot = source.transform;
-                _limited = !HasGenderPresets(customization, female);
-                ConfigureAnimator();
-                RefreshLayers();
-                return true;
-            }
-            catch (Exception error)
-            {
-                CoopPlugin.Log?.LogError("co-op character editor: customer preview body failed: "
-                    + error);
                 if (clone != null)
                 {
                     clone.SetActive(false);
@@ -618,40 +732,14 @@ namespace CardShopCoop.UI
                 return;
             }
 
-            var json = _model?.CustomizationJson;
-
             try
             {
-                if (_bodyFromCustomer)
+                PresenceLocalEditorApi.ApplyModel(_customization, new PresenceModelEntry
                 {
-                    // Reset the clone to its base preset first. Unlike a Resources prefab, a
-                    // customer clone does not reinitialize itself when the JSON is empty, so a
-                    // preview that previously showed a different (or nude) look must be dressed
-                    // back to the preset before the new data is applied.
-                    CharacterClone.PrepareForDressing(_customization, _customerSourceCustom,
-                        _customerSourceRoot, _body != null ? _body.transform : null,
-                        CharacterName(_bodyFemale, _modelIndex), "co-op character editor preview");
-
-                    if (!string.IsNullOrEmpty(json))
-                    {
-                        var data = JsonConvert.DeserializeObject<CC.CC_CharacterData>(json);
-                        if (data != null)
-                        {
-                            _customization.StoredCharacterData = data;
-                            PresenceLocalEditorApi.ApplyCharacterData(_customization, data);
-                            PresenceLocalEditorApi.ClearEmptyWardrobeSlots(_customization, data);
-                        }
-                    }
-                }
-                else
-                {
-                    PresenceLocalEditorApi.ApplyModel(_customization, new PresenceModelEntry
-                    {
-                        Female = _bodyFemale,
-                        ModelIndex = _modelIndex,
-                        CustomizationJson = json,
-                    });
-                }
+                    Female = _bodyFemale,
+                    ModelIndex = _modelIndex,
+                    CustomizationJson = _model?.CustomizationJson,
+                });
             }
             catch (Exception error)
             {
@@ -660,36 +748,9 @@ namespace CardShopCoop.UI
             }
         }
 
-        private static bool HasGenderPresets(CC.CharacterCustomization customization, bool female)
-        {
-            var presets = customization?.Presets?.Presets;
-            if (presets == null)
-            {
-                return false;
-            }
-
-            var prefix = female ? "Female" : "Male";
-            for (var i = 0; i < presets.Count; i++)
-            {
-                var preset = presets[i];
-                if (preset != null && !string.IsNullOrEmpty(preset.CharacterName)
-                    && preset.CharacterName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
         private static string CharacterName(bool female, int modelIndex)
         {
             return (female ? "Female" : "Male") + Mathf.Max(0, modelIndex);
-        }
-
-        private static bool HasBetterSource(bool female)
-        {
-            return CoopCharacterPrefabPreloader.TryGet(female, out _)
-                || SceneRef<CustomerManager>.Get() != null;
         }
 
         private void DestroyBody()
@@ -701,44 +762,6 @@ namespace CardShopCoop.UI
             }
             _body = null;
             _customization = null;
-            _bodyFromCustomer = false;
-            _customerSourceCustom = null;
-            _customerSourceRoot = null;
-            _limited = false;
-        }
-
-        private static void HideCustomerProps(Customer customer)
-        {
-            if (customer == null)
-            {
-                return;
-            }
-
-            try
-            {
-                HideProp(customer.m_ShoppingBagTransform?.gameObject, customer);
-                HideProp(customer.m_CustomerCash?.gameObject, customer);
-                HideProp(customer.m_GameCardFanOut, customer);
-                HideProp(customer.m_GameCardSingle, customer);
-                HideProp(customer.m_CleanFX, customer);
-                HideProp(customer.m_ExclaimationMesh, customer);
-                HideProp(customer.m_InteractCollider, customer);
-                HideProp(customer.m_SmellyFX, customer);
-            }
-            catch (Exception error)
-            {
-                CoopPlugin.Log?.LogWarning("co-op character editor: hiding customer props failed: "
-                    + error.Message);
-            }
-        }
-
-        private static void HideProp(GameObject prop, Customer customer)
-        {
-            if (prop == null || prop.transform == customer.transform)
-            {
-                return;
-            }
-            prop.SetActive(false);
         }
 
         private static PresenceModelEntry Clone(PresenceModelEntry model)

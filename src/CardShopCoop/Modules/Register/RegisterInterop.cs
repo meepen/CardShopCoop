@@ -394,8 +394,7 @@ namespace CardShopCoop.Modules.Register
             }
 
             var item = ItemSpawnManager.GetItem(counter.transform);
-            item.SetMesh(meshData.mesh, meshData.material, type, meshData.meshSecondary,
-                meshData.materialSecondary, meshData.materialList);
+            Runtime.ItemVisuals.Apply(item, type);
             item.SetCurrentPrice(price);
             item.transform.parent = counter.transform;
             item.transform.position = counter.m_CustomerPlaceItemPos.position;

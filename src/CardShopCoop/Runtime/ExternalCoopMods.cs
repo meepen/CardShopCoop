@@ -190,6 +190,7 @@ namespace CardShopCoop.Runtime
                     CoopPlugin.Log?.LogWarning("[api] could not roll back message registration for '"
                         + assemblyName + "': " + disposeError.Message);
                 }
+                ModuleCatalog.UnbindExternal(assemblyName);
                 lock (_gate)
                 {
                     _assemblies.Remove(assembly);

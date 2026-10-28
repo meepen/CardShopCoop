@@ -65,6 +65,13 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         public static bool Unbind(object entity)
             => GameObjectIdentityCache.Unbind(entity, out _);
 
+        /// <summary>Removes only the live object binding for a representation transition (for
+        /// example a packaging box becoming a stored warehouse record). The identity and its
+        /// extended information stay alive so the next live representation of the same id can
+        /// replay them. Use <see cref="Unbind"/> for a permanent removal.</summary>
+        internal static bool Detach(object entity)
+            => GameObjectIdentityCache.Detach(entity, out _);
+
         public static IReadOnlyList<GameObjectId> Snapshot()
             => GameObjectIdentityCache.Snapshot();
 
@@ -109,8 +116,16 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             {
                 GameObjectIdentityClientBehaviour.Active?.CancelPending(descriptor.Id);
                 BindClient(existing, descriptor.Id);
-                ApplyDescriptorToExisting(existing, descriptor);
-                return;
+                if (ApplyDescriptorToExisting(existing, descriptor))
+                {
+                    return;
+                }
+
+                // The existing object cannot represent this descriptor (normally a kind/type
+                // change). Retire it and materialize the authoritative shape instead of keeping a
+                // stale object under the id.
+                GameObjectIdentityAdapters.TryDestroy(existing);
+                Unbind(existing);
             }
 
             if (!GameObjectIdentityAdapters.TryCreate(descriptor, out var entity) || entity == null)
@@ -132,9 +147,23 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
             GameObjectIdentityClientBehaviour.Active?.CancelPending(message.Id);
 
-            if (message.Replacement == null || message.Replacement.Id != message.Id)
+            // A same-id replacement is a representation/pose change (a decoration move), not a
+            // removal. Keep the live object and its extended information; re-pose it in place.
+            var replacementInPlace = message.Replacement != null
+                && message.Replacement.Id == message.Id;
+            if (!replacementInPlace)
             {
                 ExtendedInformationModule.OnEntityRemoved(message.Id, message.Mode);
+            }
+
+            if (replacementInPlace)
+            {
+                ClientApplyAdded(new EntityAddedMessage
+                {
+                    Descriptor = message.Replacement,
+                    Adopted = true,
+                });
+                return;
             }
 
             if (TryResolve(message.Id, out var entity))
@@ -156,17 +185,32 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         /// <summary>A creation descriptor also carries authoritative state for an entity this
         /// peer already has (its own predicted spawn, or a save-loaded object). Apply it instead
         /// of only re-binding, or the peer keeps its local spawn pose/contents.</summary>
-        private static void ApplyDescriptorToExisting(object entity, EntityDescriptor descriptor)
+        private static bool ApplyDescriptorToExisting(object entity, EntityDescriptor descriptor)
         {
             if (entity is InteractableObject obj && descriptor is PlacementEntityDescriptor placement)
             {
                 PlacementIdentityAdapter.ApplyClientDescriptor(obj, placement);
+                return true;
             }
-            else if (entity is InteractablePackagingBox box
+
+            if (entity is InteractablePackagingBox box
                 && descriptor is PackagingBoxEntityDescriptor boxDescriptor)
             {
                 BoxIdentityLifecycle.ApplyDescriptorToBoxForCreate(box, boxDescriptor);
+                return true;
             }
+
+            if (entity is InteractableObject decoration
+                && descriptor is DecorationEntityDescriptor decorationDescriptor)
+            {
+                return DecorationIdentityAdapter.ApplyClientDescriptor(decoration,
+                    decorationDescriptor);
+            }
+
+            // NPC descriptors and any kind with no extra creation state keep the existing live
+            // object; the feature module owns their authoritative state. Only a decoration whose
+            // type no longer matches the id is a genuine replace-and-recreate case.
+            return true;
         }
 
         internal static void ClientApplyBaseline(EntityBaselineMessage message)
@@ -177,7 +221,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             }
 
             GameObjectIdentityClientBehaviour.Active?.ClearPending();
-            WorldClientBehaviour.SetHostWarehouseBackend(message.HostUsesRecordWarehouse);
             BoxIdentityLifecycle.BeginClientBaseline();
 
             for (var i = 0; i < message.Entries.Count; i++)

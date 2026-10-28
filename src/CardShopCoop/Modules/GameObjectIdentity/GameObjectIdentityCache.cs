@@ -196,6 +196,29 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             return true;
         }
 
+        /// <summary>Removes only the live object binding. The id stays known and its extended
+        /// information is preserved for the next live representation of the same id (a stored box
+        /// becoming a record and back). This is deliberately not <see cref="Unbind"/>: a permanent
+        /// removal must still clear the information.</summary>
+        internal static bool Detach(object entity, out GameObjectId id)
+        {
+            MainThreadGuard.RequireMainThread("game object identity detach");
+            id = default;
+            if (entity == null || !ByObject.TryGetValue(entity, out id))
+            {
+                return false;
+            }
+
+            ByObject.Remove(entity);
+            if (ById.TryGetValue(id, out var current) && ReferenceEquals(current, entity))
+            {
+                ById.Remove(id);
+                OwnershipById.Remove(id);
+            }
+
+            return true;
+        }
+
         internal static GameObjectOwnership OwnershipOf(GameObjectId id)
             => OwnershipById.TryGetValue(id, out var ownership) ? ownership : GameObjectOwnership.Host;
 

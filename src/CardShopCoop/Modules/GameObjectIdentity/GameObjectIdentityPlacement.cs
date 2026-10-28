@@ -122,7 +122,9 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                     prefix: new HarmonyMethod(typeof(GameObjectIdentityHostHooks),
                         nameof(FurniturePurchaseSpawnPrefix)),
                     postfix: new HarmonyMethod(typeof(GameObjectIdentityHostHooks),
-                        nameof(FurniturePurchaseSpawnPostfix)));
+                        nameof(FurniturePurchaseSpawnPostfix)),
+                    finalizer: new HarmonyMethod(typeof(GameObjectIdentityHostHooks),
+                        nameof(FurniturePurchaseSpawnFinalizer)));
             }
 
             // A host that starts a session inside an already-loaded shop has no init events left,
@@ -160,6 +162,16 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
         public static void FurniturePurchaseSpawnPostfix()
             => PlacementObjectIdentity.CompleteFurniturePurchaseSpawn();
+
+        public static void FurniturePurchaseSpawnFinalizer(Exception __exception)
+        {
+            if (__exception != null)
+            {
+                // A Harmony postfix does not run when the original throws. Release the depth or
+                // every later placement would stay deferred until a scene reload.
+                PlacementObjectIdentity.AbortFurniturePurchaseSpawn();
+            }
+        }
     }
 
     /// <summary>
@@ -223,6 +235,15 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             if (obj != null && GameObjectIdentityHostBehaviour.Active != null)
             {
                 HostCreated(obj);
+            }
+        }
+
+        internal static void AbortFurniturePurchaseSpawn()
+        {
+            _furniturePurchaseDepth = Math.Max(0, _furniturePurchaseDepth - 1);
+            if (_furniturePurchaseDepth == 0)
+            {
+                _pendingFurniturePlacement = null;
             }
         }
 

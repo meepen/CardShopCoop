@@ -345,6 +345,7 @@ namespace CardShopCoop.Modules.Register
                 Counter = capture.Counter,
                 Paid = capture.Paid,
                 Change = capture.ChangeValue,
+                WalletApplied = RegisterInterop.Total(capture.Counter) <= 0.0001d,
             });
         }
 

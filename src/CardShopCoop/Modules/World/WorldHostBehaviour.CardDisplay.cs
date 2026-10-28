@@ -114,6 +114,39 @@ namespace CardShopCoop.Modules.World
             {
                 BroadcastWorld(echo);
             }
+            else if (!accepted
+                && WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
+                    out var rejectedCompartment))
+            {
+                // ExecuteWorldCommand has already sent the rollback. Sending the authority after
+                // it means the client first returns its optimistic card through the action's undo
+                // and then applies the host's real slot state; the other order retires the action
+                // first and would lose the guest's card.
+                RefreshRejectedCardDisplay(context, message, rejectedCompartment);
+            }
+        }
+
+        /// <summary>After a refusal, tell the requester the slot's real state so the rollback's
+        /// restored card is replaced by authority rather than leaving a ghost on the shelf.</summary>
+        private void RefreshRejectedCardDisplay(MessageContext context,
+            CardDisplayRequestMessage request, InteractableCardCompartment compartment)
+        {
+            if (context?.Connection == null || request == null || compartment == null
+                || !WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
+            {
+                return;
+            }
+
+            var card = WorldCardDisplay.Read(compartment);
+            SendWorldTo(context.ConnectionId, new CardDisplayMessage
+            {
+                ActionId = request.ActionId,
+                Shelf = shelf,
+                Compartment = index,
+                Occupied = card != null,
+                Card = card == null ? null : WorldCardDisplay.ToState(card),
+                EncodedGrade = card == null ? -1 : WorldCardDisplay.EncodedGradeOf(card),
+            });
         }
 
         /// <summary>Host-initiated display changes (the host player placing a card, a worker

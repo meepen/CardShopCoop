@@ -102,7 +102,7 @@ namespace CardShopCoop.Modules.Staff
                 switch (message.Kind)
                 {
                     case StaffIntentKind.Hire:
-                        accepted = HostHire(worker);
+                        accepted = HostHire(message.Index);
                         break;
                     case StaffIntentKind.Task:
                     case StaffIntentKind.Options:
@@ -135,8 +135,19 @@ namespace CardShopCoop.Modules.Staff
         }
 
         private bool IsValidSender(MessageContext context, StaffModuleIntentMessage message)
-            => !_shutdown && _context.InGame() && context?.Connection != null
-                && IsJoinPhase(context.Connection.State) && message != null && message.Worker != null;
+        {
+            if (_shutdown || !_context.InGame() || context?.Connection == null
+                || !IsJoinPhase(context.Connection.State) || message == null)
+            {
+                return false;
+            }
+
+            // A hire addresses a save-data slot: the worker does not exist yet, so it cannot be
+            // carried on the wire. Every other intent operates a live, already-replicated worker.
+            return message.Kind == StaffIntentKind.Hire
+                ? StaffModuleInterop.IsAddressable(GetWorkerManager(), message.Index)
+                : message.Worker != null;
+        }
 
         private StaffModuleBaselineMessage BuildBaseline()
         {
@@ -184,10 +195,9 @@ namespace CardShopCoop.Modules.Staff
         private WorkerManager GetWorkerManager()
             => SceneRef<WorkerManager>.Get();
 
-        private bool HostHire(Worker worker)
+        private bool HostHire(int index)
         {
             var manager = GetWorkerManager();
-            var index = worker?.m_WorkerIndex ?? -1;
             if (!StaffModuleInterop.IsAddressable(manager, index)
                 || CPlayerData.m_IsWorkerHired == null || index >= CPlayerData.m_IsWorkerHired.Count
                 || CPlayerData.GetIsWorkerHired(index))
@@ -197,6 +207,14 @@ namespace CardShopCoop.Modules.Staff
 
             var workerData = manager.m_WorkerDataList[index];
             if (workerData == null || CPlayerData.m_ShopLevel + 1 < workerData.shopLevelRequired)
+            {
+                return false;
+            }
+
+            // Vanilla ActivateWorker is a no-op after the day ends. Reject before spending so a
+            // late hire cannot charge the shared wallet and leave the client's action pending
+            // without a worker/delta.
+            if (LightManager.GetHasDayEnded())
             {
                 return false;
             }

@@ -620,12 +620,32 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
 
             manager.m_CurrentSaveLoadSlotSelectedIndex = slot;
-            typeof(CGameManager).GetField("m_InitLoaded", BindingFlags.Static
-                | BindingFlags.Public | BindingFlags.NonPublic)?.SetValue(null, false);
-            manager.LoadMainLevelAsync(StartSceneName(), slot);
+            var initLoaded = typeof(CGameManager).GetField("m_InitLoaded", BindingFlags.Static
+                | BindingFlags.Public | BindingFlags.NonPublic);
+            if (initLoaded == null)
+            {
+                // Without this reset CGameManager.LoadDelay skips LoadData and the guest loads
+                // its own world instead of the host's. A silent skip is worse than a loud failure.
+                throw new InvalidOperationException(
+                    "CGameManager.m_InitLoaded was not found, so a borrowed world cannot be loaded.");
+            }
+
+            initLoaded.SetValue(null, false);
+
+            var sceneName = StartSceneName();
+            if (string.IsNullOrEmpty(sceneName) || !Application.CanStreamedLevelBeLoaded(sceneName))
+            {
+                throw new InvalidOperationException("The game's shop scene is not streamable"
+                    + (string.IsNullOrEmpty(sceneName) ? "." : " ('" + sceneName + "')."));
+            }
+
+            manager.LoadMainLevelAsync(sceneName, slot);
         }
 
-        private static string StartSceneName()
+        /// <summary>The gameplay scene this build loads. Every supported build exposes the name
+        /// as <c>CGameManager.k_StartSceneName</c>; the fallbacks exist only for a future build
+        /// that moves it or renames the scene. Cached for the process.</summary>
+        internal static string StartSceneName()
         {
             if (_startSceneName != null)
             {
@@ -643,11 +663,15 @@ namespace CardShopCoop.Modules.SaveTransfer
                 CoopLog.Swallow(error);
             }
 
-            if (string.IsNullOrEmpty(_startSceneName))
+            if (string.IsNullOrEmpty(_startSceneName)
+                || !Application.CanStreamedLevelBeLoaded(_startSceneName))
             {
-                _startSceneName = "Start";
+                _startSceneName = Application.CanStreamedLevelBeLoaded("StartOptimized")
+                    ? "StartOptimized"
+                    : Application.CanStreamedLevelBeLoaded("Start") ? "Start" : null;
             }
-            CoopPlugin.Log.LogInfo("coop: loading co-op world via scene '" + _startSceneName + "'");
+
+            CoopPlugin.Log.LogInfo("coop: co-op world scene is '" + _startSceneName + "'");
             return _startSceneName;
         }
 

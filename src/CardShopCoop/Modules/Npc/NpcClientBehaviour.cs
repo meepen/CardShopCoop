@@ -1987,9 +1987,9 @@ namespace CardShopCoop.Modules.Npc
         /// supported game baselines and appends in index order while leaving the new carrier
         /// inactive. New capacity is tracked immediately so vanilla cannot expose an extra native
         /// customer beside its synchronized puppet. The slot is also reconciled to the host's
-        /// authoritative gender: the 1.00 and 1.02 builds bake the same pool bodies in a different
-        /// order, so an index can name a male customer on the host and a female body on the guest
-        /// (whose preset table then falls back to the default model).</summary>
+        /// authoritative gender: the Steam and Game Pass builds bake the same pool bodies in a
+        /// different order, so an index can name a male customer on the host and a female body on
+        /// the guest (whose preset table then falls back to the default model).</summary>
         private static void EnsureCustomerCapacity(int index, bool female)
         {
             var manager = NpcInterop.CustomerManager;
@@ -2017,9 +2017,10 @@ namespace CardShopCoop.Modules.Npc
         }
 
         /// <summary>Keeps the local pool index authoritative for the host's customer. Both
-        /// supported pools contain the same bodies, but 1.00 and 1.02 order the male and female
-        /// entries differently, so the body at a host index can be the opposite gender. Swap it
-        /// with a free body of the authoritative gender before the identity is dressed; the old
+        /// supported pools contain the same bodies, but the Steam and Game Pass builds order the
+        /// male and female entries differently, so the body at a host index can be the opposite
+        /// gender. Swap it with a free body of the authoritative gender before the identity is
+        /// dressed; the old
         /// body moves to that free slot and is reconciled if the host ever uses it. Never move a
         /// body an active register/trade carrier is borrowing.</summary>
         private static void EnsureCustomerSlotGender(List<Customer> customers, int index, bool female)
