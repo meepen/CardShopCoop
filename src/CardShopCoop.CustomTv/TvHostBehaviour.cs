@@ -444,20 +444,23 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        private static void StreamYouTubePostfix(string url)
+        private static void StreamYouTubePostfix(object __instance, string url)
         {
+            TvInterop.RegisterController(__instance as Component);
             TvInterop.StreamYouTubePostfix(url);
             _active?.OnMediaSourceChanged();
         }
 
-        private static void ChangeToUrlPostfix(string url, string title)
+        private static void ChangeToUrlPostfix(object __instance, string url, string title)
         {
+            TvInterop.RegisterController(__instance as Component);
             TvInterop.ChangeToUrlPostfix(url);
             _active?.OnMediaSourceChanged();
         }
 
-        private static void PlaylistItemPostfix()
+        private static void PlaylistItemPostfix(object __instance)
         {
+            TvInterop.RegisterController(__instance as Component);
             if (_active == null || TvInterop.ApplyingRemote)
             {
                 return;
@@ -470,9 +473,15 @@ namespace CardShopCoop.CustomTv
             _active.PublishMediaDelta(operation, actionId, true);
         }
 
-        private static void PausePostfix() => _active?.OnScalarChanged(Pause);
-        private static void PowerPostfix() => _active?.OnScalarChanged(Power);
-        private static void ShufflePostfix() => _active?.OnScalarChanged(Shuffle);
+        private static void PausePostfix(object __instance) => RegisterScalar(__instance, Pause);
+        private static void PowerPostfix(object __instance) => RegisterScalar(__instance, Power);
+        private static void ShufflePostfix(object __instance) => RegisterScalar(__instance, Shuffle);
+
+        private static void RegisterScalar(object instance, byte operation)
+        {
+            TvInterop.RegisterController(instance as Component);
+            _active?.OnScalarChanged(operation);
+        }
 
         private void OnMediaSourceChanged()
         {
@@ -497,8 +506,9 @@ namespace CardShopCoop.CustomTv
             _active?.OnControllerLifecycle();
         }
 
-        private static void ControllerDisablePostfix()
+        private static void ControllerDisablePostfix(object __instance)
         {
+            TvInterop.ForgetController(__instance as Component);
             if (_active != null && _active._barrier && !_active._shutdown)
             {
                 _active.AbortBarrier("host TV controller playback was canceled");
@@ -536,11 +546,13 @@ namespace CardShopCoop.CustomTv
 
         private static void LocalPreparedPrefix(object __instance, object source)
         {
+            TvInterop.RegisterController(__instance as Component);
             _active?.BeforeLocalPrepared(__instance, source);
         }
 
         private static void LocalPreparedPostfix(object __instance, object source)
         {
+            TvInterop.RegisterController(__instance as Component);
             _active?.AfterLocalPrepared(__instance, source);
         }
 

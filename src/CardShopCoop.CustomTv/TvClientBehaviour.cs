@@ -359,11 +359,13 @@ namespace CardShopCoop.CustomTv
 
         private static void LocalPreparedPrefix(object __instance, object source)
         {
+            TvInterop.RegisterController(__instance as Component);
             _active?.BeforeLocalPrepared(__instance, source);
         }
 
         private static void LocalPreparedPostfix(object __instance, object source)
         {
+            TvInterop.RegisterController(__instance as Component);
             _active?.AfterLocalPrepared(__instance, source);
         }
 
@@ -373,14 +375,16 @@ namespace CardShopCoop.CustomTv
             _active?.OnControllerLifecycle();
         }
 
-        private static void ChangeToUrlPostfix(string url, string title)
+        private static void ChangeToUrlPostfix(object __instance, string url, string title)
         {
+            TvInterop.RegisterController(__instance as Component);
             TvInterop.ChangeToUrlPostfix(url);
             _active?.OnControllerLifecycle();
         }
 
-        private static void StreamYouTubePostfix(string url)
+        private static void StreamYouTubePostfix(object __instance, string url)
         {
+            TvInterop.RegisterController(__instance as Component);
             TvInterop.StreamYouTubePostfix(url);
             _active?.OnControllerLifecycle();
         }
@@ -433,8 +437,9 @@ namespace CardShopCoop.CustomTv
             public TvInterop.PlaybackUndoState Prior;
         }
 
-        private static void QualityPrefix(out QualityState __state)
+        private static void QualityPrefix(object __instance, out QualityState __state)
         {
+            TvInterop.RegisterController(__instance as Component);
             __state = default;
             if (!CanAct() || TvInterop.ApplyingRemote)
             {
@@ -452,8 +457,9 @@ namespace CardShopCoop.CustomTv
             __state.Prior = TvInterop.CapturePlaybackState();
         }
 
-        private static void QualityPostfix(QualityState __state)
+        private static void QualityPostfix(object __instance, QualityState __state)
         {
+            TvInterop.RegisterController(__instance as Component);
             if (!__state.Armed || !CanAct() || TvInterop.ApplyingRemote)
             {
                 return;
@@ -553,8 +559,11 @@ namespace CardShopCoop.CustomTv
 
         /// <summary>Captures the playback state before a control the game performs itself, so the
         /// postfix can register one observed action and replay it if the host rejects it.</summary>
-        private static void CapturePrefix(out TvInterop.PlaybackUndoState __state)
-            => __state = TvInterop.CapturePlaybackState();
+        private static void CapturePrefix(object __instance, out TvInterop.PlaybackUndoState __state)
+        {
+            TvInterop.RegisterController(__instance as Component);
+            __state = TvInterop.CapturePlaybackState();
+        }
 
         private static void PausePostfix(TvInterop.PlaybackUndoState __state)
         {

@@ -24,24 +24,31 @@ namespace CardShopCoop.CustomTv
         internal const double MaxSeekDeltaSeconds = 300.0;
         private static readonly Type ControllerType =
             CoopReflection.OptionalType("Scripts.VideoPlayerController", AssemblyName);
+        private static readonly Type ChannelType =
+            CoopReflection.OptionalType("Scripts.TvChannel", AssemblyName);
         private const BindingFlags Flags = BindingFlags.Static | BindingFlags.Instance
             | BindingFlags.Public | BindingFlags.NonPublic;
 
-        private static readonly FieldInfo Enrolled = Field("enrolledTVs");
-        private static readonly FieldInfo SharedVideoIndex = Field("sharedVideoIndex");
-        private static readonly FieldInfo StreamUrlField = Field("activeStreamUrl");
-        private static readonly FieldInfo StreamTitleField = Field("activeStreamTitle");
-        private static readonly FieldInfo PlaylistUrl = Field("activePlaylistUrl");
-        private static readonly FieldInfo PlaylistIndex = Field("activePlaylistIndex");
-        private static readonly FieldInfo Live = Field("isLiveStream");
-        private static readonly FieldInfo Segmented = Field("isSegmentedVod");
-        private static readonly FieldInfo Playing = Field("isPlayingStream");
-        private static readonly FieldInfo Fetching = Field("isFetchingUrl");
-        private static readonly FieldInfo PausedField = Field("isSharedPaused");
-        private static readonly FieldInfo Powered = Field("isPoweredOff");
-        private static readonly FieldInfo ShuffleField = Field("isShuffleMode");
-        private static readonly FieldInfo LastTime = Field("lastKnownMasterTime");
-        private static readonly FieldInfo PendingUrlField = Field("pendingYouTubeUrl");
+        // The current Custom TV build keeps all shared playback state on one TvChannel object per
+        // channel; VideoPlayerController.Ch selects it. The controller only keeps the device-local
+        // VideoPlayer, the quality dialog and the channel list.
+        private static readonly FieldInfo ChannelField = Field("Ch");
+        private static readonly FieldInfo AllTvs = Field("AllTVs");
+        private static readonly FieldInfo Enrolled = ChannelState("enrolledTVs");
+        private static readonly FieldInfo SharedVideoIndex = ChannelState("sharedVideoIndex");
+        private static readonly FieldInfo StreamUrlField = ChannelState("activeStreamUrl");
+        private static readonly FieldInfo StreamTitleField = ChannelState("activeStreamTitle");
+        private static readonly FieldInfo PlaylistUrl = ChannelState("activePlaylistUrl");
+        private static readonly FieldInfo PlaylistIndex = ChannelState("activePlaylistIndex");
+        private static readonly FieldInfo Live = ChannelState("isLiveStream");
+        private static readonly FieldInfo Segmented = ChannelState("isSegmentedVod");
+        private static readonly FieldInfo Playing = ChannelState("isPlayingStream");
+        private static readonly FieldInfo Fetching = ChannelState("isFetchingUrl");
+        private static readonly FieldInfo PausedField = ChannelState("isSharedPaused");
+        private static readonly FieldInfo Powered = ChannelState("isPoweredOff");
+        private static readonly FieldInfo ShuffleField = ChannelState("isShuffleMode");
+        private static readonly FieldInfo LastTime = ChannelState("lastKnownMasterTime");
+        private static readonly FieldInfo PendingUrlField = ChannelState("pendingYouTubeUrl");
         private static readonly FieldInfo QualityOpen = Field("isQualityChoiceOpen");
         private static readonly FieldInfo QualityRoot = Field("qualityChoiceRoot");
         private static readonly FieldInfo VideoPlayerField = Field("m_VideoPlayer");
@@ -125,6 +132,8 @@ namespace CardShopCoop.CustomTv
         }
 
         private static FieldInfo Field(string name) => CoopReflection.OptionalField(ControllerType, name);
+        private static FieldInfo ChannelState(string name)
+            => ChannelType == null ? null : CoopReflection.OptionalField(ChannelType, name);
         private static MethodInfo Method(string name, params Type[] arguments)
             => CoopReflection.OptionalMethod(ControllerType, name, arguments);
 
@@ -136,6 +145,12 @@ namespace CardShopCoop.CustomTv
             }
 
             if (!typeof(MonoBehaviour).IsAssignableFrom(ControllerType))
+            {
+                return FeatureAvailability.Drifted;
+            }
+
+            if (ChannelType == null || ChannelField == null
+                || !ChannelType.IsAssignableFrom(ChannelField.FieldType))
             {
                 return FeatureAvailability.Drifted;
             }
@@ -169,7 +184,7 @@ namespace CardShopCoop.CustomTv
                 }
             }
 
-            if (!Enrolled.IsStatic)
+            if (!typeof(IList).IsAssignableFrom(Enrolled.FieldType))
             {
                 return FeatureAvailability.Drifted;
             }
@@ -215,7 +230,18 @@ namespace CardShopCoop.CustomTv
 
         private static object Get(FieldInfo field)
         {
-            return field?.GetValue(field.IsStatic ? null : Master());
+            if (field == null)
+            {
+                return null;
+            }
+
+            if (field.IsStatic)
+            {
+                return field.GetValue(null);
+            }
+
+            var channel = ChannelOf(Master());
+            return channel == null ? null : field.GetValue(channel);
         }
 
         private static T Get<T>(FieldInfo field, T fallback = default)
@@ -236,17 +262,31 @@ namespace CardShopCoop.CustomTv
         {
             try
             {
-                var list = Enrolled?.GetValue(null) as IList;
-                if (list != null && list.Count > 0)
+                var registered = _master;
+                if (registered != null)
                 {
-                    var enrolled = list[0] as Component;
-                    if (enrolled != null)
+                    // Custom TV keeps one TvChannel per channel, and only the first enrolled TV
+                    // drives playback. Invoke controls on that master, but read/write state through
+                    // the channel it shares with every other TV on the same channel.
+                    return EnrolledMaster(registered) ?? registered;
+                }
+
+                // No controller has identified itself yet. Recover the first enrolled TV from the
+                // game's own list so a late apply still reaches the active channel.
+                var all = AllTvs?.GetValue(null) as IList;
+                if (all != null)
+                {
+                    for (var i = 0; i < all.Count; i++)
                     {
-                        _master = enrolled;
+                        var enrolled = EnrolledMaster(all[i] as Component);
+                        if (enrolled != null)
+                        {
+                            return enrolled;
+                        }
                     }
                 }
 
-                return _master;
+                return null;
             }
             catch (Exception exception)
             {
@@ -254,6 +294,34 @@ namespace CardShopCoop.CustomTv
                 return null;
             }
         }
+
+        private static Component EnrolledMaster(Component controller)
+        {
+            if (controller == null)
+            {
+                return null;
+            }
+
+            var channel = ChannelOf(controller);
+            var enrolled = channel == null ? null : Enrolled?.GetValue(channel) as IList;
+            if (enrolled == null)
+            {
+                return null;
+            }
+
+            for (var i = 0; i < enrolled.Count; i++)
+            {
+                if (enrolled[i] is Component master && master != null)
+                {
+                    return master;
+                }
+            }
+
+            return null;
+        }
+
+        private static object ChannelOf(object controller)
+            => controller == null || ChannelField == null ? null : ChannelField.GetValue(controller);
 
         internal static string StreamUrl => Get<string>(StreamUrlField);
         internal static string StreamTitle => Get<string>(StreamTitleField);
@@ -276,7 +344,14 @@ namespace CardShopCoop.CustomTv
             }
         }
         internal static string PendingSourceUrl => _pendingSourceUrl;
-        internal static int EnrolledCount => (Enrolled?.GetValue(null) as IList)?.Count ?? 0;
+        internal static int EnrolledCount
+        {
+            get
+            {
+                var channel = ChannelOf(Master());
+                return channel == null ? 0 : (Enrolled?.GetValue(channel) as IList)?.Count ?? 0;
+            }
+        }
         internal static bool ControllerReady => Master() != null;
         internal static bool EnrollmentReady => EnrolledCount > 0;
 
@@ -285,6 +360,17 @@ namespace CardShopCoop.CustomTv
             if (controller != null && ControllerType.IsInstanceOfType(controller))
             {
                 _master = controller;
+            }
+        }
+
+        /// <summary>Drops a TV that is being disabled so the next lookup can find another
+        /// enrolled TV instead of reading state from a controller that no longer drives a
+        /// channel.</summary>
+        internal static void ForgetController(Component controller)
+        {
+            if (ReferenceEquals(_master, controller))
+            {
+                _master = null;
             }
         }
 
@@ -890,7 +976,7 @@ namespace CardShopCoop.CustomTv
                             return false;
                         }
 
-                        Powered.SetValue(Powered.IsStatic ? null : master, !PoweredOff);
+                        SetField(Powered, !PoweredOff, master);
                         return true;
                     case 5:
                         if (ShuffleField == null)
@@ -903,7 +989,7 @@ namespace CardShopCoop.CustomTv
                             return true;
                         }
 
-                        ShuffleField.SetValue(ShuffleField.IsStatic ? null : master, !Shuffle);
+                        SetField(ShuffleField, !Shuffle, master);
                         return true;
                     case 6:
                         if (double.IsNaN(value) || double.IsInfinity(value)
@@ -986,7 +1072,7 @@ namespace CardShopCoop.CustomTv
 
                 Unfreeze?.Invoke(Master(), null);
                 SetField(QualityOpen, false, Master());
-                (GetField(QualityRoot) as GameObject)?.SetActive(false);
+                (Get(QualityRoot) as GameObject)?.SetActive(false);
                 return true;
             }
             catch (Exception exception)
@@ -1041,8 +1127,14 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
+            var target = LastTime.IsStatic ? null : ChannelOf(Master());
+            if (!LastTime.IsStatic && target == null)
+            {
+                return;
+            }
+
             var value = Convert.ChangeType(position, LastTime.FieldType);
-            LastTime.SetValue(LastTime.IsStatic ? null : Master(), value);
+            LastTime.SetValue(target, value);
         }
 
         private static bool IsValidPosition(double position)
@@ -1126,11 +1218,6 @@ namespace CardShopCoop.CustomTv
             property.SetValue(target, converted, null);
         }
 
-        private static object GetField(FieldInfo field)
-        {
-            return field?.GetValue(field.IsStatic ? null : Master());
-        }
-
         private static void SetField(FieldInfo field, object value, object instance)
         {
             if (field == null)
@@ -1138,7 +1225,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            var target = field.IsStatic ? null : instance;
+            var target = field.IsStatic ? null : ChannelOf(instance);
             if (!field.IsStatic && target == null)
             {
                 return;
