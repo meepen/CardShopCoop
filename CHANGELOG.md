@@ -2,7 +2,11 @@
 
 ## 2.2.1
 
-- **Fixed: loading a save could stutter badly for several seconds, even when you were only playing solo.** The mod's Unity 6 singleton safety net was searching the whole shop every time any scene was torn down. Some mods create and unload many small temporary scenes while a save loads, so those searches added up to one long freeze after the loading screen, even though no co-op session was running. The safety net still fixes mismatched managers when a world loads, but unloading a scene no longer costs you frames.
+- Fixed: Lag when loading a new save or joining a world with certain mods.
+- Fixed: The co-op window showing "Connected" before the join handshake finished.
+- Fixed: Shared TV controls not working with the latest RTCGO Custom TV.
+- Fixed: False Harmony warnings in the log at startup.
+- Fixed: An error in the log when quitting the game during a co-op session.
 
 ## 2.2.0
 
