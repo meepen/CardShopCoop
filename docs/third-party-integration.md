@@ -228,75 +228,51 @@ private void OnColor(InteractableObject shelf, InformationChange<ShelfColor> cha
 For a session-wide value, use `[GlobalInformation]` + `Global<T>` from the quick start. Join
 baselines are automatic for both extended information and global values.
 
-## 7. Actions
+## 7. Actions (advanced)
 
-An `ActionMessage` is a client command with a framework-owned action id and rollback:
+Do not use an action for extended information. A client `SetExtendedInformation` is already a
+host-authoritative intent: the host applies it, broadcasts the result, and late joiners get it in
+the baseline. Multiple clients are ordered by the host; the last host write wins.
+
+```csharp
+// Client: no action, no undo.
+shelf.SetExtendedInformation(new ShelfColor { R = 255, G = 0, B = 0 });
+```
+
+Use `ActionMessage` only when the client changes something through a game path that must feel
+instant and must be reversed if the host rejects it:
 
 ```csharp
 [NetworkMessage]
-public sealed class PaintShelf : ActionMessage
+public sealed class MyAction : ActionMessage
 {
-    public InteractableObject Shelf;
-    public byte R, G, B;
+    public InteractableObject Target;
 
-    // Local rollback state: captured where the action is applied, never sent.
-    [NonSerialized] private ShelfColor _previous;
+    [NonSerialized] private Vector3 _previous;
 
-    public override void OnApply()
-    {
-        if (Shelf == null)
-        {
-            return;
-        }
-
-        _previous = Shelf.GetExtendedInformation<ShelfColor>();
-        Shelf.SetExtendedInformation(new ShelfColor { R = R, G = G, B = B });
-    }
-
-    public override void OnUndo()
-    {
-        if (Shelf == null)
-        {
-            return;
-        }
-
-        if (_previous == null)
-        {
-            Shelf.RemoveExtendedInformation<ShelfColor>();
-        }
-        else
-        {
-            Shelf.SetExtendedInformation(_previous);
-        }
-    }
+    public override void OnApply() { /* replay the local game change */ }
+    public override void OnUndo() { /* restore _previous */ }
 }
 ```
 
-`OnApply` captures the value it replaces; `OnUndo` restores that value, and removes the
-information only when there was none before. That is the undo rule for every `ActionMessage`: put
-back what was there, not clear the field.
+- The local game change happens first; `OnApply`/`OnUndo` replay and reverse it for
+  reconciliation. `OnUndo` restores what was there, not a blank/default value.
+- The host is the authority. It applies the action and publishes the resulting state; a rejection
+  publishes the current state and rolls the client back. The host never trusts a client's undo.
+- The client's action ledger orders pending actions per object. On a rejection it undoes the
+  rejected action and every newer pending action on that object, then replays the survivors before
+  applying the host's state. One client cannot undo another client's newer action.
+- `_previous` is local prediction state, never cross-client truth. The host's state carries
+  `ActionId` and `Rejected`; the client applies it over its local undo. An `IActionValue` is a
+  normal extended-information value with those two fields, and is how the framework matches the
+  host's state to the pending action.
+- Reject with `[IntentValidator]` and handle `[IntentRejected]`; return `IntentValidation`, do
+  not throw.
+- On accept, publish the resulting `IActionValue` with `ActionId = intent.ActionId` and
+  `Rejected = false`. In `[IntentRejected]`, publish the current value with the same id and
+  `Rejected = true`.
 
-Send it like any message; never set `ActionId`:
-
-```csharp
-Context.Send(Context.HostConnection, new PaintShelf { Shelf = shelf, R = 255, G = 0, B = 0 });
-```
-
-Validate the intent on the host before it runs:
-
-```csharp
-[IntentValidator]
-private IntentValidation ValidatePaint(CoopMessageContext from, PaintShelf intent)
-    => intent.Shelf == null
-        ? IntentValidation.Deny("shelf not present")
-        : IntentValidation.Allow();
-
-[IntentRejected]
-private void PaintRejected(CoopMessageContext from, PaintShelf intent, string reason)
-    => CoopLog.Warn("paint rejected: " + reason);
-```
-
-A denial skips the handler and rolls back the action. Return `IntentValidation`; do not throw.
+See `TvOpMessage`/`TvState` in CustomTv for a complete action + authoritative state pair.
 
 ## 8. Identity and message rules
 
