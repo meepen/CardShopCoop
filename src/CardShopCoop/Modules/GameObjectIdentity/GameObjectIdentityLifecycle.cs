@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 

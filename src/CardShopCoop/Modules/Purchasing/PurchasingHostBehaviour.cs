@@ -90,7 +90,7 @@ namespace CardShopCoop.Modules.Purchasing
             internal readonly List<RestockData> PendingRestockRows = new();
             internal readonly List<int> PendingRestockIndexes = new();
             internal readonly List<int> PendingRestockCounts = new();
-            internal readonly CardShopCoop.Modules.World.BoxNetworkInteraction.DeliveryQueueState
+            internal readonly BoxNetworkInteraction.DeliveryQueueState
                 DeliveryQueue;
             internal readonly GameReportDataCollect Report;
             internal readonly GameReportDataCollect PermanentReport;

@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using CardShopCoop.Modules.ExtendedInformation;
-using CardShopCoop.Modules.World;
 using CardShopCoop.Net.Connection;
 
 namespace CardShopCoop.Modules.GameObjectIdentity
@@ -46,7 +45,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
         /// <summary>Resolves a box Guid against both box and furniture identities. Furniture and
         /// item/card box Guids are both session-unique, so one Guid selects exactly one box.</summary>
-        public static bool TryResolveBox(System.Guid id, out InteractablePackagingBox box)
+        public static bool TryResolveBox(Guid id, out InteractablePackagingBox box)
         {
             box = null;
             return id != System.Guid.Empty

@@ -6,7 +6,6 @@ using CardShopCoop.Api;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
-using UnityEngine.Events;
 
 namespace CardShopCoop.UI
 {

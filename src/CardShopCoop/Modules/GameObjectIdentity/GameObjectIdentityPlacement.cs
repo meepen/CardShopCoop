@@ -132,7 +132,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             PlacementObjectIdentity.BindLiveObjects();
         }
 
-        private static void PatchPlacementInit(Harmony harmony, string method, System.Type argument)
+        private static void PatchPlacementInit(Harmony harmony, string method, Type argument)
         {
             var original = AccessTools.Method(typeof(ShelfManager), method, new[] { argument });
             if (original == null)
