@@ -256,6 +256,9 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
+            CoopPlugin.Log.LogInfo("appearance for avatar " + id + ": "
+                + (model.Female ? "female" : "male") + " " + model.ModelIndex
+                + " customization=" + (model.CustomizationJson?.Length ?? 0) + " bytes");
             _renderer.SetModel(id, model.Female, model.ModelIndex, model.CustomizationJson);
         }
 

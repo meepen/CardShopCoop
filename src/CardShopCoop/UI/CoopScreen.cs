@@ -1757,10 +1757,6 @@ namespace CardShopCoop.UI
             {
                 CoopPlugin.AutoPortForward.Value = true;
             }
-            if (CoopPlugin.AvatarsEnabled != null)
-            {
-                CoopPlugin.AvatarsEnabled.Value = true;
-            }
             if (CoopPlugin.SendRateHz != null)
             {
                 CoopPlugin.SendRateHz.Value = 15f;

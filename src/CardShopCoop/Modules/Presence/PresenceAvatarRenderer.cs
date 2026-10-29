@@ -1685,11 +1685,6 @@ namespace CardShopCoop.Modules.Presence
         /// <summary>Called every frame by the active presence behaviour while linked.</summary>
         public void Tick(float dt)
         {
-            if (!CoopPlugin.AvatarsEnabled.Value)
-            {
-                return;
-            }
-
             var gm = SceneRef<CGameManager>.Get();
             var inGame = gm != null && gm.m_IsGameLevel;
             if (!inGame)

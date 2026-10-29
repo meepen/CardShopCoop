@@ -44,7 +44,6 @@ namespace CardShopCoop
         public static ConfigEntry<string> PlayerName;
         public static ConfigEntry<bool> NameOverride;
         public static ConfigEntry<float> SendRateHz;
-        public static ConfigEntry<bool> AvatarsEnabled;
         public static ConfigEntry<bool> AllowNsfw;
         public static ConfigEntry<KeyCode> EmoteKey;
         public static ConfigEntry<int> ClientWorldSlot;
@@ -115,8 +114,6 @@ namespace CardShopCoop
                 SendRateHz.Value = 15f; // migrate configs saved by earlier builds
             }
 
-            AvatarsEnabled = Config.Bind("Player", "AvatarsEnabled", true,
-                "Show the other player as a walking character in your shop.");
             AllowNsfw = Config.Bind("Player", "AllowNsfw", false,
                 "Allow nude/NSFW character appearances. When off, new characters get a random clothed preset, the Nude wardrobe option is hidden, and fully nude players are shown in the game's random clothed customer look. When on, you may choose Nude and you will see other players who chose it.");
             EmoteKey = Config.Bind("Keys", "EmoteKey", KeyCode.G,
