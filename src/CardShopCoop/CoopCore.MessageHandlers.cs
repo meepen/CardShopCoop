@@ -1,5 +1,6 @@
 using System;
 using CardShopCoop.Modules.GameObjectIdentity;
+using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Net.Messages;
@@ -54,6 +55,13 @@ namespace CardShopCoop
                 CoopPlugin.Log.LogWarning("Could not complete FullyJoined transition for connection "
                     + context.Connection.Id + " in phase " + context.Connection.State);
             }
+            else
+            {
+                // Admission only means the handshake passed; the world transfer and baselines
+                // are still running. Name the peer as joined only once it is actually joined.
+                SetStatus("Hosting - " + (PresenceApi.PeerName(context.Connection.Id) ?? "Player")
+                    + " joined!");
+            }
         }
 
         [MessageHandler]
@@ -88,6 +96,10 @@ namespace CardShopCoop
                 {
                     CoopPlugin.Log.LogError("Feature FullyJoined callbacks failed: " + error);
                 }
+
+                // The host acknowledged the loaded world and every module baseline, so the
+                // session is now genuinely joined. Until this point the status names the step.
+                SetStatus("Connected");
             }
         }
 

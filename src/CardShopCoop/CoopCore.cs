@@ -748,7 +748,12 @@ namespace CardShopCoop
             }
 
             ErrorLine = "";
-            SetStatus(Role == CoopRole.Host ? "Hosting - waiting for a player..." : "Connected");
+            // The bearer is up, but the application handshake has not started yet. Claiming
+            // "Connected" here made the window look joined while Hello/Welcome, catalog
+            // validation and the world transfer were still in flight.
+            SetStatus(Role == CoopRole.Host
+                ? "Hosting - waiting for a player..."
+                : "Handshaking with host...");
         }
 
         private void OnBackendTransportReady(INetworkingBackend backend, ConnectionId attempt,
@@ -1582,7 +1587,7 @@ namespace CardShopCoop
                 CoopPlugin.Log.LogError("Feature ClientJoined callbacks failed: " + error);
             }
 
-            SetStatus("Hosting - " + peerName + " joined!");
+            SetStatus("Hosting - " + peerName + " is joining...");
             CoopPlugin.Log.LogInfo(peerName + " passed admission; starting world transfer");
             Util.MemoryProbe.Log("join-admission");
             var blobs = CatalogHandshake.BuildWelcomeBlobs();
