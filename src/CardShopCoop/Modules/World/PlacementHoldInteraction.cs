@@ -1094,7 +1094,13 @@ namespace CardShopCoop.Modules.World
 
         private static void SetDashedLines(bool visible)
         {
-            if (PlacementInterop.FindShelfManager() == null)
+            // The game's static helper dereferences CSingleton<ShelfManager>.Instance, and that
+            // getter returns null for every singleton once the application is closing
+            // (CSingleton.isQuitting). Our cached scene manager is still alive at that point, so
+            // FindShelfManager alone does not catch it and the call throws inside the game method.
+            // The dashed lines belong to the scene being torn down, so there is nothing to restore
+            // during quit and the correct action is to skip the call.
+            if (CSingleton<ShelfManager>.IsQuitting || PlacementInterop.FindShelfManager() == null)
             {
                 return;
             }
