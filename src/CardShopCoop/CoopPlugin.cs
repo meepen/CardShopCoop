@@ -53,6 +53,9 @@ namespace CardShopCoop
         public static ConfigEntry<bool> AutoPortForward;
         public static ConfigEntry<GradedAlertMode> GradedDriftAlert;
         public static ConfigEntry<bool> PerfDebug;
+        /// <summary>Ask Windows to release the working-set pages a join-time full save pulled in
+        /// through every mod's save hook. See <see cref="Util.WorkingSetTrim"/>.</summary>
+        public static ConfigEntry<bool> TrimWorkingSetAfterJoin;
         public static ConfigEntry<int> ArtificialLagMs;
         public static ConfigEntry<int> ArtificialJitterMs;
         public static ConfigEntry<bool> EnableGameCheatMenu;
@@ -130,6 +133,9 @@ namespace CardShopCoop
                 "How loudly to announce that your graded albums have drifted apart. THIS CONTROLS THE HOST'S SCREEN. While you are HOSTING it decides both your own on-screen line and the heads-up sent to the joiner. While you are JOINING it does nothing at all: the host's setting alone decides whether you get that heads-up, because the drift is only ever announced from the host's side. Always: announce every check that finds a difference. OncePerSession: say it once per player per session and then stay quiet - including for a later, bigger difference. Never: never put it on screen at all. The log records every check whichever you pick and on both PCs, so a support log stays complete whatever you choose; this only controls the screen, and it never changes what the co-op panel's adopt button offers.");
             PerfDebug = Config.Bind("Diagnostics", "PerfDebug", false,
                 "Enable Unity hitch profiling. Logs frames slower than 33 ms with available main-thread, GC, rendering, physics, and co-op stage timings; individual stages above 5 ms are also rate-limited. Also logs a [perf-update] breakdown of every mod Update/LateUpdate and Harmony patch body each window. Enable temporarily to find lag spikes; it does not change gameplay.");
+            TrimWorkingSetAfterJoin = Config.Bind("Diagnostics", "TrimWorkingSetAfterJoin", true,
+                "After a guest joins, ask Windows to release the working-set pages a heavily modded host leaves resident. The pages are already-committed mod asset data; the host's own allocation stays flat (an ordinary save and the host's own rendering both stay put), but Windows does not return the pages on its own. The game pages active shop assets back in as it renders; the join itself is unchanged. Turn this off if you prefer to avoid the one-time re-read.");
+
             ArtificialLagMs = Config.Bind("Diagnostics", "ArtificialLagMs", 0,
                 "TESTING ONLY. Adds this many milliseconds of latency to every network message you RECEIVE. Set the same value on both PCs for symmetric lag (each hop adds one delay, so a round trip is roughly twice the value). 0 disables it.");
             ArtificialJitterMs = Config.Bind("Diagnostics", "ArtificialJitterMs", 0,

@@ -39,6 +39,7 @@ namespace CardShopCoop
                 GameObjectIdentityApi.SendJoinBaseline(context.Connection);
                 _runtime?.FullyJoined(context.Connection);
                 Util.MemoryProbe.Log("fully-joined-baselines:after");
+                Util.WorkingSetTrim.AfterJoin("fully-joined baselines");
             }
             catch (Exception error)
             {
