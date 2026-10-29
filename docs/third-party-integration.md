@@ -36,75 +36,65 @@ If you cannot declare a dependency, call `CoopApi.Register(assembly)` from `Awak
 `CoopApi.IsAvailable` is true. Late registration applies from the next session, and your
 `[PersistentBehaviour]` types are not created at all.
 
-## 2. Quick start: one host-owned value
+## 2. Quick start: a host-owned value
 
-The host owns the value. A client sends an intent. The host applies it and broadcasts the
-result. Each peer receives one baseline when it finishes joining.
+A session-wide value that the host owns is **global information**. There are no DTOs and no
+baseline code to write. The calls live in your attributed behaviours; the host writes and any
+peer reads:
 
-The DTOs:
+```csharp
+[GlobalInformation]
+[HostOnlyInformation]
+public sealed class ShopTaxRate
+{
+    public int Percent { get; init; }
+}
+
+// Host only: set it, or replace it when it changes.
+Global<ShopTaxRate>.Value = new ShopTaxRate { Percent = 5 };
+Global<ShopTaxRate>.Mutate(t => new ShopTaxRate { Percent = (t?.Percent ?? 0) + 1 });
+
+// Any peer: read the last authoritative value. Late joiners get it automatically.
+var tax = Global<ShopTaxRate>.Value; // null when unset
+```
+
+- `[HostOnlyInformation]` makes the value read-only for clients. Drop it if clients may change
+  the value: a client write becomes an intent, the host applies it, and the client sees the echo.
+- Keep the value immutable; assign a new instance instead of editing the old one.
+- On net472, `init` needs the standard `IsExternalInit` shim.
+
+React on any peer:
+
+```csharp
+[GlobalInformationHandler]
+private void OnTax(ShopTaxRate tax) // null when removed
+    => _label.text = tax == null ? "-" : tax.Percent + "%";
+```
+
+`Global<T>` handles host authority, the broadcast, and the join baseline. `Context` is assigned
+before `OnEnable`, so use it directly.
+
+### One-shot events
+
+State uses `Global<T>`. A one-shot event is a normal message:
 
 ```csharp
 [NetworkMessage]
-public sealed class AddScore : INetMessage
+public sealed class ShowBanner : INetMessage
 {
-    public int Delta;
+    public string Text;
 }
 
-[NetworkMessage]
-public sealed class ScoreChanged : INetMessage
-{
-    public int Value;
-}
+Context.Broadcast(new ShowBanner { Text = "Sale started" });
+
+[MessageHandler]
+private void OnBanner(CoopMessageContext from, ShowBanner message)
+    => _banner.Show(message.Text);
 ```
 
-The host:
-
-```csharp
-[ServerBehaviour]
-public sealed class ScoreHost : CoopBehaviour
-{
-    private int _score;
-
-    [OnFullyJoined]
-    private void SendBaseline(PeerConnection peer)
-        => Context.Send(peer, new ScoreChanged { Value = _score });
-
-    [MessageHandler]
-    private void OnAdd(CoopMessageContext from, AddScore intent)
-    {
-        _score += intent.Delta;
-        Context.Broadcast(new ScoreChanged { Value = _score });
-    }
-}
-```
-
-The client:
-
-```csharp
-[ClientBehaviour]
-public sealed class ScoreClient : CoopBehaviour
-{
-    private int _score;
-
-    [MessageHandler]
-    private void OnChanged(CoopMessageContext from, ScoreChanged state)
-        => _score = state.Value;
-
-    private void Update()
-    {
-        if (Input.GetKeyDown(KeyCode.K) && Context.HostConnection != null)
-        {
-            Context.Send(Context.HostConnection, new AddScore { Delta = 1 });
-        }
-    }
-}
-```
-
-`[MessageHandler]` infers the message type from its `INetMessage` parameter. `Context` is
-assigned before `OnEnable`, so use it directly.
-
-`Context.Broadcast` reaches every ready peer from the host, and the host from a client.
-`Context.Send` reaches one peer.
+`[MessageHandler]` infers the message type from its `INetMessage` parameter. `Context.Broadcast`
+reaches every ready peer from the host, and the host from a client. `Context.Send` reaches one
+peer.
 
 ## 3. Behaviours and lifecycle
 
@@ -187,16 +177,15 @@ if (target != null)
 
 | You need | Use |
 | --- | --- |
-| A host-owned value | intent + state message + `[OnFullyJoined]` baseline |
+| A session-wide value | `[GlobalInformation]` + `Global<T>`; add `[HostOnlyInformation]` if clients must not write it |
 | A one-shot event | a `[NetworkMessage]` |
-| A session-wide value | `[GlobalInformation]` + `Global<T>` |
 | Data on an existing object, NPC, or box | extended information |
 | A client action that must feel instant | `ActionMessage` |
 | A new connection method | `INetworkingBackend` + `IDatagramTransport` |
 
 Do not create your own object ids. CardShopCoop owns replicated object lifecycle.
 
-## 6. Extended information and global values
+## 6. Extended information
 
 Attach a typed value to an object that already exists on both peers:
 
@@ -236,32 +225,8 @@ private void OnColor(InteractableObject shelf, InformationChange<ShelfColor> cha
 }
 ```
 
-A session-wide value uses the same flow:
-
-```csharp
-[GlobalInformation]
-public sealed class ShopTaxRate
-{
-    public int Percent { get; init; }
-}
-
-Global<ShopTaxRate>.Value = new ShopTaxRate { Percent = 5 };
-var tax = Global<ShopTaxRate>.Value; // null when unset
-Global<ShopTaxRate>.Mutate(t => new ShopTaxRate { Percent = (t?.Percent ?? 0) + 1 });
-Global<ShopTaxRate>.Value = null; // remove
-```
-
-Keep the value immutable. On net472, `init` needs the standard `IsExternalInit` shim.
-
-```csharp
-[GlobalInformationHandler]
-private void OnTax(ShopTaxRate tax) // null when removed
-{
-    UpdateTaxUi(tax);
-}
-```
-
-Join baselines are automatic for both forms.
+For a session-wide value, use `[GlobalInformation]` + `Global<T>` from the quick start. Join
+baselines are automatic for both extended information and global values.
 
 ## 7. Actions
 
