@@ -543,18 +543,17 @@ namespace CardShopCoop
                 SaveTransferApi.SetGuestBorrowedWorld(true);
             }
 
-            // The runtime - and with it EVERY module's message handlers, which each behaviour binds in
-            // its OnEnable - must exist BEFORE the transport starts, because starting the transport is
-            // what freezes the protocol session (KcpSessionManager.Start acquires the catalog lease).
-            // A handler registered after that freeze is parked in _pendingHandlers and is NOT
-            // dispatchable for the whole session, which is what produced "no handler bound" for every
-            // module message and eventually overflowed the client's inbound queue.
+            // The runtime must be PREPARED before the transport starts: every module's message and
+            // extended-information handlers are bound there, and KcpSessionManager.Start freezes
+            // the protocol session. A handler registered after that freeze is parked and is not
+            // dispatchable for the whole session.
             //
-            // This must NOT wait for Net to exist: at this point the transport has not been created yet,
-            // and waiting is precisely the ordering that broke. Behaviours bind handlers on activation
-            // and only send from their own ticks, by which time the transport is there.
+            // Preparation does not run any behaviour's Unity lifecycle. CoopCore freezes the EIM
+            // catalog immediately afterwards and activates the core modules (preserving their
+            // pre-transport seed contract). External session behaviours stay inactive until the
+            // transport chain is started, so their OnEnable/OnSessionStarted never see a session
+            // with no transport.
             ActivateLiveModuleHooks();
-            ExtendedInformationCatalog.BeginSession();
 
             // Persistent behaviours (SessionInput, debug hooks, external UI/input) outlive a
             // session, so the live runtime above cannot deliver their start event. The persistent
@@ -797,9 +796,16 @@ namespace CardShopCoop
                 _pump = NetworkPump.Wrap(_group);
                 Net = _pump;
                 ((ICoopStartable)_pump).Start();
-                if (Role != CoopRole.None && _runtime == null)
+                CoopPlugin.Log?.LogInfo("[net] transport chain started; external session behaviours can activate");
+
+                // Start() has returned, so the protocol lease is held and the message catalog is
+                // frozen. Only now may external session behaviours run their Unity lifecycle and
+                // session-start event. A runtime created here already sees Net; the normal
+                // BeginSession path created it earlier and activates its external half now.
+                if (Role != CoopRole.None)
                 {
                     ActivateLiveModuleHooks();
+                    _runtime?.TransportReady();
                 }
             }
         }
@@ -1195,7 +1201,10 @@ namespace CardShopCoop
                 : gameObject.AddComponent<ClientRuntimeBehaviour>();
             try
             {
-                _runtime.Initialize(context);
+                // Preparing binds every handler before the transport freezes the catalog. The
+                // callback freezes the EIM catalog at the same point, before ActivateInternal runs
+                // any core OnEnable; external session behaviours remain inactive for now.
+                _runtime.Initialize(context, ExtendedInformationCatalog.BeginSession);
             }
             catch
             {
@@ -1203,6 +1212,13 @@ namespace CardShopCoop
                 Destroy(_runtime);
                 _runtime = null;
                 throw;
+            }
+
+            // A runtime created after the transport was already started (a backend that won the
+            // race with the session UI) must not leave its external behaviours inactive.
+            if (Net != null)
+            {
+                _runtime.TransportReady();
             }
         }
 

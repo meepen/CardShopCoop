@@ -7,6 +7,7 @@
 - Fixed: Shared TV controls not working with the latest RTCGO Custom TV, especially with more than one TV.
 - Fixed: False Harmony warnings in the log at startup.
 - Fixed: An error in the log when quitting the game during a co-op session.
+- Fixed: Other co-op mods could fail to set themselves up when hosting or joining, because their behaviours started before co-op networking was ready. They now start once the connection layer is up.
 
 ## 2.2.0
 

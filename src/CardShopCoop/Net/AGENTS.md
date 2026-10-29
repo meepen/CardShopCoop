@@ -45,6 +45,11 @@ soft-depends on `dev.meepen.cardshopcoop` is integrated automatically). There is
   transport policy entries behind.
 - Unknown wire names, unauthorized phases/directions, malformed payloads, and exceeded resource
   limits must fail closed with contextual, rate-limited diagnostics.
+- External session behaviours are prepared (created and handler-bound) before the transport freezes
+  the catalog, but their Unity lifecycle and `[OnSessionStarted]` run only after
+  `NetworkPump.Start` returns (KCP started, protocol lease held). Never activate an external
+  session behaviour while `CoopCore.Net` is null. Internal module behaviours keep their
+  pre-transport seed contract through `ExtendedInformationModule.Seed*`.
 - Preserve `Type.FullName` catalog identity when refactoring `MessageRegistry`, framing, or
   serialization. Module namespace moves intentionally change the wire contract unless both peers
   still use the same full type name. Never activate compact ids before exact catalog validation.

@@ -13,7 +13,19 @@ namespace CardShopCoop.Runtime
 {
     internal sealed class CoopBehaviourRegistry
     {
-        private readonly List<MonoBehaviour> _behaviours = new List<MonoBehaviour>();
+        /// <summary>
+        /// One discovered behaviour. External session behaviours are created and bound during
+        /// session preparation but stay inactive until the transport chain is up: their Unity
+        /// lifecycle and session-start events must not observe a session without a live transport.
+        /// </summary>
+        private sealed class Entry
+        {
+            internal MonoBehaviour Behaviour;
+            internal bool External;
+            internal bool Activated;
+        }
+
+        private readonly List<Entry> _behaviours = new List<Entry>();
         private readonly Dictionary<Type, List<MethodInfo>> _events = new();
         private readonly HashSet<Type> _createdTypes = new HashSet<Type>();
         private readonly GameObject _parent;
@@ -34,7 +46,8 @@ namespace CardShopCoop.Runtime
                 throw new ArgumentNullException(parent == null ? nameof(parent) : nameof(context));
             }
 
-            return CreateInternal(parent, context, Discover<ServerBehaviourAttribute>(true));
+            return CreateInternal(parent, context, Discover<ServerBehaviourAttribute>(true),
+                activateOnCreate: false);
         }
 
         public static CoopBehaviourRegistry CreateClient(GameObject parent, CoopRuntimeContext context)
@@ -44,7 +57,8 @@ namespace CardShopCoop.Runtime
                 throw new ArgumentNullException(parent == null ? nameof(parent) : nameof(context));
             }
 
-            return CreateInternal(parent, context, Discover<ClientBehaviourAttribute>(true));
+            return CreateInternal(parent, context, Discover<ClientBehaviourAttribute>(true),
+                activateOnCreate: false);
         }
 
         public static CoopBehaviourRegistry CreatePersistent(GameObject parent,
@@ -55,7 +69,8 @@ namespace CardShopCoop.Runtime
                 throw new ArgumentNullException(parent == null ? nameof(parent) : nameof(context));
             }
 
-            return CreateInternal(parent, context, Discover<PersistentBehaviourAttribute>(true));
+            return CreateInternal(parent, context, Discover<PersistentBehaviourAttribute>(true),
+                activateOnCreate: true);
         }
 
         /// <summary>
@@ -101,7 +116,7 @@ namespace CardShopCoop.Runtime
         }
 
         private static CoopBehaviourRegistry CreateInternal(GameObject parent,
-            CoopRuntimeContext context, IEnumerable<Type> types)
+            CoopRuntimeContext context, IEnumerable<Type> types, bool activateOnCreate)
         {
             var registry = new CoopBehaviourRegistry(parent, context);
             try
@@ -126,7 +141,15 @@ namespace CardShopCoop.Runtime
                             + " failed to start; skipping it: " + error);
                     }
                 }
-                registry.ActivateAll();
+
+                // Live registries prepare inactive: CoopCore freezes the EIM catalog and then
+                // activates the core behaviours, then activates external session behaviours once
+                // the transport chain is started. The persistent registry has no session transport
+                // to wait for, so its process-lifetime behaviours activate immediately.
+                if (activateOnCreate)
+                {
+                    registry.ActivateAll();
+                }
                 return registry;
             }
             catch (Exception startupError)
@@ -153,6 +176,7 @@ namespace CardShopCoop.Runtime
 
             GameObject child = null;
             MonoBehaviour behaviour = null;
+            Entry entry = null;
             try
             {
                 child = new GameObject(type.Name);
@@ -182,13 +206,19 @@ namespace CardShopCoop.Runtime
                 // call RegisterAttributedHandlers itself.
                 RegisterBehaviourEvents(behaviour);
                 _context.Messages.RegisterAttributedHandlers(behaviour);
-                _behaviours.Add(behaviour);
+                entry = new Entry
+                {
+                    Behaviour = behaviour,
+                    External = type.Assembly != typeof(CoopBehaviourRegistry).Assembly,
+                };
+                _behaviours.Add(entry);
 
                 // Activation last, so the context, event map and handlers are complete before
-                // OnEnable runs.
+                // OnEnable runs. Only the persistent registry activates during creation; a live
+                // registry waits for CoopCore's ordered ActivateInternal/ActivateExternal calls.
                 if (activate)
                 {
-                    behaviour.gameObject.SetActive(true);
+                    ActivateEntry(entry);
 
                     // A persistent behaviour added after the session started (the first-frame
                     // external scan) still gets the start event. The registry-wide SessionStarted
@@ -202,6 +232,10 @@ namespace CardShopCoop.Runtime
             catch
             {
                 _createdTypes.Remove(type);
+                if (entry != null)
+                {
+                    _behaviours.Remove(entry);
+                }
                 if (behaviour != null)
                 {
                     try
@@ -222,14 +256,98 @@ namespace CardShopCoop.Runtime
             }
         }
 
+        /// <summary>Activates the core module behaviours. Called after CoopCore has frozen the
+        /// extended-information catalog and before the transport starts, preserving the internal
+        /// pre-transport seed contract.</summary>
+        public void ActivateInternal()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            foreach (var entry in _behaviours)
+            {
+                if (!entry.External)
+                {
+                    ActivateEntry(entry);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Activates external session behaviours once the transport chain is started. Handlers were
+        /// already bound during preparation; only the Unity lifecycle and session-start event are
+        /// deferred, so a mod's OnEnable/OnSessionStarted can safely use Context.Send/Broadcast and
+        /// extended information.
+        /// </summary>
+        public void ActivateExternal()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            List<MonoBehaviour> activated = null;
+            foreach (var entry in _behaviours)
+            {
+                if (!entry.External || entry.Activated)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    if (ActivateEntry(entry))
+                    {
+                        activated ??= new List<MonoBehaviour>();
+                        activated.Add(entry.Behaviour);
+                    }
+                }
+                catch (Exception error)
+                {
+                    // A broken external mod must not take the session down.
+                    CoopPlugin.Log?.LogError("[api] external behaviour "
+                        + entry.Behaviour?.GetType().FullName + " failed to activate: " + error);
+                }
+            }
+
+            if (activated == null)
+            {
+                return;
+            }
+
+            CoopPlugin.Log?.LogInfo("[api] activated " + activated.Count
+                + " external session behaviour(s) after transport ready");
+            if (!_sessionStarted)
+            {
+                return;
+            }
+
+            // Deliver after every external OnEnable has run, matching the core ordering.
+            for (var i = 0; i < activated.Count; i++)
+            {
+                InvokeFor<OnSessionStartedAttribute>(activated[i]);
+            }
+        }
+
+        private bool ActivateEntry(Entry entry)
+        {
+            if (entry == null || entry.Activated)
+            {
+                return false;
+            }
+
+            entry.Behaviour.gameObject.SetActive(true);
+            entry.Activated = true;
+            return true;
+        }
+
         private void ActivateAll()
         {
-            foreach (var behaviour in _behaviours)
+            foreach (var entry in _behaviours)
             {
-                if (behaviour != null && !behaviour.gameObject.activeSelf)
-                {
-                    behaviour.gameObject.SetActive(true);
-                }
+                ActivateEntry(entry);
             }
         }
 
@@ -304,34 +422,43 @@ namespace CardShopCoop.Runtime
             List<Exception> errors = null;
             for (var i = _behaviours.Count - 1; i >= 0; i--)
             {
-                if (_behaviours[i] != null)
+                var entry = _behaviours[i];
+                if (entry?.Behaviour == null)
+                {
+                    continue;
+                }
+
+                // A behaviour that never activated never ran its OnEnable, so it has nothing to
+                // shut down. Handlers are still removed and the object destroyed below.
+                if (entry.Activated)
                 {
                     try
                     {
-                        var shutdown = _behaviours[i].GetType().GetMethod("Shutdown",
+                        var shutdown = entry.Behaviour.GetType().GetMethod("Shutdown",
                             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                        shutdown?.Invoke(_behaviours[i], null);
+                        shutdown?.Invoke(entry.Behaviour, null);
                     }
                     catch (Exception error)
                     {
                         errors ??= new List<Exception>();
                         errors.Add(error);
                     }
-                    try
-                    {
-                        // Registry-owned final safety net: guarantees handler removal even when a
-                        // behaviour has no feature-specific shutdown implementation.
-                        _context?.Messages.UnregisterAttributedHandlers(_behaviours[i]);
-                    }
-                    catch (Exception error)
-                    {
-                        errors ??= new List<Exception>();
-                        errors.Add(error);
-                    }
-                    finally
-                    {
-                        UnityEngine.Object.Destroy(_behaviours[i].gameObject);
-                    }
+                }
+
+                try
+                {
+                    // Registry-owned final safety net: guarantees handler removal even when a
+                    // behaviour has no feature-specific shutdown implementation.
+                    _context?.Messages.UnregisterAttributedHandlers(entry.Behaviour);
+                }
+                catch (Exception error)
+                {
+                    errors ??= new List<Exception>();
+                    errors.Add(error);
+                }
+                finally
+                {
+                    UnityEngine.Object.Destroy(entry.Behaviour.gameObject);
                 }
             }
             _behaviours.Clear();
@@ -387,17 +514,20 @@ namespace CardShopCoop.Runtime
                 // One invocation per matching instance. Deduplicating methods keeps a shared base
                 // method from firing twice on the same instance, and iterating all instances (not
                 // FirstOrDefault) means siblings that inherit it each get their turn.
-                foreach (var target in targets)
+                foreach (var entry in targets)
                 {
-                    if (target == null || method.DeclaringType == null
-                        || !method.DeclaringType.IsAssignableFrom(target.GetType()))
+                    // A deferred external session behaviour has not run OnEnable yet. It receives
+                    // its session-start event from ActivateExternal when the transport is ready.
+                    if (entry == null || !entry.Activated || entry.Behaviour == null
+                        || method.DeclaringType == null
+                        || !method.DeclaringType.IsAssignableFrom(entry.Behaviour.GetType()))
                     {
                         continue;
                     }
 
                     try
                     {
-                        method.Invoke(target, args);
+                        method.Invoke(entry.Behaviour, args);
                     }
                     catch (Exception error)
                     {

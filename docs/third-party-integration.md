@@ -73,6 +73,20 @@ public sealed class MyHost : CoopBehaviour
 }
 ```
 
+A `[ServerBehaviour]` or `[ClientBehaviour]` is created and has its handlers bound before the
+session starts, but its Unity lifecycle (`Awake`, `OnEnable`, `Start`) and `[OnSessionStarted]` are
+deferred until the co-op transport chain is running and the message and extended-information
+catalogs are frozen. `Context.Broadcast` is safe at that point; `Send(connectionId)` still needs a
+live connection, so send per-peer baselines from `[OnFullyJoined]`.
+
+A `[PersistentBehaviour]` is different: it exists for the process lifetime, so its Unity lifecycle
+runs at plugin load, outside any session and before a transport exists. Use it for UI, input or
+tooling that must survive between sessions, and do not send from its `OnEnable`.
+
+A component you create yourself must be bound before the session starts, for example from a
+`[PersistentBehaviour]`'s `OnEnable` or another process-lifetime setup. A session behaviour's
+`OnEnable` runs after the session catalog is frozen, so it is too late to add new handlers there.
+
 If you create a component yourself instead of marking it for discovery, bind it explicitly with
 `context.Messages.RegisterAttributedHandlers(component)` and unregister it when you destroy it.
 A handler on such a component never runs until it is bound; the log warns when a message arrives for

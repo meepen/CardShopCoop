@@ -14,7 +14,7 @@ namespace CardShopCoop.Runtime
             get; private set;
         }
 
-        public void Initialize(CoopRuntimeContext context)
+        public void Initialize(CoopRuntimeContext context, Action beforeActivate)
         {
             Context = context ?? throw new ArgumentNullException(nameof(context));
             _registry = this is ServerRuntimeBehaviour
@@ -25,6 +25,10 @@ namespace CardShopCoop.Runtime
                         "Session runtime must be a server or client runtime behaviour.");
             try
             {
+                // The registry has bound every handler but activated nothing. Freeze the session
+                // catalogs before any behaviour's OnEnable can observe or write session state.
+                beforeActivate?.Invoke();
+                _registry.ActivateInternal();
                 SessionStarted();
             }
             catch (Exception startupError)
@@ -48,6 +52,28 @@ namespace CardShopCoop.Runtime
         {
             Context = context ?? throw new ArgumentNullException(nameof(context));
             _registry = CoopBehaviourRegistry.CreatePersistent(gameObject, context);
+        }
+
+        /// <summary>
+        /// Called once the transport chain has actually started. External session behaviours were
+        /// created and handler-bound during <see cref="Initialize"/> but stayed inactive so their
+        /// Unity lifecycle and session-start events never run against a session with no transport.
+        /// Idempotent: a later backend addition does not re-activate them.
+        /// </summary>
+        internal void TransportReady()
+        {
+            if (_registry == null)
+            {
+                return;
+            }
+
+            if (CoopCore.Instance?.Net == null)
+            {
+                throw new InvalidOperationException(
+                    "External session behaviours cannot activate before the transport chain is started.");
+            }
+
+            _registry.ActivateExternal();
         }
 
         internal void Shutdown()

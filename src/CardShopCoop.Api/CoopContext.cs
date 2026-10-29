@@ -9,7 +9,9 @@ namespace CardShopCoop.Api
     /// Registers and unregisters attributed handlers for one object. CardShopCoop binds the
     /// handlers of every behaviour it creates (anything marked with <c>[ServerBehaviour]</c>,
     /// <c>[ClientBehaviour]</c>, or <c>[PersistentBehaviour]</c>) before <c>OnEnable</c>, so a
-    /// normal integration never calls this. Use it only for a component you create yourself.
+    /// normal integration never calls this. Use it only for a component you create yourself, and
+    /// bind it before a session starts: a session behaviour's <c>OnEnable</c> runs after the
+    /// session catalog is frozen.
     /// </summary>
     public interface ICoopMessageRegistry
     {
