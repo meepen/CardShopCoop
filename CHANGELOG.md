@@ -1,5 +1,9 @@
 # CardShopCoopCommunity — Changelog
 
+## 2.2.1
+
+- **Fixed: loading a save could stutter badly for several seconds, even when you were only playing solo.** The mod's Unity 6 singleton safety net was searching the whole shop every time any scene was torn down. Some mods create and unload many small temporary scenes while a save loads, so those searches added up to one long freeze after the loading screen, even though no co-op session was running. The safety net still fixes mismatched managers when a world loads, but unloading a scene no longer costs you frames.
+
 ## 2.2.0
 
 - Removed the obsolete pre-1.03 warehouse storage path. Both live game builds store warehouse boxes as records; the extra live-box code was dead and made box syncing harder to reason about.
