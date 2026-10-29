@@ -139,10 +139,9 @@ after it stops. It never receives `[OnClientJoined]`, `[OnFullyJoined]`, or
 | `[OnFullyJoined]` | `(PeerConnection)` | a peer is fully in game |
 | `[OnClientDisconnected]` | `(PeerConnection, DisconnectInfo)` | a peer leaves |
 
-For a component you create yourself, call
-`Context.Messages.RegisterAttributedHandlers(component)` before the session starts, for example
-from a persistent behaviour's `OnEnable`. Unregister it when you destroy it. A session
-behaviour's `OnEnable` runs after the catalog is frozen, which is too late.
+CardShopCoop creates every behaviour and binds its handlers before `OnEnable`. There is no manual
+registration. If you need more handler code, add another attributed behaviour instead of creating
+a component yourself.
 
 ## 4. Harmony
 

@@ -90,7 +90,7 @@ namespace CardShopCoop.Net
         HandlerFailed,
     }
 
-    public sealed class MessageRouter : ICoopMessageRegistry
+    public sealed class MessageRouter
     {
         private sealed class TargetRegistration
         {
@@ -149,7 +149,7 @@ namespace CardShopCoop.Net
             MessageRegistry.EnsureInitialized();
         }
 
-        public void RegisterAttributedHandlers(object target)
+        internal void RegisterAttributedHandlers(object target)
         {
             RegisterAttributedHandlers(target, false);
         }
@@ -767,7 +767,7 @@ namespace CardShopCoop.Net
             return ProtocolRegistry.Default.RegisterHandler(messageType, handler, owner);
         }
 
-        public void UnregisterAttributedHandlers(object target)
+        internal void UnregisterAttributedHandlers(object target)
         {
             if (target == null)
             {
@@ -888,8 +888,8 @@ namespace CardShopCoop.Net
             {
                 Msg.LogDecodeWarning(descriptor.WireName,
                     "coop: no handler bound for " + descriptor.WireName + " on connection "
-                    + context.ConnectionId + "; message dropped (module disabled or "
-                    + "RegisterAttributedHandlers was not called)");
+                    + context.ConnectionId + "; message dropped (no enabled behaviour owns "
+                    + "a handler for it)");
                 RollbackAction(context, message);
                 return Reject(descriptor.WireName, descriptor.MessageType,
                     "no runtime handler is bound", context);

@@ -105,7 +105,6 @@ namespace CardShopCoop.Runtime
             ? Array.Empty<int>() : ConnectionIds();
         string ICoopContext.PeerName(int connectionId)
             => PeerName == null ? null : PeerName(connectionId);
-        ICoopMessageRegistry ICoopContext.Messages => Messages;
         void ICoopContext.Send(PeerConnection connection, INetMessage message)
         {
             if (connection == null)

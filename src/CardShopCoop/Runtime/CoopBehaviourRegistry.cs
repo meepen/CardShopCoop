@@ -214,8 +214,8 @@ namespace CardShopCoop.Runtime
 
                 // Register events before adding to the dispatch list so a signature failure cannot
                 // leave a half-added target behind. Attributed handlers are part of the same
-                // lifecycle: the registry binds them before OnEnable, so a behaviour never has to
-                // call RegisterAttributedHandlers itself.
+                // lifecycle: the registry binds them before OnEnable; behaviours cannot and must
+                // not bind handlers themselves.
                 RegisterBehaviourEvents(behaviour);
                 _context.Messages.RegisterAttributedHandlers(behaviour);
                 entry = new Entry

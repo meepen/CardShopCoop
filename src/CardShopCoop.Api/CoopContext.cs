@@ -6,20 +6,6 @@ using CardShopCoop.Net.Connection;
 namespace CardShopCoop.Api
 {
     /// <summary>
-    /// Registers and unregisters attributed handlers for one object. CardShopCoop binds the
-    /// handlers of every behaviour it creates (anything marked with <c>[ServerBehaviour]</c>,
-    /// <c>[ClientBehaviour]</c>, or <c>[PersistentBehaviour]</c>) before <c>OnEnable</c>, so a
-    /// normal integration never calls this. Use it only for a component you create yourself, and
-    /// bind it before a session starts: a session behaviour's <c>OnEnable</c> runs after the
-    /// session catalog is frozen.
-    /// </summary>
-    public interface ICoopMessageRegistry
-    {
-        void RegisterAttributedHandlers(object target);
-        void UnregisterAttributedHandlers(object target);
-    }
-
-    /// <summary>
     /// The live co-op session, as seen by an integrating mod. A behaviour receives one through
     /// <see cref="CoopBehaviour.Context"/>. All members are safe to call only while a session is
     /// active; <see cref="InSession"/> tells you.
@@ -113,13 +99,6 @@ namespace CardShopCoop.Api
         /// <summary>Prefer <see cref="Connections"/>; the name is on the connection object.</summary>
         [Obsolete("Use Connections; each PeerConnection carries Name.")]
         string PeerName(int connectionId);
-
-        /// <summary>Binds and unbinds attributed message handlers for one behaviour instance
-        /// (see <see cref="ICoopMessageRegistry"/>).</summary>
-        ICoopMessageRegistry Messages
-        {
-            get;
-        }
 
         /// <summary>Sends to one reachable peer.</summary>
         void Send(PeerConnection connection, INetMessage message);

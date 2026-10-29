@@ -11,11 +11,10 @@ needed; not every feature needs every file.
   `[ClientBehaviour]`; use `[OnFullyJoined]` for late-join initialization where appropriate.
   These attributes and the message contract come from the `CardShopCoop.Api` assembly.
 - Behaviours are discovered automatically by `CoopBehaviourRegistry`; do not add manual catalog
-  registration. The registry binds every attributed handler before `OnEnable`, so a discovered
-  behaviour does not need to call `RegisterAttributedHandlers`/`UnregisterAttributedHandlers`
-  itself; do not add new calls. Use those only for a component you create directly. Keep Harmony
-  patches, subscriptions, and network resources owned by the module, and make unpatch/shutdown
-  idempotent.
+  registration. The registry binds every attributed handler before `OnEnable` and unbinds it on
+  disposal. There is no manual handler-registration API; never add registration calls. Keep
+  Harmony patches, subscriptions, and network resources owned by the module, and make
+  unpatch/shutdown idempotent.
 - Built-in modules are keyed by their `CardShopCoop.Modules.*` namespace for the enable/disable
   checkbox; an external mod is keyed by its assembly name (`ModuleCatalog.BindExternal`). Keep
   feature DTOs, hooks, and state inside the module. Put only generic infrastructure outside
