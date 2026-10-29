@@ -239,12 +239,42 @@ public sealed class PaintShelf : ActionMessage
     public InteractableObject Shelf;
     public byte R, G, B;
 
-    public override void OnApply()
-        => Shelf.SetExtendedInformation(new ShelfColor { R = R, G = G, B = B });
+    // Local rollback state: captured where the action is applied, never sent.
+    [NonSerialized] private ShelfColor _previous;
 
-    public override void OnUndo() => Shelf.RemoveExtendedInformation<ShelfColor>();
+    public override void OnApply()
+    {
+        if (Shelf == null)
+        {
+            return;
+        }
+
+        _previous = Shelf.GetExtendedInformation<ShelfColor>();
+        Shelf.SetExtendedInformation(new ShelfColor { R = R, G = G, B = B });
+    }
+
+    public override void OnUndo()
+    {
+        if (Shelf == null)
+        {
+            return;
+        }
+
+        if (_previous == null)
+        {
+            Shelf.RemoveExtendedInformation<ShelfColor>();
+        }
+        else
+        {
+            Shelf.SetExtendedInformation(_previous);
+        }
+    }
 }
 ```
+
+`OnApply` captures the value it replaces; `OnUndo` restores that value, and removes the
+information only when there was none before. That is the undo rule for every `ActionMessage`: put
+back what was there, not clear the field.
 
 Send it like any message; never set `ActionId`:
 
