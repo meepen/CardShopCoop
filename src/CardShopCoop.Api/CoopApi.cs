@@ -31,7 +31,8 @@ namespace CardShopCoop.Api
         {
             get;
         }
-        Guid Submit(string scope, ActionMessage message, Action apply, Action undo);
+        Guid Submit(string scope, ActionMessage message, Action apply,
+            Action<ActionResponseMessage> undo);
         void Ack(Guid actionId);
         void AckOrApply(Guid actionId, Action apply);
         void Confirm(Guid actionId, Action apply);

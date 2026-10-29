@@ -6,6 +6,7 @@ using System.Reflection;
 using CardShopCoop.Net.Protocol;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Api;
+using CardShopCoop.Attributes;
 using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Modules.Actions;
@@ -22,6 +23,10 @@ namespace CardShopCoop.Net
         // Core supplies the bounded-dispatch work estimate. External callers that dispatch
         // directly use the safe unit default.
         internal int WorkCost = 1;
+
+        // Set by the handler wrapper for ActionMessage handlers; read by the host dispatch to
+        // decide whether the host applies, already applied, or rejects.
+        internal ActionOutcome? HandlerOutcome;
 
         public int ConnectionId
         {
@@ -246,11 +251,41 @@ namespace CardShopCoop.Net
                         + method.Name);
                 }
 
-                if (method.IsStatic || method.ReturnType != typeof(void)
-                    || parameters.Length != 2 || contextIndex < 0 || messageIndex < 0
-                    || messageType == null)
+                if (method.IsStatic || parameters.Length != 2 || contextIndex < 0
+                    || messageIndex < 0 || messageType == null)
                 {
                     throw new InvalidOperationException("Invalid network handler signature: "
+                        + method.DeclaringType?.FullName + "." + method.Name);
+                }
+
+                var isAction = typeof(ActionMessage).IsAssignableFrom(messageType);
+                var isResponse = typeof(ActionResponseMessage).IsAssignableFrom(messageType);
+                if (isResponse)
+                {
+                    throw new InvalidOperationException("ActionResponseMessage handlers are "
+                        + "framework-owned and must not be declared: "
+                        + method.DeclaringType?.FullName + "." + method.Name);
+                }
+
+                if (isAction)
+                {
+                    if (method.ReturnType != typeof(ActionOutcome))
+                    {
+                        throw new InvalidOperationException("ActionMessage handler must return "
+                            + typeof(ActionOutcome).FullName + ": "
+                            + method.DeclaringType?.FullName + "." + method.Name);
+                    }
+
+                    if (!Attribute.IsDefined(target.GetType(), typeof(ServerBehaviourAttribute)))
+                    {
+                        throw new InvalidOperationException("ActionMessage handler must live on a "
+                            + "[ServerBehaviour]: " + method.DeclaringType?.FullName + "."
+                            + method.Name);
+                    }
+                }
+                else if (method.ReturnType != typeof(void))
+                {
+                    throw new InvalidOperationException("Network handler must return void: "
                         + method.DeclaringType?.FullName + "." + method.Name);
                 }
 
@@ -286,16 +321,18 @@ namespace CardShopCoop.Net
                         ? (context, message) =>
                         {
                             var arguments = new object[2];
-                            arguments[contextIndex] = ToPublicContext(context);
+                            arguments[contextIndex] = ToPublicContext(context, message as ActionMessage);
                             arguments[messageIndex] = message;
-                            method.Invoke(target, arguments);
+                            var result = method.Invoke(target, arguments);
+                            CaptureOutcome(context, message, result);
                         }
                 : (context, message) =>
                 {
                     var arguments = new object[2];
                     arguments[contextIndex] = context;
                     arguments[messageIndex] = message;
-                    method.Invoke(target, arguments);
+                    var result = method.Invoke(target, arguments);
+                    CaptureOutcome(context, message, result);
                 }));
             }
 
@@ -825,6 +862,10 @@ namespace CardShopCoop.Net
         }
 
         private static CoopMessageContext ToPublicContext(MessageContext context)
+            => ToPublicContext(context, null);
+
+        private static CoopMessageContext ToPublicContext(MessageContext context,
+            ActionMessage action)
         {
             var canonical = -1;
             if (context.Connection != null)
@@ -837,7 +878,21 @@ namespace CardShopCoop.Net
                 : PresenceApi.ResolvePlayerRef(canonical)
                     ?? new PlayerRef(canonical, context.Connection.Name,
                         canonical == 0, false);
-            return new CoopMessageContext(context.Connection, context.InGame, sender);
+            return new CoopMessageContext(context.Connection, context.InGame, sender,
+                action?.ActionId ?? Guid.Empty);
+        }
+
+        private static void CaptureOutcome(MessageContext context, INetMessage message,
+            object result)
+        {
+            if (message is not ActionMessage)
+            {
+                return;
+            }
+
+            context.HandlerOutcome = result is ActionOutcome outcome
+                ? outcome
+                : ActionOutcome.Reject("handler returned no action outcome");
         }
 
         public bool Dispatch(MessageContext context, INetMessage message)
@@ -884,6 +939,12 @@ namespace CardShopCoop.Net
                 return Reject(message.GetType().FullName, message.GetType(),
                     "no descriptor in the current protocol snapshot", context);
             }
+
+            if (message is ActionResponseMessage response)
+            {
+                return HandleActionResponse(context, response);
+            }
+
             if (!snapshot.TryGetHandler(message.GetType(), out var handler))
             {
                 Msg.LogDecodeWarning(descriptor.WireName,
@@ -912,14 +973,13 @@ namespace CardShopCoop.Net
 
             var timing = PerfProbe.StartHandlerMetric();
             var completed = false;
-            var actionApplied = false;
             var hostAction = CoopCore.Role == CoopRole.Host && message is ActionMessage;
             var owner = HandlerOwner(message);
             if (hostAction)
             {
-                // The action's OnApply runs before the handler, so give it the authenticated
-                // sender up front. Null on a client; never serialized.
-                var actionContext = ToPublicContext(context);
+                // The action's handler runs first and decides whether the host applies,
+                // already applied, or rejects. Give it the authenticated sender up front.
+                var actionContext = ToPublicContext(context, (ActionMessage)message);
                 ((ActionMessage)message).Sender = actionContext.Sender;
                 ((ActionMessage)message).Connection = actionContext.Connection;
             }
@@ -927,14 +987,18 @@ namespace CardShopCoop.Net
             owner?.BeginAuthorityDispatch();
             try
             {
-                if (hostAction)
-                {
-                    ((ActionMessage)message).OnApply();
-                    actionApplied = true;
-                }
-
+                context.HandlerOutcome = null;
                 handler.Invoke(context, message);
                 completed = true;
+
+                if (hostAction)
+                {
+                    var outcome = context.HandlerOutcome
+                        ?? ActionOutcome.Reject("handler returned no action outcome");
+                    context.HandlerOutcome = null;
+                    return ApplyActionOutcome(context, (ActionMessage)message, outcome);
+                }
+
                 return DispatchOutcome.Handled;
             }
             catch (Exception error)
@@ -948,32 +1012,14 @@ namespace CardShopCoop.Net
                     CoopPlugin.Log.LogError("reliable handler failed for " + typeName
                         + " on connection " + context.ConnectionId
                         + "; discarding the message and keeping the session: " + error);
-                    if (hostAction && actionApplied)
-                    {
-                        // The host applied the action; only the publication failed. Do not ask the
-                        // client to undo a change the host kept; retire the optimistic action and
-                        // let the module's next authoritative publish reconcile any missing
-                        // host-computed fields.
-                        AcceptAppliedAction(context, message);
-                    }
-                    else
-                    {
-                        RollbackAction(context, message);
-                    }
+                    RollbackAction(context, message);
                     RaiseHandlerFailed(new HandlerFailure(descriptor, context, error));
                     return DispatchOutcome.HandlerFailed;
                 }
 
                 CoopPlugin.Log.LogWarning("transient handler failed for " + typeName
                     + " on connection " + context.ConnectionId + "; dropping message: " + error);
-                if (hostAction && actionApplied)
-                {
-                    AcceptAppliedAction(context, message);
-                }
-                else
-                {
-                    RollbackAction(context, message);
-                }
+                RollbackAction(context, message);
                 return DispatchOutcome.HandlerFailed;
             }
             finally
@@ -1048,6 +1094,134 @@ namespace CardShopCoop.Net
             {
                 ActionLedger.Accept(live, context.ConnectionId, action.ActionId);
             }
+        }
+
+        private DispatchOutcome ApplyActionOutcome(MessageContext context, ActionMessage action,
+            ActionOutcome outcome)
+        {
+            switch (outcome.Disposition)
+            {
+                case ActionDisposition.Apply:
+                    try
+                    {
+                        action.OnApply();
+                    }
+                    catch (Exception error)
+                    {
+                        CoopPlugin.Log.LogError("action apply failed for "
+                            + action.GetType().FullName + " on connection "
+                            + context.ConnectionId + "; rejecting: " + error);
+                        RejectActionOutcome(context, action, outcome);
+                        return DispatchOutcome.Handled;
+                    }
+
+                    AcceptActionOutcome(context, action, outcome);
+                    return DispatchOutcome.Handled;
+
+                case ActionDisposition.Applied:
+                    AcceptActionOutcome(context, action, outcome);
+                    return DispatchOutcome.Handled;
+
+                case ActionDisposition.Reject:
+                    RejectActionOutcome(context, action, outcome);
+                    return DispatchOutcome.Handled;
+
+                default:
+                    CoopPlugin.Log.LogError("action handler for "
+                        + action.GetType().FullName + " returned no outcome; rejecting.");
+                    RejectActionOutcome(context, action, outcome);
+                    return DispatchOutcome.Handled;
+            }
+        }
+
+        private static void AcceptActionOutcome(MessageContext context, ActionMessage action,
+            ActionOutcome outcome)
+        {
+            if (outcome.Response != null)
+            {
+                SendActionResponse(context, action, outcome.Response, false);
+                return;
+            }
+
+            AcceptAppliedAction(context, action);
+        }
+
+        private static void RejectActionOutcome(MessageContext context, ActionMessage action,
+            ActionOutcome outcome)
+        {
+            if (outcome.Response != null)
+            {
+                SendActionResponse(context, action, outcome.Response, true);
+                return;
+            }
+
+            if (!string.IsNullOrEmpty(outcome.Reason))
+            {
+                CoopPlugin.Log.LogInfo("action " + action.GetType().FullName + " rejected: "
+                    + outcome.Reason);
+            }
+
+            RollbackAction(context, action);
+        }
+
+        private static void SendActionResponse(MessageContext context, ActionMessage action,
+            ActionResponseMessage response, bool rejected)
+        {
+            if (context?.Connection == null || action.ActionId == Guid.Empty)
+            {
+                CoopPlugin.Log.LogError("cannot send an action response without an authenticated "
+                    + "sender and action id.");
+                return;
+            }
+
+            response.ActionId = action.ActionId;
+            response.Rejected = rejected;
+            var live = CoopCore.Instance?.LiveContext;
+            if (live == null)
+            {
+                return;
+            }
+
+            ((ICoopContext)live).Send(context.ConnectionId, response);
+        }
+
+        /// <summary>Client side: a host response settles exactly one pending action. Responses are
+        /// framework-owned and deliberately bypass normal handler lookup.</summary>
+        private DispatchOutcome HandleActionResponse(MessageContext context,
+            ActionResponseMessage response)
+        {
+            if (CoopCore.Role != CoopRole.Client)
+            {
+                CoopPlugin.Log.LogWarning("action response received on the host; dropping.");
+                return DispatchOutcome.Handled;
+            }
+
+            if (context?.Connection == null || context.Connection.Id != 1
+                || !context.IsAuthenticated)
+            {
+                CoopPlugin.Log.LogWarning("action response received from a non-host connection; "
+                    + "dropping.");
+                return DispatchOutcome.Handled;
+            }
+
+            if (response.ActionId == Guid.Empty
+                || !ActionLedger.IsPending(response.ActionId))
+            {
+                CoopPlugin.Log.LogInfo("action response ignored for unknown or already-resolved "
+                    + "action " + response.ActionId + ".");
+                return DispatchOutcome.Handled;
+            }
+
+            if (response.Rejected)
+            {
+                ActionLedger.Rollback(response.ActionId, response);
+            }
+            else
+            {
+                ActionLedger.Accept(response.ActionId, response);
+            }
+
+            return DispatchOutcome.Handled;
         }
 
         private DispatchOutcome Reject(string wireName, Type messageType, string reason,

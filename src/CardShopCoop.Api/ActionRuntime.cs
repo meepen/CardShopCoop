@@ -19,7 +19,8 @@ namespace CardShopCoop.Api
         /// <summary>Sends an action message to the host and records the local replay/reverse. The
         /// apply/undo default to the message's overrides. The message's <see cref="ActionMessage.ActionId"/>
         /// is filled in by the runtime.</summary>
-        public static Guid Submit(ActionMessage message, Action apply = null, Action undo = null)
+        public static Guid Submit(ActionMessage message, Action apply = null,
+            Action<ActionResponseMessage> undo = null)
         {
             if (message == null)
             {

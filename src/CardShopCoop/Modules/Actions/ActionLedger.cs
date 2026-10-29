@@ -27,8 +27,10 @@ namespace CardShopCoop.Modules.Actions
             internal Guid Id;
             internal string Key;
             internal Action Apply;
-            internal Action Undo;
+            internal Action<ActionResponseMessage> Undo;
+            internal Action<ActionResponseMessage> Merge;
             internal Action Rejected;
+            internal ActionResponseMessage Response;
         }
 
         private static readonly Dictionary<Guid, ActionRecord> ById = new();
@@ -94,15 +96,15 @@ namespace CardShopCoop.Modules.Actions
 
         public static Guid Submit(string key, Action<Guid> send, Action apply, Action undo,
             Action rejected)
-            => Record(key, send, apply, undo, rejected);
+            => Record(key, send, apply, undo == null ? null : _ => undo(), rejected, null);
 
         /// <summary>Submits a typed action message to the host. The framework allocates the
         /// action id and fills it in on the message; no raw send closure is involved.</summary>
         internal static Guid Submit(string key, ActionMessage message, Action apply, Action undo)
-            => Submit(key, message, apply, undo, null);
+            => Submit(key, message, apply, undo == null ? null : _ => undo(), null);
 
-        internal static Guid Submit(string key, ActionMessage message, Action apply, Action undo,
-            Action rejected)
+        internal static Guid Submit(string key, ActionMessage message, Action apply,
+            Action<ActionResponseMessage> undo, Action rejected = null)
         {
             if (message == null)
             {
@@ -127,10 +129,10 @@ namespace CardShopCoop.Modules.Actions
                 {
                     message.ActionId = actionId;
                     context.Send(host, message);
-                }, apply, undo, rejected);
+                }, apply, undo, rejected, null);
         }
 
-        /// <summary>Submits an action message using its own apply/undo overrides and the entity
+        /// <summary>Submits an action message using its own apply/undo/merge hooks and the entity
         /// key derived from its live object fields.</summary>
         internal static Guid Submit(ActionMessage message)
         {
@@ -139,7 +141,25 @@ namespace CardShopCoop.Modules.Actions
                 throw new ArgumentNullException(nameof(message));
             }
 
-            return Submit(AutoKey(message), message, message.OnApply, message.OnUndo);
+            var runtime = CoopCore.Instance?.LiveContext;
+            if (runtime == null)
+            {
+                return Guid.Empty;
+            }
+
+            var context = (ICoopContext)runtime;
+            var host = context.HostConnection;
+            if (host == null || !runtime.InGame())
+            {
+                return Guid.Empty;
+            }
+
+            return Record(AutoKey(message),
+                actionId =>
+                {
+                    message.ActionId = actionId;
+                    context.Send(host, message);
+                }, message.OnApply, message.OnUndo, null, message.OnMerge);
         }
 
         /// <summary>Applies an authoritative value around its action: an accepted response retires
@@ -200,33 +220,6 @@ namespace CardShopCoop.Modules.Actions
             return key != null && IsPending(key, actionId);
         }
 
-        /// <summary>True when a message opts into the implicit action path by overriding
-        /// <see cref="ActionMessage.OnApply"/> or <see cref="ActionMessage.OnUndo"/>. A message that
-        /// merely carries an <see cref="ActionMessage.ActionId"/> is still an ordinary message.</summary>
-        internal static bool IsAction(ActionMessage message)
-        {
-            if (message == null)
-            {
-                return false;
-            }
-
-            var type = message.GetType();
-            if (ActionTypes.TryGetValue(type, out var known))
-            {
-                return known;
-            }
-
-            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public;
-            var result = type.GetMethod(nameof(ActionMessage.OnApply), flags)?.DeclaringType
-                    != typeof(ActionMessage)
-                || type.GetMethod(nameof(ActionMessage.OnUndo), flags)?.DeclaringType
-                    != typeof(ActionMessage);
-            ActionTypes[type] = result;
-            return result;
-        }
-
-        private static readonly Dictionary<Type, bool> ActionTypes = new();
-
         private static string AutoKey(ActionMessage message)
         {
             var type = message.GetType();
@@ -278,8 +271,9 @@ namespace CardShopCoop.Modules.Actions
             return result;
         }
 
-        private static Guid Record(string key, Action<Guid> send, Action apply, Action undo,
-            Action rejected)
+        private static Guid Record(string key, Action<Guid> send, Action apply,
+            Action<ActionResponseMessage> undo, Action rejected,
+            Action<ActionResponseMessage> merge)
         {
             if (!_active)
             {
@@ -307,6 +301,7 @@ namespace CardShopCoop.Modules.Actions
                 Key = key,
                 Apply = apply,
                 Undo = undo,
+                Merge = merge,
                 Rejected = rejected,
             };
             ById.Add(action.Id, action);
@@ -551,6 +546,23 @@ namespace CardShopCoop.Modules.Actions
             }
         }
 
+        /// <summary>Client side: an accepted response arrived. Retire the action and merge the
+        /// host's authoritative extra data into the local prediction.</summary>
+        internal static void Accept(Guid actionId, ActionResponseMessage response)
+        {
+            if (actionId == Guid.Empty || !ById.TryGetValue(actionId, out var action))
+            {
+                return;
+            }
+
+            var merge = action.Merge;
+            Remove(action);
+            if (merge != null)
+            {
+                RunApplying(() => merge(response));
+            }
+        }
+
         public static void Rollback(ICoopContext context, int connectionId, Guid actionId)
         {
             if (actionId == Guid.Empty)
@@ -575,7 +587,7 @@ namespace CardShopCoop.Modules.Actions
         /// action, then replay the later actions on top so the survivors land where they should. A
         /// rollback can cross with the authoritative message that already resolved the action,
         /// so an unknown id is ignored rather than treated as a protocol error.</summary>
-        internal static void Rollback(Guid actionId)
+        internal static void Rollback(Guid actionId, ActionResponseMessage response = null)
         {
             if (actionId == Guid.Empty)
             {
@@ -592,13 +604,14 @@ namespace CardShopCoop.Modules.Actions
 
             CoopPlugin.Log.LogInfo("action rollback client key=" + rejected.Key
                 + " id=" + actionId + ".");
+            rejected.Response = response;
             var rejectedCallback = rejected.Rejected;
-            Reconcile(rejected, null);
+            Reconcile(rejected, null, response: response);
             rejectedCallback?.Invoke();
         }
 
         private static void Reconcile(ActionRecord action, Action authoritative,
-            bool undoTarget = true)
+            bool undoTarget = true, ActionResponseMessage response = null)
         {
             if (!ByKey.TryGetValue(action.Key, out var actions))
             {
@@ -646,7 +659,8 @@ namespace CardShopCoop.Modules.Actions
 
                 for (var i = undo.Count - 1; i >= 0; i--)
                 {
-                    undo[i].Undo?.Invoke();
+                    var record = undo[i];
+                    record.Undo?.Invoke(record == action ? response : record.Response);
                 }
 
 

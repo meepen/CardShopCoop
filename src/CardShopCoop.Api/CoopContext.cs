@@ -133,15 +133,24 @@ namespace CardShopCoop.Api
 
         public int ConnectionId => Connection == null ? 0 : Connection.Id;
 
+        /// <summary>The action id of the ActionMessage being dispatched, or Guid.Empty for a
+        /// plain message. Filled by the framework for host handlers.</summary>
+        public Guid ActionId
+        {
+            get;
+        }
+
         public bool IsAuthenticated => Connection != null
             && (Connection.State == ConnectionState.Transferring
                 || Connection.State == ConnectionState.FullyJoined);
 
-        internal CoopMessageContext(PeerConnection connection, bool inGame, PlayerRef sender)
+        internal CoopMessageContext(PeerConnection connection, bool inGame, PlayerRef sender,
+            Guid actionId = default)
         {
             Connection = connection;
             InGame = inGame;
             Sender = sender;
+            ActionId = actionId;
         }
     }
 }

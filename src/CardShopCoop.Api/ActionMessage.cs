@@ -1,14 +1,18 @@
 using System;
+using CardShopCoop.Net;
 
 namespace CardShopCoop.Api
 {
     /// <summary>
-    /// A client action. The host applies it through <see cref="OnApply"/>; the framework keeps the
-    /// client's local replay/undo and the authoritative response in order. A plain
-    /// <see cref="Net.INetMessage"/> is just a message; an <see cref="ActionMessage"/> is a
-    /// command. <see cref="OnApply"/> and <see cref="OnUndo"/> are optional overrides.
+    /// A client command. The host runs <see cref="OnApply"/> (or the handler reports that it
+    /// already applied the command), then answers with an optional <see cref="ActionResponseMessage"/>.
+    /// The client replays <see cref="OnApply"/> during reconciliation and reverses it with
+    /// <see cref="OnUndo"/> when the host rejects the command.
+    ///
+    /// A plain one-way message is an <see cref="INetMessage"/>. An ActionMessage is always
+    /// ledgered, so handlers for it must return <see cref="ActionOutcome"/>.
     /// </summary>
-    public abstract class ActionMessage : Net.INetMessage
+    public abstract class ActionMessage : INetMessage
     {
         /// <summary>Correlation for the host's authoritative response. The framework fills this
         /// in; a module never sets it.</summary>
@@ -18,24 +22,28 @@ namespace CardShopCoop.Api
         }
 
         /// <summary>The authenticated player whose action the host is applying, filled by the
-        /// framework before <see cref="OnApply"/>. Null on a client and outside dispatch. Never
-        /// serialized: the sender comes from the connection, not from the payload.</summary>
+        /// framework before the host handler runs. Null on a client and outside dispatch. Never
+        /// serialized: the sender comes from the connection, not the payload.</summary>
         [NonSerialized]
         public PlayerRef Sender;
 
         /// <summary>The transport view of <see cref="Sender"/> (state, name), filled by the
-        /// framework before <see cref="OnApply"/>. Null on a client and outside dispatch.</summary>
+        /// framework before the host handler runs. Null on a client and outside dispatch.</summary>
         [NonSerialized]
         public Net.Connection.PeerConnection Connection;
 
-        /// <summary>Runs the action on the peer applying it (normally the host).</summary>
-        public virtual void OnApply()
-        {
-        }
+        /// <summary>Runs on the host when the handler returns <see cref="ActionOutcome.Apply"/>,
+        /// and on the client when a rejected action's newer neighbours are replayed. The client
+        /// performs its initial local prediction before sending; this is not called on send.
+        /// </summary>
+        public abstract void OnApply();
 
-        /// <summary>Reverses the client's local action when the host rejects it or when a newer
-        /// authoritative state has to be layered around it.</summary>
-        public virtual void OnUndo()
+        /// <summary>Reverses this action's local prediction when the host rejects it.</summary>
+        public abstract void OnUndo(ActionResponseMessage response);
+
+        /// <summary>Merges an accepted authoritative response into this action's local state.
+        /// Only called for an accepted response; rejections use <see cref="OnUndo"/>.</summary>
+        public virtual void OnMerge(ActionResponseMessage response)
         {
         }
     }

@@ -289,7 +289,8 @@ namespace CardShopCoop.Runtime
         public bool IsReconciling => ActionLedger.IsReconciling;
         public bool IsApplying => ActionLedger.IsApplying;
 
-        public Guid Submit(string scope, ActionMessage message, Action apply, Action undo)
+        public Guid Submit(string scope, ActionMessage message, Action apply,
+            Action<ActionResponseMessage> undo)
             => ActionLedger.Submit(scope, message, apply, undo);
 
         public void Ack(Guid actionId)

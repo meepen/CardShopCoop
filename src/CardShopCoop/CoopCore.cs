@@ -1766,33 +1766,27 @@ namespace CardShopCoop
             }
         }
 
-        private static readonly HashSet<Type> WarnedNonActionMessages = new();
-
-        /// <summary>Submits a client ActionMessage through the action ledger. A message that
-        /// overrides neither OnApply nor OnUndo is still a plain message: warn once (a public
-        /// integration can easily misread the optional-override contract) and let it send
-        /// untracked instead of throwing on the gameplay path.</summary>
+        /// <summary>Submits a client ActionMessage through the action ledger. ActionMessage always
+        /// means a command in the public contract; a one-way message must be an INetMessage.</summary>
         private bool TrySubmitClientAction(INetMessage message)
         {
             if (Role != CoopRole.Client || !ActionLedger.IsActive
-                || message is not ActionMessage action || action.ActionId != Guid.Empty)
+                || message is not ActionMessage action)
             {
                 return false;
             }
-            if (ActionLedger.IsAction(action))
+
+            if (action.ActionId != Guid.Empty)
             {
-                // The action id is allocated and recorded before the message leaves, so a plain
-                // module only has to send the command.
-                ActionLedger.Submit(action);
+                CoopPlugin.Log.LogError("client ActionMessage " + action.GetType().FullName
+                    + " already had an action id; refusing to send an untracked command.");
                 return true;
             }
-            if (WarnedNonActionMessages.Add(action.GetType()))
-            {
-                CoopPlugin.Log.LogWarning("ActionMessage "
-                    + action.GetType().FullName + " overrides neither OnApply nor OnUndo; sending "
-                    + "it as an ordinary message (no action id, no rollback).");
-            }
-            return false;
+
+            // The action id is allocated and recorded before the message leaves, so a plain
+            // module only has to send the command.
+            ActionLedger.Submit(action);
+            return true;
         }
 
         private void Send(int connectionId, INetMessage message)
