@@ -13,8 +13,8 @@ namespace CardShopCoop.Modules.Shop
     public sealed class ShopClientBehaviour : CoopBehaviour, IShopRenameEndpoint
     {
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         // Local UI lifecycle only. The authoritative name, owner, unnamed flag and live draft
         // are read from Global<ShopRenameState> / Global<ShopRenameDraftState>.
@@ -29,7 +29,7 @@ namespace CardShopCoop.Modules.Shop
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -37,16 +37,16 @@ namespace CardShopCoop.Modules.Shop
             _context = RuntimeContext;
             ResetLocalState();
             ShopRenamePatches.SetEndpoint(this);
-            _harmony = new Harmony("dev.meepen.cardshopcoop.shop.client");
             try
             {
-                ShopRenamePatches.Install(_harmony);
+                ShopRenamePatches.Install(Harmony);
             }
             catch
             {
                 Shutdown();
                 throw;
             }
+            _initialized = true;
         }
 
         /// <summary>The host's authoritative rename/lock state. The store owns the baseline and
@@ -672,8 +672,6 @@ namespace CardShopCoop.Modules.Shop
             _shutdown = true;
             ResetLocalState();
             ShopRenamePatches.ClearEndpoint(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             _context = null;
             ShopState.Reset();
         }

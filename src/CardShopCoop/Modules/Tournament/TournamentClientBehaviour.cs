@@ -20,7 +20,6 @@ namespace CardShopCoop.Modules.Tournament
             AccessTools.Field(typeof(TournamentPrizeShelf), "m_ScreenMesh");
 
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private TournamentStateMessage _pendingState;
         private TournamentDeltaMessage _pendingHeader;
         private readonly Dictionary<int, TournamentDeltaMessage> _pendingPrizes = new();
@@ -28,10 +27,11 @@ namespace CardShopCoop.Modules.Tournament
         private int _pendingBracketCount = -1;
         private readonly List<PairingEntry> _clientBracket = new();
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -44,16 +44,13 @@ namespace CardShopCoop.Modules.Tournament
                 _context.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.tournament.client.runtime");
-                ApplyPatches(_harmony);
+                ApplyPatches(Harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
                 SceneManager.sceneLoaded += OnSceneLoaded;
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Tournament client initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (registered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -66,6 +63,7 @@ namespace CardShopCoop.Modules.Tournament
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [MessageHandler]
@@ -127,8 +125,6 @@ namespace CardShopCoop.Modules.Tournament
                 _active = null;
             }
 
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             ResetSessionState();
             _context = null;
         }

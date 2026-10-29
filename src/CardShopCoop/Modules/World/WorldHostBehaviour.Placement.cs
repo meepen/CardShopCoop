@@ -423,7 +423,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            _harmony.Patch(original, postfix: new HarmonyMethod(
+            Harmony.Patch(original, postfix: new HarmonyMethod(
                 typeof(WorldHostBehaviour), nameof(ObjectMutationPostfix)));
         }
 

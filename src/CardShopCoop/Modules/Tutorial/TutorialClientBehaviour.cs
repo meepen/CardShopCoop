@@ -16,12 +16,12 @@ namespace CardShopCoop.Modules.Tutorial
     {
         private static TutorialClientBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -35,15 +35,12 @@ namespace CardShopCoop.Modules.Tutorial
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycle = true;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.tutorial.client");
-                _harmony.CreateClassProcessor(typeof(CreditPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(TutorialReadyPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(CreditPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(TutorialReadyPatch)).Patch();
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Tutorial client initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (lifecycle)
                 {
                     CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -59,6 +56,7 @@ namespace CardShopCoop.Modules.Tutorial
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         /// <summary>The host's authoritative progression changed. The store owns the value, so the
@@ -267,8 +265,6 @@ namespace CardShopCoop.Modules.Tutorial
             _shutdown = true;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

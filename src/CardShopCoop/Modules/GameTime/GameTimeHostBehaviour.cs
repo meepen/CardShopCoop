@@ -11,24 +11,24 @@ namespace CardShopCoop.Modules.GameTime
     {
         private static GameTimeHostBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _hasObservedTime;
         private int _observedDay;
         private int _observedHour;
         private int _observedMinute;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
 
             _context = RuntimeContext;
             _active = this;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.game-time.host");
-            _harmony.CreateClassProcessor(typeof(TimeChangedPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(TimeChangedPatch)).Patch();
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -51,8 +51,6 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             _shutdown = true;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

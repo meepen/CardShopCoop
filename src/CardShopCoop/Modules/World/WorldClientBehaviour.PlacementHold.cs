@@ -12,12 +12,12 @@ namespace CardShopCoop.Modules.World
         internal void InstallPlacementHold()
         {
             _placementHold = new PlacementHoldInteraction(false, _ => { }, _context.Send);
-            _harmony.CreateClassProcessor(typeof(PlacementHoldBoxUpPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlacementHoldRotatePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlacementHoldFlipPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlacementHoldInputPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlacementHoldRemoteValidityPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlacementHoldGlobalPreviewPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlacementHoldBoxUpPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlacementHoldRotatePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlacementHoldFlipPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlacementHoldInputPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlacementHoldRemoteValidityPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlacementHoldGlobalPreviewPatch)).Patch();
         }
 
         internal void ShutdownPlacementHold()

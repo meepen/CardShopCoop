@@ -17,22 +17,22 @@ namespace CardShopCoop.Modules.Register
     {
         private static RegisterHostBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         internal static RegisterHostBehaviour Active => _active;
 
         private void OnEnable()
         {
-            if (_harmony != null)
+            if (_initialized)
             {
                 return;
             }
 
             _context = RuntimeContext;
             _active = this;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.register.host");
-            RegisterHooks.PatchHost(_harmony);
+            RegisterHooks.PatchHost(Harmony);
+            _initialized = true;
         }
 
         // Fires after every behaviour's OnEnable, so the identity module has bound the existing
@@ -61,8 +61,6 @@ namespace CardShopCoop.Modules.Register
                 _active = null;
             }
 
-            _harmony?.UnpatchSelf();
-            _harmony = null;
         }
 
         private void OnDestroy() => Shutdown();

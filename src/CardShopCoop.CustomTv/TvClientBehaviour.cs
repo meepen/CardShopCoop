@@ -22,13 +22,13 @@ namespace CardShopCoop.CustomTv
 
         private static TvClientBehaviour _active;
         private ICoopContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _joined;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -39,14 +39,11 @@ namespace CardShopCoop.CustomTv
                 ResetSessionState();
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.tv.client.runtime");
-                ApplyPatches(_harmony);
+                ApplyPatches(Harmony);
             }
             catch (Exception exception)
             {
                 CoopLog.Error("TV client initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (ReferenceEquals(_active, this))
                 {
@@ -56,6 +53,7 @@ namespace CardShopCoop.CustomTv
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -123,8 +121,6 @@ namespace CardShopCoop.CustomTv
             {
                 _active = null;
             }
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             ResetSessionState();
             _context = null;
         }

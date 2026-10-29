@@ -14,9 +14,9 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
         }
 
         [MessageHandler]

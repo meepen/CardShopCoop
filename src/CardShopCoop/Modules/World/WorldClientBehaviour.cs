@@ -14,7 +14,6 @@ namespace CardShopCoop.Modules.World
     {
         private static WorldClientBehaviour _instance;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
         private BoxNetworkInteraction _boxNetworkInteraction;
         private PlayerBoxInteraction _playerBoxInteraction;
@@ -55,7 +54,6 @@ namespace CardShopCoop.Modules.World
             // so the container module holds those records until the placement layer reports the
             // object. This is the same late-join signal PlayTable, Register and CardDisplay use.
             PlacementApi.StructureChanged += OnPlacementStructureChanged;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.world.client");
             InstallBoxNetworkInteractionPatches();
             InstallPlayerBoxInteractionPatches();
             InstallPlayerBoxPresenceHook();
@@ -98,7 +96,6 @@ namespace CardShopCoop.Modules.World
                 _instance = null;
             }
 
-            _harmony?.UnpatchSelf();
         }
 
         private void OnDestroy() => Shutdown();

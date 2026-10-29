@@ -17,14 +17,14 @@ namespace CardShopCoop.Modules.Bills
         private static BillsHostBehaviour _active;
         private readonly HashSet<int> _fullyJoined = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private int _forwardedRequester;
         private bool _applyingIntent;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -38,16 +38,13 @@ namespace CardShopCoop.Modules.Bills
                 handlersRegistered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.bills.host");
-                _harmony.CreateClassProcessor(typeof(BillChangedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(BillSetPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(BillPopupPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(BillChangedPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(BillSetPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(BillPopupPatch)).Patch();
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Bills host initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (handlersRegistered)
                 {
@@ -63,6 +60,7 @@ namespace CardShopCoop.Modules.Bills
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -303,8 +301,6 @@ namespace CardShopCoop.Modules.Bills
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

@@ -27,13 +27,13 @@ namespace CardShopCoop.Modules.Catalog
         private readonly HashSet<int> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _applying;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -47,16 +47,13 @@ namespace CardShopCoop.Modules.Catalog
                 registered = true;
                 _active = this;
                 CatalogInterop.ProbeOptionalSurfaces();
-                _harmony = new Harmony("dev.meepen.cardshopcoop.catalog.host");
-                _harmony.CreateClassProcessor(typeof(ProductLicensePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(ScannerUnlockPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ProductLicensePatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ScannerUnlockPatch)).Patch();
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
             }
             catch
             {
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (registered)
@@ -74,6 +71,7 @@ namespace CardShopCoop.Modules.Catalog
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         private void OnReady(CEventPlayer_GameDataFinishLoaded _)
@@ -396,8 +394,6 @@ namespace CardShopCoop.Modules.Catalog
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _joined.Clear();

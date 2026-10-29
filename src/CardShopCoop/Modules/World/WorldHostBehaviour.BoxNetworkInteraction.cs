@@ -14,18 +14,18 @@ namespace CardShopCoop.Modules.World
             // Box creation, destruction, identity and baselines are installed by the
             // GameObjectIdentity module. Only contents/open state and delivery bookkeeping
             // belong to the world box engine.
-            _harmony.CreateClassProcessor(typeof(HostItemBoxOpenStatePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostItemBoxContentsPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostItemBoxRemoveFromShelfPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostPackOpenerDispenseFromBoxPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostCleanserDispenseFromBoxPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostItemBoxOpenStatePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostItemBoxContentsPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostItemBoxRemoveFromShelfPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostPackOpenerDispenseFromBoxPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostCleanserDispenseFromBoxPatch)).Patch();
             // The game's restock delivery queue drains inside RestockManager.Update; mark that
             // span so an accepted purchase's creator-assigned ids are consumed in spawn order.
-            _harmony.CreateClassProcessor(typeof(HostRestockUpdatePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostRestockUpdatePatch)).Patch();
             // The delivery-id mirror is fed by the game's own enqueue and cleared by its data-load
             // rebuild, never by the caller, so an id cannot outlive the entry it was bound to.
-            _harmony.CreateClassProcessor(typeof(HostRestockEnqueuePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostRestockInitPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostRestockEnqueuePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostRestockInitPatch)).Patch();
         }
 
         [MessageHandler]

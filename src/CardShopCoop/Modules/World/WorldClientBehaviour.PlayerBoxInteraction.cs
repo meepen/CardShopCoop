@@ -41,16 +41,16 @@ namespace CardShopCoop.Modules.World
 
         private void InstallPlayerBoxInteractionPatches()
         {
-            _harmony.CreateClassProcessor(typeof(PlayerBoxPickupPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlayerBoxThrowPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlayerBoxDropPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlayerBoxPlacementPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(FurnitureBoxUpPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ItemBoxOpenStatePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ItemBoxContentsPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ItemBoxRemoveFromShelfPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PackOpenerDispenseFromBoxPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CleanserDispenseFromBoxPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlayerBoxPickupPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlayerBoxThrowPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlayerBoxDropPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlayerBoxPlacementPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(FurnitureBoxUpPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ItemBoxOpenStatePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ItemBoxContentsPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ItemBoxRemoveFromShelfPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PackOpenerDispenseFromBoxPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CleanserDispenseFromBoxPatch)).Patch();
         }
 
         /// <summary>Pre-action state captured for a local furniture box-up. The hook prefix only

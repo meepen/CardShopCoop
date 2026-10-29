@@ -20,12 +20,12 @@ namespace CardShopCoop.Modules.StoreAccess
 
         private static StoreAccessClientBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -35,14 +35,13 @@ namespace CardShopCoop.Modules.StoreAccess
             StoreAccessInterop.Reset();
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.store-access.client");
             try
             {
-                _harmony.CreateClassProcessor(typeof(OpenSignPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(WarehouseSignPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(OpenSignReadyPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(WarehouseSignReadyPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(GuestDayStartedBlockPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(OpenSignPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(WarehouseSignPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(OpenSignReadyPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(WarehouseSignReadyPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(GuestDayStartedBlockPatch)).Patch();
             }
             catch
             {
@@ -54,6 +53,7 @@ namespace CardShopCoop.Modules.StoreAccess
             // no sign-ready hook fires again. The normal join path is the global-information
             // baseline itself; this only heals the re-enable case.
             ApplyStoredState();
+            _initialized = true;
         }
 
         /// <summary>The host's authoritative access flags. The store owns the baseline and the
@@ -282,8 +282,6 @@ namespace CardShopCoop.Modules.StoreAccess
             _shutdown = true;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

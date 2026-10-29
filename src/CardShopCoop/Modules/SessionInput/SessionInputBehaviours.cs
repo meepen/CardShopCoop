@@ -24,19 +24,19 @@ namespace CardShopCoop.Modules.SessionInput
 
     public abstract class SessionInputBehaviour : CoopBehaviour
     {
-        private HarmonyLib.Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         protected void StartSessionInput(string role)
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
 
             SessionInputRuntime.Attach(this);
-            _harmony = new HarmonyLib.Harmony("dev.meepen.cardshopcoop.session-input." + role);
-            SessionInputPatches.Apply(_harmony);
+            SessionInputPatches.Apply(Harmony);
+            _initialized = true;
         }
 
         protected void StopSessionInput()
@@ -48,8 +48,6 @@ namespace CardShopCoop.Modules.SessionInput
 
             _shutdown = true;
             SessionInputRuntime.Detach(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
         }
     }
 }

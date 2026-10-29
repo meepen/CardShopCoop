@@ -639,11 +639,11 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         private readonly Dictionary<InteractableObject, DecorationPose> _moveOrigins =
             new(ReferenceComparer.Instance);
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private InteractableObject _placing;
         private bool _placingWasBound;
         private bool _joined;
         private bool _shutdown;
+        private bool _initialized;
         private bool _prunePending;
         // Process-wide so a reconnecting peer cannot reuse an id this process already handed to
         // the host for a decoration that still exists.
@@ -659,7 +659,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -670,19 +670,19 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             ActionLedger.ActionSettled += OnActionSettled;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.gameobjectidentity.decoration.client");
-            Patch(_harmony, typeof(ShelfManager), "Awake", Type.EmptyTypes,
+            Patch(Harmony, typeof(ShelfManager), "Awake", Type.EmptyTypes,
                 postfix: nameof(Hooks.ShelfAwakePostfix));
-            Patch(_harmony, typeof(InteractableObject), "StartMoveObject", Type.EmptyTypes,
+            Patch(Harmony, typeof(InteractableObject), "StartMoveObject", Type.EmptyTypes,
                 prefix: nameof(Hooks.StartMoveObjectPrefix));
-            Patch(_harmony, typeof(InteractableObject), "PlaceMovedObject", Type.EmptyTypes,
+            Patch(Harmony, typeof(InteractableObject), "PlaceMovedObject", Type.EmptyTypes,
                 prefix: nameof(Hooks.PlaceMovedObjectPrefix),
                 postfix: nameof(Hooks.PlaceMovedObjectPostfix),
                 finalizer: nameof(Hooks.PlaceMovedObjectFinalizer));
-            Patch(_harmony, typeof(InteractableObject), "BoxUpObject", new[] { typeof(bool) },
+            Patch(Harmony, typeof(InteractableObject), "BoxUpObject", new[] { typeof(bool) },
                 prefix: nameof(Hooks.BoxUpObjectPrefix), postfix: nameof(Hooks.BoxUpObjectPostfix));
-            Patch(_harmony, typeof(InteractableObject), "OnLockedRoomHidden", Type.EmptyTypes,
+            Patch(Harmony, typeof(InteractableObject), "OnLockedRoomHidden", Type.EmptyTypes,
                 prefix: nameof(Hooks.OnLockedRoomHiddenPrefix));
+            _initialized = true;
         }
 
         private static void Patch(Harmony harmony, Type type, string name, Type[] args,
@@ -790,8 +790,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             ActionLedger.ActionSettled -= OnActionSettled;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(Active, this))
             {
                 Active = null;

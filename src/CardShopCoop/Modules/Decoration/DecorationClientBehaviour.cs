@@ -16,15 +16,15 @@ namespace CardShopCoop.Modules.Decoration
     {
         private static DecorationClientBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private DecorationStateMessage _pendingState;
         private bool _shutdown;
+        private bool _initialized;
         private int _applyingState;
         private bool _joined;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -43,16 +43,13 @@ namespace CardShopCoop.Modules.Decoration
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycle = true;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.decoration.client");
-                _harmony.CreateClassProcessor(typeof(EquipPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(BuyPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(BuyItemPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(EquipPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(BuyPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(BuyItemPatch)).Patch();
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Decoration client initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (lifecycle)
                 {
                     CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -75,6 +72,7 @@ namespace CardShopCoop.Modules.Decoration
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [MessageHandler]
@@ -295,8 +293,6 @@ namespace CardShopCoop.Modules.Decoration
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

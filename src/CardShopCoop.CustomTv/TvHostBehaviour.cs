@@ -22,13 +22,13 @@ namespace CardShopCoop.CustomTv
 
         private static TvHostBehaviour _active;
         private ICoopContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private float _lastSeekInputTime;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -39,8 +39,7 @@ namespace CardShopCoop.CustomTv
                 ResetSessionState();
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.tv.host.runtime");
-                ApplyPatches(_harmony);
+                ApplyPatches(Harmony);
 
                 // A TV created before the host module was installed never ran a patched
                 // lifecycle method. Write its current state once so the EIM store has the entry
@@ -53,8 +52,6 @@ namespace CardShopCoop.CustomTv
             catch (Exception exception)
             {
                 CoopLog.Error("TV host initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (ReferenceEquals(_active, this))
                 {
@@ -64,6 +61,7 @@ namespace CardShopCoop.CustomTv
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [MessageHandler]
@@ -108,8 +106,6 @@ namespace CardShopCoop.CustomTv
             {
                 _active = null;
             }
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             ResetSessionState();
             _context = null;
         }

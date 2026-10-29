@@ -16,13 +16,13 @@ namespace CardShopCoop.Modules.Pricing
     {
         private static PricingClientBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private PricingStateMessage _pendingState;
         private readonly Dictionary<EItemType, PricingItemDeltaEntry> _pendingItemDeltas = new();
         private readonly Dictionary<string, PricingCardDeltaEntry> _pendingCardDeltas = new();
         private bool _contentReady;
         private bool _applying;
         private bool _shutdown;
+        private bool _initialized;
 
         // The game's price screen records the exact display compartment whose price tag was
         // clicked. Carry that slot's live shelf + compartment in the price intent so the host
@@ -34,7 +34,7 @@ namespace CardShopCoop.Modules.Pricing
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -47,8 +47,7 @@ namespace CardShopCoop.Modules.Pricing
                 _context.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.pricing.client");
-                PricingClientPatches.Apply(_harmony);
+                PricingClientPatches.Apply(Harmony);
                 if (_context.InGame())
                 {
                     PriceTagRegistry.Bootstrap();
@@ -57,8 +56,6 @@ namespace CardShopCoop.Modules.Pricing
             }
             catch
             {
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (registered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -75,6 +72,7 @@ namespace CardShopCoop.Modules.Pricing
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         private void OnReady(CEventPlayer_GameDataFinishLoaded _)
@@ -507,8 +505,6 @@ namespace CardShopCoop.Modules.Pricing
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _pendingState = null;
             ClearPendingDeltas();

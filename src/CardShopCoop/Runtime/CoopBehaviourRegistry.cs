@@ -5,6 +5,7 @@ using System.Reflection;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Util;
+using HarmonyLib;
 using UnityEngine;
 using CoopLog = CardShopCoop.Api.CoopLog;
 using CardShopCoop.Net;
@@ -200,6 +201,17 @@ namespace CardShopCoop.Runtime
                     externalBehaviour.SetContext(_context);
                 }
 
+                // Every behaviour that opts into the public base receives the one Harmony instance
+                // the runtime owns for it. It exists before activation so OnEnable may install its
+                // patches, and the registry unpatches it when the behaviour is disposed. A plain
+                // external MonoBehaviour is not part of this contract: it keeps whatever Harmony
+                // instance it creates and owns.
+                if (behaviour is Api.CoopBehaviour patchableBehaviour)
+                {
+                    patchableBehaviour.SetHarmony(new Harmony(
+                        "dev.meepen.cardshopcoop.behaviour." + type.FullName));
+                }
+
                 // Register events before adding to the dispatch list so a signature failure cannot
                 // leave a half-added target behind. Attributed handlers are part of the same
                 // lifecycle: the registry binds them before OnEnable, so a behaviour never has to
@@ -250,6 +262,12 @@ namespace CardShopCoop.Runtime
                 }
                 if (child != null)
                 {
+                    if (behaviour is Api.CoopBehaviour patchable)
+                    {
+                        // The behaviour never activated, so it installed no patches; drop the
+                        // instance the runtime handed it before the object is destroyed.
+                        patchable.SetHarmony(null);
+                    }
                     UnityEngine.Object.Destroy(child);
                 }
                 throw;
@@ -443,6 +461,24 @@ namespace CardShopCoop.Runtime
                         errors ??= new List<Exception>();
                         errors.Add(error);
                     }
+                }
+
+                try
+                {
+                    // Patch removal belongs to the runtime that handed out the instance. Doing it
+                    // here, after the behaviour's own Shutdown and before the GameObject dies,
+                    // keeps a behaviour from having to unpatch itself. Unpatching an instance with
+                    // no patches (a behaviour that never activated) is a no-op.
+                    if (entry.Behaviour is Api.CoopBehaviour patchable)
+                    {
+                        patchable.Harmony?.UnpatchSelf();
+                        patchable.SetHarmony(null);
+                    }
+                }
+                catch (Exception error)
+                {
+                    errors ??= new List<Exception>();
+                    errors.Add(error);
                 }
 
                 try

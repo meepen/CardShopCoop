@@ -21,13 +21,13 @@ namespace CardShopCoop.Modules.StoreAccess
 
         private static StoreAccessHostBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _applyingIntent;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -36,18 +36,18 @@ namespace CardShopCoop.Modules.StoreAccess
             _active = this;
             StoreAccessInterop.Reset();
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.store-access.host");
             try
             {
-                _harmony.CreateClassProcessor(typeof(SignChangedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(WarehouseSignChangedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(StoreOpenedPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(SignChangedPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(WarehouseSignChangedPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(StoreOpenedPatch)).Patch();
             }
             catch
             {
                 Shutdown();
                 throw;
             }
+            _initialized = true;
         }
 
         /// <summary>Seeds the session value before the transport starts. The generic
@@ -238,8 +238,6 @@ namespace CardShopCoop.Modules.StoreAccess
 
             _shutdown = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

@@ -19,8 +19,8 @@ namespace CardShopCoop.Modules.Expansion
         private static ExpansionClientBehaviour _active;
         private static int _applyingPrediction;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _joined;
         private ExpansionBaselineMessage _latestBaseline;
         private ExpansionDeltaMessage _pendingShopDelta;
@@ -30,7 +30,7 @@ namespace CardShopCoop.Modules.Expansion
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -44,16 +44,13 @@ namespace CardShopCoop.Modules.Expansion
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.expansion.client");
-                _harmony.CreateClassProcessor(typeof(RoomCheckoutPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(LotBCheckoutPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(ExpansionManagerReadyPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(RoomCheckoutPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(LotBCheckoutPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ExpansionManagerReadyPatch)).Patch();
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Expansion client initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (handlersRegistered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -67,6 +64,7 @@ namespace CardShopCoop.Modules.Expansion
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -130,8 +128,6 @@ namespace CardShopCoop.Modules.Expansion
             {
                 _active = null;
             }
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             _latestBaseline = null;
             ClearPendingDeltas();
             _baselineNeedsManagerInitialization = false;

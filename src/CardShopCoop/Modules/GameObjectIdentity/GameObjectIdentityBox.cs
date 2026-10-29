@@ -21,20 +21,15 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
     public sealed partial class GameObjectIdentityClientBehaviour
     {
-        private Harmony _boxHarmony;
-
         [OnSessionStarted]
         private void InstallBoxLifecycle()
         {
-            _boxHarmony = new Harmony("dev.meepen.cardshopcoop.gameobjectidentity.box.client");
-            BoxLifecycleHooks.InstallClient(_boxHarmony);
+            BoxLifecycleHooks.InstallClient(Harmony);
         }
 
         [OnSessionStopped]
         private void ShutdownBoxLifecycle()
         {
-            _boxHarmony?.UnpatchSelf();
-            _boxHarmony = null;
             BoxIdentityLifecycle.Reset();
         }
 

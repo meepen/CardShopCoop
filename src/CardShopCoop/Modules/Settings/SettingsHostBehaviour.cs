@@ -32,12 +32,12 @@ namespace CardShopCoop.Modules.Settings
         private static bool _applyingRemote;
 
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -49,7 +49,6 @@ namespace CardShopCoop.Modules.Settings
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.settings.host");
                 Patch(typeof(GameEventFormatPatch));
                 Patch(typeof(GameEventResetPatch));
                 Patch(typeof(GameEventFeePatch));
@@ -61,8 +60,6 @@ namespace CardShopCoop.Modules.Settings
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError("Settings host initialization failed: " + error);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (handlersRegistered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -76,11 +73,12 @@ namespace CardShopCoop.Modules.Settings
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         private void Patch(Type patchType)
         {
-            _harmony.CreateClassProcessor(patchType).Patch();
+            Harmony.CreateClassProcessor(patchType).Patch();
         }
 
         [OnFullyJoined]
@@ -457,8 +455,6 @@ namespace CardShopCoop.Modules.Settings
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

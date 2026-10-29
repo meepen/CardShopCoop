@@ -28,7 +28,6 @@ namespace CardShopCoop.Modules.Staff
         private readonly Dictionary<string, StaffModuleDeltaMessage> _deferredDeltas = new();
         private StaffModuleBaselineMessage _pendingBaseline;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
         private bool _joined;
         private int _applyingPrediction;
@@ -80,7 +79,6 @@ namespace CardShopCoop.Modules.Staff
             _context = RuntimeContext;
             _context.Messages.RegisterAttributedHandlers(this);
             _active = this;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.staff.module.client");
             Patch(typeof(HirePatch));
             Patch(typeof(TaskPatch));
             Patch(typeof(OptionPatch));
@@ -96,7 +94,7 @@ namespace CardShopCoop.Modules.Staff
         }
 
         private void Patch(Type patchType)
-            => _harmony.CreateClassProcessor(patchType).Patch();
+            => Harmony.CreateClassProcessor(patchType).Patch();
 
         [OnFullyJoined]
         private void Joined(PeerConnection _)
@@ -1255,7 +1253,6 @@ namespace CardShopCoop.Modules.Staff
                 _active = null;
             }
 
-            _harmony?.UnpatchSelf();
         }
 
         private void OnDestroy() => Shutdown();

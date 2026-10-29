@@ -27,8 +27,8 @@ namespace CardShopCoop.Modules.Npc
     {
         private static NpcHostBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private readonly Dictionary<int, Customer> _customers = new();
         private readonly Dictionary<int, Worker> _workers = new();
 
@@ -36,21 +36,21 @@ namespace CardShopCoop.Modules.Npc
 
         private void OnEnable()
         {
-            if (_harmony != null)
+            if (_initialized)
             {
                 return;
             }
             _context = RuntimeContext;
             _active = this;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.npc.host");
-            _harmony.CreateClassProcessor(typeof(WorkerActionPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(SpeechPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(MoneyPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(WorkerActionPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(SpeechPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(MoneyPatch)).Patch();
             SceneManager.sceneLoaded += OnSceneLoaded;
 
             // The identity module owns the NPC lifecycle hooks; it binds the live population as
             // soon as both behaviours are online.
             NpcHostLifecycle.NpcTrackingReady();
+            _initialized = true;
         }
 
         private void Update()
@@ -91,7 +91,6 @@ namespace CardShopCoop.Modules.Npc
             {
                 _active = null;
             }
-            _harmony?.UnpatchSelf();
             _customers.Clear();
             _workers.Clear();
             _npcStates.Clear();

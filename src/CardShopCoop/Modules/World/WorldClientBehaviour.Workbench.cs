@@ -13,14 +13,14 @@ namespace CardShopCoop.Modules.World
         private void InstallWorkbench()
         {
             _workbenchInteraction = new WorldWorkbenchInteraction(false, _ => { }, SendWorldCommand);
-            _harmony.CreateClassProcessor(typeof(ClientWorkbenchAddItemPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ClientWorkbenchRemoveItemPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ClientWorkbenchTakeItemToHandPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ClientWorkbenchDispenseFromBoxPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ClientWorkbenchRemoveFromShelfPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ClientWorkbenchBundleScopePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ClientWorkbenchBundleStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ClientWorkbenchTaskCompletedPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ClientWorkbenchAddItemPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ClientWorkbenchRemoveItemPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ClientWorkbenchTakeItemToHandPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ClientWorkbenchDispenseFromBoxPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ClientWorkbenchRemoveFromShelfPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ClientWorkbenchBundleScopePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ClientWorkbenchBundleStartPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ClientWorkbenchTaskCompletedPatch)).Patch();
         }
 
         private void ShutdownWorkbench()

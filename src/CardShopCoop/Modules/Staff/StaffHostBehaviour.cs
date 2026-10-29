@@ -27,7 +27,6 @@ namespace CardShopCoop.Modules.Staff
         private readonly Dictionary<Worker, int> _leaseOwner = new();
         private readonly Dictionary<Worker, WorkerIdentity> _identities = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
         private Guid _intentActionId;
 
@@ -46,7 +45,6 @@ namespace CardShopCoop.Modules.Staff
             _context = RuntimeContext;
             _context.Messages.RegisterAttributedHandlers(this);
             _active = this;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.staff.module.host");
             Patch(typeof(WorkerMousePatch));
             Patch(typeof(WorkerStopPatch));
             Patch(typeof(WorkerLifecyclePatch));
@@ -61,7 +59,7 @@ namespace CardShopCoop.Modules.Staff
         }
 
         private void Patch(Type patchType)
-            => _harmony.CreateClassProcessor(patchType).Patch();
+            => Harmony.CreateClassProcessor(patchType).Patch();
 
         [OnFullyJoined]
         private void SendJoinBaseline(PeerConnection connection)
@@ -798,8 +796,6 @@ namespace CardShopCoop.Modules.Staff
                 _active = null;
             }
 
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             _context = null;
         }
 

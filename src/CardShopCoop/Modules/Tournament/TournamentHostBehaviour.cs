@@ -17,12 +17,12 @@ namespace CardShopCoop.Modules.Tournament
 
         private static TournamentHostBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -31,14 +31,11 @@ namespace CardShopCoop.Modules.Tournament
             try
             {
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.tournament.host.runtime");
-                ApplyPatches(_harmony);
+                ApplyPatches(Harmony);
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Tournament host initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
@@ -47,6 +44,7 @@ namespace CardShopCoop.Modules.Tournament
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -70,8 +68,6 @@ namespace CardShopCoop.Modules.Tournament
             }
 
             _shutdown = true;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

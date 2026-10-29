@@ -25,7 +25,6 @@ namespace CardShopCoop.Modules.PlayTable
         private readonly Dictionary<InteractablePlayTable, PlayTableEntry> _knownVisuals = new();
         private readonly HashSet<int> _fullyJoined = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
         private bool _suppressStoppedVisual;
 
@@ -48,7 +47,6 @@ namespace CardShopCoop.Modules.PlayTable
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.play-table.host");
             ApplyPatches();
             RefreshVisuals(false);
         }
@@ -760,7 +758,7 @@ namespace CardShopCoop.Modules.PlayTable
                 return;
             }
 
-            _harmony.Patch(original, prefix, postfix);
+            Harmony.Patch(original, prefix, postfix);
         }
 
         private static class TableChangedPatch
@@ -819,7 +817,6 @@ namespace CardShopCoop.Modules.PlayTable
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
             _reservations.Clear();
             _knownVisuals.Clear();
             _fullyJoined.Clear();
@@ -828,7 +825,6 @@ namespace CardShopCoop.Modules.PlayTable
                 _active = null;
             }
 
-            _harmony = null;
             _context = null;
         }
 

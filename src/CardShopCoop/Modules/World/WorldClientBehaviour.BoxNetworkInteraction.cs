@@ -13,7 +13,7 @@ namespace CardShopCoop.Modules.World
             // Box creation, destruction, identity and baselines are installed by the
             // GameObjectIdentity module. Only the delivery window (which box id a local vanilla
             // spawn consumes) and the guest's out-of-bounds sweep suppression belong here.
-            _harmony.CreateClassProcessor(typeof(RestockUpdatePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(RestockUpdatePatch)).Patch();
         }
 
         [MessageHandler]

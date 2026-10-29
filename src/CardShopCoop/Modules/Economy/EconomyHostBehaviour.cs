@@ -11,7 +11,6 @@ namespace CardShopCoop.Modules.Economy
     {
         private bool _active;
         private bool _shutdown;
-        private Harmony _harmony;
 
         private void OnEnable()
         {
@@ -30,14 +29,11 @@ namespace CardShopCoop.Modules.Economy
 
             try
             {
-                _harmony = new Harmony("dev.meepen.cardshopcoop.economy");
-                _harmony.CreateClassProcessor(typeof(QueueEventPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(QueueEventPatch)).Patch();
                 _active = true;
             }
             catch
             {
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 EconomyAuthority.Deactivate(this);
                 throw;
             }
@@ -52,8 +48,6 @@ namespace CardShopCoop.Modules.Economy
 
 
             _shutdown = true;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (_active)
             {
                 EconomyAuthority.Deactivate(this);

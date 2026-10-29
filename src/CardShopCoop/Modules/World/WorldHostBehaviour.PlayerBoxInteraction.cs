@@ -16,17 +16,17 @@ namespace CardShopCoop.Modules.World
     {
         private void InstallPlayerBoxInteractionPatches()
         {
-            _harmony.CreateClassProcessor(typeof(PlayerBoxPickupPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlayerBoxThrowPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlayerBoxDropPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PlayerBoxPlacementPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlayerBoxPickupPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlayerBoxThrowPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlayerBoxDropPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PlayerBoxPlacementPatch)).Patch();
             // A furniture purchase boxes the furniture before the outer factory settles the
             // package at its delivery pose. Republish placement state once that move is done.
             var purchaseSpawn = AccessTools.Method(typeof(ShelfManager),
                 "SpawnInteractableObjectInPackageBox");
             if (purchaseSpawn != null)
             {
-                _harmony.Patch(purchaseSpawn, postfix: new HarmonyMethod(
+                Harmony.Patch(purchaseSpawn, postfix: new HarmonyMethod(
                     typeof(WorldHostBehaviour), nameof(FurniturePurchaseSettledPostfix)));
             }
         }

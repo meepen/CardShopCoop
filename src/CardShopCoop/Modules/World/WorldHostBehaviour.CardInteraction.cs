@@ -9,9 +9,9 @@ namespace CardShopCoop.Modules.World
     {
         private void InstallCardInteractionPatches()
         {
-            WorldCardInteractionPatches.Apply(_harmony);
-            WorldContainerInteraction.ApplyHostPatches(_harmony);
-            WorldMarketInteraction.ApplyPatches(_harmony);
+            WorldCardInteractionPatches.Apply(Harmony);
+            WorldContainerInteraction.ApplyHostPatches(Harmony);
+            WorldMarketInteraction.ApplyPatches(Harmony);
         }
 
         [OnClientDisconnected]

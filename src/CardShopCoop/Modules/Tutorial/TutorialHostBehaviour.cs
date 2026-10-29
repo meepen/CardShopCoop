@@ -27,12 +27,12 @@ namespace CardShopCoop.Modules.Tutorial
         private static TutorialHostBehaviour _active;
 
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -41,8 +41,8 @@ namespace CardShopCoop.Modules.Tutorial
             TutorialInterop.Reset();
             _active = this;
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.tutorial.host");
-            _harmony.CreateClassProcessor(typeof(TutorialProgressPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(TutorialProgressPatch)).Patch();
+            _initialized = true;
         }
 
         /// <summary>Seeds the session value before the transport starts. The generic
@@ -224,8 +224,6 @@ namespace CardShopCoop.Modules.Tutorial
 
             _shutdown = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

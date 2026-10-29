@@ -17,7 +17,6 @@ namespace CardShopCoop.Modules.GameTime
     {
         private static GameTimeClientBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private DayTimeMessage _pendingMessage;
         private bool _hasHostDay;
         private bool _shutdown;
@@ -33,8 +32,7 @@ namespace CardShopCoop.Modules.GameTime
             _active = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.game-time.client");
-            _harmony.CreateClassProcessor(typeof(LightManagerReadyPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(LightManagerReadyPatch)).Patch();
             _context.Messages.RegisterAttributedHandlers(this);
         }
 
@@ -163,8 +161,6 @@ namespace CardShopCoop.Modules.GameTime
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

@@ -298,7 +298,7 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            _harmony.Patch(original,
+            Harmony.Patch(original,
                 prefix: prefix == null ? null : new HarmonyMethod(typeof(WorldClientBehaviour), prefix),
                 postfix: postfix == null ? null : new HarmonyMethod(typeof(WorldClientBehaviour), postfix));
         }

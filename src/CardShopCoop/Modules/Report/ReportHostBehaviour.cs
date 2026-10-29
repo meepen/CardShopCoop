@@ -31,8 +31,8 @@ namespace CardShopCoop.Modules.Report
 
         private static ReportHostBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private readonly HashSet<int> _nextDayParticipants = new();
         private readonly HashSet<int> _nextDayReadyPeers = new();
         private bool _nextDayHostReady;
@@ -44,7 +44,7 @@ namespace CardShopCoop.Modules.Report
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -56,7 +56,6 @@ namespace CardShopCoop.Modules.Report
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.report.host");
                 Patch(typeof(ReportOpenPatch));
                 Patch(typeof(ReviewAddPatch));
                 Patch(typeof(ReportMutationPatch));
@@ -68,8 +67,6 @@ namespace CardShopCoop.Modules.Report
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError("Report host initialization failed: " + error);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (handlersRegistered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -83,11 +80,12 @@ namespace CardShopCoop.Modules.Report
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         private void Patch(Type patchType)
         {
-            _harmony.CreateClassProcessor(patchType).Patch();
+            Harmony.CreateClassProcessor(patchType).Patch();
         }
 
         [OnFullyJoined]
@@ -628,8 +626,6 @@ namespace CardShopCoop.Modules.Report
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

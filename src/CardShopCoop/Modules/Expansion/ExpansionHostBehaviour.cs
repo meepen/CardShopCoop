@@ -15,13 +15,13 @@ namespace CardShopCoop.Modules.Expansion
     {
         private static ExpansionHostBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _purchaseInProgress;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -33,16 +33,13 @@ namespace CardShopCoop.Modules.Expansion
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.expansion.host");
-                _harmony.CreateClassProcessor(typeof(ExpansionChangedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(ShopRoomChangedPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(WarehouseRoomChangedPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ExpansionChangedPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ShopRoomChangedPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(WarehouseRoomChangedPatch)).Patch();
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Expansion host initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (handlersRegistered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -54,6 +51,7 @@ namespace CardShopCoop.Modules.Expansion
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -124,8 +122,6 @@ namespace CardShopCoop.Modules.Expansion
             {
                 _active = null;
             }
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             _context = null;
         }
 

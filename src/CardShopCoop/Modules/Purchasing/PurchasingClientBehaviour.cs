@@ -62,12 +62,12 @@ namespace CardShopCoop.Modules.Purchasing
         private static PurchasingClientBehaviour _active;
         private readonly Dictionary<Guid, PendingRequest> _pendingRequests = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -81,7 +81,6 @@ namespace CardShopCoop.Modules.Purchasing
                 registered = true;
                 ActionLedger.ActionSettled += RetirePendingRequest;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.purchasing.client");
                 Patch(typeof(RestockCheckoutPatch));
                 Patch(typeof(ScannerCheckoutPatch));
                 Patch(typeof(FurnitureCheckoutPatch));
@@ -90,8 +89,6 @@ namespace CardShopCoop.Modules.Purchasing
             }
             catch
             {
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (registered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -108,6 +105,7 @@ namespace CardShopCoop.Modules.Purchasing
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [MessageHandler]
@@ -169,8 +167,6 @@ namespace CardShopCoop.Modules.Purchasing
             ActionLedger.ActionSettled -= RetirePendingRequest;
             _pendingRequests.Clear();
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
@@ -186,7 +182,7 @@ namespace CardShopCoop.Modules.Purchasing
             => _pendingRequests.Remove(actionId);
 
         private void Patch(Type type)
-            => _harmony.CreateClassProcessor(type).Patch();
+            => Harmony.CreateClassProcessor(type).Patch();
 
         /// <summary>Marks the vanilla checkout's wallet/experience side effects as owned by the
         /// forwarded purchase intent: the host charges the accepted intent exactly once, so the Hud

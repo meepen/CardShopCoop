@@ -24,7 +24,6 @@ namespace CardShopCoop.Modules.Grading
         private readonly Dictionary<GradeCardSubmitSet, Guid> _jobIds = new();
         private readonly Dictionary<Guid, GradeCardSubmitSet> _localJobSets = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private GradingStateMessage _pendingState;
         private readonly Dictionary<Guid, GradingJobDeltaMessage> _pendingDeltas = new();
         private bool _contentReady;
@@ -53,14 +52,11 @@ namespace CardShopCoop.Modules.Grading
                 // authoritative state; retiring the prediction must also drop the job binding so a
                 // later delta cannot adopt a job the host never accepted.
                 ActionLedger.ActionSettled += RetireLocalJob;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.grading.client");
-                GradingPatches.ApplyClient(_harmony);
+                GradingPatches.ApplyClient(Harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }
             catch
             {
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 ActionLedger.ActionSettled -= RetireLocalJob;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
@@ -761,8 +757,6 @@ namespace CardShopCoop.Modules.Grading
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             ActionLedger.ActionSettled -= RetireLocalJob;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _pendingState = null;
             ClearPendingDeltas();

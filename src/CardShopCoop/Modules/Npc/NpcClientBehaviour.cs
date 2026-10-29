@@ -44,8 +44,8 @@ namespace CardShopCoop.Modules.Npc
         private static readonly HashSet<int> _pendingCapacityChanged = new();
         private static readonly Dictionary<int, ExistingCustomerChange> _pendingExistingCustomerChanged = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private readonly struct ExistingCustomerChange
         {
@@ -81,7 +81,7 @@ namespace CardShopCoop.Modules.Npc
 
         private void OnEnable()
         {
-            if (_harmony != null)
+            if (_initialized)
             {
                 return;
             }
@@ -89,20 +89,20 @@ namespace CardShopCoop.Modules.Npc
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.npc.client");
-            _harmony.CreateClassProcessor(typeof(CustomerManagerPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerActivationPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerDeactivationPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WorkerManagerPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerManagerStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WorkerManagerStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WorkerActivationPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WorkerUpdatePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerManagerPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerStartPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerActivationPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerDeactivationPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(WorkerManagerPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerManagerStartPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(WorkerManagerStartPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(WorkerActivationPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(WorkerUpdatePatch)).Patch();
             SuppressInitialPopulation(SceneRef<CustomerManager>.Get());
             SignalCustomerManagerReady();
             SignalWorkerManagerReady();
+            _initialized = true;
         }
 
         private void Update()
@@ -209,7 +209,6 @@ namespace CardShopCoop.Modules.Npc
             {
                 _active = null;
             }
-            _harmony?.UnpatchSelf();
         }
 
         private void OnDestroy() => Shutdown();

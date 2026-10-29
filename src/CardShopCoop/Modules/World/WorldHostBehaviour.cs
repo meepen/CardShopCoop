@@ -15,7 +15,6 @@ namespace CardShopCoop.Modules.World
     {
         private static WorldHostBehaviour _instance;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
         private BoxNetworkInteraction _boxNetworkInteraction;
 
@@ -104,7 +103,6 @@ namespace CardShopCoop.Modules.World
             _cardInteraction.Containers.SendToClient = SendWorldTo;
             _cardInteraction.Containers.RelayState = RelayWorldExcept;
             _cardInteraction.Containers.InGameProvider = _context.InGame;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.world.host");
             InstallBoxNetworkInteractionPatches();
             InstallPlayerBoxInteractionPatches();
             InstallPlayerBoxPresenceHook();
@@ -150,7 +148,6 @@ namespace CardShopCoop.Modules.World
             }
 
 
-            _harmony?.UnpatchSelf();
         }
 
         private void OnDestroy() => Shutdown();

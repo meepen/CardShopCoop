@@ -24,7 +24,6 @@ namespace CardShopCoop.Modules.Grading
         private readonly HashSet<int> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
 
         private sealed class GoJobSnapshot
@@ -55,14 +54,11 @@ namespace CardShopCoop.Modules.Grading
                 _active = this;
                 _context.Messages.RegisterAttributedHandlers(this);
                 registered = true;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.grading.host");
-                GradingPatches.ApplyHost(_harmony);
+                GradingPatches.ApplyHost(Harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }
             catch
             {
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
                 {
@@ -635,8 +631,6 @@ namespace CardShopCoop.Modules.Grading
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _setIds.Clear();
             _joined.Clear();

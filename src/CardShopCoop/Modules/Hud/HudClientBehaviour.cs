@@ -17,7 +17,7 @@ namespace CardShopCoop.Modules.Hud
         private CoopRuntimeContext _context;
         private HudAuthoritativeState _pending;
         private bool _shutdown;
-        private Harmony _harmony;
+        private bool _initialized;
         private static HudClientBehaviour _active;
         private int _highestNotifiedLevel = -1;
         private bool _hasAuthoritativeLevel;
@@ -49,7 +49,7 @@ namespace CardShopCoop.Modules.Hud
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null || _harmony != null)
+            if (_shutdown || _context != null || _initialized)
             {
                 return;
             }
@@ -62,20 +62,17 @@ namespace CardShopCoop.Modules.Hud
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.hud.client");
-                _harmony.CreateClassProcessor(typeof(EconomyQueuePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(ObservedAddCoinPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(ObservedReduceCoinPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(ObservedAddShopExpPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(ObservedAddFamePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(GameUiReadyPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(EconomyQueuePatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ObservedAddCoinPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ObservedReduceCoinPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ObservedAddShopExpPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ObservedAddFamePatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(GameUiReadyPatch)).Patch();
                 SceneManager.sceneLoaded += OnSceneLoaded;
             }
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError($"HUD client initialization failed: {error}");
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (handlersRegistered)
                 {
@@ -91,6 +88,7 @@ namespace CardShopCoop.Modules.Hud
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
@@ -481,8 +479,6 @@ namespace CardShopCoop.Modules.Hud
             HudPresentationState.Clear();
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (_active == this)
             {
                 _active = null;

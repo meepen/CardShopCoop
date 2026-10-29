@@ -19,8 +19,8 @@ namespace CardShopCoop.Modules.Hud
 
         private static HudHostBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private Guid _pendingActionId;
         private readonly Dictionary<CEvent, PendingContribution> _contributionsByEvent = new();
 
@@ -38,7 +38,7 @@ namespace CardShopCoop.Modules.Hud
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -50,18 +50,15 @@ namespace CardShopCoop.Modules.Hud
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.hud.host");
-                _harmony.CreateClassProcessor(typeof(EventQueuePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(AddCoinPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(ReduceCoinPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(AddShopExperiencePatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(AddFamePatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(EventQueuePatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(AddCoinPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(ReduceCoinPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(AddShopExperiencePatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(AddFamePatch)).Patch();
             }
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError($"HUD host initialization failed: {error}");
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (handlersRegistered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -75,6 +72,7 @@ namespace CardShopCoop.Modules.Hud
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         private void Update()
@@ -311,8 +309,6 @@ namespace CardShopCoop.Modules.Hud
 
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

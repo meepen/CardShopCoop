@@ -26,12 +26,12 @@ namespace CardShopCoop.Modules.SaveTransfer
     public abstract class SaveTransferBehaviour : CoopBehaviour
     {
         private static SaveTransferBehaviour _active;
-        private HarmonyLib.Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         protected void StartSaveTransfer(string role)
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -43,8 +43,8 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
 
             _active = this;
-            _harmony = new HarmonyLib.Harmony("dev.meepen.cardshopcoop.save-transfer." + role);
-            SaveTransferPatches.Apply(_harmony);
+            SaveTransferPatches.Apply(Harmony);
+            _initialized = true;
         }
 
         protected void StopSaveTransfer()
@@ -55,8 +55,6 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
 
             _shutdown = true;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

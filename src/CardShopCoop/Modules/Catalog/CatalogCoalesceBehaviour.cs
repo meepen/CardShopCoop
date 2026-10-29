@@ -12,18 +12,18 @@ namespace CardShopCoop.Modules.Catalog
     [PersistentBehaviour]
     public sealed class CatalogCoalesceBehaviour : CoopBehaviour
     {
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
 
-            _harmony = new Harmony("dev.meepen.cardshopcoop.catalog.coalesce");
-            CatalogCoalescePatches.Apply(_harmony);
+            CatalogCoalescePatches.Apply(Harmony);
+            _initialized = true;
         }
 
         internal void Shutdown()
@@ -34,8 +34,6 @@ namespace CardShopCoop.Modules.Catalog
             }
 
             _shutdown = true;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
         }
 
         private void OnDestroy() => Shutdown();

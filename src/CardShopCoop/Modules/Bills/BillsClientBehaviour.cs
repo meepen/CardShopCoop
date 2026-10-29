@@ -15,14 +15,14 @@ namespace CardShopCoop.Modules.Bills
     {
         private static BillsClientBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _joined;
         private BillsStateMessage _pendingState;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -41,18 +41,15 @@ namespace CardShopCoop.Modules.Bills
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycleSubscribed = true;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.bills.client");
-                _harmony.CreateClassProcessor(typeof(PayRentPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(PayElectricPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(PaySalaryPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(PayAllPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(AccrualPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(PayRentPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(PayElectricPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(PaySalaryPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(PayAllPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(AccrualPatch)).Patch();
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Bills client initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (lifecycleSubscribed)
                 {
                     CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -75,6 +72,7 @@ namespace CardShopCoop.Modules.Bills
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [MessageHandler]
@@ -337,8 +335,6 @@ namespace CardShopCoop.Modules.Bills
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

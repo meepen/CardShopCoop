@@ -35,9 +35,9 @@ namespace CardShopCoop.Modules.Trade
         private readonly Dictionary<Customer, Offer> _offersByCustomer = new();
         private readonly Dictionary<int, PeerConnection> _joinedConnections = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private uint _nextNonce;
         private bool _shutdown;
+        private bool _initialized;
         private bool _customerManagerReady;
         private bool _tradeScreenReady;
         private int _observedDay;
@@ -45,7 +45,7 @@ namespace CardShopCoop.Modules.Trade
 
         private void OnEnable()
         {
-            if (_harmony != null)
+            if (_initialized)
             {
                 return;
             }
@@ -53,22 +53,22 @@ namespace CardShopCoop.Modules.Trade
             _context = RuntimeContext;
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
-            _harmony = new Harmony("dev.meepen.cardshopcoop.trade.host");
-            _harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerStatePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerActionPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerPathEndPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerStopPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ThinkPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerManagerStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerPopulationPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(TradeScreenStartPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerStatePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerActionPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerPathEndPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerStopPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ThinkPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerManagerStartPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerPopulationPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(TradeScreenStartPatch)).Patch();
             SceneManager.sceneLoaded += OnSceneLoaded;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             RegisterAllCustomers(TradeInterop.Customers);
             SignalCustomerManagerReady();
             SignalTradeScreenReady();
             CoopPlugin.Log.LogInfo("[trade] host module enabled.");
+            _initialized = true;
         }
 
         private void Update()
@@ -109,8 +109,6 @@ namespace CardShopCoop.Modules.Trade
             CleanupOffers();
             _joinedConnections.Clear();
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

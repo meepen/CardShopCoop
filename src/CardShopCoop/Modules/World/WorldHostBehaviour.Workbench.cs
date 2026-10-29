@@ -11,13 +11,13 @@ namespace CardShopCoop.Modules.World
         {
             _workbenchInteraction = new WorldWorkbenchInteraction(true, BroadcastWorld, SendWorldTo,
                 () => _context.InGame());
-            _harmony.CreateClassProcessor(typeof(HostWorkbenchAddItemPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostWorkbenchRemoveItemPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostWorkbenchTakeItemToHandPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostWorkbenchDispenseFromBoxPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostWorkbenchRemoveFromShelfPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostWorkbenchBundleStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(HostWorkbenchTaskCompletedPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostWorkbenchAddItemPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostWorkbenchRemoveItemPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostWorkbenchTakeItemToHandPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostWorkbenchDispenseFromBoxPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostWorkbenchRemoveFromShelfPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostWorkbenchBundleStartPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(HostWorkbenchTaskCompletedPatch)).Patch();
         }
 
         private void ShutdownWorkbench()

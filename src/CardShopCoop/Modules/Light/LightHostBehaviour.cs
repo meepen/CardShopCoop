@@ -17,12 +17,12 @@ namespace CardShopCoop.Modules.Light
         private static LightHostBehaviour _active;
         private readonly HashSet<int> _fullyJoined = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -39,15 +39,12 @@ namespace CardShopCoop.Modules.Light
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 lifecycle = true;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.light.host");
-                _harmony.CreateClassProcessor(typeof(LightSwitchPatch)).Patch();
-                _harmony.CreateClassProcessor(typeof(LightReadyPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(LightSwitchPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(LightReadyPatch)).Patch();
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Light host initialization failed: " + exception);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (lifecycle)
                 {
                     CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -68,6 +65,7 @@ namespace CardShopCoop.Modules.Light
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -191,8 +189,6 @@ namespace CardShopCoop.Modules.Light
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

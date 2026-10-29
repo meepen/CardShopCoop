@@ -84,7 +84,6 @@ namespace CardShopCoop.Modules.Trade
         private readonly Dictionary<InteractableCashierCounter, LocalOffer> _offers = new();
         private readonly Dictionary<int, LocalOffer> _offersByCustomerIndex = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private TradeOfferBaselineMessage _pendingBaseline;
         private readonly Dictionary<InteractableCashierCounter, TradeOfferDeltaMessage> _pendingDeltas = new();
         private bool _applyingPending;
@@ -97,10 +96,11 @@ namespace CardShopCoop.Modules.Trade
         private bool _stopHandled;
         private bool _ignoreScreenClose;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_harmony != null)
+            if (_initialized)
             {
                 return;
             }
@@ -108,16 +108,15 @@ namespace CardShopCoop.Modules.Trade
             _context = RuntimeContext;
             _active = this;
             _context.Messages.RegisterAttributedHandlers(this);
-            _harmony = new Harmony("dev.meepen.cardshopcoop.trade.client");
-            _harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerStopPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(AcceptPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(DeclinePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ThinkPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(ScreenClosePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CustomerLifecyclePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(TradeScreenStartPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(TradeScreenSetCustomerPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerStopPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(AcceptPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(DeclinePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ThinkPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(ScreenClosePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CustomerLifecyclePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(TradeScreenStartPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(TradeScreenSetCustomerPatch)).Patch();
             NpcClientBehaviour.ExistingCustomerPuppetReady += OnExistingCustomerPuppetReady;
             NpcClientBehaviour.CustomerManagerReady += OnReadinessSignal;
             NpcClientBehaviour.CustomerPoolChanged += OnReadinessSignal;
@@ -125,6 +124,7 @@ namespace CardShopCoop.Modules.Trade
             NpcClientBehaviour.ExistingCustomerChanged += OnExistingCustomerChanged;
             SceneManager.sceneLoaded += OnSceneLoaded;
             OnReadinessSignal();
+            _initialized = true;
         }
 
         internal void Shutdown()
@@ -143,8 +143,6 @@ namespace CardShopCoop.Modules.Trade
             SceneManager.sceneLoaded -= OnSceneLoaded;
             ClearForSceneChange();
             _context?.Messages.UnregisterAttributedHandlers(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

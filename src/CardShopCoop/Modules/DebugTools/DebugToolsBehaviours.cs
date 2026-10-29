@@ -17,20 +17,20 @@ namespace CardShopCoop.Modules.DebugTools
 
     public abstract class DebugToolsBehaviour : CoopBehaviour
     {
-        private HarmonyLib.Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
 
         protected void StartDebugTools(string role)
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
 
             DebugToolsRuntime.Attach(this);
-            _harmony = new HarmonyLib.Harmony("dev.meepen.cardshopcoop.debug-tools." + role);
-            DebugToolsPatches.Apply(_harmony);
+            DebugToolsPatches.Apply(Harmony);
             DebugToolsRuntime.BootstrapCheatManager();
+            _initialized = true;
         }
 
         protected void StopDebugTools()
@@ -42,8 +42,6 @@ namespace CardShopCoop.Modules.DebugTools
 
             _shutdown = true;
             DebugToolsRuntime.Detach(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
         }
     }
 }

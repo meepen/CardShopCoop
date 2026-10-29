@@ -14,15 +14,15 @@ namespace CardShopCoop.Modules.World
     {
         private void InstallPlayerShelfInteractionPatches()
         {
-            _harmony.CreateClassProcessor(typeof(AddItemPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(RemoveItemPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(TakeItemToHandPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(SetCompartmentItemTypePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(PutItemOnShelfScopePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(TakeItemFromShelfScopePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(BoxAddToShelfScopePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(BoxRemoveFromShelfScopePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(RemoveLabelPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(AddItemPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(RemoveItemPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(TakeItemToHandPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(SetCompartmentItemTypePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(PutItemOnShelfScopePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(TakeItemFromShelfScopePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(BoxAddToShelfScopePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(BoxRemoveFromShelfScopePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(RemoveLabelPatch)).Patch();
         }
 
         [MessageHandler]

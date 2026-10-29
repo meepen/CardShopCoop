@@ -61,7 +61,6 @@ namespace CardShopCoop.Modules.Report
 
         private static ReportClientBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private ReportStateMessage _pendingState;
         private EndOfDayReportScreen _screen;
         private InteractionPlayerController _ipc;
@@ -70,6 +69,7 @@ namespace CardShopCoop.Modules.Report
         private bool _haveOpenReport;
         private bool _pendingOpen;
         private bool _shutdown;
+        private bool _initialized;
         private bool _nextDayLocalReady;
         private ReportNextDayWaitMessage _nextDayWait;
 
@@ -95,7 +95,7 @@ namespace CardShopCoop.Modules.Report
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -107,7 +107,6 @@ namespace CardShopCoop.Modules.Report
                 _context.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.report.client");
                 Patch(typeof(NextButtonPatch));
                 Patch(typeof(NextDayPatch));
                 Patch(typeof(ShowGoNextDayPatch));
@@ -119,8 +118,6 @@ namespace CardShopCoop.Modules.Report
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError("Report client initialization failed: " + error);
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (handlersRegistered)
                 {
                     _context.Messages.UnregisterAttributedHandlers(this);
@@ -134,11 +131,12 @@ namespace CardShopCoop.Modules.Report
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         private void Patch(Type patchType)
         {
-            _harmony.CreateClassProcessor(patchType).Patch();
+            Harmony.CreateClassProcessor(patchType).Patch();
         }
 
         private void PatchScreenReadiness()
@@ -148,7 +146,7 @@ namespace CardShopCoop.Modules.Report
             var awake = AccessTools.Method(typeof(EndOfDayReportScreen), "Awake");
             if (awake != null)
             {
-                _harmony.Patch(awake, postfix: new HarmonyMethod(typeof(ReportClientBehaviour),
+                Harmony.Patch(awake, postfix: new HarmonyMethod(typeof(ReportClientBehaviour),
                     nameof(ScreenReadyPostfix)));
             }
         }
@@ -751,8 +749,6 @@ namespace CardShopCoop.Modules.Report
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

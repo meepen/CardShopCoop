@@ -7,10 +7,10 @@ namespace CardShopCoop.Modules.World
     {
         private void InstallCardInteractionPatches()
         {
-            WorldCardInteractionPatches.Apply(_harmony);
-            WorldContainerInteraction.ApplyClientPatches(_harmony);
-            WorldMarketInteraction.ApplyPatches(_harmony);
-            _harmony.CreateClassProcessor(typeof(CardObtainedBatchScopePatch)).Patch();
+            WorldCardInteractionPatches.Apply(Harmony);
+            WorldContainerInteraction.ApplyClientPatches(Harmony);
+            WorldMarketInteraction.ApplyPatches(Harmony);
+            Harmony.CreateClassProcessor(typeof(CardObtainedBatchScopePatch)).Patch();
         }
 
         /// <summary>A pack-opener collect reveals its whole output in one synchronous call

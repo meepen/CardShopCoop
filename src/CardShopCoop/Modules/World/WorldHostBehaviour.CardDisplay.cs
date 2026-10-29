@@ -12,8 +12,8 @@ namespace CardShopCoop.Modules.World
 
         private void InstallCardDisplayPatches()
         {
-            _harmony.CreateClassProcessor(typeof(CardDisplayPlacePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(CardDisplayRemovePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CardDisplayPlacePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(CardDisplayRemovePatch)).Patch();
         }
 
         [MessageHandler]

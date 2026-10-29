@@ -32,8 +32,8 @@ namespace CardShopCoop.Modules.Pricing
         private readonly HashSet<int> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _applying;
         // One frame's pricing changes, flushed as capped batches in Update. Entries are appended
         // in apply order and each keeps its own prediction id.
@@ -47,7 +47,7 @@ namespace CardShopCoop.Modules.Pricing
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -60,8 +60,7 @@ namespace CardShopCoop.Modules.Pricing
                 _context.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.pricing.host");
-                PricingHostPatches.Apply(_harmony);
+                PricingHostPatches.Apply(Harmony);
                 if (_context.InGame())
                 {
                     PriceTagRegistry.Bootstrap();
@@ -70,8 +69,6 @@ namespace CardShopCoop.Modules.Pricing
             }
             catch
             {
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
                 {
@@ -88,6 +85,7 @@ namespace CardShopCoop.Modules.Pricing
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -716,8 +714,6 @@ namespace CardShopCoop.Modules.Pricing
             _shutdown = true;
             _context?.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             _cards.Clear();
             _joined.Clear();
             _baselinePending.Clear();

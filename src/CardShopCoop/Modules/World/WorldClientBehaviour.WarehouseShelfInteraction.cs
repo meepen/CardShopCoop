@@ -15,12 +15,12 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            _harmony.CreateClassProcessor(typeof(WarehouseTakeObservePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WarehouseShelfOpenVisualPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(WarehouseShelfPlacedVisualPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
-            _harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(WarehouseTakeObservePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(WarehouseShelfOpenVisualPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(WarehouseShelfPlacedVisualPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(BoxRecordStoreCompletePatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(StoredBoxRecordAddedPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(StoredBoxRecordPoppedPatch)).Patch();
         }
 
         [MessageHandler]

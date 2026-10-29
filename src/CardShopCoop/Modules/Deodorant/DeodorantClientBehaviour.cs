@@ -15,13 +15,13 @@ namespace CardShopCoop.Modules.Deodorant
         private const string PredictionScope = "deodorant.spray";
         private static DeodorantClientBehaviour _active;
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _joined;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -30,14 +30,11 @@ namespace CardShopCoop.Modules.Deodorant
             try
             {
                 _active = this;
-                _harmony = new Harmony("dev.meepen.cardshopcoop.deodorant.client");
-                _harmony.CreateClassProcessor(typeof(SprayPatch)).Patch();
+                Harmony.CreateClassProcessor(typeof(SprayPatch)).Patch();
             }
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError($"Deodorant client initialization failed: {error}");
-                _harmony?.UnpatchSelf();
-                _harmony = null;
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
@@ -46,6 +43,7 @@ namespace CardShopCoop.Modules.Deodorant
                 _context = null;
                 throw;
             }
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -76,8 +74,6 @@ namespace CardShopCoop.Modules.Deodorant
                 _active = null;
             }
 
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             _joined = false;
             _context = null;
         }

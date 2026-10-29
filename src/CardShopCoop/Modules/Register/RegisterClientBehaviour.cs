@@ -30,8 +30,8 @@ namespace CardShopCoop.Modules.Register
         private readonly HashSet<Guid> _claimActions = new();
         private readonly Dictionary<Guid, InteractableCashierCounter> _actionCounters = new();
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _joined;
         private bool _rendering;
         private bool _rerun;
@@ -168,15 +168,14 @@ namespace CardShopCoop.Modules.Register
 
         private void OnEnable()
         {
-            if (_harmony != null)
+            if (_initialized)
             {
                 return;
             }
 
             _context = RuntimeContext;
             _active = this;
-            _harmony = new Harmony("dev.meepen.cardshopcoop.register.client");
-            RegisterHooks.PatchClient(_harmony);
+            RegisterHooks.PatchClient(Harmony);
             SceneManager.sceneLoaded += OnSceneLoaded;
             NpcClientBehaviour.CustomerManagerReady += OnReadinessSignal;
             NpcClientBehaviour.CustomerPoolChanged += OnReadinessSignal;
@@ -187,6 +186,7 @@ namespace CardShopCoop.Modules.Register
             // register states whenever that structure changes.
             PlacementApi.StructureChanged += OnPlacementStructureChanged;
             OnReadinessSignal();
+            _initialized = true;
         }
 
         [OnFullyJoined]
@@ -380,8 +380,6 @@ namespace CardShopCoop.Modules.Register
                 _active = null;
             }
 
-            _harmony?.UnpatchSelf();
-            _harmony = null;
         }
 
         private void OnDestroy() => Shutdown();

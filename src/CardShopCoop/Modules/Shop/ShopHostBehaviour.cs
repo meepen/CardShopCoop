@@ -16,15 +16,15 @@ namespace CardShopCoop.Modules.Shop
     public sealed class ShopHostBehaviour : CoopBehaviour, IShopRenameEndpoint
     {
         private CoopRuntimeContext _context;
-        private Harmony _harmony;
         private bool _shutdown;
+        private bool _initialized;
         private bool _localEditing;
         private bool _confirming;
         private bool _pendingTutorialOpen;
 
         private void OnEnable()
         {
-            if (_shutdown || _harmony != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
@@ -39,16 +39,16 @@ namespace CardShopCoop.Modules.Shop
             }
 
             ShopRenamePatches.SetEndpoint(this);
-            _harmony = new Harmony("dev.meepen.cardshopcoop.shop.host");
             try
             {
-                ShopRenamePatches.Install(_harmony);
+                ShopRenamePatches.Install(Harmony);
             }
             catch
             {
                 Shutdown();
                 throw;
             }
+            _initialized = true;
         }
 
         /// <summary>The store owns the join baseline; seed it once after every behaviour's
@@ -673,8 +673,6 @@ namespace CardShopCoop.Modules.Shop
 
             _shutdown = true;
             ShopRenamePatches.ClearEndpoint(this);
-            _harmony?.UnpatchSelf();
-            _harmony = null;
             ClearSessionState();
             _context = null;
         }
