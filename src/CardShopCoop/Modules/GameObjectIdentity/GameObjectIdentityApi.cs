@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net.Connection;
@@ -109,6 +110,24 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             var descriptor = message?.Descriptor;
             if (descriptor == null || !descriptor.Id.IsValid)
             {
+                return;
+            }
+
+            // A Transferring peer still receives normal application broadcasts, and a box add
+            // materializes through RestockManager.SpawnPackageBoxItem. Outside a loaded shop that
+            // factory fabricates the empty (singleton)RestockManager and then throws on its null
+            // spawn locations; it also freezes the save-slot snapshot before the real boxes exist.
+            // The ordered entity baseline that follows resends the authoritative set, so queue
+            // pre-baseline adds instead of applying them against the title/loading scene.
+            if (CoopCore.Role != CoopRole.Client)
+            {
+                return;
+            }
+
+            var context = CoopCore.Instance?.LiveContext;
+            if (context == null || !context.InGame())
+            {
+                GameObjectIdentityClientBehaviour.Active?.QueuePending(descriptor);
                 return;
             }
 
@@ -231,21 +250,34 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                     continue;
                 }
 
-                if (TryResolve(descriptor.Id, out var entity))
+                // One bad descriptor must not discard the whole reliable baseline: the host has
+                // already promoted this peer to FullyJoined, and every module baseline is sent
+                // after this one. Keep the bad entity pending for the end-of-baseline retry
+                // instead of unwinding into MessageRouter and losing every later module's state.
+                try
                 {
-                    ApplyDescriptorToExisting(entity, descriptor);
-                    continue;
-                }
+                    if (TryResolve(descriptor.Id, out var entity))
+                    {
+                        ApplyDescriptorToExisting(entity, descriptor);
+                        continue;
+                    }
 
-                if (!GameObjectIdentityAdapters.TryCreate(descriptor, out entity)
-                    || entity == null)
+                    if (!GameObjectIdentityAdapters.TryCreate(descriptor, out entity)
+                        || entity == null)
+                    {
+                        GameObjectIdentityClientBehaviour.Active?.QueuePending(descriptor);
+                        continue;
+                    }
+
+                    BindClient(entity, descriptor.Id);
+                    GameObjectIdentityClientBehaviour.Active?.CancelPending(descriptor.Id);
+                }
+                catch (Exception error)
                 {
+                    CoopPlugin.Log?.LogError("[identity] baseline descriptor " + descriptor.Id
+                        + " failed; keeping it pending: " + error);
                     GameObjectIdentityClientBehaviour.Active?.QueuePending(descriptor);
-                    continue;
                 }
-
-                BindClient(entity, descriptor.Id);
-                GameObjectIdentityClientBehaviour.Active?.CancelPending(descriptor.Id);
             }
 
             BoxIdentityLifecycle.CompleteClientBaseline();

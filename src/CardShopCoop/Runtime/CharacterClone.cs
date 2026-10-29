@@ -190,19 +190,39 @@ namespace CardShopCoop.Runtime
         /// wardrobe tables instead of inheriting a scene instance's dressed state.</summary>
         internal static void ResetForTemplate(CC.CharacterCustomization custom)
         {
+            ResetForTemplate(custom, null, null, null);
+        }
+
+        /// <summary>Returns a cloned, already-dressed character to an uninitialized template.
+        /// The clone's private HairObjects/ApparelObjects lists are non-serialized, so
+        /// Instantiate leaves them empty (or pointing at the SOURCE's children); resetting from
+        /// those lists therefore removes nothing and every inherited outfit stays visible beside
+        /// the freshly initialized one. Map the source's generated paths onto the clone first,
+        /// then destroy the mapped clone children under the cloned customer root.</summary>
+        internal static bool ResetForTemplate(CC.CharacterCustomization custom,
+            CC.CharacterCustomization source, Transform sourceRoot, Transform cloneRoot)
+        {
             if (custom == null)
             {
-                return;
+                return false;
             }
 
-            ResetCollectionImmediate(custom, HairObjectsField);
-            ResetCollectionImmediate(custom, ApparelObjectsField);
+            var mappedAll = true;
+            if (source != null)
+            {
+                mappedAll = RebuildCollections(custom, source,
+                    sourceRoot ?? source.transform, cloneRoot ?? custom.transform);
+            }
+
+            ResetCollectionImmediate(custom, HairObjectsField, cloneRoot);
+            ResetCollectionImmediate(custom, ApparelObjectsField, cloneRoot);
             custom.m_HasInit = false;
             custom.Autoload = false;
+            return mappedAll;
         }
 
         private static void ResetCollectionImmediate(CC.CharacterCustomization custom,
-            FieldInfo field)
+            FieldInfo field, Transform cloneRoot)
         {
             if (custom == null || field == null)
             {
@@ -216,10 +236,11 @@ namespace CardShopCoop.Runtime
                 return;
             }
 
+            var root = cloneRoot ?? custom.transform;
             for (var i = 0; i < objects.Count; i++)
             {
                 if (objects[i] is GameObject generated && generated != null
-                    && generated.transform.IsChildOf(custom.transform))
+                    && generated.transform.IsChildOf(root))
                 {
                     Object.DestroyImmediate(generated);
                 }

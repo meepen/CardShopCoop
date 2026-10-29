@@ -885,6 +885,11 @@ namespace CardShopCoop.Modules.World
         // index space, which is ordered by the LOCALLY installed mod set and would
         // cross-assign prices between machines.
         private static bool s_eplProbed;
+        // A missing EPL cannot appear later in this process. Latch the failed probe instead of
+        // re-walking every loaded assembly (and logging a HarmonyX miss) on every item/price read;
+        // the join baseline refreshes hundreds of price tags, so the unlatched path turned a
+        // missing optional mod into a reflection/log storm.
+        private static bool s_eplProbeFailed;
         private static object s_eplSaveMgr;    // EplServices.SaveDataManager (created once, never reassigned)
         private static MethodInfo s_eplTryGet; // TryGetSaveData<EItemType, ItemSaveData>(key, out data)
         private static MethodInfo s_eplCardTryGet;
@@ -900,6 +905,12 @@ namespace CardShopCoop.Modules.World
                 return true;
             }
 
+            if (s_eplProbeFailed)
+            {
+                return false;
+            }
+
+            var typesMissing = false;
             try
             {
                 // assembly-qualified bind first, app-domain type walk only if it misses -
@@ -909,6 +920,10 @@ namespace CardShopCoop.Modules.World
                 var save = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.Models.SaveData.ItemSaveData", EplAsm);
                 var cardSave = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.Models.SaveData.CardExpansionSaveData", EplAsm);
                 var resolver = Util.ModParity.ResolveType("EnhancedPrefabLoader.Core.Utils.ItemTypeResolver", EplAsm);
+                // Only latch when the types themselves are absent. A present EPL whose runtime
+                // data is not created yet must be retried later; its Type.GetType fast path is
+                // cheap and does not produce the app-domain walk or HarmonyX warning.
+                typesMissing = t == null || save == null || cardSave == null || resolver == null;
                 const BindingFlags F = BindingFlags.Static | BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
                 s_eplAssetsProp = t?.GetProperty("Assets", F);
                 var assets = s_eplAssetsProp?.GetValue(null);
@@ -967,6 +982,7 @@ namespace CardShopCoop.Modules.World
                 return true;
             }
 
+            s_eplProbeFailed = typesMissing;
             return false;
         }
 

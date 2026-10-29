@@ -28,6 +28,22 @@ namespace CardShopCoop.Modules.World
             BeginWorldBaseline(message.BaselineId);
         }
 
+        /// <summary>The host sent the last baseline frame. This is the only point at which the
+        /// identity baseline and every module baseline are guaranteed to have been dispatched in
+        /// order, so descriptors whose target object did not exist yet can be retried and the
+        /// warehouse/container/shelf queues that deferred them can be drained. Without this
+        /// handler the old end-of-baseline signal is dropped, late descriptors stay pending for
+        /// the rest of the session, and every state message for them is retained forever.</summary>
+        [MessageHandler]
+        private void HandleWorldBaselineComplete(MessageContext context,
+            WorldBaselineCompleteMessage message)
+        {
+            GameObjectIdentityClientBehaviour.Active?.RetryPendingNow();
+            _cardInteraction?.Containers.FlushClientState();
+            _warehouseShelfInteraction?.FlushClientState();
+            FlushPlayerShelfState();
+        }
+
         /// <summary>Client: the box engine owns this local box (the identity module bound it).</summary>
         internal static bool TryGetBoxId(InteractablePackagingBox box, out Guid id)
         {

@@ -80,6 +80,12 @@ namespace CardShopCoop.UI
         private const float ClientPlayersY = 360f;
         private const string DiscordUrl = "https://discord.gg/UQwXwV5Qrg";
 
+        /// <summary>The full character prefab only exists in a loaded shop scene. The title
+        /// fallback is the limited CC_Dummy body, and loading the shop additively at the title is
+        /// not safe under EnhancedPrefabLoader, so keep the editor disabled until a shop exists.
+        /// In a live shop the editor clones the real prefab without any extra scene load.</summary>
+        private static bool CharacterEditorAvailable => CoopMenus.InShop;
+
         internal static bool IsOpen;
 
         private static bool _openedPause;
@@ -574,6 +580,7 @@ namespace CardShopCoop.UI
             _tabSessionBtn = NativeCoopUi.Button(panelRt, "Co-op Session", NativeCoopUi.Purple, () => ShowTab(ScreenTab.Session), 40f, 116f, 305f, 46f, 22f);
             _tabCharBtn = NativeCoopUi.Button(panelRt, "Character", NativeCoopUi.Grey, () => ShowTab(ScreenTab.Character), 365f, 116f, 305f, 46f, 22f);
             _tabAdvancedBtn = NativeCoopUi.Button(panelRt, "Advanced Options", NativeCoopUi.Grey, () => ShowTab(ScreenTab.Advanced), 690f, 116f, 310f, 46f, 22f);
+            RefreshCharacterTabAvailability();
             BuildJoin(panelRt);
             BuildSession(panelRt);
             BuildCharacter(panelRt);
@@ -662,8 +669,22 @@ namespace CardShopCoop.UI
             y += 56f;
         }
 
+        private static void RefreshCharacterTabAvailability()
+        {
+            bool available = CharacterEditorAvailable;
+            _tabCharBtn?.SetInteractable(available);
+            _tabCharBtn?.SetLabel("Character");
+        }
+
         private static void ShowTab(ScreenTab tab)
         {
+            RefreshCharacterTabAvailability();
+            if (tab == ScreenTab.Character && !CharacterEditorAvailable)
+            {
+                Hint("Load or start a shop before editing your character.");
+                tab = ScreenTab.Session;
+            }
+
             _currentTab = tab;
             CloseCredits();
             _cancel?.Show(on: false);
@@ -1198,6 +1219,12 @@ namespace CardShopCoop.UI
 
         private static void Refresh()
         {
+            RefreshCharacterTabAvailability();
+            if (_currentTab == ScreenTab.Character && !CharacterEditorAvailable)
+            {
+                ShowTab(ScreenTab.Session);
+                return;
+            }
             if (_currentTab == ScreenTab.Advanced)
             {
                 RefreshAdvanced();

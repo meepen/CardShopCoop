@@ -617,7 +617,16 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         /// save has loaded. A scene reload invalidates the capture explicitly. Deferred
         /// descriptors must survive this marker: they arrived in the identity baseline that
         /// precedes it.</summary>
-        internal static void BeginClientBaseline() => EnsureSceneSlots();
+        internal static void BeginClientBaseline()
+        {
+            // The baseline is the authoritative save snapshot. Recapture the scene slots here even
+            // if an early descriptor tried to resolve them while the transferred save was still
+            // loading; a lazy one-shot capture at that point is empty/partial and makes every save
+            // box look unowned, so the baseline materializes a second copy instead of binding the
+            // existing one.
+            InvalidateSceneSlots();
+            EnsureSceneSlots();
+        }
 
         internal static void CompleteClientBaseline()
         {
@@ -955,10 +964,18 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
             // The save is the host's. Stored item boxes are represented by the warehouse channel,
             // never by a free save-slot identity, so both backends use the same non-stored order.
+            var itemBoxes = RestockInterop.ItemBoxes;
+            var cardBoxes = RestockInterop.CardBoxes;
+            if (itemBoxes == null || cardBoxes == null)
+            {
+                // The manager is not loaded yet. Do not latch an empty snapshot: the next
+                // baseline/retry must see the transferred save's real boxes.
+                return;
+            }
+
             SceneSlots.Clear();
-            SceneSlots[(byte)BoxNetworkKind.Item] = SnapshotBoxes(RestockInterop.ItemBoxes, true);
-            SceneSlots[(byte)BoxNetworkKind.Card] =
-                SnapshotBoxes(RestockInterop.CardBoxes, false);
+            SceneSlots[(byte)BoxNetworkKind.Item] = SnapshotBoxes(itemBoxes, true);
+            SceneSlots[(byte)BoxNetworkKind.Card] = SnapshotBoxes(cardBoxes, false);
             _sceneSlotsCaptured = true;
 
             BaselineSaveBoxes.Clear();

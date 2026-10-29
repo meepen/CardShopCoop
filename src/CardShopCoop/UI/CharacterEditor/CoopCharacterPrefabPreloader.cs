@@ -433,9 +433,20 @@ namespace CardShopCoop.UI
 
                 customization.Autoload = false;
                 customization.UI = null;
-                // A live customer may already be dressed; strip its generated wardrobe and clear
-                // the runtime lists so every preview clone initializes from the tables.
-                CharacterClone.ResetForTemplate(customization);
+                // A live customer may already be dressed; map the source's generated
+                // hair/apparel children onto this clone before destroying them, otherwise the
+                // non-serialized lists are empty and the inherited outfit survives beside the
+                // next initialized one.
+                var sourceCustom = source != null
+                    ? source.GetComponentInChildren<CC.CharacterCustomization>(true) : null;
+                var mappedAll = CharacterClone.ResetForTemplate(customization, sourceCustom,
+                    source != null ? source.transform : null, clone.transform);
+                if (!mappedAll)
+                {
+                    CoopPlugin.Log?.LogWarning("co-op character editor: could not map every "
+                        + "inherited wardrobe object from " + source?.name
+                        + "; the template may keep an extra look.");
+                }
 
                 var storage = customization.gameObject.GetComponent<SharedMaterials>();
                 if (storage == null)
@@ -539,6 +550,8 @@ namespace CardShopCoop.UI
             var objects = Resources.FindObjectsOfTypeAll<GameObject>();
             GameObject female = null;
             GameObject male = null;
+            var femaleRank = -1;
+            var maleRank = -1;
             for (var i = 0; i < objects.Length; i++)
             {
                 var candidate = objects[i];
@@ -546,27 +559,47 @@ namespace CardShopCoop.UI
                 {
                     continue;
                 }
-                if (!IsLoadedSource(candidate))
+                if (!IsLoadedSource(candidate) || !IsUsable(candidate))
                 {
                     continue;
                 }
 
-                if (female == null && Matches(candidate.name, FemalePrefabNames)
-                    && IsUsable(candidate))
+                var rank = SourceRank(candidate);
+                if (rank > femaleRank && Matches(candidate.name, FemalePrefabNames))
                 {
                     female = candidate;
+                    femaleRank = rank;
                 }
-                if (male == null && Matches(candidate.name, MalePrefabNames)
-                    && IsUsable(candidate))
+                if (rank > maleRank && Matches(candidate.name, MalePrefabNames))
                 {
                     male = candidate;
+                    maleRank = rank;
                 }
-                if (female != null && male != null)
+                if (femaleRank >= 3 && maleRank >= 3)
                 {
                     break;
                 }
             }
             return (female, male);
+        }
+
+        /// <summary>Prefers a real, uninitialized prefab asset over an uninitialized scene copy,
+        /// and both over a live dressed customer. A live source still works because the template
+        /// reset now maps and removes its inherited wardrobe, but the clean source avoids the
+        /// work and is the only safe choice when an appearance mod added unlisted children.</summary>
+        private static int SourceRank(GameObject candidate)
+        {
+            var custom = candidate != null
+                ? candidate.GetComponentInChildren<CC.CharacterCustomization>(true) : null;
+            if (custom == null)
+            {
+                return -1;
+            }
+            if (!candidate.scene.IsValid())
+            {
+                return custom.m_HasInit ? 1 : 3;
+            }
+            return custom.m_HasInit ? 1 : 2;
         }
 
         private static bool IsLoadedSource(GameObject candidate)

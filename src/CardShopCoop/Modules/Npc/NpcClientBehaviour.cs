@@ -1992,12 +1992,31 @@ namespace CardShopCoop.Modules.Npc
         /// the guest (whose preset table then falls back to the default model).</summary>
         private static void EnsureCustomerCapacity(int index, bool female)
         {
+            // The host's index is a ushort on the wire. The game's pool is tens of bodies, so a
+            // malformed/cross-build descriptor (for example -1 serialized as 65535) must not turn
+            // into 65k full customer prefab instantiations inside a baseline handler.
+            const int MaxCustomerPoolIndex = 256;
             var manager = NpcInterop.CustomerManager;
             var customers = manager?.GetCustomerList();
+            if (customers == null || index < 0 || index > MaxCustomerPoolIndex)
+            {
+                CoopPlugin.Log.LogError("npc: customer slot " + index
+                    + " is outside the local pool limit " + MaxCustomerPoolIndex
+                    + "; dropping the spawn.");
+                return;
+            }
+
             var grew = false;
             while (customers.Count <= index)
             {
                 var customer = manager.GetNewCustomerPrefab(female);
+                if (customer == null)
+                {
+                    CoopPlugin.Log.LogError("npc: customer factory returned no body for slot "
+                        + index + "; dropping the spawn.");
+                    return;
+                }
+
                 _active.TrackNativeRoot(customer.gameObject);
                 customer.gameObject.SetActive(false);
                 grew = true;

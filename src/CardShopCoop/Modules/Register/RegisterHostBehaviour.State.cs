@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
+using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net.Connection;
 
@@ -27,7 +28,7 @@ namespace CardShopCoop.Modules.Register
         /// New counters publish from the counter-added hook; the store then owns the join baseline,
         /// so no join-time rebroadcast is needed (which could overwrite a live action on
         /// existing guests).</summary>
-        private void PublishAllCounters()
+        private void PublishAllCounters(bool seed = false)
         {
             if (_shutdown || _context == null || !_context.InGame()
                 || RegisterInterop.Counters == null)
@@ -41,7 +42,7 @@ namespace CardShopCoop.Modules.Register
                 var counter = counters[i];
                 if (counter != null)
                 {
-                    PublishNow(counter, ResolveOwner(counter), Guid.Empty);
+                    PublishNow(counter, ResolveOwner(counter), Guid.Empty, seed: seed);
                 }
             }
         }
@@ -178,7 +179,7 @@ namespace CardShopCoop.Modules.Register
         /// <summary>Writes one snapshot through the object-information store. That store owns the
         /// baseline, the host broadcast, and the client apply.</summary>
         private void PublishNow(InteractableCashierCounter counter, PlayerRef owner, Guid actionId,
-            bool rejected = false)
+            bool rejected = false, bool seed = false)
         {
             if (_shutdown || counter == null || _context == null || !_context.InGame())
             {
@@ -186,12 +187,22 @@ namespace CardShopCoop.Modules.Register
             }
 
             var state = BuildState(counter, owner);
-            counter.SetExtendedInformation(new RegisterSnapshot
+            var snapshot = new RegisterSnapshot
             {
                 State = state,
                 ActionId = actionId,
                 Rejected = rejected,
-            });
+            };
+            if (seed)
+            {
+                // Session-start seeding runs before the transport exists. The normal host path
+                // broadcasts and throws "no live transport"; store the value silently and let
+                // the generic join baseline (and SeedForJoin) publish it.
+                ExtendedInformationModule.Seed(typeof(RegisterSnapshot), counter, snapshot);
+                return;
+            }
+
+            counter.SetExtendedInformation(snapshot);
         }
 
         /// <summary>Publishes a host-originated snapshot. Called by the game-observation hooks; an

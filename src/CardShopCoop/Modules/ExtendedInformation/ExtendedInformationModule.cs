@@ -541,6 +541,24 @@ namespace CardShopCoop.Modules.ExtendedInformation
             NotifyFor(id, null, informationType, previous, information);
         }
 
+        /// <summary>Host-only: seeds an object-attached value before the transport exists,
+        /// without broadcasting. This is the object counterpart of <see cref="SeedGlobal"/>;
+        /// a session-start seed must not call the normal host path, which broadcasts and throws
+        /// when <c>Net</c> is still null. The generic join baseline sends it to each peer.</summary>
+        internal static void Seed(Type informationType, object gameObject, object information)
+        {
+            MainThreadGuard.RequireMainThread("extended information seed");
+            RequireConcrete(informationType, information, "SeedExtendedInformation");
+            if (!Validate(informationType, gameObject, out var id, out var owner))
+            {
+                return;
+            }
+
+            ExtendedInformationStore.TryGet(id, informationType, out var previous);
+            ExtendedInformationStore.Set(id, informationType, information);
+            NotifyFor(id, owner, informationType, previous, information);
+        }
+
         /// <summary>The one host-authority flow for object-attached and session-wide values. A
         /// global is simply the entry keyed by <see cref="GameObjectId.Global"/>, so the two paths
         /// cannot drift apart in validation, echo, or notification.</summary>

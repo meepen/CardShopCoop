@@ -39,7 +39,7 @@ namespace CardShopCoop.Modules.Register
         // counters by the time the host seeds their snapshots. Seeding in OnEnable could run before
         // that and drop every value for lacking an identity, with no later retry.
         [OnSessionStarted]
-        private void SeedCounters() => PublishAllCounters();
+        private void SeedCounters() => PublishAllCounters(seed: true);
 
         // A hook-time seed can still run before the identity module has bound an existing counter
         // (discovery order is not a contract). Re-publishing when each peer finishes joining gives
