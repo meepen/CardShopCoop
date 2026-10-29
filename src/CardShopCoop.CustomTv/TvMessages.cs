@@ -4,21 +4,10 @@ using CardShopCoop.Net;
 
 namespace CardShopCoop.CustomTv
 {
-    /// <summary>One client playback intent. The host applies it once and publishes a new
-    /// <see cref="TvState"/>.</summary>
-    [NetworkMessage]
-    public sealed class TvOpMessage : ActionMessage
+    /// <summary>Shared client intent for one TV. <see cref="Tv"/> is also the action ledger key.</summary>
+    public abstract class TvActionMessage : ActionMessage
     {
-        internal const byte SeekOp = 6;
-
-        /// <summary>The TV this intent targets. The identity module maps it to the same placed
-        /// object on the host, so multi-TV shops do not fall back to whichever TV was last seen.</summary>
         public InteractableObject Tv;
-
-        public byte Op;
-        public string Url;
-        public string Title;
-        public double Value;
 
         /// <summary>The playback state before the local game action, used only for the client's
         /// own undo on rejection. Never serialized; the host applies the command itself.</summary>
@@ -33,11 +22,20 @@ namespace CardShopCoop.CustomTv
         [NonSerialized]
         internal bool Rejected;
 
+        internal abstract TvOperation Operation
+        {
+            get;
+        }
+
+        internal bool IsMedia => Operation == TvOperation.Open
+            || Operation == TvOperation.Next
+            || Operation == TvOperation.Previous;
+
         public override void OnApply()
         {
             try
             {
-                TvInterop.ApplyOp(Tv, Op, Url, Title, Value);
+                Apply();
             }
             catch (InvalidOperationException)
             {
@@ -54,7 +52,7 @@ namespace CardShopCoop.CustomTv
 
         public override void OnUndo()
         {
-            if (Op == SeekOp)
+            if (Operation == TvOperation.Seek)
             {
                 TvInterop.UndoSeek(Tv, UndoSeek);
                 return;
@@ -62,5 +60,68 @@ namespace CardShopCoop.CustomTv
 
             TvInterop.UndoOp(Tv, Previous);
         }
+
+        protected abstract void Apply();
+    }
+
+    [NetworkMessage]
+    public sealed class TvNextMessage : TvActionMessage
+    {
+        internal override TvOperation Operation => TvOperation.Next;
+
+        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Next, null, null, 0);
+    }
+
+    [NetworkMessage]
+    public sealed class TvPreviousMessage : TvActionMessage
+    {
+        internal override TvOperation Operation => TvOperation.Previous;
+
+        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Previous, null, null, 0);
+    }
+
+    [NetworkMessage]
+    public sealed class TvOpenMessage : TvActionMessage
+    {
+        public string Url;
+        public string Title;
+
+        internal override TvOperation Operation => TvOperation.Open;
+
+        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Open, Url, Title, 0);
+    }
+
+    [NetworkMessage]
+    public sealed class TvPauseMessage : TvActionMessage
+    {
+        internal override TvOperation Operation => TvOperation.Pause;
+
+        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Pause, null, null, 0);
+    }
+
+    [NetworkMessage]
+    public sealed class TvPowerMessage : TvActionMessage
+    {
+        internal override TvOperation Operation => TvOperation.Power;
+
+        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Power, null, null, 0);
+    }
+
+    [NetworkMessage]
+    public sealed class TvShuffleMessage : TvActionMessage
+    {
+        internal override TvOperation Operation => TvOperation.Shuffle;
+
+        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Shuffle, null, null, 0);
+    }
+
+    [NetworkMessage]
+    public sealed class TvSeekMessage : TvActionMessage
+    {
+        public double Delta;
+
+        internal override TvOperation Operation => TvOperation.Seek;
+
+        protected override void Apply() => TvInterop.ApplyOp(Tv, TvOperation.Seek, null, null, Delta);
     }
 }

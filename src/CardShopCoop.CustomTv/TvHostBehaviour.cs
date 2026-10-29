@@ -12,14 +12,6 @@ namespace CardShopCoop.CustomTv
     [ServerBehaviour]
     public sealed class TvHostBehaviour : CoopBehaviour
     {
-        private const byte Next = 1;
-        private const byte Previous = 2;
-        private const byte Pause = 3;
-        private const byte Power = 4;
-        private const byte Shuffle = 5;
-        private const byte Seek = 6;
-        private const byte Open = 7;
-
         private static TvHostBehaviour _active;
         private bool _shutdown;
         private bool _initialized;
@@ -62,7 +54,34 @@ namespace CardShopCoop.CustomTv
         }
 
         [IntentValidator]
-        private IntentValidation ValidateOperation(CoopMessageContext context, TvOpMessage message)
+        private IntentValidation ValidateNext(CoopMessageContext context, TvNextMessage message)
+            => ValidateAction(message);
+
+        [IntentValidator]
+        private IntentValidation ValidatePrevious(CoopMessageContext context, TvPreviousMessage message)
+            => ValidateAction(message);
+
+        [IntentValidator]
+        private IntentValidation ValidateOpen(CoopMessageContext context, TvOpenMessage message)
+            => ValidateAction(message);
+
+        [IntentValidator]
+        private IntentValidation ValidatePause(CoopMessageContext context, TvPauseMessage message)
+            => ValidateAction(message);
+
+        [IntentValidator]
+        private IntentValidation ValidatePower(CoopMessageContext context, TvPowerMessage message)
+            => ValidateAction(message);
+
+        [IntentValidator]
+        private IntentValidation ValidateShuffle(CoopMessageContext context, TvShuffleMessage message)
+            => ValidateAction(message);
+
+        [IntentValidator]
+        private IntentValidation ValidateSeek(CoopMessageContext context, TvSeekMessage message)
+            => ValidateAction(message);
+
+        private static IntentValidation ValidateAction(TvActionMessage message)
         {
             if (message?.Tv == null || !TvInterop.Present
                 || TvInterop.ControllerFor(message.Tv) == null)
@@ -74,7 +93,34 @@ namespace CardShopCoop.CustomTv
         }
 
         [IntentRejected]
-        private void RejectOperation(CoopMessageContext context, TvOpMessage message, string reason)
+        private void RejectNext(CoopMessageContext context, TvNextMessage message, string reason)
+            => RejectAction(message);
+
+        [IntentRejected]
+        private void RejectPrevious(CoopMessageContext context, TvPreviousMessage message, string reason)
+            => RejectAction(message);
+
+        [IntentRejected]
+        private void RejectOpen(CoopMessageContext context, TvOpenMessage message, string reason)
+            => RejectAction(message);
+
+        [IntentRejected]
+        private void RejectPause(CoopMessageContext context, TvPauseMessage message, string reason)
+            => RejectAction(message);
+
+        [IntentRejected]
+        private void RejectPower(CoopMessageContext context, TvPowerMessage message, string reason)
+            => RejectAction(message);
+
+        [IntentRejected]
+        private void RejectShuffle(CoopMessageContext context, TvShuffleMessage message, string reason)
+            => RejectAction(message);
+
+        [IntentRejected]
+        private void RejectSeek(CoopMessageContext context, TvSeekMessage message, string reason)
+            => RejectAction(message);
+
+        private void RejectAction(TvActionMessage message)
         {
             var controller = message == null ? null : TvInterop.ControllerFor(message.Tv);
             if (controller != null)
@@ -84,7 +130,34 @@ namespace CardShopCoop.CustomTv
         }
 
         [MessageHandler]
-        private void HandleOperation(CoopMessageContext context, TvOpMessage message)
+        private void HandleNext(CoopMessageContext context, TvNextMessage message)
+            => Handle(context, message);
+
+        [MessageHandler]
+        private void HandlePrevious(CoopMessageContext context, TvPreviousMessage message)
+            => Handle(context, message);
+
+        [MessageHandler]
+        private void HandleOpen(CoopMessageContext context, TvOpenMessage message)
+            => Handle(context, message);
+
+        [MessageHandler]
+        private void HandlePause(CoopMessageContext context, TvPauseMessage message)
+            => Handle(context, message);
+
+        [MessageHandler]
+        private void HandlePower(CoopMessageContext context, TvPowerMessage message)
+            => Handle(context, message);
+
+        [MessageHandler]
+        private void HandleShuffle(CoopMessageContext context, TvShuffleMessage message)
+            => Handle(context, message);
+
+        [MessageHandler]
+        private void HandleSeek(CoopMessageContext context, TvSeekMessage message)
+            => Handle(context, message);
+
+        private void Handle(CoopMessageContext context, TvActionMessage message)
         {
             if (_shutdown || message == null || !TvInterop.Present)
             {
@@ -105,13 +178,8 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            var operation = message.Op == Next ? TvStateOperations.Next
-                : message.Op == Previous ? TvStateOperations.Previous
-                : message.Op == Open ? TvStateOperations.Open
-                : ScalarOperation(message.Op);
-            var mediaOperation = message.Op == Next || message.Op == Previous
-                || message.Op == Open;
-            CaptureHostState(controller, operation, message.ActionId, mediaOperation,
+            var operation = message.Operation;
+            CaptureHostState(controller, operation, message.ActionId, message.IsMedia,
                 out var snapshot);
             if (snapshot == null)
             {
@@ -188,14 +256,14 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            if (CaptureHostState(controller, TvStateOperations.Open, Guid.Empty, false,
+            if (CaptureHostState(controller, TvOperation.Open, Guid.Empty, false,
                 out var snapshot) && !string.IsNullOrEmpty(snapshot.SourceUrl))
             {
                 PublishState(controller, snapshot);
             }
         }
 
-        private bool CaptureHostState(Component controller, byte operation, Guid actionId,
+        private bool CaptureHostState(Component controller, TvOperation operation, Guid actionId,
             bool startBarrier, out TvState snapshot)
         {
             snapshot = null;
@@ -288,7 +356,7 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        private static TvState CopyState(TvState source, byte operation, Guid actionId,
+        private static TvState CopyState(TvState source, TvOperation operation, Guid actionId,
             bool barrier, bool resume, bool rejected = false)
             => new TvState
             {
@@ -311,15 +379,14 @@ namespace CardShopCoop.CustomTv
                 ActionId = actionId,
             };
 
-        private void PublishScalarDelta(Component controller, byte operation, Guid actionId)
+        private void PublishScalarDelta(Component controller, TvOperation operation, Guid actionId)
         {
             if (_shutdown || !Context.InGame || !TvInterop.Present)
             {
                 return;
             }
 
-            CaptureHostState(controller, ScalarOperation(operation), actionId, false,
-                out var snapshot);
+            CaptureHostState(controller, operation, actionId, false, out var snapshot);
             if (snapshot != null)
             {
                 PublishState(controller, snapshot);
@@ -337,7 +404,7 @@ namespace CardShopCoop.CustomTv
             var previous = owner?.GetExtendedInformation<TvState>();
             if (previous != null)
             {
-                PublishState(controller, CopyState(previous, TvStateOperations.Barrier,
+                PublishState(controller, CopyState(previous, TvOperation.Barrier,
                     actionId, barrier, true));
             }
         }
@@ -370,13 +437,6 @@ namespace CardShopCoop.CustomTv
             PublishState(controller, CopyState(previous, previous.Operation, actionId,
                 previous.Barrier, false, rejected: true));
         }
-
-        private static byte ScalarOperation(byte operation)
-            => operation == Pause ? TvStateOperations.Pause
-                : operation == Power ? TvStateOperations.Power
-                : operation == Shuffle ? TvStateOperations.Shuffle
-                : operation == Seek ? TvStateOperations.Seek
-                : throw new InvalidOperationException("Unknown scalar TV operation " + operation + ".");
 
         private void ApplyPatches()
         {
@@ -440,11 +500,14 @@ namespace CardShopCoop.CustomTv
             _active.OnMediaSourceChanged(controller);
         }
 
-        private static void PausePostfix(object __instance) => RegisterScalar(__instance, Pause);
-        private static void PowerPostfix(object __instance) => RegisterScalar(__instance, Power);
-        private static void ShufflePostfix(object __instance) => RegisterScalar(__instance, Shuffle);
+        private static void PausePostfix(object __instance)
+            => RegisterScalar(__instance, TvOperation.Pause);
+        private static void PowerPostfix(object __instance)
+            => RegisterScalar(__instance, TvOperation.Power);
+        private static void ShufflePostfix(object __instance)
+            => RegisterScalar(__instance, TvOperation.Shuffle);
 
-        private static void RegisterScalar(object instance, byte operation)
+        private static void RegisterScalar(object instance, TvOperation operation)
         {
             var controller = instance as Component;
             TvInterop.RegisterController(controller);
@@ -464,7 +527,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            if (CaptureHostState(controller, TvStateOperations.Open, Guid.Empty, true,
+            if (CaptureHostState(controller, TvOperation.Open, Guid.Empty, true,
                 out var snapshot) && snapshot != null
                 && !string.IsNullOrEmpty(snapshot.SourceUrl))
             {
@@ -472,7 +535,7 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        private void OnScalarChanged(Component controller, byte operation)
+        private void OnScalarChanged(Component controller, TvOperation operation)
         {
             if (TvInterop.ApplyingRemote || controller == null)
             {
@@ -532,7 +595,7 @@ namespace CardShopCoop.CustomTv
                 && now - _active._lastSeekInputTime >= 0.25f)
             {
                 _active._lastSeekInputTime = now;
-                _active.PublishScalarDelta(controller, Seek, Guid.Empty);
+                _active.PublishScalarDelta(controller, TvOperation.Seek, Guid.Empty);
             }
         }
 
@@ -653,7 +716,7 @@ namespace CardShopCoop.CustomTv
                         Barrier = false,
                         Resume = true,
                         Generation = previous?.Generation ?? 0,
-                        Operation = TvStateOperations.Error,
+                        Operation = TvOperation.Error,
                         ActionId = Guid.Empty,
                     });
                 }

@@ -1146,8 +1146,8 @@ namespace CardShopCoop.CustomTv
         /// <summary>Applies one ActionMessage on the peer that owns the command (the host for a
         /// client intent, or the client when a newer authoritative value replays a local follower).
         /// Throws on refusal so the action framework rolls the sender back.</summary>
-        internal static void ApplyOp(InteractableObject tv, byte op, string url, string title,
-            double value)
+        internal static void ApplyOp(InteractableObject tv, TvOperation operation, string url,
+            string title, double value)
         {
             var controller = ControllerFor(tv);
             if (!Present || controller == null)
@@ -1158,7 +1158,7 @@ namespace CardShopCoop.CustomTv
             BeginFocus(controller);
             try
             {
-                if (!ApplyOperation(op, url, title, value))
+                if (!ApplyOperation(operation, url, title, value))
                 {
                     throw new InvalidOperationException("The TV rejected the operation.");
                 }
@@ -1207,7 +1207,8 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        internal static bool ApplyOperation(byte op, string url, string title, double value)
+        internal static bool ApplyOperation(TvOperation operation, string url, string title,
+            double value)
         {
             if (!Present)
             {
@@ -1224,23 +1225,23 @@ namespace CardShopCoop.CustomTv
             ApplyingRemote = true;
             try
             {
-                switch (op)
+                switch (operation)
                 {
-                    case 1:
+                    case TvOperation.Next:
                         if (!IsPlaylist || PlayPlaylistItem == null)
                         {
                             return false;
                         }
                         PlayPlaylistItem.Invoke(master, new object[] { PlaylistIndexValue + 1 });
                         return true;
-                    case 2:
+                    case TvOperation.Previous:
                         if (!IsPlaylist || PlayPlaylistItem == null)
                         {
                             return false;
                         }
                         PlayPlaylistItem.Invoke(master, new object[] { Math.Max(1, PlaylistIndexValue - 1) });
                         return true;
-                    case 3:
+                    case TvOperation.Pause:
                         if (TogglePause == null)
                         {
                             return false;
@@ -1248,7 +1249,7 @@ namespace CardShopCoop.CustomTv
 
                         TogglePause?.Invoke(master, null);
                         return true;
-                    case 4:
+                    case TvOperation.Power:
                         if (RemotePower != null)
                         {
                             RemotePower.Invoke(master, null);
@@ -1261,7 +1262,7 @@ namespace CardShopCoop.CustomTv
 
                         SetField(Powered, !PoweredOff, master);
                         return true;
-                    case 5:
+                    case TvOperation.Shuffle:
                         if (ShuffleField == null)
                         {
                             return false;
@@ -1274,7 +1275,7 @@ namespace CardShopCoop.CustomTv
 
                         SetField(ShuffleField, !Shuffle, master);
                         return true;
-                    case 6:
+                    case TvOperation.Seek:
                         if (double.IsNaN(value) || double.IsInfinity(value)
                             || Math.Abs(value) > MaxSeekDeltaSeconds)
                         {
@@ -1307,7 +1308,7 @@ namespace CardShopCoop.CustomTv
 
                         SetPlayerPosition(player, position);
                         return true;
-                    case 7:
+                    case TvOperation.Open:
                         if (string.IsNullOrWhiteSpace(url))
                         {
                             return false;

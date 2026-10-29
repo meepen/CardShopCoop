@@ -12,14 +12,6 @@ namespace CardShopCoop.CustomTv
     [ClientBehaviour]
     public sealed class TvClientBehaviour : CoopBehaviour
     {
-        private const byte Next = 1;
-        private const byte Previous = 2;
-        private const byte Pause = 3;
-        private const byte Power = 4;
-        private const byte Shuffle = 5;
-        private const byte Seek = 6;
-        private const byte Open = 7;
-
         private static TvClientBehaviour _active;
         private bool _shutdown;
         private bool _initialized;
@@ -153,34 +145,34 @@ namespace CardShopCoop.CustomTv
         {
             switch (state.Operation)
             {
-                case TvStateOperations.Open:
-                case TvStateOperations.Playlist:
-                case TvStateOperations.Next:
-                case TvStateOperations.Previous:
+                case TvOperation.Open:
+                case TvOperation.Playlist:
+                case TvOperation.Next:
+                case TvOperation.Previous:
                     ApplyMediaState(state);
                     break;
 
-                case TvStateOperations.Pause:
+                case TvOperation.Pause:
                     TvInterop.ApplyPaused(state.Paused);
                     break;
 
-                case TvStateOperations.Power:
+                case TvOperation.Power:
                     TvInterop.ApplyPowered(state.PoweredOff);
                     break;
 
-                case TvStateOperations.Shuffle:
+                case TvOperation.Shuffle:
                     TvInterop.ApplyShuffle(state.Shuffle);
                     break;
 
-                case TvStateOperations.Seek:
+                case TvOperation.Seek:
                     TvInterop.ApplySeek(state.Position);
                     break;
 
-                case TvStateOperations.Barrier:
+                case TvOperation.Barrier:
                     TvInterop.ApplyBarrier(state.Barrier, state.Resume);
                     break;
 
-                case TvStateOperations.Error:
+                case TvOperation.Error:
                     TvInterop.ApplyPlaybackError();
                     break;
 
@@ -338,11 +330,10 @@ namespace CardShopCoop.CustomTv
                 && _active.Context.InGame && TvInterop.Present;
         }
 
-        private static void SendAction(byte op, string url = null, string title = null,
-            double value = 0, TvInterop.PlaybackUndoState previous = default,
-            double undoSeek = double.NaN)
+        private static void Send(TvActionMessage message,
+            TvInterop.PlaybackUndoState previous = default, double undoSeek = double.NaN)
         {
-            if (!CanAct())
+            if (!CanAct() || message == null)
             {
                 return;
             }
@@ -353,16 +344,10 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            _active.Context.Send(_active.Context.HostConnection, new TvOpMessage
-            {
-                Tv = tv,
-                Op = op,
-                Url = url,
-                Title = title,
-                Value = value,
-                Previous = previous,
-                UndoSeek = undoSeek,
-            });
+            message.Tv = tv;
+            message.Previous = previous;
+            message.UndoSeek = undoSeek;
+            _active.Context.Send(_active.Context.HostConnection, message);
         }
 
         /// <summary>Captures the pending URL before the game clears it, so the Open the quality
@@ -415,7 +400,8 @@ namespace CardShopCoop.CustomTv
             TvInterop.BeginFocus(controller);
             try
             {
-                ForwardMedia(Open, __state.Prior, __state.Url, "Shared stream");
+                Send(new TvOpenMessage { Url = __state.Url, Title = "Shared stream" },
+                    __state.Prior);
             }
             finally
             {
@@ -517,19 +503,19 @@ namespace CardShopCoop.CustomTv
             {
                 if (__state.Next)
                 {
-                    ForwardMedia(Next, __state.Prior, null, null);
+                    Send(new TvNextMessage(), __state.Prior);
                 }
                 else if (__state.Previous)
                 {
-                    ForwardMedia(Previous, __state.Prior, null, null);
+                    Send(new TvPreviousMessage(), __state.Prior);
                 }
                 else if (__state.Shuffle)
                 {
-                    ForwardSelfApplied(Shuffle, __state.Prior);
+                    ForwardSelfApplied(new TvShuffleMessage(), __state.Prior);
                 }
                 else if (__state.Power)
                 {
-                    ForwardSelfApplied(Power, __state.Prior);
+                    ForwardSelfApplied(new TvPowerMessage(), __state.Prior);
                 }
             }
             finally
@@ -571,7 +557,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            SendAction(Pause, previous: __state);
+            Send(new TvPauseMessage(), __state);
         }
 
         private static void PowerPostfix(TvInterop.PlaybackUndoState __state)
@@ -582,7 +568,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            SendAction(Power, previous: __state);
+            Send(new TvPowerMessage(), __state);
         }
 
         private static void ShufflePostfix(TvInterop.PlaybackUndoState __state)
@@ -592,44 +578,32 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            SendAction(Shuffle, previous: __state);
+            Send(new TvShuffleMessage(), __state);
         }
 
         private static void NextPostfix(TvInterop.PlaybackUndoState __state)
-            => ForwardMedia(Next, __state, null, null);
+            => Send(new TvNextMessage(), __state);
 
         private static void PreviousPostfix(TvInterop.PlaybackUndoState __state)
-            => ForwardMedia(Previous, __state, null, null);
-
-        /// <summary>Records one observed media change (next/previous/open) the game already applied
-        /// and sends it; the apply/undo closures replay it through the game path on a rejection.</summary>
-        private static void ForwardMedia(byte op, TvInterop.PlaybackUndoState prior, string url,
-            string title)
-        {
-            if (!CanAct() || TvInterop.ApplyingRemote)
-            {
-                return;
-            }
-
-            SendAction(op, url, title, previous: prior);
-        }
+            => Send(new TvPreviousMessage(), __state);
 
         /// <summary>Shuffle/power have no vanilla key binding: drive the game's own control for the
         /// observed hotkey, then register the change it made. The game call runs under
         /// <c>ApplyingRemote</c>, so the control postfix does not also forward it.</summary>
-        private static void ForwardSelfApplied(byte op, TvInterop.PlaybackUndoState prior)
+        private static void ForwardSelfApplied(TvActionMessage message,
+            TvInterop.PlaybackUndoState prior)
         {
-            if (!TvInterop.ApplyOperation(op, null, null, 0))
+            if (!TvInterop.ApplyOperation(message.Operation, null, null, 0))
             {
                 return;
             }
 
-            SendAction(op, previous: prior);
+            Send(message, prior);
         }
 
         private static void ForwardSeek(double fromPosition, double delta)
         {
-            SendAction(Seek, value: delta, undoSeek: fromPosition);
+            Send(new TvSeekMessage { Delta = delta }, undoSeek: fromPosition);
         }
     }
 }

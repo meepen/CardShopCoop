@@ -4,19 +4,19 @@ using CardShopCoop.Api;
 namespace CardShopCoop.CustomTv
 {
     /// <summary>Operation that produced the current <see cref="TvState"/> snapshot.</summary>
-    public static class TvStateOperations
+    public enum TvOperation : byte
     {
-        public const byte None = 0;
-        public const byte Open = 1;
-        public const byte Playlist = 2;
-        public const byte Next = 3;
-        public const byte Previous = 4;
-        public const byte Pause = 5;
-        public const byte Power = 6;
-        public const byte Shuffle = 7;
-        public const byte Seek = 8;
-        public const byte Barrier = 9;
-        public const byte Error = 10;
+        None = 0,
+        Open = 1,
+        Playlist = 2,
+        Next = 3,
+        Previous = 4,
+        Pause = 5,
+        Power = 6,
+        Shuffle = 7,
+        Seek = 8,
+        Barrier = 9,
+        Error = 10,
     }
 
     /// <summary>
@@ -84,7 +84,7 @@ namespace CardShopCoop.CustomTv
         {
             get; init;
         }
-        public byte Operation
+        public TvOperation Operation
         {
             get; init;
         }
