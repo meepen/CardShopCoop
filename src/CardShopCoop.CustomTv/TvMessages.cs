@@ -4,6 +4,43 @@ using CardShopCoop.Net;
 
 namespace CardShopCoop.CustomTv
 {
+    /// <summary>Playback state captured before a local TV control, used to reverse it.</summary>
+    internal readonly struct PlaybackUndoState
+    {
+        internal readonly string SourceUrl;
+        internal readonly string StreamUrl;
+        internal readonly string StreamTitle;
+        internal readonly string PlaylistUrl;
+        internal readonly bool IsLive;
+        internal readonly bool IsSegmentedVod;
+        internal readonly int PlaylistIndex;
+        internal readonly double Position;
+        internal readonly bool Paused;
+        internal readonly bool PoweredOff;
+        internal readonly bool Shuffle;
+        internal readonly bool Barrier;
+        internal readonly int Generation;
+
+        internal PlaybackUndoState(string sourceUrl, string url, string title, string playlistUrl,
+            bool live, bool segmented, int playlistIndex, double position, bool paused,
+            bool powered, bool shuffle, bool barrier, int generation)
+        {
+            SourceUrl = sourceUrl;
+            StreamUrl = url;
+            StreamTitle = title;
+            PlaylistUrl = playlistUrl;
+            IsLive = live;
+            IsSegmentedVod = segmented;
+            PlaylistIndex = playlistIndex;
+            Position = position;
+            Paused = paused;
+            PoweredOff = powered;
+            Shuffle = shuffle;
+            Barrier = barrier;
+            Generation = generation;
+        }
+    }
+
     /// <summary>Shared client intent for one TV. <see cref="Tv"/> is also the action ledger key.</summary>
     public abstract class TvActionMessage : ActionMessage
     {
@@ -12,7 +49,7 @@ namespace CardShopCoop.CustomTv
         /// <summary>The playback state before the local game action, used only for the client's
         /// own undo on rejection. Never serialized; the host applies the command itself.</summary>
         [NonSerialized]
-        internal TvInterop.PlaybackUndoState Previous;
+        internal PlaybackUndoState Previous;
 
         [NonSerialized]
         internal double UndoSeek;

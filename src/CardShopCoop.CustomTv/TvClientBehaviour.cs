@@ -149,7 +149,7 @@ namespace CardShopCoop.CustomTv
                 case TvOperation.Playlist:
                 case TvOperation.Next:
                 case TvOperation.Previous:
-                    ApplyMediaState(state);
+                    TvInterop.ApplyMediaState(state);
                     break;
 
                 case TvOperation.Pause:
@@ -177,17 +177,9 @@ namespace CardShopCoop.CustomTv
                     break;
 
                 default:
-                    ApplyMediaState(state);
+                    TvInterop.ApplyMediaState(state);
                     break;
             }
-        }
-
-        private static void ApplyMediaState(TvState state)
-        {
-            TvInterop.ApplyMediaState(state.SourceUrl, state.StreamUrl, state.StreamTitle,
-                state.PlaylistUrl, state.IsLive, state.IsSegmentedVod, state.PlaylistIndex,
-                state.Position, state.Paused, state.PoweredOff, state.Shuffle,
-                state.Barrier, state.Resume, state.Generation);
         }
 
         private void ApplyPatches()
@@ -331,7 +323,7 @@ namespace CardShopCoop.CustomTv
         }
 
         private static void Send(TvActionMessage message,
-            TvInterop.PlaybackUndoState previous = default, double undoSeek = double.NaN)
+            PlaybackUndoState previous = default, double undoSeek = double.NaN)
         {
             if (!CanAct() || message == null)
             {
@@ -356,7 +348,7 @@ namespace CardShopCoop.CustomTv
         {
             public bool Armed;
             public string Url;
-            public TvInterop.PlaybackUndoState Prior;
+            public PlaybackUndoState Prior;
         }
 
         private static void QualityPrefix(object __instance, out QualityState __state)
@@ -419,7 +411,7 @@ namespace CardShopCoop.CustomTv
             public bool Previous;
             public bool Shuffle;
             public bool Power;
-            public TvInterop.PlaybackUndoState Prior;
+            public PlaybackUndoState Prior;
         }
 
         // The seek keys are held, and the game advances the video position on its own cadence.
@@ -526,7 +518,7 @@ namespace CardShopCoop.CustomTv
 
         /// <summary>Captures the playback state before a control the game performs itself, so the
         /// postfix can register one observed action and replay it if the host rejects it.</summary>
-        private static void CapturePrefix(object __instance, out TvInterop.PlaybackUndoState __state)
+        private static void CapturePrefix(object __instance, out PlaybackUndoState __state)
         {
             var controller = __instance as Component;
             TvInterop.RegisterController(controller);
@@ -550,7 +542,7 @@ namespace CardShopCoop.CustomTv
         private static void ControllerDisablePostfix(object __instance)
             => TvInterop.ForgetController(__instance as Component);
 
-        private static void PausePostfix(TvInterop.PlaybackUndoState __state)
+        private static void PausePostfix(PlaybackUndoState __state)
         {
             if (!CanAct() || TvInterop.ApplyingRemote || TvInterop.Paused == __state.Paused)
             {
@@ -560,7 +552,7 @@ namespace CardShopCoop.CustomTv
             Send(new TvPauseMessage(), __state);
         }
 
-        private static void PowerPostfix(TvInterop.PlaybackUndoState __state)
+        private static void PowerPostfix(PlaybackUndoState __state)
         {
             if (!CanAct() || TvInterop.ApplyingRemote
                 || TvInterop.PoweredOff == __state.PoweredOff)
@@ -571,7 +563,7 @@ namespace CardShopCoop.CustomTv
             Send(new TvPowerMessage(), __state);
         }
 
-        private static void ShufflePostfix(TvInterop.PlaybackUndoState __state)
+        private static void ShufflePostfix(PlaybackUndoState __state)
         {
             if (!CanAct() || TvInterop.ApplyingRemote || TvInterop.Shuffle == __state.Shuffle)
             {
@@ -581,17 +573,17 @@ namespace CardShopCoop.CustomTv
             Send(new TvShuffleMessage(), __state);
         }
 
-        private static void NextPostfix(TvInterop.PlaybackUndoState __state)
+        private static void NextPostfix(PlaybackUndoState __state)
             => Send(new TvNextMessage(), __state);
 
-        private static void PreviousPostfix(TvInterop.PlaybackUndoState __state)
+        private static void PreviousPostfix(PlaybackUndoState __state)
             => Send(new TvPreviousMessage(), __state);
 
         /// <summary>Shuffle/power have no vanilla key binding: drive the game's own control for the
         /// observed hotkey, then register the change it made. The game call runs under
         /// <c>ApplyingRemote</c>, so the control postfix does not also forward it.</summary>
         private static void ForwardSelfApplied(TvActionMessage message,
-            TvInterop.PlaybackUndoState prior)
+            PlaybackUndoState prior)
         {
             if (!TvInterop.ApplyOperation(message.Operation, null, null, 0))
             {

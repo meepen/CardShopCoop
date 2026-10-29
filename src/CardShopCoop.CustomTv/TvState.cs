@@ -28,66 +28,21 @@ namespace CardShopCoop.CustomTv
     [HostOnlyInformation]
     public sealed class TvState : ExtendGameObjectInformation<InteractableObject>, IActionValue
     {
-        public string SourceUrl
-        {
-            get; init;
-        }
-        public string StreamUrl
-        {
-            get; init;
-        }
-        public string StreamTitle
-        {
-            get; init;
-        }
-        public string PlaylistUrl
-        {
-            get; init;
-        }
-        public bool IsLive
-        {
-            get; init;
-        }
-        public bool IsSegmentedVod
-        {
-            get; init;
-        }
-        public int PlaylistIndex
-        {
-            get; init;
-        }
-        public double Position
-        {
-            get; init;
-        }
-        public bool Paused
-        {
-            get; init;
-        }
-        public bool PoweredOff
-        {
-            get; init;
-        }
-        public bool Shuffle
-        {
-            get; init;
-        }
-        public bool Barrier
-        {
-            get; init;
-        }
-        public bool Resume
-        {
-            get; init;
-        }
-        public int Generation
-        {
-            get; init;
-        }
-        public TvOperation Operation
-        {
-            get; init;
-        }
+        public string SourceUrl;
+        public string StreamUrl;
+        public string StreamTitle;
+        public string PlaylistUrl;
+        public bool IsLive;
+        public bool IsSegmentedVod;
+        public int PlaylistIndex;
+        public double Position;
+        public bool Paused;
+        public bool PoweredOff;
+        public bool Shuffle;
+        public bool Barrier;
+        public bool Resume;
+        public int Generation;
+        public TvOperation Operation;
         public Guid ActionId
         {
             get; init;
