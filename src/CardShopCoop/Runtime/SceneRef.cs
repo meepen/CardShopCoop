@@ -179,6 +179,15 @@ namespace CardShopCoop.Runtime
                 return null;
             }
 
+            // A non-fabricated candidate is already the live scene instance, so the extra
+            // all-objects scan below can only return the same kind of object. Skipping it removes
+            // a full FindObjectsByType<T> from every first lookup after a scene change (measured
+            // at ~35 ms in a loaded shop).
+            if (!SingletonLatchGuard.IsFabricatedSingleton(candidate))
+            {
+                return candidate;
+            }
+
             var found = UnityEngine.Object.FindObjectsByType<T>(FindObjectsSortMode.InstanceID);
             T live = null;
             T fabricated = null;

@@ -182,14 +182,30 @@ namespace CardShopCoop.Util
 
         private static void OnSceneUnloaded(Scene _)
         {
+            // Unload is a sweep-only boundary. There is nothing to REPAIR on the way out: the
+            // repair's whole job is to point a shadowed cache at a live scene manager, and an
+            // unloading scene's managers are being destroyed. Scanning the scene here was also
+            // pathologically expensive. Mods that create and unload one small scene per asset
+            // (Collection Tracker creates a scene per product image during a save load) made this
+            // run for every one of them: each pass is a full FindObjectsByType per shadowed
+            // singleton, which measured ~120 ms in a loaded shop and turned a sub-second load into
+            // an eight-second stutter with the co-op session code entirely idle. Scene LOAD still
+            // repairs, which is the only boundary where a live replacement can exist.
             Sweep("scene unloaded");
-            RepairAll("scene unloaded");
         }
 
-        private static void OnSceneLoaded(Scene _, LoadSceneMode __)
+        private static void OnSceneLoaded(Scene _, LoadSceneMode mode)
         {
             Sweep("scene loaded");
-            RepairAll("scene loaded");
+            if (mode != LoadSceneMode.Additive)
+            {
+                // Only a full world load may swap the game's singleton caches. An additive scene is
+                // a temporary container (the character-model preload, or another mod's asset
+                // scene), and a manager inside it must not replace the live world's manager.
+                // Skipping additive loads also keeps the repair's scene-wide scans off the many
+                // small scenes such mods load and unload while a save is coming up.
+                RepairAll("scene loaded");
+            }
         }
 
         private static void SweepPrefix() => Sweep("object init");

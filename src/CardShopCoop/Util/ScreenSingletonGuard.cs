@@ -91,11 +91,17 @@ namespace CardShopCoop.Util
             var fields = GetFields(screenType);
             var instance = fields.Instance?.GetValue(null) as Component;
             var isSet = fields.IsSet == null ? (bool?)null : (bool)fields.IsSet.GetValue(null);
-            var live = UnityEngine.Object.FindFirstObjectByType(screenType) as Component;
+            var liveText = instance != null ? instance.gameObject.name : "not-scanned";
 
-            // Unity's == null is true for a destroyed object, which is exactly the latched state.
+            // The only diagnosis that needs to search the scene is a latched DEAD instance: that is
+            // the case this guard exists to repair, and it needs a live replacement to point at.
+            // A healthy (or not-yet-resolved) latch reports from the fields alone. The unconditional
+            // FindFirstObjectByType here used to cost six full-scene scans per load-lifecycle event
+            // (~100 ms in a loaded shop), for a log line.
             if (isSet == true && instance == null)
             {
+                var live = UnityEngine.Object.FindFirstObjectByType(screenType) as Component;
+                liveText = live != null ? live.gameObject.name : "none";
                 if (live != null)
                 {
                     // Clear the latch (report the reason once); the game's next read of Instance
@@ -126,7 +132,6 @@ namespace CardShopCoop.Util
             var instanceText = instance == null
                 ? (isSet == true ? "destroyed" : "unresolved")
                 : instance.gameObject.name;
-            var liveText = live == null ? "none" : live.gameObject.name;
             return screenType.Name + "[isSet="
                 + (isSet.HasValue ? (isSet.Value ? "true" : "false") : "n/a")
                 + " instance=" + instanceText + " live=" + liveText + "]";
