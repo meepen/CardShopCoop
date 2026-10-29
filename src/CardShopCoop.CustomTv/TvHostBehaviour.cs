@@ -37,7 +37,7 @@ namespace CardShopCoop.CustomTv
                 ResetSessionState();
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
-                ApplyPatches(Harmony);
+                ApplyPatches();
 
                 // A TV created before the host module was installed never ran a patched
                 // lifecycle method. Write its current state once so the EIM store has the entry
@@ -321,58 +321,38 @@ namespace CardShopCoop.CustomTv
                 : operation == Seek ? TvStateOperations.Seek
                 : throw new InvalidOperationException("Unknown scalar TV operation " + operation + ".");
 
-        private static void ApplyPatches(Harmony harmony)
+        private void ApplyPatches()
         {
             if (!TvInterop.Present)
             {
                 return;
             }
 
-            TryPatch(harmony, "OnEnable", null,
+            TryPatch(TvInterop.OptionalControllerType, "OnEnable", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(ControllerLifecyclePostfix)));
-            TryPatch(harmony, "Start", null,
+            TryPatch(TvInterop.OptionalControllerType, "Start", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(ControllerLifecyclePostfix)));
-            TryPatch(harmony, "ChangeVideo", null,
+            TryPatch(TvInterop.OptionalControllerType, "ChangeVideo", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(ControllerLifecyclePostfix)));
-            TryPatch(harmony, "HandleGlobalInput", null,
+            TryPatch(TvInterop.OptionalControllerType, "HandleGlobalInput", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(HostGlobalInputPostfix)));
-            TryPatch(harmony, "StreamYouTube", null,
+            TryPatch(TvInterop.OptionalControllerType, "StreamYouTube", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(StreamYouTubePostfix)));
-            TryPatch(harmony, "ChangeToUrl", null,
+            TryPatch(TvInterop.OptionalControllerType, "ChangeToUrl", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(ChangeToUrlPostfix)));
-            TryPatch(harmony, "PlayPlaylistItem", null,
+            TryPatch(TvInterop.OptionalControllerType, "PlayPlaylistItem", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(PlaylistItemPostfix)));
-            TryPatch(harmony, "ToggleGlobalPause", null,
+            TryPatch(TvInterop.OptionalControllerType, "ToggleGlobalPause", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(PausePostfix)));
-            TryPatch(harmony, "RemotePower", null,
+            TryPatch(TvInterop.OptionalControllerType, "RemotePower", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(PowerPostfix)));
-            TryPatch(harmony, "RemoteShuffle", null,
+            TryPatch(TvInterop.OptionalControllerType, "RemoteShuffle", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(ShufflePostfix)));
-            TryPatch(harmony, "OnDisable", null,
+            TryPatch(TvInterop.OptionalControllerType, "OnDisable", null,
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(ControllerDisablePostfix)));
-            TryPatch(harmony, "OnLocalPrepared",
+            TryPatch(TvInterop.OptionalControllerType, "OnLocalPrepared",
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(LocalPreparedPrefix)),
                 new HarmonyMethod(typeof(TvHostBehaviour), nameof(LocalPreparedPostfix)));
-        }
-
-        private static void TryPatch(Harmony harmony, string method, HarmonyMethod prefix,
-            HarmonyMethod postfix)
-        {
-            try
-            {
-                var original = AccessTools.Method(TvInterop.OptionalControllerType, method);
-                if (original == null)
-                {
-                    CoopLog.Warn("TV host patch target missing: " + method);
-                    return;
-                }
-
-                harmony.Patch(original, prefix: prefix, postfix: postfix);
-            }
-            catch (Exception exception)
-            {
-                CoopLog.Warn("TV host patch failed " + method + ": " + exception.Message);
-            }
         }
 
         private static void StreamYouTubePostfix(object __instance, string url)

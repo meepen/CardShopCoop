@@ -1,3 +1,4 @@
+using System;
 using HarmonyLib;
 using UnityEngine;
 
@@ -36,6 +37,15 @@ namespace CardShopCoop.Api
             get;
             private set;
         }
+
+        /// <summary>
+        /// Installs one prefix/postfix when the target method exists. Returns false and logs once
+        /// when the type or method is missing, or when Harmony rejects the patch. Resolve a type
+        /// from an optional mod with <see cref="CoopReflection.OptionalType"/>.
+        /// </summary>
+        protected bool TryPatch(Type target, string method, HarmonyMethod prefix = null,
+            HarmonyMethod postfix = null, Type[] args = null)
+            => CoopHarmony.TryPatch(Harmony, target, method, prefix, postfix, args);
 
         internal void SetHarmony(Harmony harmony)
         {

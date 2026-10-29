@@ -37,7 +37,7 @@ namespace CardShopCoop.CustomTv
                 ResetSessionState();
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 _active = this;
-                ApplyPatches(Harmony);
+                ApplyPatches();
             }
             catch (Exception exception)
             {
@@ -198,71 +198,51 @@ namespace CardShopCoop.CustomTv
                 state.Barrier, state.Resume, state.Generation);
         }
 
-        private static void ApplyPatches(Harmony harmony)
+        private void ApplyPatches()
         {
             if (!TvInterop.Present)
             {
                 return;
             }
 
-            TryPatch(harmony, "OnEnable", null,
+            TryPatch(TvInterop.OptionalControllerType, "OnEnable", null,
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(ControllerLifecyclePostfix)));
-            TryPatch(harmony, "Start", null,
+            TryPatch(TvInterop.OptionalControllerType, "Start", null,
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(ControllerLifecyclePostfix)));
-            TryPatch(harmony, "ChangeVideo", null,
+            TryPatch(TvInterop.OptionalControllerType, "ChangeVideo", null,
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(ControllerLifecyclePostfix)));
-            TryPatch(harmony, "ChangeToUrl", null,
+            TryPatch(TvInterop.OptionalControllerType, "ChangeToUrl", null,
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(ChangeToUrlPostfix)));
-            TryPatch(harmony, "StreamYouTube", null,
+            TryPatch(TvInterop.OptionalControllerType, "StreamYouTube", null,
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(StreamYouTubePostfix)));
             // The game performs every control through its own path; these observe the resulting
             // local change and register one post-hoc action. No vanilla input is suppressed.
-            TryPatch(harmony, "HandleGlobalInput",
+            TryPatch(TvInterop.OptionalControllerType, "HandleGlobalInput",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(GlobalInputPrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(GlobalInputPostfix)));
-            TryPatch(harmony, "OnQualityChoice",
+            TryPatch(TvInterop.OptionalControllerType, "OnQualityChoice",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(QualityPrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(QualityPostfix)));
-            TryPatch(harmony, "ToggleGlobalPause",
+            TryPatch(TvInterop.OptionalControllerType, "ToggleGlobalPause",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(CapturePrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(PausePostfix)));
-            TryPatch(harmony, "RemoteNext",
+            TryPatch(TvInterop.OptionalControllerType, "RemoteNext",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(CapturePrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(NextPostfix)));
-            TryPatch(harmony, "RemotePrev",
+            TryPatch(TvInterop.OptionalControllerType, "RemotePrev",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(CapturePrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(PreviousPostfix)));
-            TryPatch(harmony, "RemoteShuffle",
+            TryPatch(TvInterop.OptionalControllerType, "RemoteShuffle",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(CapturePrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(ShufflePostfix)));
-            TryPatch(harmony, "RemotePower",
+            TryPatch(TvInterop.OptionalControllerType, "RemotePower",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(CapturePrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(PowerPostfix)));
-            TryPatch(harmony, "OnLocalPrepared",
+            TryPatch(TvInterop.OptionalControllerType, "OnLocalPrepared",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(LocalPreparedPrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(LocalPreparedPostfix)));
-            TryPatch(harmony, "OnDisable", null,
+            TryPatch(TvInterop.OptionalControllerType, "OnDisable", null,
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(ControllerDisablePostfix)));
-        }
-
-        private static void TryPatch(Harmony harmony, string method, HarmonyMethod prefix,
-            HarmonyMethod postfix)
-        {
-            try
-            {
-                var original = AccessTools.Method(TvInterop.OptionalControllerType, method);
-                if (original == null)
-                {
-                    CoopLog.Warn("TV client patch target missing: " + method);
-                    return;
-                }
-
-                harmony.Patch(original, prefix: prefix, postfix: postfix);
-            }
-            catch (Exception exception)
-            {
-                CoopLog.Warn("TV client patch failed " + method + ": " + exception.Message);
-            }
         }
 
         private static void LocalPreparedPrefix(object __instance, object source)
