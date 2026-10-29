@@ -579,19 +579,10 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        internal static void ResetSession()
-        {
-            ResetControllerState();
-            ApplyingRemote = false;
-        }
-
-        internal static void NotifySceneLoaded()
-        {
-            ResetControllerState();
-            ApplyingRemote = false;
-        }
-
-        private static void ResetControllerState()
+        /// <summary>Drops every cache that keys live scene objects: the current controller, the
+        /// focused controller, channel playback state, player positions and VideoPlayer error
+        /// bindings. A session boundary and a full world load both make them stale.</summary>
+        internal static void ResetState()
         {
             DetachVideoErrorHandlers();
             _master = null;
@@ -599,6 +590,7 @@ namespace CardShopCoop.CustomTv
             _focusDepth = 0;
             Playbacks.Clear();
             Positions.Clear();
+            ApplyingRemote = false;
         }
 
         internal static bool AttachVideoErrorHandler(Component controller,

@@ -118,12 +118,20 @@ namespace CardShopCoop.CustomTv
 
         private void ResetSessionState()
         {
-            TvInterop.ResetSession();
+            TvInterop.ResetState();
             _lastSeekInputTime = -0.25f;
         }
 
-        private void OnSceneLoaded(Scene _, LoadSceneMode __)
-            => TvInterop.NotifySceneLoaded();
+        private void OnSceneLoaded(Scene _, LoadSceneMode mode)
+        {
+            // Only a full world replacement invalidates the controller and channel caches. An
+            // additive scene (the character-prefab preload) loads next to the live shop and must
+            // not clear the state of the TVs already in it.
+            if (mode == LoadSceneMode.Single)
+            {
+                TvInterop.ResetState();
+            }
+        }
 
         private void OnControllerLifecycle(Component controller)
         {
