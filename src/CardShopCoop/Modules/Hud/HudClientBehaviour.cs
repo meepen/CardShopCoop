@@ -14,7 +14,6 @@ namespace CardShopCoop.Modules.Hud
     public sealed class HudClientBehaviour : CoopBehaviour
     {
         private const string PredictionScope = "hud";
-        private CoopRuntimeContext _context;
         private HudAuthoritativeState _pending;
         private bool _shutdown;
         private Harmony _harmony;
@@ -49,17 +48,16 @@ namespace CardShopCoop.Modules.Hud
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null || _harmony != null)
+            if (_shutdown || _harmony != null)
             {
                 return;
             }
 
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.hud.client");
@@ -79,7 +77,7 @@ namespace CardShopCoop.Modules.Hud
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (_active == this)
@@ -88,7 +86,6 @@ namespace CardShopCoop.Modules.Hud
                 }
 
 
-                _context = null;
                 throw;
             }
         }
@@ -111,7 +108,7 @@ namespace CardShopCoop.Modules.Hud
 
         private void ApplyPendingIfReady()
         {
-            if (_shutdown || !_context.InGame() || !IsGameUiReady())
+            if (_shutdown || !RuntimeContext.InGame() || !IsGameUiReady())
             {
                 return;
             }
@@ -148,7 +145,7 @@ namespace CardShopCoop.Modules.Hud
         private void ForwardObserved(HudContributionKind kind, float value,
             HudAuthoritativeState previous)
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -157,7 +154,7 @@ namespace CardShopCoop.Modules.Hud
             var version = VersionFor(kind);
             ActionLedger.Submit(
                 PredictionScope,
-                actionId => _context.Send(1, new HudContributionIntent
+                actionId => RuntimeContext.Send(1, new HudContributionIntent
                 {
                     ActionId = actionId,
                     Kind = kind,
@@ -480,7 +477,7 @@ namespace CardShopCoop.Modules.Hud
             _gameUi = null;
             HudPresentationState.Clear();
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (_active == this)
@@ -489,7 +486,6 @@ namespace CardShopCoop.Modules.Hud
             }
 
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -510,8 +506,8 @@ namespace CardShopCoop.Modules.Hud
             private static void Prefix(CEvent evt)
             {
                 var active = _active;
-                if (active == null || active._shutdown || active._context == null
-                    || !active._context.InGame() || evt == null
+                if (active == null || active._shutdown
+                    || !active.RuntimeContext.InGame() || evt == null
                     || active._applyingSnapshot != 0
                     || EconomyActionScope.Active
                     || ActionLedger.IsApplying || ActionLedger.IsReconciling)

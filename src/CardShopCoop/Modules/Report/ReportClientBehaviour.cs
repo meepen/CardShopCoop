@@ -60,7 +60,6 @@ namespace CardShopCoop.Modules.Report
             "End of Day pending, back out of what you are doing to proceed!";
 
         private static ReportClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private ReportStateMessage _pendingState;
         private EndOfDayReportScreen _screen;
@@ -100,11 +99,10 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.report.client");
@@ -123,7 +121,7 @@ namespace CardShopCoop.Modules.Report
                 _harmony = null;
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -131,7 +129,6 @@ namespace CardShopCoop.Modules.Report
                     _active = null;
                 }
 
-                _context = null;
                 throw;
             }
         }
@@ -174,7 +171,7 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            if (_context == null || !_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 RefreshPendingNotice();
                 return;
@@ -185,7 +182,7 @@ namespace CardShopCoop.Modules.Report
 
         private void RefreshPendingNotice()
         {
-            var show = !_shutdown && _pendingOpen && _context != null && _context.InGame();
+            var show = !_shutdown && _pendingOpen && RuntimeContext.InGame();
             HudApi.SetEndOfDayPending(show, show ? EndOfDayPendingNotice : "");
         }
 
@@ -492,7 +489,7 @@ namespace CardShopCoop.Modules.Report
 
         private void TryApplyPendingState()
         {
-            if (_shutdown || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -611,7 +608,7 @@ namespace CardShopCoop.Modules.Report
         /// auto-continue deadline elapsed.</summary>
         private void ReadyForNextDay()
         {
-            if (_context == null || !_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 return;
             }
@@ -619,7 +616,7 @@ namespace CardShopCoop.Modules.Report
             if (!_nextDayLocalReady)
             {
                 _nextDayLocalReady = true;
-                _context.Send(1, new ReportNextDayReadyMessage());
+                RuntimeContext.Send(1, new ReportNextDayReadyMessage());
             }
 
             ApplyNextDayWaitUi();
@@ -748,7 +745,7 @@ namespace CardShopCoop.Modules.Report
 
             _shutdown = true;
             StopNextDayRollover();
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
@@ -766,7 +763,6 @@ namespace CardShopCoop.Modules.Report
             _haveOpenReport = false;
             PendingOpen = false;
             ClearNextDayWait();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

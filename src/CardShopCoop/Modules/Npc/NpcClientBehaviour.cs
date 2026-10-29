@@ -43,7 +43,6 @@ namespace CardShopCoop.Modules.Npc
         // queue more, never re-enter.
         private static readonly HashSet<int> _pendingCapacityChanged = new();
         private static readonly Dictionary<int, ExistingCustomerChange> _pendingExistingCustomerChanged = new();
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
 
@@ -85,9 +84,8 @@ namespace CardShopCoop.Modules.Npc
             {
                 return;
             }
-            _context = RuntimeContext;
             _active = this;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             _harmony = new Harmony("dev.meepen.cardshopcoop.npc.client");
             _harmony.CreateClassProcessor(typeof(CustomerManagerPatch)).Patch();
@@ -115,7 +113,7 @@ namespace CardShopCoop.Modules.Npc
 
         private void UpdateInner()
         {
-            var inGame = _context.InGame();
+            var inGame = RuntimeContext.InGame();
             var delta = Time.deltaTime;
             TickPuppets(delta, inGame);
             FlushPendingCustomerSignals();
@@ -204,7 +202,7 @@ namespace CardShopCoop.Modules.Npc
             _shutdown = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             Reset();
-            _context.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
@@ -230,7 +228,7 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            if (!_context.InGame() || !IsSceneReady())
+            if (!RuntimeContext.InGame() || !IsSceneReady())
             {
                 BufferPendingState(state);
                 return;
@@ -248,7 +246,7 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            ShowSpeech(message, _context.InGame());
+            ShowSpeech(message, RuntimeContext.InGame());
         }
 
         [MessageHandler]
@@ -260,7 +258,7 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
 
-            ShowMoneyPopup(message, _context.InGame());
+            ShowMoneyPopup(message, RuntimeContext.InGame());
         }
 
         /// <summary>Resolves a transient delta's live NPC into the internal snapshot. The wire
@@ -352,7 +350,7 @@ namespace CardShopCoop.Modules.Npc
         internal static object SpawnPuppet(in NpcSnapshot snapshot)
         {
             var client = _active;
-            if (client == null || client._context == null || !client._context.InGame()
+            if (client == null || !client.RuntimeContext.InGame()
                 || !IsSceneReady() || snapshot.Identity <= 0
                 || string.IsNullOrEmpty(snapshot.CharName))
             {

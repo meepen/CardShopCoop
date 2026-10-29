@@ -29,7 +29,6 @@ namespace CardShopCoop.Modules.Register
         private readonly Dictionary<Guid, InteractableCashierCounter> _ownershipActions = new();
         private readonly HashSet<Guid> _claimActions = new();
         private readonly Dictionary<Guid, InteractableCashierCounter> _actionCounters = new();
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
         private bool _joined;
@@ -112,13 +111,13 @@ namespace CardShopCoop.Modules.Register
         /// <summary>True while this client may turn a game action into an action. The shared
         /// reentrancy guard owns the render gate and the action layer, so the module keeps no
         /// suppression state of its own.</summary>
-        internal bool CanObserve => !_shutdown && _joined && _context != null && _context.InGame()
+        internal bool CanObserve => !_shutdown && _joined && RuntimeContext.InGame()
             && !ReentrancyGuard.Suppressed(this);
 
         /// <summary>True while the local peer is in a running game (joined or not). A global game
         /// guard uses this rather than <see cref="CanObserve"/> because it must also hold while a
         /// replay is driving the game.</summary>
-        internal bool InGame => !_shutdown && _context != null && _context.InGame();
+        internal bool InGame => !_shutdown && RuntimeContext.InGame();
 
         /// <summary>Set while the client is inside EvaluateCreditCard, so the nested OnPressSpaceBar
         /// records one card-payment action rather than a second completion.</summary>
@@ -173,7 +172,6 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             _harmony = new Harmony("dev.meepen.cardshopcoop.register.client");
             RegisterHooks.PatchClient(_harmony);
@@ -223,7 +221,7 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
-            if (_context == null || !_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 return;
             }

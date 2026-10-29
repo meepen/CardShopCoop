@@ -61,7 +61,6 @@ namespace CardShopCoop.Modules.Purchasing
 
         private static PurchasingClientBehaviour _active;
         private readonly Dictionary<Guid, PendingRequest> _pendingRequests = new();
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
 
@@ -73,11 +72,10 @@ namespace CardShopCoop.Modules.Purchasing
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 ActionLedger.ActionSettled += RetirePendingRequest;
                 _active = this;
@@ -94,7 +92,7 @@ namespace CardShopCoop.Modules.Purchasing
                 _harmony = null;
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -105,7 +103,6 @@ namespace CardShopCoop.Modules.Purchasing
                 }
 
 
-                _context = null;
                 throw;
             }
         }
@@ -168,7 +165,7 @@ namespace CardShopCoop.Modules.Purchasing
             _shutdown = true;
             ActionLedger.ActionSettled -= RetirePendingRequest;
             _pendingRequests.Clear();
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
@@ -177,7 +174,6 @@ namespace CardShopCoop.Modules.Purchasing
             }
 
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -443,7 +439,7 @@ namespace CardShopCoop.Modules.Purchasing
         /// generic rollback, which reopens the cart/confirmation.</summary>
         private void Observe(PendingRequest pending)
         {
-            if (pending == null || _context?.InGame() != true)
+            if (pending == null || RuntimeContext.InGame() != true)
             {
                 return;
             }
@@ -537,7 +533,7 @@ namespace CardShopCoop.Modules.Purchasing
                     _pendingRequests[actionId] = pending;
                     try
                     {
-                        _context.Send(1, intent);
+                        RuntimeContext.Send(1, intent);
                     }
                     catch
                     {
@@ -571,7 +567,7 @@ namespace CardShopCoop.Modules.Purchasing
 
         private bool CanCapture(string action)
         {
-            if (_context?.InGame() == true)
+            if (RuntimeContext.InGame() == true)
             {
 
                 return true;
@@ -715,7 +711,7 @@ namespace CardShopCoop.Modules.Purchasing
 
         private void ShowStatus(string text)
         {
-            _context?.SetStatusLine?.Invoke(text, 8f);
+            RuntimeContext.SetStatusLine?.Invoke(text, 8f);
         }
 
         [HarmonyPatch(typeof(RestockItemCheckoutScreen), "OnPressConfirmCheckout")]

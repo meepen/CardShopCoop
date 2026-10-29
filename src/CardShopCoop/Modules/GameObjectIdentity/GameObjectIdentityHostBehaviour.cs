@@ -14,12 +14,10 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             get; private set;
         }
 
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
 
         private void OnEnable()
         {
-            _context = RuntimeContext;
             Active = this;
             _harmony = new Harmony("dev.meepen.cardshopcoop.gameobjectidentity.host");
             GameObjectIdentityHostHooks.Install(_harmony);
@@ -34,10 +32,9 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
             _harmony?.UnpatchSelf();
             _harmony = null;
-            _context = null;
         }
 
-        internal void Broadcast(INetMessage message) => _context.Broadcast(message);
+        internal void Broadcast(INetMessage message) => RuntimeContext.Broadcast(message);
     }
 
     /// <summary>

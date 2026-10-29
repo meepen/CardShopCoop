@@ -83,7 +83,6 @@ namespace CardShopCoop.Modules.Trade
         private static TradeClientBehaviour _active;
         private readonly Dictionary<InteractableCashierCounter, LocalOffer> _offers = new();
         private readonly Dictionary<int, LocalOffer> _offersByCustomerIndex = new();
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private TradeOfferBaselineMessage _pendingBaseline;
         private readonly Dictionary<InteractableCashierCounter, TradeOfferDeltaMessage> _pendingDeltas = new();
@@ -105,9 +104,8 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _harmony = new Harmony("dev.meepen.cardshopcoop.trade.client");
             _harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(CustomerStopPatch)).Patch();
@@ -142,7 +140,7 @@ namespace CardShopCoop.Modules.Trade
             NpcClientBehaviour.ExistingCustomerChanged -= OnExistingCustomerChanged;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             ClearForSceneChange();
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
@@ -218,7 +216,7 @@ namespace CardShopCoop.Modules.Trade
 
             CoopPlugin.Log.LogInfo("[trade] client offer delta counter=" + message.Counter.name
                 + " removed=" + message.Removed + " ready=" + IsTradeSceneReady() + ".");
-            if (!_context.InGame() || !IsTradeSceneReady())
+            if (!RuntimeContext.InGame() || !IsTradeSceneReady())
             {
                 DeferDelta(message);
                 return;
@@ -239,11 +237,11 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            if (!_context.InGame() || !IsTradeSceneReady())
+            if (!RuntimeContext.InGame() || !IsTradeSceneReady())
             {
                 if (_pendingBaseline != null || _pendingDeltas.Count > 0)
                 {
-                    CoopPlugin.Log.LogInfo("[trade] offers waiting: inGame=" + _context.InGame()
+                    CoopPlugin.Log.LogInfo("[trade] offers waiting: inGame=" + RuntimeContext.InGame()
                         + " manager=" + (TradeInterop.Manager != null)
                         + " customers=" + (TradeInterop.Customers != null)
                         + " screen=" + (TradeInterop.Screen != null)
@@ -671,7 +669,7 @@ namespace CardShopCoop.Modules.Trade
 
         private void OnReadinessSignal()
         {
-            if (!_shutdown && _context.InGame() && IsTradeSceneReady())
+            if (!_shutdown && RuntimeContext.InGame() && IsTradeSceneReady())
             {
                 ApplyPendingMessages();
             }
@@ -747,7 +745,7 @@ namespace CardShopCoop.Modules.Trade
             Func<string, Action<Guid>, Action, Action, Guid> register)
         {
             var offer = PendingOffer();
-            if (!_context.InGame() || offer?.State == null || _pendingCounter == null)
+            if (!RuntimeContext.InGame() || offer?.State == null || _pendingCounter == null)
             {
                 return false;
             }
@@ -775,7 +773,7 @@ namespace CardShopCoop.Modules.Trade
             CustomerTradeData acceptBefore = null)
         {
             var offer = PendingOffer();
-            if (!_context.InGame() || offer?.State == null || _pendingCounter == null)
+            if (!RuntimeContext.InGame() || offer?.State == null || _pendingCounter == null)
             {
                 return null;
             }
@@ -944,7 +942,7 @@ namespace CardShopCoop.Modules.Trade
                 + (state.Customer == null ? "null" : state.Customer.name) + " gen="
                 + state.CustomerGeneration + " nonce=" + state.OfferNonce + " price="
                 + price.ToString("F2") + " result=" + result + " id=" + actionId + ".");
-            _context.Send(1, new TradeIntentMessage
+            RuntimeContext.Send(1, new TradeIntentMessage
             {
                 ActionId = actionId,
                 Operation = operation,

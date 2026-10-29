@@ -14,7 +14,6 @@ namespace CardShopCoop.Modules.Bills
     public sealed class BillsClientBehaviour : CoopBehaviour
     {
         private static BillsClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
         private bool _joined;
@@ -28,14 +27,13 @@ namespace CardShopCoop.Modules.Bills
             }
 
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             var lifecycleSubscribed = false;
             try
             {
                 ResetSessionState();
                 BillsInterop.Reset();
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -60,7 +58,7 @@ namespace CardShopCoop.Modules.Bills
                 }
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -72,7 +70,6 @@ namespace CardShopCoop.Modules.Bills
 
                 ResetSessionState();
                 BillsInterop.Reset();
-                _context = null;
                 throw;
             }
         }
@@ -114,7 +111,7 @@ namespace CardShopCoop.Modules.Bills
         [MessageHandler]
         private void HandlePopup(MessageContext context, BillPopupMessage message)
         {
-            if (_shutdown || !_context.InGame() || !BillsInterop.IsSceneReady())
+            if (_shutdown || !RuntimeContext.InGame() || !BillsInterop.IsSceneReady())
             {
                 return;
             }
@@ -125,7 +122,7 @@ namespace CardShopCoop.Modules.Bills
 
         private void TryApplyPending()
         {
-            if (_shutdown || _pendingState == null || _context == null || !_context.InGame()
+            if (_shutdown || _pendingState == null || !RuntimeContext.InGame()
                 || !BillsInterop.IsSceneReady())
             {
                 return;
@@ -207,8 +204,8 @@ namespace CardShopCoop.Modules.Bills
         private static bool BeginPayment(byte billType, bool forcePay)
         {
             var client = _active;
-            if (client == null || client._shutdown || !client._joined || client._context == null
-                || !client._context.InGame())
+            if (client == null || client._shutdown || !client._joined
+                || !client.RuntimeContext.InGame())
             {
                 return true;
             }
@@ -240,7 +237,7 @@ namespace CardShopCoop.Modules.Bills
             SoundManager.PlayAudio("SFX_CustomerBuy", 0.6f);
             ActionLedger.Submit(
                 "bills",
-                actionId => client._context.Send(1, new BillPaymentMessage
+                actionId => client.RuntimeContext.Send(1, new BillPaymentMessage
                 {
                     ActionId = actionId,
                     BillType = billType,
@@ -334,7 +331,7 @@ namespace CardShopCoop.Modules.Bills
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
@@ -347,7 +344,6 @@ namespace CardShopCoop.Modules.Bills
 
             ResetSessionState();
             BillsInterop.Reset();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

@@ -22,7 +22,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleWarehouseStore(MessageContext context, WarehouseStoreMessage message)
         {
-            if (!_context.InGame() || !IsJoinPhaseSender(context))
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -45,7 +45,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleWarehouseTake(MessageContext context, WarehouseTakeMessage message)
         {
-            if (!_context.InGame() || !IsJoinPhaseSender(context))
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
             {
                 RejectWorldIntent(context, message);
                 return;

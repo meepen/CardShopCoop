@@ -33,7 +33,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleMarketState(MessageContext context, MarketStateMessage message)
         {
-            _cardInteraction.Market.ClientApplyOrBuffer(message, _context.InGame());
+            _cardInteraction.Market.ClientApplyOrBuffer(message, RuntimeContext.InGame());
         }
 
         [MessageHandler]

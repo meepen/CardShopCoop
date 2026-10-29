@@ -157,7 +157,7 @@ namespace CardShopCoop.Modules.World
             // The requester must actually be standing at the object it settles, exactly as the
             // trade and deodorant intents require. The authoritative presence is used, never the
             // client-supplied pose.
-            if (!_context.PeerPresence.TryGet(messageContext.Connection.Id, out var presence)
+            if (!RuntimeContext.PeerPresence.TryGet(messageContext.Connection.Id, out var presence)
                 || presence.Age > TimeSpan.FromSeconds(2)
                 || !IsWithinPlacementReach(presence.Position, obj.transform.position))
             {
@@ -288,7 +288,7 @@ namespace CardShopCoop.Modules.World
 
         private void SendBaseline(int connectionId)
         {
-            if (connectionId <= 0 || !_context.InGame())
+            if (connectionId <= 0 || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -296,7 +296,7 @@ namespace CardShopCoop.Modules.World
             var baseline = BuildBaseline();
             if (baseline != null)
             {
-                _context.Send(connectionId, baseline);
+                RuntimeContext.Send(connectionId, baseline);
             }
         }
 
@@ -310,18 +310,18 @@ namespace CardShopCoop.Modules.World
 
         private void PublishDelta(byte operation, PlacementMoveEntry entity, Guid actionId)
         {
-            if (_shutdown || !_context.InGame() || entity == null || entity.Entity == null
+            if (_shutdown || !RuntimeContext.InGame() || entity == null || entity.Entity == null
                 || !PlacementInterop.HasSharedIdentity(entity.Entity))
             {
                 CoopPlugin.Log.LogInfo("[placement] skip delta op=" + operation + " entity="
                     + (entity == null ? "<no-entry>" : PlacementInterop.Describe(entity.Entity))
-                    + " shutdown=" + _shutdown + " inGame=" + _context.InGame() + ".");
+                    + " shutdown=" + _shutdown + " inGame=" + RuntimeContext.InGame() + ".");
                 return;
             }
 
             CoopPlugin.Log.LogInfo("[placement] publish delta op=" + operation + " entity="
                 + PlacementInterop.Describe(entity.Entity) + ".");
-            _context.Broadcast(new PlacementDeltaMessage
+            RuntimeContext.Broadcast(new PlacementDeltaMessage
             {
                 ActionId = actionId,
                 Operation = operation,
@@ -335,12 +335,12 @@ namespace CardShopCoop.Modules.World
                 + ": " + reason);
             if (actionId != Guid.Empty)
             {
-                ActionLedger.Rollback(_context, connectionId, actionId);
+                ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
             }
         }
 
         private bool IsPeerMessage(MessageContext messageContext)
-            => !_shutdown && _context.InGame() && messageContext?.Connection != null
+            => !_shutdown && RuntimeContext.InGame() && messageContext?.Connection != null
                 && IsJoinPhase(messageContext.Connection.State);
 
         private static bool IsJoinPhase(ConnectionState state)

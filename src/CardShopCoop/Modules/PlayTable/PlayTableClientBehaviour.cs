@@ -34,7 +34,6 @@ namespace CardShopCoop.Modules.PlayTable
         private readonly Dictionary<InteractablePlayTable, LaunchState> _launches = new();
         private readonly Dictionary<SeatVisualKey, PlayTableVisualDeltaMessage> _pendingVisuals = new();
 
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private PlayTableBaselineMessage _latestBaseline;
         private bool _shutdown;
@@ -108,15 +107,14 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _harmony != null)
             {
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             PlacementApi.StructureChanged += OnPlacementStructureChanged;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             _harmony = new Harmony("dev.meepen.cardshopcoop.play-table.client");
             ApplyPatches();
@@ -454,7 +452,7 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void SendStartMatch(PlayTableMatchEntry match, Guid actionId)
         {
-            _context.Send(1, new StartTableMatchIntent
+            RuntimeContext.Send(1, new StartTableMatchIntent
             {
                 ActionId = actionId,
                 MatchId = match.MatchId,
@@ -467,7 +465,7 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void SendCancelMatch(PlayTableMatchEntry match, Guid actionId)
         {
-            _context.Send(1, new CancelTableMatchIntent
+            RuntimeContext.Send(1, new CancelTableMatchIntent
             {
                 ActionId = actionId,
                 MatchId = match.MatchId,
@@ -477,7 +475,7 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void SendMatchStarted(PlayTableMatchEntry match, Guid actionId)
         {
-            _context.Send(1, new MarkTableMatchStartedIntent
+            RuntimeContext.Send(1, new MarkTableMatchStartedIntent
             {
                 ActionId = actionId,
                 MatchId = match.MatchId,
@@ -487,7 +485,7 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void SendReleaseMatch(PlayTableMatchEntry match, Guid actionId)
         {
-            _context.Send(1, new ReleaseTableMatchIntent
+            RuntimeContext.Send(1, new ReleaseTableMatchIntent
             {
                 ActionId = actionId,
                 MatchId = match.MatchId,
@@ -605,7 +603,7 @@ namespace CardShopCoop.Modules.PlayTable
             // own copy under the same identity and hands the hold to the requester.
             ActionLedger.Submit(
                 ScopeFor(table),
-                actionId => _context.Send(1, new FurnitureBoxUpRequestMessage
+                actionId => RuntimeContext.Send(1, new FurnitureBoxUpRequestMessage
                 {
                     ActionId = actionId,
                     ObjectType = table.m_ObjectType,
@@ -633,7 +631,7 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void SendKick(InteractablePlayTable table, Guid actionId)
         {
-            _context.Send(1, new KickTableIntent
+            RuntimeContext.Send(1, new KickTableIntent
             {
                 ActionId = actionId,
                 Table = table,
@@ -1208,7 +1206,7 @@ namespace CardShopCoop.Modules.PlayTable
 
             _shutdown = true;
             PlacementApi.StructureChanged -= OnPlacementStructureChanged;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             ClearMirrors();
             _harmony?.UnpatchSelf();
@@ -1223,7 +1221,6 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _harmony = null;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

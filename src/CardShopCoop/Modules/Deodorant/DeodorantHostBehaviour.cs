@@ -10,21 +10,19 @@ namespace CardShopCoop.Modules.Deodorant
     [ServerBehaviour]
     public sealed class DeodorantHostBehaviour : CoopBehaviour
     {
-        private CoopRuntimeContext _context;
         private bool _shutdown;
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown)
             {
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
             }
             catch (Exception error)
@@ -32,10 +30,9 @@ namespace CardShopCoop.Modules.Deodorant
                 CoopPlugin.Log.LogError($"Deodorant host initialization failed: {error}");
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
-                _context = null;
                 throw;
             }
         }
@@ -48,8 +45,7 @@ namespace CardShopCoop.Modules.Deodorant
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
-            _context = null;
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
         }
         private void OnDestroy() => Shutdown();
 
@@ -68,7 +64,7 @@ namespace CardShopCoop.Modules.Deodorant
                 Reject(context, message.ActionId);
                 return;
             }
-            if (!_context.PeerPresence.TryGet(context.Connection.Id, out var presence))
+            if (!RuntimeContext.PeerPresence.TryGet(context.Connection.Id, out var presence))
             {
                 Reject(context, message.ActionId);
                 return;
@@ -119,7 +115,7 @@ namespace CardShopCoop.Modules.Deodorant
                 });
             }
 
-            _context.Broadcast(new HandheldSprayEventMessage
+            RuntimeContext.Broadcast(new HandheldSprayEventMessage
             {
                 ActionId = message.ActionId,
                 Position = message.Position,
@@ -135,7 +131,7 @@ namespace CardShopCoop.Modules.Deodorant
 
         private bool IsAuthenticatedSender(MessageContext context)
         {
-            return !_shutdown && _context.InGame() && context?.Connection != null
+            return !_shutdown && RuntimeContext.InGame() && context?.Connection != null
                 && context.IsAuthenticated;
         }
 
@@ -143,7 +139,7 @@ namespace CardShopCoop.Modules.Deodorant
         {
             if (actionId != Guid.Empty && context?.Connection != null)
             {
-                ActionLedger.Rollback(_context, context.Connection.Id, actionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, actionId);
             }
         }
 

@@ -19,7 +19,6 @@ namespace CardShopCoop.Modules.Tournament
         private static readonly FieldInfo ScreenMesh =
             AccessTools.Field(typeof(TournamentPrizeShelf), "m_ScreenMesh");
 
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private TournamentStateMessage _pendingState;
         private TournamentDeltaMessage _pendingHeader;
@@ -36,12 +35,11 @@ namespace CardShopCoop.Modules.Tournament
                 return;
             }
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
                 ResetSessionState();
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.tournament.client.runtime");
@@ -56,14 +54,13 @@ namespace CardShopCoop.Modules.Tournament
                 _harmony = null;
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
                 }
                 ResetSessionState();
-                _context = null;
                 throw;
             }
         }
@@ -119,7 +116,7 @@ namespace CardShopCoop.Modules.Tournament
             _shutdown = true;
             _pendingState = null;
             ClearPendingDeltas();
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
@@ -130,7 +127,6 @@ namespace CardShopCoop.Modules.Tournament
             _harmony?.UnpatchSelf();
             _harmony = null;
             ResetSessionState();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -172,7 +168,7 @@ namespace CardShopCoop.Modules.Tournament
 
         private void TryApplyPending()
         {
-            if (_shutdown || !_context.InGame() || !IsTournamentUiReady())
+            if (_shutdown || !RuntimeContext.InGame() || !IsTournamentUiReady())
             {
                 return;
             }
@@ -547,7 +543,7 @@ namespace CardShopCoop.Modules.Tournament
                 return true;
             }
 
-            _active._context.SetStatusLine?.Invoke("the host schedules tournaments", 3f);
+            _active.RuntimeContext.SetStatusLine?.Invoke("the host schedules tournaments", 3f);
             return false;
         }
 

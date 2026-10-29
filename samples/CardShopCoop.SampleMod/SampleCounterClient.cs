@@ -13,18 +13,11 @@ namespace CardShopCoop.SampleMod
     [ClientBehaviour]
     public sealed class SampleCounterClient : CoopBehaviour
     {
-        private ICoopContext _context;
         private int _value;
 
         private void OnEnable()
         {
-            _context = Context;
             CoopLog.Info("[sample] client counter online");
-        }
-
-        private void OnDisable()
-        {
-            _context = null;
         }
 
         private void Update()
@@ -32,10 +25,10 @@ namespace CardShopCoop.SampleMod
             if (Input.GetKeyDown(KeyCode.K))
             {
                 CoopLog.Info("[sample] client sends an increment intent");
-                var host = _context.HostConnection;
+                var host = Context.HostConnection;
                 if (host != null)
                 {
-                    _context.Send(host, new SampleIncrementIntent());
+                    Context.Send(host, new SampleIncrementIntent());
                 }
             }
         }

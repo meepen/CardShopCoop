@@ -438,20 +438,18 @@ namespace CardShopCoop.Modules.Purchasing
 
         internal static PurchasingHostBehaviour Active => _active;
         private bool _shutdown;
-        private CoopRuntimeContext _context;
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || ReferenceEquals(_active, this))
             {
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
             }
@@ -460,7 +458,7 @@ namespace CardShopCoop.Modules.Purchasing
                 CoopPlugin.Log.LogError("Purchasing host initialization failed: " + exception);
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -468,7 +466,6 @@ namespace CardShopCoop.Modules.Purchasing
                     _active = null;
                 }
 
-                _context = null;
                 throw;
             }
         }
@@ -512,7 +509,7 @@ namespace CardShopCoop.Modules.Purchasing
         private PurchaseOutcomeMessage ApplyPurchase(ActionMessage intent, PurchaseKind kind,
             List<PurchaseLine> lines, Func<PurchasePlan, string> build)
         {
-            if (_shutdown || _context == null || !_context.InGame() || intent == null)
+            if (_shutdown || !RuntimeContext.InGame() || intent == null)
             {
                 return null;
             }
@@ -563,7 +560,7 @@ namespace CardShopCoop.Modules.Purchasing
             }
             else if (intent.ActionId != Guid.Empty)
             {
-                ActionLedger.Rollback(_context, connectionId, intent.ActionId);
+                ActionLedger.Rollback(RuntimeContext, connectionId, intent.ActionId);
             }
         }
 
@@ -575,13 +572,12 @@ namespace CardShopCoop.Modules.Purchasing
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
             }
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -1227,7 +1223,7 @@ namespace CardShopCoop.Modules.Purchasing
         {
             if (!_shutdown)
             {
-                _context.Send(connectionId, outcome);
+                RuntimeContext.Send(connectionId, outcome);
             }
 
         }
@@ -1266,7 +1262,7 @@ namespace CardShopCoop.Modules.Purchasing
 
         private string PeerLabel(int connectionId)
         {
-            var name = _context?.PeerName?.Invoke(connectionId);
+            var name = RuntimeContext.PeerName?.Invoke(connectionId);
             return string.IsNullOrEmpty(name) ? $"conn {connectionId}" : $"{name}/conn {connectionId}";
         }
     }

@@ -19,7 +19,6 @@ namespace CardShopCoop.Modules.Presence
         private readonly Dictionary<int, PresenceModelEntry> _models = new();
         private readonly Dictionary<int, PresenceStateMessage> _latestStates = new();
         private readonly Dictionary<int, PresenceHoldMessage> _latestHolds = new();
-        private CoopRuntimeContext _context;
         private PresenceService _service;
         private float _stateTimer;
         private bool _shutdown;
@@ -28,18 +27,17 @@ namespace CardShopCoop.Modules.Presence
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _service != null)
             {
                 return;
             }
 
-            _context = RuntimeContext;
-            _service = new PresenceService(_context);
+            _service = new PresenceService(RuntimeContext);
             _service.ModelChanged += OnLocalModelChanged;
             var registered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
             }
@@ -48,12 +46,11 @@ namespace CardShopCoop.Modules.Presence
                 CoopPlugin.Log.LogError("Presence host initialization failed: " + error);
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 _service.Shutdown();
                 _service = null;
-                _context = null;
                 throw;
             }
         }
@@ -74,7 +71,7 @@ namespace CardShopCoop.Modules.Presence
         private void UpdateInner()
         {
             _service.Tick(Time.deltaTime);
-            if (_context.InGame())
+            if (RuntimeContext.InGame())
             {
                 PublishLocalState(Time.deltaTime);
             }
@@ -112,7 +109,7 @@ namespace CardShopCoop.Modules.Presence
             _models.Remove(connection.Id);
             _latestStates.Remove(connection.Id);
             _latestHolds.Remove(connection.Id);
-            _context?.PeerPresence.Clear(connection.Id);
+            RuntimeContext.PeerPresence.Clear(connection.Id);
             _service?.Remove(connection.Id);
             BroadcastRosterDelta(new PresenceRosterDeltaMessage
             {
@@ -136,7 +133,7 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            _context.PeerPresence.RecordAuthenticatedPosition(context.Connection, message.Position);
+            RuntimeContext.PeerPresence.RecordAuthenticatedPosition(context.Connection, message.Position);
             _service.ApplyState(context.Connection.Id, message);
             _latestStates[context.Connection.Id] = CloneState(message);
 
@@ -149,7 +146,7 @@ namespace CardShopCoop.Modules.Presence
             {
                 if (connectionId != context.Connection.Id && _joined.Contains(connectionId))
                 {
-                    _context.Send(connectionId, relay);
+                    RuntimeContext.Send(connectionId, relay);
                 }
             }
         }
@@ -162,7 +159,7 @@ namespace CardShopCoop.Modules.Presence
                 return;
             }
 
-            _context.PeerPresence.RecordAuthenticatedHold(context.Connection, message.Hold,
+            RuntimeContext.PeerPresence.RecordAuthenticatedHold(context.Connection, message.Hold,
                 message.HoldTypes);
             _service.ApplyHold(context.Connection.Id, message);
             _latestHolds[context.Connection.Id] = CloneHold(message);
@@ -176,7 +173,7 @@ namespace CardShopCoop.Modules.Presence
             {
                 if (connectionId != context.Connection.Id && _joined.Contains(connectionId))
                 {
-                    _context.Send(connectionId, relay);
+                    RuntimeContext.Send(connectionId, relay);
                 }
             }
         }
@@ -246,7 +243,7 @@ namespace CardShopCoop.Modules.Presence
         internal bool TryGetPeerPresence(int connectionId, out PeerPresence presence)
         {
             presence = default(PeerPresence);
-            return _context != null && _context.PeerPresence.TryGet(connectionId, out presence);
+            return RuntimeContext.PeerPresence.TryGet(connectionId, out presence);
         }
 
         /// <summary>A copy of one session member's appearance, keyed by the host's canonical
@@ -276,7 +273,7 @@ namespace CardShopCoop.Modules.Presence
             for (var i = 0; i < ids.Count; i++)
             {
                 var id = ids[i];
-                var name = _context?.PeerName?.Invoke(id);
+                var name = RuntimeContext.PeerName?.Invoke(id);
                 players.Add(new PresencePlayer(id,
                     string.IsNullOrEmpty(name) ? "Player " + id : name, false, false));
             }
@@ -292,7 +289,7 @@ namespace CardShopCoop.Modules.Presence
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
@@ -308,18 +305,17 @@ namespace CardShopCoop.Modules.Presence
             _joined.Clear();
             _models.Clear();
             _latestStates.Clear();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
 
         private void SendBaseline(int connectionId)
         {
-            _context.Send(connectionId, BuildRoster(connectionId));
-            _context.Send(connectionId, BuildModelState());
+            RuntimeContext.Send(connectionId, BuildRoster(connectionId));
+            RuntimeContext.Send(connectionId, BuildModelState());
             if (_latestStates.TryGetValue(0, out var hostState))
             {
-                _context.Send(connectionId, CloneState(hostState));
+                RuntimeContext.Send(connectionId, CloneState(hostState));
             }
 
             foreach (var pair in _latestStates)
@@ -329,7 +325,7 @@ namespace CardShopCoop.Modules.Presence
                     continue;
                 }
 
-                _context.Send(connectionId, new PresenceRelayStateMessage
+                RuntimeContext.Send(connectionId, new PresenceRelayStateMessage
                 {
                     SenderId = pair.Key,
                     State = CloneState(pair.Value),
@@ -338,7 +334,7 @@ namespace CardShopCoop.Modules.Presence
 
             if (_latestHolds.TryGetValue(0, out var hostHold))
             {
-                _context.Send(connectionId, CloneHold(hostHold));
+                RuntimeContext.Send(connectionId, CloneHold(hostHold));
             }
 
             foreach (var pair in _latestHolds)
@@ -348,7 +344,7 @@ namespace CardShopCoop.Modules.Presence
                     continue;
                 }
 
-                _context.Send(connectionId, new PresenceRelayHoldMessage
+                RuntimeContext.Send(connectionId, new PresenceRelayHoldMessage
                 {
                     SenderId = pair.Key,
                     Hold = CloneHold(pair.Value),
@@ -367,7 +363,7 @@ namespace CardShopCoop.Modules.Presence
 
             _stateTimer = 0f;
             _latestStates[0] = CloneState(state);
-            _context.Broadcast(state);
+            RuntimeContext.Broadcast(state);
             PublishLocalHold();
         }
 
@@ -381,7 +377,7 @@ namespace CardShopCoop.Modules.Presence
             }
 
             _latestHolds[0] = CloneHold(hold);
-            _context.Broadcast(hold);
+            RuntimeContext.Broadcast(hold);
         }
 
         private void OnLocalModelChanged(PresenceModelEntry model)
@@ -393,7 +389,7 @@ namespace CardShopCoop.Modules.Presence
 
             model.Id = 0;
             _models[0] = Clone(model);
-            if (_context.InGame())
+            if (RuntimeContext.InGame())
             {
                 BroadcastModelDelta(new PresenceModelDeltaMessage
                 {
@@ -433,7 +429,7 @@ namespace CardShopCoop.Modules.Presence
                     continue;
                 }
 
-                var name = _context.PeerName?.Invoke(id);
+                var name = RuntimeContext.PeerName?.Invoke(id);
                 message.Entries.Add(BuildRosterEntry(id, name));
             }
 
@@ -442,7 +438,7 @@ namespace CardShopCoop.Modules.Presence
 
         private PresenceRosterEntry BuildRosterEntry(int id, string name = null)
         {
-            name ??= _context.PeerName?.Invoke(id);
+            name ??= RuntimeContext.PeerName?.Invoke(id);
             return new PresenceRosterEntry
             {
                 Id = id,
@@ -458,7 +454,7 @@ namespace CardShopCoop.Modules.Presence
         /// the wire lifetime of a peer name.</summary>
         private void ApplyPeerName(int connectionId)
         {
-            var name = _context.PeerName?.Invoke(connectionId);
+            var name = RuntimeContext.PeerName?.Invoke(connectionId);
             if (!string.IsNullOrEmpty(name))
             {
                 _service.SetName(connectionId, name);
@@ -474,7 +470,7 @@ namespace CardShopCoop.Modules.Presence
                 {
                     if (connectionId != excludedConnectionId && _joined.Contains(connectionId))
                     {
-                        _context.Send(connectionId, delta);
+                        RuntimeContext.Send(connectionId, delta);
                     }
                 }
             }
@@ -492,7 +488,7 @@ namespace CardShopCoop.Modules.Presence
             {
                 if (connectionId != excludedConnectionId && _joined.Contains(connectionId))
                 {
-                    _context.Send(connectionId, delta);
+                    RuntimeContext.Send(connectionId, delta);
                 }
             }
         }
@@ -501,7 +497,7 @@ namespace CardShopCoop.Modules.Presence
         {
             if (actionId != Guid.Empty && context?.Connection != null)
             {
-                ActionLedger.Rollback(_context, context.Connection.Id, actionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, actionId);
             }
         }
 
@@ -512,21 +508,21 @@ namespace CardShopCoop.Modules.Presence
             {
                 if (connectionId != senderId && _joined.Contains(connectionId))
                 {
-                    _context.Send(connectionId, tag);
+                    RuntimeContext.Send(connectionId, tag);
                 }
             }
         }
 
         private bool IsAuthenticatedSender(MessageContext context)
         {
-            return !_shutdown && _context.InGame()
+            return !_shutdown && RuntimeContext.InGame()
                 && context?.Connection != null && _joined.Contains(context.Connection.Id)
                 && context.IsAuthenticated;
         }
 
         private IReadOnlyList<int> ConnectionIds()
         {
-            return _context.ConnectionIds?.Invoke() ?? new List<int>();
+            return RuntimeContext.ConnectionIds?.Invoke() ?? new List<int>();
         }
 
         private static PresenceStateMessage CloneState(PresenceStateMessage state)

@@ -21,7 +21,6 @@ namespace CardShopCoop.Modules.Settings
         private static SettingsClientBehaviour _active;
         private static bool _applyingRemote;
 
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private SettingsStateMessage _pendingFullState;
         private readonly Dictionary<string, SettingsStateMessage> _pendingStates = new();
@@ -35,11 +34,10 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.settings.client");
@@ -63,7 +61,7 @@ namespace CardShopCoop.Modules.Settings
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -71,7 +69,6 @@ namespace CardShopCoop.Modules.Settings
                     _active = null;
                 }
 
-                _context = null;
                 throw;
             }
         }
@@ -89,7 +86,7 @@ namespace CardShopCoop.Modules.Settings
 
         private void TryApplyPendingState()
         {
-            if (_shutdown || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || !SettingsInterop.IsSceneReady)
             {
                 return;
@@ -427,7 +424,7 @@ namespace CardShopCoop.Modules.Settings
             ECardExpansionType previousExpansion)
         {
             if (_applyingRemote || _active == null || _active._shutdown
-                || !_active._context.InGame())
+                || !_active.RuntimeContext.InGame())
             {
                 return;
             }
@@ -448,7 +445,7 @@ namespace CardShopCoop.Modules.Settings
         private static void SendGameEventFeeIntent(EGameEventFormat format, float fee, float previousFee)
         {
             if (_applyingRemote || _active == null || _active._shutdown
-                || !_active._context.InGame())
+                || !_active.RuntimeContext.InGame())
             {
                 return;
             }
@@ -464,7 +461,7 @@ namespace CardShopCoop.Modules.Settings
         private static void SendCashierIntent(InteractableCashierCounter counter, byte previousFlags)
         {
             if (_applyingRemote || _active == null || _active._shutdown
-                || !_active._context.InGame() || counter == null)
+                || !_active.RuntimeContext.InGame() || counter == null)
             {
                 return;
             }
@@ -485,7 +482,7 @@ namespace CardShopCoop.Modules.Settings
         private static void SendTableIntent(InteractablePlayTable table, int number, int previousNumber)
         {
             if (_applyingRemote || _active == null || _active._shutdown
-                || !_active._context.InGame() || table == null)
+                || !_active.RuntimeContext.InGame() || table == null)
             {
                 return;
             }
@@ -500,7 +497,7 @@ namespace CardShopCoop.Modules.Settings
 
         private void SendIntent(SettingsOpMessage message, Action undo)
         {
-            if (_shutdown || message == null || !_joined || !_context.InGame() || _applyingRemote)
+            if (_shutdown || message == null || !_joined || !RuntimeContext.InGame() || _applyingRemote)
             {
                 return;
             }
@@ -511,7 +508,7 @@ namespace CardShopCoop.Modules.Settings
                 actionId =>
                 {
                     message.ActionId = actionId;
-                    _context.Send(1, message);
+                    RuntimeContext.Send(1, message);
                 },
                 () => { }, undo ?? (() => { }));
         }
@@ -546,7 +543,7 @@ namespace CardShopCoop.Modules.Settings
             _shutdown = true;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
@@ -557,7 +554,6 @@ namespace CardShopCoop.Modules.Settings
             ClearPendingStates();
             _joined = false;
             _applyingRemote = false;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

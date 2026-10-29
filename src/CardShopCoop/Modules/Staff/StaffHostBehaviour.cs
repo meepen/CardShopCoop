@@ -26,7 +26,6 @@ namespace CardShopCoop.Modules.Staff
         private static StaffHostBehaviour _active;
         private readonly Dictionary<Worker, int> _leaseOwner = new();
         private readonly Dictionary<Worker, WorkerIdentity> _identities = new();
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
         private Guid _intentActionId;
@@ -38,13 +37,12 @@ namespace CardShopCoop.Modules.Staff
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _harmony != null)
             {
                 return;
             }
 
-            _context = RuntimeContext;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _active = this;
             _harmony = new Harmony("dev.meepen.cardshopcoop.staff.module.host");
             Patch(typeof(WorkerMousePatch));
@@ -66,10 +64,10 @@ namespace CardShopCoop.Modules.Staff
         [OnFullyJoined]
         private void SendJoinBaseline(PeerConnection connection)
         {
-            if (connection != null && IsJoinPhase(connection.State) && _context.InGame()
+            if (connection != null && IsJoinPhase(connection.State) && RuntimeContext.InGame()
                 && GetWorkerManager()?.m_WorkerDataList != null)
             {
-                _context.Send(connection.Id, BuildBaseline());
+                RuntimeContext.Send(connection.Id, BuildBaseline());
             }
         }
 
@@ -136,7 +134,7 @@ namespace CardShopCoop.Modules.Staff
 
         private bool IsValidSender(MessageContext context, StaffModuleIntentMessage message)
         {
-            if (_shutdown || !_context.InGame() || context?.Connection == null
+            if (_shutdown || !RuntimeContext.InGame() || context?.Connection == null
                 || !IsJoinPhase(context.Connection.State) || message == null)
             {
                 return false;
@@ -455,7 +453,7 @@ namespace CardShopCoop.Modules.Staff
                 // A remote interaction must come from a player actually standing at the worker,
                 // by the same authenticated-presence rule the trade/deodorant intents use - never
                 // from the client's own position payload.
-                if (!_context.PeerPresence.TryGet(connectionId, out var presence)
+                if (!RuntimeContext.PeerPresence.TryGet(connectionId, out var presence)
                     || presence.Age > TimeSpan.FromSeconds(2)
                     || (presence.Position - worker.transform.position).sqrMagnitude
                         > StaffInteractionReach * StaffInteractionReach)
@@ -516,7 +514,7 @@ namespace CardShopCoop.Modules.Staff
 
         private void PublishInteraction(Worker worker, bool occupied, int grantedPeer)
         {
-            if (_shutdown || !_context.InGame() || worker == null)
+            if (_shutdown || !RuntimeContext.InGame() || worker == null)
             {
                 return;
             }
@@ -536,8 +534,8 @@ namespace CardShopCoop.Modules.Staff
             // holds a lease) that belongs to another player.
             if (grantedPeer > 0 && occupied)
             {
-                _context.Send(grantedPeer, message);
-                _context.Relay(grantedPeer, new StaffModuleDeltaMessage
+                RuntimeContext.Send(grantedPeer, message);
+                RuntimeContext.Relay(grantedPeer, new StaffModuleDeltaMessage
                 {
                     ActionId = message.ActionId,
                     Kind = message.Kind,
@@ -549,13 +547,13 @@ namespace CardShopCoop.Modules.Staff
                 return;
             }
 
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private void PublishWorkerBootstrap(Worker worker)
         {
             var manager = GetWorkerManager();
-            if (_shutdown || !_context.InGame() || worker == null
+            if (_shutdown || !RuntimeContext.InGame() || worker == null
                 || !StaffModuleInterop.IsAddressable(manager, worker.m_WorkerIndex))
             {
                 return;
@@ -726,13 +724,13 @@ namespace CardShopCoop.Modules.Staff
 
         private void Broadcast(StaffModuleDeltaMessage message)
         {
-            if (_shutdown || !_context.InGame() || message?.Worker == null
+            if (_shutdown || !RuntimeContext.InGame() || message?.Worker == null
                 || !NpcHostBehaviour.IsNpcTracked(message.Worker))
             {
                 return;
             }
 
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private static bool TryGetFinite(float value, out float result)
@@ -778,7 +776,7 @@ namespace CardShopCoop.Modules.Staff
         {
             if (actionId != Guid.Empty)
             {
-                ActionLedger.Rollback(_context, connectionId, actionId);
+                ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
             }
         }
 
@@ -792,7 +790,7 @@ namespace CardShopCoop.Modules.Staff
             _shutdown = true;
             ResetWorldState();
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
@@ -800,7 +798,6 @@ namespace CardShopCoop.Modules.Staff
 
             _harmony?.UnpatchSelf();
             _harmony = null;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

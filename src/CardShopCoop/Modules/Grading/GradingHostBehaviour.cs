@@ -23,7 +23,6 @@ namespace CardShopCoop.Modules.Grading
         private readonly Dictionary<GradeCardSubmitSet, Guid> _setIds = new();
         private readonly HashSet<int> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
 
@@ -42,18 +41,17 @@ namespace CardShopCoop.Modules.Grading
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _harmony != null)
             {
                 return;
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
                 _active = this;
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.grading.host");
                 GradingPatches.ApplyHost(_harmony);
@@ -66,7 +64,7 @@ namespace CardShopCoop.Modules.Grading
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -140,7 +138,7 @@ namespace CardShopCoop.Modules.Grading
 
         internal bool FullUpdate(int connectionId)
         {
-            if (_shutdown || !_context.InGame() || GradingWorldBridge.Current?.SceneReady != true)
+            if (_shutdown || !RuntimeContext.InGame() || GradingWorldBridge.Current?.SceneReady != true)
             {
                 return false;
             }
@@ -154,7 +152,7 @@ namespace CardShopCoop.Modules.Grading
             }
 
 
-            _context.Send(connectionId, BuildState(list));
+            RuntimeContext.Send(connectionId, BuildState(list));
             _baselinePending.Remove(connectionId);
             return true;
         }
@@ -175,7 +173,7 @@ namespace CardShopCoop.Modules.Grading
         /// <summary>Called by the vanilla day-start hook after job progress changed.</summary>
         internal void PushCurrentSets()
         {
-            if (_shutdown || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -507,7 +505,7 @@ namespace CardShopCoop.Modules.Grading
                 + connectionId + ": " + reason);
             if (actionId != Guid.Empty)
             {
-                ActionLedger.Rollback(_context, connectionId, actionId);
+                ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
             }
 
         }
@@ -563,7 +561,7 @@ namespace CardShopCoop.Modules.Grading
         private void BroadcastJobDelta(Guid actionId, Guid id, GradeCardSubmitSet set,
             bool removed)
         {
-            if (_shutdown || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -588,7 +586,7 @@ namespace CardShopCoop.Modules.Grading
                 }
 
             }
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private static List<CardData> CloneCards(List<CardData> cards)
@@ -634,7 +632,7 @@ namespace CardShopCoop.Modules.Grading
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
@@ -648,7 +646,6 @@ namespace CardShopCoop.Modules.Grading
             }
 
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

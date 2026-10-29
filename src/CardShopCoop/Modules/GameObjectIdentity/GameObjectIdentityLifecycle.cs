@@ -23,7 +23,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 return;
             }
 
-            _context?.Broadcast(new EntityAddedMessage
+            RuntimeContext.Broadcast(new EntityAddedMessage
             {
                 Descriptor = descriptor,
                 Adopted = adopted,
@@ -38,7 +38,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 return;
             }
 
-            _context?.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         internal void SendBaseline(PeerConnection connection)
@@ -75,7 +75,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 GameObjectIdentityBaselineContext.ConnectionId = 0;
             }
 
-            _context?.Send(connection.Id, new EntityBaselineMessage
+            RuntimeContext.Send(connection.Id, new EntityBaselineMessage
             {
                 BaselineId = 1,
                 Complete = true,

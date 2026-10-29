@@ -19,7 +19,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleCardDisplayRequest(MessageContext context, CardDisplayRequestMessage message)
         {
-            if (!_context.InGame() || !IsJoinPhaseSender(context) || message == null)
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message == null)
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -155,7 +155,7 @@ namespace CardShopCoop.Modules.World
         /// the in-flight guard because the handler publishes the prediction-stamped echo itself.</summary>
         private void PublishHostCardDisplay(InteractableCardCompartment compartment, bool occupied)
         {
-            if (_shutdown || _cardDisplayApplying || compartment == null || !_context.InGame()
+            if (_shutdown || _cardDisplayApplying || compartment == null || !RuntimeContext.InGame()
                 || !WorldCardDisplay.TryGetShelf(compartment, out var shelf, out var index))
             {
                 return;

@@ -14,7 +14,6 @@ namespace CardShopCoop.Modules.Deodorant
     {
         private const string PredictionScope = "deodorant.spray";
         private static DeodorantClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
         private bool _joined;
@@ -26,7 +25,6 @@ namespace CardShopCoop.Modules.Deodorant
                 return;
             }
 
-            _context = RuntimeContext;
             try
             {
                 _active = this;
@@ -43,7 +41,6 @@ namespace CardShopCoop.Modules.Deodorant
                     _active = null;
                 }
 
-                _context = null;
                 throw;
             }
         }
@@ -79,7 +76,6 @@ namespace CardShopCoop.Modules.Deodorant
             _harmony?.UnpatchSelf();
             _harmony = null;
             _joined = false;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -90,14 +86,14 @@ namespace CardShopCoop.Modules.Deodorant
         private void Forward(InteractionPlayerController controller, Vector3 position, float before,
             float after)
         {
-            if (!_joined || _context == null || !_context.InGame())
+            if (!_joined || !RuntimeContext.InGame())
             {
                 return;
             }
 
             ActionLedger.Submit(
                 PredictionScope,
-                actionId => _context.Send(1, new HandheldSprayIntentMessage
+                actionId => RuntimeContext.Send(1, new HandheldSprayIntentMessage
                 {
                     ActionId = actionId,
                     Position = position,
@@ -175,8 +171,8 @@ namespace CardShopCoop.Modules.Deodorant
             {
                 __state = default;
                 var active = _active;
-                if (active == null || !active._joined || active._context == null
-                    || !active._context.InGame())
+                if (active == null || !active._joined
+                    || !active.RuntimeContext.InGame())
                 {
                     return;
                 }

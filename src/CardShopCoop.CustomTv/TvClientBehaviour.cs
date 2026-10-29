@@ -21,7 +21,6 @@ namespace CardShopCoop.CustomTv
         private const byte Open = 7;
 
         private static TvClientBehaviour _active;
-        private ICoopContext _context;
         private Harmony _harmony;
         private bool _shutdown;
         private bool _joined;
@@ -33,7 +32,6 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            _context = Context;
             try
             {
                 ResetSessionState();
@@ -53,7 +51,6 @@ namespace CardShopCoop.CustomTv
                     _active = null;
                 }
                 ResetSessionState();
-                _context = null;
                 throw;
             }
         }
@@ -81,7 +78,7 @@ namespace CardShopCoop.CustomTv
 
         private void ApplyTvState(Component controller, TvState state, TvState previous)
         {
-            if (_shutdown || _context == null || !_context.InGame
+            if (_shutdown || !Context.InGame
                 || !TvInterop.Present || TvInterop.ApplyingRemote)
             {
                 return;
@@ -126,7 +123,6 @@ namespace CardShopCoop.CustomTv
             _harmony?.UnpatchSelf();
             _harmony = null;
             ResetSessionState();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -363,7 +359,7 @@ namespace CardShopCoop.CustomTv
         private static bool CanAct()
         {
             return _active != null && !_active._shutdown && _active._joined
-                && _active._context != null && _active._context.InGame && TvInterop.Present;
+                && _active.Context.InGame && TvInterop.Present;
         }
 
         private static void SendAction(byte op, string url = null, string title = null,
@@ -381,7 +377,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            _active._context.Send(_active._context.HostConnection, new TvOpMessage
+            _active.Context.Send(_active.Context.HostConnection, new TvOpMessage
             {
                 Tv = tv,
                 Op = op,

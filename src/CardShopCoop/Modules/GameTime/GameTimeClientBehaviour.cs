@@ -16,7 +16,6 @@ namespace CardShopCoop.Modules.GameTime
     public sealed class GameTimeClientBehaviour : CoopBehaviour
     {
         private static GameTimeClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private DayTimeMessage _pendingMessage;
         private bool _hasHostDay;
@@ -24,18 +23,17 @@ namespace CardShopCoop.Modules.GameTime
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _harmony != null)
             {
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
             _harmony = new Harmony("dev.meepen.cardshopcoop.game-time.client");
             _harmony.CreateClassProcessor(typeof(LightManagerReadyPatch)).Patch();
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
         }
 
         [MessageHandler]
@@ -106,7 +104,7 @@ namespace CardShopCoop.Modules.GameTime
 
         private void TryApplyPending()
         {
-            if (_shutdown || _pendingMessage == null || _context == null || !_context.InGame())
+            if (_shutdown || _pendingMessage == null || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -160,7 +158,7 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
@@ -171,7 +169,6 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             _pendingMessage = null;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

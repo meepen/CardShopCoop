@@ -14,7 +14,7 @@ namespace CardShopCoop.Modules.World
 
         internal void InstallPlacementHold()
         {
-            _placementHold = new PlacementHoldInteraction(true, _context.Broadcast, _context.Send);
+            _placementHold = new PlacementHoldInteraction(true, RuntimeContext.Broadcast, RuntimeContext.Send);
             _harmony.CreateClassProcessor(typeof(PlacementHoldStartPatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlacementHoldRotatePatch)).Patch();
             _harmony.CreateClassProcessor(typeof(PlacementHoldFlipPatch)).Patch();
@@ -35,7 +35,7 @@ namespace CardShopCoop.Modules.World
         private void HandlePlacementHoldBegin(MessageContext context,
             PlacementHoldBeginRequestMessage message)
         {
-            if (message == null || _placementHold == null || !_context.InGame()
+            if (message == null || _placementHold == null || !RuntimeContext.InGame()
                 || !IsJoinPhaseSender(context))
             {
                 return;
@@ -54,7 +54,7 @@ namespace CardShopCoop.Modules.World
                 // The host is an observer of a client's hold too, so render it here as well as
                 // broadcasting to the other peers.
                 _placementHold.ApplyBegin(granted);
-                _context.Broadcast(granted);
+                RuntimeContext.Broadcast(granted);
             }
             else
             {
@@ -68,7 +68,7 @@ namespace CardShopCoop.Modules.World
         private void HandlePlacementHoldEnd(MessageContext context,
             PlacementHoldEndRequestMessage message)
         {
-            if (message == null || _placementHold == null || !_context.InGame()
+            if (message == null || _placementHold == null || !RuntimeContext.InGame()
                 || !IsJoinPhaseSender(context))
             {
                 return;
@@ -86,7 +86,7 @@ namespace CardShopCoop.Modules.World
                 // The host rendered this client's hold when it granted it, so it must stop that
                 // local render as well as telling the peers.
                 _placementHold.ApplyEnd(message.Entity);
-                _context.Broadcast(new PlacementHoldEndMessage { Entity = message.Entity });
+                RuntimeContext.Broadcast(new PlacementHoldEndMessage { Entity = message.Entity });
             }
         }
 
@@ -103,7 +103,7 @@ namespace CardShopCoop.Modules.World
         private void HandlePlacementHoldRotation(MessageContext context,
             PlacementHoldRotationRequestMessage message)
         {
-            if (message == null || _placementHold == null || !_context.InGame()
+            if (message == null || _placementHold == null || !RuntimeContext.InGame()
                 || !IsJoinPhaseSender(context))
             {
                 return;
@@ -132,14 +132,14 @@ namespace CardShopCoop.Modules.World
                 Rotation = message.Rotation,
             };
             _placementHold.ApplyRotation(rotation);
-            _context.Broadcast(rotation);
+            RuntimeContext.Broadcast(rotation);
         }
 
         [MessageHandler]
         private void HandlePlacementHoldState(MessageContext context,
             PlacementHoldStateRequestMessage message)
         {
-            if (message == null || _placementHold == null || !_context.InGame()
+            if (message == null || _placementHold == null || !RuntimeContext.InGame()
                 || !IsJoinPhaseSender(context))
             {
                 return;
@@ -167,7 +167,7 @@ namespace CardShopCoop.Modules.World
                 IsFlipped = message.IsFlipped,
             };
             _placementHold.ApplyState(state);
-            _context.Broadcast(state);
+            RuntimeContext.Broadcast(state);
         }
 
         /// <summary>Observes the host entering placement move mode. Vanilla <c>StartMoveObject</c>

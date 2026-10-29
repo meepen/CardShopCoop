@@ -27,7 +27,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleCardDelta(MessageContext context, CardDeltaRequestMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context))
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
                 ExecuteWorldCommand(context, message, () =>
                     _cardInteraction != null
@@ -42,7 +42,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleCardDeltaBatch(MessageContext context, CardDeltaBatchRequestMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context))
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
                 ExecuteWorldCommand(context, message, ()
                     => ApplyCardDeltaBatchCommand(context, message));
@@ -56,7 +56,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleGradedRemove(MessageContext context, GradedRemoveRequestMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context))
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
                 ExecuteWorldCommand(context, message, ()
                     => ApplyGradedRemoveCommand(context, message));
@@ -79,7 +79,7 @@ namespace CardShopCoop.Modules.World
         private IntentValidation ValidateEmptyBoxIntent(CoopMessageContext context,
             InteractableObject container, bool take)
         {
-            if (_context == null || !_context.InGame() || context?.Connection == null)
+            if (!RuntimeContext.InGame() || context?.Connection == null)
             {
                 return IntentValidation.Deny("session is not active");
             }
@@ -105,7 +105,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleEmptyBoxTake(MessageContext context, EmptyBoxTakeIntent message)
         {
-            if (!_context.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -117,7 +117,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleEmptyBoxStore(MessageContext context, EmptyBoxStoreIntent message)
         {
-            if (!_context.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -129,7 +129,7 @@ namespace CardShopCoop.Modules.World
         private IntentValidation ValidateContainerCommand(CoopMessageContext context,
             InteractableObject container)
         {
-            if (_context == null || !_context.InGame() || context?.Connection == null)
+            if (!RuntimeContext.InGame() || context?.Connection == null)
             {
                 return IntentValidation.Deny("session is not active");
             }
@@ -178,7 +178,7 @@ namespace CardShopCoop.Modules.World
 
         private void ApplyContainerIntent(MessageContext context, ContainerIntent intent)
         {
-            if (!_context.InGame() || !IsJoinPhaseSender(context) || intent?.Container == null)
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || intent?.Container == null)
             {
                 RejectWorldIntent(context, intent);
                 return;

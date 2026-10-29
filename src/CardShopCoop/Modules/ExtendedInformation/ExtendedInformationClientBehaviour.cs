@@ -8,18 +8,6 @@ namespace CardShopCoop.Modules.ExtendedInformation
     [ClientBehaviour]
     public sealed class ExtendedInformationClientBehaviour : CoopBehaviour
     {
-        private CoopRuntimeContext _context;
-
-        private void OnEnable()
-        {
-            _context = RuntimeContext;
-        }
-
-        private void OnDisable()
-        {
-            _context = null;
-        }
-
         [MessageHandler]
         private void HandleSet(MessageContext context, ExtendedInformationSetMessage message)
             => ExtendedInformationModule.ClientHandleSet(message);

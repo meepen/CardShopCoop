@@ -638,7 +638,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         private readonly Dictionary<Guid, Preview> _previews = new();
         private readonly Dictionary<InteractableObject, DecorationPose> _moveOrigins =
             new(ReferenceComparer.Instance);
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private InteractableObject _placing;
         private bool _placingWasBound;
@@ -664,7 +663,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 return;
             }
 
-            _context = RuntimeContext;
             Active = this;
             _suppress = 0;
             ActionLedger.ActionSettled += OnActionSettled;
@@ -696,7 +694,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         }
 
         private bool CanPredict()
-            => !_shutdown && _joined && _context != null && _context.InGame()
+            => !_shutdown && _joined && RuntimeContext.InGame()
                 && ActionLedger.IsActive && !ActionLedger.IsReconciling && !ActionLedger.IsApplying
                 && _suppress == 0 && DecorationInterop.IsSceneReady();
 
@@ -745,7 +743,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
 
         private void TryPrune()
         {
-            if (!_prunePending || _context == null || !_context.InGame()
+            if (!_prunePending || !RuntimeContext.InGame()
                 || !DecorationInterop.IsSceneReady())
             {
                 return;
@@ -802,7 +800,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             _placing = null;
             _joined = false;
             _suppress = 0;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -835,7 +832,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                     _previews[actionId] = preview;
                 }
 
-                _context.Send(1, message);
+                RuntimeContext.Send(1, message);
             }, apply, undo);
         }
 

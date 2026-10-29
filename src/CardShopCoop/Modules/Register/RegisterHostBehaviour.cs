@@ -16,7 +16,6 @@ namespace CardShopCoop.Modules.Register
     public sealed partial class RegisterHostBehaviour : CoopBehaviour
     {
         private static RegisterHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
 
@@ -29,7 +28,6 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             _harmony = new Harmony("dev.meepen.cardshopcoop.register.host");
             RegisterHooks.PatchHost(_harmony);

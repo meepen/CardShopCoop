@@ -18,7 +18,6 @@ namespace CardShopCoop.Modules.Expansion
     {
         private static ExpansionClientBehaviour _active;
         private static int _applyingPrediction;
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
         private bool _joined;
@@ -35,11 +34,10 @@ namespace CardShopCoop.Modules.Expansion
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -56,7 +54,7 @@ namespace CardShopCoop.Modules.Expansion
                 _harmony = null;
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
                 if (ReferenceEquals(_active, this))
                 {
@@ -64,7 +62,6 @@ namespace CardShopCoop.Modules.Expansion
                 }
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
-                _context = null;
                 throw;
             }
         }
@@ -123,7 +120,7 @@ namespace CardShopCoop.Modules.Expansion
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
@@ -136,7 +133,6 @@ namespace CardShopCoop.Modules.Expansion
             ClearPendingDeltas();
             _baselineNeedsManagerInitialization = false;
             _joined = false;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -164,7 +160,7 @@ namespace CardShopCoop.Modules.Expansion
 
         private void ApplyLatestState()
         {
-            if (_shutdown || !_joined || !_context.InGame() || ExpansionInterop.ApplyingAuthoritativeState)
+            if (_shutdown || !_joined || !RuntimeContext.InGame() || ExpansionInterop.ApplyingAuthoritativeState)
             {
                 return;
             }
@@ -255,8 +251,8 @@ namespace CardShopCoop.Modules.Expansion
         private static PurchaseCapture Capture(float totalCost, int index, bool isShopB)
         {
             var client = _active;
-            if (client == null || client._shutdown || !client._joined || client._context == null
-                || !client._context.InGame() || _applyingPrediction != 0
+            if (client == null || client._shutdown || !client._joined
+                || !client.RuntimeContext.InGame() || _applyingPrediction != 0
                 || ExpansionInterop.ApplyingAuthoritativeState)
             {
                 return null;
@@ -281,8 +277,8 @@ namespace CardShopCoop.Modules.Expansion
         private static void Observe(PurchaseCapture capture, byte kind, Action replay)
         {
             var client = _active;
-            if (client == null || !client._joined || client._context == null
-                || !client._context.InGame())
+            if (client == null || !client._joined
+                || !client.RuntimeContext.InGame())
             {
                 return;
             }
@@ -292,7 +288,7 @@ namespace CardShopCoop.Modules.Expansion
                 + CPlayerData.m_UnlockWarehouseRoomCount + " unlocked="
                 + CPlayerData.m_IsWarehouseRoomUnlocked + ".");
             ActionLedger.Submit("expansion:" + kind,
-                id => client._context.Send(1, new ExpansionPurchaseMessage
+                id => client.RuntimeContext.Send(1, new ExpansionPurchaseMessage
                 {
                     ActionId = id,
                     Kind = kind,

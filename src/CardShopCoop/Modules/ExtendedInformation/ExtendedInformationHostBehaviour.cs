@@ -10,18 +10,6 @@ namespace CardShopCoop.Modules.ExtendedInformation
     [ServerBehaviour]
     public sealed class ExtendedInformationHostBehaviour : CoopBehaviour
     {
-        private CoopRuntimeContext _context;
-
-        private void OnEnable()
-        {
-            _context = RuntimeContext;
-        }
-
-        private void OnDisable()
-        {
-            _context = null;
-        }
-
         [MessageHandler]
         private void HandleIntent(MessageContext context, ExtendedInformationIntentMessage message)
             => ExtendedInformationModule.HostHandleIntent(message);
@@ -34,7 +22,7 @@ namespace CardShopCoop.Modules.ExtendedInformation
                 return;
             }
 
-            _context.Send(connection.Id, ExtendedInformationModule.BuildBaseline());
+            RuntimeContext.Send(connection.Id, ExtendedInformationModule.BuildBaseline());
         }
     }
 }

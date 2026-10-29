@@ -30,7 +30,6 @@ namespace CardShopCoop.Modules.Report
         private const int NextDayAutoContinueSeconds = 30;
 
         private static ReportHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private bool _shutdown;
         private readonly HashSet<int> _nextDayParticipants = new();
@@ -49,11 +48,10 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.report.host");
@@ -72,7 +70,7 @@ namespace CardShopCoop.Modules.Report
                 _harmony = null;
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -80,7 +78,6 @@ namespace CardShopCoop.Modules.Report
                     _active = null;
                 }
 
-                _context = null;
                 throw;
             }
         }
@@ -106,12 +103,12 @@ namespace CardShopCoop.Modules.Report
                 BroadcastNextDayWait();
             }
 
-            if (!_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 return;
             }
 
-            _context.Send(connection.Id, BuildFullState());
+            RuntimeContext.Send(connection.Id, BuildFullState());
         }
 
         [OnClientDisconnected]
@@ -151,7 +148,7 @@ namespace CardShopCoop.Modules.Report
         [MessageHandler]
         private void HandleNextDayReady(MessageContext context, ReportNextDayReadyMessage message)
         {
-            if (_shutdown || _nextDayAdvancing || !_context.InGame() || context?.Connection == null)
+            if (_shutdown || _nextDayAdvancing || !RuntimeContext.InGame() || context?.Connection == null)
             {
                 return;
             }
@@ -188,7 +185,7 @@ namespace CardShopCoop.Modules.Report
         /// deadline fires while players are still pending.</summary>
         private bool HostPressNextDay()
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return true;
             }
@@ -267,7 +264,7 @@ namespace CardShopCoop.Modules.Report
             yield return new WaitForSeconds(NextDayAutoContinueSeconds);
             _nextDayCountdown = null;
             if (_shutdown || _nextDayAdvancing || !_nextDayGateActive
-                || _context == null || !_context.InGame())
+                || !RuntimeContext.InGame())
             {
                 yield break;
             }
@@ -346,7 +343,7 @@ namespace CardShopCoop.Modules.Report
 
         private void BroadcastNextDayWait()
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -366,7 +363,7 @@ namespace CardShopCoop.Modules.Report
             var showHostWait = _nextDayGateActive && pending.Count > 0;
             HudApi.SetNextDayWait(showHostWait,
                 showHostWait ? "Waiting for: " + string.Join(", ", pending) : "", countdown);
-            _context.Broadcast(new ReportNextDayWaitMessage
+            RuntimeContext.Broadcast(new ReportNextDayWaitMessage
             {
                 Active = _nextDayGateActive,
                 Pending = pending,
@@ -389,7 +386,7 @@ namespace CardShopCoop.Modules.Report
                     continue;
                 }
 
-                var name = _context.PeerName?.Invoke(id);
+                var name = RuntimeContext.PeerName?.Invoke(id);
                 pending.Add(string.IsNullOrWhiteSpace(name) ? "Player " + id : name);
             }
 
@@ -411,12 +408,12 @@ namespace CardShopCoop.Modules.Report
 
         private void Publish(ReportStateMessage message)
         {
-            if (_shutdown || message == null || !_context.InGame())
+            if (_shutdown || message == null || !RuntimeContext.InGame())
             {
                 return;
             }
 
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private static ReportStateMessage BuildState(GameReportDataCollect report, int index,
@@ -499,7 +496,7 @@ namespace CardShopCoop.Modules.Report
         private static bool IsHostActive()
         {
             return _active != null && !_active._shutdown
-                && _active._context.InGame();
+                && _active.RuntimeContext.InGame();
         }
 
         private static void ReportOpened()
@@ -577,12 +574,12 @@ namespace CardShopCoop.Modules.Report
 
         private void PublishDelta(ReportStateMessage source, int kind)
         {
-            if (_shutdown || source == null || !_context.InGame())
+            if (_shutdown || source == null || !RuntimeContext.InGame())
             {
                 return;
             }
 
-            _context.Broadcast(ToDelta(source, kind));
+            RuntimeContext.Broadcast(ToDelta(source, kind));
         }
 
         private static ReportDeltaMessage ToDelta(ReportStateMessage source, int kind)
@@ -627,7 +624,7 @@ namespace CardShopCoop.Modules.Report
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _harmony?.UnpatchSelf();
             _harmony = null;
             if (ReferenceEquals(_active, this))
@@ -643,7 +640,6 @@ namespace CardShopCoop.Modules.Report
             _nextDayAdvancing = false;
             StopNextDayCountdown();
             HudApi.SetNextDayWait(false, "");
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

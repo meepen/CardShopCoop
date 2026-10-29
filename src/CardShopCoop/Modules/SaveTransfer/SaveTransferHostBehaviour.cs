@@ -68,12 +68,11 @@ namespace CardShopCoop.Modules.SaveTransfer
         // deadline is armed once at authorization and not refreshed per chunk, so it is the whole
         // transfer's budget: 1200 s is ~2 Mbit/s for a 256 MiB payload.
         private const float CompletionDeadlineSeconds = 1200f;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || ReferenceEquals(_active, this))
             {
                 return;
             }
@@ -82,8 +81,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 throw new InvalidOperationException("A save-transfer host owner is already active.");
             }
             _active = this;
-            _context = RuntimeContext;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
         }
 
         private void Update()
@@ -127,7 +125,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 var connectionId = expired[i];
                 var reason = "world transfer completion timed out for connection " + connectionId;
                 CoopPlugin.Log.LogWarning("coop: " + reason);
-                _context.Disconnect?.Invoke(connectionId,
+                RuntimeContext.Disconnect?.Invoke(connectionId,
                     new DisconnectInfo(reason, false, "transfer_timeout", true,
                         ConnectionState.Transferring));
             }
@@ -390,7 +388,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
             CoopPlugin.Log.LogWarning("coop: client rejected world transfer for connection "
                 + connectionId + ": " + reason);
-            _context.Disconnect?.Invoke(connectionId,
+            RuntimeContext.Disconnect?.Invoke(connectionId,
                 new DisconnectInfo("client rejected world transfer: " + reason, true,
                     "transfer_failed", false, ConnectionState.Transferring));
         }
@@ -427,7 +425,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 throw new InvalidOperationException("world transfer session ended before send");
             }
 
-            owner._context.Send(target.Id, message);
+            owner.RuntimeContext.Send(target.Id, message);
         }
 
         private static void SendHandshakeOffer(SaveTransferHostBehaviour owner,
@@ -494,12 +492,11 @@ namespace CardShopCoop.Modules.SaveTransfer
                 _aborted.Clear();
                 _completionDeadlines.Clear();
             }
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
             }
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

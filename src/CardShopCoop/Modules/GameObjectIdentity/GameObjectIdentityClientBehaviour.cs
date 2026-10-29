@@ -16,11 +16,9 @@ namespace CardShopCoop.Modules.GameObjectIdentity
         }
 
         private readonly Dictionary<GameObjectId, EntityDescriptor> _pending = new();
-        private CoopRuntimeContext _context;
 
         private void OnEnable()
         {
-            _context = RuntimeContext;
             Active = this;
             SceneManager.sceneLoaded += OnSceneLoaded;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -36,7 +34,6 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             _pending.Clear();
-            _context = null;
         }
 
         internal void QueuePending(EntityDescriptor descriptor)
@@ -101,7 +98,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             // Materializing a descriptor there would call RestockManager.SpawnPackageBoxItem
             // outside a game session and fabricate a persistent (singleton)RestockManager. Only
             // retry while this is the live client and the world is actually in game.
-            if (_context == null || CoopCore.Role != CoopRole.Client || !_context.InGame())
+            if (CoopCore.Role != CoopRole.Client || !RuntimeContext.InGame())
             {
                 return;
             }

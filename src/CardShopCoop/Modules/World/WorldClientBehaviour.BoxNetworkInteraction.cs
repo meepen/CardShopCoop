@@ -100,7 +100,7 @@ namespace CardShopCoop.Modules.World
             => _instance?._playerBoxInteraction?.ForgetDestroyed(id);
 
         internal static bool IsPreloadHeld
-            => _instance?._context?.PreloadHold?.Invoke() == true;
+            => _instance?.RuntimeContext.PreloadHold?.Invoke() == true;
 
         /// <summary>Client: pre-assign the ids for the boxes a checkout's vanilla delivery queue
         /// will spawn and register them for the creating intent.</summary>

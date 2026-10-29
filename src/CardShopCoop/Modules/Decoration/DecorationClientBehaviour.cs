@@ -15,7 +15,6 @@ namespace CardShopCoop.Modules.Decoration
     public sealed class DecorationClientBehaviour : CoopBehaviour
     {
         private static DecorationClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private Harmony _harmony;
         private DecorationStateMessage _pendingState;
         private bool _shutdown;
@@ -30,14 +29,13 @@ namespace CardShopCoop.Modules.Decoration
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             var lifecycle = false;
             try
             {
                 ResetSessionState();
                 DecorationInterop.Reset();
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -60,7 +58,7 @@ namespace CardShopCoop.Modules.Decoration
                 }
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -72,7 +70,6 @@ namespace CardShopCoop.Modules.Decoration
 
                 ResetSessionState();
                 DecorationInterop.Reset();
-                _context = null;
                 throw;
             }
         }
@@ -127,7 +124,7 @@ namespace CardShopCoop.Modules.Decoration
 
         private void TryApplyPending()
         {
-            if (_shutdown || _context == null || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || !DecorationInterop.IsSceneReady() || _pendingState == null)
             {
                 return;
@@ -153,8 +150,8 @@ namespace CardShopCoop.Modules.Decoration
         private static void Predict(DecorationIntentMessage message, Action apply, Action undo)
         {
             var client = _active;
-            if (client == null || client._shutdown || !client._joined || client._context == null
-                || !client._context.InGame() || !ActionLedger.IsActive
+            if (client == null || client._shutdown || !client._joined
+                || !client.RuntimeContext.InGame() || !ActionLedger.IsActive
                 || ActionLedger.IsReconciling)
             {
                 return;
@@ -165,7 +162,7 @@ namespace CardShopCoop.Modules.Decoration
                 actionId =>
                 {
                     message.ActionId = actionId;
-                    client._context.Send(1, message);
+                    client.RuntimeContext.Send(1, message);
                 }, apply, undo);
         }
 
@@ -257,7 +254,7 @@ namespace CardShopCoop.Modules.Decoration
 
         private static bool IsClientReady()
             => _active != null && !_active._shutdown && _active._joined
-                && _active._context != null && _active._context.InGame();
+                && _active.RuntimeContext.InGame();
 
         private void ResetSessionState()
         {
@@ -292,7 +289,7 @@ namespace CardShopCoop.Modules.Decoration
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _harmony?.UnpatchSelf();
@@ -305,7 +302,6 @@ namespace CardShopCoop.Modules.Decoration
 
             ResetSessionState();
             DecorationInterop.Reset();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -416,8 +412,8 @@ namespace CardShopCoop.Modules.Decoration
 
 
             var client = _active;
-            if (client == null || client._shutdown || !client._joined || client._context == null
-                || !client._context.InGame())
+            if (client == null || client._shutdown || !client._joined
+                || !client.RuntimeContext.InGame())
             {
                 return;
             }
