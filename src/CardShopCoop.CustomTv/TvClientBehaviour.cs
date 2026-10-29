@@ -46,7 +46,11 @@ namespace CardShopCoop.CustomTv
         }
 
         [OnFullyJoined]
-        private void MarkJoined(PeerConnection _) => _joined = true;
+        private void MarkJoined(PeerConnection _)
+        {
+            _joined = true;
+            ApplyStoredStates();
+        }
 
         [ExtendedInformationHandler]
         private void OnTvState(InteractableObject tv, InformationChange<TvState> change)
@@ -71,6 +75,12 @@ namespace CardShopCoop.CustomTv
             if (_shutdown || !Context.InGame
                 || !TvInterop.Present || TvInterop.ApplyingRemote)
             {
+                if (state != null)
+                {
+                    CoopLog.Info("[tv] defer state source=" + (state.SourceUrl ?? "<null>")
+                        + " op=" + state.Operation + " inGame=" + Context.InGame);
+                }
+
                 return;
             }
 
@@ -79,6 +89,9 @@ namespace CardShopCoop.CustomTv
             {
                 return;
             }
+
+            CoopLog.Info("[tv] apply state source=" + (state.SourceUrl ?? "<null>")
+                + " op=" + state.Operation + " gen=" + state.Generation);
 
             TvInterop.BeginFocus(controller);
             try
@@ -270,7 +283,44 @@ namespace CardShopCoop.CustomTv
         }
 
         private static void ControllerLifecyclePostfix(object __instance)
-            => TvInterop.RegisterController(__instance as Component);
+        {
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            _active?.OnControllerReady(controller);
+        }
+
+        private void OnControllerReady(Component controller)
+        {
+            if (_shutdown || !_joined || !Context.InGame)
+            {
+                return;
+            }
+
+            ApplyStoredState(controller);
+        }
+
+        private void ApplyStoredStates()
+        {
+            if (_shutdown || !Context.InGame)
+            {
+                return;
+            }
+
+            foreach (var controller in TvInterop.Controllers())
+            {
+                ApplyStoredState(controller);
+            }
+        }
+
+        private void ApplyStoredState(Component controller)
+        {
+            var owner = TvInterop.OwnerOf(controller);
+            var state = owner?.GetExtendedInformation<TvState>();
+            if (state != null)
+            {
+                ApplyTvState(controller, state, null);
+            }
+        }
 
         private static void ChangeToUrlPostfix(object __instance, string url, string title)
         {

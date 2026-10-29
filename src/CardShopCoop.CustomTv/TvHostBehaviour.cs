@@ -420,6 +420,8 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
+            CoopLog.Info("[tv] host state source=" + (snapshot.SourceUrl ?? "<null>")
+                + " op=" + snapshot.Operation + " action=" + snapshot.ActionId);
             TvInterop.OwnerOf(controller)?.SetExtendedInformation(snapshot);
         }
 
