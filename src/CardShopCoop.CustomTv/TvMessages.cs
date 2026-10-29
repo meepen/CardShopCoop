@@ -28,8 +28,29 @@ namespace CardShopCoop.CustomTv
         [NonSerialized]
         internal double UndoSeek;
 
+        /// <summary>Set on the host when the operation was refused without changing the TV.
+        /// The host then publishes the current state with <see cref="TvState.Rejected"/>.</summary>
+        [NonSerialized]
+        internal bool Rejected;
+
         public override void OnApply()
-            => TvInterop.ApplyOp(Tv, Op, Url, Title, Value);
+        {
+            try
+            {
+                TvInterop.ApplyOp(Tv, Op, Url, Title, Value);
+            }
+            catch (InvalidOperationException)
+            {
+                var controller = TvInterop.ControllerFor(Tv);
+                if (!TvInterop.Present || controller == null
+                    || TvInterop.OwnerOf(controller)?.GetExtendedInformation<TvState>() == null)
+                {
+                    throw;
+                }
+
+                Rejected = true;
+            }
+        }
 
         public override void OnUndo()
         {

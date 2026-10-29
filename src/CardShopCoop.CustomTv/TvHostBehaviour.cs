@@ -61,6 +61,28 @@ namespace CardShopCoop.CustomTv
             _initialized = true;
         }
 
+        [IntentValidator]
+        private IntentValidation ValidateOperation(CoopMessageContext context, TvOpMessage message)
+        {
+            if (message?.Tv == null || !TvInterop.Present
+                || TvInterop.ControllerFor(message.Tv) == null)
+            {
+                return IntentValidation.Deny("TV is not available");
+            }
+
+            return IntentValidation.Allow();
+        }
+
+        [IntentRejected]
+        private void RejectOperation(CoopMessageContext context, TvOpMessage message, string reason)
+        {
+            var controller = message == null ? null : TvInterop.ControllerFor(message.Tv);
+            if (controller != null)
+            {
+                PublishRejected(controller, message.ActionId);
+            }
+        }
+
         [MessageHandler]
         private void HandleOperation(CoopMessageContext context, TvOpMessage message)
         {
@@ -77,14 +99,33 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
+            if (message.Rejected)
+            {
+                PublishRejected(controller, message.ActionId);
+                return;
+            }
+
             var operation = message.Op == Next ? TvStateOperations.Next
                 : message.Op == Previous ? TvStateOperations.Previous
                 : message.Op == Open ? TvStateOperations.Open
                 : ScalarOperation(message.Op);
             var mediaOperation = message.Op == Next || message.Op == Previous
                 || message.Op == Open;
-            if (CaptureHostState(controller, operation, message.ActionId, mediaOperation,
-                out var snapshot) && snapshot != null)
+            CaptureHostState(controller, operation, message.ActionId, mediaOperation,
+                out var snapshot);
+            if (snapshot == null)
+            {
+                // Confirm the action even when the current state cannot be captured from the
+                // controller; otherwise the sender's action stays pending on that TV.
+                var previous = TvInterop.OwnerOf(controller)?.GetExtendedInformation<TvState>();
+                if (previous != null)
+                {
+                    snapshot = CopyState(previous, operation, message.ActionId,
+                        previous.Barrier, false);
+                }
+            }
+
+            if (snapshot != null)
             {
                 PublishState(controller, snapshot);
             }
@@ -248,9 +289,10 @@ namespace CardShopCoop.CustomTv
         }
 
         private static TvState CopyState(TvState source, byte operation, Guid actionId,
-            bool barrier, bool resume)
+            bool barrier, bool resume, bool rejected = false)
             => new TvState
             {
+                Rejected = rejected,
                 SourceUrl = source.SourceUrl,
                 StreamUrl = source.StreamUrl,
                 StreamTitle = source.StreamTitle,
@@ -312,6 +354,21 @@ namespace CardShopCoop.CustomTv
             }
 
             TvInterop.OwnerOf(controller)?.SetExtendedInformation(snapshot);
+        }
+
+        /// <summary>Publishes the TV's current state as the authoritative answer to a rejected
+        /// action. The sender's ledger undoes its prediction, applies this value, and replays any
+        /// newer pending action on the same TV.</summary>
+        private void PublishRejected(Component controller, Guid actionId)
+        {
+            var previous = TvInterop.OwnerOf(controller)?.GetExtendedInformation<TvState>();
+            if (previous == null)
+            {
+                return;
+            }
+
+            PublishState(controller, CopyState(previous, previous.Operation, actionId,
+                previous.Barrier, false, rejected: true));
         }
 
         private static byte ScalarOperation(byte operation)
