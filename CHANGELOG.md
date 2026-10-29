@@ -4,7 +4,7 @@
 
 - Fixed: Lag when loading a new save or joining a world with certain mods.
 - Fixed: The co-op window showing "Connected" before the join handshake finished.
-- Fixed: Shared TV controls not working with the latest RTCGO Custom TV.
+- Fixed: Shared TV controls not working with the latest RTCGO Custom TV, especially with more than one TV.
 - Fixed: False Harmony warnings in the log at startup.
 - Fixed: An error in the log when quitting the game during a co-op session.
 

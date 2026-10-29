@@ -20,12 +20,13 @@ namespace CardShopCoop.CustomTv
     }
 
     /// <summary>
-    /// One immutable snapshot of the shared TV. The host publishes it through
-    /// <see cref="Global{T}"/>; the operation and action id identify which client action (if
-    /// any) produced this snapshot so the client can confirm or roll back its action.
+    /// One immutable snapshot of one TV. It is extended information owned by the TV's
+    /// <see cref="InteractableObject"/>, so the identity module replicates it per TV with the
+    /// same stable id on both peers. The operation and action id identify which client action
+    /// (if any) produced this snapshot so the client can confirm or roll back its action.
     /// </summary>
-    [GlobalInformation]
-    public sealed class TvState
+    [HostOnlyInformation]
+    public sealed class TvState : ExtendGameObjectInformation<InteractableObject>, IActionValue
     {
         public string SourceUrl
         {
@@ -88,6 +89,10 @@ namespace CardShopCoop.CustomTv
             get; init;
         }
         public Guid ActionId
+        {
+            get; init;
+        }
+        public bool Rejected
         {
             get; init;
         }

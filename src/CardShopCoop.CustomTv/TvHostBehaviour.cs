@@ -2,7 +2,6 @@ using System;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
-using CardShopCoop.Net.Connection;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -26,25 +25,6 @@ namespace CardShopCoop.CustomTv
         private Harmony _harmony;
         private bool _shutdown;
         private float _lastSeekInputTime;
-        private bool _hasHostState;
-        private string _lastUrl;
-        private string _lastSource;
-        private string _lastTitle;
-        private string _lastPlaylist;
-        private bool _lastLive;
-        private bool _lastSegmented;
-        private bool _lastPaused;
-        private bool _lastPowered;
-        private bool _lastShuffle;
-        private int _lastPlaylistIndex;
-        private double _lastPosition;
-        private bool _barrier;
-        private bool _resumePulse;
-        private int _generation;
-        private bool _hasPendingMediaOperation;
-        private byte _pendingMediaOperation;
-        private Guid _pendingMediaActionId;
-        private bool _statePublished;
 
         private void OnEnable()
         {
@@ -61,7 +41,14 @@ namespace CardShopCoop.CustomTv
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.tv.host.runtime");
                 ApplyPatches(_harmony);
-                OnControllerLifecycle();
+
+                // A TV created before the host module was installed never ran a patched
+                // lifecycle method. Write its current state once so the EIM store has the entry
+                // that the normal join baseline will carry to clients.
+                foreach (var controller in TvInterop.Controllers())
+                {
+                    OnControllerLifecycle(controller);
+                }
             }
             catch (Exception exception)
             {
@@ -79,56 +66,33 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        [OnClientJoined]
-        private void PublishStateForJoin(PeerConnection connection)
-        {
-            if (_statePublished || !TvInterop.Present)
-            {
-                return;
-            }
-
-            CaptureHostState(false);
-            PublishState(TvStateOperations.Open, Guid.Empty);
-        }
-
         [MessageHandler]
         private void HandleOperation(CoopMessageContext context, TvOpMessage message)
         {
-            if (_shutdown || message == null || !IsJoinedClient(context) || !TvInterop.Present
-                || message.Op < Next || message.Op > Open)
+            if (_shutdown || message == null || !TvInterop.Present)
             {
                 return;
             }
 
-            var mediaOperation = message.Op == Next || message.Op == Previous || message.Op == Open;
-            if (mediaOperation)
-            {
-                if (!TryBeginPendingMediaOperation(message.Op, message.ActionId))
-                {
-                    ActionRuntime.Rollback(_context, context.Connection.Id, message.ActionId);
-                    return;
-                }
-            }
-
-            var pendingOperation = mediaOperation ? _pendingMediaOperation : (byte)0;
-            var pendingActionId = mediaOperation ? _pendingMediaActionId : Guid.Empty;
-            var applied = TvInterop.ApplyOperation(message.Op, message.Url, message.Title, message.Value);
-            if (!applied)
-            {
-                ActionRuntime.Rollback(_context, context.Connection.Id, message.ActionId);
-                if (mediaOperation)
-                {
-                    ClearPendingMediaOperation(pendingOperation, pendingActionId);
-                }
-                return;
-            }
-
-            if (mediaOperation)
+            // OnApply already performed the command. Publish the resulting state under the
+            // action id; the EIM IActionValue wrapper retires or reverses the sender's action.
+            var controller = TvInterop.ControllerFor(message.Tv);
+            if (controller == null)
             {
                 return;
             }
 
-            PublishScalarDelta(message.Op, message.ActionId);
+            var operation = message.Op == Next ? TvStateOperations.Next
+                : message.Op == Previous ? TvStateOperations.Previous
+                : message.Op == Open ? TvStateOperations.Open
+                : ScalarOperation(message.Op);
+            var mediaOperation = message.Op == Next || message.Op == Previous
+                || message.Op == Open;
+            if (CaptureHostState(controller, operation, message.ActionId, mediaOperation,
+                out var snapshot) && snapshot != null)
+            {
+                PublishState(controller, snapshot);
+            }
         }
 
         internal void Shutdown()
@@ -156,197 +120,198 @@ namespace CardShopCoop.CustomTv
         {
             TvInterop.ResetSession();
             _lastSeekInputTime = -0.25f;
-            _hasHostState = false;
-            _lastUrl = null;
-            _lastSource = null;
-            _lastTitle = null;
-            _lastPlaylist = null;
-            _lastLive = false;
-            _lastSegmented = false;
-            _lastPaused = false;
-            _lastPowered = false;
-            _lastShuffle = false;
-            _lastPlaylistIndex = 0;
-            _lastPosition = 0.0;
-            _barrier = false;
-            _resumePulse = false;
-            _generation = 0;
-            _statePublished = false;
-            ClearPendingMediaOperation();
-        }
-
-        private static bool IsJoinedClient(CoopMessageContext context)
-        {
-            return context?.Connection != null
-                && (context.Connection.State == ConnectionState.Transferring
-                    || context.Connection.State == ConnectionState.FullyJoined)
-                && (context.Sender == null || !context.Sender.IsHost);
         }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
-        {
-            TvInterop.NotifySceneLoaded();
-            _hasHostState = false;
-            _lastSource = null;
-            _lastUrl = null;
-            _lastTitle = null;
-            _lastPlaylist = null;
-            _barrier = false;
-            _resumePulse = false;
-            _generation++;
-            _statePublished = false;
-            ClearPendingMediaOperation();
-            OnControllerLifecycle();
-        }
+            => TvInterop.NotifySceneLoaded();
 
-        private void OnControllerLifecycle()
+        private void OnControllerLifecycle(Component controller)
         {
             if (!TvInterop.Present)
             {
                 return;
             }
 
-            TvInterop.AttachVideoErrorHandler(OnHostVideoError);
-            if (CaptureHostState(false) && !string.IsNullOrEmpty(_lastSource))
+            controller ??= TvInterop.CurrentController;
+            if (controller == null || TvInterop.ApplyingRemote)
             {
-                PublishMediaDelta(TvStateOperations.Open, Guid.Empty, true);
+                return;
+            }
+
+            // Attach to the TV that actually owns this VideoPlayer, not its channel master, so a
+            // secondary TV's failure is observed and attributed to the correct TV.
+            TvInterop.AttachVideoErrorHandler(controller, OnHostVideoError);
+            var owner = TvInterop.OwnerOf(controller);
+            if (owner == null)
+            {
+                return;
+            }
+
+            if (CaptureHostState(controller, TvStateOperations.Open, Guid.Empty, false,
+                out var snapshot) && !string.IsNullOrEmpty(snapshot.SourceUrl))
+            {
+                PublishState(controller, snapshot);
             }
         }
 
-        private bool CaptureHostState(bool startBarrier)
+        private bool CaptureHostState(Component controller, byte operation, Guid actionId,
+            bool startBarrier, out TvState snapshot)
         {
-            var playing = TvInterop.IsPlayingStream;
-            var fetching = TvInterop.IsFetching;
-            var powered = TvInterop.PoweredOff;
-            var streaming = playing || fetching || !string.IsNullOrWhiteSpace(TvInterop.PendingSourceUrl);
-            if (playing)
-            {
-                TvInterop.ClearPendingSourceUrl();
-            }
-
-            var source = !string.IsNullOrWhiteSpace(TvInterop.SourceUrl)
-                ? TvInterop.SourceUrl : (streaming ? null : _lastSource);
-            if (streaming && string.IsNullOrWhiteSpace(source))
+            snapshot = null;
+            var owner = TvInterop.OwnerOf(controller);
+            if (controller == null || owner == null)
             {
                 return false;
             }
 
-            var url = streaming ? TvInterop.StreamUrl : _lastUrl;
-            var title = streaming ? TvInterop.StreamTitle : _lastTitle;
-            var playlist = streaming ? TvInterop.PlaylistUrlValue : _lastPlaylist;
-            var live = streaming && TvInterop.IsLive;
-            var segmented = streaming && TvInterop.IsSegmentedVod;
-            var paused = streaming ? TvInterop.Paused : _lastPaused;
-            var shuffle = streaming ? TvInterop.Shuffle : _lastShuffle;
-            var playlistIndex = streaming ? TvInterop.PlaylistIndexValue : _lastPlaylistIndex;
-            var position = TvInterop.Position;
-            var mediaReplaced = !string.Equals(source, _lastSource, StringComparison.Ordinal)
-                || !string.Equals(playlist, _lastPlaylist, StringComparison.Ordinal)
-                || (streaming && playlistIndex != _lastPlaylistIndex);
-            var changed = !_hasHostState || mediaReplaced || url != _lastUrl || title != _lastTitle
-                || live != _lastLive || segmented != _lastSegmented || paused != _lastPaused
-                || powered != _lastPowered || shuffle != _lastShuffle
-                || playlistIndex != _lastPlaylistIndex || position != _lastPosition;
-
-            if (mediaReplaced)
+            var previous = owner.GetExtendedInformation<TvState>();
+            TvInterop.BeginFocus(controller);
+            try
             {
-                _generation++;
-                if (startBarrier && !string.IsNullOrEmpty(source))
+                var playing = TvInterop.IsPlayingStream;
+                var fetching = TvInterop.IsFetching;
+                var powered = TvInterop.PoweredOff;
+                var streaming = playing || fetching
+                    || !string.IsNullOrWhiteSpace(TvInterop.PendingSourceUrl);
+                if (playing)
                 {
-                    _barrier = true;
-                    TvInterop.SetSharedPaused(true);
+                    TvInterop.ClearPendingSourceUrl();
                 }
-            }
 
-            _lastSource = source;
-            _lastUrl = url;
-            _lastTitle = title;
-            _lastPlaylist = playlist;
-            _lastLive = live;
-            _lastSegmented = segmented;
-            _lastPaused = paused;
-            _lastPowered = powered;
-            _lastShuffle = shuffle;
-            _lastPlaylistIndex = playlistIndex;
-            _lastPosition = position;
-            _hasHostState = streaming || _barrier || powered || !string.IsNullOrEmpty(source);
-            return changed;
+                var source = !string.IsNullOrWhiteSpace(TvInterop.SourceUrl)
+                    ? TvInterop.SourceUrl
+                    : (streaming ? TvInterop.StreamUrl : previous?.SourceUrl);
+                if (streaming && string.IsNullOrWhiteSpace(source))
+                {
+                    return false;
+                }
+
+                var url = streaming ? TvInterop.StreamUrl : previous?.StreamUrl;
+                var title = streaming ? TvInterop.StreamTitle : previous?.StreamTitle;
+                var playlist = streaming ? TvInterop.PlaylistUrlValue : previous?.PlaylistUrl;
+                var live = streaming && TvInterop.IsLive;
+                var segmented = streaming && TvInterop.IsSegmentedVod;
+                var paused = streaming ? TvInterop.Paused : previous?.Paused ?? false;
+                var shuffle = streaming ? TvInterop.Shuffle : previous?.Shuffle ?? false;
+                var playlistIndex = streaming
+                    ? TvInterop.PlaylistIndexValue : previous?.PlaylistIndex ?? 0;
+                var position = TvInterop.Position;
+                var mediaReplaced = !string.Equals(source, previous?.SourceUrl,
+                        StringComparison.Ordinal)
+                    || !string.Equals(playlist, previous?.PlaylistUrl, StringComparison.Ordinal)
+                    || (streaming && playlistIndex != previous?.PlaylistIndex);
+                var changed = previous == null || mediaReplaced
+                    || url != previous.StreamUrl || title != previous.StreamTitle
+                    || live != previous.IsLive || segmented != previous.IsSegmentedVod
+                    || paused != previous.Paused || powered != previous.PoweredOff
+                    || shuffle != previous.Shuffle
+                    || playlistIndex != previous.PlaylistIndex
+                    || position != previous.Position;
+                var generation = previous?.Generation ?? 0;
+                var barrier = previous?.Barrier ?? false;
+
+                if (mediaReplaced)
+                {
+                    generation++;
+                    if (startBarrier && !string.IsNullOrEmpty(source))
+                    {
+                        barrier = true;
+                        TvInterop.SetSharedPaused(true);
+                    }
+                }
+
+                snapshot = new TvState
+                {
+                    SourceUrl = source,
+                    StreamUrl = url,
+                    StreamTitle = title,
+                    PlaylistUrl = playlist,
+                    IsLive = live,
+                    IsSegmentedVod = segmented,
+                    PlaylistIndex = playlistIndex,
+                    Position = position,
+                    Paused = paused,
+                    PoweredOff = powered,
+                    Shuffle = shuffle,
+                    Barrier = barrier,
+                    Resume = false,
+                    Generation = generation,
+                    Operation = operation,
+                    ActionId = actionId,
+                };
+                return changed;
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
 
-        private void PublishMediaDelta(byte operation, Guid actionId, bool force)
-        {
-            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
+        private static TvState CopyState(TvState source, byte operation, Guid actionId,
+            bool barrier, bool resume)
+            => new TvState
             {
-                return;
-            }
-
-            var changed = CaptureHostState(operation != TvStateOperations.Playlist);
-            if (!changed && !force)
-            {
-                return;
-            }
-
-            if (!force && string.IsNullOrEmpty(_lastSource))
-            {
-                return;
-            }
-
-            PublishState(operation, actionId);
-            ClearPendingMediaOperation(operation, actionId);
-        }
-
-        private void PublishScalarDelta(byte operation, Guid actionId)
-        {
-            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
-            {
-                return;
-            }
-
-            CaptureHostState(false);
-            PublishState(ScalarOperation(operation), actionId);
-        }
-
-        private void PublishBarrierDelta(Guid actionId)
-        {
-            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
-            {
-                return;
-            }
-
-            PublishState(TvStateOperations.Barrier, actionId);
-        }
-
-        /// <summary>Publishes one immutable snapshot. The global information store owns the
-        /// baseline, host echo and client apply; the TV only decides when the snapshot changed and
-        /// which operation caused it.</summary>
-        private void PublishState(byte operation, Guid actionId)
-        {
-            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
-            {
-                return;
-            }
-
-            Global<TvState>.Value = new TvState
-            {
-                SourceUrl = _lastSource,
-                StreamUrl = _lastUrl,
-                StreamTitle = _lastTitle,
-                PlaylistUrl = _lastPlaylist,
-                IsLive = _lastLive,
-                IsSegmentedVod = _lastSegmented,
-                PlaylistIndex = _lastPlaylistIndex,
-                Position = _lastPosition,
-                Paused = _lastPaused,
-                PoweredOff = _lastPowered,
-                Shuffle = _lastShuffle,
-                Barrier = _barrier,
-                Resume = _resumePulse,
-                Generation = _generation,
+                SourceUrl = source.SourceUrl,
+                StreamUrl = source.StreamUrl,
+                StreamTitle = source.StreamTitle,
+                PlaylistUrl = source.PlaylistUrl,
+                IsLive = source.IsLive,
+                IsSegmentedVod = source.IsSegmentedVod,
+                PlaylistIndex = source.PlaylistIndex,
+                Position = source.Position,
+                Paused = source.Paused,
+                PoweredOff = source.PoweredOff,
+                Shuffle = source.Shuffle,
+                Barrier = barrier,
+                Resume = resume,
+                Generation = source.Generation,
                 Operation = operation,
                 ActionId = actionId,
             };
-            _statePublished = true;
-            _resumePulse = false;
+
+        private void PublishScalarDelta(Component controller, byte operation, Guid actionId)
+        {
+            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
+            {
+                return;
+            }
+
+            CaptureHostState(controller, ScalarOperation(operation), actionId, false,
+                out var snapshot);
+            if (snapshot != null)
+            {
+                PublishState(controller, snapshot);
+            }
+        }
+
+        private void PublishBarrierDelta(Component controller, bool barrier, Guid actionId)
+        {
+            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
+            {
+                return;
+            }
+
+            var owner = TvInterop.OwnerOf(controller);
+            var previous = owner?.GetExtendedInformation<TvState>();
+            if (previous != null)
+            {
+                PublishState(controller, CopyState(previous, TvStateOperations.Barrier,
+                    actionId, barrier, true));
+            }
+        }
+
+        /// <summary>Publishes one immutable snapshot as extended information on the TV itself.
+        /// The identity module owns the baseline, host echo and client apply; the TV only decides
+        /// when the snapshot changed and which operation caused it.</summary>
+        private void PublishState(Component controller, TvState snapshot)
+        {
+            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present
+                || snapshot == null)
+            {
+                return;
+            }
+
+            TvInterop.OwnerOf(controller)?.SetExtendedInformation(snapshot);
         }
 
         private static byte ScalarOperation(byte operation)
@@ -355,40 +320,6 @@ namespace CardShopCoop.CustomTv
                 : operation == Shuffle ? TvStateOperations.Shuffle
                 : operation == Seek ? TvStateOperations.Seek
                 : throw new InvalidOperationException("Unknown scalar TV operation " + operation + ".");
-
-        private bool TryBeginPendingMediaOperation(byte operation, Guid actionId)
-        {
-            if (_hasPendingMediaOperation)
-            {
-                return false;
-            }
-
-            _hasPendingMediaOperation = true;
-            _pendingMediaOperation = operation == Next ? TvStateOperations.Next
-                : operation == Previous ? TvStateOperations.Previous : TvStateOperations.Open;
-            _pendingMediaActionId = actionId;
-            return true;
-        }
-
-        private void ClearPendingMediaOperation(byte operation, Guid actionId)
-        {
-            if (!_hasPendingMediaOperation || _pendingMediaOperation != operation
-                || _pendingMediaActionId != actionId)
-            {
-                return;
-            }
-
-            _hasPendingMediaOperation = false;
-            _pendingMediaOperation = 0;
-            _pendingMediaActionId = Guid.Empty;
-        }
-
-        private void ClearPendingMediaOperation()
-        {
-            _hasPendingMediaOperation = false;
-            _pendingMediaOperation = 0;
-            _pendingMediaActionId = Guid.Empty;
-        }
 
         private static void ApplyPatches(Harmony harmony)
         {
@@ -446,31 +377,30 @@ namespace CardShopCoop.CustomTv
 
         private static void StreamYouTubePostfix(object __instance, string url)
         {
-            TvInterop.RegisterController(__instance as Component);
-            TvInterop.StreamYouTubePostfix(url);
-            _active?.OnMediaSourceChanged();
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            TvInterop.StreamYouTubePostfix(controller, url);
+            _active?.OnMediaSourceChanged(controller);
         }
 
         private static void ChangeToUrlPostfix(object __instance, string url, string title)
         {
-            TvInterop.RegisterController(__instance as Component);
-            TvInterop.ChangeToUrlPostfix(url);
-            _active?.OnMediaSourceChanged();
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            TvInterop.ChangeToUrlPostfix(controller, url);
+            _active?.OnMediaSourceChanged(controller);
         }
 
         private static void PlaylistItemPostfix(object __instance)
         {
-            TvInterop.RegisterController(__instance as Component);
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
             if (_active == null || TvInterop.ApplyingRemote)
             {
                 return;
             }
 
-            var operation = _active._hasPendingMediaOperation
-                ? _active._pendingMediaOperation : TvStateOperations.Playlist;
-            var actionId = _active._hasPendingMediaOperation
-                ? _active._pendingMediaActionId : Guid.Empty;
-            _active.PublishMediaDelta(operation, actionId, true);
+            _active.OnMediaSourceChanged(controller);
         }
 
         private static void PausePostfix(object __instance) => RegisterScalar(__instance, Pause);
@@ -479,41 +409,65 @@ namespace CardShopCoop.CustomTv
 
         private static void RegisterScalar(object instance, byte operation)
         {
-            TvInterop.RegisterController(instance as Component);
-            _active?.OnScalarChanged(operation);
+            var controller = instance as Component;
+            TvInterop.RegisterController(controller);
+            _active?.OnScalarChanged(controller, operation);
         }
 
-        private void OnMediaSourceChanged()
+        private void OnMediaSourceChanged(Component controller)
         {
-            var operation = _hasPendingMediaOperation ? _pendingMediaOperation : TvStateOperations.Open;
-            var actionId = _hasPendingMediaOperation ? _pendingMediaActionId : Guid.Empty;
-            PublishMediaDelta(operation, actionId, true);
-        }
-
-        private void OnScalarChanged(byte operation)
-        {
-            if (TvInterop.ApplyingRemote)
+            if (TvInterop.ApplyingRemote || controller == null)
             {
                 return;
             }
 
-            PublishScalarDelta(operation, Guid.Empty);
+            var owner = TvInterop.OwnerOf(controller);
+            if (owner == null)
+            {
+                return;
+            }
+
+            if (CaptureHostState(controller, TvStateOperations.Open, Guid.Empty, true,
+                out var snapshot) && snapshot != null
+                && !string.IsNullOrEmpty(snapshot.SourceUrl))
+            {
+                PublishState(controller, snapshot);
+            }
+        }
+
+        private void OnScalarChanged(Component controller, byte operation)
+        {
+            if (TvInterop.ApplyingRemote || controller == null)
+            {
+                return;
+            }
+
+            PublishScalarDelta(controller, operation, Guid.Empty);
         }
 
         private static void ControllerLifecyclePostfix(object __instance)
         {
-            TvInterop.RegisterController(__instance as Component);
-            _active?.OnControllerLifecycle();
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            _active?.OnControllerLifecycle(controller);
         }
 
         private static void ControllerDisablePostfix(object __instance)
         {
-            TvInterop.ForgetController(__instance as Component);
-            if (_active != null && _active._barrier && !_active._shutdown)
+            var controller = __instance as Component;
+            var active = _active;
+            if (active != null && controller != null)
             {
-                _active.AbortBarrier("host TV controller playback was canceled");
-                _active.PublishBarrierDelta(Guid.Empty);
+                var previous = TvInterop.OwnerOf(controller)?.GetExtendedInformation<TvState>();
+                if (previous?.Barrier == true && !active._shutdown)
+                {
+                    active.AbortBarrier(controller,
+                        "host TV controller playback was canceled");
+                    active.PublishBarrierDelta(controller, false, Guid.Empty);
+                }
             }
+
+            TvInterop.ForgetController(controller);
         }
 
         private static void HostGlobalInputPostfix()
@@ -530,7 +484,8 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            if (_active == null)
+            var controller = TvInterop.CurrentController;
+            if (_active == null || controller == null)
             {
                 return;
             }
@@ -540,85 +495,145 @@ namespace CardShopCoop.CustomTv
                 && now - _active._lastSeekInputTime >= 0.25f)
             {
                 _active._lastSeekInputTime = now;
-                _active.PublishScalarDelta(Seek, Guid.Empty);
+                _active.PublishScalarDelta(controller, Seek, Guid.Empty);
             }
         }
 
         private static void LocalPreparedPrefix(object __instance, object source)
         {
-            TvInterop.RegisterController(__instance as Component);
-            _active?.BeforeLocalPrepared(__instance, source);
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            if (_active == null || controller == null)
+            {
+                return;
+            }
+
+            TvInterop.BeginFocus(controller);
+            try
+            {
+                _active.BeforeLocalPrepared(controller, source);
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
 
         private static void LocalPreparedPostfix(object __instance, object source)
         {
-            TvInterop.RegisterController(__instance as Component);
-            _active?.AfterLocalPrepared(__instance, source);
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            if (_active == null || controller == null)
+            {
+                return;
+            }
+
+            TvInterop.BeginFocus(controller);
+            try
+            {
+                _active.AfterLocalPrepared(controller, source);
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
+
+            // A TV that was already playing when the bridge initialized only reveals its stream
+            // once the VideoPlayer prepares; write that first state now.
+            _active.OnControllerLifecycle(controller);
         }
 
-        private void BeforeLocalPrepared(object instance, object source)
+        private void BeforeLocalPrepared(Component controller, object source)
         {
-            if (_barrier && TvInterop.IsMainPreparedPlayer(instance, source))
+            var owner = TvInterop.OwnerOf(controller);
+            if (owner == null)
+            {
+                return;
+            }
+
+            if (owner.GetExtendedInformation<TvState>()?.Barrier == true
+                && TvInterop.IsMainPreparedPlayer(controller, source))
             {
                 TvInterop.SetSharedPausedForPrepare(false);
             }
         }
 
-        private void AfterLocalPrepared(object instance, object source)
+        private void AfterLocalPrepared(Component controller, object source)
         {
-            if (!_barrier || !TvInterop.IsMainPreparedPlayer(instance, source))
+            var owner = TvInterop.OwnerOf(controller);
+            if (owner == null)
             {
                 return;
             }
 
-            TvInterop.PausePreparedStream(instance);
-            CompleteBarrier();
-            PublishBarrierDelta(Guid.Empty);
+            if (owner.GetExtendedInformation<TvState>()?.Barrier != true
+                || !TvInterop.IsMainPreparedPlayer(controller, source))
+            {
+                return;
+            }
+
+            TvInterop.PausePreparedStream(controller);
+            CompleteBarrier(controller);
+            PublishBarrierDelta(controller, false, Guid.Empty);
         }
 
-        private void OnHostVideoError(string message)
+        private void OnHostVideoError(Component failed, string message)
         {
             if (_shutdown)
             {
                 return;
             }
 
-            var pendingOperation = _pendingMediaOperation;
-            var pendingActionId = _pendingMediaActionId;
-            CoopLog.Error("Host TV VideoPlayer failed: " + (message ?? "unknown error"));
-            TvInterop.AbortSharedPlayback();
-            AbortBarrier("host TV playback failed");
-            _lastSource = null;
-            _lastUrl = null;
-            _lastTitle = null;
-            _lastPlaylist = null;
-            _lastLive = false;
-            _lastSegmented = false;
-            _lastPaused = false;
-            _lastPowered = TvInterop.PoweredOff;
-            _lastShuffle = TvInterop.Shuffle;
-            _lastPlaylistIndex = 0;
-            _lastPosition = 0.0;
-            _hasHostState = _lastPowered;
-            if (_context != null && _context.InGame && TvInterop.Present)
+            var controller = failed;
+            var owner = TvInterop.OwnerOf(controller);
+            if (owner == null)
             {
-                PublishState(TvStateOperations.Error,
-                    _hasPendingMediaOperation ? pendingActionId : Guid.Empty);
-                ClearPendingMediaOperation(pendingOperation, pendingActionId);
+                return;
+            }
+
+            var previous = owner.GetExtendedInformation<TvState>();
+            CoopLog.Error("Host TV VideoPlayer failed: " + (message ?? "unknown error"));
+            TvInterop.BeginFocus(controller);
+            try
+            {
+                TvInterop.AbortSharedPlayback();
+                AbortBarrier(controller, "host TV playback failed");
+                if (_context != null && _context.InGame && TvInterop.Present)
+                {
+                    PublishState(controller, new TvState
+                    {
+                        SourceUrl = null,
+                        StreamUrl = null,
+                        StreamTitle = null,
+                        PlaylistUrl = null,
+                        IsLive = false,
+                        IsSegmentedVod = false,
+                        PlaylistIndex = 0,
+                        Position = 0.0,
+                        Paused = false,
+                        PoweredOff = TvInterop.PoweredOff,
+                        Shuffle = TvInterop.Shuffle,
+                        Barrier = false,
+                        Resume = true,
+                        Generation = previous?.Generation ?? 0,
+                        Operation = TvStateOperations.Error,
+                        ActionId = Guid.Empty,
+                    });
+                }
+            }
+            finally
+            {
+                TvInterop.EndFocus();
             }
         }
 
-        private void CompleteBarrier()
+        private void CompleteBarrier(Component controller)
         {
-            _barrier = false;
-            _resumePulse = true;
             TvInterop.ResumePlayback();
         }
 
-        private void AbortBarrier(string reason)
+        private void AbortBarrier(Component controller, string reason)
         {
-            _barrier = false;
-            _resumePulse = true;
             TvInterop.ResumePlayback();
             CoopLog.Warn("TV load barrier aborted: " + reason);
         }

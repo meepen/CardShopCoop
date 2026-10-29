@@ -23,12 +23,8 @@ namespace CardShopCoop.CustomTv
         private static TvClientBehaviour _active;
         private ICoopContext _context;
         private Harmony _harmony;
-        private TvState _appliedState;
-        private Guid _pendingActionId;
         private bool _shutdown;
         private bool _joined;
-        private bool _clientBarrier;
-        private int _clientGeneration = -1;
 
         private void OnEnable()
         {
@@ -41,19 +37,16 @@ namespace CardShopCoop.CustomTv
             try
             {
                 ResetSessionState();
-                CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 _active = this;
                 _harmony = new Harmony("dev.meepen.cardshopcoop.tv.client.runtime");
                 ApplyPatches(_harmony);
-                OnControllerLifecycle();
             }
             catch (Exception exception)
             {
                 CoopLog.Error("TV client initialization failed: " + exception);
                 _harmony?.UnpatchSelf();
                 _harmony = null;
-                CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (ReferenceEquals(_active, this))
                 {
@@ -66,22 +59,55 @@ namespace CardShopCoop.CustomTv
         }
 
         [OnFullyJoined]
-        private void MarkJoined(PeerConnection _)
-        {
-            _joined = true;
-            _appliedState = null;
-            ApplyLatestState(null, true);
-        }
+        private void MarkJoined(PeerConnection _) => _joined = true;
 
-        [GlobalInformationHandler]
-        private void OnTvState(InformationChange<TvState> change)
+        [ExtendedInformationHandler]
+        private void OnTvState(InteractableObject tv, InformationChange<TvState> change)
         {
-            if (_shutdown || !TvInterop.Present || change.Current == null)
+            if (_shutdown || !TvInterop.Present || tv == null || change.Removed)
             {
                 return;
             }
 
-            ApplyLatestState(change.Current, change.IsFirstValue);
+            var controller = TvInterop.ControllerFor(tv);
+            if (controller == null)
+            {
+                CoopLog.Warn("TV state arrived before its VideoPlayerController: " + tv.name);
+                return;
+            }
+
+            ApplyTvState(controller, change.Current, change.Previous);
+        }
+
+        private void ApplyTvState(Component controller, TvState state, TvState previous)
+        {
+            if (_shutdown || _context == null || !_context.InGame
+                || !TvInterop.Present || TvInterop.ApplyingRemote)
+            {
+                return;
+            }
+
+            if (state == null || ReferenceEquals(state, previous)
+                || (previous != null && state.Generation < previous.Generation))
+            {
+                return;
+            }
+
+            TvInterop.BeginFocus(controller);
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(state.SourceUrl) && !TvInterop.EnrollmentReady)
+                {
+                    TvInterop.RequestClientEnrollment();
+                    return;
+                }
+
+                ApplyState(state);
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
 
         internal void Shutdown()
@@ -92,7 +118,6 @@ namespace CardShopCoop.CustomTv
             }
 
             _shutdown = true;
-            CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
             {
@@ -109,26 +134,11 @@ namespace CardShopCoop.CustomTv
         private void ResetSessionState()
         {
             TvInterop.ResetSession();
-            _appliedState = null;
-            _pendingActionId = Guid.Empty;
             _joined = false;
-            _clientBarrier = false;
-            _clientGeneration = -1;
-        }
-
-        private void OnWorldReady(CEventPlayer_GameDataFinishLoaded _)
-        {
-            _appliedState = null;
-            ApplyLatestState();
         }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
-        {
-            TvInterop.NotifySceneLoaded();
-            _clientGeneration = -1;
-            _appliedState = null;
-            ApplyLatestState();
-        }
+            => TvInterop.NotifySceneLoaded();
 
         [OnClientDisconnected]
         private void ForgetHost(PeerConnection connection, DisconnectInfo info)
@@ -139,86 +149,7 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        private void OnControllerLifecycle()
-        {
-            if (TvInterop.Present)
-            {
-                ApplyLatestState();
-            }
-        }
-
-        private void ApplyLatestState()
-            => ApplyLatestState(Global<TvState>.Value, false);
-
-        private void ApplyLatestState(TvState state, bool first)
-        {
-            if (_shutdown || !_joined || _context == null || !_context.InGame
-                || !TvInterop.Present || TvInterop.ApplyingRemote || !TvInterop.ControllerReady)
-            {
-                return;
-            }
-
-            if (state == null || ReferenceEquals(state, _appliedState))
-            {
-                return;
-            }
-
-            if (!first && state.Generation < _clientGeneration)
-            {
-                RetireAction(state.ActionId);
-                _appliedState = state;
-                return;
-            }
-
-            SupersedeAction(state.ActionId);
-            if (!string.IsNullOrWhiteSpace(state.SourceUrl) && !TvInterop.EnrollmentReady)
-            {
-                TvInterop.RequestClientEnrollment();
-                return;
-            }
-
-            if (first)
-            {
-                ApplyBaselineState(state);
-            }
-            else
-            {
-                ApplyState(state);
-            }
-
-            _appliedState = state;
-        }
-
-        private void ApplyBaselineState(TvState state)
-        {
-            ActionRuntime.Confirm(state.ActionId, () =>
-            {
-                _clientGeneration = state.Generation;
-                _clientBarrier = state.Barrier;
-                ApplyMediaState(state);
-            });
-            _pendingActionId = Guid.Empty;
-        }
-
-        private void SupersedeAction(Guid actionId)
-        {
-            if (_pendingActionId != Guid.Empty && _pendingActionId != actionId)
-            {
-                ActionRuntime.Ack(_pendingActionId);
-            }
-
-            _pendingActionId = actionId;
-        }
-
-        private static void RetireAction(Guid actionId)
-        {
-            if (actionId != Guid.Empty)
-            {
-                ActionRuntime.Ack(actionId);
-            }
-        }
-
-        private void ApplyState(TvState state)
+        private static void ApplyState(TvState state)
         {
             switch (state.Operation)
             {
@@ -226,62 +157,37 @@ namespace CardShopCoop.CustomTv
                 case TvStateOperations.Playlist:
                 case TvStateOperations.Next:
                 case TvStateOperations.Previous:
-                    ActionRuntime.Confirm(state.ActionId, () =>
-                    {
-                        _clientGeneration = state.Generation;
-                        _clientBarrier = state.Barrier;
-                        ApplyMediaState(state);
-                    });
+                    ApplyMediaState(state);
                     break;
 
                 case TvStateOperations.Pause:
-                    ActionRuntime.AckOrApply(state.ActionId,
-                        () => TvInterop.ApplyPaused(state.Paused));
+                    TvInterop.ApplyPaused(state.Paused);
                     break;
 
                 case TvStateOperations.Power:
-                    ActionRuntime.AckOrApply(state.ActionId,
-                        () => TvInterop.ApplyPowered(state.PoweredOff));
+                    TvInterop.ApplyPowered(state.PoweredOff);
                     break;
 
                 case TvStateOperations.Shuffle:
-                    ActionRuntime.AckOrApply(state.ActionId,
-                        () => TvInterop.ApplyShuffle(state.Shuffle));
+                    TvInterop.ApplyShuffle(state.Shuffle);
                     break;
 
                 case TvStateOperations.Seek:
-                    ActionRuntime.Confirm(state.ActionId,
-                        () => TvInterop.ApplySeek(state.Position));
+                    TvInterop.ApplySeek(state.Position);
                     break;
 
                 case TvStateOperations.Barrier:
-                    ActionRuntime.Confirm(state.ActionId, () =>
-                    {
-                        _clientBarrier = state.Barrier;
-                        TvInterop.ApplyBarrier(state.Barrier, state.Resume);
-                    });
+                    TvInterop.ApplyBarrier(state.Barrier, state.Resume);
                     break;
 
                 case TvStateOperations.Error:
-                    ActionRuntime.Confirm(state.ActionId, () =>
-                    {
-                        _clientGeneration = Math.Max(_clientGeneration, state.Generation);
-                        _clientBarrier = false;
-                        TvInterop.ApplyPlaybackError();
-                    });
+                    TvInterop.ApplyPlaybackError();
                     break;
 
                 default:
-                    ActionRuntime.Confirm(state.ActionId, () =>
-                    {
-                        _clientGeneration = state.Generation;
-                        _clientBarrier = state.Barrier;
-                        ApplyMediaState(state);
-                    });
+                    ApplyMediaState(state);
                     break;
             }
-
-            _pendingActionId = Guid.Empty;
         }
 
         private static void ApplyMediaState(TvState state)
@@ -335,6 +241,8 @@ namespace CardShopCoop.CustomTv
             TryPatch(harmony, "OnLocalPrepared",
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(LocalPreparedPrefix)),
                 new HarmonyMethod(typeof(TvClientBehaviour), nameof(LocalPreparedPostfix)));
+            TryPatch(harmony, "OnDisable", null,
+                new HarmonyMethod(typeof(TvClientBehaviour), nameof(ControllerDisablePostfix)));
         }
 
         private static void TryPatch(Harmony harmony, string method, HarmonyMethod prefix,
@@ -359,56 +267,88 @@ namespace CardShopCoop.CustomTv
 
         private static void LocalPreparedPrefix(object __instance, object source)
         {
-            TvInterop.RegisterController(__instance as Component);
-            _active?.BeforeLocalPrepared(__instance, source);
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            if (_active == null || controller == null)
+            {
+                return;
+            }
+
+            TvInterop.BeginFocus(controller);
+            try
+            {
+                _active.BeforeLocalPrepared(controller, source);
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
 
         private static void LocalPreparedPostfix(object __instance, object source)
         {
-            TvInterop.RegisterController(__instance as Component);
-            _active?.AfterLocalPrepared(__instance, source);
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            if (_active == null || controller == null)
+            {
+                return;
+            }
+
+            TvInterop.BeginFocus(controller);
+            try
+            {
+                _active.AfterLocalPrepared(controller, source);
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
 
         private static void ControllerLifecyclePostfix(object __instance)
-        {
-            TvInterop.RegisterController(__instance as Component);
-            _active?.OnControllerLifecycle();
-        }
+            => TvInterop.RegisterController(__instance as Component);
 
         private static void ChangeToUrlPostfix(object __instance, string url, string title)
         {
-            TvInterop.RegisterController(__instance as Component);
-            TvInterop.ChangeToUrlPostfix(url);
-            _active?.OnControllerLifecycle();
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            TvInterop.ChangeToUrlPostfix(controller, url);
         }
 
         private static void StreamYouTubePostfix(object __instance, string url)
         {
-            TvInterop.RegisterController(__instance as Component);
-            TvInterop.StreamYouTubePostfix(url);
-            _active?.OnControllerLifecycle();
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            TvInterop.StreamYouTubePostfix(controller, url);
         }
 
-        private void BeforeLocalPrepared(object instance, object source)
+        private void BeforeLocalPrepared(Component controller, object source)
         {
-            if (_clientBarrier && TvInterop.IsMainPreparedPlayer(instance, source))
+            var owner = TvInterop.OwnerOf(controller);
+            if (owner == null)
+            {
+                return;
+            }
+
+            if (owner.GetExtendedInformation<TvState>()?.Barrier == true
+                && TvInterop.IsMainPreparedPlayer(controller, source))
             {
                 TvInterop.SetSharedPausedForPrepare(false);
             }
         }
 
-        private void AfterLocalPrepared(object instance, object source)
+        private void AfterLocalPrepared(Component controller, object source)
         {
-            if (!TvInterop.IsMainPreparedPlayer(instance, source))
+            var owner = TvInterop.OwnerOf(controller);
+            if (owner == null || !TvInterop.IsMainPreparedPlayer(controller, source))
             {
                 return;
             }
 
-            TvInterop.ApplyPreparedPosition(instance);
-            ApplyLatestState();
-            if (_clientBarrier)
+            TvInterop.ApplyPreparedPosition(controller);
+            if (owner.GetExtendedInformation<TvState>()?.Barrier == true)
             {
-                TvInterop.PausePreparedStream(instance);
+                TvInterop.PausePreparedStream(controller);
             }
         }
 
@@ -419,14 +359,31 @@ namespace CardShopCoop.CustomTv
         }
 
         private static void SendAction(byte op, string url = null, string title = null,
-            double value = 0, Action apply = null, Action undo = null)
-            => ActionRuntime.Submit(new TvOpMessage
+            double value = 0, TvInterop.PlaybackUndoState previous = default,
+            double undoSeek = double.NaN)
+        {
+            if (!CanAct())
             {
+                return;
+            }
+
+            var tv = TvInterop.OwnerOf(TvInterop.ActionController);
+            if (tv == null)
+            {
+                return;
+            }
+
+            _active._context.Send(_active._context.HostConnection, new TvOpMessage
+            {
+                Tv = tv,
                 Op = op,
                 Url = url,
                 Title = title,
                 Value = value,
-            }, apply, undo);
+                Previous = previous,
+                UndoSeek = undoSeek,
+            });
+        }
 
         /// <summary>Captures the pending URL before the game clears it, so the Open the quality
         /// dialog launches can be observed and forwarded with its original (pre-resolution) URL.</summary>
@@ -439,33 +396,51 @@ namespace CardShopCoop.CustomTv
 
         private static void QualityPrefix(object __instance, out QualityState __state)
         {
-            TvInterop.RegisterController(__instance as Component);
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
             __state = default;
-            if (!CanAct() || TvInterop.ApplyingRemote)
+            if (!CanAct() || TvInterop.ApplyingRemote || controller == null)
             {
                 return;
             }
 
-            var url = TvInterop.PendingUrl;
-            if (string.IsNullOrWhiteSpace(url))
+            TvInterop.BeginFocus(controller);
+            try
             {
-                return;
-            }
+                var url = TvInterop.PendingUrl;
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    return;
+                }
 
-            __state.Armed = true;
-            __state.Url = url;
-            __state.Prior = TvInterop.CapturePlaybackState();
+                __state.Armed = true;
+                __state.Url = url;
+                __state.Prior = TvInterop.CapturePlaybackState();
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
 
         private static void QualityPostfix(object __instance, QualityState __state)
         {
-            TvInterop.RegisterController(__instance as Component);
-            if (!__state.Armed || !CanAct() || TvInterop.ApplyingRemote)
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            if (!__state.Armed || !CanAct() || TvInterop.ApplyingRemote || controller == null)
             {
                 return;
             }
 
-            ForwardMedia(Open, __state.Prior, __state.Url, "Shared stream");
+            TvInterop.BeginFocus(controller);
+            try
+            {
+                ForwardMedia(Open, __state.Prior, __state.Url, "Shared stream");
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
 
         /// <summary>Observed keyboard controls. The game itself handles Alt+P/=/−/]/[ through its
@@ -487,73 +462,99 @@ namespace CardShopCoop.CustomTv
         private static double _seekObservedPosition;
         private static bool _seekHeld;
 
-        private static void GlobalInputPrefix(out GlobalInputState __state)
+        private static void GlobalInputPrefix(object __instance, out GlobalInputState __state)
         {
+            var controller = __instance as Component;
             __state = default;
-            var alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
-            var now = TvInterop.Position;
-            var seekHeld = alt
-                && (Input.GetKey(KeyCode.RightBracket) || Input.GetKey(KeyCode.LeftBracket));
-            if (CanAct() && !TvInterop.ApplyingRemote && _seekHeld
-                && Math.Abs(now - _seekObservedPosition) >= 1.0)
-            {
-                ForwardSeek(_seekObservedPosition, now - _seekObservedPosition);
-            }
-
-            _seekObservedPosition = now;
-            _seekHeld = seekHeld;
-
-            if (!CanAct() || TvInterop.ApplyingRemote || !alt)
+            if (!TvInterop.IsSoundController(controller))
             {
                 return;
             }
 
-            if (Input.GetKeyDown(KeyCode.Equals))
+            TvInterop.RegisterController(controller);
+            TvInterop.BeginFocus(controller);
+            try
             {
-                __state.Next = true;
-            }
-            else if (Input.GetKeyDown(KeyCode.Minus))
-            {
-                __state.Previous = true;
-            }
-            else if (Input.GetKeyDown(KeyCode.S))
-            {
-                __state.Shuffle = true;
-            }
-            else if (Input.GetKeyDown(KeyCode.O))
-            {
-                __state.Power = true;
-            }
-            else
-            {
-                return;
-            }
+                var alt = Input.GetKey(KeyCode.LeftAlt) || Input.GetKey(KeyCode.RightAlt);
+                var now = TvInterop.Position;
+                var seekHeld = alt
+                    && (Input.GetKey(KeyCode.RightBracket) || Input.GetKey(KeyCode.LeftBracket));
+                if (CanAct() && !TvInterop.ApplyingRemote && _seekHeld
+                    && Math.Abs(now - _seekObservedPosition) >= 1.0)
+                {
+                    ForwardSeek(_seekObservedPosition, now - _seekObservedPosition);
+                }
 
-            __state.Prior = TvInterop.CapturePlaybackState();
+                _seekObservedPosition = now;
+                _seekHeld = seekHeld;
+
+                if (!CanAct() || TvInterop.ApplyingRemote || !alt)
+                {
+                    return;
+                }
+
+                if (Input.GetKeyDown(KeyCode.Equals))
+                {
+                    __state.Next = true;
+                }
+                else if (Input.GetKeyDown(KeyCode.Minus))
+                {
+                    __state.Previous = true;
+                }
+                else if (Input.GetKeyDown(KeyCode.S))
+                {
+                    __state.Shuffle = true;
+                }
+                else if (Input.GetKeyDown(KeyCode.O))
+                {
+                    __state.Power = true;
+                }
+                else
+                {
+                    return;
+                }
+
+                __state.Prior = TvInterop.CapturePlaybackState();
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
 
-        private static void GlobalInputPostfix(GlobalInputState __state)
+        private static void GlobalInputPostfix(object __instance, GlobalInputState __state)
         {
-            if (!CanAct() || TvInterop.ApplyingRemote)
+            var controller = __instance as Component;
+            if (!CanAct() || TvInterop.ApplyingRemote
+                || !TvInterop.IsSoundController(controller))
             {
                 return;
             }
 
-            if (__state.Next)
+            TvInterop.RegisterController(controller);
+            TvInterop.BeginFocus(controller);
+            try
             {
-                ForwardMedia(Next, __state.Prior, null, null);
+                if (__state.Next)
+                {
+                    ForwardMedia(Next, __state.Prior, null, null);
+                }
+                else if (__state.Previous)
+                {
+                    ForwardMedia(Previous, __state.Prior, null, null);
+                }
+                else if (__state.Shuffle)
+                {
+                    ForwardSelfApplied(Shuffle, __state.Prior);
+                }
+                else if (__state.Power)
+                {
+                    ForwardSelfApplied(Power, __state.Prior);
+                }
             }
-            else if (__state.Previous)
+            finally
             {
-                ForwardMedia(Previous, __state.Prior, null, null);
-            }
-            else if (__state.Shuffle)
-            {
-                ForwardSelfApplied(Shuffle, __state.Prior);
-            }
-            else if (__state.Power)
-            {
-                ForwardSelfApplied(Power, __state.Prior);
+                TvInterop.EndFocus();
             }
         }
 
@@ -561,9 +562,27 @@ namespace CardShopCoop.CustomTv
         /// postfix can register one observed action and replay it if the host rejects it.</summary>
         private static void CapturePrefix(object __instance, out TvInterop.PlaybackUndoState __state)
         {
-            TvInterop.RegisterController(__instance as Component);
-            __state = TvInterop.CapturePlaybackState();
+            var controller = __instance as Component;
+            TvInterop.RegisterController(controller);
+            if (controller == null)
+            {
+                __state = default;
+                return;
+            }
+
+            TvInterop.BeginFocus(controller);
+            try
+            {
+                __state = TvInterop.CapturePlaybackState();
+            }
+            finally
+            {
+                TvInterop.EndFocus();
+            }
         }
+
+        private static void ControllerDisablePostfix(object __instance)
+            => TvInterop.ForgetController(__instance as Component);
 
         private static void PausePostfix(TvInterop.PlaybackUndoState __state)
         {
@@ -572,9 +591,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            SendAction(Pause,
-                apply: () => TvInterop.ApplyPaused(!__state.Paused),
-                undo: () => TvInterop.ApplyPaused(__state.Paused));
+            SendAction(Pause, previous: __state);
         }
 
         private static void PowerPostfix(TvInterop.PlaybackUndoState __state)
@@ -585,9 +602,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            SendAction(Power,
-                apply: () => TvInterop.ApplyPowered(!__state.PoweredOff),
-                undo: () => TvInterop.ApplyPowered(__state.PoweredOff));
+            SendAction(Power, previous: __state);
         }
 
         private static void ShufflePostfix(TvInterop.PlaybackUndoState __state)
@@ -597,9 +612,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            SendAction(Shuffle,
-                apply: () => TvInterop.ApplyShuffle(!__state.Shuffle),
-                undo: () => TvInterop.ApplyShuffle(__state.Shuffle));
+            SendAction(Shuffle, previous: __state);
         }
 
         private static void NextPostfix(TvInterop.PlaybackUndoState __state)
@@ -618,9 +631,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            SendAction(op, url, title,
-                apply: () => TvInterop.ApplyOperation(op, url, title, 0),
-                undo: () => TvInterop.RestorePlaybackState(prior));
+            SendAction(op, url, title, previous: prior);
         }
 
         /// <summary>Shuffle/power have no vanilla key binding: drive the game's own control for the
@@ -633,18 +644,12 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            SendAction(op,
-                apply: () => TvInterop.ApplyOperation(op, null, null, 0),
-                undo: () => TvInterop.RestorePlaybackState(prior));
+            SendAction(op, previous: prior);
         }
 
         private static void ForwardSeek(double fromPosition, double delta)
         {
-            var target = Math.Max(0.0,
-                Math.Min(TvInterop.MaxPositionSeconds, fromPosition + delta));
-            SendAction(Seek, value: delta,
-                apply: () => TvInterop.ApplySeek(target),
-                undo: () => TvInterop.ApplySeek(fromPosition));
+            SendAction(Seek, value: delta, undoSeek: fromPosition);
         }
     }
 }

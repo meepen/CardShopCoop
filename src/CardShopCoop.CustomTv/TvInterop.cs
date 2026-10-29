@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using CardShopCoop.Api;
 using UnityEngine;
@@ -29,8 +30,8 @@ namespace CardShopCoop.CustomTv
         private const BindingFlags Flags = BindingFlags.Static | BindingFlags.Instance
             | BindingFlags.Public | BindingFlags.NonPublic;
 
-        // The current Custom TV build keeps all shared playback state on one TvChannel object per
-        // channel; VideoPlayerController.Ch selects it. The controller only keeps the device-local
+        // Custom TV keeps all shared playback state on one TvChannel object per channel;
+        // VideoPlayerController.Ch selects it. The controller only keeps the device-local
         // VideoPlayer, the quality dialog and the channel list.
         private static readonly FieldInfo ChannelField = Field("Ch");
         private static readonly FieldInfo AllTvs = Field("AllTVs");
@@ -49,8 +50,6 @@ namespace CardShopCoop.CustomTv
         private static readonly FieldInfo ShuffleField = ChannelState("isShuffleMode");
         private static readonly FieldInfo LastTime = ChannelState("lastKnownMasterTime");
         private static readonly FieldInfo PendingUrlField = ChannelState("pendingYouTubeUrl");
-        private static readonly FieldInfo QualityOpen = Field("isQualityChoiceOpen");
-        private static readonly FieldInfo QualityRoot = Field("qualityChoiceRoot");
         private static readonly FieldInfo VideoPlayerField = Field("m_VideoPlayer");
         private static readonly EventInfo VideoErrorReceived = VideoPlayerField?.FieldType.GetEvent(
             "errorReceived", Flags);
@@ -62,33 +61,51 @@ namespace CardShopCoop.CustomTv
         private static readonly MethodInfo BroadcastChange = Method("BroadcastChange", typeof(int));
         private static readonly MethodInfo TogglePause = Method("ToggleGlobalPause");
         private static readonly MethodInfo RemotePower = Method("RemotePower");
-        private static readonly MethodInfo Unfreeze = Method("UnfreezeGame");
-        private static readonly MethodInfo LifecycleEnable = Method("OnEnable");
-        private static readonly MethodInfo LifecycleStart = Method("Start");
-        private static readonly MethodInfo LifecycleInput = Method("HandleGlobalInput");
-        private static readonly MethodInfo LifecycleQuality = Method("OnQualityChoice");
-        private static readonly MethodInfo LifecyclePrepared = Method("OnLocalPrepared");
         private static readonly MethodInfo RemotePlayPause = Method("RemotePlayPause");
         private static readonly MethodInfo RemoteNext = Method("RemoteNext");
         private static readonly MethodInfo RemotePrev = Method("RemotePrev");
         private static readonly MethodInfo RemoteShuffle = Method("RemoteShuffle");
+        private static readonly MethodInfo SoundTv = SilentMethod("SoundTV");
         private static readonly FeatureAvailability AvailabilityState = ValidateSurface();
         private static bool _logged;
         private static bool _availabilityLogged;
         private static Component _master;
-        private static string _pendingSourceUrl;
-        private static string _requestedSourceUrl;
-        private static string _launchedSource;
-        private static int _launchedPlaylistIndex;
-        private static bool _streamLaunchPending;
-        private static double _pendingPosition;
-        private static bool _hasPendingPosition;
-        private static int _pendingPositionGeneration;
-        private static int _playbackGeneration;
-        private static bool _barrierState;
-        private static object _attachedVideoPlayer;
-        private static Delegate _videoErrorDelegate;
-        private static Action<string> _videoErrorHandler;
+        private sealed class ChannelPlayback
+        {
+            internal string PendingSourceUrl;
+            internal string RequestedSourceUrl;
+            internal string LaunchedSource;
+            internal int LaunchedPlaylistIndex;
+            internal bool StreamLaunchPending;
+            internal int PlaybackGeneration;
+            internal bool Barrier;
+        }
+
+        private sealed class PlayerPosition
+        {
+            internal double Pending;
+            internal bool HasPending;
+            internal int Generation;
+        }
+
+        private sealed class VideoErrorSink
+        {
+            internal Component Controller;
+            internal Action<Component, string> Handler;
+            internal void OnError(object _, string message) => Handler?.Invoke(Controller, message);
+        }
+
+        private sealed class ErrorBinding
+        {
+            internal object Player;
+            internal Delegate Handler;
+        }
+
+        private static Component _focus;
+        private static int _focusDepth;
+        private static readonly Dictionary<object, ChannelPlayback> Playbacks = new();
+        private static readonly Dictionary<Component, PlayerPosition> Positions = new();
+        private static readonly Dictionary<Component, ErrorBinding> ErrorBindings = new();
 
         internal static Type OptionalControllerType => ControllerType;
         internal static bool ApplyingRemote;
@@ -136,6 +153,8 @@ namespace CardShopCoop.CustomTv
             => ChannelType == null ? null : CoopReflection.OptionalField(ChannelType, name);
         private static MethodInfo Method(string name, params Type[] arguments)
             => CoopReflection.OptionalMethod(ControllerType, name, arguments);
+        private static MethodInfo SilentMethod(string name)
+            => ControllerType?.GetMethod(name, Flags);
 
         private static FeatureAvailability ValidateSurface()
         {
@@ -159,7 +178,7 @@ namespace CardShopCoop.CustomTv
             {
                 Enrolled, SharedVideoIndex, StreamUrlField, StreamTitleField, PlaylistUrl,
                 PlaylistIndex, Live, Segmented, Playing, Fetching, PausedField, Powered,
-                ShuffleField, LastTime, PendingUrlField, QualityOpen, QualityRoot,
+                ShuffleField, LastTime, PendingUrlField,
             };
             for (var i = 0; i < fields.Length; i++)
             {
@@ -172,8 +191,7 @@ namespace CardShopCoop.CustomTv
             var methods = new[]
             {
                 ChangeUrl, PlayPlaylistItem, Stream, QualityChoice, ChangeVideo,
-                BroadcastChange, TogglePause, RemotePower, Unfreeze, LifecycleEnable,
-                LifecycleStart, LifecycleInput, LifecycleQuality, LifecyclePrepared,
+                BroadcastChange, TogglePause, RemotePower,
                 RemotePlayPause, RemoteNext, RemotePrev, RemoteShuffle,
             };
             for (var i = 0; i < methods.Length; i++)
@@ -258,21 +276,86 @@ namespace CardShopCoop.CustomTv
             }
         }
 
+        /// <summary>Narrows every read/write to one TV for the duration of a handler. The EIM
+        /// handler and the action hooks know the exact TV; this keeps a multi-TV shop from
+        /// resolving state through whichever controller happened to enable last.</summary>
+        internal static void BeginFocus(Component controller)
+        {
+            if (_focusDepth++ == 0)
+            {
+                _focus = controller;
+            }
+        }
+
+        internal static void EndFocus()
+        {
+            if (_focusDepth == 0)
+            {
+                return;
+            }
+
+            if (--_focusDepth == 0)
+            {
+                _focus = null;
+            }
+        }
+
+        internal static Component CurrentController => Master();
+
+        /// <summary>The controller that performed the current local action. The hooks register it
+        /// before they ask for an action target, so an action carries the TV it belongs to instead
+        /// of the channel master selected for game calls.</summary>
+        internal static Component ActionController => _master ?? Master();
+
+        internal static InteractableObject OwnerOf(Component controller)
+            => controller == null || ControllerType == null
+                ? null : controller.GetComponentInParent<InteractableObject>();
+
+        internal static Component ControllerFor(InteractableObject owner)
+        {
+            if (owner == null || ControllerType == null)
+            {
+                return null;
+            }
+
+            var controller = owner.GetComponentInChildren(ControllerType, true);
+            return controller != null ? controller : owner.GetComponentInParent(ControllerType, true);
+        }
+
         private static Component Master()
         {
             try
             {
+                var focus = _focus;
+                if (focus != null)
+                {
+                    return EnrolledMaster(focus) ?? focus;
+                }
+
+                // A TV that is enrolled is a real active channel, so it outranks the idle TV that
+                // happened to run Start last. This is the one-TV fallback for code paths without
+                // an explicit focus (for example the global seek input).
                 var registered = _master;
                 if (registered != null)
                 {
-                    // Custom TV keeps one TvChannel per channel, and only the first enrolled TV
-                    // drives playback. Invoke controls on that master, but read/write state through
-                    // the channel it shares with every other TV on the same channel.
-                    return EnrolledMaster(registered) ?? registered;
+                    var master = EnrolledMaster(registered);
+                    if (master != null)
+                    {
+                        return master;
+                    }
                 }
 
-                // No controller has identified itself yet. Recover the first enrolled TV from the
-                // game's own list so a late apply still reaches the active channel.
+                var sound = SoundTvController();
+                if (sound != null)
+                {
+                    return EnrolledMaster(sound) ?? sound;
+                }
+
+                if (registered != null)
+                {
+                    return registered;
+                }
+
                 var all = AllTvs?.GetValue(null) as IList;
                 if (all != null)
                 {
@@ -293,6 +376,58 @@ namespace CardShopCoop.CustomTv
                 CoopLog.Swallow(exception);
                 return null;
             }
+        }
+
+        private static Component SoundTvController()
+        {
+            if (SoundTv == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return SoundTv.Invoke(null, null) as Component;
+            }
+            catch (Exception exception)
+            {
+                CoopLog.Swallow(exception);
+                return null;
+            }
+        }
+
+        internal static Component ChannelMaster(Component controller)
+            => controller == null ? null : EnrolledMaster(controller) ?? controller;
+
+        internal static IEnumerable<Component> Controllers()
+        {
+            var all = AllTvs?.GetValue(null) as IList;
+            if (all == null)
+            {
+                yield break;
+            }
+
+            for (var i = 0; i < all.Count; i++)
+            {
+                if (all[i] is Component controller && controller != null)
+                {
+                    yield return controller;
+                }
+            }
+        }
+
+        /// <summary>True for the controller the game's <c>IsSoundChannelMaster</c> gate would
+        /// accept: the channel master of the sound TV. Global hotkeys belong to that TV, not to
+        /// whichever controller happened to run Start last.</summary>
+        internal static bool IsSoundController(Component controller)
+        {
+            if (controller == null)
+            {
+                return false;
+            }
+
+            var sound = SoundTvController();
+            return ReferenceEquals(ChannelMaster(sound ?? controller), controller);
         }
 
         private static Component EnrolledMaster(Component controller)
@@ -320,7 +455,7 @@ namespace CardShopCoop.CustomTv
             return null;
         }
 
-        private static object ChannelOf(object controller)
+        internal static object ChannelOf(Component controller)
             => controller == null || ChannelField == null ? null : ChannelField.GetValue(controller);
 
         internal static string StreamUrl => Get<string>(StreamUrlField);
@@ -336,14 +471,8 @@ namespace CardShopCoop.CustomTv
         internal static int PlaylistIndexValue => Get(PlaylistIndex, 1);
         internal static double Position => GetDouble(LastTime, 0.0);
         internal static bool IsPlaylist => !string.IsNullOrEmpty(PlaylistUrlValue);
-        internal static string SourceUrl
-        {
-            get
-            {
-                return _requestedSourceUrl;
-            }
-        }
-        internal static string PendingSourceUrl => _pendingSourceUrl;
+        internal static string SourceUrl => PlaybackFor(Master())?.RequestedSourceUrl;
+        internal static string PendingSourceUrl => PlaybackFor(Master())?.PendingSourceUrl;
         internal static int EnrolledCount
         {
             get
@@ -352,7 +481,6 @@ namespace CardShopCoop.CustomTv
                 return channel == null ? 0 : (Enrolled?.GetValue(channel) as IList)?.Count ?? 0;
             }
         }
-        internal static bool ControllerReady => Master() != null;
         internal static bool EnrollmentReady => EnrolledCount > 0;
 
         internal static void RegisterController(Component controller)
@@ -374,116 +502,177 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        internal static void RecordPendingSourceUrl(string url)
+        private static ChannelPlayback PlaybackFor(Component controller)
         {
-            if (!string.IsNullOrWhiteSpace(url))
+            if (controller == null)
             {
-                _requestedSourceUrl = url;
-                _pendingSourceUrl = url;
+                controller = Master();
+            }
+
+            var channel = ChannelOf(controller);
+            if (channel == null)
+            {
+                return null;
+            }
+
+            if (!Playbacks.TryGetValue(channel, out var playback))
+            {
+                playback = new ChannelPlayback();
+                Playbacks.Add(channel, playback);
+            }
+
+            return playback;
+        }
+
+        private static PlayerPosition PositionFor(Component controller)
+        {
+            if (controller == null)
+            {
+                return null;
+            }
+
+            if (!Positions.TryGetValue(controller, out var position))
+            {
+                position = new PlayerPosition();
+                Positions.Add(controller, position);
+            }
+
+            return position;
+        }
+
+        internal static void RecordPendingSourceUrl(Component controller, string url)
+        {
+            var playback = PlaybackFor(controller);
+            if (playback != null && !string.IsNullOrWhiteSpace(url))
+            {
+                playback.RequestedSourceUrl = url;
+                playback.PendingSourceUrl = url;
             }
         }
 
-        internal static void RecordActiveSourceUrl(string url)
+        internal static void RecordActiveSourceUrl(Component controller, string url)
         {
-            if (!string.IsNullOrWhiteSpace(url))
+            var playback = PlaybackFor(controller);
+            if (playback != null && !string.IsNullOrWhiteSpace(url)
+                && string.IsNullOrWhiteSpace(playback.RequestedSourceUrl))
             {
-                if (string.IsNullOrWhiteSpace(_requestedSourceUrl))
-                {
-                    _requestedSourceUrl = url;
-                }
+                playback.RequestedSourceUrl = url;
             }
         }
 
         internal static void ClearPendingSourceUrl()
         {
-            _pendingSourceUrl = null;
+            var playback = PlaybackFor(Master());
+            if (playback != null)
+            {
+                playback.PendingSourceUrl = null;
+            }
         }
 
         internal static void ClearSourceIdentity()
         {
-            _pendingSourceUrl = null;
-            _requestedSourceUrl = null;
+            var playback = PlaybackFor(Master());
+            if (playback != null)
+            {
+                playback.PendingSourceUrl = null;
+                playback.RequestedSourceUrl = null;
+            }
         }
 
         internal static void ResetSession()
         {
-            _pendingSourceUrl = null;
-            _requestedSourceUrl = null;
             ResetControllerState();
             ApplyingRemote = false;
         }
 
         internal static void NotifySceneLoaded()
         {
-            _pendingSourceUrl = null;
-            _requestedSourceUrl = null;
             ResetControllerState();
             ApplyingRemote = false;
         }
 
         private static void ResetControllerState()
         {
-            if (_attachedVideoPlayer != null && _videoErrorDelegate != null
-                && VideoErrorReceived != null)
-            {
-                VideoErrorReceived.RemoveEventHandler(_attachedVideoPlayer, _videoErrorDelegate);
-            }
-
+            DetachVideoErrorHandlers();
             _master = null;
-            _launchedSource = null;
-            _launchedPlaylistIndex = 0;
-            _streamLaunchPending = false;
-            _pendingPosition = 0.0;
-            _hasPendingPosition = false;
-            _pendingPositionGeneration = 0;
-            _playbackGeneration = 0;
-            _barrierState = false;
-            _attachedVideoPlayer = null;
-            _videoErrorDelegate = null;
-            _videoErrorHandler = null;
+            _focus = null;
+            _focusDepth = 0;
+            Playbacks.Clear();
+            Positions.Clear();
         }
 
-        internal static bool AttachVideoErrorHandler(Action<string> handler)
+        internal static bool AttachVideoErrorHandler(Component controller,
+            Action<Component, string> handler)
         {
-            _videoErrorHandler = handler;
-            var player = VideoPlayer(Master());
-            if (player == null || VideoErrorReceived == null)
+            if (controller == null || VideoErrorReceived == null)
             {
                 return false;
             }
 
-            if (ReferenceEquals(player, _attachedVideoPlayer))
+            var player = VideoPlayer(controller);
+            if (player == null)
+            {
+                return false;
+            }
+
+            if (ErrorBindings.TryGetValue(controller, out var existing)
+                && ReferenceEquals(existing.Player, player))
             {
                 return true;
             }
 
-            if (_attachedVideoPlayer != null && _videoErrorDelegate != null)
-            {
-                VideoErrorReceived.RemoveEventHandler(_attachedVideoPlayer, _videoErrorDelegate);
-            }
-
-            var callback = typeof(TvInterop).GetMethod(nameof(OnVideoError),
-                BindingFlags.Static | BindingFlags.NonPublic);
+            DetachVideoErrorHandler(controller);
+            var sink = new VideoErrorSink { Controller = controller, Handler = handler };
             try
             {
-                _videoErrorDelegate = Delegate.CreateDelegate(VideoErrorReceived.EventHandlerType,
+                var callback = typeof(VideoErrorSink).GetMethod(nameof(VideoErrorSink.OnError),
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                var binding = Delegate.CreateDelegate(VideoErrorReceived.EventHandlerType, sink,
                     callback);
-                VideoErrorReceived.AddEventHandler(player, _videoErrorDelegate);
-                _attachedVideoPlayer = player;
+                VideoErrorReceived.AddEventHandler(player, binding);
+                ErrorBindings[controller] = new ErrorBinding
+                {
+                    Player = player,
+                    Handler = binding,
+                };
                 return true;
             }
             catch (Exception exception)
             {
-                _videoErrorDelegate = null;
-                _attachedVideoPlayer = null;
                 CoopLog.Error("TV VideoPlayer error lifecycle hook failed: " + exception);
                 return false;
             }
         }
 
-        private static void OnVideoError(object _, string message)
+        private static void DetachVideoErrorHandler(Component controller)
         {
-            _videoErrorHandler?.Invoke(message);
+            if (controller == null || !ErrorBindings.TryGetValue(controller, out var binding))
+            {
+                return;
+            }
+
+            if (VideoErrorReceived != null && binding.Player != null)
+            {
+                VideoErrorReceived.RemoveEventHandler(binding.Player, binding.Handler);
+            }
+
+            ErrorBindings.Remove(controller);
+        }
+
+        private static void DetachVideoErrorHandlers()
+        {
+            if (VideoErrorReceived != null)
+            {
+                foreach (var binding in ErrorBindings.Values)
+                {
+                    if (binding.Player != null)
+                    {
+                        VideoErrorReceived.RemoveEventHandler(binding.Player, binding.Handler);
+                    }
+                }
+            }
+
+            ErrorBindings.Clear();
         }
 
         internal static void ApplyMediaState(string sourceUrl, string url, string title, string playlistUrl,
@@ -496,23 +685,25 @@ namespace CardShopCoop.CustomTv
             }
 
             var master = Master();
-            if (master == null)
+            var playback = PlaybackFor(master);
+            if (master == null || playback == null)
             {
                 return;
             }
 
+            var positionState = PositionFor(master);
             ApplyingRemote = true;
             try
             {
-                var oldSource = _launchedSource;
+                var oldSource = playback.LaunchedSource;
                 var replaced = !string.Equals(oldSource, sourceUrl, StringComparison.Ordinal)
-                    || _launchedPlaylistIndex != playlistIndex;
+                    || playback.LaunchedPlaylistIndex != playlistIndex;
                 if (replaced)
                 {
-                    _playbackGeneration = generation;
+                    playback.PlaybackGeneration = generation;
                 }
 
-                _barrierState = barrier;
+                playback.Barrier = barrier;
                 SetField(Live, live, master);
                 SetField(Segmented, segmented, master);
                 SetField(StreamTitleField, title, master);
@@ -523,38 +714,43 @@ namespace CardShopCoop.CustomTv
 
                 if (string.IsNullOrEmpty(sourceUrl))
                 {
-                    _hasPendingPosition = false;
+                    if (positionState != null)
+                    {
+                        positionState.HasPending = false;
+                    }
+
                     ClearSourceIdentity();
                 }
-                else
+                else if (positionState != null)
                 {
-                    _pendingPosition = position;
-                    _hasPendingPosition = true;
-                    _pendingPositionGeneration = generation;
+                    positionState.Pending = position;
+                    positionState.HasPending = true;
+                    positionState.Generation = generation;
                 }
 
                 var newPlaylistItem = !string.IsNullOrEmpty(playlistUrl)
                     && string.Equals(oldSource, sourceUrl, StringComparison.Ordinal)
-                    && _launchedPlaylistIndex != playlistIndex;
+                    && playback.LaunchedPlaylistIndex != playlistIndex;
                 var needsLaunch = !string.IsNullOrEmpty(sourceUrl)
                     && (!string.Equals(oldSource, sourceUrl, StringComparison.Ordinal)
-                        || newPlaylistItem || _streamLaunchPending);
+                        || newPlaylistItem || playback.StreamLaunchPending);
                 if (needsLaunch)
                 {
-                    _launchedSource = sourceUrl;
-                    _launchedPlaylistIndex = playlistIndex;
-                    _streamLaunchPending = true;
+                    playback.LaunchedSource = sourceUrl;
+                    playback.LaunchedPlaylistIndex = playlistIndex;
+                    playback.StreamLaunchPending = true;
                     CoopLog.Info("TV client injecting shared stream: " + sourceUrl);
                     SetField(PendingUrlField, sourceUrl, master);
                     QualityChoice.Invoke(master, new object[] { false });
-                    _streamLaunchPending = false;
+                    playback.StreamLaunchPending = false;
                 }
                 else if (string.IsNullOrEmpty(sourceUrl) && string.IsNullOrEmpty(playlistUrl))
                 {
-                    var wasStreaming = !string.IsNullOrEmpty(_launchedSource) || _launchedPlaylistIndex != 0;
-                    _launchedSource = null;
-                    _launchedPlaylistIndex = 0;
-                    _streamLaunchPending = false;
+                    var wasStreaming = !string.IsNullOrEmpty(playback.LaunchedSource)
+                        || playback.LaunchedPlaylistIndex != 0;
+                    playback.LaunchedSource = null;
+                    playback.LaunchedPlaylistIndex = 0;
+                    playback.StreamLaunchPending = false;
                     if (wasStreaming)
                     {
                         BroadcastChange?.Invoke(master, new object[] { Get(SharedVideoIndex, 0) });
@@ -563,7 +759,10 @@ namespace CardShopCoop.CustomTv
 
                 if (string.IsNullOrEmpty(sourceUrl))
                 {
-                    _hasPendingPosition = false;
+                    if (positionState != null)
+                    {
+                        positionState.HasPending = false;
+                    }
                 }
                 else
                 {
@@ -668,7 +867,12 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            _barrierState = barrier;
+            var playback = PlaybackFor(Master());
+            if (playback != null)
+            {
+                playback.Barrier = barrier;
+            }
+
             SetSharedPaused(barrier);
             if (resume && !PoweredOff)
             {
@@ -683,7 +887,12 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            _barrierState = false;
+            var playback = PlaybackFor(Master());
+            if (playback != null)
+            {
+                playback.Barrier = false;
+            }
+
             AbortSharedPlayback();
         }
 
@@ -763,9 +972,12 @@ namespace CardShopCoop.CustomTv
         }
 
         internal static PlaybackUndoState CapturePlaybackState()
-            => new PlaybackUndoState(SourceUrl, StreamUrl, StreamTitle, PlaylistUrlValue, IsLive,
-                IsSegmentedVod, PlaylistIndexValue, Position, Paused, PoweredOff, Shuffle,
-                _barrierState, _playbackGeneration);
+        {
+            var playback = PlaybackFor(Master());
+            return new PlaybackUndoState(SourceUrl, StreamUrl, StreamTitle, PlaylistUrlValue,
+                IsLive, IsSegmentedVod, PlaylistIndexValue, Position, Paused, PoweredOff, Shuffle,
+                playback?.Barrier ?? false, playback?.PlaybackGeneration ?? 0);
+        }
 
         internal static void RestorePlaybackState(PlaybackUndoState state)
         {
@@ -825,10 +1037,19 @@ namespace CardShopCoop.CustomTv
             finally
             {
                 ClearSourceIdentity();
-                _launchedSource = null;
-                _launchedPlaylistIndex = 0;
-                _streamLaunchPending = false;
-                _hasPendingPosition = false;
+                var playback = PlaybackFor(master);
+                if (playback != null)
+                {
+                    playback.LaunchedSource = null;
+                    playback.LaunchedPlaylistIndex = 0;
+                    playback.StreamLaunchPending = false;
+                }
+
+                var position = PositionFor(master);
+                if (position != null)
+                {
+                    position.HasPending = false;
+                }
             }
         }
 
@@ -873,13 +1094,17 @@ namespace CardShopCoop.CustomTv
 
         internal static bool ApplyPreparedPosition(object instance)
         {
-            if (!_hasPendingPosition || instance == null || !ReferenceEquals(Master(), instance)
-                || _pendingPositionGeneration != _playbackGeneration)
+            var controller = instance as Component;
+            var playback = PlaybackFor(controller);
+            var position = PositionFor(controller);
+            if (position == null || !position.HasPending || controller == null
+                || !ReferenceEquals(Master(), controller)
+                || position.Generation != (playback?.PlaybackGeneration ?? 0))
             {
                 return false;
             }
 
-            var player = VideoPlayer(instance as Component);
+            var player = VideoPlayer(controller);
             if (player == null || !GetProperty(player, "isPrepared", false))
             {
                 return false;
@@ -888,8 +1113,8 @@ namespace CardShopCoop.CustomTv
             ApplyingRemote = true;
             try
             {
-                SetPlayerPosition(player, _pendingPosition);
-                _hasPendingPosition = false;
+                SetPlayerPosition(player, position.Pending);
+                position.HasPending = false;
                 return true;
             }
             finally
@@ -920,9 +1145,75 @@ namespace CardShopCoop.CustomTv
             return true;
         }
 
-        internal static void StreamYouTubePostfix(string url) => RecordPendingSourceUrl(url);
+        internal static void StreamYouTubePostfix(Component controller, string url)
+            => RecordPendingSourceUrl(controller, url);
 
-        internal static void ChangeToUrlPostfix(string url) => RecordActiveSourceUrl(url);
+        internal static void ChangeToUrlPostfix(Component controller, string url)
+            => RecordActiveSourceUrl(controller, url);
+
+        /// <summary>Applies one ActionMessage on the peer that owns the command (the host for a
+        /// client intent, or the client when a newer authoritative value replays a local follower).
+        /// Throws on refusal so the action framework rolls the sender back.</summary>
+        internal static void ApplyOp(InteractableObject tv, byte op, string url, string title,
+            double value)
+        {
+            var controller = ControllerFor(tv);
+            if (!Present || controller == null)
+            {
+                throw new InvalidOperationException("The target TV is not available.");
+            }
+
+            BeginFocus(controller);
+            try
+            {
+                if (!ApplyOperation(op, url, title, value))
+                {
+                    throw new InvalidOperationException("The TV rejected the operation.");
+                }
+            }
+            finally
+            {
+                EndFocus();
+            }
+        }
+
+        internal static void UndoOp(InteractableObject tv, PlaybackUndoState previous)
+        {
+            var controller = ControllerFor(tv);
+            if (controller == null)
+            {
+                return;
+            }
+
+            BeginFocus(controller);
+            try
+            {
+                RestorePlaybackState(previous);
+            }
+            finally
+            {
+                EndFocus();
+            }
+        }
+
+        internal static void UndoSeek(InteractableObject tv, double position)
+        {
+            var controller = ControllerFor(tv);
+            if (controller == null)
+            {
+                return;
+            }
+
+            BeginFocus(controller);
+            try
+            {
+                ApplySeek(position);
+            }
+            finally
+            {
+                EndFocus();
+            }
+        }
 
         internal static bool ApplyOperation(byte op, string url, string title, double value)
         {
@@ -1056,32 +1347,6 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        internal static bool FinishQualitySelection()
-        {
-            if (!Present)
-            {
-                return false;
-            }
-
-            try
-            {
-                if (string.IsNullOrWhiteSpace(Get<string>(PendingUrlField)))
-                {
-                    return false;
-                }
-
-                Unfreeze?.Invoke(Master(), null);
-                SetField(QualityOpen, false, Master());
-                (Get(QualityRoot) as GameObject)?.SetActive(false);
-                return true;
-            }
-            catch (Exception exception)
-            {
-                CoopLog.Warn("TV quality selection failed: " + exception);
-                return false;
-            }
-        }
-
         internal static string PendingUrl => Get<string>(PendingUrlField);
 
         private static object VideoPlayer(Component master)
@@ -1092,13 +1357,19 @@ namespace CardShopCoop.CustomTv
 
         private static void RequestPosition(Component master, double position)
         {
-            var player = VideoPlayer(master);
-            _pendingPosition = position;
-            _hasPendingPosition = true;
-            _pendingPositionGeneration = _playbackGeneration;
-            if (ApplyPosition(master, _pendingPosition))
+            var playback = PlaybackFor(master);
+            var pending = PositionFor(master);
+            if (playback == null || pending == null)
             {
-                _hasPendingPosition = false;
+                return;
+            }
+
+            pending.Pending = position;
+            pending.HasPending = true;
+            pending.Generation = playback.PlaybackGeneration;
+            if (ApplyPosition(master, position))
+            {
+                pending.HasPending = false;
             }
         }
 
@@ -1225,7 +1496,7 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            var target = field.IsStatic ? null : ChannelOf(instance);
+            var target = field.IsStatic ? null : ChannelOf(instance as Component);
             if (!field.IsStatic && target == null)
             {
                 return;
