@@ -41,11 +41,8 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            var handlersRegistered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
                 _active = this;
                 Patch(typeof(GameEventFormatPatch));
                 Patch(typeof(GameEventResetPatch));
@@ -58,10 +55,6 @@ namespace CardShopCoop.Modules.Settings
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError("Settings host initialization failed: " + error);
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
                 if (ReferenceEquals(_active, this))
                 {
@@ -451,7 +444,6 @@ namespace CardShopCoop.Modules.Settings
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

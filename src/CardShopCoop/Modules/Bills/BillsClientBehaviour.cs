@@ -27,14 +27,11 @@ namespace CardShopCoop.Modules.Bills
             }
 
 
-            var handlersRegistered = false;
             var lifecycleSubscribed = false;
             try
             {
                 ResetSessionState();
                 BillsInterop.Reset();
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
@@ -52,10 +49,6 @@ namespace CardShopCoop.Modules.Bills
                 {
                     CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                     SceneManager.sceneLoaded -= OnSceneLoaded;
-                }
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -329,7 +322,6 @@ namespace CardShopCoop.Modules.Bills
 
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))

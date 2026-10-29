@@ -12,31 +12,6 @@ namespace CardShopCoop.Modules.Deodorant
     {
         private bool _shutdown;
 
-        private void OnEnable()
-        {
-            if (_shutdown)
-            {
-                return;
-            }
-
-            var handlersRegistered = false;
-            try
-            {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
-            }
-            catch (Exception error)
-            {
-                CoopPlugin.Log.LogError($"Deodorant host initialization failed: {error}");
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
-
-                throw;
-            }
-        }
-
         internal void Shutdown()
         {
             if (_shutdown)
@@ -45,7 +20,6 @@ namespace CardShopCoop.Modules.Deodorant
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
         }
         private void OnDestroy() => Shutdown();
 

@@ -42,7 +42,6 @@ namespace CardShopCoop.Modules.Staff
                 return;
             }
 
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _active = this;
             Patch(typeof(WorkerMousePatch));
             Patch(typeof(WorkerStopPatch));
@@ -790,7 +789,6 @@ namespace CardShopCoop.Modules.Staff
             _shutdown = true;
             ResetWorldState();
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

@@ -85,7 +85,6 @@ namespace CardShopCoop.Modules.Npc
                 return;
             }
             _active = this;
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             Harmony.CreateClassProcessor(typeof(CustomerManagerPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(CustomerPatch)).Patch();
@@ -202,7 +201,6 @@ namespace CardShopCoop.Modules.Npc
             _shutdown = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             Reset();
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

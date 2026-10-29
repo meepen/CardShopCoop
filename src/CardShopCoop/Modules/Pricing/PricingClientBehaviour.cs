@@ -39,11 +39,8 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            var registered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 _active = this;
                 PricingClientPatches.Apply(Harmony);
                 if (RuntimeContext.InGame())
@@ -54,10 +51,6 @@ namespace CardShopCoop.Modules.Pricing
             }
             catch
             {
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
 
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
@@ -501,7 +494,6 @@ namespace CardShopCoop.Modules.Pricing
 
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _pendingState = null;
             ClearPendingDeltas();

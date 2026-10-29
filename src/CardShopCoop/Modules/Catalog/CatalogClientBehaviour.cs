@@ -41,11 +41,8 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            var registered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 _active = this;
                 CatalogInterop.ProbeOptionalSurfaces();
                 CatalogPatches.ApplyClientLifecycle(Harmony);
@@ -56,10 +53,6 @@ namespace CardShopCoop.Modules.Catalog
             {
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
 
                 if (ReferenceEquals(_active, this))
@@ -439,7 +432,6 @@ namespace CardShopCoop.Modules.Catalog
 
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _pendingState = null;

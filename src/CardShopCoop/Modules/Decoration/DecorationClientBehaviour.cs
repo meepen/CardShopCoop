@@ -29,14 +29,11 @@ namespace CardShopCoop.Modules.Decoration
             }
 
 
-            var registered = false;
             var lifecycle = false;
             try
             {
                 ResetSessionState();
                 DecorationInterop.Reset();
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                 SceneManager.sceneLoaded += OnSceneLoaded;
@@ -52,10 +49,6 @@ namespace CardShopCoop.Modules.Decoration
                 {
                     CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
                     SceneManager.sceneLoaded -= OnSceneLoaded;
-                }
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -287,7 +280,6 @@ namespace CardShopCoop.Modules.Decoration
 
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))

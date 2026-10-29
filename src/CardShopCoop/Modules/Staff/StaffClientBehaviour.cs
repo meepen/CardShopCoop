@@ -76,7 +76,6 @@ namespace CardShopCoop.Modules.Staff
                 return;
             }
 
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _active = this;
             Patch(typeof(HirePatch));
             Patch(typeof(TaskPatch));
@@ -1247,7 +1246,6 @@ namespace CardShopCoop.Modules.Staff
             ResetWorldState();
             NpcClientBehaviour.WorkerManagerReady -= OnReadinessSignal;
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

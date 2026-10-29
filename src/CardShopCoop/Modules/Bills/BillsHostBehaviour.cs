@@ -28,12 +28,9 @@ namespace CardShopCoop.Modules.Bills
                 return;
             }
 
-            var handlersRegistered = false;
             try
             {
                 BillsInterop.Reset();
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 Harmony.CreateClassProcessor(typeof(BillChangedPatch)).Patch();
@@ -44,10 +41,6 @@ namespace CardShopCoop.Modules.Bills
             {
                 CoopPlugin.Log.LogError("Bills host initialization failed: " + exception);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
                 if (ReferenceEquals(_active, this))
                 {
@@ -296,7 +289,6 @@ namespace CardShopCoop.Modules.Bills
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
             {

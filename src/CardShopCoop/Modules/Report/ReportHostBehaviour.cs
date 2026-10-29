@@ -48,11 +48,8 @@ namespace CardShopCoop.Modules.Report
                 return;
             }
 
-            var handlersRegistered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
                 _active = this;
                 Patch(typeof(ReportOpenPatch));
                 Patch(typeof(ReviewAddPatch));
@@ -65,10 +62,6 @@ namespace CardShopCoop.Modules.Report
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError("Report host initialization failed: " + error);
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
                 if (ReferenceEquals(_active, this))
                 {
@@ -622,7 +615,6 @@ namespace CardShopCoop.Modules.Report
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

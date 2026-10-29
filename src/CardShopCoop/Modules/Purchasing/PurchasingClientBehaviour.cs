@@ -72,11 +72,8 @@ namespace CardShopCoop.Modules.Purchasing
             }
 
 
-            var registered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 ActionLedger.ActionSettled += RetirePendingRequest;
                 _active = this;
                 Patch(typeof(RestockCheckoutPatch));
@@ -87,10 +84,6 @@ namespace CardShopCoop.Modules.Purchasing
             }
             catch
             {
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
 
                 ActionLedger.ActionSettled -= RetirePendingRequest;
@@ -163,7 +156,6 @@ namespace CardShopCoop.Modules.Purchasing
             _shutdown = true;
             ActionLedger.ActionSettled -= RetirePendingRequest;
             _pendingRequests.Clear();
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

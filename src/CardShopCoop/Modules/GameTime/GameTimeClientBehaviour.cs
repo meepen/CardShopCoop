@@ -32,7 +32,6 @@ namespace CardShopCoop.Modules.GameTime
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
             Harmony.CreateClassProcessor(typeof(LightManagerReadyPatch)).Patch();
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _initialized = true;
         }
 
@@ -158,7 +157,6 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))

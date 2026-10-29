@@ -34,11 +34,8 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            var handlersRegistered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
                 _active = this;
                 Patch(typeof(GameEventFormatPatch));
                 Patch(typeof(GameEventResetPatch));
@@ -56,10 +53,6 @@ namespace CardShopCoop.Modules.Settings
                 CoopPlugin.Log.LogError("Settings client initialization failed: " + error);
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
                 if (ReferenceEquals(_active, this))
                 {
@@ -541,7 +534,6 @@ namespace CardShopCoop.Modules.Settings
             _shutdown = true;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

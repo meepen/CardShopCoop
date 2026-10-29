@@ -25,11 +25,8 @@ namespace CardShopCoop.Modules.Expansion
                 return;
             }
 
-            var handlersRegistered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
                 _active = this;
                 Harmony.CreateClassProcessor(typeof(ExpansionChangedPatch)).Patch();
                 Harmony.CreateClassProcessor(typeof(ShopRoomChangedPatch)).Patch();
@@ -38,10 +35,6 @@ namespace CardShopCoop.Modules.Expansion
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Expansion host initialization failed: " + exception);
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
@@ -114,7 +107,6 @@ namespace CardShopCoop.Modules.Expansion
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

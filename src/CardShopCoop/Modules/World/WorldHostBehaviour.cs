@@ -84,7 +84,6 @@ namespace CardShopCoop.Modules.World
 
             _instance = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _boxNetworkInteraction = new BoxNetworkInteraction(true, BroadcastWorld, SendWorldTo);
             _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction, BroadcastWorld);
             _shelfInteraction = new ShelfInteraction(BroadcastWorld, () => RuntimeContext.InGame());
@@ -137,7 +136,6 @@ namespace CardShopCoop.Modules.World
             _cardInteraction?.Shutdown();
             _cardInteraction = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _nextBaselineId = 1;
             _transferManifests.Clear();
             _appliedPredictions.Clear();

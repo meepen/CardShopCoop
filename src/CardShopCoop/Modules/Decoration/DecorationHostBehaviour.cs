@@ -30,12 +30,9 @@ namespace CardShopCoop.Modules.Decoration
             }
 
 
-            var registered = false;
             try
             {
                 DecorationInterop.Reset();
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
                 Harmony.CreateClassProcessor(typeof(EquipPatch)).Patch();
@@ -46,10 +43,6 @@ namespace CardShopCoop.Modules.Decoration
             {
                 CoopPlugin.Log.LogError("Decoration host initialization failed: " + exception);
                 SceneManager.sceneLoaded -= OnSceneLoaded;
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
 
                 if (ReferenceEquals(_active, this))
@@ -414,7 +407,6 @@ namespace CardShopCoop.Modules.Decoration
 
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
             {

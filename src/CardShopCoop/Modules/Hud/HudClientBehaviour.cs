@@ -54,11 +54,8 @@ namespace CardShopCoop.Modules.Hud
             }
 
 
-            var handlersRegistered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
                 _active = this;
                 Harmony.CreateClassProcessor(typeof(EconomyQueuePatch)).Patch();
                 Harmony.CreateClassProcessor(typeof(ObservedAddCoinPatch)).Patch();
@@ -72,10 +69,6 @@ namespace CardShopCoop.Modules.Hud
             {
                 CoopPlugin.Log.LogError($"HUD client initialization failed: {error}");
                 SceneManager.sceneLoaded -= OnSceneLoaded;
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
                 if (_active == this)
                 {
@@ -475,7 +468,6 @@ namespace CardShopCoop.Modules.Hud
             _gameUi = null;
             HudPresentationState.Clear();
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (_active == this)
             {
                 _active = null;

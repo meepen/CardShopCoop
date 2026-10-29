@@ -81,7 +81,6 @@ namespace CardShopCoop.Modules.SaveTransfer
                 throw new InvalidOperationException("A save-transfer host owner is already active.");
             }
             _active = this;
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
         }
 
         private void Update()
@@ -492,7 +491,6 @@ namespace CardShopCoop.Modules.SaveTransfer
                 _aborted.Clear();
                 _completionDeadlines.Clear();
             }
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

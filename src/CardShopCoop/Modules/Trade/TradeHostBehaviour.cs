@@ -50,7 +50,6 @@ namespace CardShopCoop.Modules.Trade
             }
 
             _active = this;
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             Harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(CustomerStatePatch)).Patch();
             Harmony.CreateClassProcessor(typeof(CustomerActionPatch)).Patch();
@@ -106,7 +105,6 @@ namespace CardShopCoop.Modules.Trade
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CleanupOffers();
             _joinedConnections.Clear();
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

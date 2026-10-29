@@ -42,11 +42,8 @@ namespace CardShopCoop.Modules.Hud
                 return;
             }
 
-            var handlersRegistered = false;
             try
             {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
                 _active = this;
                 Harmony.CreateClassProcessor(typeof(EventQueuePatch)).Patch();
                 Harmony.CreateClassProcessor(typeof(AddCoinPatch)).Patch();
@@ -57,10 +54,6 @@ namespace CardShopCoop.Modules.Hud
             catch (Exception error)
             {
                 CoopPlugin.Log.LogError($"HUD host initialization failed: {error}");
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
                 if (ReferenceEquals(_active, this))
                 {
@@ -305,7 +298,6 @@ namespace CardShopCoop.Modules.Hud
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

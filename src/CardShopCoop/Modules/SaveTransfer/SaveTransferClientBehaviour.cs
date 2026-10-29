@@ -46,7 +46,6 @@ namespace CardShopCoop.Modules.SaveTransfer
                 throw new InvalidOperationException("A save-transfer client owner is already active.");
             }
             _active = this;
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldLoaded);
         }
@@ -417,7 +416,6 @@ namespace CardShopCoop.Modules.SaveTransfer
             _shutdown = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldLoaded);
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _saveBuffer?.Dispose();
             _bundleBuffer?.Dispose();
             _saveBuffer = null;

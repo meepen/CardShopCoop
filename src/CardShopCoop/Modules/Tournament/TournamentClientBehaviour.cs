@@ -35,12 +35,9 @@ namespace CardShopCoop.Modules.Tournament
                 return;
             }
 
-            var registered = false;
             try
             {
                 ResetSessionState();
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 _active = this;
                 ApplyPatches(Harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
@@ -49,10 +46,6 @@ namespace CardShopCoop.Modules.Tournament
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Tournament client initialization failed: " + exception);
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
@@ -114,7 +107,6 @@ namespace CardShopCoop.Modules.Tournament
             _shutdown = true;
             _pendingState = null;
             ClearPendingDeltas();
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnGameDataFinishLoaded);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))

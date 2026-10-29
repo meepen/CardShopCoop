@@ -41,12 +41,9 @@ namespace CardShopCoop.Modules.Grading
             }
 
 
-            var registered = false;
             try
             {
                 _active = this;
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 // A rejected prediction leaves its locally minted job behind until the next
                 // authoritative state; retiring the prediction must also drop the job binding so a
                 // later delta cannot adopt a job the host never accepted.
@@ -58,10 +55,6 @@ namespace CardShopCoop.Modules.Grading
             {
                 ActionLedger.ActionSettled -= RetireLocalJob;
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
                 if (ReferenceEquals(_active, this))
                 {
@@ -755,7 +748,6 @@ namespace CardShopCoop.Modules.Grading
 
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             ActionLedger.ActionSettled -= RetireLocalJob;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _pendingState = null;

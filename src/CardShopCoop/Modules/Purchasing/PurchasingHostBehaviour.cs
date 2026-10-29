@@ -446,28 +446,7 @@ namespace CardShopCoop.Modules.Purchasing
                 return;
             }
 
-            var handlersRegistered = false;
-            try
-            {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                handlersRegistered = true;
-                _active = this;
-            }
-            catch (Exception exception)
-            {
-                CoopPlugin.Log.LogError("Purchasing host initialization failed: " + exception);
-                if (handlersRegistered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
-
-                if (ReferenceEquals(_active, this))
-                {
-                    _active = null;
-                }
-
-                throw;
-            }
+            _active = this;
         }
 
         /// <summary>Runs from the concrete restock intent's <c>OnApply</c> on the host, with the
@@ -572,7 +551,6 @@ namespace CardShopCoop.Modules.Purchasing
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

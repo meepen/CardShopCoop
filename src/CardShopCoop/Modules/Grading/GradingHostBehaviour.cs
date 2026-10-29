@@ -47,22 +47,15 @@ namespace CardShopCoop.Modules.Grading
             }
 
 
-            var registered = false;
             try
             {
                 _active = this;
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
                 GradingPatches.ApplyHost(Harmony);
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             }
             catch
             {
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
 
                 if (ReferenceEquals(_active, this))
                 {
@@ -630,7 +623,6 @@ namespace CardShopCoop.Modules.Grading
 
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _setIds.Clear();
             _joined.Clear();

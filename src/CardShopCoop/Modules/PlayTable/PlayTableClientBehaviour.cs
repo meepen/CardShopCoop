@@ -114,7 +114,6 @@ namespace CardShopCoop.Modules.PlayTable
 
             _active = this;
             PlacementApi.StructureChanged += OnPlacementStructureChanged;
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             ApplyPatches();
             _initialized = true;
@@ -1206,7 +1205,6 @@ namespace CardShopCoop.Modules.PlayTable
 
             _shutdown = true;
             PlacementApi.StructureChanged -= OnPlacementStructureChanged;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             ClearMirrors();
             _launches.Clear();

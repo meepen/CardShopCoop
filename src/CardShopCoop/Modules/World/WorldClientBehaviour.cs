@@ -30,7 +30,6 @@ namespace CardShopCoop.Modules.World
 
             _instance = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _boxNetworkInteraction = new BoxNetworkInteraction(false, _ => { }, SendWorldCommand);
             _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction,
                 SendWorldCommand);
@@ -90,7 +89,6 @@ namespace CardShopCoop.Modules.World
             _cardInteraction?.Shutdown();
             _cardInteraction = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_instance, this))
             {
                 _instance = null;

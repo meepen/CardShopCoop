@@ -86,25 +86,7 @@ namespace CardShopCoop.Modules.Presence
 
             _service = new PresenceService(RuntimeContext);
             _service.ModelChanged += OnLocalModelChanged;
-            var registered = false;
-            try
-            {
-                RuntimeContext.Messages.RegisterAttributedHandlers(this);
-                registered = true;
-                _active = this;
-            }
-            catch (Exception error)
-            {
-                CoopPlugin.Log.LogError("Presence client initialization failed: " + error);
-                if (registered)
-                {
-                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
-                }
-
-                _service.Shutdown();
-                _service = null;
-                throw;
-            }
+            _active = this;
         }
 
         private void Update()
@@ -443,7 +425,6 @@ namespace CardShopCoop.Modules.Presence
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

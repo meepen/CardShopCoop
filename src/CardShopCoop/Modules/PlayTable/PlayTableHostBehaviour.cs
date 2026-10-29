@@ -44,7 +44,6 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _active = this;
-            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             ApplyPatches();
             RefreshVisuals(false);
@@ -815,7 +814,6 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _shutdown = true;
-            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _reservations.Clear();
             _knownVisuals.Clear();
