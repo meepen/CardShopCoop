@@ -1,5 +1,5 @@
+using System;
 using System.Collections.Generic;
-using CardShopCoop.Api;
 using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.Report
@@ -39,9 +39,13 @@ namespace CardShopCoop.Modules.Report
         public List<ReportReviewEntry> Reviews = new();
     }
 
+    /// <summary>Authoritative slice of the end-of-day report. State, not a command: the host
+    /// owns the shared report and broadcasts the newest slice. <see cref="ActionId"/> is retained
+    /// so a delta can answer a client prediction (empty for host-originated changes).</summary>
     [NetworkMessage]
-    public sealed class ReportDeltaMessage : ActionMessage
+    public sealed class ReportDeltaMessage : INetMessage
     {
+        public Guid ActionId;
         public byte Kind;
         public bool OpenScreen;
         public bool CloseScreen;

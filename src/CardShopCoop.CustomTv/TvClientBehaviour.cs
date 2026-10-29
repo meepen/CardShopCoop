@@ -13,17 +13,9 @@ namespace CardShopCoop.CustomTv
     public sealed class TvClientBehaviour : CoopBehaviour
     {
         private static TvClientBehaviour _active;
-        private bool _shutdown;
-        private bool _initialized;
-        private bool _joined;
 
         private void OnEnable()
         {
-            if (_shutdown || _initialized)
-            {
-                return;
-            }
-
             try
             {
                 ResetSessionState();
@@ -42,20 +34,19 @@ namespace CardShopCoop.CustomTv
                 ResetSessionState();
                 throw;
             }
-            _initialized = true;
         }
 
         [OnFullyJoined]
-        private void MarkJoined(PeerConnection _)
-        {
-            _joined = true;
-            ApplyStoredStates();
-        }
+        private void MarkJoined(PeerConnection _) => ApplyStoredStates();
+
+        private bool Joined
+            => Context != null
+                && Context.HostConnection?.State == ConnectionState.FullyJoined;
 
         [ExtendedInformationHandler]
         private void OnTvState(InteractableObject tv, InformationChange<TvState> change)
         {
-            if (_shutdown || !TvInterop.Present || tv == null || change.Removed)
+            if (!TvInterop.Present || tv == null || change.Removed)
             {
                 return;
             }
@@ -72,8 +63,7 @@ namespace CardShopCoop.CustomTv
 
         private void ApplyTvState(Component controller, TvState state, TvState previous)
         {
-            if (_shutdown || !Context.InGame
-                || !TvInterop.Present || TvInterop.ApplyingRemote)
+            if (!Context.InGame || !TvInterop.Present || TvInterop.ApplyingRemote)
             {
                 if (state != null)
                 {
@@ -110,14 +100,8 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        internal void Shutdown()
+        private void OnDisable()
         {
-            if (_shutdown)
-            {
-                return;
-            }
-
-            _shutdown = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
             {
@@ -126,12 +110,9 @@ namespace CardShopCoop.CustomTv
             ResetSessionState();
         }
 
-        private void OnDestroy() => Shutdown();
-
         private void ResetSessionState()
         {
             TvInterop.ResetState();
-            _joined = false;
         }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode mode)
@@ -291,7 +272,7 @@ namespace CardShopCoop.CustomTv
 
         private void OnControllerReady(Component controller)
         {
-            if (_shutdown || !_joined || !Context.InGame)
+            if (!Joined || !Context.InGame)
             {
                 return;
             }
@@ -301,7 +282,7 @@ namespace CardShopCoop.CustomTv
 
         private void ApplyStoredStates()
         {
-            if (_shutdown || !Context.InGame)
+            if (!Context.InGame)
             {
                 return;
             }
@@ -368,7 +349,7 @@ namespace CardShopCoop.CustomTv
 
         private static bool CanAct()
         {
-            return _active != null && !_active._shutdown && _active._joined
+            return _active != null && _active.Joined
                 && _active.Context.InGame && TvInterop.Present;
         }
 

@@ -4,7 +4,7 @@ using CardShopCoop.Net;
 namespace CardShopCoop.Modules.World
 {
     [NetworkMessage]
-    public sealed class ContainerStateMessage : WorldMessage
+    public sealed class ContainerStateMessage : WorldStateMessage
     {
         public List<ContainerRecord> Records = new();
     }
@@ -12,7 +12,7 @@ namespace CardShopCoop.Modules.World
     /// <summary>One authoritative container record changed during normal play. A complete
     /// ContainerStateMessage is reserved for the join baseline.</summary>
     [NetworkMessage]
-    public sealed class ContainerDeltaMessage : WorldMessage
+    public sealed class ContainerDeltaMessage : WorldStateMessage
     {
         public InteractableObject Container;
         public ContainerRecord Record;
@@ -39,7 +39,7 @@ namespace CardShopCoop.Modules.World
     }
 
     [NetworkMessage]
-    public sealed class ContainerPackClaimMessage : WorldMessage
+    public sealed class ContainerPackClaimMessage : WorldStateMessage
     {
         public InteractableAutoPackOpener Container;
         public int ClaimToken;

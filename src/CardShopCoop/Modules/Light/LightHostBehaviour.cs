@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Light
 {
@@ -82,21 +83,21 @@ namespace CardShopCoop.Modules.Light
         }
 
         [MessageHandler]
-        private void HandleIntent(MessageContext context, LightSwitchIntentMessage message)
+        private ActionOutcome HandleIntent(MessageContext context, LightSwitchIntentMessage message)
         {
             if (!IsPeerMessage(context))
             {
-                return;
+                return ActionOutcome.Reject("shop-light sender is not an admitted peer");
             }
 
 
             if (!LightInterop.IsSceneReady(LightInterop.FindSceneManager()))
             {
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
-                return;
+                return ActionOutcome.Reject("shop-light scene is not ready");
             }
             LightSwitchState.Apply(message.IsActive);
             BroadcastState(message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         private void BroadcastState(Guid actionId)

@@ -4,7 +4,7 @@ using CardShopCoop.Net;
 namespace CardShopCoop.Modules.World
 {
     [NetworkMessage]
-    public sealed class MarketStateMessage : WorldMessage
+    public sealed class MarketStateMessage : WorldStateMessage
     {
         /// <summary>True only for the snapshot produced by the host's day roll. The client
         /// appends that day's price history locally after applying the values; history is

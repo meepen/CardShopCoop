@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 using UnityEngine;
@@ -10,14 +12,27 @@ namespace CardShopCoop.Modules.Deodorant
     {
         public Vector3 Position;
         public float Content;
+
+        // The client registers this prediction through the explicit Apply/Undo closures in
+        // DeodorantClientBehaviour, and the host handler performs the spray itself, so the action
+        // hooks are never the applied path.
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     [NetworkMessage]
-    public sealed class HandheldSprayEventMessage : ActionMessage
+    public sealed class HandheldSprayEventMessage : INetMessage
     {
+        /// <summary>The prediction this event answers, or empty for a host-local spray.</summary>
+        public Guid ActionId;
         public Vector3 Position;
         public float Content;
-        public System.Collections.Generic.List<DeodorantCustomerState> Customers = new();
+        public List<DeodorantCustomerState> Customers = new();
     }
 
     /// <summary>Resulting smell state for one live customer.</summary>

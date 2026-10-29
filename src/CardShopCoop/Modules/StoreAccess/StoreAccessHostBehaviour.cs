@@ -1,7 +1,6 @@
 using System;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -124,11 +123,18 @@ namespace CardShopCoop.Modules.StoreAccess
         }
 
         [MessageHandler]
-        private void HandleToggle(CoopMessageContext context, StoreAccessToggleIntent message)
+        private ActionOutcome HandleToggle(CoopMessageContext context,
+            StoreAccessToggleIntent message)
         {
-            if (_shutdown || context?.Connection == null || message == null)
+            if (message == null)
             {
-                return;
+                return ActionOutcome.Reject("access sign command is missing");
+            }
+
+            message.OnApply();
+            if (_shutdown || context?.Connection == null)
+            {
+                return ActionOutcome.Reject("access sign session is not active");
             }
 
             if (message.Which > WarehouseSign)
@@ -136,8 +142,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 CoopPlugin.Log.LogWarning("[store-access] unknown sign " + message.Which
                     + " for toggle " + message.ActionId + ".");
                 PublishState(message.ActionId, rejected: true);
-                Rollback(context.ConnectionId, message.ActionId);
-                return;
+                return ActionOutcome.Reject("unknown access sign");
             }
 
             var sign = FindSign(message.Which);
@@ -146,8 +151,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 CoopPlugin.Log.LogWarning("[store-access] sign=" + message.Which
                     + " disappeared before toggle " + message.ActionId + ".");
                 PublishState(message.ActionId, rejected: true);
-                Rollback(context.ConnectionId, message.ActionId);
-                return;
+                return ActionOutcome.Reject("the access sign is not available");
             }
 
             var before = ReadFlag(message.Which);
@@ -171,11 +175,11 @@ namespace CardShopCoop.Modules.StoreAccess
                 CoopPlugin.Log.LogWarning("[store-access] toggle sign=" + message.Which
                     + " made no change; rolling back " + message.ActionId + ".");
                 PublishState(message.ActionId, rejected: true);
-                Rollback(context.ConnectionId, message.ActionId);
-                return;
+                return ActionOutcome.Reject("the access sign refused the toggle");
             }
 
             PublishState(message.ActionId, rejected: false);
+            return ActionOutcome.Applied();
         }
 
         private static InteractableObject FindSign(byte which)
@@ -187,16 +191,6 @@ namespace CardShopCoop.Modules.StoreAccess
             => which == ShopSign
                 ? CPlayerData.m_IsShopOpen
                 : CPlayerData.m_IsWarehouseDoorClosed;
-
-        private void Rollback(int connectionId, Guid actionId)
-        {
-            if (actionId == Guid.Empty)
-            {
-                return;
-            }
-
-            ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
-        }
 
         /// <summary>Publishes the host's current access flags as the one session-wide value. The
         /// store owns the broadcast, baseline and client apply; the host has no handler, exactly

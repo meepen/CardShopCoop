@@ -25,46 +25,43 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleCardDelta(MessageContext context, CardDeltaRequestMessage message)
+        private ActionOutcome HandleCardDelta(MessageContext context,
+            CardDeltaRequestMessage message)
         {
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
-                ExecuteWorldCommand(context, message, () =>
+                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
                     _cardInteraction != null
-                        && _cardInteraction.HandleCardDelta(context.ConnectionId, message));
+                        && _cardInteraction.HandleCardDelta(context.ConnectionId, message)));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         [MessageHandler]
-        private void HandleCardDeltaBatch(MessageContext context, CardDeltaBatchRequestMessage message)
+        private ActionOutcome HandleCardDeltaBatch(MessageContext context,
+            CardDeltaBatchRequestMessage message)
         {
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
-                ExecuteWorldCommand(context, message, ()
-                    => ApplyCardDeltaBatchCommand(context, message));
+                return CommandOutcome(ExecuteWorldCommand(context, message, ()
+                    => ApplyCardDeltaBatchCommand(context, message)));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         [MessageHandler]
-        private void HandleGradedRemove(MessageContext context, GradedRemoveRequestMessage message)
+        private ActionOutcome HandleGradedRemove(MessageContext context,
+            GradedRemoveRequestMessage message)
         {
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
-                ExecuteWorldCommand(context, message, ()
-                    => ApplyGradedRemoveCommand(context, message));
+                return CommandOutcome(ExecuteWorldCommand(context, message, ()
+                    => ApplyGradedRemoveCommand(context, message)));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
         [IntentValidator]
         private IntentValidation ValidateEmptyBoxTake(CoopMessageContext context,
@@ -103,27 +100,27 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleEmptyBoxTake(MessageContext context, EmptyBoxTakeIntent message)
+        private ActionOutcome HandleEmptyBoxTake(MessageContext context, EmptyBoxTakeIntent message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
-            ExecuteWorldCommand(context, message, () => ApplyContainerCommand(context, message));
+            return CommandOutcome(ExecuteWorldCommand(context, message,
+                () => ApplyContainerCommand(context, message)));
         }
 
         [MessageHandler]
-        private void HandleEmptyBoxStore(MessageContext context, EmptyBoxStoreIntent message)
+        private ActionOutcome HandleEmptyBoxStore(MessageContext context, EmptyBoxStoreIntent message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Container == null)
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
-            ExecuteWorldCommand(context, message, () => ApplyContainerCommand(context, message));
+            return CommandOutcome(ExecuteWorldCommand(context, message,
+                () => ApplyContainerCommand(context, message)));
         }
 
         private IntentValidation ValidateContainerCommand(CoopMessageContext context,
@@ -176,47 +173,47 @@ namespace CardShopCoop.Modules.World
         private IntentValidation Validate(CoopMessageContext context, WorkerTakeFlagIntent m)
             => ValidateContainerCommand(context, m?.Container);
 
-        private void ApplyContainerIntent(MessageContext context, ContainerIntent intent)
+        private ActionOutcome ApplyContainerIntent(MessageContext context, ContainerIntent intent)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || intent?.Container == null)
             {
-                RejectWorldIntent(context, intent);
-                return;
+                return RejectWorldIntent(context, intent);
             }
 
-            ExecuteWorldCommand(context, intent, () => ApplyContainerCommand(context, intent));
+            return CommandOutcome(ExecuteWorldCommand(context, intent,
+                () => ApplyContainerCommand(context, intent)));
         }
 
         [MessageHandler]
-        private void HandleContentSet(MessageContext context, ContainerContentSetIntent message)
+        private ActionOutcome HandleContentSet(MessageContext context, ContainerContentSetIntent message)
             => ApplyContainerIntent(context, message);
 
         [MessageHandler]
-        private void HandlePackInsert(MessageContext context, PackInsertIntent message)
+        private ActionOutcome HandlePackInsert(MessageContext context, PackInsertIntent message)
             => ApplyContainerIntent(context, message);
 
         [MessageHandler]
-        private void HandlePackTurnOn(MessageContext context, PackTurnOnIntent message)
+        private ActionOutcome HandlePackTurnOn(MessageContext context, PackTurnOnIntent message)
             => ApplyContainerIntent(context, message);
 
         [MessageHandler]
-        private void HandlePackCollect(MessageContext context, PackCollectIntent message)
+        private ActionOutcome HandlePackCollect(MessageContext context, PackCollectIntent message)
             => ApplyContainerIntent(context, message);
 
         [MessageHandler]
-        private void HandlePackClaim(MessageContext context, PackClaimIntent message)
+        private ActionOutcome HandlePackClaim(MessageContext context, PackClaimIntent message)
             => ApplyContainerIntent(context, message);
 
         [MessageHandler]
-        private void HandleCleanserToggle(MessageContext context, CleanserToggleIntent message)
+        private ActionOutcome HandleCleanserToggle(MessageContext context, CleanserToggleIntent message)
             => ApplyContainerIntent(context, message);
 
         [MessageHandler]
-        private void HandleCleanserRefill(MessageContext context, CleanserRefillIntent message)
+        private ActionOutcome HandleCleanserRefill(MessageContext context, CleanserRefillIntent message)
             => ApplyContainerIntent(context, message);
 
         [MessageHandler]
-        private void HandleWorkerTakeFlag(MessageContext context, WorkerTakeFlagIntent message)
+        private ActionOutcome HandleWorkerTakeFlag(MessageContext context, WorkerTakeFlagIntent message)
             => ApplyContainerIntent(context, message);
 
         private bool ApplyCardDeltaBatchCommand(MessageContext context,

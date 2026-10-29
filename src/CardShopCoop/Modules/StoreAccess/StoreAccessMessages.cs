@@ -13,5 +13,15 @@ namespace CardShopCoop.Modules.StoreAccess
     public sealed class StoreAccessToggleIntent : ActionMessage
     {
         public byte Which;
+
+        /// <summary>The client's ledger replay/undo closures own the optimistic toggle; the
+        /// message is only the host command.</summary>
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 }

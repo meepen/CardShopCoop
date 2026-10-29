@@ -3,61 +3,106 @@ using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.Register
 {
-    /// <summary>The host command lane. The router applies the message's <c>OnApply</c> inside the
-    /// host-apply scope; the handler only publishes the resulting snapshot for that action. The
-    /// game hooks are suppressed during the apply, so exactly one authoritative state goes out.</summary>
+    /// <summary>The host command lane. The handler runs the message's <c>OnApply</c> inside the
+    /// host-apply scope, then publishes the resulting snapshot for that action. The game hooks are
+    /// suppressed during the apply, so exactly one authoritative state goes out.</summary>
     public sealed partial class RegisterHostBehaviour
     {
         [MessageHandler]
-        private void HandleClaim(CoopMessageContext context, RegisterClaimIntent message)
+        private ActionOutcome HandleClaim(CoopMessageContext context, RegisterClaimIntent message)
         {
-            var counter = message?.Counter;
+            if (message == null)
+            {
+                return ActionOutcome.Reject("register command is missing");
+            }
+
+            message.OnApply();
+            var counter = message.Counter;
             if (context == null || counter == null)
             {
-                return;
+                return ActionOutcome.Applied();
             }
 
             PublishNow(counter, context.Sender, message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
-        private void HandleRelease(CoopMessageContext context, RegisterReleaseIntent message)
+        private ActionOutcome HandleRelease(CoopMessageContext context, RegisterReleaseIntent message)
         {
-            var counter = message?.Counter;
+            if (message == null)
+            {
+                return ActionOutcome.Reject("register command is missing");
+            }
+
+            message.OnApply();
+            var counter = message.Counter;
             if (counter == null)
             {
-                return;
+                return ActionOutcome.Applied();
             }
 
             // A release has no game action; clear the owner and publish that state.
             PublishNow(counter, null, message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
-        private void HandleScanItem(CoopMessageContext context, RegisterScanItemIntent message)
+        private ActionOutcome HandleScanItem(CoopMessageContext context,
+            RegisterScanItemIntent message)
         {
-            PublishCheckout(message?.Counter, message?.ActionId ?? default);
+            if (message == null)
+            {
+                return ActionOutcome.Reject("register command is missing");
+            }
+
+            message.OnApply();
+            PublishCheckout(message.Counter, message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
-        private void HandleScanCard(CoopMessageContext context, RegisterScanCardIntent message)
+        private ActionOutcome HandleScanCard(CoopMessageContext context,
+            RegisterScanCardIntent message)
         {
-            PublishCheckout(message?.Counter, message?.ActionId ?? default);
+            if (message == null)
+            {
+                return ActionOutcome.Reject("register command is missing");
+            }
+
+            message.OnApply();
+            PublishCheckout(message.Counter, message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
-        private void HandleTakePayment(CoopMessageContext context, RegisterTakePaymentIntent message)
+        private ActionOutcome HandleTakePayment(CoopMessageContext context,
+            RegisterTakePaymentIntent message)
         {
-            PublishCheckout(message?.Counter, message?.ActionId ?? default);
+            if (message == null)
+            {
+                return ActionOutcome.Reject("register command is missing");
+            }
+
+            message.OnApply();
+            PublishCheckout(message.Counter, message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
-        private void HandleCardPayment(CoopMessageContext context, RegisterCardPaymentIntent message)
+        private ActionOutcome HandleCardPayment(CoopMessageContext context,
+            RegisterCardPaymentIntent message)
         {
-            var counter = message?.Counter;
+            if (message == null)
+            {
+                return ActionOutcome.Reject("register command is missing");
+            }
+
+            message.OnApply();
+            var counter = message.Counter;
             if (counter == null)
             {
-                return;
+                return ActionOutcome.Applied();
             }
 
             PublishNow(counter, ResolveOwner(counter), message.ActionId);
@@ -65,25 +110,41 @@ namespace CardShopCoop.Modules.Register
             // false here (the host never physically manned the counter), so credit the shared
             // tutorial, report count, and achievement on the host's authoritative state.
             CreditGuestCheckout();
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
-        private void HandleChange(CoopMessageContext context, RegisterChangeIntent message)
+        private ActionOutcome HandleChange(CoopMessageContext context, RegisterChangeIntent message)
         {
-            PublishCheckout(message?.Counter, message?.ActionId ?? default);
+            if (message == null)
+            {
+                return ActionOutcome.Reject("register command is missing");
+            }
+
+            message.OnApply();
+            PublishCheckout(message.Counter, message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
-        private void HandleComplete(CoopMessageContext context, RegisterCompleteIntent message)
+        private ActionOutcome HandleComplete(CoopMessageContext context,
+            RegisterCompleteIntent message)
         {
-            var counter = message?.Counter;
+            if (message == null)
+            {
+                return ActionOutcome.Reject("register command is missing");
+            }
+
+            message.OnApply();
+            var counter = message.Counter;
             if (counter == null)
             {
-                return;
+                return ActionOutcome.Applied();
             }
 
             PublishNow(counter, ResolveOwner(counter), message.ActionId);
             CreditGuestCheckout();
+            return ActionOutcome.Applied();
         }
 
         private void PublishCheckout(InteractableCashierCounter counter, System.Guid actionId)

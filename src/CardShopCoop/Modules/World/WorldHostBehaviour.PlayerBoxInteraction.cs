@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.Presence;
@@ -68,7 +69,8 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandlePlayerBoxPickup(MessageContext context, PlayerBoxPickupRequestMessage message)
+        private ActionOutcome HandlePlayerBoxPickup(MessageContext context,
+            PlayerBoxPickupRequestMessage message)
         {
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
@@ -76,11 +78,10 @@ namespace CardShopCoop.Modules.World
                 {
                     CoopPlugin.Log.LogWarning(
                         "[box-id] dropped player-box pickup: the box did not resolve to a live object.");
-                    RejectWorldIntent(context, message);
-                    return;
+                    return RejectWorldIntent(context, message);
                 }
 
-                ExecuteWorldCommand(context, message, () =>
+                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
                 {
                     // The requester is the holder; record it so this host and every other observer
                     // can attach the box to that player's avatar.
@@ -99,16 +100,14 @@ namespace CardShopCoop.Modules.World
                         HolderConnectionId = message.HolderConnectionId,
                     });
                     return true;
-                });
+                }));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         [MessageHandler]
-        private void HandlePlayerBoxPlacement(MessageContext context,
+        private ActionOutcome HandlePlayerBoxPlacement(MessageContext context,
             PlayerBoxPlacementRequestMessage message)
         {
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
@@ -117,11 +116,10 @@ namespace CardShopCoop.Modules.World
                 {
                     CoopPlugin.Log.LogWarning(
                         "[box-id] dropped player-box placement: the box did not resolve to a live object.");
-                    RejectWorldIntent(context, message);
-                    return;
+                    return RejectWorldIntent(context, message);
                 }
 
-                ExecuteWorldCommand(context, message, () =>
+                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
                 {
                     if (!ApplyPlayerBoxAction(message))
                     {
@@ -136,16 +134,15 @@ namespace CardShopCoop.Modules.World
                         Rotation = message.Rotation,
                     });
                     return true;
-                });
+                }));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         [MessageHandler]
-        private void HandlePlayerBoxThrow(MessageContext context, PlayerBoxThrowRequestMessage message)
+        private ActionOutcome HandlePlayerBoxThrow(MessageContext context,
+            PlayerBoxThrowRequestMessage message)
         {
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
@@ -153,11 +150,10 @@ namespace CardShopCoop.Modules.World
                 {
                     CoopPlugin.Log.LogWarning(
                         "[box-id] dropped player-box throw: the box did not resolve to a live object.");
-                    RejectWorldIntent(context, message);
-                    return;
+                    return RejectWorldIntent(context, message);
                 }
 
-                ExecuteWorldCommand(context, message, () =>
+                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
                 {
                     if (!ApplyPlayerBoxAction(message))
                     {
@@ -174,12 +170,10 @@ namespace CardShopCoop.Modules.World
                         AngularVelocity = message.AngularVelocity,
                     });
                     return true;
-                });
+                }));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         private PlayerBoxInteraction.LocalAction CapturePlayerBoxAction(InteractablePackagingBox box,
@@ -199,7 +193,7 @@ namespace CardShopCoop.Modules.World
         private void PublishPlayerBoxThrow(InteractablePackagingBox box,
             PlayerBoxInteraction.LocalAction action) => _playerBoxInteraction?.PublishThrow(box, action);
 
-        private bool ApplyPlayerBoxAction(PlayerBoxInteractionMessage message)
+        private bool ApplyPlayerBoxAction(IPlayerBoxAction message)
         {
             return _playerBoxInteraction != null && _playerBoxInteraction.ApplyIncoming(message);
         }
@@ -371,49 +365,187 @@ namespace CardShopCoop.Modules.World
         }
     }
 
+    /// <summary>The three player-box action shapes. A state message and its request share the
+    /// same fields but different bases (authoritative state vs ledgered command).</summary>
+    public enum PlayerBoxActionKind : byte
+    {
+        Pickup = 1,
+        Placement = 2,
+        Throw = 3,
+    }
+
+    /// <summary>Shared read surface for a player-box action in either direction.</summary>
+    internal interface IPlayerBoxAction
+    {
+        PlayerBoxActionKind Kind
+        {
+            get;
+        }
+        InteractablePackagingBox Box
+        {
+            get;
+        }
+        Guid ActionId
+        {
+            get;
+        }
+        int HolderConnectionId
+        {
+            get;
+        }
+        Vector3 HeldPosition
+        {
+            get;
+        }
+        Quaternion HeldRotation
+        {
+            get;
+        }
+        Vector3 Position
+        {
+            get;
+        }
+        Quaternion Rotation
+        {
+            get;
+        }
+        Vector3 Velocity
+        {
+            get;
+        }
+        Vector3 AngularVelocity
+        {
+            get;
+        }
+    }
+
     [NetworkMessage]
-    public class PlayerBoxPickupMessage : PlayerBoxInteractionMessage
+    public class PlayerBoxPickupMessage : PlayerBoxInteractionMessage, IPlayerBoxAction
     {
         public Vector3 HeldPosition;
         public Quaternion HeldRotation;
         /// <summary>Connection id of the player now holding the box, in the sender's connection
         /// space (0 = the host). Observers use it to attach the box to that player's avatar.</summary>
         public int HolderConnectionId;
+
+        PlayerBoxActionKind IPlayerBoxAction.Kind => PlayerBoxActionKind.Pickup;
+        InteractablePackagingBox IPlayerBoxAction.Box => Box;
+        Guid IPlayerBoxAction.ActionId => ActionId;
+        int IPlayerBoxAction.HolderConnectionId => HolderConnectionId;
+        Vector3 IPlayerBoxAction.HeldPosition => HeldPosition;
+        Quaternion IPlayerBoxAction.HeldRotation => HeldRotation;
+        Vector3 IPlayerBoxAction.Position => default;
+        Quaternion IPlayerBoxAction.Rotation => default;
+        Vector3 IPlayerBoxAction.Velocity => default;
+        Vector3 IPlayerBoxAction.AngularVelocity => default;
     }
 
     [NetworkMessage]
-    public sealed class PlayerBoxPickupRequestMessage : PlayerBoxPickupMessage
-    {
-    }
-
-    [NetworkMessage]
-    public class PlayerBoxPlacementMessage : PlayerBoxInteractionMessage
+    public class PlayerBoxPlacementMessage : PlayerBoxInteractionMessage, IPlayerBoxAction
     {
         public Vector3 Position;
         public Quaternion Rotation;
+
+        PlayerBoxActionKind IPlayerBoxAction.Kind => PlayerBoxActionKind.Placement;
+        InteractablePackagingBox IPlayerBoxAction.Box => Box;
+        Guid IPlayerBoxAction.ActionId => ActionId;
+        int IPlayerBoxAction.HolderConnectionId => 0;
+        Vector3 IPlayerBoxAction.HeldPosition => default;
+        Quaternion IPlayerBoxAction.HeldRotation => default;
+        Vector3 IPlayerBoxAction.Position => Position;
+        Quaternion IPlayerBoxAction.Rotation => Rotation;
+        Vector3 IPlayerBoxAction.Velocity => default;
+        Vector3 IPlayerBoxAction.AngularVelocity => default;
     }
 
     [NetworkMessage]
-    public sealed class PlayerBoxPlacementRequestMessage : PlayerBoxPlacementMessage
-    {
-    }
-
-    [NetworkMessage]
-    public class PlayerBoxThrowMessage : PlayerBoxInteractionMessage
+    public class PlayerBoxThrowMessage : PlayerBoxInteractionMessage, IPlayerBoxAction
     {
         public Vector3 Position;
         public Quaternion Rotation;
         public Vector3 Velocity;
         public Vector3 AngularVelocity;
+
+        PlayerBoxActionKind IPlayerBoxAction.Kind => PlayerBoxActionKind.Throw;
+        InteractablePackagingBox IPlayerBoxAction.Box => Box;
+        Guid IPlayerBoxAction.ActionId => ActionId;
+        int IPlayerBoxAction.HolderConnectionId => 0;
+        Vector3 IPlayerBoxAction.HeldPosition => default;
+        Quaternion IPlayerBoxAction.HeldRotation => default;
+        Vector3 IPlayerBoxAction.Position => Position;
+        Quaternion IPlayerBoxAction.Rotation => Rotation;
+        Vector3 IPlayerBoxAction.Velocity => Velocity;
+        Vector3 IPlayerBoxAction.AngularVelocity => AngularVelocity;
     }
 
     [NetworkMessage]
-    public sealed class PlayerBoxThrowRequestMessage : PlayerBoxThrowMessage
+    public sealed class PlayerBoxPickupRequestMessage : PlayerBoxInteractionRequestMessage,
+        IPlayerBoxAction
     {
+        public Vector3 HeldPosition;
+        public Quaternion HeldRotation;
+        public int HolderConnectionId;
+
+        PlayerBoxActionKind IPlayerBoxAction.Kind => PlayerBoxActionKind.Pickup;
+        InteractablePackagingBox IPlayerBoxAction.Box => Box;
+        Guid IPlayerBoxAction.ActionId => ActionId;
+        int IPlayerBoxAction.HolderConnectionId => HolderConnectionId;
+        Vector3 IPlayerBoxAction.HeldPosition => HeldPosition;
+        Quaternion IPlayerBoxAction.HeldRotation => HeldRotation;
+        Vector3 IPlayerBoxAction.Position => default;
+        Quaternion IPlayerBoxAction.Rotation => default;
+        Vector3 IPlayerBoxAction.Velocity => default;
+        Vector3 IPlayerBoxAction.AngularVelocity => default;
     }
 
-    /// <summary>Every player-box action addresses exactly one live packaging box.</summary>
-    public abstract class PlayerBoxInteractionMessage : WorldMessage
+    [NetworkMessage]
+    public sealed class PlayerBoxPlacementRequestMessage : PlayerBoxInteractionRequestMessage,
+        IPlayerBoxAction
+    {
+        public Vector3 Position;
+        public Quaternion Rotation;
+
+        PlayerBoxActionKind IPlayerBoxAction.Kind => PlayerBoxActionKind.Placement;
+        InteractablePackagingBox IPlayerBoxAction.Box => Box;
+        Guid IPlayerBoxAction.ActionId => ActionId;
+        int IPlayerBoxAction.HolderConnectionId => 0;
+        Vector3 IPlayerBoxAction.HeldPosition => default;
+        Quaternion IPlayerBoxAction.HeldRotation => default;
+        Vector3 IPlayerBoxAction.Position => Position;
+        Quaternion IPlayerBoxAction.Rotation => Rotation;
+        Vector3 IPlayerBoxAction.Velocity => default;
+        Vector3 IPlayerBoxAction.AngularVelocity => default;
+    }
+
+    [NetworkMessage]
+    public sealed class PlayerBoxThrowRequestMessage : PlayerBoxInteractionRequestMessage,
+        IPlayerBoxAction
+    {
+        public Vector3 Position;
+        public Quaternion Rotation;
+        public Vector3 Velocity;
+        public Vector3 AngularVelocity;
+
+        PlayerBoxActionKind IPlayerBoxAction.Kind => PlayerBoxActionKind.Throw;
+        InteractablePackagingBox IPlayerBoxAction.Box => Box;
+        Guid IPlayerBoxAction.ActionId => ActionId;
+        int IPlayerBoxAction.HolderConnectionId => 0;
+        Vector3 IPlayerBoxAction.HeldPosition => default;
+        Quaternion IPlayerBoxAction.HeldRotation => default;
+        Vector3 IPlayerBoxAction.Position => Position;
+        Quaternion IPlayerBoxAction.Rotation => Rotation;
+        Vector3 IPlayerBoxAction.Velocity => Velocity;
+        Vector3 IPlayerBoxAction.AngularVelocity => AngularVelocity;
+    }
+
+    /// <summary>Every authoritative player-box action addresses exactly one live packaging box.</summary>
+    public abstract class PlayerBoxInteractionMessage : WorldStateMessage
+    {
+        public InteractablePackagingBox Box;
+    }
+
+    /// <summary>Every player-box command addresses exactly one live packaging box.</summary>
+    public abstract class PlayerBoxInteractionRequestMessage : WorldIntentMessage
     {
         public InteractablePackagingBox Box;
     }
@@ -558,7 +690,7 @@ namespace CardShopCoop.Modules.World
         }
 
         private void ApplyPredictedLocal(InteractablePackagingBox box,
-            PlayerBoxInteractionMessage message)
+            IPlayerBoxAction message)
         {
             if (IsBeingPlaced(box))
             {
@@ -571,21 +703,20 @@ namespace CardShopCoop.Modules.World
             _applyingPrediction = true;
             try
             {
-                if (message is PlayerBoxPickupMessage)
+                switch (message.Kind)
                 {
-                    TakeIntoLocalHand(box);
-                }
-                else if (message is PlayerBoxPlacementMessage)
-                {
-                    box.DropBox(true);
-                }
-                else if (message is PlayerBoxThrowMessage)
-                {
-                    box.ThrowBox(true);
-                }
-                else
-                {
-                    throw new InvalidOperationException("Unsupported predicted player-box action.");
+                    case PlayerBoxActionKind.Pickup:
+                        TakeIntoLocalHand(box);
+                        break;
+                    case PlayerBoxActionKind.Placement:
+                        box.DropBox(true);
+                        break;
+                    case PlayerBoxActionKind.Throw:
+                        box.ThrowBox(true);
+                        break;
+                    default:
+                        throw new InvalidOperationException(
+                            "Unsupported predicted player-box action.");
                 }
 
             }
@@ -715,18 +846,23 @@ namespace CardShopCoop.Modules.World
         private void PublishForcedDrop(InteractablePackagingBox box,
             InteractablePackagingBox replacement)
         {
-            var placement = _host
-                ? (PlayerBoxPlacementMessage)new PlayerBoxPlacementMessage()
-                : new PlayerBoxPlacementRequestMessage();
-            placement.Box = box;
-            placement.Position = box.transform.position;
-            placement.Rotation = box.transform.rotation;
             if (_host)
             {
-                _broadcast(placement);
+                _broadcast(new PlayerBoxPlacementMessage
+                {
+                    Box = box,
+                    Position = box.transform.position,
+                    Rotation = box.transform.rotation,
+                });
                 return;
             }
 
+            var placement = new PlayerBoxPlacementRequestMessage
+            {
+                Box = box,
+                Position = box.transform.position,
+                Rotation = box.transform.rotation,
+            };
             if (_coveredHold > 0 || ActionLedger.IsApplying || ActionLedger.IsReconciling)
             {
                 // The drop is part of an enclosing prediction (a warehouse/container take that
@@ -840,14 +976,28 @@ namespace CardShopCoop.Modules.World
             {
                 ReleaseRemoteHold(pickupId);
             }
-            var pickup = _host
-                ? (PlayerBoxPickupMessage)new PlayerBoxPickupMessage()
-                : new PlayerBoxPickupRequestMessage();
-            ReadHoldPose(box, out pickup.HeldPosition, out pickup.HeldRotation);
-            pickup.Box = box;
-            // The host's own pickup has no remote avatar; a client's request is stamped by the host.
-            pickup.HolderConnectionId = 0;
-            PublishAction(box, action, pickup);
+            ReadHoldPose(box, out var heldPosition, out var heldRotation);
+            if (_host)
+            {
+                // The host's own pickup has no remote avatar.
+                PublishAction(box, action, new PlayerBoxPickupMessage
+                {
+                    Box = box,
+                    HeldPosition = heldPosition,
+                    HeldRotation = heldRotation,
+                    HolderConnectionId = 0,
+                });
+                return;
+            }
+
+            // A client request is stamped with the holder by the host.
+            PublishAction(box, action, new PlayerBoxPickupRequestMessage
+            {
+                Box = box,
+                HeldPosition = heldPosition,
+                HeldRotation = heldRotation,
+                HolderConnectionId = 0,
+            });
         }
 
         /// <summary>Announces a host hold that was not covered by the normal pickup capture: a
@@ -917,13 +1067,23 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            var placement = _host
-                ? (PlayerBoxPlacementMessage)new PlayerBoxPlacementMessage()
-                : new PlayerBoxPlacementRequestMessage();
-            placement.Position = box.transform.position;
-            placement.Rotation = box.transform.rotation;
-            placement.Box = box;
-            PublishAction(box, action, placement);
+            if (_host)
+            {
+                PublishAction(box, action, new PlayerBoxPlacementMessage
+                {
+                    Box = box,
+                    Position = box.transform.position,
+                    Rotation = box.transform.rotation,
+                });
+                return;
+            }
+
+            PublishAction(box, action, new PlayerBoxPlacementRequestMessage
+            {
+                Box = box,
+                Position = box.transform.position,
+                Rotation = box.transform.rotation,
+            });
         }
 
         internal void PublishThrow(InteractablePackagingBox box, LocalAction action)
@@ -934,26 +1094,42 @@ namespace CardShopCoop.Modules.World
             }
 
             var body = box.m_Rigidbody;
-            var thrown = _host
-                ? (PlayerBoxThrowMessage)new PlayerBoxThrowMessage()
-                : new PlayerBoxThrowRequestMessage();
-            thrown.Position = body == null ? box.transform.position : body.position;
-            thrown.Rotation = body == null ? box.transform.rotation : body.rotation;
-            thrown.Velocity = ReadVelocity(body);
-            thrown.AngularVelocity = body == null ? Vector3.zero : body.angularVelocity;
-            thrown.Box = box;
-            PublishAction(box, action, thrown);
+            var position = body == null ? box.transform.position : body.position;
+            var rotation = body == null ? box.transform.rotation : body.rotation;
+            var velocity = ReadVelocity(body);
+            var angularVelocity = body == null ? Vector3.zero : body.angularVelocity;
+            if (_host)
+            {
+                PublishAction(box, action, new PlayerBoxThrowMessage
+                {
+                    Box = box,
+                    Position = position,
+                    Rotation = rotation,
+                    Velocity = velocity,
+                    AngularVelocity = angularVelocity,
+                });
+                return;
+            }
+
+            PublishAction(box, action, new PlayerBoxThrowRequestMessage
+            {
+                Box = box,
+                Position = position,
+                Rotation = rotation,
+                Velocity = velocity,
+                AngularVelocity = angularVelocity,
+            });
         }
 
         /// <summary>Publishes one player-box action. The host broadcasts the authoritative
         /// result; a client registers the prediction now that the game's own method has already
         /// run, so the sent intent carries the real post-action pose and throw velocity.</summary>
         private void PublishAction(InteractablePackagingBox box, LocalAction action,
-            PlayerBoxInteractionMessage message)
+            IPlayerBoxAction message)
         {
             if (_host)
             {
-                _broadcast(message);
+                _broadcast((INetMessage)message);
                 return;
             }
 
@@ -965,7 +1141,7 @@ namespace CardShopCoop.Modules.World
                 // container op is the single forwarded action, and the host announces the granted
                 // hold once it creates the box. A drop/throw produced inside the same window is
                 // still forwarded below, because the host must release the box it replaces.
-                if (message is PlayerBoxPickupMessage)
+                if (message.Kind == PlayerBoxActionKind.Pickup)
                 {
                     return;
                 }
@@ -976,14 +1152,15 @@ namespace CardShopCoop.Modules.World
                 // This hold belongs to an action that already owns a prediction (a warehouse or
                 // container take) or to an authoritative apply. Forward it without creating a
                 // second prediction, so one physical action maps to exactly one prediction.
-                WorldClientBehaviour.SendClientIntent(message);
+                WorldClientBehaviour.SendClientIntent((WorldIntentMessage)message);
                 return;
             }
 
-            var actionId = WorldAction.Submit(WorldAction.BoxesScope, message,
+            var actionId = WorldAction.Submit(WorldAction.BoxesScope, (WorldIntentMessage)message,
                 () => ApplyPredictedLocal(box, message),
                 action.Undo);
-            if (message is PlayerBoxPlacementRequestMessage || message is PlayerBoxThrowRequestMessage)
+            if (message.Kind == PlayerBoxActionKind.Placement
+                || message.Kind == PlayerBoxActionKind.Throw)
             {
                 // A granted hold or creation descriptor that reaches this peer before the host's
                 // decision does crossed this move on the wire and describes the box's earlier
@@ -1016,7 +1193,7 @@ namespace CardShopCoop.Modules.World
         /// <summary>Publishes the moving world pose of this peer's locally held box. The initial
         /// pickup remains reliable; these updates only keep the already-authoritative box in the
         /// remote player's hands while they walk.</summary>
-        internal bool ApplyIncoming(PlayerBoxInteractionMessage message)
+        internal bool ApplyIncoming(IPlayerBoxAction message)
         {
             if (message == null || message.Box == null)
             {
@@ -1045,7 +1222,8 @@ namespace CardShopCoop.Modules.World
                 // hold, drop, or throw on top of that fight the move state machine and strand the
                 // box, and the move will publish its own authoritative result when it finishes.
                 // A terminal action still means nobody holds it, so retire any mirrored hold.
-                if (message is PlayerBoxPlacementMessage || message is PlayerBoxThrowMessage)
+                if (message.Kind == PlayerBoxActionKind.Placement
+                    || message.Kind == PlayerBoxActionKind.Throw)
                 {
                     ReleaseRemoteHold(boxNetworkId);
                 }
@@ -1053,7 +1231,7 @@ namespace CardShopCoop.Modules.World
                 return false;
             }
 
-            if (message is PlayerBoxPickupMessage pickup)
+            if (message.Kind == PlayerBoxActionKind.Pickup)
             {
                 if (_boxes.IsStored(boxNetworkId))
                 {
@@ -1066,12 +1244,12 @@ namespace CardShopCoop.Modules.World
                     return false;
                 }
 
-                if (!_host && pickup.HolderConnectionId == CoopCore.LocalConnectionId)
+                if (!_host && message.HolderConnectionId == CoopCore.LocalConnectionId)
                 {
                     // The host named us the holder: either the echo of our own pickup, or a
                     // server-driven hold such as the furniture box-up we requested. Take the box
                     // into our own hand; attaching it to a remote anchor would strand it.
-                    ApplyPredictedLocal(box, pickup);
+                    ApplyPredictedLocal(box, message);
                 }
                 else
                 {
@@ -1085,17 +1263,17 @@ namespace CardShopCoop.Modules.World
                         SceneRef<InteractionPlayerController>.Get()?.OnExitHoldBoxMode();
                     }
 
-                    ApplyPickup(box, boxNetworkId, pickup.HeldPosition, pickup.HeldRotation,
-                        pickup.HolderConnectionId);
+                    ApplyPickup(box, boxNetworkId, message.HeldPosition, message.HeldRotation,
+                        message.HolderConnectionId);
                 }
             }
-            else if (message is PlayerBoxPlacementMessage placement)
+            else if (message.Kind == PlayerBoxActionKind.Placement)
             {
-                ApplyPlacement(box, boxNetworkId, placement);
+                ApplyPlacement(box, boxNetworkId, message.Position, message.Rotation);
             }
-            else if (message is PlayerBoxThrowMessage thrown)
+            else if (message.Kind == PlayerBoxActionKind.Throw)
             {
-                ApplyThrow(box, boxNetworkId, thrown);
+                ApplyThrow(box, boxNetworkId, message);
             }
             else
             {
@@ -1136,15 +1314,15 @@ namespace CardShopCoop.Modules.World
         }
 
         private void ApplyPlacement(InteractablePackagingBox box, Guid boxNetworkId,
-            PlayerBoxPlacementMessage message)
+            Vector3 position, Quaternion rotation)
         {
             box.DropBox(false);
             ReleaseRemoteHold(boxNetworkId);
-            ApplyPose(box, message.Position, message.Rotation);
+            ApplyPose(box, position, rotation);
         }
 
         private void ApplyThrow(InteractablePackagingBox box, Guid boxNetworkId,
-            PlayerBoxThrowMessage message)
+            IPlayerBoxAction message)
         {
             // Face the box along the thrower's released rotation first so the game's own throw
             // force leaves in the right direction even when the velocity sample is weak; the
@@ -1473,20 +1651,20 @@ namespace CardShopCoop.Modules.World
             property?.SetValue(body, velocity);
         }
 
-        private static bool Validate(PlayerBoxInteractionMessage message)
+        private static bool Validate(IPlayerBoxAction message)
         {
             if (message == null || message.Box == null)
             {
                 return false;
             }
 
-            return message switch
+            return message.Kind switch
             {
-                PlayerBoxPickupMessage pickup => IsSanePose(pickup.HeldPosition, pickup.HeldRotation),
-                PlayerBoxPlacementMessage placement => IsSanePose(placement.Position, placement.Rotation),
-                PlayerBoxThrowMessage thrown => IsSanePose(thrown.Position, thrown.Rotation)
-                    && IsSaneVector(thrown.Velocity, MaxVelocity)
-                    && IsSaneVector(thrown.AngularVelocity, MaxVelocity),
+                PlayerBoxActionKind.Pickup => IsSanePose(message.HeldPosition, message.HeldRotation),
+                PlayerBoxActionKind.Placement => IsSanePose(message.Position, message.Rotation),
+                PlayerBoxActionKind.Throw => IsSanePose(message.Position, message.Rotation)
+                    && IsSaneVector(message.Velocity, MaxVelocity)
+                    && IsSaneVector(message.AngularVelocity, MaxVelocity),
                 _ => false,
             };
         }

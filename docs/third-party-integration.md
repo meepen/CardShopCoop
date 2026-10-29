@@ -228,7 +228,15 @@ private void OnColor(InteractableObject shelf, InformationChange<ShelfColor> cha
 For a session-wide value, use `[GlobalInformation]` + `Global<T>` from the quick start. Join
 baselines are automatic for both extended information and global values.
 
-## 7. Actions (advanced)
+## 7. Messages and actions (advanced)
+
+There are two message shapes:
+
+- `INetMessage` is a one-way message. Its handler returns `void`, may live on any behaviour, and
+  runs wherever the message arrives. Use it for events, announcements, and state you replicate
+  yourself.
+- `ActionMessage` is a client command that the host resolves. It is always recorded in the action
+  ledger, so its handler returns `ActionOutcome` and lives on a `[ServerBehaviour]`.
 
 Do not use an action for extended information. A client `SetExtendedInformation` is already a
 host-authoritative intent: the host applies it, broadcasts the result, and late joiners get it in
@@ -250,15 +258,64 @@ public sealed class MyAction : ActionMessage
 
     [NonSerialized] private Vector3 _previous;
 
-    public override void OnApply() { /* replay the local game change */ }
-    public override void OnUndo() { /* restore _previous */ }
+    // Host apply and client replay. The client performs its own local prediction before
+    // sending; this is not called on the initial send.
+    public override void OnApply() { /* perform the local game change */ }
+
+    // Reverse the local prediction when the host rejects the action.
+    public override void OnUndo(ActionResponseMessage response) { /* restore _previous */ }
+
+    // Optional. Only needed when a custom ActionResponseMessage carries data worth merging
+    // into local state. Accepted responses call this; rejections call OnUndo.
+    public override void OnMerge(ActionResponseMessage response) { /* merge accepted state */ }
+}
+
+// Client: perform the local prediction through the game path, then send the command.
+// Context.Send records it in the action ledger and fills ActionId before it leaves.
+Context.Send(Context.HostConnection, new MyAction { Target = target });
+```
+
+The host handler decides the outcome:
+
+```csharp
+[ServerBehaviour]
+public sealed class MyActionHost : CoopBehaviour
+{
+    [MessageHandler]
+    private ActionOutcome Handle(CoopMessageContext from, MyAction message)
+    {
+        // Refuse without applying anything on the host; the client undoes its prediction.
+        if (message.Target == null)
+        {
+            return ActionOutcome.Reject("target is not available");
+        }
+
+        // Let the framework call message.OnApply() on the host after this returns.
+        // If this handler already applied the command itself, return
+        // ActionOutcome.Applied() instead so the framework does not apply it twice.
+        return ActionOutcome.Apply();
+    }
 }
 ```
 
-- The local game change happens first; `OnApply`/`OnUndo` replay and reverse it for
-  reconciliation. `OnUndo` restores what was there, not a blank/default value.
-- The host is the authority. It applies the action and publishes the resulting state; a rejection
-  publishes the current state and rolls the client back. The host never trusts a client's undo.
+- Every `[MessageHandler]` for an `ActionMessage` must return `CardShopCoop.Api.ActionOutcome` and
+  live on a `[ServerBehaviour]`. Registration fails otherwise.
+- `ActionOutcome.Apply(response)` means the handler did not apply the command: the framework calls
+  `OnApply()` on the host, then answers the client.
+- `ActionOutcome.Applied(response)` means the handler already applied the command: the framework
+  skips `OnApply()`.
+- `ActionOutcome.Reject(reason, response)` means the host did not apply the command. The client
+  reverses its prediction with `OnUndo`. The reason is logged when no response is supplied.
+- The `response` argument is optional. Null sends only the framework's internal accept/rollback
+  control, which is all a state-based action needs.
+- `ActionResponseMessage` is the reply base (`Guid ActionId`, `bool Rejected`); the framework fills
+  both fields from the request and the outcome. Responses are routed by the framework: an accepted
+  response calls the action's `OnMerge`, a rejected response calls its `OnUndo`. Never declare a
+  `[MessageHandler]` for an `ActionResponseMessage`; registration fails.
+- `OnApply` runs on the host for `Apply`, and on the client when a rejected action's newer
+  neighbours are replayed. It does not run when the client first sends the action.
+- `OnUndo` restores what was there, not a blank/default value. The host never trusts a client's
+  undo.
 - The client's action ledger orders pending actions per object. On a rejection it undoes the
   rejected action and every newer pending action on that object, then replays the survivors before
   applying the host's state. One client cannot undo another client's newer action.
@@ -267,12 +324,13 @@ public sealed class MyAction : ActionMessage
   normal extended-information value with those two fields, and is how the framework matches the
   host's state to the pending action.
 - Reject with `[IntentValidator]` and handle `[IntentRejected]`; return `IntentValidation`, do
-  not throw.
+  not throw. A validator rejection never reaches the handler.
 - On accept, publish the resulting `IActionValue` with `ActionId = intent.ActionId` and
   `Rejected = false`. In `[IntentRejected]`, publish the current value with the same id and
-  `Rejected = true`.
+  `Rejected = true`. A handler that publishes state itself returns `ActionOutcome.Applied()`; the
+  state settles the sender's action.
 
-See `TvOpMessage`/`TvState` in CustomTv for a complete action + authoritative state pair.
+See `TvActionMessage`/`TvState` in CustomTv for a complete action + authoritative state pair.
 
 ## 8. Identity and message rules
 
@@ -347,4 +405,6 @@ Register once at plugin load and treat it as process-lifetime. Do not dispose th
 | Attach data to the session | `Global<T>.Value` |
 | React to extended information | `[ExtendedInformationHandler]`, `[GlobalInformationHandler]` |
 | Reject a client intent | `[IntentValidator]`, `[IntentRejected]` |
+| Send a one-way event | a `[NetworkMessage]` `INetMessage` with a `void` handler |
+| Resolve a client command | return `ActionOutcome.Apply/Applied/Reject` from its `[MessageHandler]` |
 | Add a transport | `CoopApi.RegisterNetworkingBackend` |

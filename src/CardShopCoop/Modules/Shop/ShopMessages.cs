@@ -3,19 +3,27 @@ using CardShopCoop.Net;
 
 namespace CardShopCoop.Modules.Shop
 {
-    /// <summary>Client intent for the single shop-rename edit lock. Acquire carries the action id
-    /// that a denial rolls back; release is a session fact with an empty id and must still reach
-    /// the host across a loading transition.</summary>
+    /// <summary>Client intent for the single shop-rename edit lock. Acquire is a command, so a
+    /// denial rolls the requester's action back.</summary>
     [NetworkMessage]
     public sealed class ShopRenameLockIntent : ActionMessage
     {
-        public byte Op;
+        /// <summary>The client's ledger replay/undo closures own the pending UI open; the message
+        /// is only the host command.</summary>
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
-    internal static class ShopRenameLockOp
+    /// <summary>A release is a session fact, not a command: it carries no action id and must still
+    /// reach the host across a loading transition, so it is a plain one-way message.</summary>
+    [NetworkMessage]
+    public sealed class ShopRenameReleaseMessage : INetMessage
     {
-        internal const byte Acquire = 0;
-        internal const byte Release = 1;
     }
 
     /// <summary>Client rename proposal. Vanilla already renamed the local sign; the host validates
@@ -24,6 +32,16 @@ namespace CardShopCoop.Modules.Shop
     public sealed class ShopRenameRequestIntent : ActionMessage
     {
         public string Name;
+
+        /// <summary>The client's ledger replay/undo closures own the optimistic sign; the message
+        /// is only the host command.</summary>
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     /// <summary>The editor's live text, before the host validates the lock owner and republishes

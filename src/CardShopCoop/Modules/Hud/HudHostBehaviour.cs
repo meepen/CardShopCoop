@@ -1,6 +1,6 @@
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -8,6 +8,7 @@ using CardShopCoop.Net.Connection;
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Hud
 {
@@ -87,30 +88,28 @@ namespace CardShopCoop.Modules.Hud
         }
 
         [MessageHandler]
-        private void HandleContribution(MessageContext context, HudContributionIntent message)
+        private ActionOutcome HandleContribution(MessageContext context, HudContributionIntent message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
             {
-                return;
+                return ActionOutcome.Reject("HUD contribution sender is not authenticated");
             }
 
             if (!TryValidateContribution(message))
             {
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("HUD contribution is invalid");
             }
 
             switch (message.Kind)
             {
                 case HudContributionKind.AddCoin:
                     QueueContribution(message.ActionId, new CEventPlayer_AddCoin(message.Value));
-                    break;
+                    return ActionOutcome.Applied();
                 case HudContributionKind.ReduceCoin:
                     if (!EconomyAuthority.TryReserveHostSpend(message.Value, out var spend))
                     {
-                        Reject(context, message.ActionId);
                         _pendingActionId = Guid.Empty;
-                        return;
+                        return ActionOutcome.Reject("host wallet could not cover the contribution");
                     }
 
                     _pendingActionId = message.ActionId;
@@ -127,19 +126,20 @@ namespace CardShopCoop.Modules.Hud
                     if (!queued)
                     {
                         spend.Dispose();
-                        Reject(context, message.ActionId);
+                        return ActionOutcome.Reject("host wallet spend could not be admitted");
                     }
-                    break;
+
+                    return ActionOutcome.Applied();
                 case HudContributionKind.AddShopExperience:
                     QueueContribution(message.ActionId,
                         new CEventPlayer_AddShopExp((int)message.Value));
-                    break;
+                    return ActionOutcome.Applied();
                 case HudContributionKind.AddFame:
                     QueueContribution(message.ActionId,
                         new CEventPlayer_AddFame((int)message.Value));
-                    break;
+                    return ActionOutcome.Applied();
                 default:
-                    return;
+                    return ActionOutcome.Reject("unsupported HUD contribution kind");
             }
         }
 
@@ -147,14 +147,6 @@ namespace CardShopCoop.Modules.Hud
         {
             return !_shutdown && RuntimeContext.InGame() && context?.Connection != null
                 && context.IsAuthenticated;
-        }
-
-        private void Reject(MessageContext context, Guid actionId)
-        {
-            if (actionId != Guid.Empty && context?.Connection != null)
-            {
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, actionId);
-            }
         }
 
         private static bool TryValidateContribution(HudContributionIntent message)

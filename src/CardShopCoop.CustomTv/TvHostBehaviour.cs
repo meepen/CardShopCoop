@@ -13,17 +13,10 @@ namespace CardShopCoop.CustomTv
     public sealed class TvHostBehaviour : CoopBehaviour
     {
         private static TvHostBehaviour _active;
-        private bool _shutdown;
-        private bool _initialized;
         private float _lastSeekInputTime;
 
         private void OnEnable()
         {
-            if (_shutdown || _initialized)
-            {
-                return;
-            }
-
             try
             {
                 ResetSessionState();
@@ -50,7 +43,6 @@ namespace CardShopCoop.CustomTv
                 ResetSessionState();
                 throw;
             }
-            _initialized = true;
         }
 
         [IntentValidator]
@@ -130,52 +122,58 @@ namespace CardShopCoop.CustomTv
         }
 
         [MessageHandler]
-        private void HandleNext(CoopMessageContext context, TvNextMessage message)
+        private ActionOutcome HandleNext(CoopMessageContext context, TvNextMessage message)
             => Handle(context, message);
 
         [MessageHandler]
-        private void HandlePrevious(CoopMessageContext context, TvPreviousMessage message)
+        private ActionOutcome HandlePrevious(CoopMessageContext context, TvPreviousMessage message)
             => Handle(context, message);
 
         [MessageHandler]
-        private void HandleOpen(CoopMessageContext context, TvOpenMessage message)
+        private ActionOutcome HandleOpen(CoopMessageContext context, TvOpenMessage message)
             => Handle(context, message);
 
         [MessageHandler]
-        private void HandlePause(CoopMessageContext context, TvPauseMessage message)
+        private ActionOutcome HandlePause(CoopMessageContext context, TvPauseMessage message)
             => Handle(context, message);
 
         [MessageHandler]
-        private void HandlePower(CoopMessageContext context, TvPowerMessage message)
+        private ActionOutcome HandlePower(CoopMessageContext context, TvPowerMessage message)
             => Handle(context, message);
 
         [MessageHandler]
-        private void HandleShuffle(CoopMessageContext context, TvShuffleMessage message)
+        private ActionOutcome HandleShuffle(CoopMessageContext context, TvShuffleMessage message)
             => Handle(context, message);
 
         [MessageHandler]
-        private void HandleSeek(CoopMessageContext context, TvSeekMessage message)
+        private ActionOutcome HandleSeek(CoopMessageContext context, TvSeekMessage message)
             => Handle(context, message);
 
-        private void Handle(CoopMessageContext context, TvActionMessage message)
+        private ActionOutcome Handle(CoopMessageContext context, TvActionMessage message)
         {
-            if (_shutdown || message == null || !TvInterop.Present)
+            if (message == null || !TvInterop.Present)
             {
-                return;
+                return ActionOutcome.Reject("TV is not available");
             }
 
-            // OnApply already performed the command. Publish the resulting state under the
-            // action id; the EIM IActionValue wrapper retires or reverses the sender's action.
+            // Apply on the host before publishing so the snapshot is captured from the state the
+            // command produced. The framework must not apply a second time.
+            message.OnApply();
+
+            // Publish the resulting state under the action id; the EIM IActionValue wrapper
+            // retires or reverses the sender's action.
             var controller = TvInterop.ControllerFor(message.Tv);
             if (controller == null)
             {
-                return;
+                CoopLog.Warn("[tv] action applied but the TV controller is gone; no state to publish"
+                    + " for action " + message.ActionId);
+                return ActionOutcome.Applied();
             }
 
             if (message.Rejected)
             {
                 PublishRejected(controller, message.ActionId);
-                return;
+                return ActionOutcome.Applied();
             }
 
             var operation = message.Operation;
@@ -197,16 +195,12 @@ namespace CardShopCoop.CustomTv
             {
                 PublishState(controller, snapshot);
             }
+
+            return ActionOutcome.Applied();
         }
 
-        internal void Shutdown()
+        private void OnDisable()
         {
-            if (_shutdown)
-            {
-                return;
-            }
-
-            _shutdown = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
             {
@@ -214,8 +208,6 @@ namespace CardShopCoop.CustomTv
             }
             ResetSessionState();
         }
-
-        private void OnDestroy() => Shutdown();
 
         private void ResetSessionState()
         {
@@ -381,7 +373,7 @@ namespace CardShopCoop.CustomTv
 
         private void PublishScalarDelta(Component controller, TvOperation operation, Guid actionId)
         {
-            if (_shutdown || !Context.InGame || !TvInterop.Present)
+            if (!Context.InGame || !TvInterop.Present)
             {
                 return;
             }
@@ -395,7 +387,7 @@ namespace CardShopCoop.CustomTv
 
         private void PublishBarrierDelta(Component controller, bool barrier, Guid actionId)
         {
-            if (_shutdown || !Context.InGame || !TvInterop.Present)
+            if (!Context.InGame || !TvInterop.Present)
             {
                 return;
             }
@@ -414,8 +406,7 @@ namespace CardShopCoop.CustomTv
         /// when the snapshot changed and which operation caused it.</summary>
         private void PublishState(Component controller, TvState snapshot)
         {
-            if (_shutdown || !Context.InGame || !TvInterop.Present
-                || snapshot == null)
+            if (!Context.InGame || !TvInterop.Present || snapshot == null)
             {
                 return;
             }
@@ -561,7 +552,7 @@ namespace CardShopCoop.CustomTv
             if (active != null && controller != null)
             {
                 var previous = TvInterop.OwnerOf(controller)?.GetExtendedInformation<TvState>();
-                if (previous?.Barrier == true && !active._shutdown)
+                if (previous?.Barrier == true)
                 {
                     active.AbortBarrier(controller,
                         "host TV controller playback was canceled");
@@ -681,11 +672,6 @@ namespace CardShopCoop.CustomTv
 
         private void OnHostVideoError(Component failed, string message)
         {
-            if (_shutdown)
-            {
-                return;
-            }
-
             var controller = failed;
             var owner = TvInterop.OwnerOf(controller);
             if (owner == null)

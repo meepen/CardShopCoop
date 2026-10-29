@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Modules.PlayTable;
 using CardShopCoop.Net;
@@ -29,11 +30,12 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleBoxDestroyRequest(MessageContext context, BoxDestroyRequestMessage message)
+        private ActionOutcome HandleBoxDestroyRequest(MessageContext context,
+            BoxDestroyRequestMessage message)
         {
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context) && message != null)
             {
-                ExecuteWorldCommand(context, message, () =>
+                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
                 {
                     if (!_boxNetworkInteraction.TryGetBox(message.BoxNetworkId, out var box))
                     {
@@ -48,24 +50,22 @@ namespace CardShopCoop.Modules.World
                     }
 
                     return _boxNetworkInteraction.HostDestroyRequested(box);
-                });
+                }));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         [MessageHandler]
-        private void HandleFurnitureDestroy(MessageContext context, FurnitureDestroyIntent message)
+        private ActionOutcome HandleFurnitureDestroy(MessageContext context,
+            FurnitureDestroyIntent message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Entity == null)
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
-            ExecuteWorldCommand(context, message, () =>
+            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
             {
                 var furniture = message.Entity;
                 if (PlacementInterop.FindKind(furniture) < 0)
@@ -79,28 +79,27 @@ namespace CardShopCoop.Modules.World
                 // placement removal publishes the entity removal to every peer.
                 return PlacementObjectIdentity
                     .Destroy(furniture);
-            });
+            }));
         }
 
         [MessageHandler]
-        private void HandleFurnitureBoxUp(MessageContext context, FurnitureBoxUpRequestMessage message)
+        private ActionOutcome HandleFurnitureBoxUp(MessageContext context,
+            FurnitureBoxUpRequestMessage message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context)
                 || message == null)
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
             if (message.Entity == null)
             {
                 CoopPlugin.Log.LogWarning(
                     "[box-furniture] dropped box-up request: the furniture did not resolve to a live object.");
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
-            ExecuteWorldCommand(context, message, () =>
+            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
             {
                 var match = message.Entity;
                 if (match.m_ObjectType != message.ObjectType)
@@ -151,7 +150,7 @@ namespace CardShopCoop.Modules.World
                 // (IsBoxed + boxed pose); now hand the box to the requesting player.
                 GrantFurnitureHold(match, context.ConnectionId, message.ActionId);
                 return true;
-            });
+            }));
         }
 
         /// <summary>After a client boxes furniture up, the box belongs in that player's hands, not
@@ -188,7 +187,8 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleBoxStateRequest(MessageContext context, BoxStateRequestMessage message)
+        private ActionOutcome HandleBoxStateRequest(MessageContext context,
+            BoxStateRequestMessage message)
         {
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
@@ -196,11 +196,10 @@ namespace CardShopCoop.Modules.World
                 {
                     CoopPlugin.Log.LogWarning(
                         "[box-id] dropped box state request: the box did not resolve to a live object.");
-                    RejectWorldIntent(context, message);
-                    return;
+                    return RejectWorldIntent(context, message);
                 }
 
-                ExecuteWorldCommand(context, message, () =>
+                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
                 {
                     if (message.Box is not InteractablePackagingBox_Item item
                         || !_boxNetworkInteraction.TryGetId(item, out var boxId))
@@ -248,12 +247,10 @@ namespace CardShopCoop.Modules.World
                     // (the count ping-pong), so relay the mirror only to the other peers.
                     RelayItemBoxState(item, context.ConnectionId);
                     return true;
-                });
+                }));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         /// <summary>Publishes the host's own item-box mutation to every client.</summary>

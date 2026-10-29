@@ -1,10 +1,11 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.Presence
@@ -161,17 +162,17 @@ namespace CardShopCoop.Modules.Presence
         }
 
         [MessageHandler]
-        private void HandleModelRequest(MessageContext context, PresenceModelRequestMessage message)
+        private ActionOutcome HandleModelRequest(MessageContext context,
+            PresenceModelRequestMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
             {
-                return;
+                return ActionOutcome.Reject("appearance request from an unauthenticated sender");
             }
 
             if (message.ModelIndex < 0 || message.CustomizationJson?.Length > MaxCustomizationJson)
             {
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("appearance payload is outside the allowed range");
             }
 
             var kind = _models.ContainsKey(context.Connection.Id)
@@ -196,6 +197,7 @@ namespace CardShopCoop.Modules.Presence
                 Entry = Clone(model),
                 ActionId = message.ActionId,
             });
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
@@ -471,14 +473,6 @@ namespace CardShopCoop.Modules.Presence
                 {
                     RuntimeContext.Send(connectionId, delta);
                 }
-            }
-        }
-
-        private void Reject(MessageContext context, Guid actionId)
-        {
-            if (actionId != Guid.Empty && context?.Connection != null)
-            {
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, actionId);
             }
         }
 

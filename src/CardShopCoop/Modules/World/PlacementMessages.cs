@@ -17,7 +17,7 @@ namespace CardShopCoop.Modules.World
     /// <summary>A minimal host-owned placement entity state change. Creation and removal are not
     /// state operations; they belong to the identity lifecycle.</summary>
     [NetworkMessage]
-    public sealed class PlacementDeltaMessage : ActionMessage
+    public sealed class PlacementDeltaMessage : WorldStateMessage
     {
         /// <summary>A full state update (pose and boxed state).</summary>
         public const byte Update = 1;
@@ -30,7 +30,7 @@ namespace CardShopCoop.Modules.World
 
     /// <summary>A client request to settle one object at a pose.</summary>
     [NetworkMessage]
-    public sealed class PlacementMoveIntentMessage : ActionMessage
+    public sealed class PlacementMoveIntentMessage : WorldIntentMessage
     {
         public PlacementMoveEntry Move;
     }

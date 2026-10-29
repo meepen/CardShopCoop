@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -20,11 +21,24 @@ namespace CardShopCoop.Modules.Settings
         public byte CashierFlags;
         public InteractablePlayTable Table;
         public int TableNumber;
+
+        // The client registers this prediction through the explicit Apply/Undo closures in
+        // SettingsClientBehaviour, and the host handler performs the mutation itself, so the
+        // action hooks are never the applied path.
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     [NetworkMessage]
-    public sealed class SettingsStateMessage : ActionMessage
+    public sealed class SettingsStateMessage : INetMessage
     {
+        /// <summary>The prediction this state answers, or empty for host-local state.</summary>
+        public Guid ActionId;
         public bool Full = true;
         public int Index = -1;
         // For partial fee mutations this is the price-list element. Cashier/table partials use the

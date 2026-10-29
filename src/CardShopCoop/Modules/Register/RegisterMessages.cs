@@ -11,6 +11,12 @@ namespace CardShopCoop.Modules.Register
     {
         /// <summary>The live cashier counter the intent targets.</summary>
         public InteractableCashierCounter Counter;
+
+        /// <summary>Most register commands restore their entity from the authoritative snapshot
+        /// under the rejected action id, so the message itself has nothing to reverse.</summary>
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     [NetworkMessage]
@@ -18,7 +24,8 @@ namespace CardShopCoop.Modules.Register
     {
         public override void OnApply() => RegisterActions.Claim(Counter);
 
-        public override void OnUndo() => RegisterClientBehaviour.Active?.UndoClaim(this);
+        public override void OnUndo(ActionResponseMessage response)
+            => RegisterClientBehaviour.Active?.UndoClaim(this);
     }
 
     [NetworkMessage]
@@ -26,7 +33,8 @@ namespace CardShopCoop.Modules.Register
     {
         public override void OnApply() => RegisterActions.Release(Counter);
 
-        public override void OnUndo() => RegisterClientBehaviour.Active?.UndoRelease(this);
+        public override void OnUndo(ActionResponseMessage response)
+            => RegisterClientBehaviour.Active?.UndoRelease(this);
     }
 
     [NetworkMessage]
@@ -67,7 +75,8 @@ namespace CardShopCoop.Modules.Register
 
         public override void OnApply() => WalletApplied = RegisterActions.CardPayment(Counter, Value);
 
-        public override void OnUndo() => RegisterClientBehaviour.Active?.UndoCardPayment(this);
+        public override void OnUndo(ActionResponseMessage response)
+            => RegisterClientBehaviour.Active?.UndoCardPayment(this);
     }
 
     [NetworkMessage]
@@ -98,6 +107,7 @@ namespace CardShopCoop.Modules.Register
 
         public override void OnApply() => WalletApplied = RegisterActions.Complete(Counter);
 
-        public override void OnUndo() => RegisterClientBehaviour.Active?.UndoComplete(this);
+        public override void OnUndo(ActionResponseMessage response)
+            => RegisterClientBehaviour.Active?.UndoComplete(this);
     }
 }

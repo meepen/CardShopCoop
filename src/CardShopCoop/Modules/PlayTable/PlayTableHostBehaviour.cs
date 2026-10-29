@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -102,59 +101,59 @@ namespace CardShopCoop.Modules.PlayTable
         }
 
         [MessageHandler]
-        private void HandleStartMatchIntent(MessageContext messageContext,
+        private ActionOutcome HandleStartMatchIntent(MessageContext messageContext,
             StartTableMatchIntent request)
         {
             if (!IsPeerMessage(messageContext) || request == null)
             {
-                return;
+                return ActionOutcome.Reject("match start from an invalid sender");
             }
 
-            StartMatch(request, messageContext.Connection.Id);
+            return StartMatch(request, messageContext.Connection.Id);
         }
 
         [MessageHandler]
-        private void HandleCancelMatchIntent(MessageContext messageContext,
+        private ActionOutcome HandleCancelMatchIntent(MessageContext messageContext,
             CancelTableMatchIntent request)
         {
             if (!IsPeerMessage(messageContext) || request == null)
             {
-                return;
+                return ActionOutcome.Reject("match cancel from an invalid sender");
             }
 
-            CancelMatch(request, messageContext.Connection.Id);
+            return CancelMatch(request, messageContext.Connection.Id);
         }
 
         [MessageHandler]
-        private void HandleMatchStartedIntent(MessageContext messageContext,
+        private ActionOutcome HandleMatchStartedIntent(MessageContext messageContext,
             MarkTableMatchStartedIntent request)
         {
             if (!IsPeerMessage(messageContext) || request == null)
             {
-                return;
+                return ActionOutcome.Reject("match-started notice from an invalid sender");
             }
 
-            MarkMatchStarted(request, messageContext.Connection.Id);
+            return MarkMatchStarted(request, messageContext.Connection.Id);
         }
 
         [MessageHandler]
-        private void HandleReleaseMatchIntent(MessageContext messageContext,
+        private ActionOutcome HandleReleaseMatchIntent(MessageContext messageContext,
             ReleaseTableMatchIntent request)
         {
             if (!IsPeerMessage(messageContext) || request == null)
             {
-                return;
+                return ActionOutcome.Reject("match release from an invalid sender");
             }
 
-            ReleaseMatch(request, messageContext.Connection.Id);
+            return ReleaseMatch(request, messageContext.Connection.Id);
         }
 
         [MessageHandler]
-        private void HandleKickTableIntent(MessageContext messageContext, KickTableIntent message)
+        private ActionOutcome HandleKickTableIntent(MessageContext messageContext, KickTableIntent message)
         {
             if (!IsPeerMessage(messageContext) || message == null)
             {
-                return;
+                return ActionOutcome.Reject("table kick from an invalid sender");
             }
 
             var owner = messageContext.Connection.Id;
@@ -164,8 +163,7 @@ namespace CardShopCoop.Modules.PlayTable
             var table = message.Table;
             if (table == null)
             {
-                Reject(owner, message.ActionId, "table is not live");
-                return;
+                return Reject(owner, message.ActionId, "table is not live");
             }
 
             if (table.GetIsTournamentPlayTable() || table.GetCurrentPlayerCount() <= 0
@@ -181,9 +179,10 @@ namespace CardShopCoop.Modules.PlayTable
                 // is the one that trailed.
                 PublishGameState(table, true);
                 SendTableState(owner, table, message.ActionId);
-                Reject(owner, message.ActionId,
-                    "table is not occupied by a kickable game");
-                return;
+                CoopPlugin.Log.LogWarning("play-table intent rejected for connection=" + owner
+                    + ": table is not occupied by a kickable game (authority resent).");
+                // The authoritative table state above already settles the requester's prediction.
+                return ActionOutcome.Applied();
             }
 
             _suppressStoppedVisual = true;
@@ -197,6 +196,7 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             NotifyTableChanged(table, message.ActionId, true);
+            return ActionOutcome.Applied();
         }
 
         internal bool HasActiveMatch(InteractablePlayTable table)
@@ -219,42 +219,37 @@ namespace CardShopCoop.Modules.PlayTable
                 && !PlayTableInterop.HostPlayingAt(table)
                 && table.GetTournamentPlayTableNumber() <= 0;
 
-        private void StartMatch(StartTableMatchIntent request, int owner)
+        private ActionOutcome StartMatch(StartTableMatchIntent request, int owner)
         {
             // The request names the live table; the identity converter resolved it against this
             // host's live placement list. A missing object is a stale table and is dropped.
             var table = request.Table;
             if (table == null)
             {
-                Reject(owner, request.ActionId, "table is not live");
-                return;
+                return Reject(owner, request.ActionId, "table is not live");
             }
 
             if (_reservations.ContainsKey(table))
             {
-                Reject(owner, request.ActionId, "table already reserved");
-                return;
+                return Reject(owner, request.ActionId, "table already reserved");
             }
 
             foreach (var existing in _reservations.Values)
             {
                 if (existing.Match.OwnerConn == owner)
                 {
-                    Reject(owner, request.ActionId, "owner already has a match");
-                    return;
+                    return Reject(owner, request.ActionId, "owner already has a match");
                 }
 
                 if (existing.Match.MatchId == request.MatchId)
                 {
-                    Reject(owner, request.ActionId, "match id is already active");
-                    return;
+                    return Reject(owner, request.ActionId, "match id is already active");
                 }
             }
 
             if (PlayTableInterop.HostPlayingAt(table) || request.Seat > 1)
             {
-                Reject(owner, request.ActionId, "table or seat is unavailable");
-                return;
+                return Reject(owner, request.ActionId, "table or seat is unavailable");
             }
 
             var occupied = table.m_IsSeatOccupied;
@@ -268,28 +263,24 @@ namespace CardShopCoop.Modules.PlayTable
                 || occupied.Count <= customerSeat || !occupied[customerSeat]
                 || request.SideA != (request.Seat == 0))
             {
-                Reject(owner, request.ActionId,
+                return Reject(owner, request.ActionId,
                     "requested seat must be free and the customer seat occupied");
-                return;
             }
 
             var maxDeck = GameInstance.GetMaxDeckCardCount();
             if (request.DeckCardCount < 1 || request.DeckCardCount > maxDeck)
             {
-                Reject(owner, request.ActionId, "invalid deck size");
-                return;
+                return Reject(owner, request.ActionId, "invalid deck size");
             }
 
             if (string.IsNullOrEmpty(request.MatchId) || request.MatchId.Length > 64)
             {
-                Reject(owner, request.ActionId, "invalid match id");
-                return;
+                return Reject(owner, request.ActionId, "invalid match id");
             }
 
             if (!PlayTableInterop.ReserveSeat(table, request.Seat, out var seatBefore))
             {
-                Reject(owner, request.ActionId, "reservation race");
-                return;
+                return Reject(owner, request.ActionId, "reservation race");
             }
 
             var reservation = new Reservation
@@ -308,40 +299,41 @@ namespace CardShopCoop.Modules.PlayTable
             _reservations.Add(table, reservation);
             NotifyTableChanged(table, request.ActionId, false);
             PublishMatchUpsert(reservation.Match, request.ActionId);
+            return ActionOutcome.Applied();
         }
 
-        private void CancelMatch(CancelTableMatchIntent request, int owner)
+        private ActionOutcome CancelMatch(CancelTableMatchIntent request, int owner)
         {
             if (!TryGetOwnedReservation(request.Table, request.MatchId, owner, out var reservation))
             {
-                Reject(owner, request.ActionId, "cancel is not authenticated");
-                return;
+                return Reject(owner, request.ActionId, "cancel is not authenticated");
             }
 
             Release(reservation.Match.Table, "cancelled", request.ActionId);
+            return ActionOutcome.Applied();
         }
 
-        private void MarkMatchStarted(MarkTableMatchStartedIntent request, int owner)
+        private ActionOutcome MarkMatchStarted(MarkTableMatchStartedIntent request, int owner)
         {
             if (!TryGetOwnedReservation(request.Table, request.MatchId, owner, out var reservation))
             {
-                Reject(owner, request.ActionId, "match is not owned by sender");
-                return;
+                return Reject(owner, request.ActionId, "match is not owned by sender");
             }
 
             reservation.Match.Phase = PlayTableMatchEntry.StateStarted;
             PublishMatchUpsert(reservation.Match, request.ActionId);
+            return ActionOutcome.Applied();
         }
 
-        private void ReleaseMatch(ReleaseTableMatchIntent request, int owner)
+        private ActionOutcome ReleaseMatch(ReleaseTableMatchIntent request, int owner)
         {
             if (!TryGetOwnedReservation(request.Table, request.MatchId, owner, out var reservation))
             {
-                Reject(owner, request.ActionId, "match release is not authenticated");
-                return;
+                return Reject(owner, request.ActionId, "match release is not authenticated");
             }
 
             Release(reservation.Match.Table, "gameplay-finished", request.ActionId);
+            return ActionOutcome.Applied();
         }
 
         private bool TryGetOwnedReservation(InteractablePlayTable table, string matchId, int owner,
@@ -371,14 +363,11 @@ namespace CardShopCoop.Modules.PlayTable
             return true;
         }
 
-        private void Reject(int connectionId, Guid actionId, string reason)
+        private ActionOutcome Reject(int connectionId, Guid actionId, string reason)
         {
             CoopPlugin.Log.LogWarning("play-table intent rejected for connection=" + connectionId
-                + ": " + reason);
-            if (actionId != Guid.Empty)
-            {
-                ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
-            }
+                + " id=" + actionId + ": " + reason);
+            return ActionOutcome.Reject(reason);
         }
 
         private PlayTableBaselineMessage BuildBaseline()

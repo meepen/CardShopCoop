@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Bills
 {
@@ -75,91 +76,88 @@ namespace CardShopCoop.Modules.Bills
         }
 
         [MessageHandler]
-        private void HandlePayment(MessageContext context, BillPaymentMessage message)
+        private ActionOutcome HandlePayment(MessageContext context, BillPaymentMessage message)
         {
             if (!IsPeerMessage(context) || message == null)
             {
-                return;
+                return ActionOutcome.Reject("bills payment sender is not an admitted peer");
             }
 
             var peer = context.Connection.Id;
-            var accepted = false;
             try
             {
                 if (message.BillType != 0
                     && !Enum.IsDefined(typeof(EBillType), (int)message.BillType))
                 {
-                    Rollback(context, message);
+                    return RejectPayment(context, message, "unsupported bill type");
                 }
-                else
-                {
-                    var screen = BillsInterop.FindScreen();
-                    if (screen == null)
-                    {
-                        Rollback(context, message);
-                    }
-                    else if (!BillsInterop.TryReservePayment(message.BillType, out var spend))
-                    {
-                        // The guest's intent was predicted locally, so the refusal feedback
-                        // belongs to the requester, not (only) to the host screen.
-                        _forwardedRequester = peer;
-                        try
-                        {
-                            NotEnoughResourceTextPopup.ShowText(ENotEnoughResourceText.Money);
-                        }
-                        finally
-                        {
-                            _forwardedRequester = 0;
-                        }
 
-                        Rollback(context, message);
-                    }
-                    else
-                    {
-                        _forwardedRequester = peer;
-                        _applyingIntent = true;
-                        try
-                        {
-                            accepted = BillsInterop.CommitPayment(spend, () =>
-                            {
-                                switch (message.BillType)
-                                {
-                                    case 0:
-                                        screen.OnPressPayAllBill();
-                                        break;
-                                    case (byte)EBillType.Rent:
-                                        screen.OnPressPayRentBill();
-                                        break;
-                                    case (byte)EBillType.Electric:
-                                        screen.OnPressPayElectricBill();
-                                        break;
-                                    case (byte)EBillType.Employee:
-                                        screen.OnPressPaySalaryBill();
-                                        break;
-                                }
-                            });
-                        }
-                        finally
-                        {
-                            _applyingIntent = false;
-                        }
-                        _forwardedRequester = 0;
-                        if (accepted)
-                        {
-                            BroadcastDelta(BuildDelta(message.BillType, message.ActionId));
-                        }
-                        else
-                        {
-                            Rollback(context, message);
-                        }
-                    }
+                var screen = BillsInterop.FindScreen();
+                if (screen == null)
+                {
+                    return RejectPayment(context, message, "bill screen is not available");
                 }
+
+                if (!BillsInterop.TryReservePayment(message.BillType, out var spend))
+                {
+                    // The guest's intent was predicted locally, so the refusal feedback
+                    // belongs to the requester, not (only) to the host screen.
+                    _forwardedRequester = peer;
+                    try
+                    {
+                        NotEnoughResourceTextPopup.ShowText(ENotEnoughResourceText.Money);
+                    }
+                    finally
+                    {
+                        _forwardedRequester = 0;
+                    }
+
+                    return RejectPayment(context, message, "host wallet could not cover the payment");
+                }
+
+                _forwardedRequester = peer;
+                _applyingIntent = true;
+                bool accepted;
+                try
+                {
+                    accepted = BillsInterop.CommitPayment(spend, () =>
+                    {
+                        switch (message.BillType)
+                        {
+                            case 0:
+                                screen.OnPressPayAllBill();
+                                break;
+                            case (byte)EBillType.Rent:
+                                screen.OnPressPayRentBill();
+                                break;
+                            case (byte)EBillType.Electric:
+                                screen.OnPressPayElectricBill();
+                                break;
+                            case (byte)EBillType.Employee:
+                                screen.OnPressPaySalaryBill();
+                                break;
+                        }
+                    });
+                }
+                finally
+                {
+                    _applyingIntent = false;
+                    _forwardedRequester = 0;
+                }
+
+                if (!accepted)
+                {
+                    return RejectPayment(context, message, "the host refused the payment");
+                }
+
+                BroadcastDelta(BuildDelta(message.BillType, message.ActionId));
+                return ActionOutcome.Applied();
             }
             catch (Exception exception)
             {
                 _forwardedRequester = 0;
                 CoopPlugin.Log.LogError("Bills payment failed for peer " + peer + ": " + exception);
-                Rollback(context, message);
+                return RejectPayment(context, message, "bills payment failed");
             }
         }
 
@@ -238,30 +236,29 @@ namespace CardShopCoop.Modules.Bills
             };
 
         /// <summary>Answers a rejected payment with the authoritative bills under the rejected
-        /// prediction id, sent before the generic rollback. The requester's Confirm retires the
-        /// prediction and applies those values, so the rollback is ignored as already-resolved
-        /// instead of restoring the capture's stale three-bill snapshot.</summary>
-        private static void Rollback(MessageContext context, BillPaymentMessage message)
+        /// prediction id. Those values settle the requester's prediction, so the handler reports
+        /// the command as already applied instead of asking the framework for a second generic
+        /// rollback. When no authority can be sent (the host is leaving the game), the caller gets
+        /// a plain rejection so the framework still reverses the guest's optimistic payment.</summary>
+        private static ActionOutcome RejectPayment(MessageContext context,
+            BillPaymentMessage message, string reason)
         {
             var active = _active;
             if (active == null || context?.Connection == null || message == null)
             {
-                return;
+                return ActionOutcome.Reject(reason);
             }
 
-            active.SendRejectionState(context.Connection.Id, message);
-
-            if (message.ActionId != Guid.Empty)
-            {
-                ActionLedger.Rollback(active.RuntimeContext, context.Connection.Id, message.ActionId);
-            }
+            return active.SendRejectionState(context.Connection.Id, message)
+                ? ActionOutcome.Applied()
+                : ActionOutcome.Reject(reason);
         }
 
-        private void SendRejectionState(int peer, BillPaymentMessage message)
+        private bool SendRejectionState(int peer, BillPaymentMessage message)
         {
             if (_shutdown || !RuntimeContext.InGame())
             {
-                return;
+                return false;
             }
 
             var refresh = BuildDelta(0, message.ActionId);
@@ -270,6 +267,7 @@ namespace CardShopCoop.Modules.Bills
                 + " employee=" + refresh.Employee.AmountToPay
                 + " pred=" + message.ActionId + ".");
             RuntimeContext.Send(peer, refresh);
+            return true;
         }
 
         private bool IsPeerMessage(MessageContext context)

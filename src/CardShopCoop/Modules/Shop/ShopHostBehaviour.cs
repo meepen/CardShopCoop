@@ -1,7 +1,6 @@
 using System;
 using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.ExtendedInformation;
 using CardShopCoop.Modules.Presence;
 using CardShopCoop.Net;
@@ -97,20 +96,26 @@ namespace CardShopCoop.Modules.Shop
                 return IntentValidation.Deny("player is not authenticated");
             }
 
-            if (message.Op != ShopRenameLockOp.Acquire && message.Op != ShopRenameLockOp.Release)
+            // Acquire is gameplay traffic and waits for the peer's fully-joined acknowledgement.
+            return context.Connection.State != ConnectionState.FullyJoined
+                ? IntentValidation.Deny("player is still joining")
+                : IntentValidation.Allow();
+        }
+
+        /// <summary>Release is a session fact, not a command: it has no action id to roll back and
+        /// must land even while a peer is between scenes, so only authentication gates it.</summary>
+        [IntentValidator]
+        private IntentValidation ValidateRelease(CoopMessageContext context,
+            ShopRenameReleaseMessage message)
+        {
+            if (_shutdown || context?.Connection == null || message == null)
             {
-                return IntentValidation.Deny("unknown lock operation");
+                return IntentValidation.Deny("session is not active");
             }
 
-            // Release is a session fact and must land across a loading scene. Acquire is gameplay
-            // traffic and waits for the peer's fully-joined acknowledgement.
-            if (message.Op == ShopRenameLockOp.Acquire
-                && context.Connection.State != ConnectionState.FullyJoined)
-            {
-                return IntentValidation.Deny("player is still joining");
-            }
-
-            return IntentValidation.Allow();
+            return context.IsAuthenticated
+                ? IntentValidation.Allow()
+                : IntentValidation.Deny("player is not authenticated");
         }
 
         [IntentRejected]
@@ -127,36 +132,21 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [MessageHandler]
-        private void Handle(CoopMessageContext context, ShopRenameLockIntent message)
+        private ActionOutcome Handle(CoopMessageContext context, ShopRenameLockIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
-                return;
+                return ActionOutcome.Reject("shop rename session is not active");
             }
 
+            message.OnApply();
             var sender = context.ConnectionId;
-            if (message.Op == ShopRenameLockOp.Release)
-            {
-                if (ShopRenameSession.IsOwner(sender))
-                {
-                    CoopPlugin.Log.LogDebug("Shop rename lock released by peer " + sender + ".");
-                    ReleaseLock(sender);
-                }
-                return;
-            }
-
-            if (message.Op != ShopRenameLockOp.Acquire)
-            {
-                return;
-            }
-
             if (!RuntimeContext.InGame())
             {
-                // Do not hand out a game-scene UI lock while the host is loading. The release
-                // branch above still runs, so a lock opened before the load cannot stick.
+                // Do not hand out a game-scene UI lock while the host is loading. A release still
+                // reaches the host, so a lock opened before the load cannot stick.
                 PublishRenameState(message.ActionId, rejected: true, isRename: false);
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("the host is not in the game");
             }
 
             if (!ShopRenameSession.HasOwner)
@@ -166,7 +156,7 @@ namespace CardShopCoop.Modules.Shop
                 CoopPlugin.Log.LogInfo("Shop rename lock acquired by peer " + sender
                     + " (" + ownerName + ").");
                 PublishRenameState(message.ActionId, rejected: false, isRename: false);
-                return;
+                return ActionOutcome.Applied();
             }
 
             if (ShopRenameSession.IsOwner(sender))
@@ -174,13 +164,29 @@ namespace CardShopCoop.Modules.Shop
                 // A repeated acquire (the UI was reopened before the release crossed) is a grant,
                 // not a denial: retire the new action with the current state.
                 PublishRenameState(message.ActionId, rejected: false, isRename: false);
-                return;
+                return ActionOutcome.Applied();
             }
 
             CoopPlugin.Log.LogDebug("Shop rename lock denied to peer " + sender
                 + "; held by peer " + ShopRenameSession.Owner + ".");
             PublishRenameState(message.ActionId, rejected: true, isRename: false);
-            Reject(context, message.ActionId);
+            return ActionOutcome.Reject("the shop rename is locked by another player");
+        }
+
+        [MessageHandler]
+        private void Handle(CoopMessageContext context, ShopRenameReleaseMessage message)
+        {
+            if (_shutdown || context?.Connection == null || message == null)
+            {
+                return;
+            }
+
+            var sender = context.ConnectionId;
+            if (ShopRenameSession.IsOwner(sender))
+            {
+                CoopPlugin.Log.LogDebug("Shop rename lock released by peer " + sender + ".");
+                ReleaseLock(sender);
+            }
         }
 
         [IntentValidator]
@@ -211,20 +217,21 @@ namespace CardShopCoop.Modules.Shop
         }
 
         [MessageHandler]
-        private void Handle(CoopMessageContext context, ShopRenameRequestIntent message)
+        private ActionOutcome Handle(CoopMessageContext context, ShopRenameRequestIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
-                return;
+                return ActionOutcome.Reject("shop rename session is not active");
             }
 
+            message.OnApply();
             var sender = context.ConnectionId;
             if (!RuntimeContext.InGame())
             {
                 // The host cannot apply a scene change while it is loading. Release the sender's
                 // lock and reject the proposal so the client reconciles instead of waiting.
                 RejectRename(context, message, releaseOwner: true);
-                return;
+                return ActionOutcome.Reject("the host is not in the game");
             }
 
             if (!ShopRenameSession.IsOwner(sender))
@@ -232,7 +239,7 @@ namespace CardShopCoop.Modules.Shop
                 CoopPlugin.Log.LogDebug("Shop rename rejected from peer " + sender
                     + " because it does not hold the edit lock.");
                 RejectRename(context, message, releaseOwner: false);
-                return;
+                return ActionOutcome.Reject("you do not hold the shop rename lock");
             }
 
             if (!ShopState.TryNormalize(message.Name, out var name))
@@ -240,7 +247,7 @@ namespace CardShopCoop.Modules.Shop
                 CoopPlugin.Log.LogDebug("Shop rename rejected from peer " + sender
                     + ": invalid name.");
                 RejectRename(context, message, releaseOwner: true);
-                return;
+                return ActionOutcome.Reject("the shop name is invalid");
             }
 
             var applied = false;
@@ -273,6 +280,7 @@ namespace CardShopCoop.Modules.Shop
 
                 PublishRenameCleared(message.ActionId, name);
                 published = true;
+                return ActionOutcome.Applied();
             }
             catch (Exception error)
             {
@@ -286,9 +294,10 @@ namespace CardShopCoop.Modules.Shop
                     PublishRenameState(message.ActionId, rejected: !applied, isRename: false);
                     if (!applied)
                     {
-                        Reject(context, message.ActionId);
+                        return ActionOutcome.Reject("the shop rename could not be applied");
                     }
                 }
+                return ActionOutcome.Applied();
             }
             finally
             {
@@ -321,14 +330,6 @@ namespace CardShopCoop.Modules.Shop
             PublishDraft();
         }
 
-        private void Reject(CoopMessageContext context, Guid actionId)
-        {
-            if (actionId != Guid.Empty && context?.Connection != null)
-            {
-                ActionLedger.Rollback(RuntimeContext, context.ConnectionId, actionId);
-            }
-        }
-
         private void RejectRename(CoopMessageContext context, ShopRenameRequestIntent message,
             bool releaseOwner)
         {
@@ -340,8 +341,6 @@ namespace CardShopCoop.Modules.Shop
             {
                 PublishRenameState(message.ActionId, rejected: true, isRename: false);
             }
-
-            Reject(context, message.ActionId);
         }
 
         /// <summary>Publishes the accepted rename and releases the lock in one state, so the

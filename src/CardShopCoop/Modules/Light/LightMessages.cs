@@ -1,20 +1,34 @@
+using System;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
 using UnityEngine;
 
 namespace CardShopCoop.Modules.Light
 {
-    /// <summary>Host-owned shop-light state.</summary>
+    /// <summary>Host-owned shop-light state. State, not a command: the host owns every toggle.
+    /// <see cref="ActionId"/> retires the toggle prediction this absolute answers.</summary>
     [NetworkMessage]
-    public sealed class LightSwitchStateMessage : ActionMessage
+    public sealed class LightSwitchStateMessage : INetMessage
     {
+        public Guid ActionId;
         public bool IsActive;
     }
 
+    /// <summary>Client command: set the shared shop-light flag. The prediction is recorded by the
+    /// client's action-ledger closures (they capture the prior flag for the undo), so the
+    /// framework hooks stay empty.</summary>
     [NetworkMessage]
     public sealed class LightSwitchIntentMessage : ActionMessage
     {
         public bool IsActive;
+
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     /// <summary>Applies the one shop-light flag through the game's live lighting surface.

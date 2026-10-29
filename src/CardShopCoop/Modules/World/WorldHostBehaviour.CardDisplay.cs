@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
+using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
 using HarmonyLib;
@@ -17,24 +19,23 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleCardDisplayRequest(MessageContext context, CardDisplayRequestMessage message)
+        private ActionOutcome HandleCardDisplayRequest(MessageContext context,
+            CardDisplayRequestMessage message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message == null)
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
             if (message.Shelf == null)
             {
                 CoopPlugin.Log.LogWarning("[card-display] dropped request: the display shelf did not "
                     + "resolve to a live object.");
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
             var echo = default(CardDisplayMessage);
-            var accepted = ExecuteWorldCommand(context, message, () =>
+            var result = ExecuteWorldCommand(context, message, () =>
             {
                 if (!WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
                     out var compartment))
@@ -110,20 +111,30 @@ namespace CardShopCoop.Modules.World
                 return true;
             });
 
-            if (accepted && echo != null)
+            if (result == WorldCommandResult.Applied && echo != null)
             {
                 BroadcastWorld(echo);
+                return ActionOutcome.Applied();
             }
-            else if (!accepted
-                && WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
-                    out var rejectedCompartment))
+
+            // A refused display change must first reverse the guest's optimistic placement (the
+            // card left the shared collection when it was picked up) and only THEN apply the
+            // host's real slot state. Sending the authority first retires the action without its
+            // undo and loses the guest's card. Send the one generic rollback here, before the
+            // refresh, and report Applied so the framework does not send a second one. A duplicate
+            // never applied anything, so it only refreshes.
+            if (result == WorldCommandResult.Rejected)
             {
-                // ExecuteWorldCommand has already sent the rollback. Sending the authority after
-                // it means the client first returns its optimistic card through the action's undo
-                // and then applies the host's real slot state; the other order retires the action
-                // first and would lose the guest's card.
+                ActionLedger.Rollback(RuntimeContext, context.ConnectionId, message.ActionId);
+            }
+
+            if (WorldCardDisplay.TryGetCompartment(message.Shelf, message.Compartment,
+                out var rejectedCompartment))
+            {
                 RefreshRejectedCardDisplay(context, message, rejectedCompartment);
             }
+
+            return ActionOutcome.Applied();
         }
 
         /// <summary>After a refusal, tell the requester the slot's real state so the rollback's

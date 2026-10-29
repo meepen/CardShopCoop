@@ -6,9 +6,10 @@ namespace CardShopCoop.Modules.World
     /// <summary>Host -> clients: authoritative state of one workbench - the bulk boxes stored on
     /// it and, while a bundle is running, the box tier it is producing. Sent for the join
     /// baseline and as a complete state-set after any change (never as a mutation). A non-empty
-    /// <see cref="WorldMessage.ActionId"/> is the accepted client intent this state confirms.</summary>
+    /// <see cref="WorldStateMessage.ActionId"/> is the accepted client intent this state
+    /// confirms.</summary>
     [NetworkMessage]
-    public class WorkbenchStateMessage : WorldMessage
+    public class WorkbenchStateMessage : WorldStateMessage
     {
         /// <summary>The live bench this state describes. A state whose bench no longer exists is
         /// logged and dropped; there is no bench-index fallback on the wire.</summary>
@@ -23,7 +24,7 @@ namespace CardShopCoop.Modules.World
     /// editing one bench at once can no longer overwrite (or duplicate) each other's item. The
     /// inherited <see cref="WorldMessage.ActionId"/> confirms the edit to the sender.</summary>
     [NetworkMessage]
-    public sealed class WorkbenchOpMessage : WorldMessage
+    public sealed class WorkbenchOpMessage : WorldIntentMessage
     {
         /// <summary>The live bench the acting player edited.</summary>
         public InteractableWorkbench Bench;
@@ -37,7 +38,7 @@ namespace CardShopCoop.Modules.World
     /// client already minted the bulk box locally in vanilla <c>OnTaskCompleted</c>; the host only
     /// clears its mirrored bundling state and republishes the bench.</summary>
     [NetworkMessage]
-    public sealed class WorkbenchBundleMessage : WorldMessage
+    public sealed class WorkbenchBundleMessage : WorldIntentMessage
     {
         /// <summary>The live bench whose bundle the acting player finished.</summary>
         public InteractableWorkbench Bench;

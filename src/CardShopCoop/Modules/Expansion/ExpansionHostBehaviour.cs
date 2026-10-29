@@ -1,11 +1,12 @@
 using System;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Expansion
 {
@@ -58,14 +59,14 @@ namespace CardShopCoop.Modules.Expansion
         }
 
         [MessageHandler]
-        private void HandlePurchase(MessageContext context, ExpansionPurchaseMessage message)
+        private ActionOutcome HandlePurchase(MessageContext context, ExpansionPurchaseMessage message)
         {
             // Every joined client, including the first connection (which the host numbers 1),
             // is allowed to ask the host to buy an expansion. The host is the only writer.
             if (_shutdown || message == null || context?.Connection == null
                 || !RuntimeContext.InGame() || !IsJoinPhase(context.Connection.State))
             {
-                return;
+                return ActionOutcome.Reject("expansion purchase is not available to this sender");
             }
 
             if (message.Kind > 2)
@@ -73,30 +74,25 @@ namespace CardShopCoop.Modules.Expansion
                 CoopPlugin.Log.LogWarning("Expansion purchase rejected peer="
                     + context.Connection.Id + " kind=" + message.Kind
                     + " reason=unsupported purchase kind");
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
-                return;
+                return ActionOutcome.Reject("unsupported expansion purchase kind");
             }
 
-            var accepted = false;
             try
             {
-                accepted = HostPurchase(message.Kind, context.Connection.Id, out _);
+                if (!HostPurchase(message.Kind, context.Connection.Id, out _))
+                {
+                    return ActionOutcome.Reject("expansion purchase was refused");
+                }
             }
             catch (Exception exception)
             {
                 CoopPlugin.Log.LogError("Expansion purchase failed for peer "
                     + context.Connection.Id + ": " + exception);
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
-                return;
-            }
-
-            if (!accepted)
-            {
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
-                return;
+                return ActionOutcome.Reject("expansion purchase failed");
             }
 
             BroadcastDelta(message.Kind, message.ActionId);
+            return ActionOutcome.Applied();
         }
 
         internal void Shutdown()

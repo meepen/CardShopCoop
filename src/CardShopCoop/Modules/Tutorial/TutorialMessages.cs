@@ -16,5 +16,11 @@ namespace CardShopCoop.Modules.Tutorial
         public float Increment;
 
         public override void OnApply() => TutorialActions.Add(Condition, Increment);
+
+        /// <summary>A client registers its own pre-increment state as the ledger undo, so the
+        /// message itself never restores progress.</summary>
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 }

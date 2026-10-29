@@ -103,6 +103,10 @@ namespace CardShopCoop.Modules.Actions
         internal static Guid Submit(string key, ActionMessage message, Action apply, Action undo)
             => Submit(key, message, apply, undo == null ? null : _ => undo(), null);
 
+        internal static Guid Submit(string key, ActionMessage message, Action apply, Action undo,
+            Action rejected)
+            => Submit(key, message, apply, undo == null ? null : _ => undo(), rejected);
+
         internal static Guid Submit(string key, ActionMessage message, Action apply,
             Action<ActionResponseMessage> undo, Action rejected = null)
         {
@@ -559,7 +563,15 @@ namespace CardShopCoop.Modules.Actions
             Remove(action);
             if (merge != null)
             {
-                RunApplying(() => merge(response));
+                try
+                {
+                    RunApplying(() => merge(response));
+                }
+                catch (Exception error)
+                {
+                    CoopPlugin.Log.LogError("action merge failed for " + action.Key
+                        + " id=" + actionId + ": " + error);
+                }
             }
         }
 

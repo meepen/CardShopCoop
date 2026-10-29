@@ -1,12 +1,13 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine;
 
@@ -84,31 +85,25 @@ namespace CardShopCoop.Modules.Settings
         }
 
         [MessageHandler]
-        private void HandleOperation(MessageContext context, SettingsOpMessage message)
+        private ActionOutcome HandleOperation(MessageContext context, SettingsOpMessage message)
         {
             if (!IsFullyJoinedSender(context))
             {
-                return;
+                return ActionOutcome.Reject("settings operation from a sender that is not fully joined");
             }
 
             if (message == null)
             {
                 CoopPlugin.Log.LogWarning("Settings: rejected null authenticated operation from "
                     + context.Connection.Id + ".");
-                return;
+                return ActionOutcome.Reject("settings operation payload is missing");
             }
 
             if (!TryValidateOperation(message, out var reason))
             {
                 CoopPlugin.Log.LogWarning("Settings: rejected malformed authenticated operation from "
                     + context.Connection.Id + ": " + reason);
-                if (message.ActionId != Guid.Empty)
-                {
-                    ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
-                }
-
-
-                return;
+                return ActionOutcome.Reject(reason);
             }
 
             switch (message.Op)
@@ -117,7 +112,7 @@ namespace CardShopCoop.Modules.Settings
                     CPlayerData.m_PendingGameEventFormat = (EGameEventFormat)message.Index;
                     CPlayerData.m_PendingGameEventExpansionType = message.Expansion;
                     BroadcastGameEvent(message.ActionId);
-                    break;
+                    return ActionOutcome.Applied();
                 case OpGameEventFee:
                     _applyingRemote = true;
                     try
@@ -131,7 +126,7 @@ namespace CardShopCoop.Modules.Settings
                     }
 
                     BroadcastGameEventFee((EGameEventFormat)message.Index, message.ActionId);
-                    break;
+                    return ActionOutcome.Applied();
                 case OpCashier:
                     {
                         // The intent names the live counter. A null means the entity is not live on
@@ -141,18 +136,12 @@ namespace CardShopCoop.Modules.Settings
                         {
                             CoopPlugin.Log.LogWarning("Settings: dropped cashier intent with no live "
                                 + "counter from connection " + context.Connection.Id + ".");
-                            if (message.ActionId != Guid.Empty)
-                            {
-                                ActionLedger.Rollback(RuntimeContext, context.Connection.Id,
-                                    message.ActionId);
-                            }
-
-                            return;
+                            return ActionOutcome.Reject("cashier is not live on the host");
                         }
 
                         ApplyCashier(counter, message.CashierFlags);
                         PublishCashier(counter, "cashier intent", message.ActionId);
-                        break;
+                        return ActionOutcome.Applied();
                     }
                 case OpTableNumber:
                     {
@@ -161,24 +150,17 @@ namespace CardShopCoop.Modules.Settings
                         {
                             CoopPlugin.Log.LogWarning("Settings: dropped table intent with no live "
                                 + "table from connection " + context.Connection.Id + ".");
-                            if (message.ActionId != Guid.Empty)
-                            {
-                                ActionLedger.Rollback(RuntimeContext, context.Connection.Id,
-                                    message.ActionId);
-                            }
-
-                            return;
+                            return ActionOutcome.Reject("play table is not live on the host");
                         }
 
                         ApplyTableNumber(table, message.TableNumber);
                         PublishTable(table, "table number intent", message.ActionId);
-                        break;
+                        return ActionOutcome.Applied();
                     }
                 default:
                     CoopPlugin.Log.LogWarning("Settings: unknown sub-op " + message.Op);
-                    break;
+                    return ActionOutcome.Reject("unknown settings operation");
             }
-
         }
 
         private static bool IsValidEventIndex(int index, bool allowNone)

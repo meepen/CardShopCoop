@@ -1,3 +1,4 @@
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using HarmonyLib;
 
@@ -20,15 +21,15 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleWarehouseStore(MessageContext context, WarehouseStoreMessage message)
+        private ActionOutcome HandleWarehouseStore(MessageContext context,
+            WarehouseStoreMessage message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
-            ExecuteWorldCommand(context, message, () =>
+            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
             {
                 if (Warehouse == null || message?.Shelf == null || message.Box == null)
                 {
@@ -39,19 +40,19 @@ namespace CardShopCoop.Modules.World
 
                 return Warehouse.HostApplyStore(message, context.ConnectionId,
                     response => SendWorldTo(context.ConnectionId, response));
-            });
+            }));
         }
 
         [MessageHandler]
-        private void HandleWarehouseTake(MessageContext context, WarehouseTakeMessage message)
+        private ActionOutcome HandleWarehouseTake(MessageContext context,
+            WarehouseTakeMessage message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
-            ExecuteWorldCommand(context, message, () =>
+            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
             {
                 if (Warehouse == null || message?.Source?.Shelf == null
                     || message.CreatedBox == null)
@@ -63,7 +64,7 @@ namespace CardShopCoop.Modules.World
 
                 return Warehouse.HostApplyTake(message, context.ConnectionId,
                     response => SendWorldTo(context.ConnectionId, response));
-            });
+            }));
         }
 
         private void NotifyStoredBoxRecordAdded(ShelfCompartment compartment)

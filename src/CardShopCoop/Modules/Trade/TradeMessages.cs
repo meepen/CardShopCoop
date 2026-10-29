@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -57,6 +58,17 @@ namespace CardShopCoop.Modules.Trade
 
         /// <summary>Coins the actor spent for a coin purchase; 0 for a card-for-card trade.</summary>
         public float CoinSpent;
+
+        // The client registers this prediction through the explicit Apply/Undo closures in
+        // TradeClientBehaviour, and the host handler performs the trade operation itself, so the
+        // action hooks are never the applied path.
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     /// <summary>Full authoritative offer baseline sent once when a peer joins.</summary>
@@ -68,8 +80,10 @@ namespace CardShopCoop.Modules.Trade
 
     /// <summary>Accepted claim for a predicted guest trade session.</summary>
     [NetworkMessage]
-    public sealed class TradeSessionMessage : ActionMessage
+    public sealed class TradeSessionMessage : INetMessage
     {
+        /// <summary>The prediction this claim answers, or empty for a host-local session.</summary>
+        public Guid ActionId;
         public InteractableCashierCounter Counter;
         public Customer Customer;
         public int CustomerGeneration;
@@ -80,8 +94,9 @@ namespace CardShopCoop.Modules.Trade
     /// <summary>One authoritative offer upsert or removal. A host-local delta has an empty
     /// ActionId; an accepted guest action carries that action's prediction id.</summary>
     [NetworkMessage]
-    public sealed class TradeOfferDeltaMessage : ActionMessage
+    public sealed class TradeOfferDeltaMessage : INetMessage
     {
+        public Guid ActionId;
         public InteractableCashierCounter Counter;
         public TradeOutcome Outcome;
         public bool Removed;

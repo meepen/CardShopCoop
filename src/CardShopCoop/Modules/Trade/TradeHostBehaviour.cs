@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -194,42 +195,39 @@ namespace CardShopCoop.Modules.Trade
         }
 
         [MessageHandler]
-        private void HandleIntent(MessageContext messageContext, TradeIntentMessage message)
+        private ActionOutcome HandleIntent(MessageContext messageContext, TradeIntentMessage message)
         {
             if (!IsValidSender(messageContext, message))
             {
                 CoopPlugin.Log.LogWarning("[trade] host ignored intent from invalid sender conn="
                     + (messageContext?.Connection?.Id ?? 0) + " op="
                     + (message == null ? "<null>" : message.Operation.ToString()) + ".");
-                return;
+                return ActionOutcome.Reject("trade intent from an invalid sender or payload");
             }
 
             if (message.Counter == null || message.Customer == null)
             {
                 CoopPlugin.Log.LogWarning("[trade] host dropped intent with no live "
                     + (message.Counter == null ? "counter" : "customer") + ".");
-                Reject(messageContext.Connection.Id, message, "intent entity is not live");
-                return;
+                return Reject(messageContext.Connection.Id, message, "intent entity is not live");
             }
 
             if (!_offers.TryGetValue(message.Counter, out var offer)
                 || !Matches(offer, message))
             {
-                Reject(messageContext.Connection.Id, message,
+                return Reject(messageContext.Connection.Id, message,
                     offer == null
                         ? "no live offer for counter " + message.Counter.name
                         : "offer identity mismatch (offer customer=" + offer.Customer.name + " gen="
                             + offer.CustomerGeneration + " nonce=" + offer.Nonce + ", intent customer="
                             + message.Customer.name + " gen=" + message.CustomerGeneration
                             + " nonce=" + message.OfferNonce + ")");
-                return;
             }
 
             var connectionId = messageContext.Connection.Id;
             if (message.Operation == TradeIntentOperation.Open)
             {
-                Open(connectionId, message, offer);
-                return;
+                return Open(connectionId, message, offer);
             }
 
             if (message.Operation == TradeIntentOperation.Close)
@@ -239,52 +237,46 @@ namespace CardShopCoop.Modules.Trade
                     offer.Owner = 0;
                 }
 
-                return;
+                return ActionOutcome.Applied();
             }
 
             if (offer.Owner != connectionId)
             {
-                Reject(connectionId, message,
+                return Reject(connectionId, message,
                     "offer is owned by connection " + offer.Owner + ", not " + connectionId);
-                return;
             }
 
             if (!ValidateLiveAction(connectionId, offer, out var reason))
             {
-                Reject(connectionId, message, reason);
-                return;
+                return Reject(connectionId, message, reason);
             }
 
             if (message.Operation == TradeIntentOperation.Accept)
             {
-                ResolveAccept(connectionId, message, offer);
+                return ResolveAccept(connectionId, message, offer);
             }
-            else if (message.Operation == TradeIntentOperation.Decline)
+            if (message.Operation == TradeIntentOperation.Decline)
             {
-                ResolveDecline(connectionId, message, offer);
+                return ResolveDecline(connectionId, message, offer);
             }
-            else if (message.Operation == TradeIntentOperation.Think)
+            if (message.Operation == TradeIntentOperation.Think)
             {
-                ResolveThink(connectionId, message, offer);
+                return ResolveThink(connectionId, message, offer);
             }
-            else
-            {
-                Reject(connectionId, message, "unknown operation " + message.Operation);
-            }
+
+            return Reject(connectionId, message, "unknown operation " + message.Operation);
         }
 
-        private void Open(int connectionId, TradeIntentMessage message, Offer offer)
+        private ActionOutcome Open(int connectionId, TradeIntentMessage message, Offer offer)
         {
             if (offer.Owner != 0)
             {
-                Reject(connectionId, message, "offer already owned by connection " + offer.Owner);
-                return;
+                return Reject(connectionId, message, "offer already owned by connection " + offer.Owner);
             }
 
             if (!ValidateLiveAction(connectionId, offer, out var reason))
             {
-                Reject(connectionId, message, reason);
-                return;
+                return Reject(connectionId, message, reason);
             }
 
             offer.Owner = connectionId;
@@ -300,18 +292,18 @@ namespace CardShopCoop.Modules.Trade
                 OfferNonce = offer.Nonce,
                 Accepted = true,
             });
+            return ActionOutcome.Applied();
         }
 
-        private void ResolveAccept(int connectionId, TradeIntentMessage message, Offer offer)
+        private ActionOutcome ResolveAccept(int connectionId, TradeIntentMessage message, Offer offer)
         {
             var data = offer.Data;
             if (!TryValidateBid(data, message.Price, out var bid))
             {
-                Reject(connectionId, message, "invalid bid price=" + message.Price
+                return Reject(connectionId, message, "invalid bid price=" + message.Price
                     + " (trading=" + (data == null ? "null" : data.m_IsTrading.ToString())
                     + ", ask=" + (data == null ? "n/a" : data.m_SellCardAskPrice.ToString("F2"))
                     + ")");
-                return;
             }
 
             // The actor's own vanilla accept is the single application: it already minted/took
@@ -325,29 +317,28 @@ namespace CardShopCoop.Modules.Trade
                 case TradeOutcome.Accepted:
                     if (!ApplyAcceptedEffect(connectionId, message, offer, bid))
                     {
-                        Reject(connectionId, message, "accept effect could not be applied");
-                        return;
+                        return Reject(connectionId, message, "accept effect could not be applied");
                     }
 
                     RemoveOffer(offer);
                     SendOfferDelta(offer, removed: true, message.ActionId, message.Result,
                         connectionId);
                     FinishCustomerReservation(offer);
-                    return;
+                    return ActionOutcome.Applied();
                 case TradeOutcome.WalkedAway:
                     // The declines ran out, so vanilla minted/took nothing; only the offer ends.
                     RemoveOffer(offer);
                     SendOfferDelta(offer, removed: true, message.ActionId, message.Result,
                         connectionId);
                     FinishCustomerReservation(offer);
-                    return;
+                    return ActionOutcome.Applied();
                 case TradeOutcome.Haggle:
                 case TradeOutcome.Refused:
                     {
                         if (message.ResultState == null)
                         {
-                            Reject(connectionId, message, "kept offer has no resulting state");
-                            return;
+                            return Reject(connectionId, message,
+                                "kept offer has no resulting state");
                         }
 
                         var updated = TradeInterop.DataFromState(message.ResultState);
@@ -355,11 +346,11 @@ namespace CardShopCoop.Modules.Trade
                         offer.Data = updated;
                         SendOfferDelta(offer, removed: false, message.ActionId, message.Result,
                             connectionId);
-                        return;
+                        return ActionOutcome.Applied();
                     }
                 default:
-                    Reject(connectionId, message, "unexpected accept result " + message.Result);
-                    return;
+                    return Reject(connectionId, message,
+                        "unexpected accept result " + message.Result);
             }
         }
 
@@ -459,22 +450,22 @@ namespace CardShopCoop.Modules.Trade
             return true;
         }
 
-        private void ResolveDecline(int connectionId, TradeIntentMessage message, Offer offer)
+        private ActionOutcome ResolveDecline(int connectionId, TradeIntentMessage message, Offer offer)
         {
             RemoveOffer(offer);
             SendOfferDelta(offer, removed: true, message.ActionId, TradeOutcome.Declined,
                 connectionId);
             FinishCustomerReservation(offer);
+            return ActionOutcome.Applied();
         }
 
-        private void ResolveThink(int connectionId, TradeIntentMessage message, Offer offer)
+        private ActionOutcome ResolveThink(int connectionId, TradeIntentMessage message, Offer offer)
         {
             if (!TryValidateBid(offer.Data, message.Price, out var bid))
             {
-                Reject(connectionId, message, "invalid think price=" + message.Price
+                return Reject(connectionId, message, "invalid think price=" + message.Price
                     + " (trading=" + (offer.Data == null ? "null" : offer.Data.m_IsTrading.ToString())
                     + ")");
-                return;
             }
 
             var screen = TradeInterop.Screen;
@@ -508,6 +499,7 @@ namespace CardShopCoop.Modules.Trade
             SendOfferDelta(offer, removed: false, message.ActionId, TradeOutcome.Thinking,
                 connectionId);
             offer.Owner = 0;
+            return ActionOutcome.Applied();
         }
 
         private bool ValidateLiveAction(int connectionId, Offer offer, out string reason)
@@ -803,12 +795,13 @@ namespace CardShopCoop.Modules.Trade
             };
         }
 
-        private void Reject(int connectionId, TradeIntentMessage message, string reason)
+        private ActionOutcome Reject(int connectionId, TradeIntentMessage message, string reason)
         {
-            CoopPlugin.Log.LogInfo("[trade] host rejected " + message.Operation + " counter="
+            CoopPlugin.Log.LogInfo("[trade] host rejected " + message.Operation + " conn="
+                + connectionId + " counter="
                 + (message.Counter == null ? "null" : message.Counter.name) + " id="
                 + message.ActionId + " nonce=" + message.OfferNonce + ": " + reason + ".");
-            ActionLedger.Rollback(RuntimeContext, connectionId, message.ActionId);
+            return ActionOutcome.Reject(reason);
         }
 
         private void SendOfferDelta(Offer offer, bool removed, Guid actionId,

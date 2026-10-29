@@ -8,7 +8,6 @@ namespace CardShopCoop.Modules.Grading
     [NetworkMessage]
     public sealed class GradingOpMessage : ActionMessage
     {
-
         public byte ServiceLevel;
         public List<CardData> Cards = new();
         public byte CompanyId;
@@ -17,6 +16,17 @@ namespace CardShopCoop.Modules.Grading
         /// adopts it as the authoritative set id, so both peers bind the job by id rather than by
         /// list position.</summary>
         public Guid JobId;
+
+        // The client registers this prediction through the explicit Apply/Undo closures in
+        // GradingClientBehaviour, and the host handler performs the submission itself, so the
+        // action hooks are never the applied path.
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     /// <summary>Complete authoritative grading-job state.</summary>
@@ -27,9 +37,10 @@ namespace CardShopCoop.Modules.Grading
     }
 
     [NetworkMessage]
-    public sealed class GradingJobDeltaMessage : ActionMessage
+    public sealed class GradingJobDeltaMessage : INetMessage
     {
-
+        /// <summary>The prediction this delta answers, or empty for host-local job state.</summary>
+        public Guid ActionId;
         public Guid Id;
         public bool Removed;
         public int ServiceLevel;

@@ -1,10 +1,11 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 
 namespace CardShopCoop.Modules.World
@@ -237,22 +238,35 @@ namespace CardShopCoop.Modules.World
             }
         }
 
+        /// <summary>How one validated world command resolved on the host. A duplicate is not a
+        /// failure: the first application stands, so the caller must acknowledge it without
+        /// applying or reversing anything.</summary>
+        internal enum WorldCommandResult
+        {
+            Applied,
+            Duplicate,
+            Rejected,
+        }
+
+        /// <summary>The handler outcome for one world command result. The authoritative state the
+        /// handler published first remains the settle path; the framework response that follows it
+        /// is a harmless acknowledgement (or the generic rollback for a rejection).</summary>
+        internal static ActionOutcome CommandOutcome(WorldCommandResult result)
+            => result == WorldCommandResult.Rejected
+                ? ActionOutcome.Reject("world command rejected")
+                : ActionOutcome.Applied();
+
         /// <summary>Apply one validated client intent on the host. Successful operations publish
-        /// their authoritative state or the small gameplay handoff they require.</summary>
-        internal bool ExecuteWorldCommand(MessageContext context, WorldMessage command,
-            Func<bool> apply)
+        /// their authoritative state or the small gameplay handoff they require. The handler maps
+        /// the result to an <see cref="ActionOutcome"/>, so this never emits a rollback itself.</summary>
+        internal WorldCommandResult ExecuteWorldCommand(MessageContext context,
+            WorldIntentMessage command, Func<bool> apply)
         {
             if (context?.Connection == null || !WorldMessageMetadata.IsValidIntent(command))
             {
                 CoopPlugin.Log.LogWarning("Rejected world intent with an invalid identity: "
                     + DescribeIntent(command) + ".");
-                if (context?.Connection != null)
-                {
-                    ActionHost.Reject(RuntimeContext, context.ConnectionId,
-                        command?.ActionId ?? Guid.Empty);
-                }
-
-                return false;
+                return WorldCommandResult.Rejected;
             }
 
             var connectionId = context.ConnectionId;
@@ -263,16 +277,15 @@ namespace CardShopCoop.Modules.World
                     CoopPlugin.Log.LogWarning("Rejected world intent naming another connection's "
                         + "prediction: " + DescribeIntent(command) + " owner=" + owner
                         + " sender=" + connectionId + ".");
-                    ActionHost.Reject(RuntimeContext, connectionId, command.ActionId);
-                    return false;
+                    return WorldCommandResult.Rejected;
                 }
 
                 // A duplicate of an intent this connection already got applied (a transport
                 // resend). Applying it a second time is the double-apply this ledger exists to
-                // stop, so drop it without replying: the first application stands.
+                // stop, so drop it without applying: the first application stands.
                 CoopPlugin.Log.LogInfo("Dropped duplicate world intent from conn " + connectionId
                     + ": " + DescribeIntent(command) + ".");
-                return false;
+                return WorldCommandResult.Duplicate;
             }
 
             _predictionOwners[command.ActionId] = connectionId;
@@ -291,8 +304,14 @@ namespace CardShopCoop.Modules.World
                 }
             });
 
-            return ActionHost.Resolve(RuntimeContext, connectionId,
-                command.ActionId, apply);
+            if (apply == null || !apply())
+            {
+                CoopPlugin.Log.LogWarning("action rejected -> conn " + connectionId
+                    + " id=" + command.ActionId + " (host apply refused).");
+                return WorldCommandResult.Rejected;
+            }
+
+            return WorldCommandResult.Applied;
         }
 
         /// <summary>A peer left, so its applied-prediction ids can no longer be resent or named.
@@ -318,12 +337,14 @@ namespace CardShopCoop.Modules.World
             _appliedPredictions.Remove(connection.Id);
         }
 
-        internal void RejectWorldIntent(MessageContext context, WorldMessage command)
+        /// <summary>Logs one refused world intent before host execution and returns the handler
+        /// outcome that asks the framework for the single generic rollback.</summary>
+        internal ActionOutcome RejectWorldIntent(MessageContext context, WorldIntentMessage command)
         {
             if (context?.Connection == null
                 || command?.ActionId == Guid.Empty)
             {
-                return;
+                return ActionOutcome.Reject("world intent has no actionable identity");
             }
 
             // Say which intent and why, so a recurring "before host execution" warning is
@@ -332,10 +353,10 @@ namespace CardShopCoop.Modules.World
             CoopPlugin.Log.LogWarning("Rejected world intent before host execution: "
                 + DescribeIntent(command) + " inGame=" + RuntimeContext.InGame()
                 + " connState=" + context.Connection.State + ".");
-            ActionHost.Reject(RuntimeContext, context.ConnectionId, command.ActionId);
+            return ActionOutcome.Reject("world intent rejected before host execution");
         }
 
-        private static string DescribeIntent(WorldMessage command)
+        private static string DescribeIntent(WorldIntentMessage command)
             => command == null
                 ? "<null>"
                 : command.GetType().Name;
@@ -399,10 +420,10 @@ namespace CardShopCoop.Modules.World
 
         private void BroadcastWorld(INetMessage message)
         {
-            if (message is not WorldMessage worldMessage)
+            if (message is not WorldStateMessage worldMessage)
             {
 
-                throw new InvalidOperationException("World host can only broadcast WorldMessage values.");
+                throw new InvalidOperationException("World host can only broadcast WorldStateMessage values.");
             }
 
 
@@ -411,10 +432,10 @@ namespace CardShopCoop.Modules.World
 
         private void SendWorldTo(int connectionId, INetMessage message)
         {
-            if (message is not WorldMessage worldMessage)
+            if (message is not WorldStateMessage worldMessage)
             {
 
-                throw new InvalidOperationException("World host can only send WorldMessage values.");
+                throw new InvalidOperationException("World host can only send WorldStateMessage values.");
             }
 
 
@@ -423,10 +444,10 @@ namespace CardShopCoop.Modules.World
 
         private void RelayWorldExcept(int excludedConnectionId, INetMessage message)
         {
-            if (message is not WorldMessage worldMessage)
+            if (message is not WorldStateMessage worldMessage)
             {
 
-                throw new InvalidOperationException("World host can only relay WorldMessage values.");
+                throw new InvalidOperationException("World host can only relay WorldStateMessage values.");
             }
 
             // Relay through the transport's broadcast admission so a peer that is still joining

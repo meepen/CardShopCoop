@@ -11,6 +11,16 @@ namespace CardShopCoop.Modules.Pricing
 
         public EItemType ItemType;
         public float Price;
+
+        /// <summary>The client's ledger replay/undo closures own the prediction; the message is
+        /// only the host command.</summary>
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     [NetworkMessage]
@@ -26,6 +36,16 @@ namespace CardShopCoop.Modules.Pricing
 
         /// <summary>Index of the compartment in the shelf's GetCardCompartmentList().</summary>
         public int Compartment;
+
+        /// <summary>The client's ledger replay/undo closures own the prediction; the message is
+        /// only the host command.</summary>
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     /// <summary>One host-owned pricing snapshot. The newest received snapshot replaces the old one.</summary>

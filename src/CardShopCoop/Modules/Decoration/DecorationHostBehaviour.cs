@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.GameObjectIdentity;
 using CardShopCoop.Modules.Economy;
@@ -9,6 +10,7 @@ using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
 using HarmonyLib;
 using UnityEngine.SceneManagement;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 
 namespace CardShopCoop.Modules.Decoration
 {
@@ -81,11 +83,11 @@ namespace CardShopCoop.Modules.Decoration
         }
 
         [MessageHandler]
-        private void HandleIntent(MessageContext context, DecorationIntentMessage message)
+        private ActionOutcome HandleIntent(MessageContext context, DecorationIntentMessage message)
         {
             if (!IsPeerMessage(context) || message == null)
             {
-                return;
+                return ActionOutcome.Reject("decoration intent sender is not an admitted peer");
             }
 
 
@@ -128,8 +130,10 @@ namespace CardShopCoop.Modules.Decoration
                 // it from the authoritative values the apply just produced.
 
                 DecorationInterop.RefreshUi();
+                return ActionOutcome.Applied();
             }
-            else if (message.ActionId != Guid.Empty)
+
+            if (message.ActionId != Guid.Empty)
             {
                 CoopPlugin.Log.LogInfo("[decoration] intent rejected action=" + message.Action
                     + " type=" + message.DecorationType + " prediction=" + message.ActionId + ".");
@@ -137,10 +141,15 @@ namespace CardShopCoop.Modules.Decoration
                 // stale if the host or another guest changed the decorations during the round
                 // trip. DecorationStateMessage cannot carry the prediction id, so the
                 // authoritative snapshot follows the rollback: the undo runs first and the state
-                // then overrides it on the same reliable lane.
+                // then overrides it on the same reliable lane. Because the state - not the
+                // framework's generic rollback - settles this prediction, report the command as
+                // already applied so no second rollback lands after the authority.
                 ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
                 SendState(context.Connection.Id);
+                return ActionOutcome.Applied();
             }
+
+            return ActionOutcome.Reject("decoration action was refused");
         }
 
         private static bool ApplyIntent(DecorationIntentMessage message)

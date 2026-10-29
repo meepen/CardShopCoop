@@ -6,7 +6,7 @@ namespace CardShopCoop.Modules.World
     /// player. The host owns the authoritative slot and echoes a <see cref="CardDisplayMessage"/>
     /// carrying the same prediction id.</summary>
     [NetworkMessage]
-    public sealed class CardDisplayRequestMessage : WorldMessage
+    public sealed class CardDisplayRequestMessage : WorldIntentMessage
     {
         /// <summary>The live display shelf that owns the compartment.</summary>
         public CardShelf Shelf;
@@ -23,7 +23,7 @@ namespace CardShopCoop.Modules.World
 
     /// <summary>Host -> peers: the authoritative state of one single-card display slot.</summary>
     [NetworkMessage]
-    public sealed class CardDisplayMessage : WorldMessage
+    public sealed class CardDisplayMessage : WorldStateMessage
     {
         public CardShelf Shelf;
         public int Compartment;

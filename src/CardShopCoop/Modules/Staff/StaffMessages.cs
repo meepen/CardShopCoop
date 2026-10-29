@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -51,6 +52,17 @@ namespace CardShopCoop.Modules.Staff
         public float PriceMult;
         public float CardPriceMult;
         public List<StaffPackChange> PackChanges = new();
+
+        // The client registers this prediction through the explicit Apply/Undo closures in
+        // StaffClientBehaviour, and the host handler performs the worker operation itself, so the
+        // action hooks are never the applied path.
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     /// <summary>Complete worker state sent only as a join baseline.</summary>
@@ -63,9 +75,11 @@ namespace CardShopCoop.Modules.Staff
     /// <summary>One keyed worker operation. Hired carries the one-worker bootstrap needed when
     /// a newly constructed worker is first shown to a client.</summary>
     [NetworkMessage]
-    public sealed class StaffModuleDeltaMessage : ActionMessage
+    public sealed class StaffModuleDeltaMessage : INetMessage
     {
 
+        /// <summary>The prediction this delta answers, or empty for host-local worker state.</summary>
+        public Guid ActionId;
         public StaffDeltaKind Kind;
         /// <summary>The live worker this operation/state describes.</summary>
         public Worker Worker;

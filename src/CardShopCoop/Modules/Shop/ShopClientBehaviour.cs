@@ -253,11 +253,7 @@ namespace CardShopCoop.Modules.Shop
 
             // Release is a session fact. It must still go out while the game is between scenes,
             // otherwise a confirm/open that crosses a load strands the host's lock forever.
-            SendToHost(new ShopRenameLockIntent
-            {
-                ActionId = Guid.Empty,
-                Op = ShopRenameLockOp.Release,
-            });
+            SendToHost(new ShopRenameReleaseMessage());
         }
 
         /// <summary>Sends a non-action message to the host. A plain message has no action ledger to
@@ -458,7 +454,7 @@ namespace CardShopCoop.Modules.Shop
             _pendingShowIntro = showIntro;
             var actionId = ActionLedger.Submit(
                 RenameLockScope,
-                new ShopRenameLockIntent { Op = ShopRenameLockOp.Acquire },
+                new ShopRenameLockIntent(),
                 OpenPendingRenameUi,
                 CancelPendingRenameUi,
                 ShowBusyNotice);
@@ -515,7 +511,7 @@ namespace CardShopCoop.Modules.Shop
         {
             var actionId = ActionLedger.Submit(
                 RenameLockScope,
-                new ShopRenameLockIntent { Op = ShopRenameLockOp.Acquire },
+                new ShopRenameLockIntent(),
                 () => { },
                 AbandonLocalEdit,
                 ShowBusyNotice);

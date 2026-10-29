@@ -4,7 +4,6 @@ using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Grading;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
@@ -115,41 +114,63 @@ namespace CardShopCoop.Modules.Pricing
         }
 
         [MessageHandler]
-        private void Item(MessageContext context, PricingItemIntentMessage message)
+        private ActionOutcome Item(MessageContext context, PricingItemIntentMessage message)
         {
-            if (_shutdown || context?.Connection == null || message == null
-                || !PricingInterop.IsItemTypeValid(message.ItemType)
-                || !PricingInterop.ValidPrice(message.Price)
-                || !TrySetItem(message.ItemType, message.Price, out var actual))
+            if (message == null)
             {
-                Reject(context, message?.ActionId ?? Guid.Empty);
-                return;
+                return ActionOutcome.Reject("pricing command is missing");
+            }
+
+            message.OnApply();
+            if (_shutdown || context?.Connection == null)
+            {
+                return ActionOutcome.Reject("pricing session is not active");
+            }
+
+            if (!PricingInterop.IsItemTypeValid(message.ItemType)
+                || !PricingInterop.ValidPrice(message.Price))
+            {
+                return ActionOutcome.Reject("item price is invalid");
+            }
+
+            if (!TrySetItem(message.ItemType, message.Price, out var actual))
+            {
+                return ActionOutcome.Reject("the item price could not be set");
             }
 
             QueueItemDelta(message.ActionId, message.ItemType, actual);
+            return ActionOutcome.Applied();
         }
 
         [MessageHandler]
-        private void Card(MessageContext context, PricingCardIntentMessage message)
+        private ActionOutcome Card(MessageContext context, PricingCardIntentMessage message)
         {
-            if (_shutdown || context?.Connection == null || message?.Card == null
+            if (message == null)
+            {
+                return ActionOutcome.Reject("pricing command is missing");
+            }
+
+            message.OnApply();
+            if (_shutdown || context?.Connection == null)
+            {
+                return ActionOutcome.Reject("pricing session is not active");
+            }
+
+            if (message.Card == null
                 || !PricingInterop.ValidCard(message.Card)
                 || !PricingInterop.ValidPrice(message.Price) || message.EncodedGrade < 0)
             {
                 CoopPlugin.Log.LogWarning("[pricing] rejected card intent: card="
-                    + (message?.Card == null ? "null" : Describe(message.Card))
-                    + " valid=" + (message?.Card != null && PricingInterop.ValidCard(message.Card))
-                    + " price=" + (message?.Price ?? -1f) + " grade=" + (message?.EncodedGrade ?? -1)
-                    + ".");
-                Reject(context, message?.ActionId ?? Guid.Empty);
-                return;
+                    + (message.Card == null ? "null" : Describe(message.Card))
+                    + " valid=" + (message.Card != null && PricingInterop.ValidCard(message.Card))
+                    + " price=" + message.Price + " grade=" + message.EncodedGrade + ".");
+                return ActionOutcome.Reject("card price intent is invalid");
             }
 
             if (message.Shelf == null)
             {
                 CoopPlugin.Log.LogWarning("[pricing] dropped card intent with no live display shelf.");
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("card price intent has no live display shelf");
             }
 
             var key = PricingInterop.CardKey(message.Card, message.EncodedGrade);
@@ -162,8 +183,7 @@ namespace CardShopCoop.Modules.Pricing
                     + " shelf=" + message.Shelf.name + " compartment=" + message.Compartment
                     + " card=" + Describe(message.Card) + " key=" + (key ?? "null") + " grade="
                     + message.EncodedGrade + ".");
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("the priced card is not the displayed card");
             }
 
             var displayed = WorldCardDisplay.Read(compartment);
@@ -177,13 +197,13 @@ namespace CardShopCoop.Modules.Pricing
                         : GradingApi.Encoded(canonical)) + " requestedPrice=" + message.Price
                     + " actualPrice=" + (canonical == null ? -1f : PricingInterop.ReadCard(canonical))
                     + ".");
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("the card price could not be set");
             }
 
             GradingApi.Remember(canonical);
             _cards[key] = new OwnedCardState { Card = canonical, Price = actual };
             QueueCardDelta(message.ActionId, canonical, actual, false);
+            return ActionOutcome.Applied();
         }
 
         private static string Describe(CardData card)
@@ -451,15 +471,6 @@ namespace CardShopCoop.Modules.Pricing
             if (_pendingItemDeltas.Count > 0 || _pendingCardDeltas.Count > 0)
             {
                 FlushPendingDeltas();
-            }
-
-        }
-
-        private void Reject(MessageContext context, Guid actionId)
-        {
-            if (actionId != Guid.Empty && context?.Connection != null)
-            {
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, actionId);
             }
 
         }

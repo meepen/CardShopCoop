@@ -1,12 +1,13 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Economy;
 using CardShopCoop.Modules.Npc;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -83,11 +84,11 @@ namespace CardShopCoop.Modules.Staff
         }
 
         [MessageHandler]
-        private void HandleIntent(MessageContext context, StaffModuleIntentMessage message)
+        private ActionOutcome HandleIntent(MessageContext context, StaffModuleIntentMessage message)
         {
             if (!IsValidSender(context, message))
             {
-                return;
+                return ActionOutcome.Reject("staff intent from an invalid sender or target");
             }
 
             var peerId = context.Connection.Id;
@@ -125,10 +126,9 @@ namespace CardShopCoop.Modules.Staff
                 _intentActionId = Guid.Empty;
             }
 
-            if (!accepted)
-            {
-                Reject(peerId, message.ActionId);
-            }
+            return accepted
+                ? ActionOutcome.Applied()
+                : ActionOutcome.Reject("staff intent " + message.Kind + " was refused by the host");
         }
 
         private bool IsValidSender(MessageContext context, StaffModuleIntentMessage message)
@@ -769,14 +769,6 @@ namespace CardShopCoop.Modules.Staff
 
             _leaseOwner.Clear();
             _identities.Clear();
-        }
-
-        private void Reject(int connectionId, Guid actionId)
-        {
-            if (actionId != Guid.Empty)
-            {
-                ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
-            }
         }
 
         internal void Shutdown()

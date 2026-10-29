@@ -125,17 +125,19 @@ namespace CardShopCoop.Modules.Tutorial
             Publish(message.ActionId, rejected: true);
         }
 
-        /// <summary>Runs after <see cref="ActionMessage.OnApply"/> applied the validated increment,
-        /// so the state read here is the authoritative post-action progression.</summary>
+        /// <summary>Applies the validated increment through the game path, then publishes the
+        /// authoritative post-action progression.</summary>
         [MessageHandler]
-        private void Handle(CoopMessageContext context, TutorialActionIntent message)
+        private ActionOutcome Handle(CoopMessageContext context, TutorialActionIntent message)
         {
             if (_shutdown || context?.Connection == null || message == null)
             {
-                return;
+                return ActionOutcome.Reject("tutorial session is not active");
             }
 
+            message.OnApply();
             Publish(message.ActionId, rejected: false);
+            return ActionOutcome.Applied();
         }
 
         /// <summary>Publishes a host-originated change. While this behaviour is applying a client's

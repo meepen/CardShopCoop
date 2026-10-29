@@ -447,7 +447,7 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        internal bool HandleCardDelta(int connectionId, CardDeltaMessage message)
+        internal bool HandleCardDelta(int connectionId, ICardDeltaSource message)
         {
             if (_host && message == null)
             {
@@ -503,16 +503,16 @@ namespace CardShopCoop.Modules.World
             return true;
         }
 
-        internal bool HandleCardDeltaBatch(int connectionId, CardDeltaBatchMessage message)
+        internal bool HandleCardDeltaBatch(int connectionId, ICardDeltaBatchSource message)
             => HandleCardDeltaBatch(connectionId, message, requireAllApplied: false);
 
-        /// <summary>As <see cref="HandleCardDeltaBatch(int, CardDeltaBatchMessage)"/>, but when
+        /// <summary>As <see cref="HandleCardDeltaBatch(int, ICardDeltaBatchSource)"/>, but when
         /// <paramref name="requireAllApplied"/> is set the batch is one atomic movement: every
         /// delta must truly apply on this host, and the first delta that cannot be applied -
         /// refused, or merely relayed for content this host does not have - aborts the batch and
         /// retracts whatever it already applied, so the host is never left with a partial
         /// movement (for example, gaining the received card without giving up the offered one).</summary>
-        internal bool HandleCardDeltaBatch(int connectionId, CardDeltaBatchMessage message,
+        internal bool HandleCardDeltaBatch(int connectionId, ICardDeltaBatchSource message,
             bool requireAllApplied)
         {
             if (_host && message == null)
@@ -669,7 +669,7 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        internal bool HandleGradedRemove(int connectionId, GradedRemoveMessage message)
+        internal bool HandleGradedRemove(int connectionId, IGradedRemoveSource message)
         {
             if (_host && message == null)
             {
@@ -2585,7 +2585,7 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private void SendAcceptedPendingCard(PendingCard pending, WorldMessage message)
+        private void SendAcceptedPendingCard(PendingCard pending, WorldStateMessage message)
         {
             if (pending.ActionId != Guid.Empty && pending.ConnectionId > 0)
             {
@@ -2631,7 +2631,7 @@ namespace CardShopCoop.Modules.World
             }
         }
 
-        private static CardDeltaBatchMessage ToAuthoritative(CardDeltaBatchMessage message)
+        private static CardDeltaBatchMessage ToAuthoritative(ICardDeltaBatchSource message)
         {
             var result = new CardDeltaBatchMessage();
             if (message?.Deltas == null)

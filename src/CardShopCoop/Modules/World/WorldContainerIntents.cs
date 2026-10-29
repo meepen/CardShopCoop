@@ -7,7 +7,7 @@ namespace CardShopCoop.Modules.World
     /// <summary>A client command against one placed container. The concrete type is the command;
     /// the host validates it and applies it through the game's own path. The container is the live
     /// placed object, never a list index or key.</summary>
-    public abstract class ContainerIntent : WorldMessage
+    public abstract class ContainerIntent : WorldIntentMessage
     {
         public InteractableObject Container;
     }

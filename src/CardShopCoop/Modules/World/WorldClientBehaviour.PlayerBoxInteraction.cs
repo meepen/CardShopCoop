@@ -224,7 +224,7 @@ namespace CardShopCoop.Modules.World
             _playerBoxInteraction?.PublishThrow(box, action);
         }
 
-        private bool ApplyPlayerBoxAction(PlayerBoxInteractionMessage message)
+        private bool ApplyPlayerBoxAction(IPlayerBoxAction message)
         {
             if (_playerBoxInteraction == null)
             {

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using CardShopCoop.Api;
 using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
@@ -26,15 +27,15 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleShelfItemAdd(MessageContext context, ShelfItemAddRequestMessage message)
+        private ActionOutcome HandleShelfItemAdd(MessageContext context,
+            ShelfItemAddRequestMessage message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
-            ExecuteWorldCommand(context, message, () =>
+            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
             {
                 if (!ApplyShelfAction(message))
                 {
@@ -51,19 +52,19 @@ namespace CardShopCoop.Modules.World
                     ItemCount = message.ItemCount,
                 });
                 return true;
-            });
+            }));
         }
 
         [MessageHandler]
-        private void HandleShelfItemRemove(MessageContext context, ShelfItemRemoveRequestMessage message)
+        private ActionOutcome HandleShelfItemRemove(MessageContext context,
+            ShelfItemRemoveRequestMessage message)
         {
             if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
             {
-                RejectWorldIntent(context, message);
-                return;
+                return RejectWorldIntent(context, message);
             }
 
-            ExecuteWorldCommand(context, message, () =>
+            return CommandOutcome(ExecuteWorldCommand(context, message, () =>
             {
                 if (!ApplyShelfAction(message))
                 {
@@ -80,7 +81,7 @@ namespace CardShopCoop.Modules.World
                     ItemCount = message.ItemCount,
                 });
                 return true;
-            });
+            }));
         }
 
         internal void ResetPlayerShelfInteractionState()
@@ -136,7 +137,7 @@ namespace CardShopCoop.Modules.World
                 _shelfInteraction.CaptureLabelChange(compartment, allowWarehouse));
         }
 
-        private bool ApplyShelfAction(ShelfInteractionMessage message)
+        private bool ApplyShelfAction(IShelfMutation message)
         {
             return _shelfInteraction != null && _shelfInteraction.ApplyIncoming(message);
         }
@@ -145,7 +146,7 @@ namespace CardShopCoop.Modules.World
         /// (type, count), sent to the requester before the generic rollback so its undo
         /// reconciles to reality instead of inverting a snapshot authority has moved past.</summary>
         private void RefreshRejectedShelfAction(MessageContext context,
-            ShelfInteractionMessage message)
+            IShelfMutation message)
         {
             if (context?.Connection == null || _shelfInteraction == null)
             {
@@ -392,7 +393,7 @@ namespace CardShopCoop.Modules.World
     }
 
     [NetworkMessage]
-    public sealed class ShelfItemAddRequestMessage : ShelfItemAddMessage
+    public sealed class ShelfItemAddRequestMessage : ShelfInteractionRequestMessage
     {
     }
 
@@ -402,18 +403,94 @@ namespace CardShopCoop.Modules.World
     }
 
     [NetworkMessage]
-    public sealed class ShelfItemRemoveRequestMessage : ShelfItemRemoveMessage
+    public sealed class ShelfItemRemoveRequestMessage : ShelfInteractionRequestMessage
     {
+    }
+
+    /// <summary>Shared read/write surface for a shelf mutation in either direction.</summary>
+    internal interface IShelfMutation
+    {
+        Guid ActionId
+        {
+            get;
+        }
+        InteractableObject Shelf
+        {
+            get; set;
+        }
+        int Compartment
+        {
+            get; set;
+        }
+        EItemType ItemType
+        {
+            get; set;
+        }
+        int ItemCount
+        {
+            get; set;
+        }
     }
 
     /// <summary>Wire state for one player-induced shelf stock mutation. The shelf is the live
     /// placed object plus the compartment index, never a scene name, hierarchy path or key.</summary>
-    public abstract class ShelfInteractionMessage : WorldMessage
+    public abstract class ShelfInteractionMessage : WorldStateMessage, IShelfMutation
     {
         public InteractableObject Shelf;
         public int Compartment;
         public EItemType ItemType;
         public int ItemCount;
+
+        Guid IShelfMutation.ActionId => ActionId;
+        InteractableObject IShelfMutation.Shelf
+        {
+            get => Shelf; set => Shelf = value;
+        }
+        int IShelfMutation.Compartment
+        {
+            get => Compartment; set => Compartment = value;
+        }
+        EItemType IShelfMutation.ItemType
+        {
+            get => ItemType;
+            set => ItemType = value;
+        }
+
+        int IShelfMutation.ItemCount
+        {
+            get => ItemCount;
+            set => ItemCount = value;
+        }
+    }
+
+    /// <summary>Wire command for one player-induced shelf stock mutation.</summary>
+    public abstract class ShelfInteractionRequestMessage : WorldIntentMessage, IShelfMutation
+    {
+        public InteractableObject Shelf;
+        public int Compartment;
+        public EItemType ItemType;
+        public int ItemCount;
+
+        Guid IShelfMutation.ActionId => ActionId;
+        InteractableObject IShelfMutation.Shelf
+        {
+            get => Shelf; set => Shelf = value;
+        }
+        int IShelfMutation.Compartment
+        {
+            get => Compartment; set => Compartment = value;
+        }
+        EItemType IShelfMutation.ItemType
+        {
+            get => ItemType;
+            set => ItemType = value;
+        }
+
+        int IShelfMutation.ItemCount
+        {
+            get => ItemCount;
+            set => ItemCount = value;
+        }
     }
 
     /// <summary>
@@ -497,7 +574,7 @@ namespace CardShopCoop.Modules.World
         internal struct LocalMutation
         {
             public bool Send;
-            public ShelfInteractionMessage Command;
+            public WorldIntentMessage Command;
             public InteractableObject Shelf;
             public int Compartment;
 
@@ -580,12 +657,14 @@ namespace CardShopCoop.Modules.World
             var targetType = isAdd && requestedType != EItemType.None
                 ? requestedType : beforeType;
             var targetCount = isAdd ? beforeCount + 1 : Math.Max(0, beforeCount - 1);
-            var message = isAdd ? new ShelfItemAddRequestMessage() as ShelfInteractionMessage
+            WorldIntentMessage message = isAdd
+                ? new ShelfItemAddRequestMessage()
                 : new ShelfItemRemoveRequestMessage();
-            message.Shelf = shelf;
-            message.Compartment = compartmentIndex;
-            message.ItemType = targetType;
-            message.ItemCount = targetCount;
+            var mutation = (IShelfMutation)message;
+            mutation.Shelf = shelf;
+            mutation.Compartment = compartmentIndex;
+            mutation.ItemType = targetType;
+            mutation.ItemCount = targetCount;
 
             // On the client, the game's own method performs the mutation: an add moves the real
             // item with AddItem (a rejected add hands that exact item back), and a remove is not
@@ -914,7 +993,7 @@ namespace CardShopCoop.Modules.World
             };
         }
 
-        internal bool ApplyIncoming(ShelfInteractionMessage message)
+        internal bool ApplyIncoming(IShelfMutation message)
         {
             if (message == null || message.Shelf == null)
             {
@@ -986,7 +1065,7 @@ namespace CardShopCoop.Modules.World
         /// <summary>Host: the compartment's authoritative (type, count) as a state message, used to
         /// refresh a rejected add/remove request before its generic rollback. The empty prediction
         /// id makes the requester apply it as a remote state instead of consuming a prediction.</summary>
-        internal ShelfItemAddMessage BuildRefresh(ShelfInteractionMessage failed)
+        internal ShelfItemAddMessage BuildRefresh(IShelfMutation failed)
         {
             if (failed == null)
             {
@@ -1082,7 +1161,7 @@ namespace CardShopCoop.Modules.World
         }
 
         private static bool ResolveHostResult(ShelfCompartment compartment,
-            ShelfInteractionMessage message)
+            IShelfMutation message)
         {
             var count = compartment.GetItemCount();
             var type = compartment.GetItemType();
@@ -1158,28 +1237,27 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
-            ShelfInteractionMessage message;
-            if (isAdd)
-            {
-                message = _host ? new ShelfItemAddMessage() : new ShelfItemAddRequestMessage();
-            }
-            else
-            {
-                message = _host ? new ShelfItemRemoveMessage() : new ShelfItemRemoveRequestMessage();
-            }
-            message.Shelf = mutation.Shelf;
-            message.Compartment = mutation.Compartment;
-            message.ItemType = compartment.GetItemType();
-            message.ItemCount = compartment.GetItemCount();
-
             if (_host)
             {
-                _broadcast(message);
+                var state = isAdd ? (ShelfInteractionMessage)new ShelfItemAddMessage()
+                    : new ShelfItemRemoveMessage();
+                state.Shelf = mutation.Shelf;
+                state.Compartment = mutation.Compartment;
+                state.ItemType = compartment.GetItemType();
+                state.ItemCount = compartment.GetItemCount();
+                _broadcast(state);
+                return;
             }
-            else
-            {
-                _send(1, message);
-            }
+
+            WorldIntentMessage request = isAdd
+                ? new ShelfItemAddRequestMessage()
+                : new ShelfItemRemoveRequestMessage();
+            var wire = (IShelfMutation)request;
+            wire.Shelf = mutation.Shelf;
+            wire.Compartment = mutation.Compartment;
+            wire.ItemType = compartment.GetItemType();
+            wire.ItemCount = compartment.GetItemCount();
+            _send(1, request);
         }
 
         private static bool IsSyncableShelf(ShelfCompartment compartment)
@@ -1387,7 +1465,7 @@ namespace CardShopCoop.Modules.World
             compartment.PreSpawnItemUpdate(0);
         }
 
-        private bool Validate(ShelfInteractionMessage message)
+        private bool Validate(IShelfMutation message)
         {
             if (message == null || message.Shelf == null || message.Compartment < 0
                 || message.Compartment >= MaxCompartments

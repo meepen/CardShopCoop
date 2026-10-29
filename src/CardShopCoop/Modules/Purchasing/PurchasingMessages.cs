@@ -28,6 +28,12 @@ namespace CardShopCoop.Modules.Purchasing
 
         public override void OnApply()
             => Result = PurchasingHostBehaviour.Active?.ApplyRestockPurchase(this);
+
+        /// <summary>The client registers its own checkout undo closure with the ledger, so the
+        /// message itself never reverses a prediction.</summary>
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     [NetworkMessage]
@@ -43,6 +49,12 @@ namespace CardShopCoop.Modules.Purchasing
 
         public override void OnApply()
             => Result = PurchasingHostBehaviour.Active?.ApplyFurniturePurchase(this);
+
+        /// <summary>The client registers its own checkout undo closure with the ledger, so the
+        /// message itself never reverses a prediction.</summary>
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     [NetworkMessage]
@@ -58,6 +70,12 @@ namespace CardShopCoop.Modules.Purchasing
 
         public override void OnApply()
             => Result = PurchasingHostBehaviour.Active?.ApplyProductLicensePurchase(this);
+
+        /// <summary>The client registers its own checkout undo closure with the ledger, so the
+        /// message itself never reverses a prediction.</summary>
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     [NetworkMessage]
@@ -73,6 +91,12 @@ namespace CardShopCoop.Modules.Purchasing
 
         public override void OnApply()
             => Result = PurchasingHostBehaviour.Active?.ApplyScannerLicensePurchase(this);
+
+        /// <summary>The client registers its own checkout undo closure with the ledger, so the
+        /// message itself never reverses a prediction.</summary>
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     public sealed class PurchaseLine
@@ -93,9 +117,13 @@ namespace CardShopCoop.Modules.Purchasing
         public List<Guid> BoxNetworkIds = new();
     }
 
+    /// <summary>The host's answer to one accepted purchase intent. A rejection is the framework's
+    /// generic rollback, so this message is only ever sent for an accepted checkout.</summary>
     [NetworkMessage]
-    public sealed class PurchaseOutcomeMessage : ActionMessage
+    public sealed class PurchaseOutcomeMessage : INetMessage
     {
+        /// <summary>The purchase intent this outcome answers.</summary>
+        public Guid ActionId;
 
         public PurchaseKind Kind;
         public bool Success;

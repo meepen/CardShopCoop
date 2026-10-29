@@ -1,11 +1,12 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using HarmonyLib;
 using UnityEngine;
 
@@ -102,13 +103,14 @@ namespace CardShopCoop.Modules.Grading
         }
 
         [MessageHandler]
-        private void HandleSubmission(MessageContext context, GradingOpMessage message)
+        private ActionOutcome HandleSubmission(MessageContext context, GradingOpMessage message)
         {
-            if (context?.Connection != null)
+            if (context?.Connection == null || message == null)
             {
-                HostApply(message, context.Connection.Id);
+                return ActionOutcome.Reject("grading submission without an authenticated sender");
             }
 
+            return HostApply(message, context.Connection.Id);
         }
 
         internal static void InventoryReset()
@@ -205,46 +207,41 @@ namespace CardShopCoop.Modules.Grading
 
         }
 
-        private void HostApply(GradingOpMessage message, int senderConnection)
+        private ActionOutcome HostApply(GradingOpMessage message, int senderConnection)
         {
             var bridge = GradingWorldBridge.Current;
             var cards = message?.Cards;
             if (message == null || cards == null || cards.Count == 0)
             {
-                Reject(senderConnection, message?.ActionId ?? Guid.Empty,
+                return Reject(senderConnection, message?.ActionId ?? Guid.Empty,
                     cards, "grading-submit-cards", bridge);
-                return;
             }
 
             // The client mints the job id and the host adopts it as the authoritative set id, so
             // both peers bind the job by id. An empty or duplicated id is a broken intent.
             if (message.JobId == Guid.Empty || _setIds.ContainsValue(message.JobId))
             {
-                Reject(senderConnection, message.ActionId, cards, "grading-submit-job", bridge);
-                return;
+                return Reject(senderConnection, message.ActionId, cards, "grading-submit-job", bridge);
             }
 
             if (bridge == null || !bridge.SceneReady)
             {
-                Reject(senderConnection, message.ActionId, cards,
+                return Reject(senderConnection, message.ActionId, cards,
                     "grading-submit-not-ready", bridge);
-                return;
             }
 
             var cap = GradingInterop.MaxSubmitSlots;
             if (cards.Count > cap)
             {
-                Reject(senderConnection, message.ActionId, cards, "grading-submit-cap", bridge);
-                return;
+                return Reject(senderConnection, message.ActionId, cards, "grading-submit-cap", bridge);
             }
 
             for (var i = 0; i < cards.Count; i++)
             {
                 if (cards[i] == null)
                 {
-                    Reject(senderConnection, message.ActionId, cards,
+                    return Reject(senderConnection, message.ActionId, cards,
                         "grading-submit-card", bridge);
-                    return;
                 }
 
                 if (!GradingInterop.ValidSubmissionCard(cards[i], out var cardReason)
@@ -254,51 +251,45 @@ namespace CardShopCoop.Modules.Grading
                         + " refused for connection " + senderConnection + ": "
                         + (cardReason ?? "card set is not installed on the host")
                         + " - " + GradingInterop.DescribeCard(cards[i]));
-                    Reject(senderConnection, message.ActionId, cards,
+                    return Reject(senderConnection, message.ActionId, cards,
                         "grading-submit-card", bridge);
-                    return;
                 }
             }
 
             if (CPlayerData.m_GradeCardInProgressList == null
                 || CPlayerData.m_GradeCardInProgressList.Count >= 4)
             {
-                Reject(senderConnection, message.ActionId, cards,
+                return Reject(senderConnection, message.ActionId, cards,
                     "grading-submit-slots", bridge);
-                return;
             }
 
             var serviceLevel = message.ServiceLevel;
             if (!bridge.TryGetVanillaServiceCost(serviceLevel, cards.Count, out var total)
                 || float.IsNaN(total) || float.IsInfinity(total) || total < 0f)
             {
-                Reject(senderConnection, message.ActionId, cards,
+                return Reject(senderConnection, message.ActionId, cards,
                     "grading-submit-fee", bridge);
-                return;
             }
 
             if (GradingInterop.Present && (!GradingInterop.GoCompatible
                 || !GradingInterop.IsAllowedCompany(message.CompanyId)))
             {
-                Reject(senderConnection, message.ActionId, cards,
+                return Reject(senderConnection, message.ActionId, cards,
                     "grading-submit-service", bridge);
-                return;
             }
 
             if (!EconomyAuthority.TryReserveHostSpend(total, out var spend))
             {
-                Reject(senderConnection, message.ActionId, cards,
+                return Reject(senderConnection, message.ActionId, cards,
                     "grading-submit-wallet", bridge);
-                return;
             }
 
             if (!bridge.TryReserveCards(senderConnection, cards, out var reservation,
                 out var ownershipReason) || reservation == null)
             {
                 CoopPlugin.Log.LogWarning("grading submission refused: " + ownershipReason);
-                Reject(senderConnection, message.ActionId, cards,
+                return Reject(senderConnection, message.ActionId, cards,
                     "grading-submit-ownership", bridge);
-                return;
             }
 
             GradeCardSubmitSet set = null;
@@ -363,6 +354,7 @@ namespace CardShopCoop.Modules.Grading
                 SceneRef<GradeCardWebsiteUIScreen>.Get()?.UpdateSubmissionProgressPanelUI();
                 CoopPlugin.Log.LogInfo("grading submission accepted for connection "
                     + senderConnection + " as set " + id);
+                return ActionOutcome.Applied();
             }
             catch (Exception error)
             {
@@ -391,7 +383,7 @@ namespace CardShopCoop.Modules.Grading
                     CoopPlugin.Log.LogError("grading local compensation failed: " + compensationError);
                 }
                 CoopPlugin.Log.LogError("grading submission failed after local validation: " + error);
-                Reject(senderConnection, message.ActionId, cards,
+                return Reject(senderConnection, message.ActionId, cards,
                     "grading-submit-failure", bridge);
             }
         }
@@ -477,8 +469,8 @@ namespace CardShopCoop.Modules.Grading
             }
         }
 
-        private void Reject(int connectionId, Guid actionId, List<CardData> cards, string reason,
-            IGradingWorldBridge bridge)
+        private ActionOutcome Reject(int connectionId, Guid actionId, List<CardData> cards,
+            string reason, IGradingWorldBridge bridge)
         {
             cards ??= new List<CardData>();
             if (bridge != null)
@@ -493,12 +485,8 @@ namespace CardShopCoop.Modules.Grading
                 }
             }
             CoopPlugin.Log.LogWarning("grading submission rejected for connection "
-                + connectionId + ": " + reason);
-            if (actionId != Guid.Empty)
-            {
-                ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
-            }
-
+                + connectionId + " id=" + actionId + ": " + reason);
+            return ActionOutcome.Reject(reason);
         }
 
         private Guid GetSetId(GradeCardSubmitSet set)

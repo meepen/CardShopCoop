@@ -1214,11 +1214,27 @@ namespace CardShopCoop.Net
 
             if (response.Rejected)
             {
-                ActionLedger.Rollback(response.ActionId, response);
+                try
+                {
+                    ActionLedger.Rollback(response.ActionId, response);
+                }
+                catch (Exception error)
+                {
+                    CoopPlugin.Log.LogError("action rollback/merge failed for "
+                        + response.ActionId + ": " + error);
+                }
             }
             else
             {
-                ActionLedger.Accept(response.ActionId, response);
+                try
+                {
+                    ActionLedger.Accept(response.ActionId, response);
+                }
+                catch (Exception error)
+                {
+                    CoopPlugin.Log.LogError("action accept/merge failed for "
+                        + response.ActionId + ": " + error);
+                }
             }
 
             return DispatchOutcome.Handled;

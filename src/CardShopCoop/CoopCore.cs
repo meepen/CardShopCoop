@@ -1778,8 +1778,16 @@ namespace CardShopCoop
 
             if (action.ActionId != Guid.Empty)
             {
+                // An explicit ActionLedger.Submit records the action and then sends it through
+                // Context.Send. That second pass must be allowed through; only an untracked
+                // non-empty id is a protocol error.
+                if (ActionLedger.IsPending(action.ActionId))
+                {
+                    return false;
+                }
+
                 CoopPlugin.Log.LogError("client ActionMessage " + action.GetType().FullName
-                    + " already had an action id; refusing to send an untracked command.");
+                    + " had an action id that is not pending; refusing to send it.");
                 return true;
             }
 

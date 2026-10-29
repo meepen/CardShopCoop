@@ -1,3 +1,4 @@
+using CardShopCoop.Api;
 using CardShopCoop.Net;
 using HarmonyLib;
 
@@ -43,7 +44,7 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleWorkbenchOp(MessageContext context, WorkbenchOpMessage message)
+        private ActionOutcome HandleWorkbenchOp(MessageContext context, WorkbenchOpMessage message)
         {
             if (message != null && message.Bench == null)
             {
@@ -53,32 +54,32 @@ namespace CardShopCoop.Modules.World
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context)
                 && message != null && message.Bench != null)
             {
-                ExecuteWorldCommand(context, message, () =>
-            {
-                if (_workbenchInteraction != null && _workbenchInteraction.HostApplyOp(message))
+                return CommandOutcome(ExecuteWorldCommand(context, message, () =>
                 {
-                    return true;
-                }
+                    if (_workbenchInteraction != null && _workbenchInteraction.HostApplyOp(message))
+                    {
+                        return true;
+                    }
 
-                // Refresh the failed edit with the bench's absolute authoritative state before the
-                // generic rollback, so the client reconciles instead of replaying its snapshot.
-                var refresh = _workbenchInteraction?.BuildRefresh(message.Bench);
-                if (refresh != null)
-                {
-                    SendWorldTo(context.Connection.Id, refresh);
-                }
+                    // Refresh the failed edit with the bench's absolute authoritative state before
+                    // the generic rollback, so the client reconciles instead of replaying its
+                    // snapshot.
+                    var refresh = _workbenchInteraction?.BuildRefresh(message.Bench);
+                    if (refresh != null)
+                    {
+                        SendWorldTo(context.Connection.Id, refresh);
+                    }
 
-                return false;
-            });
+                    return false;
+                }));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         [MessageHandler]
-        private void HandleWorkbenchBundle(MessageContext context, WorkbenchBundleMessage message)
+        private ActionOutcome HandleWorkbenchBundle(MessageContext context,
+            WorkbenchBundleMessage message)
         {
             if (message != null && message.Bench == null)
             {
@@ -89,14 +90,12 @@ namespace CardShopCoop.Modules.World
             if (RuntimeContext.InGame() && IsJoinPhaseSender(context)
                 && message != null && message.Bench != null)
             {
-                ExecuteWorldCommand(context, message,
+                return CommandOutcome(ExecuteWorldCommand(context, message,
                     () => _workbenchInteraction != null
-                        && _workbenchInteraction.HostCompleteBundle(message.Bench));
+                        && _workbenchInteraction.HostCompleteBundle(message.Bench)));
             }
-            else
-            {
-                RejectWorldIntent(context, message);
-            }
+
+            return RejectWorldIntent(context, message);
         }
 
         [HarmonyPatch(typeof(InteractableWorkbench), "AddItem")]

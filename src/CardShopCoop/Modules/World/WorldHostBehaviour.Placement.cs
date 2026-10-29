@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.PlayTable;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Net.Connection;
 using HarmonyLib;
@@ -117,21 +117,20 @@ namespace CardShopCoop.Modules.World
         }
 
         [MessageHandler]
-        private void HandleMoveIntent(MessageContext messageContext,
+        private ActionOutcome HandleMoveIntent(MessageContext messageContext,
             PlacementMoveIntentMessage message)
         {
             if (!IsPeerMessage(messageContext) || message == null)
             {
-                return;
+                return ActionOutcome.Reject("placement intent is not admissible");
             }
 
             if (message.Move == null || message.Move.Entity == null)
             {
                 CoopPlugin.Log.LogWarning("[placement] dropped move intent from connection="
                     + messageContext.Connection.Id + " with no live entity.");
-                Reject(messageContext.Connection.Id, message.ActionId,
+                return RejectPlacement(messageContext.Connection.Id, message.ActionId,
                     "placement intent has no live entity");
-                return;
             }
 
             // A settled pose is host-applied, so it is bounded and finite before it can move a
@@ -140,18 +139,16 @@ namespace CardShopCoop.Modules.World
                 || (message.Move.IsBoxed
                     && !IsSanePose(message.Move.BoxedPos, message.Move.BoxedRot)))
             {
-                Reject(messageContext.Connection.Id, message.ActionId,
+                return RejectPlacement(messageContext.Connection.Id, message.ActionId,
                     "placement pose is not finite/bounded");
-                return;
             }
 
             var obj = message.Move.Entity;
             var table = obj as InteractablePlayTable;
             if (table != null && !PlayTableHostBehaviour.IsPlacementMoveAllowed(table))
             {
-                Reject(messageContext.Connection.Id, message.ActionId,
+                return RejectPlacement(messageContext.Connection.Id, message.ActionId,
                     "play table is occupied or reserved");
-                return;
             }
 
             // The requester must actually be standing at the object it settles, exactly as the
@@ -161,9 +158,8 @@ namespace CardShopCoop.Modules.World
                 || presence.Age > TimeSpan.FromSeconds(2)
                 || !IsWithinPlacementReach(presence.Position, obj.transform.position))
             {
-                Reject(messageContext.Connection.Id, message.ActionId,
+                return RejectPlacement(messageContext.Connection.Id, message.ActionId,
                     "sender is not within reach of the placement");
-                return;
             }
 
             _applyingIntent++;
@@ -171,9 +167,8 @@ namespace CardShopCoop.Modules.World
             {
                 if (!PlacementMoveState.Apply(message.Move, true))
                 {
-                    Reject(messageContext.Connection.Id, message.ActionId,
+                    return RejectPlacement(messageContext.Connection.Id, message.ActionId,
                         "placement pose could not be applied");
-                    return;
                 }
             }
             finally
@@ -182,6 +177,7 @@ namespace CardShopCoop.Modules.World
             }
 
             NotifyObjectChanged(obj, message.ActionId, true);
+            return ActionOutcome.Applied();
         }
 
         /// <summary>Re-read the live lists: publish a state update for every entity whose observed
@@ -329,14 +325,11 @@ namespace CardShopCoop.Modules.World
             });
         }
 
-        private void Reject(int connectionId, Guid actionId, string reason)
+        private static ActionOutcome RejectPlacement(int connectionId, Guid actionId, string reason)
         {
             CoopPlugin.Log.LogWarning("placement intent rejected for connection=" + connectionId
-                + ": " + reason);
-            if (actionId != Guid.Empty)
-            {
-                ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
-            }
+                + " id=" + actionId + ": " + reason);
+            return ActionOutcome.Reject(reason);
         }
 
         private bool IsPeerMessage(MessageContext messageContext)

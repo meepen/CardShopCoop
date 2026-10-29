@@ -139,9 +139,9 @@ namespace CardShopCoop.Modules.World
 
         private void SendWorldCommand(int connectionId, INetMessage message)
         {
-            if (message is not WorldMessage worldMessage)
+            if (message is not WorldIntentMessage command)
             {
-                throw new InvalidOperationException("World client can only send WorldMessage values.");
+                throw new InvalidOperationException("World client can only send WorldIntentMessage values.");
             }
 
             // Direct sends from the interaction classes are fire-and-forget intents (a shelf
@@ -149,24 +149,24 @@ namespace CardShopCoop.Modules.World
             // still need a real prediction id: the host's intent ledger rejects an empty one.
             // None of them has the id pending on any client, so an echo is applied exactly as a
             // remote change, never consumed as a prediction.
-            if (worldMessage.ActionId == Guid.Empty)
+            if (command.ActionId == Guid.Empty)
             {
-                worldMessage.ActionId = Guid.NewGuid();
+                command.ActionId = Guid.NewGuid();
             }
 
-            RuntimeContext.Send(connectionId, worldMessage);
+            RuntimeContext.Send(connectionId, command);
         }
 
         // A fire-and-forget forward (a covered-hold drop, an item-box state mirror) still needs a
         // real prediction id: the host's intent ledger requires one and treats an empty id as an
         // unauthenticated, dedupe-unscoped message. It is not a prediction here - no client has it
         // pending - so every valid peer simply applies the echo.
-        internal static bool SendClientIntent(WorldMessage command)
+        internal static bool SendClientIntent(WorldIntentMessage command)
             => SendClientIntent(command,
                 command == null || command.ActionId == Guid.Empty
                     ? Guid.NewGuid() : command.ActionId);
 
-        internal static bool SendClientIntent(WorldMessage command, Guid actionId)
+        internal static bool SendClientIntent(WorldIntentMessage command, Guid actionId)
         {
             if (_instance == null || command == null)
             {

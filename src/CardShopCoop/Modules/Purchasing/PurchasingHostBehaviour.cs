@@ -5,7 +5,6 @@ using CardShopCoop.Api;
 using CardShopCoop.Attributes;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.Economy;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Modules.Report;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Net;
@@ -505,42 +504,75 @@ namespace CardShopCoop.Modules.Purchasing
         }
 
         [MessageHandler]
-        private void HandleRestockPurchase(MessageContext context, RestockPurchaseIntent message)
-            => PublishIntentResult(context, message, message?.Result);
+        private ActionOutcome HandleRestockPurchase(MessageContext context,
+            RestockPurchaseIntent message)
+        {
+            if (message == null)
+            {
+                return ActionOutcome.Reject("purchase command is missing");
+            }
+
+            message.OnApply();
+            return PublishIntentResult(context, message.Result);
+        }
 
         [MessageHandler]
-        private void HandleFurniturePurchase(MessageContext context, FurniturePurchaseIntent message)
-            => PublishIntentResult(context, message, message?.Result);
+        private ActionOutcome HandleFurniturePurchase(MessageContext context,
+            FurniturePurchaseIntent message)
+        {
+            if (message == null)
+            {
+                return ActionOutcome.Reject("purchase command is missing");
+            }
+
+            message.OnApply();
+            return PublishIntentResult(context, message.Result);
+        }
 
         [MessageHandler]
-        private void HandleProductLicensePurchase(MessageContext context,
+        private ActionOutcome HandleProductLicensePurchase(MessageContext context,
             ProductLicensePurchaseIntent message)
-            => PublishIntentResult(context, message, message?.Result);
+        {
+            if (message == null)
+            {
+                return ActionOutcome.Reject("purchase command is missing");
+            }
+
+            message.OnApply();
+            return PublishIntentResult(context, message.Result);
+        }
 
         [MessageHandler]
-        private void HandleScannerLicensePurchase(MessageContext context,
+        private ActionOutcome HandleScannerLicensePurchase(MessageContext context,
             ScannerLicensePurchaseIntent message)
-            => PublishIntentResult(context, message, message?.Result);
+        {
+            if (message == null)
+            {
+                return ActionOutcome.Reject("purchase command is missing");
+            }
 
-        /// <summary>The intent's <c>OnApply</c> has already run and stored the host's answer. Publish
-        /// an acceptance, or roll the client's optimistic checkout back on a rejection.</summary>
-        private void PublishIntentResult(MessageContext context, ActionMessage intent,
+            message.OnApply();
+            return PublishIntentResult(context, message.Result);
+        }
+
+        /// <summary>The intent has already run <c>OnApply</c> and stored the host's answer.
+        /// Publish an acceptance, or let the framework's one generic rollback reverse the
+        /// client's optimistic checkout on a rejection.</summary>
+        private ActionOutcome PublishIntentResult(MessageContext context,
             PurchaseOutcomeMessage result)
         {
             if (_shutdown || result == null || context?.Connection == null)
             {
-                return;
+                return ActionOutcome.Reject("purchasing is not ready on the host");
             }
 
-            var connectionId = context.Connection.Id;
-            if (result.Success)
+            if (!result.Success)
             {
-                SendOutcome(connectionId, result);
+                return ActionOutcome.Reject(result.Text);
             }
-            else if (intent.ActionId != Guid.Empty)
-            {
-                ActionLedger.Rollback(RuntimeContext, connectionId, intent.ActionId);
-            }
+
+            SendOutcome(context.Connection.Id, result);
+            return ActionOutcome.Applied();
         }
 
         internal void Shutdown()

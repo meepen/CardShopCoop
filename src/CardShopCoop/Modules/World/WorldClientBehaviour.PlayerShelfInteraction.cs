@@ -99,7 +99,7 @@ namespace CardShopCoop.Modules.World
                 _shelfInteraction.CaptureLabelChange(compartment, allowWarehouse));
         }
 
-        private bool ApplyShelfAction(ShelfInteractionMessage message)
+        private bool ApplyShelfAction(IShelfMutation message)
         {
             if (_shelfInteraction == null)
             {

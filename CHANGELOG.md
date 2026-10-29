@@ -8,6 +8,7 @@
 - Fixed: False Harmony warnings in the log at startup.
 - Fixed: An error in the log when quitting the game during a co-op session.
 - Fixed: Other co-op mods could fail to set themselves up when hosting or joining, because their behaviours started before co-op networking was ready. They now start once the connection layer is up.
+- Updated the public action API for co-op mods. An `ActionMessage` handler now returns an `ActionOutcome` (apply it, already applied, or reject), the host's reply is routed back to the action automatically, and rejecting no longer needs a separate client handler. Mods built against the earlier action API need to be rebuilt; `docs/third-party-integration.md` shows the new contract.
 - Fixed: The other player's character could stay invisible even though co-op was connected. The old "Walking Avatars" switch is gone from the window, but a saved copy of it could still hide avatars; avatars now always show.
 
 ## 2.2.0

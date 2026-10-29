@@ -87,8 +87,11 @@ namespace CardShopCoop.CustomTv
             }
         }
 
-        public override void OnUndo()
+        public override void OnUndo(ActionResponseMessage response)
         {
+            // TV state is authoritative and travels as TvState extended information, so the
+            // response carries nothing this prediction needs. A rejected action only has to put
+            // the TV back exactly where it was.
             if (Operation == TvOperation.Seek)
             {
                 TvInterop.UndoSeek(Tv, UndoSeek);

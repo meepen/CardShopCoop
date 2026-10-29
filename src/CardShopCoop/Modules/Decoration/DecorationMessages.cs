@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using CardShopCoop.Api;
 using CardShopCoop.Net;
@@ -52,13 +53,26 @@ namespace CardShopCoop.Modules.Decoration
         public bool WarehouseWallSnap;
         public int WallIndex;
         public InteractableObject Entity;
+
+        /// <summary>The live prediction/reversal for an intent is recorded by the client's
+        /// action-ledger closures: they capture the piece's pre-action snapshot and which game
+        /// path produced it. Nothing is replayed from this DTO itself.</summary>
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     /// <summary>Authoritative decoration state delta. Object creation, movement and removal are
-    /// identity lifecycle events; this message carries only inventory/equip state.</summary>
+    /// identity lifecycle events; this message carries only inventory/equip state and is never a
+    /// command. <see cref="ActionId"/> retires the intent prediction this delta answers.</summary>
     [NetworkMessage]
-    public sealed class DecorationDeltaMessage : ActionMessage
+    public sealed class DecorationDeltaMessage : INetMessage
     {
+        public Guid ActionId;
         public byte Action;
         public int Category;
         public int Index;

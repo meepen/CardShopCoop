@@ -1,7 +1,8 @@
+using CardShopCoop.Api;
 using CardShopCoop.Attributes;
-using CardShopCoop.Modules.Actions;
 using CardShopCoop.Net;
 using CardShopCoop.Runtime;
+using CoopBehaviour = CardShopCoop.Runtime.CoopBehaviour;
 using UnityEngine;
 using System;
 
@@ -24,42 +25,38 @@ namespace CardShopCoop.Modules.Deodorant
         private void OnDestroy() => Shutdown();
 
         [MessageHandler]
-        private void Handle(MessageContext context, HandheldSprayIntentMessage message)
+        private ActionOutcome Handle(MessageContext context, HandheldSprayIntentMessage message)
         {
             if (!IsAuthenticatedSender(context) || message == null)
             {
-                return;
+                return ActionOutcome.Reject("spray intent from an unauthenticated sender");
             }
 
             if (!IsFinite(message.Position.x) || !IsFinite(message.Position.y)
                 || !IsFinite(message.Position.z) || !IsFinite(message.Content)
                 || message.Content < 0f || message.Content > 1f)
             {
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("spray position or content is outside the allowed range");
             }
             if (!RuntimeContext.PeerPresence.TryGet(context.Connection.Id, out var presence))
             {
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("no authenticated presence for the spray intent");
             }
             if (presence.Age > TimeSpan.FromSeconds(2) || presence.Hold != 2
                 || !HasDeodorant(presence.HoldTypes))
             {
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject(
+                    "spray source is not holding a deodorant in a fresh presence sample");
             }
             if (Vector3.Distance(presence.Position, message.Position) > 3.5f)
             {
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("spray source is too far from the spray position");
             }
 
             var manager = GetCustomerManager();
             if (manager == null)
             {
-                Reject(context, message.ActionId);
-                return;
+                return ActionOutcome.Reject("customer manager is not available on the host");
             }
             var customers = manager.GetCustomerList();
             var states = new System.Collections.Generic.List<DeodorantCustomerState>();
@@ -96,6 +93,7 @@ namespace CardShopCoop.Modules.Deodorant
                 Content = message.Content,
                 Customers = states,
             });
+            return ActionOutcome.Applied();
         }
 
         private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
@@ -107,14 +105,6 @@ namespace CardShopCoop.Modules.Deodorant
         {
             return !_shutdown && RuntimeContext.InGame() && context?.Connection != null
                 && context.IsAuthenticated;
-        }
-
-        private void Reject(MessageContext context, Guid actionId)
-        {
-            if (actionId != Guid.Empty && context?.Connection != null)
-            {
-                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, actionId);
-            }
         }
 
         private static bool HasDeodorant(System.Collections.Generic.IReadOnlyList<int> holdTypes)

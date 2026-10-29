@@ -49,6 +49,17 @@ namespace CardShopCoop.Modules.Presence
         public bool Female;
         public int ModelIndex;
         public string CustomizationJson;
+
+        // The client registers this prediction through the explicit Apply/Undo closures in
+        // PresenceClientBehaviour, and the host handler applies the model itself, so the action
+        // hooks are never the applied path.
+        public override void OnApply()
+        {
+        }
+
+        public override void OnUndo(ActionResponseMessage response)
+        {
+        }
     }
 
     /// <summary>Authoritative appearance state. Entry 0 is the host; other ids are host
@@ -68,8 +79,10 @@ namespace CardShopCoop.Modules.Presence
     }
 
     [NetworkMessage]
-    public sealed class PresenceModelDeltaMessage : ActionMessage
+    public sealed class PresenceModelDeltaMessage : INetMessage
     {
+        /// <summary>The prediction this delta answers, or empty for host-local state.</summary>
+        public Guid ActionId;
         public PresenceEntityDeltaKind Kind;
         public int Id;
         public PresenceModelEntry Entry;
