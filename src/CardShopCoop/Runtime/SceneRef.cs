@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using CardShopCoop.Util;
 using HarmonyLib;
@@ -383,6 +384,7 @@ namespace CardShopCoop.Runtime
         private static readonly Dictionary<Type, List<Action<Component>>> ReadyHandlers = new();
         private static readonly Dictionary<Type, List<Action<Component>>> GoneHandlers = new();
         private static readonly HashSet<Type> Patched = new();
+        private static readonly HashSet<MethodBase> PatchedMethods = new();
 
         internal static void Register(Type type, Action<Component> ready,
             Action<Component> gone)
@@ -416,13 +418,57 @@ namespace CardShopCoop.Runtime
 
         private static void Patch(Type type, string methodName, string postfixName)
         {
-            var method = AccessTools.Method(type, methodName);
-            if (method == null || method.IsStatic)
+            var method = FindDeclaredMethod(type, methodName);
+            if (method == null || !PatchedMethods.Add(method))
             {
                 return;
             }
 
             Harmony.Patch(method, postfix: new HarmonyMethod(typeof(SceneLifecycleHooks), postfixName));
+        }
+
+        /// <summary>
+        /// Resolves the most-derived declaration of one lifecycle name without AccessTools'
+        /// warnings. Every registration probes six names that most types do not implement, and
+        /// AccessTools.Method logs "could not find" for each miss. On a hit it also returns the
+        /// base declaration reflected through the derived type, which makes HarmonyX warn that
+        /// only implemented methods should be patched. Walking the hierarchy here resolves both:
+        /// misses are silent, and every hit is the canonical declaration (ReflectedType equals
+        /// DeclaringType), so <see cref="PatchedMethods"/> can also stop a second derived type
+        /// from adding a duplicate postfix to the same shared base method.
+        /// </summary>
+        private static MethodInfo FindDeclaredMethod(Type type, string name)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public
+                | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            for (var current = type; current != null; current = current.BaseType)
+            {
+                MethodInfo fallback = null;
+                var methods = current.GetMethods(flags);
+                for (var i = 0; i < methods.Length; i++)
+                {
+                    var candidate = methods[i];
+                    if (!string.Equals(candidate.Name, name, StringComparison.Ordinal)
+                        || candidate.IsStatic || candidate.IsAbstract)
+                    {
+                        continue;
+                    }
+
+                    if (candidate.GetParameters().Length == 0)
+                    {
+                        return candidate;
+                    }
+
+                    fallback ??= candidate;
+                }
+
+                if (fallback != null)
+                {
+                    return fallback;
+                }
+            }
+
+            return null;
         }
 
         private static void ReadyPostfix(Component __instance)
