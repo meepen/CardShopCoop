@@ -381,7 +381,11 @@ namespace CardShopCoop.Modules.Presence
             return false;
         }
 
-        internal PresenceModelEntry EnsureLocalModel()
+        /// <summary><paramref name="buildEditor"/> is false for callers that only need the model
+        /// payload (the host sends it to a new peer). The editor body is a full dressed clone used
+        /// for the character UI and for normalizing a model; applying the payload to it on a join
+        /// would build that clone even when nobody opened the tab.</summary>
+        internal PresenceModelEntry EnsureLocalModel(bool buildEditor = true)
         {
             if (!_localModelReady)
             {
@@ -408,16 +412,19 @@ namespace CardShopCoop.Modules.Presence
                 TryUpgradeAutoModel();
             }
 
-            var editor = _renderer.GetEditorCustomization(_localModel.Female);
-            if (editor != null && _appliedModelRoot != editor.transform)
+            if (buildEditor)
             {
-                var before = _localModel.CustomizationJson;
-                _renderer.ApplyLocalModel(editor, _localModel);
-                _appliedModelRoot = editor.transform;
-                if (before != _localModel.CustomizationJson)
+                var editor = _renderer.GetEditorCustomization(_localModel.Female);
+                if (editor != null && _appliedModelRoot != editor.transform)
                 {
-                    _lastCommittedModel = Clone(_localModel);
-                    QueueModelSave();
+                    var before = _localModel.CustomizationJson;
+                    _renderer.ApplyLocalModel(editor, _localModel);
+                    _appliedModelRoot = editor.transform;
+                    if (before != _localModel.CustomizationJson)
+                    {
+                        _lastCommittedModel = Clone(_localModel);
+                        QueueModelSave();
+                    }
                 }
             }
 
@@ -453,7 +460,7 @@ namespace CardShopCoop.Modules.Presence
             _modelGeneration++;
         }
 
-        internal PresenceModelEntry GetLocalModel() => Clone(EnsureLocalModel());
+        internal PresenceModelEntry GetLocalModel() => Clone(EnsureLocalModel(buildEditor: false));
 
         internal bool CanUndo => _undo.Count > 0;
         internal bool CanRedo => _redo.Count > 0;

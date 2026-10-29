@@ -326,11 +326,14 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
+            Util.MemoryProbe.Log("catalog-baseline:before conn=" + connectionId);
             _context.Send(connectionId, new CatalogLicenseStateMessage
             {
                 ScannerUnlocked = scanner,
                 Entries = entries,
             });
+            Util.MemoryProbe.Log("catalog-baseline:after conn=" + connectionId
+                + " entries=" + entries.Count);
             _baselinePending.Remove(connectionId);
             return true;
         }

@@ -302,6 +302,8 @@ namespace CardShopCoop.Modules.SaveTransfer
             {
                 SendHandshakeOffer(owner, target, generation, offer, sendHandshakeOffer);
                 afterOfferQueued?.Invoke();
+                Util.MemoryProbe.Log("transfer-send:before save=" + savePayload.Length / 1024
+                    + "KB modData=" + bundlePayload.Length / 1024 + "KB");
                 SendChunks(owner, target, generation, savePayload, true);
                 SendDirect(owner, target, generation,
                     new SaveDoneMessage { TotalLength = savePayload.Length });
@@ -317,6 +319,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                     }
                 }
 
+                Util.MemoryProbe.Log("transfer-send:after conn=" + target.Id);
                 CoopPlugin.Log.LogInfo("coop: transfer sent to connection " + target.Id + " (save "
                     + savePayload.Length / 1024 + " KB, mod data " + bundlePayload.Length / 1024
                     + " KB)");

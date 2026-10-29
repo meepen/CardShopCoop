@@ -6,6 +6,7 @@ using System.Threading;
 using CardShopCoop.Modules.Catalog;
 using CardShopCoop.Modules.World;
 using CardShopCoop.Runtime;
+using CardShopCoop.Util;
 using UnityEngine;
 using CardShopCoop.Api;
 
@@ -123,11 +124,10 @@ namespace CardShopCoop.Modules.SaveTransfer
             var counterBeforeKnown = Net.PlatformProbe.TrySampleSaveCounter(out var indexBefore,
                 out var cycleBefore);
             var previousSlot = manager.m_CurrentSaveLoadSlotSelectedIndex;
+            MemoryProbe.Log("host-snapshot:before");
             try
             {
-                // SaveGameData is synchronous on both required builds. The save guard patch
-                // permits this on the host, while the UpdateSlot patch handles beta slot 6 UI.
-                manager.SaveGameData(HostSnapshotSlot);
+                SaveLiveWorldForSnapshot(manager);
             }
             catch (Exception error)
             {
@@ -137,7 +137,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
             finally
             {
-                manager.m_CurrentSaveLoadSlotSelectedIndex = previousSlot;
+                MemoryProbe.Log("host-snapshot:after-save");
             }
 
             try
@@ -203,6 +203,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             {
                 var bytes = File.ReadAllBytes(path);
                 ValidateSavePayload(bytes);
+                MemoryProbe.Log("host-snapshot:after-read " + bytes.Length / 1024 + "KB");
                 CoopPlugin.Log.LogInfo("coop: shipping world from slot file" + DescribeWorldJson(bytes)
                     + " (" + bytes.Length / 1024 + " KB)");
                 return bytes;
@@ -228,6 +229,66 @@ namespace CardShopCoop.Modules.SaveTransfer
             throw new FileNotFoundException(counterKnown && !saveRan
                 ? "Host snapshot failed: SaveGameData did not complete and no fresh slot file exists. Load into the shop fully, then retry."
                 : "Host snapshot failed: neither a fresh slot file nor a readable in-memory world was produced. Load into the shop fully, then retry.", path);
+        }
+
+        /// <summary>
+        /// Serializes the live world into the scratch slot through the data owner instead of
+        /// <c>CGameManager.SaveGameData</c>. The wrapper adds UI bookkeeping and ends with a full
+        /// <c>GC.Collect()</c>; a scratch snapshot only needs the serializer, so the UI side
+        /// effects and that collection are not wanted. The data method is the same serializer the
+        /// wrapper calls (CSaveLoad.Save), so the JSON, the .gd backup and every save postfix
+        /// (including EPL's sidecar) are unchanged.
+        /// </summary>
+        private static void SaveLiveWorldForSnapshot(CGameManager manager)
+        {
+            if (manager == null)
+            {
+                throw new InvalidOperationException("The game manager is not available for a host snapshot.");
+            }
+            if (!manager.m_IsGameLevel)
+            {
+                throw new InvalidOperationException(
+                    "The host is not in a gameplay level, so no live world can be snapshotted.");
+            }
+            if (GameInstance.m_HasLoadingError)
+            {
+                throw new InvalidOperationException(
+                    "The loaded world has a loading error, so it cannot be snapshotted.");
+            }
+            if (!GameInstance.m_FinishedSavefileLoading)
+            {
+                throw new InvalidOperationException(
+                    "The world is still loading, so it cannot be snapshotted yet.");
+            }
+            if (CPlayerData.m_CashCounterSaveDataList == null
+                || CPlayerData.m_CashCounterSaveDataList.Count <= 0)
+            {
+                throw new InvalidOperationException(
+                    "The live world has no shelf/counter data, so it cannot be snapshotted.");
+            }
+
+            var data = CGameData.instance;
+            if (data == null)
+            {
+                throw new InvalidOperationException("The live game data is not available for a snapshot.");
+            }
+
+            // Preserve the manager flags exactly as the user-facing save path leaves them. The
+            // scratch slot is not a UI save, so no slot-list or autosave-cooldown side effect is
+            // wanted; only the slot index is consumed by a mod save hook during CSaveLoad.Save.
+            var previousSlot = manager.m_CurrentSaveLoadSlotSelectedIndex;
+            var previousManual = manager.m_IsManualSaveLoad;
+            try
+            {
+                manager.m_CurrentSaveLoadSlotSelectedIndex = HostSnapshotSlot;
+                manager.m_IsManualSaveLoad = true;
+                data.SaveGameData(HostSnapshotSlot);
+            }
+            finally
+            {
+                manager.m_CurrentSaveLoadSlotSelectedIndex = previousSlot;
+                manager.m_IsManualSaveLoad = previousManual;
+            }
         }
 
         private static bool IsFresh(string path, DateTime before)
@@ -326,23 +387,38 @@ namespace CardShopCoop.Modules.SaveTransfer
             }
         }
 
+        /// <summary>
+        /// Reads only the two log fields out of the UTF-8 save. Decoding the whole world into a
+        /// UTF-16 string here used to allocate roughly twice the save size on every join just to
+        /// print a day and a shop name; the byte scan is allocation-free apart from the two values.
+        /// </summary>
         private static string DescribeWorldJson(byte[] bytes)
         {
             try
             {
-                var json = new UTF8Encoding(false).GetString(bytes);
                 int? day = null;
                 const string dayKey = "\"m_CurrentDay\":";
-                var dayAt = json.IndexOf(dayKey, StringComparison.Ordinal);
+                var dayAt = IndexOfAscii(bytes, dayKey);
                 if (dayAt >= 0)
                 {
                     var start = dayAt + dayKey.Length;
+                    while (start < bytes.Length && (bytes[start] == ' ' || bytes[start] == '\t'
+                        || bytes[start] == '\r' || bytes[start] == '\n'))
+                    {
+                        start++;
+                    }
                     var end = start;
-                    while (end < json.Length && (json[end] == '-' || char.IsDigit(json[end])))
+                    if (end < bytes.Length && bytes[end] == '-')
                     {
                         end++;
                     }
-                    if (int.TryParse(json.Substring(start, end - start), out var parsed))
+                    while (end < bytes.Length && bytes[end] >= '0' && bytes[end] <= '9')
+                    {
+                        end++;
+                    }
+                    if (end > start
+                        && int.TryParse(Encoding.ASCII.GetString(bytes, start, end - start),
+                            out var parsed))
                     {
                         day = parsed;
                     }
@@ -350,18 +426,19 @@ namespace CardShopCoop.Modules.SaveTransfer
 
                 string player = null;
                 const string playerKey = "\"m_PlayerName\":\"";
-                var playerAt = json.IndexOf(playerKey, StringComparison.Ordinal);
+                var playerAt = IndexOfAscii(bytes, playerKey);
                 if (playerAt >= 0)
                 {
                     var start = playerAt + playerKey.Length;
                     var end = start;
-                    while (end < json.Length && !(json[end] == '"' && json[end - 1] != '\\'))
+                    while (end < bytes.Length
+                        && !(bytes[end] == '"' && bytes[end - 1] != '\\'))
                     {
                         end++;
                     }
-                    if (end < json.Length)
+                    if (end < bytes.Length)
                     {
-                        player = json.Substring(start, end - start);
+                        player = Encoding.UTF8.GetString(bytes, start, end - start);
                     }
                 }
 
@@ -373,6 +450,36 @@ namespace CardShopCoop.Modules.SaveTransfer
                 CoopLog.Swallow(error);
                 return "";
             }
+        }
+
+        private static int IndexOfAscii(byte[] bytes, string ascii)
+        {
+            if (bytes == null || ascii == null || ascii.Length == 0
+                || bytes.Length < ascii.Length)
+            {
+                return -1;
+            }
+
+            var last = bytes.Length - ascii.Length;
+            for (var i = 0; i <= last; i++)
+            {
+                var match = true;
+                for (var j = 0; j < ascii.Length; j++)
+                {
+                    if (bytes[i + j] != ascii[j])
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+
+                if (match)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
         }
 
         private static string Describe(int? day, string player)

@@ -1584,7 +1584,9 @@ namespace CardShopCoop
 
             SetStatus("Hosting - " + peerName + " joined!");
             CoopPlugin.Log.LogInfo(peerName + " passed admission; starting world transfer");
+            Util.MemoryProbe.Log("join-admission");
             var blobs = CatalogHandshake.BuildWelcomeBlobs();
+            Util.MemoryProbe.Log("welcome-blobs:after");
             var transport = Net;
             var transferGeneration = SessionGeneration;
             if (transport == null)

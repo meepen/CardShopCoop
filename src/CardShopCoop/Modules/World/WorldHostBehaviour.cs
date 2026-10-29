@@ -380,7 +380,7 @@ namespace CardShopCoop.Modules.World
                 _nextBaselineId = 1;
             }
 
-
+            Util.MemoryProbe.Log("world-baseline:before conn=" + connectionId);
             SendWorldTo(connectionId, new WorldBaselineStartMessage
             {
                 BaselineId = baselineId,
@@ -399,6 +399,7 @@ namespace CardShopCoop.Modules.World
             {
                 BaselineId = baselineId,
             });
+            Util.MemoryProbe.Log("world-baseline:after conn=" + connectionId);
         }
 
         private void BroadcastWorld(INetMessage message)

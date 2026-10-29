@@ -34,9 +34,11 @@ namespace CardShopCoop
 
             try
             {
+                Util.MemoryProbe.Log("fully-joined-baselines:before");
                 // Identity existence must reach the client before any module state baseline.
                 GameObjectIdentityApi.SendJoinBaseline(context.Connection);
                 _runtime?.FullyJoined(context.Connection);
+                Util.MemoryProbe.Log("fully-joined-baselines:after");
             }
             catch (Exception error)
             {

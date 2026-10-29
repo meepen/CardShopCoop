@@ -366,8 +366,12 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
+            Util.MemoryProbe.Log("pricing-baseline:before conn=" + connectionId);
             HydrateOwnedCards();
-            _context.Send(connectionId, BuildState());
+            var state = BuildState();
+            Util.MemoryProbe.Log("pricing-baseline:after conn=" + connectionId
+                + " items=" + state.ItemTypes.Count + " cards=" + state.Cards.Count);
+            _context.Send(connectionId, state);
             _baselinePending.Remove(connectionId);
             return true;
         }

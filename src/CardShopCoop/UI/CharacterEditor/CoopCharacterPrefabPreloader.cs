@@ -1,7 +1,7 @@
 using System;
 using System.Collections;
-using CardShopCoop.Modules.Presence;
 using CardShopCoop.Runtime;
+using CardShopCoop.Util;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -182,9 +182,10 @@ namespace CardShopCoop.UI
             }
 
             // Activate with a sceneLoaded handler that deactivates every root and extracts the
-            // model synchronously, before any Start/Update can run. The scene stays loaded but
-            // inactive as the temporary asset lease; it is unloaded when the Character tab is
-            // left. Keeping it loaded is what keeps the wardrobe prefabs/materials alive.
+            // model synchronously, before any Start/Update can run. The scene is unloaded as soon
+            // as the templates exist; the cloned template holds its own references to the
+            // wardrobe prefabs/materials, so a second shop scene must not stay resident through a
+            // later join.
             SubscribeSceneLoaded();
             _activationOwned = true;
             operation.allowSceneActivation = true;
@@ -202,8 +203,10 @@ namespace CardShopCoop.UI
             }
 
             // The roots are inactive, so this extraction can take as long as it needs without
-            // any scene Start/Update running. Keep the scene loaded but inactive as the temporary
-            // asset lease (hair/apparel prefabs and materials live in it) until the tab closes.
+            // any scene Start/Update running. The templates keep the wardrobe prefabs/materials
+            // they reference alive, so the scene is only a temporary container and must not stay
+            // loaded: a second copy of the shop is exactly the multi-gigabyte leak the join path
+            // must never retain.
             if (!TryCreateTemplatesFromLoadedScene())
             {
                 CoopPlugin.Log?.LogWarning("co-op character editor: no usable character prefab "
@@ -213,8 +216,38 @@ namespace CardShopCoop.UI
             _operation = null;
             _activationOwned = false;
             UnsubscribeSceneLoaded();
-            _preloadSceneName = sceneName;
-            FinishPreload(keepScene: true);
+            yield return UnloadLeaseScene(sceneName);
+            FinishPreload();
+        }
+
+        /// <summary>Drops the temporary additive scene and leaves only the extracted templates
+        /// (which are in DontDestroyOnLoad and hold their own asset references).</summary>
+        private static IEnumerator UnloadLeaseScene(string sceneName)
+        {
+            _preloadSceneName = null;
+            if (string.IsNullOrEmpty(sceneName))
+            {
+                yield break;
+            }
+
+            var scene = SceneManager.GetSceneByName(sceneName);
+            if (!scene.IsValid() || !scene.isLoaded || scene == SceneManager.GetActiveScene())
+            {
+                yield break;
+            }
+
+            var unload = SceneManager.UnloadSceneAsync(scene);
+            if (unload != null)
+            {
+                while (!unload.isDone)
+                {
+                    yield return null;
+                }
+            }
+
+            MemoryProbe.Log("character-preload:scene-unloaded");
+            CoopPlugin.Log?.LogInfo("co-op character editor: unloaded " + sceneName
+                + "; only the extracted character model remains.");
         }
 
         private static IEnumerator FinishAndUnload(AsyncOperation operation, string sceneName)
@@ -237,25 +270,9 @@ namespace CardShopCoop.UI
             // to process the activation before unloading; by then no Start/Update ran.
             yield return null;
             _operation = null;
-            _preloadSceneName = null;
             _activationOwned = false;
             UnsubscribeSceneLoaded();
-
-            var scene = SceneManager.GetSceneByName(sceneName);
-            if (scene.IsValid() && scene.isLoaded && scene != SceneManager.GetActiveScene())
-            {
-                var unload = SceneManager.UnloadSceneAsync(scene);
-                if (unload != null)
-                {
-                    while (!unload.isDone)
-                    {
-                        yield return null;
-                    }
-                }
-                CoopPlugin.Log?.LogInfo("co-op character editor: unloaded " + sceneName
-                    + "; only the extracted character model remains.");
-            }
-
+            yield return UnloadLeaseScene(sceneName);
             FinishPreload();
         }
 
@@ -294,6 +311,7 @@ namespace CardShopCoop.UI
                 DestroyInScene<CMF.MouseCursorLock>(roots[i]);
             }
 
+            MemoryProbe.Log("character-preload:scene-active");
             CoopPlugin.Log?.LogInfo("co-op character editor: deactivated the temporary "
                 + scene.name + " scene before any gameplay component could start.");
         }
@@ -336,16 +354,13 @@ namespace CardShopCoop.UI
             SceneManager.sceneLoaded -= OnPreloadSceneLoaded;
         }
 
-        private static void FinishPreload(bool keepScene = false)
+        private static void FinishPreload()
         {
             _preloadInFlight = false;
             _operation = null;
             _activationOwned = false;
             UnsubscribeSceneLoaded();
-            if (!keepScene)
-            {
-                _preloadSceneName = null;
-            }
+            _preloadSceneName = null;
 
             var host = _preloadHost;
             _preloadHost = null;
@@ -732,12 +747,39 @@ namespace CardShopCoop.UI
                 return;
             }
 
+            UnloadLeaseSceneNow();
             DestroyTemplates();
             _preloadAttemptedThisScene = false;
             _preloadAttemptedScene = int.MinValue;
             _loggedMissingScene = false;
             _notified = false;
             _releaseRequested = false;
+        }
+
+        /// <summary>Best-effort synchronous start of the scene unload for a lease that is no longer
+        /// wanted. Unity finishes the unload asynchronously; the templates keep their own asset
+        /// references, so nothing they render depends on the scene staying resident.</summary>
+        private static void UnloadLeaseSceneNow()
+        {
+            var sceneName = _preloadSceneName;
+            _preloadSceneName = null;
+            if (string.IsNullOrEmpty(sceneName))
+            {
+                return;
+            }
+
+            var scene = SceneManager.GetSceneByName(sceneName);
+            if (!scene.IsValid() || !scene.isLoaded || scene == SceneManager.GetActiveScene())
+            {
+                return;
+            }
+
+            var unload = SceneManager.UnloadSceneAsync(scene);
+            if (unload != null)
+            {
+                CoopPlugin.Log?.LogInfo("co-op character editor: unloading the temporary "
+                    + sceneName + " scene lease.");
+            }
         }
 
         private static void DestroyTemplates()

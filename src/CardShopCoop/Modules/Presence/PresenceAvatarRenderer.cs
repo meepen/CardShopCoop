@@ -769,6 +769,7 @@ namespace CardShopCoop.Modules.Presence
             }
 
             var sourceCustom = source.m_CharacterCustom;
+            Util.MemoryProbe.Log("editor-template:before female=" + female);
             _editorHolder = new GameObject("CoopCharacterEditorTemplate");
             _editorHolder.SetActive(false);
             var clone = Object.Instantiate(source.gameObject, _editorHolder.transform);
@@ -817,6 +818,7 @@ namespace CardShopCoop.Modules.Presence
             SceneComponentRegistry<CC.CharacterCustomization>.Register(_editorCustomization);
             _editorFemale = female;
             CoopPlugin.Log.LogInfo($"character editor template: {(female ? "female" : "male")}, hair slots={_editorCustomization.HairTables.Count}, apparel slots={_editorCustomization.ApparelTables.Count}, presets={(_editorCustomization.Presets != null && _editorCustomization.Presets.Presets != null ? _editorCustomization.Presets.Presets.Count : 0)}");
+            Util.MemoryProbe.Log("editor-template:after female=" + female);
             return _editorCustomization;
         }
 
@@ -2010,6 +2012,7 @@ namespace CardShopCoop.Modules.Presence
 
         private void TrySpawn(RemoteAvatar av)
         {
+            Util.MemoryProbe.Log("avatar-spawn:before key=" + av.ConnId);
             var cm = SceneRef<CustomerManager>.Get();
             if (cm == null)
             {
@@ -2225,6 +2228,8 @@ namespace CardShopCoop.Modules.Presence
                 CoopPlugin.Log.LogInfo($"Spawned co-op avatar for '{av.Name}' key={av.ConnId} "
                     + $"({(female ? "female" : "male")} model) active={clone.activeInHierarchy} "
                     + $"renderers={enabledRenderers}/{spawnRenderers.Length} animator={controller}");
+                Util.MemoryProbe.Log("avatar-spawn:after key=" + av.ConnId
+                    + " renderers=" + spawnRenderers.Length);
                 // A carried box announced before this body existed rides a standalone anchor; now
                 // that the avatar exists, let observers move it onto the skeleton.
                 RemoteAvatarsChanged?.Invoke();

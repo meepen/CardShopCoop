@@ -49,6 +49,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 return;
             }
 
+            Util.MemoryProbe.Log("identity-baseline:before");
             var entries = new List<EntityDescriptor>();
             // A host can start a session inside an already-loaded shop. By join time every
             // feature owner is alive, so bind any world object that predates the identity hooks
@@ -81,6 +82,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 Complete = true,
                 Entries = entries,
             });
+            Util.MemoryProbe.Log("identity-baseline:after entries=" + entries.Count);
         }
     }
 

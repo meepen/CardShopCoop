@@ -153,7 +153,9 @@ namespace CardShopCoop.Modules.World
                 return;
             }
 
+            Util.MemoryProbe.Log("market-baseline:before");
             append(BuildState(dayRoll: false));
+            Util.MemoryProbe.Log("market-baseline:after");
             s_dirty = false;
         }
 
