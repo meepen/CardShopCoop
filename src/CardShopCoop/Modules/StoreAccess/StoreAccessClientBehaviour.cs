@@ -19,7 +19,6 @@ namespace CardShopCoop.Modules.StoreAccess
         private const string WarehouseKey = "store-access:warehouse";
 
         private static StoreAccessClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
 
@@ -30,7 +29,6 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             StoreAccessInterop.Reset();
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -169,12 +167,12 @@ namespace CardShopCoop.Modules.StoreAccess
         /// sign while the host stayed on the old side, and no later event would correct it.</summary>
         internal bool CanToggleNow()
         {
-            if (_shutdown || _context == null)
+            if (_shutdown)
             {
                 return true;
             }
 
-            var host = ((ICoopContext)_context).HostConnection;
+            var host = ((ICoopContext)RuntimeContext).HostConnection;
             if (host != null && host.State != ConnectionState.FullyJoined)
             {
                 CoopPlugin.Log.LogInfo("[store-access] sign click ignored: host connection is "
@@ -201,7 +199,7 @@ namespace CardShopCoop.Modules.StoreAccess
         /// layered rejection and never restores a stale absolute value.</summary>
         private void ForwardToggle(byte which, bool before, bool after)
         {
-            if (_shutdown || _context == null || !_context.InGame() || after == before)
+            if (_shutdown || !RuntimeContext.InGame() || after == before)
             {
                 return;
             }
@@ -209,7 +207,7 @@ namespace CardShopCoop.Modules.StoreAccess
             // No join callback: the guest's own connection to the host is the authoritative
             // "gameplay traffic is allowed" signal. Before the FullyJoined ack the sign cannot
             // drive a shared state change anyway.
-            var host = ((ICoopContext)_context).HostConnection;
+            var host = ((ICoopContext)RuntimeContext).HostConnection;
             if (host == null || host.State != ConnectionState.FullyJoined)
             {
                 return;
@@ -219,7 +217,7 @@ namespace CardShopCoop.Modules.StoreAccess
             var key = which == ShopSign ? ShopKey : WarehouseKey;
             ActionLedger.Submit(
                 key,
-                actionId => _context.Send(host.Id, new StoreAccessToggleIntent
+                actionId => RuntimeContext.Send(host.Id, new StoreAccessToggleIntent
                 {
                     ActionId = actionId,
                     Which = which,
@@ -288,7 +286,6 @@ namespace CardShopCoop.Modules.StoreAccess
             }
 
             StoreAccessInterop.Reset();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

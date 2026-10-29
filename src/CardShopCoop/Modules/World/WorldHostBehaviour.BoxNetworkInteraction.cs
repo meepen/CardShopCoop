@@ -31,7 +31,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleBoxDestroyRequest(MessageContext context, BoxDestroyRequestMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context) && message != null)
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context) && message != null)
             {
                 ExecuteWorldCommand(context, message, () =>
                 {
@@ -59,7 +59,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleFurnitureDestroy(MessageContext context, FurnitureDestroyIntent message)
         {
-            if (!_context.InGame() || !IsJoinPhaseSender(context) || message?.Entity == null)
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context) || message?.Entity == null)
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -85,7 +85,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleFurnitureBoxUp(MessageContext context, FurnitureBoxUpRequestMessage message)
         {
-            if (!_context.InGame() || !IsJoinPhaseSender(context)
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context)
                 || message == null)
             {
                 RejectWorldIntent(context, message);
@@ -190,7 +190,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleBoxStateRequest(MessageContext context, BoxStateRequestMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context))
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
                 if (message?.Box == null)
                 {

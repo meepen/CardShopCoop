@@ -16,24 +16,24 @@ namespace CardShopCoop.Modules.GameTime
     public sealed class GameTimeClientBehaviour : CoopBehaviour
     {
         private static GameTimeClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private DayTimeMessage _pendingMessage;
         private bool _hasHostDay;
         private bool _shutdown;
+        private bool _initialized;
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded += OnSceneLoaded;
             Harmony.CreateClassProcessor(typeof(LightManagerReadyPatch)).Patch();
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
+            _initialized = true;
         }
 
         [MessageHandler]
@@ -104,7 +104,7 @@ namespace CardShopCoop.Modules.GameTime
 
         private void TryApplyPending()
         {
-            if (_shutdown || _pendingMessage == null || _context == null || !_context.InGame())
+            if (_shutdown || _pendingMessage == null || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -158,7 +158,7 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
@@ -167,7 +167,6 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             _pendingMessage = null;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

@@ -28,7 +28,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleShelfItemAdd(MessageContext context, ShelfItemAddRequestMessage message)
         {
-            if (_context == null || !_context.InGame() || !IsJoinPhaseSender(context))
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -57,7 +57,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandleShelfItemRemove(MessageContext context, ShelfItemRemoveRequestMessage message)
         {
-            if (_context == null || !_context.InGame() || !IsJoinPhaseSender(context))
+            if (!RuntimeContext.InGame() || !IsJoinPhaseSender(context))
             {
                 RejectWorldIntent(context, message);
                 return;
@@ -122,7 +122,7 @@ namespace CardShopCoop.Modules.World
         private void PublishLabelChange(ShelfCompartment compartment, EItemType previousType,
             bool allowWarehouse = false)
         {
-            if (_shelfInteraction == null || compartment == null || !_context.InGame()
+            if (_shelfInteraction == null || compartment == null || !RuntimeContext.InGame()
                 || compartment.GetItemCount() > 0
                 || compartment.GetItemType() != EItemType.None
                 || previousType == EItemType.None)

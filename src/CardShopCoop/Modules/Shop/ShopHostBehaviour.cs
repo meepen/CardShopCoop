@@ -15,7 +15,6 @@ namespace CardShopCoop.Modules.Shop
     [ServerBehaviour]
     public sealed class ShopHostBehaviour : CoopBehaviour, IShopRenameEndpoint
     {
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private bool _localEditing;
@@ -29,7 +28,6 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            _context = RuntimeContext;
             ShopRenameSession.Reset();
             // A rename UI already open when the session starts has the live draft in
             // CPlayerData; the canonical read below deliberately ignores it then.
@@ -57,7 +55,7 @@ namespace CardShopCoop.Modules.Shop
         [OnSessionStarted]
         private void SeedState()
         {
-            if (_shutdown || _context == null)
+            if (_shutdown)
             {
                 return;
             }
@@ -152,7 +150,7 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            if (!_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 // Do not hand out a game-scene UI lock while the host is loading. The release
                 // branch above still runs, so a lock opened before the load cannot stick.
@@ -221,7 +219,7 @@ namespace CardShopCoop.Modules.Shop
             }
 
             var sender = context.ConnectionId;
-            if (!_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 // The host cannot apply a scene change while it is loading. Release the sender's
                 // lock and reject the proposal so the client reconciles instead of waiting.
@@ -327,7 +325,7 @@ namespace CardShopCoop.Modules.Shop
         {
             if (actionId != Guid.Empty && context?.Connection != null)
             {
-                ActionLedger.Rollback(_context, context.ConnectionId, actionId);
+                ActionLedger.Rollback(RuntimeContext, context.ConnectionId, actionId);
             }
         }
 
@@ -414,7 +412,7 @@ namespace CardShopCoop.Modules.Shop
         private void PublishRenameState(Guid actionId, bool rejected, bool isRename,
             string name = null, bool? unnamed = null, bool refreshUnnamed = false)
         {
-            if (_shutdown || _context == null || CoopCore.Instance?.Net == null)
+            if (_shutdown || CoopCore.Instance?.Net == null)
             {
                 return;
             }
@@ -439,7 +437,7 @@ namespace CardShopCoop.Modules.Shop
 
         private void PublishDraft()
         {
-            if (_shutdown || _context == null || CoopCore.Instance?.Net == null)
+            if (_shutdown || CoopCore.Instance?.Net == null)
             {
                 return;
             }
@@ -470,7 +468,7 @@ namespace CardShopCoop.Modules.Shop
 
         private void ShowBusyNotice()
         {
-            _context?.SetStatusLine?.Invoke(ShopRenameSession.BusyEditorName()
+            RuntimeContext.SetStatusLine?.Invoke(ShopRenameSession.BusyEditorName()
                 + " is renaming the shop.", 4f);
         }
 
@@ -482,13 +480,13 @@ namespace CardShopCoop.Modules.Shop
                 return string.IsNullOrWhiteSpace(local) ? "The host" : local;
             }
 
-            var name = _context?.PeerName?.Invoke(connectionId);
+            var name = RuntimeContext.PeerName?.Invoke(connectionId);
             return string.IsNullOrWhiteSpace(name) ? "Player " + connectionId : name;
         }
 
         bool IShopRenameEndpoint.TryOpenRenameUi(ShopRenamer renamer, bool showIntro)
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return true;
             }
@@ -522,7 +520,7 @@ namespace CardShopCoop.Modules.Shop
 
         void IShopRenameEndpoint.RenameInputChanged(string text)
         {
-            if (_shutdown || !_localEditing || _context == null || !_context.InGame()
+            if (_shutdown || !_localEditing || !RuntimeContext.InGame()
                 || !ShopRenameSession.IsLocalOwner)
             {
                 return;
@@ -539,7 +537,7 @@ namespace CardShopCoop.Modules.Shop
         {
             _confirming = false;
             _pendingTutorialOpen = false;
-            if (_shutdown || _context == null)
+            if (_shutdown)
             {
                 _localEditing = false;
                 ShopRenameSession.ClearOwner();
@@ -547,7 +545,7 @@ namespace CardShopCoop.Modules.Shop
             }
 
             _localEditing = false;
-            if (!_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 // Vanilla already closed the UI. Do not leave the lock held across a loading
                 // transition; release is a session fact, not a game-chunk message.
@@ -622,7 +620,7 @@ namespace CardShopCoop.Modules.Shop
         /// released so the host's tutorial can still be named.</summary>
         private void TryResumePendingTutorialOpen()
         {
-            if (!_pendingTutorialOpen || _shutdown || _context == null || !_context.InGame())
+            if (!_pendingTutorialOpen || _shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -674,7 +672,6 @@ namespace CardShopCoop.Modules.Shop
             _shutdown = true;
             ShopRenamePatches.ClearEndpoint(this);
             ClearSessionState();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

@@ -14,8 +14,8 @@ namespace CardShopCoop.Modules.World
     public sealed partial class WorldHostBehaviour : CoopBehaviour
     {
         private static WorldHostBehaviour _instance;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
+        private bool _initialized;
         private BoxNetworkInteraction _boxNetworkInteraction;
 
         internal static WorldHostBehaviour Active => _instance;
@@ -76,23 +76,22 @@ namespace CardShopCoop.Modules.World
 
         private void OnEnable()
         {
-            if (_context != null)
+            if (_initialized)
             {
                 return;
             }
 
 
-            _context = RuntimeContext;
             _instance = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _boxNetworkInteraction = new BoxNetworkInteraction(true, BroadcastWorld, SendWorldTo);
             _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction, BroadcastWorld);
-            _shelfInteraction = new ShelfInteraction(BroadcastWorld, () => _context.InGame());
+            _shelfInteraction = new ShelfInteraction(BroadcastWorld, () => RuntimeContext.InGame());
             _warehouseShelfInteraction = new WarehouseShelfInteraction(true, BroadcastWorld,
                 SendWorldTo, _boxNetworkInteraction, _playerBoxInteraction,
-                () => _context.InGame());
-            _cardInteraction = new WorldCardInteraction(_context, true, _boxNetworkInteraction,
+                () => RuntimeContext.InGame());
+            _cardInteraction = new WorldCardInteraction(RuntimeContext, true, _boxNetworkInteraction,
                 _playerBoxInteraction)
             {
                 BroadcastOverride = BroadcastWorld,
@@ -102,7 +101,7 @@ namespace CardShopCoop.Modules.World
             _cardInteraction.Containers.BroadcastState = BroadcastWorld;
             _cardInteraction.Containers.SendToClient = SendWorldTo;
             _cardInteraction.Containers.RelayState = RelayWorldExcept;
-            _cardInteraction.Containers.InGameProvider = _context.InGame;
+            _cardInteraction.Containers.InGameProvider = RuntimeContext.InGame;
             InstallBoxNetworkInteractionPatches();
             InstallPlayerBoxInteractionPatches();
             InstallPlayerBoxPresenceHook();
@@ -113,6 +112,7 @@ namespace CardShopCoop.Modules.World
             InstallPlacement();
             InstallPlacementHold();
             InstallWorkbench();
+            _initialized = true;
         }
 
         internal void Shutdown()
@@ -137,7 +137,7 @@ namespace CardShopCoop.Modules.World
             _cardInteraction?.Shutdown();
             _cardInteraction = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _nextBaselineId = 1;
             _transferManifests.Clear();
             _appliedPredictions.Clear();
@@ -248,9 +248,9 @@ namespace CardShopCoop.Modules.World
             {
                 CoopPlugin.Log.LogWarning("Rejected world intent with an invalid identity: "
                     + DescribeIntent(command) + ".");
-                if (_context != null && context?.Connection != null)
+                if (context?.Connection != null)
                 {
-                    ActionHost.Reject(_context, context.ConnectionId,
+                    ActionHost.Reject(RuntimeContext, context.ConnectionId,
                         command?.ActionId ?? Guid.Empty);
                 }
 
@@ -265,7 +265,7 @@ namespace CardShopCoop.Modules.World
                     CoopPlugin.Log.LogWarning("Rejected world intent naming another connection's "
                         + "prediction: " + DescribeIntent(command) + " owner=" + owner
                         + " sender=" + connectionId + ".");
-                    ActionHost.Reject(_context, connectionId, command.ActionId);
+                    ActionHost.Reject(RuntimeContext, connectionId, command.ActionId);
                     return false;
                 }
 
@@ -293,7 +293,7 @@ namespace CardShopCoop.Modules.World
                 }
             });
 
-            return ActionHost.Resolve(_context, connectionId,
+            return ActionHost.Resolve(RuntimeContext, connectionId,
                 command.ActionId, apply);
         }
 
@@ -322,7 +322,7 @@ namespace CardShopCoop.Modules.World
 
         internal void RejectWorldIntent(MessageContext context, WorldMessage command)
         {
-            if (_context == null || context?.Connection == null
+            if (context?.Connection == null
                 || command?.ActionId == Guid.Empty)
             {
                 return;
@@ -332,9 +332,9 @@ namespace CardShopCoop.Modules.World
             // diagnosable instead of a dead end: the handlers reject when the world is not in
             // game, the sender has not reached FullyJoined yet, or the payload was null.
             CoopPlugin.Log.LogWarning("Rejected world intent before host execution: "
-                + DescribeIntent(command) + " inGame=" + _context.InGame()
+                + DescribeIntent(command) + " inGame=" + RuntimeContext.InGame()
                 + " connState=" + context.Connection.State + ".");
-            ActionHost.Reject(_context, context.ConnectionId, command.ActionId);
+            ActionHost.Reject(RuntimeContext, context.ConnectionId, command.ActionId);
         }
 
         private static string DescribeIntent(WorldMessage command)
@@ -345,7 +345,7 @@ namespace CardShopCoop.Modules.World
         [OnFullyJoined]
         private void SendWarehouseBaseline(PeerConnection connection)
         {
-            if (connection != null && _context.InGame())
+            if (connection != null && RuntimeContext.InGame())
             {
                 SendWorldBaseline(connection.Id);
             }
@@ -408,7 +408,7 @@ namespace CardShopCoop.Modules.World
             }
 
 
-            _context.Broadcast(worldMessage);
+            RuntimeContext.Broadcast(worldMessage);
         }
 
         private void SendWorldTo(int connectionId, INetMessage message)
@@ -420,7 +420,7 @@ namespace CardShopCoop.Modules.World
             }
 
 
-            _context.Send(connectionId, worldMessage);
+            RuntimeContext.Send(connectionId, worldMessage);
         }
 
         private void RelayWorldExcept(int excludedConnectionId, INetMessage message)
@@ -434,7 +434,7 @@ namespace CardShopCoop.Modules.World
             // Relay through the transport's broadcast admission so a peer that is still joining
             // is skipped rather than treated as a hard send failure.
 
-            _context.Relay(excludedConnectionId, worldMessage);
+            RuntimeContext.Relay(excludedConnectionId, worldMessage);
         }
 
     }

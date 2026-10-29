@@ -14,11 +14,9 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             get; private set;
         }
 
-        private CoopRuntimeContext _context;
 
         private void OnEnable()
         {
-            _context = RuntimeContext;
             Active = this;
             GameObjectIdentityHostHooks.Install(Harmony);
         }
@@ -30,10 +28,9 @@ namespace CardShopCoop.Modules.GameObjectIdentity
                 Active = null;
             }
 
-            _context = null;
         }
 
-        internal void Broadcast(INetMessage message) => _context.Broadcast(message);
+        internal void Broadcast(INetMessage message) => RuntimeContext.Broadcast(message);
     }
 
     /// <summary>

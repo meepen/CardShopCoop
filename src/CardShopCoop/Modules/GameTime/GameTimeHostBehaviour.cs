@@ -10,7 +10,6 @@ namespace CardShopCoop.Modules.GameTime
     public sealed class GameTimeHostBehaviour : CoopBehaviour
     {
         private static GameTimeHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _hasObservedTime;
         private int _observedDay;
         private int _observedHour;
@@ -25,7 +24,6 @@ namespace CardShopCoop.Modules.GameTime
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             Harmony.CreateClassProcessor(typeof(TimeChangedPatch)).Patch();
             _initialized = true;
@@ -35,12 +33,12 @@ namespace CardShopCoop.Modules.GameTime
         private void SendJoinBaseline(PeerConnection connection)
         {
             if (_shutdown || connection == null || !IsJoinPhase(connection.State)
-                || !_context.InGame() || !TryBuildMessage(null, out var message))
+                || !RuntimeContext.InGame() || !TryBuildMessage(null, out var message))
             {
                 return;
             }
 
-            _context.Send(connection.Id, message);
+            RuntimeContext.Send(connection.Id, message);
         }
 
         internal void Shutdown()
@@ -56,7 +54,6 @@ namespace CardShopCoop.Modules.GameTime
                 _active = null;
             }
 
-            _context = null;
             _hasObservedTime = false;
         }
 
@@ -64,7 +61,7 @@ namespace CardShopCoop.Modules.GameTime
 
         private void BroadcastWhenTimeChanged(LightManager manager)
         {
-            if (_shutdown || !_context.InGame() || !TryBuildMessage(manager, out var message))
+            if (_shutdown || !RuntimeContext.InGame() || !TryBuildMessage(manager, out var message))
             {
                 return;
             }
@@ -76,7 +73,7 @@ namespace CardShopCoop.Modules.GameTime
             }
 
             RecordObservedTime(message);
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private static bool TryBuildMessage(LightManager knownManager, out DayTimeMessage message)

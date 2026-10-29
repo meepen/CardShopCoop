@@ -14,7 +14,6 @@ namespace CardShopCoop.Modules.Expansion
     public sealed class ExpansionHostBehaviour : CoopBehaviour
     {
         private static ExpansionHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private bool _purchaseInProgress;
@@ -26,11 +25,10 @@ namespace CardShopCoop.Modules.Expansion
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 Harmony.CreateClassProcessor(typeof(ExpansionChangedPatch)).Patch();
@@ -42,13 +40,12 @@ namespace CardShopCoop.Modules.Expansion
                 CoopPlugin.Log.LogError("Expansion host initialization failed: " + exception);
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
                 if (ReferenceEquals(_active, this))
                 {
                     _active = null;
                 }
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -64,7 +61,7 @@ namespace CardShopCoop.Modules.Expansion
 
             // Join catch-up is deliberately one-shot. The normal event hooks below publish
             // later authoritative changes; a failed send is not turned into a retry queue.
-            _context.Send(connection.Id, BuildBaseline());
+            RuntimeContext.Send(connection.Id, BuildBaseline());
         }
 
         [MessageHandler]
@@ -73,7 +70,7 @@ namespace CardShopCoop.Modules.Expansion
             // Every joined client, including the first connection (which the host numbers 1),
             // is allowed to ask the host to buy an expansion. The host is the only writer.
             if (_shutdown || message == null || context?.Connection == null
-                || !_context.InGame() || !IsJoinPhase(context.Connection.State))
+                || !RuntimeContext.InGame() || !IsJoinPhase(context.Connection.State))
             {
                 return;
             }
@@ -83,7 +80,7 @@ namespace CardShopCoop.Modules.Expansion
                 CoopPlugin.Log.LogWarning("Expansion purchase rejected peer="
                     + context.Connection.Id + " kind=" + message.Kind
                     + " reason=unsupported purchase kind");
-                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
                 return;
             }
 
@@ -96,13 +93,13 @@ namespace CardShopCoop.Modules.Expansion
             {
                 CoopPlugin.Log.LogError("Expansion purchase failed for peer "
                     + context.Connection.Id + ": " + exception);
-                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
                 return;
             }
 
             if (!accepted)
             {
-                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
                 return;
             }
 
@@ -117,12 +114,11 @@ namespace CardShopCoop.Modules.Expansion
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
             }
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -253,7 +249,7 @@ namespace CardShopCoop.Modules.Expansion
 
         private void BroadcastDelta(byte kind, Guid actionId)
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -278,7 +274,7 @@ namespace CardShopCoop.Modules.Expansion
                     throw new InvalidOperationException("Unknown expansion delta area " + kind + ".");
             }
 
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private static ExpansionBaselineMessage BuildBaseline()

@@ -21,7 +21,6 @@ namespace CardShopCoop.CustomTv
         private const byte Open = 7;
 
         private static TvHostBehaviour _active;
-        private ICoopContext _context;
         private bool _shutdown;
         private bool _initialized;
         private float _lastSeekInputTime;
@@ -33,7 +32,6 @@ namespace CardShopCoop.CustomTv
                 return;
             }
 
-            _context = Context;
             try
             {
                 ResetSessionState();
@@ -58,7 +56,6 @@ namespace CardShopCoop.CustomTv
                     _active = null;
                 }
                 ResetSessionState();
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -107,7 +104,6 @@ namespace CardShopCoop.CustomTv
                 _active = null;
             }
             ResetSessionState();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -275,7 +271,7 @@ namespace CardShopCoop.CustomTv
 
         private void PublishScalarDelta(Component controller, byte operation, Guid actionId)
         {
-            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
+            if (_shutdown || !Context.InGame || !TvInterop.Present)
             {
                 return;
             }
@@ -290,7 +286,7 @@ namespace CardShopCoop.CustomTv
 
         private void PublishBarrierDelta(Component controller, bool barrier, Guid actionId)
         {
-            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present)
+            if (_shutdown || !Context.InGame || !TvInterop.Present)
             {
                 return;
             }
@@ -309,7 +305,7 @@ namespace CardShopCoop.CustomTv
         /// when the snapshot changed and which operation caused it.</summary>
         private void PublishState(Component controller, TvState snapshot)
         {
-            if (_shutdown || _context == null || !_context.InGame || !TvInterop.Present
+            if (_shutdown || !Context.InGame || !TvInterop.Present
                 || snapshot == null)
             {
                 return;
@@ -602,7 +598,7 @@ namespace CardShopCoop.CustomTv
             {
                 TvInterop.AbortSharedPlayback();
                 AbortBarrier(controller, "host TV playback failed");
-                if (_context != null && _context.InGame && TvInterop.Present)
+                if (Context.InGame && TvInterop.Present)
                 {
                     PublishState(controller, new TvState
                     {

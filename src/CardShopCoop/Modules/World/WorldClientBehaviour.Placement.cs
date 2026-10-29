@@ -79,7 +79,7 @@ namespace CardShopCoop.Modules.World
             }
 
             CoopPlugin.Log.LogInfo("[placement] fully connected; requesting a fresh state baseline.");
-            _context.Send(connection.Id, new PlacementBaselineRequestMessage());
+            RuntimeContext.Send(connection.Id, new PlacementBaselineRequestMessage());
         }
 
         [MessageHandler]
@@ -220,7 +220,7 @@ namespace CardShopCoop.Modules.World
             // stop the preview before the authoritative delta follows.
             _placementHold?.LocalEnded(obj);
 
-            if (!_context.InGame() || !ReferenceEquals(_movingObject, obj) || _movingBefore == null)
+            if (!RuntimeContext.InGame() || !ReferenceEquals(_movingObject, obj) || _movingBefore == null)
             {
                 // Not a move this peer started through the placement channel (a hold mirror, a
                 // remote apply, or a hold we lost). Nothing to predict.
@@ -238,7 +238,7 @@ namespace CardShopCoop.Modules.World
             _movingBefore = null;
             ActionLedger.Submit(
                 PredictionScope,
-                actionId => _context.Send(1, new PlacementMoveIntentMessage
+                actionId => RuntimeContext.Send(1, new PlacementMoveIntentMessage
                 {
                     ActionId = actionId,
                     Move = after,

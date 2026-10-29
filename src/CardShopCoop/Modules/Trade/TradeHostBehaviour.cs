@@ -34,7 +34,6 @@ namespace CardShopCoop.Modules.Trade
         private readonly Dictionary<InteractableCashierCounter, Offer> _offers = new();
         private readonly Dictionary<Customer, Offer> _offersByCustomer = new();
         private readonly Dictionary<int, PeerConnection> _joinedConnections = new();
-        private CoopRuntimeContext _context;
         private uint _nextNonce;
         private bool _shutdown;
         private bool _initialized;
@@ -50,9 +49,8 @@ namespace CardShopCoop.Modules.Trade
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             Harmony.CreateClassProcessor(typeof(CustomerPressPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(CustomerStatePatch)).Patch();
             Harmony.CreateClassProcessor(typeof(CustomerActionPatch)).Patch();
@@ -73,7 +71,7 @@ namespace CardShopCoop.Modules.Trade
 
         private void Update()
         {
-            if (!_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 if (_offers.Count != 0)
                 {
@@ -108,7 +106,7 @@ namespace CardShopCoop.Modules.Trade
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CleanupOffers();
             _joinedConnections.Clear();
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
@@ -171,19 +169,19 @@ namespace CardShopCoop.Modules.Trade
 
         private void SendBaselineWhenReady(int connectionId)
         {
-            if (!_context.InGame() || !_customerManagerReady || !_tradeScreenReady
+            if (!RuntimeContext.InGame() || !_customerManagerReady || !_tradeScreenReady
                 || !_joinedConnections.TryGetValue(connectionId, out var connection)
                 || connection == null || !IsJoinPhase(connection.State))
             {
                 return;
             }
 
-            _context.Send(connectionId, BuildBaseline());
+            RuntimeContext.Send(connectionId, BuildBaseline());
         }
 
         private void SendBaselinesToJoined()
         {
-            if (!_context.InGame() || !_customerManagerReady || !_tradeScreenReady)
+            if (!RuntimeContext.InGame() || !_customerManagerReady || !_tradeScreenReady)
             {
                 return;
             }
@@ -192,7 +190,7 @@ namespace CardShopCoop.Modules.Trade
             {
                 if (pair.Value != null && IsJoinPhase(pair.Value.State))
                 {
-                    _context.Send(pair.Key, BuildBaseline());
+                    RuntimeContext.Send(pair.Key, BuildBaseline());
                 }
             }
         }
@@ -295,7 +293,7 @@ namespace CardShopCoop.Modules.Trade
             CoopPlugin.Log.LogInfo("[trade] host accepted open counter=" + offer.Counter.name
                 + " customer=" + offer.Customer.name + " gen=" + offer.CustomerGeneration
                 + " nonce=" + offer.Nonce + " owner=" + connectionId + ".");
-            _context.Send(connectionId, new TradeSessionMessage
+            RuntimeContext.Send(connectionId, new TradeSessionMessage
             {
                 ActionId = message.ActionId,
                 Counter = offer.Counter,
@@ -548,7 +546,7 @@ namespace CardShopCoop.Modules.Trade
                 return false;
             }
 
-            if (!_context.PeerPresence.TryGet(connectionId, out var presence))
+            if (!RuntimeContext.PeerPresence.TryGet(connectionId, out var presence))
             {
                 reason = "no presence recorded for connection " + connectionId;
                 return false;
@@ -812,13 +810,13 @@ namespace CardShopCoop.Modules.Trade
             CoopPlugin.Log.LogInfo("[trade] host rejected " + message.Operation + " counter="
                 + (message.Counter == null ? "null" : message.Counter.name) + " id="
                 + message.ActionId + " nonce=" + message.OfferNonce + ": " + reason + ".");
-            ActionLedger.Rollback(_context, connectionId, message.ActionId);
+            ActionLedger.Rollback(RuntimeContext, connectionId, message.ActionId);
         }
 
         private void SendOfferDelta(Offer offer, bool removed, Guid actionId,
             TradeOutcome outcome, int predictionPeer)
         {
-            if (_shutdown || !_context.InGame() || offer == null)
+            if (_shutdown || !RuntimeContext.InGame() || offer == null)
             {
                 return;
             }
@@ -839,7 +837,7 @@ namespace CardShopCoop.Modules.Trade
                     continue;
                 }
 
-                _context.Send(pair.Key, new TradeOfferDeltaMessage
+                RuntimeContext.Send(pair.Key, new TradeOfferDeltaMessage
                 {
                     ActionId = pair.Key == predictionPeer ? actionId : Guid.Empty,
                     Counter = offer.Counter,

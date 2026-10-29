@@ -15,7 +15,6 @@ namespace CardShopCoop.Modules.Pricing
     public sealed class PricingClientBehaviour : CoopBehaviour
     {
         private static PricingClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private PricingStateMessage _pendingState;
         private readonly Dictionary<EItemType, PricingItemDeltaEntry> _pendingItemDeltas = new();
         private readonly Dictionary<string, PricingCardDeltaEntry> _pendingCardDeltas = new();
@@ -40,15 +39,14 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 PricingClientPatches.Apply(Harmony);
-                if (_context.InGame())
+                if (RuntimeContext.InGame())
                 {
                     PriceTagRegistry.Bootstrap();
                 }
@@ -58,7 +56,7 @@ namespace CardShopCoop.Modules.Pricing
             {
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -69,7 +67,6 @@ namespace CardShopCoop.Modules.Pricing
                 }
 
 
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -108,7 +105,7 @@ namespace CardShopCoop.Modules.Pricing
 
         private void ApplyPendingState()
         {
-            if (_shutdown || !_contentReady || !_context.InGame()
+            if (_shutdown || !_contentReady || !RuntimeContext.InGame()
                 || WorldCardInteraction.Inv() == null)
             {
                 return;
@@ -193,7 +190,7 @@ namespace CardShopCoop.Modules.Pricing
             // same-key entry is the newest absolute price, and every entry reconciles exactly the
             // prediction id it carries.
 
-            var ready = _contentReady && _context.InGame() && WorldCardInteraction.Inv() != null;
+            var ready = _contentReady && RuntimeContext.InGame() && WorldCardInteraction.Inv() != null;
             for (var i = 0; i < message.Items.Count; i++)
             {
                 if (ready)
@@ -397,7 +394,7 @@ namespace CardShopCoop.Modules.Pricing
 
             ActionLedger.Submit(
                 "pricing-item:" + (int)type,
-                actionId => _context.Send(1, new PricingItemIntentMessage
+                actionId => RuntimeContext.Send(1, new PricingItemIntentMessage
                 {
                     ActionId = actionId,
                     ItemType = type,
@@ -420,7 +417,7 @@ namespace CardShopCoop.Modules.Pricing
             var key = PricingInterop.CardKey(copy, grade);
             ActionLedger.Submit(
                 "pricing-card:" + key,
-                actionId => _context.Send(1, new PricingCardIntentMessage
+                actionId => RuntimeContext.Send(1, new PricingCardIntentMessage
                 {
                     ActionId = actionId,
                     Card = PricingInterop.CopyCard(copy, grade),
@@ -493,7 +490,7 @@ namespace CardShopCoop.Modules.Pricing
         }
 
         private bool CanSend()
-            => !_shutdown && _context?.InGame() == true;
+            => !_shutdown && RuntimeContext.InGame() == true;
 
         internal void Shutdown()
         {
@@ -504,7 +501,7 @@ namespace CardShopCoop.Modules.Pricing
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _pendingState = null;
             ClearPendingDeltas();
@@ -517,7 +514,6 @@ namespace CardShopCoop.Modules.Pricing
             PriceTagRegistry.RefreshAll();
             PriceTagRegistry.Clear();
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

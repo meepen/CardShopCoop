@@ -15,7 +15,6 @@ namespace CardShopCoop.Modules.Tutorial
     public sealed class TutorialClientBehaviour : CoopBehaviour
     {
         private static TutorialClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
 
@@ -26,7 +25,6 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
             }
 
-            _context = RuntimeContext;
             var lifecycle = false;
             try
             {
@@ -53,7 +51,6 @@ namespace CardShopCoop.Modules.Tutorial
                 }
 
                 TutorialInterop.Reset();
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -78,7 +75,7 @@ namespace CardShopCoop.Modules.Tutorial
         /// there and is applied from the lifecycle hooks, so no per-message copy is retained.</summary>
         private void TryApplyStored()
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -104,8 +101,8 @@ namespace CardShopCoop.Modules.Tutorial
             TutorialState previous)
         {
             var client = _active;
-            if (client == null || client._shutdown || client._context == null
-                || !client._context.InGame())
+            if (client == null || client._shutdown
+                || !client.RuntimeContext.InGame())
             {
                 return;
             }
@@ -271,7 +268,6 @@ namespace CardShopCoop.Modules.Tutorial
             }
 
             TutorialInterop.Reset();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -343,7 +339,7 @@ namespace CardShopCoop.Modules.Tutorial
                     return;
                 }
 
-                if (_active._context == null || !_active._context.InGame())
+                if (!_active.RuntimeContext.InGame())
                 {
                     return;
                 }

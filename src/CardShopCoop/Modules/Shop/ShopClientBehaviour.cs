@@ -12,7 +12,6 @@ namespace CardShopCoop.Modules.Shop
     [ClientBehaviour]
     public sealed class ShopClientBehaviour : CoopBehaviour, IShopRenameEndpoint
     {
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
 
@@ -34,7 +33,6 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            _context = RuntimeContext;
             ResetLocalState();
             ShopRenamePatches.SetEndpoint(this);
             try
@@ -248,7 +246,7 @@ namespace CardShopCoop.Modules.Shop
 
         private void SendRelease()
         {
-            if (_shutdown || _context == null)
+            if (_shutdown)
             {
                 return;
             }
@@ -267,12 +265,12 @@ namespace CardShopCoop.Modules.Shop
         /// shop's lock or draft traffic.</summary>
         private void SendToHost(INetMessage message)
         {
-            if (_shutdown || _context == null)
+            if (_shutdown)
             {
                 return;
             }
 
-            var host = ((ICoopContext)_context).HostConnection;
+            var host = ((ICoopContext)RuntimeContext).HostConnection;
             if (host == null)
             {
                 CoopPlugin.Log.LogWarning("[shop] dropped " + message.GetType().Name
@@ -280,7 +278,7 @@ namespace CardShopCoop.Modules.Shop
                 return;
             }
 
-            _context.Send(host.Id, message);
+            RuntimeContext.Send(host.Id, message);
         }
 
         /// <summary>Repaints the name and draft from the store once the scene's renamer surface
@@ -404,12 +402,12 @@ namespace CardShopCoop.Modules.Shop
                 ? (owner == null ? "Another player"
                     : owner.IsHost ? "The host" : "Player " + owner.Id)
                 : owner.Name;
-            _context?.SetStatusLine?.Invoke(name + " is renaming the shop.", 4f);
+            RuntimeContext.SetStatusLine?.Invoke(name + " is renaming the shop.", 4f);
         }
 
         bool IShopRenameEndpoint.TryOpenRenameUi(ShopRenamer renamer, bool showIntro)
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return true;
             }
@@ -480,7 +478,7 @@ namespace CardShopCoop.Modules.Shop
             var showIntro = _pendingShowIntro;
             _pendingRenamer = null;
             _pendingShowIntro = false;
-            if (_shutdown || _context == null || !_context.InGame() || renamer == null)
+            if (_shutdown || !RuntimeContext.InGame() || renamer == null)
             {
                 return;
             }
@@ -555,7 +553,7 @@ namespace CardShopCoop.Modules.Shop
         /// open, so no position/UI side effects run before a grant.</summary>
         private void TryResumePendingTutorialOpen()
         {
-            if (!_pendingTutorialOpen || _shutdown || _context == null || !_context.InGame())
+            if (!_pendingTutorialOpen || _shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -586,7 +584,7 @@ namespace CardShopCoop.Modules.Shop
 
         void IShopRenameEndpoint.RenameInputChanged(string text)
         {
-            if (_shutdown || !_localEditing || _context == null || !_context.InGame()
+            if (_shutdown || !_localEditing || !RuntimeContext.InGame()
                 || Global<ShopRenameState>.Value?.Owner?.IsSelf != true)
             {
                 return;
@@ -602,14 +600,14 @@ namespace CardShopCoop.Modules.Shop
         {
             _confirming = false;
             _pendingTutorialOpen = false;
-            if (_shutdown || _context == null)
+            if (_shutdown)
             {
                 _localEditing = false;
                 return;
             }
 
             _localEditing = false;
-            if (!_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 // Vanilla already closed the UI. Release the lock even across a loading frame;
                 // there is no rename to send.
@@ -672,7 +670,6 @@ namespace CardShopCoop.Modules.Shop
             _shutdown = true;
             ResetLocalState();
             ShopRenamePatches.ClearEndpoint(this);
-            _context = null;
             ShopState.Reset();
         }
 

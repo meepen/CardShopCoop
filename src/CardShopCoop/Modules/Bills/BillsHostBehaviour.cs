@@ -16,7 +16,6 @@ namespace CardShopCoop.Modules.Bills
     {
         private static BillsHostBehaviour _active;
         private readonly HashSet<int> _fullyJoined = new();
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private int _forwardedRequester;
@@ -29,12 +28,11 @@ namespace CardShopCoop.Modules.Bills
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
                 BillsInterop.Reset();
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
@@ -48,7 +46,7 @@ namespace CardShopCoop.Modules.Bills
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -57,7 +55,6 @@ namespace CardShopCoop.Modules.Bills
                 }
 
                 BillsInterop.Reset();
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -175,22 +172,22 @@ namespace CardShopCoop.Modules.Bills
 
         private void SendState(int peer)
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
 
-            _context.Send(peer, BuildState());
+            RuntimeContext.Send(peer, BuildState());
         }
 
         private void BroadcastDelta(BillsDeltaMessage message)
         {
-            if (_shutdown || _context == null || !_context.InGame() || message == null)
+            if (_shutdown || !RuntimeContext.InGame() || message == null)
             {
                 return;
             }
 
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private static BillsStateMessage BuildState()
@@ -263,13 +260,13 @@ namespace CardShopCoop.Modules.Bills
 
             if (message.ActionId != Guid.Empty)
             {
-                ActionLedger.Rollback(active._context, context.Connection.Id, message.ActionId);
+                ActionLedger.Rollback(active.RuntimeContext, context.Connection.Id, message.ActionId);
             }
         }
 
         private void SendRejectionState(int peer, BillPaymentMessage message)
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -279,7 +276,7 @@ namespace CardShopCoop.Modules.Bills
                 + " rent=" + refresh.Rent.AmountToPay + " electric=" + refresh.Electric.AmountToPay
                 + " employee=" + refresh.Employee.AmountToPay
                 + " pred=" + message.ActionId + ".");
-            _context.Send(peer, refresh);
+            RuntimeContext.Send(peer, refresh);
         }
 
         private bool IsPeerMessage(MessageContext context)
@@ -299,7 +296,7 @@ namespace CardShopCoop.Modules.Bills
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
             {
@@ -308,7 +305,6 @@ namespace CardShopCoop.Modules.Bills
 
             _fullyJoined.Clear();
             BillsInterop.Reset();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -353,12 +349,12 @@ namespace CardShopCoop.Modules.Bills
             private static void Postfix(ENotEnoughResourceText __0)
             {
                 var host = _active;
-                if (host == null || host._forwardedRequester <= 0 || host._context == null)
+                if (host == null || host._forwardedRequester <= 0)
                 {
                     return;
                 }
 
-                host._context.Send(host._forwardedRequester,
+                host.RuntimeContext.Send(host._forwardedRequester,
                     new BillPopupMessage { Text = (int)__0 });
             }
         }

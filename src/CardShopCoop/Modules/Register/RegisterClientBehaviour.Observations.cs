@@ -23,7 +23,7 @@ namespace CardShopCoop.Modules.Register
             public double ChangeValue;
         }
 
-        private ICoopContext Api => _context;
+        private ICoopContext Api => RuntimeContext;
 
         internal ActionCapture CaptureScanItem(InteractableScanItem item)
         {
@@ -400,7 +400,7 @@ namespace CardShopCoop.Modules.Register
 
         private void Send(RegisterIntent message)
         {
-            if (_shutdown || !_joined || _context == null || !_context.InGame())
+            if (_shutdown || !_joined || !RuntimeContext.InGame())
             {
                 CoopPlugin.Log.LogWarning("[register] dropped " + message.GetType().Name
                     + " because the client is not in a joined game.");
@@ -416,7 +416,7 @@ namespace CardShopCoop.Modules.Register
             }
 
             // The core action send allocates the id and records the replay/undo before it sends.
-            _context.Send(host.Id, message);
+            RuntimeContext.Send(host.Id, message);
             if (message.ActionId != Guid.Empty && message.Counter != null)
             {
                 _actionCounters[message.ActionId] = message.Counter;

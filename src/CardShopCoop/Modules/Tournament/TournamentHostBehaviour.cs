@@ -16,7 +16,6 @@ namespace CardShopCoop.Modules.Tournament
         private const int MaxBracketEntries = 64;
 
         private static TournamentHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
 
@@ -27,7 +26,6 @@ namespace CardShopCoop.Modules.Tournament
                 return;
             }
 
-            _context = RuntimeContext;
             try
             {
                 _active = this;
@@ -41,7 +39,6 @@ namespace CardShopCoop.Modules.Tournament
                     _active = null;
                 }
 
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -51,13 +48,13 @@ namespace CardShopCoop.Modules.Tournament
         private void SendJoinBaseline(PeerConnection connection)
         {
             if (_shutdown || connection == null || !IsJoinPhase(connection.State)
-                || !_context.InGame() || !TryBuildState(out var baseline))
+                || !RuntimeContext.InGame() || !TryBuildState(out var baseline))
             {
                 return;
             }
 
             baseline.Full = true;
-            _context.Send(connection.Id, baseline);
+            RuntimeContext.Send(connection.Id, baseline);
         }
 
         internal void Shutdown()
@@ -73,7 +70,6 @@ namespace CardShopCoop.Modules.Tournament
                 _active = null;
             }
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -90,7 +86,7 @@ namespace CardShopCoop.Modules.Tournament
 
         private void NotifyHeader()
         {
-            if (_shutdown || !_context.InGame() || !TryBuildState(out var state))
+            if (_shutdown || !RuntimeContext.InGame() || !TryBuildState(out var state))
             {
                 return;
             }
@@ -104,7 +100,7 @@ namespace CardShopCoop.Modules.Tournament
 
         private void NotifyPrizes()
         {
-            if (_shutdown || !_context.InGame() || !TryBuildState(out var state))
+            if (_shutdown || !RuntimeContext.InGame() || !TryBuildState(out var state))
             {
                 return;
             }
@@ -122,7 +118,7 @@ namespace CardShopCoop.Modules.Tournament
 
         private void NotifyPrize(int index)
         {
-            if (_shutdown || !_context.InGame() || !TryBuildState(out var state)
+            if (_shutdown || !RuntimeContext.InGame() || !TryBuildState(out var state)
                 || index < 0 || index >= state.PrizeSlots.Count)
             {
                 return;
@@ -139,7 +135,7 @@ namespace CardShopCoop.Modules.Tournament
 
         private void NotifyBracket()
         {
-            if (_shutdown || !_context.InGame() || !TryBuildState(out var state))
+            if (_shutdown || !RuntimeContext.InGame() || !TryBuildState(out var state))
             {
                 return;
             }
@@ -176,12 +172,12 @@ namespace CardShopCoop.Modules.Tournament
 
         private void Publish(TournamentDeltaMessage message)
         {
-            if (_shutdown || message == null || !_context.InGame())
+            if (_shutdown || message == null || !RuntimeContext.InGame())
             {
                 return;
             }
 
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private TournamentStateMessage BuildState(TournamentData tournament)

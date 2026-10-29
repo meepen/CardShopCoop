@@ -24,8 +24,8 @@ namespace CardShopCoop.Modules.PlayTable
         private readonly Dictionary<InteractablePlayTable, Reservation> _reservations = new();
         private readonly Dictionary<InteractablePlayTable, PlayTableEntry> _knownVisuals = new();
         private readonly HashSet<int> _fullyJoined = new();
-        private CoopRuntimeContext _context;
         private bool _shutdown;
+        private bool _initialized;
         private bool _suppressStoppedVisual;
 
         private sealed class Reservation
@@ -38,17 +38,17 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             ApplyPatches();
             RefreshVisuals(false);
+            _initialized = true;
         }
 
         /// <summary>Seeds every live table's move gate before this peer receives the table mirror.
@@ -378,7 +378,7 @@ namespace CardShopCoop.Modules.PlayTable
                 + ": " + reason);
             if (actionId != Guid.Empty)
             {
-                ActionLedger.Rollback(_context, connectionId, actionId);
+                ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
             }
         }
 
@@ -411,7 +411,7 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void SendBaseline(int connectionId)
         {
-            if (connectionId <= 0 || !_context.InGame())
+            if (connectionId <= 0 || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -419,7 +419,7 @@ namespace CardShopCoop.Modules.PlayTable
             var baseline = BuildBaseline();
             if (baseline != null)
             {
-                _context.Send(connectionId, baseline);
+                RuntimeContext.Send(connectionId, baseline);
             }
         }
 
@@ -433,9 +433,9 @@ namespace CardShopCoop.Modules.PlayTable
 
         private void PublishVisual(PlayTableVisualDeltaMessage delta)
         {
-            if (!_shutdown && _context.InGame())
+            if (!_shutdown && RuntimeContext.InGame())
             {
-                _context.Broadcast(delta);
+                RuntimeContext.Broadcast(delta);
             }
         }
 
@@ -444,12 +444,12 @@ namespace CardShopCoop.Modules.PlayTable
         /// against a snapshot the host has already moved past.</summary>
         private void SendTableState(int connectionId, InteractablePlayTable table, Guid actionId)
         {
-            if (_shutdown || connectionId <= 0 || table == null || !_context.InGame())
+            if (_shutdown || connectionId <= 0 || table == null || !RuntimeContext.InGame())
             {
                 return;
             }
 
-            _context.Send(connectionId, CreateTableDelta(BuildTableEntry(table), actionId));
+            RuntimeContext.Send(connectionId, CreateTableDelta(BuildTableEntry(table), actionId));
         }
 
         private void NotifyTableChanged(InteractablePlayTable table, Guid actionId,
@@ -503,7 +503,7 @@ namespace CardShopCoop.Modules.PlayTable
         {
             // A host has no peer before the bearer exists, so there is nothing to broadcast and
             // CoopCore.Broadcast would throw. Lifecycle hooks can still run game code this early.
-            if (_shutdown || table == null || !_context.InGame()
+            if (_shutdown || table == null || !RuntimeContext.InGame()
                 || CoopCore.Instance?.Net == null
                 || !GameObjectIdentityApi.TryGetId(table, out _))
             {
@@ -605,7 +605,7 @@ namespace CardShopCoop.Modules.PlayTable
                 return;
             }
 
-            _context.Broadcast(new PlayTableMatchDeltaMessage
+            RuntimeContext.Broadcast(new PlayTableMatchDeltaMessage
             {
                 ActionId = actionId,
                 Operation = PlayTableMatchDeltaMessage.Upsert,
@@ -624,7 +624,7 @@ namespace CardShopCoop.Modules.PlayTable
                 return;
             }
 
-            _context.Broadcast(new PlayTableMatchDeltaMessage
+            RuntimeContext.Broadcast(new PlayTableMatchDeltaMessage
             {
                 ActionId = actionId,
                 Operation = PlayTableMatchDeltaMessage.Release,
@@ -716,7 +716,7 @@ namespace CardShopCoop.Modules.PlayTable
             };
 
         private bool IsPeerMessage(MessageContext context)
-            => !_shutdown && _context.InGame() && context?.Connection != null
+            => !_shutdown && RuntimeContext.InGame() && context?.Connection != null
                 && IsJoinPhase(context.Connection.State);
 
         private static bool IsJoinPhase(ConnectionState state)
@@ -815,7 +815,7 @@ namespace CardShopCoop.Modules.PlayTable
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _reservations.Clear();
             _knownVisuals.Clear();
@@ -825,7 +825,6 @@ namespace CardShopCoop.Modules.PlayTable
                 _active = null;
             }
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

@@ -26,7 +26,6 @@ namespace CardShopCoop.Modules.Catalog
         private static CatalogHostBehaviour _active;
         private readonly HashSet<int> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private bool _applying;
@@ -39,11 +38,10 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 CatalogInterop.ProbeOptionalSurfaces();
@@ -58,7 +56,7 @@ namespace CardShopCoop.Modules.Catalog
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -68,7 +66,6 @@ namespace CardShopCoop.Modules.Catalog
                 }
 
 
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -316,7 +313,7 @@ namespace CardShopCoop.Modules.Catalog
 
         private bool SendState(int connectionId)
         {
-            if (_shutdown || !_context.InGame() || !CatalogInterop.IsSceneReady
+            if (_shutdown || !RuntimeContext.InGame() || !CatalogInterop.IsSceneReady
                 || !CatalogInterop.TryBuildLicenseEntries(out var entries, out var scanner))
             {
 
@@ -325,7 +322,7 @@ namespace CardShopCoop.Modules.Catalog
 
 
             Util.MemoryProbe.Log("catalog-baseline:before conn=" + connectionId);
-            _context.Send(connectionId, new CatalogLicenseStateMessage
+            RuntimeContext.Send(connectionId, new CatalogLicenseStateMessage
             {
                 ScannerUnlocked = scanner,
                 Entries = entries,
@@ -338,13 +335,13 @@ namespace CardShopCoop.Modules.Catalog
 
         private void BroadcastProductDelta(Guid actionId, RestockData data, bool unlocked)
         {
-            if (_shutdown || !_context.InGame() || data == null)
+            if (_shutdown || !RuntimeContext.InGame() || data == null)
             {
                 return;
             }
 
 
-            _context.Broadcast(new CatalogLicenseDeltaMessage
+            RuntimeContext.Broadcast(new CatalogLicenseDeltaMessage
             {
                 ActionId = actionId,
                 Scanner = false,
@@ -357,13 +354,13 @@ namespace CardShopCoop.Modules.Catalog
 
         private void BroadcastScannerDelta(Guid actionId, bool unlocked)
         {
-            if (_shutdown || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
 
 
-            _context.Broadcast(new CatalogLicenseDeltaMessage
+            RuntimeContext.Broadcast(new CatalogLicenseDeltaMessage
             {
                 ActionId = actionId,
                 Scanner = true,
@@ -393,7 +390,7 @@ namespace CardShopCoop.Modules.Catalog
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _joined.Clear();
@@ -404,7 +401,6 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

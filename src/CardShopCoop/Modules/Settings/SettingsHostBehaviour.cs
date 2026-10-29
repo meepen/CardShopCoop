@@ -31,7 +31,6 @@ namespace CardShopCoop.Modules.Settings
         private static SettingsHostBehaviour _active;
         private static bool _applyingRemote;
 
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
 
@@ -42,11 +41,10 @@ namespace CardShopCoop.Modules.Settings
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 Patch(typeof(GameEventFormatPatch));
@@ -62,7 +60,7 @@ namespace CardShopCoop.Modules.Settings
                 CoopPlugin.Log.LogError("Settings host initialization failed: " + error);
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -70,7 +68,6 @@ namespace CardShopCoop.Modules.Settings
                     _active = null;
                 }
 
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -85,12 +82,12 @@ namespace CardShopCoop.Modules.Settings
         private void SendJoinBaseline(PeerConnection connection)
         {
             if (_shutdown || connection == null || !IsJoinPhase(connection.State)
-                || !_context.InGame() || !SettingsInterop.IsSceneReady)
+                || !RuntimeContext.InGame() || !SettingsInterop.IsSceneReady)
             {
                 return;
             }
 
-            _context.Send(connection.Id, BuildFullState());
+            RuntimeContext.Send(connection.Id, BuildFullState());
         }
 
         [MessageHandler]
@@ -114,7 +111,7 @@ namespace CardShopCoop.Modules.Settings
                     + context.Connection.Id + ": " + reason);
                 if (message.ActionId != Guid.Empty)
                 {
-                    ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
+                    ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
                 }
 
 
@@ -153,7 +150,7 @@ namespace CardShopCoop.Modules.Settings
                                 + "counter from connection " + context.Connection.Id + ".");
                             if (message.ActionId != Guid.Empty)
                             {
-                                ActionLedger.Rollback(_context, context.Connection.Id,
+                                ActionLedger.Rollback(RuntimeContext, context.Connection.Id,
                                     message.ActionId);
                             }
 
@@ -173,7 +170,7 @@ namespace CardShopCoop.Modules.Settings
                                 + "table from connection " + context.Connection.Id + ".");
                             if (message.ActionId != Guid.Empty)
                             {
-                                ActionLedger.Rollback(_context, context.Connection.Id,
+                                ActionLedger.Rollback(RuntimeContext, context.Connection.Id,
                                     message.ActionId);
                             }
 
@@ -329,7 +326,7 @@ namespace CardShopCoop.Modules.Settings
 
         private bool IsFullyJoinedSender(MessageContext context)
         {
-            return !_shutdown && _context.InGame()
+            return !_shutdown && RuntimeContext.InGame()
                 && context?.Connection != null
                 && context.Connection.State == ConnectionState.FullyJoined;
         }
@@ -341,12 +338,12 @@ namespace CardShopCoop.Modules.Settings
 
         private void Broadcast(SettingsStateMessage message)
         {
-            if (_shutdown || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
 
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private void BroadcastGameEvent(Guid actionId)
@@ -454,14 +451,13 @@ namespace CardShopCoop.Modules.Settings
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
             }
 
             _applyingRemote = false;
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

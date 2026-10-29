@@ -70,7 +70,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandlePlayerBoxPickup(MessageContext context, PlayerBoxPickupRequestMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context))
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
                 if (message?.Box == null)
                 {
@@ -111,7 +111,7 @@ namespace CardShopCoop.Modules.World
         private void HandlePlayerBoxPlacement(MessageContext context,
             PlayerBoxPlacementRequestMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context))
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
                 if (message?.Box == null)
                 {
@@ -147,7 +147,7 @@ namespace CardShopCoop.Modules.World
         [MessageHandler]
         private void HandlePlayerBoxThrow(MessageContext context, PlayerBoxThrowRequestMessage message)
         {
-            if (_context.InGame() && IsJoinPhaseSender(context))
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context))
             {
                 if (message?.Box == null)
                 {

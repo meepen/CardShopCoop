@@ -103,7 +103,7 @@ namespace CardShopCoop.Modules.World
 
         private void PublishCardDisplayPlace(InteractableCardCompartment compartment)
         {
-            if (_shutdown || _cardDisplayApplying || compartment == null || !_context.InGame())
+            if (_shutdown || _cardDisplayApplying || compartment == null || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -143,7 +143,7 @@ namespace CardShopCoop.Modules.World
             InteractableCard3d card3d)
         {
             if (_shutdown || _cardDisplayApplying || compartment == null || card3d == null
-                || !card3d || !_context.InGame())
+                || !card3d || !RuntimeContext.InGame())
             {
                 return;
             }

@@ -18,7 +18,6 @@ namespace CardShopCoop.Modules.Decoration
     {
         private static DecorationHostBehaviour _active;
         private readonly HashSet<int> _fullyJoined = new();
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private bool _applyingIntent;
@@ -31,12 +30,11 @@ namespace CardShopCoop.Modules.Decoration
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
                 DecorationInterop.Reset();
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 SceneManager.sceneLoaded += OnSceneLoaded;
@@ -50,7 +48,7 @@ namespace CardShopCoop.Modules.Decoration
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -61,7 +59,6 @@ namespace CardShopCoop.Modules.Decoration
 
 
                 DecorationInterop.Reset();
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -148,7 +145,7 @@ namespace CardShopCoop.Modules.Decoration
                 // trip. DecorationStateMessage cannot carry the prediction id, so the
                 // authoritative snapshot follows the rollback: the undo runs first and the state
                 // then overrides it on the same reliable lane.
-                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
                 SendState(context.Connection.Id);
             }
         }
@@ -321,31 +318,31 @@ namespace CardShopCoop.Modules.Decoration
 
         private void BroadcastDelta(DecorationDeltaMessage message)
         {
-            if (_shutdown || _context == null || !_context.InGame() || message == null)
+            if (_shutdown || !RuntimeContext.InGame() || message == null)
             {
                 return;
             }
 
 
-            _context.Broadcast(message);
+            RuntimeContext.Broadcast(message);
         }
 
         private void SendState(int peer)
         {
-            if (_shutdown || _context == null || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || !TryBuildState(out var state))
             {
                 return;
             }
 
 
-            _context.Send(peer, state);
+            RuntimeContext.Send(peer, state);
         }
 
         private bool TryBuildState(out DecorationStateMessage message)
         {
             message = null;
-            if (_context == null || !_context.InGame() || !DecorationInterop.IsSceneReady())
+            if (!RuntimeContext.InGame() || !DecorationInterop.IsSceneReady())
             {
 
                 return false;
@@ -367,7 +364,7 @@ namespace CardShopCoop.Modules.Decoration
 
         private void BroadcastInventory(byte action, EDecoObject type)
         {
-            if (_shutdown || _context == null || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || type == EDecoObject.None)
             {
                 return;
@@ -417,7 +414,7 @@ namespace CardShopCoop.Modules.Decoration
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
             {
@@ -427,7 +424,6 @@ namespace CardShopCoop.Modules.Decoration
 
             _fullyJoined.Clear();
             DecorationInterop.Reset();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

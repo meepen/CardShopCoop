@@ -23,11 +23,11 @@ namespace CardShopCoop.Modules.Grading
         private static GradingClientBehaviour _active;
         private readonly Dictionary<GradeCardSubmitSet, Guid> _jobIds = new();
         private readonly Dictionary<Guid, GradeCardSubmitSet> _localJobSets = new();
-        private CoopRuntimeContext _context;
         private GradingStateMessage _pendingState;
         private readonly Dictionary<Guid, GradingJobDeltaMessage> _pendingDeltas = new();
         private bool _contentReady;
         private bool _shutdown;
+        private bool _initialized;
         private GradeCardWebsiteUIScreen _website;
         private GradedCardSubmitSelectScreen _submitScreen;
 
@@ -35,18 +35,17 @@ namespace CardShopCoop.Modules.Grading
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
                 _active = this;
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 // A rejected prediction leaves its locally minted job behind until the next
                 // authoritative state; retiring the prediction must also drop the job binding so a
@@ -61,7 +60,7 @@ namespace CardShopCoop.Modules.Grading
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -72,6 +71,7 @@ namespace CardShopCoop.Modules.Grading
 
                 throw;
             }
+            _initialized = true;
         }
 
         private void OnReady(CEventPlayer_GameDataFinishLoaded _)
@@ -124,7 +124,7 @@ namespace CardShopCoop.Modules.Grading
             out SubmissionCapture state)
         {
             state = default;
-            if (_shutdown || _context?.InGame() != true || IsShowingOrHiding(screen))
+            if (_shutdown || RuntimeContext.InGame() != true || IsShowingOrHiding(screen))
             {
                 return;
             }
@@ -172,7 +172,7 @@ namespace CardShopCoop.Modules.Grading
 
         internal void ObserveSubmission(SubmissionCapture state)
         {
-            if (!state.Armed || _shutdown || _context?.InGame() != true)
+            if (!state.Armed || _shutdown || RuntimeContext.InGame() != true)
             {
                 return;
             }
@@ -203,7 +203,7 @@ namespace CardShopCoop.Modules.Grading
                     _jobIds[jobSet] = state.JobId;
                     try
                     {
-                        _context.Send(1, new GradingOpMessage
+                        RuntimeContext.Send(1, new GradingOpMessage
                         {
                             ActionId = actionId,
                             JobId = state.JobId,
@@ -267,7 +267,7 @@ namespace CardShopCoop.Modules.Grading
 
         private void ApplyPending()
         {
-            if (_shutdown || !_contentReady || !_context.InGame()
+            if (_shutdown || !_contentReady || !RuntimeContext.InGame()
                 || GradingWorldBridge.Current?.SceneReady != true)
             {
                 return;
@@ -303,7 +303,7 @@ namespace CardShopCoop.Modules.Grading
             }
 
 
-            if (!_contentReady || !_context.InGame()
+            if (!_contentReady || !RuntimeContext.InGame()
                 || GradingWorldBridge.Current?.SceneReady != true)
             {
                 DeferDelta(message);
@@ -651,7 +651,7 @@ namespace CardShopCoop.Modules.Grading
         }
 
         private void SetStatus(string text, float seconds)
-            => _context?.SetStatusLine?.Invoke(text, seconds);
+            => RuntimeContext.SetStatusLine?.Invoke(text, seconds);
 
         private static CardData Clone(CardData card)
         {
@@ -755,7 +755,7 @@ namespace CardShopCoop.Modules.Grading
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             ActionLedger.ActionSettled -= RetireLocalJob;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _pendingState = null;
@@ -770,7 +770,6 @@ namespace CardShopCoop.Modules.Grading
             }
 
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

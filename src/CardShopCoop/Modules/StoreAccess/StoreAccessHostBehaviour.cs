@@ -20,7 +20,6 @@ namespace CardShopCoop.Modules.StoreAccess
         private const byte WarehouseSign = 1;
 
         private static StoreAccessHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private bool _applyingIntent;
@@ -32,7 +31,6 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             StoreAccessInterop.Reset();
             SceneManager.sceneLoaded += OnSceneLoaded;
@@ -59,12 +57,12 @@ namespace CardShopCoop.Modules.StoreAccess
         [OnSessionStarted]
         private void SeedState()
         {
-            if (_shutdown || _context == null)
+            if (_shutdown)
             {
                 return;
             }
 
-            if (!_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 CoopPlugin.Log.LogWarning("[store-access] host has no loaded shop at session start; "
                     + "the first sign change or day roll-over will publish the access state.");
@@ -197,7 +195,7 @@ namespace CardShopCoop.Modules.StoreAccess
                 return;
             }
 
-            ActionLedger.Rollback(_context, connectionId, actionId);
+            ActionLedger.Rollback(RuntimeContext, connectionId, actionId);
         }
 
         /// <summary>Publishes the host's current access flags as the one session-wide value. The
@@ -205,7 +203,7 @@ namespace CardShopCoop.Modules.StoreAccess
         /// like the register's authoritative snapshot.</summary>
         private void PublishState(Guid actionId, bool rejected)
         {
-            if (_shutdown || _context == null || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || CoopCore.Instance?.Net == null)
             {
                 return;
@@ -244,7 +242,6 @@ namespace CardShopCoop.Modules.StoreAccess
             }
 
             StoreAccessInterop.Reset();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

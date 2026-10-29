@@ -26,7 +26,6 @@ namespace CardShopCoop.Modules.Npc
     public sealed class NpcHostBehaviour : CoopBehaviour
     {
         private static NpcHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private readonly Dictionary<int, Customer> _customers = new();
@@ -40,7 +39,6 @@ namespace CardShopCoop.Modules.Npc
             {
                 return;
             }
-            _context = RuntimeContext;
             _active = this;
             Harmony.CreateClassProcessor(typeof(WorkerActionPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(SpeechPatch)).Patch();
@@ -55,7 +53,7 @@ namespace CardShopCoop.Modules.Npc
 
         private void Update()
         {
-            if (!_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 return;
             }
@@ -75,7 +73,7 @@ namespace CardShopCoop.Modules.Npc
             }
             for (var i = 0; i < deltas.Count; i++)
             {
-                _context.Broadcast(deltas[i]);
+                RuntimeContext.Broadcast(deltas[i]);
             }
         }
 
@@ -854,7 +852,7 @@ namespace CardShopCoop.Modules.Npc
                         && popup.m_Text.text == text
                         && TryGetTrackedCustomer(followTransform, out var customer))
                     {
-                        _active._context.Broadcast(new NpcSpeechMessage
+                        _active.RuntimeContext.Broadcast(new NpcSpeechMessage
                         {
                             Customer = customer,
                             Text = text,
@@ -878,7 +876,7 @@ namespace CardShopCoop.Modules.Npc
                 {
                     return;
                 }
-                _active._context.Broadcast(new NpcMoneyPopupMessage
+                _active.RuntimeContext.Broadcast(new NpcMoneyPopupMessage
                 {
                     Customer = customer,
                     Amount = price,

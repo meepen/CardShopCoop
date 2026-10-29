@@ -27,8 +27,8 @@ namespace CardShopCoop.Modules.Staff
         private readonly Dictionary<Worker, uint> _workerGenerations = new();
         private readonly Dictionary<string, StaffModuleDeltaMessage> _deferredDeltas = new();
         private StaffModuleBaselineMessage _pendingBaseline;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
+        private bool _initialized;
         private bool _joined;
         private int _applyingPrediction;
 
@@ -71,13 +71,12 @@ namespace CardShopCoop.Modules.Staff
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || _initialized)
             {
                 return;
             }
 
-            _context = RuntimeContext;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _active = this;
             Patch(typeof(HirePatch));
             Patch(typeof(TaskPatch));
@@ -91,6 +90,7 @@ namespace CardShopCoop.Modules.Staff
             SceneManager.sceneLoaded += OnSceneLoaded;
             NpcClientBehaviour.WorkerManagerReady += OnReadinessSignal;
             OnReadinessSignal();
+            _initialized = true;
         }
 
         private void Patch(Type patchType)
@@ -145,7 +145,7 @@ namespace CardShopCoop.Modules.Staff
 
         private void OnReadinessSignal()
         {
-            if (_shutdown || !_context.InGame() || !IsSceneReady())
+            if (_shutdown || !RuntimeContext.InGame() || !IsSceneReady())
             {
                 return;
             }
@@ -162,7 +162,7 @@ namespace CardShopCoop.Modules.Staff
 
         private void TryApplyPending()
         {
-            if (_pendingBaseline == null || !_context.InGame() || !IsSceneReady())
+            if (_pendingBaseline == null || !RuntimeContext.InGame() || !IsSceneReady())
             {
                 return;
             }
@@ -186,7 +186,7 @@ namespace CardShopCoop.Modules.Staff
 
         private bool ApplyDelta(StaffModuleDeltaMessage message)
         {
-            if (_shutdown || !_context.InGame() || !IsSceneReady())
+            if (_shutdown || !RuntimeContext.InGame() || !IsSceneReady())
             {
                 return false;
             }
@@ -600,7 +600,7 @@ namespace CardShopCoop.Modules.Staff
         /// applying remote state, and not inside a converted staff action. The game method always
         /// runs; only the prediction is skipped.</summary>
         private bool CanObserve()
-            => !_shutdown && _joined && _context != null && _context.InGame()
+            => !_shutdown && _joined && RuntimeContext.InGame()
                 && !_applyingRemote && _applyingPrediction == 0 && _insideStaffAction == 0
                 && !ActionLedger.IsReconciling;
 
@@ -683,7 +683,7 @@ namespace CardShopCoop.Modules.Staff
                     ApplyEntry(index, before);
                     Refund(spend);
                 });
-            _context.SetStatusLine?.Invoke("hired - starting work at the host's shop", 4f);
+            RuntimeContext.SetStatusLine?.Invoke("hired - starting work at the host's shop", 4f);
         }
 
         /// <summary>Capture-only prefix for a salary bonus: snapshot the worker before vanilla
@@ -1195,12 +1195,12 @@ namespace CardShopCoop.Modules.Staff
                 throw new InvalidOperationException("Cannot send a Staff intent before FullyJoined.");
             }
 
-            if (_context == null || !_context.InGame())
+            if (!RuntimeContext.InGame())
             {
                 throw new InvalidOperationException("Cannot send a Staff intent outside the game.");
             }
 
-            _context.Send(1, message);
+            RuntimeContext.Send(1, message);
         }
 
         private void OnSceneLoaded(Scene _, LoadSceneMode __)
@@ -1247,7 +1247,7 @@ namespace CardShopCoop.Modules.Staff
             ResetWorldState();
             NpcClientBehaviour.WorkerManagerReady -= OnReadinessSignal;
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;

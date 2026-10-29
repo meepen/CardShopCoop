@@ -31,7 +31,6 @@ namespace CardShopCoop.Modules.Pricing
         private readonly Dictionary<string, OwnedCardState> _cards = new(StringComparer.Ordinal);
         private readonly HashSet<int> _joined = new();
         private readonly HashSet<int> _baselinePending = new();
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private bool _applying;
@@ -53,15 +52,14 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 PricingHostPatches.Apply(Harmony);
-                if (_context.InGame())
+                if (RuntimeContext.InGame())
                 {
                     PriceTagRegistry.Bootstrap();
                 }
@@ -72,7 +70,7 @@ namespace CardShopCoop.Modules.Pricing
                 CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -82,7 +80,6 @@ namespace CardShopCoop.Modules.Pricing
                 }
 
 
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -356,7 +353,7 @@ namespace CardShopCoop.Modules.Pricing
 
         private bool SendBaseline(int connectionId)
         {
-            if (_shutdown || !_context.InGame() || PricingInterop.ItemCount == 0
+            if (_shutdown || !RuntimeContext.InGame() || PricingInterop.ItemCount == 0
                 || WorldCardInteraction.Inv() == null)
             {
 
@@ -369,7 +366,7 @@ namespace CardShopCoop.Modules.Pricing
             var state = BuildState();
             Util.MemoryProbe.Log("pricing-baseline:after conn=" + connectionId
                 + " items=" + state.ItemTypes.Count + " cards=" + state.Cards.Count);
-            _context.Send(connectionId, state);
+            RuntimeContext.Send(connectionId, state);
             _baselinePending.Remove(connectionId);
             return true;
         }
@@ -391,7 +388,7 @@ namespace CardShopCoop.Modules.Pricing
         /// sending keeps a mass price pass to one message per frame per peer.</summary>
         private void QueueItemDelta(Guid actionId, EItemType type, float price)
         {
-            if (_shutdown || _context?.InGame() != true)
+            if (_shutdown || RuntimeContext.InGame() != true)
             {
                 return;
             }
@@ -409,7 +406,7 @@ namespace CardShopCoop.Modules.Pricing
         /// here, while it is still the caller's live object.</summary>
         private void QueueCardDelta(Guid actionId, CardData card, float price, bool removed)
         {
-            if (_shutdown || _context?.InGame() != true)
+            if (_shutdown || RuntimeContext.InGame() != true)
             {
                 return;
             }
@@ -432,7 +429,7 @@ namespace CardShopCoop.Modules.Pricing
         /// replaying stale prices into the next world.</summary>
         private void FlushPendingDeltas()
         {
-            if (_shutdown || _context?.InGame() != true)
+            if (_shutdown || RuntimeContext.InGame() != true)
             {
                 _pendingItemDeltas.Clear();
                 _pendingCardDeltas.Clear();
@@ -443,7 +440,7 @@ namespace CardShopCoop.Modules.Pricing
             {
                 var count = Math.Min(PricingDeltaBatchMax, _pendingItemDeltas.Count);
                 var chunk = _pendingItemDeltas.GetRange(0, count);
-                _context.Broadcast(new PricingDeltaBatchMessage { Items = chunk });
+                RuntimeContext.Broadcast(new PricingDeltaBatchMessage { Items = chunk });
                 _pendingItemDeltas.RemoveRange(0, count);
             }
 
@@ -451,7 +448,7 @@ namespace CardShopCoop.Modules.Pricing
             {
                 var count = Math.Min(PricingDeltaBatchMax, _pendingCardDeltas.Count);
                 var chunk = _pendingCardDeltas.GetRange(0, count);
-                _context.Broadcast(new PricingDeltaBatchMessage { Cards = chunk });
+                RuntimeContext.Broadcast(new PricingDeltaBatchMessage { Cards = chunk });
                 _pendingCardDeltas.RemoveRange(0, count);
             }
         }
@@ -469,7 +466,7 @@ namespace CardShopCoop.Modules.Pricing
         {
             if (actionId != Guid.Empty && context?.Connection != null)
             {
-                ActionLedger.Rollback(_context, context.Connection.Id, actionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, actionId);
             }
 
         }
@@ -712,7 +709,7 @@ namespace CardShopCoop.Modules.Pricing
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             _cards.Clear();
             _joined.Clear();
@@ -728,7 +725,6 @@ namespace CardShopCoop.Modules.Pricing
             }
 
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

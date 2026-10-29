@@ -13,8 +13,8 @@ namespace CardShopCoop.Modules.World
     public sealed partial class WorldClientBehaviour : CoopBehaviour
     {
         private static WorldClientBehaviour _instance;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
+        private bool _initialized;
         private BoxNetworkInteraction _boxNetworkInteraction;
         private PlayerBoxInteraction _playerBoxInteraction;
         private ShelfInteraction _shelfInteraction;
@@ -23,23 +23,22 @@ namespace CardShopCoop.Modules.World
 
         private void OnEnable()
         {
-            if (_context != null)
+            if (_initialized)
             {
                 return;
             }
 
-            _context = RuntimeContext;
             _instance = this;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             _boxNetworkInteraction = new BoxNetworkInteraction(false, _ => { }, SendWorldCommand);
             _playerBoxInteraction = new PlayerBoxInteraction(_boxNetworkInteraction,
                 SendWorldCommand);
             _shelfInteraction = new ShelfInteraction(SendWorldCommand);
             _warehouseShelfInteraction = new WarehouseShelfInteraction(false, _ => { },
                 SendWorldCommand, _boxNetworkInteraction, _playerBoxInteraction,
-                () => _context.InGame());
-            _cardInteraction = new WorldCardInteraction(_context, false, _boxNetworkInteraction,
+                () => RuntimeContext.InGame());
+            _cardInteraction = new WorldCardInteraction(RuntimeContext, false, _boxNetworkInteraction,
                 _playerBoxInteraction)
             {
                 SendOverride = SendWorldCommand
@@ -48,8 +47,8 @@ namespace CardShopCoop.Modules.World
             // tracker's retirement event is the one deterministic cleanup point.
             ActionLedger.ActionSettled += WorldCardInteraction.OnActionSettled;
             _cardInteraction.Containers.SendOp = message => SendWorldCommand(1, message);
-            _cardInteraction.Containers.InGameProvider = _context.InGame;
-            _cardInteraction.Containers.ReloadingProvider = _context.PreloadHold;
+            _cardInteraction.Containers.InGameProvider = RuntimeContext.InGame;
+            _cardInteraction.Containers.ReloadingProvider = RuntimeContext.PreloadHold;
             // The join container baseline can name a placement the guest rebuilds only after it,
             // so the container module holds those records until the placement layer reports the
             // object. This is the same late-join signal PlayTable, Register and CardDisplay use.
@@ -64,6 +63,7 @@ namespace CardShopCoop.Modules.World
             InstallPlacement();
             InstallPlacementHold();
             InstallWorkbench();
+            _initialized = true;
         }
 
         internal void Shutdown()
@@ -90,7 +90,7 @@ namespace CardShopCoop.Modules.World
             _cardInteraction?.Shutdown();
             _cardInteraction = null;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
-            _context.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_instance, this))
             {
                 _instance = null;
@@ -129,7 +129,7 @@ namespace CardShopCoop.Modules.World
         [OnFullyJoined]
         private void SendWorldReady(PeerConnection connection)
         {
-            if (_context.InGame())
+            if (RuntimeContext.InGame())
             {
                 _cardInteraction?.FlushWorldReady();
                 _warehouseShelfInteraction?.FlushClientState();
@@ -156,7 +156,7 @@ namespace CardShopCoop.Modules.World
                 worldMessage.ActionId = Guid.NewGuid();
             }
 
-            _context.Send(connectionId, worldMessage);
+            RuntimeContext.Send(connectionId, worldMessage);
         }
 
         // A fire-and-forget forward (a covered-hold drop, an item-box state mirror) still needs a
@@ -176,7 +176,7 @@ namespace CardShopCoop.Modules.World
             }
 
             command.ActionId = actionId;
-            _instance._context.Send(1, command);
+            _instance.RuntimeContext.Send(1, command);
             return true;
         }
 

@@ -17,7 +17,6 @@ namespace CardShopCoop.Modules.SaveTransfer
         internal const int ChunkSize = 128 * 1024;
 
         private static SaveTransferClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private MemoryStream _saveBuffer;
         private MemoryStream _bundleBuffer;
         private MemoryStream _pendingSave;
@@ -38,7 +37,7 @@ namespace CardShopCoop.Modules.SaveTransfer
 
         private void OnEnable()
         {
-            if (_shutdown || _context != null)
+            if (_shutdown || ReferenceEquals(_active, this))
             {
                 return;
             }
@@ -47,8 +46,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 throw new InvalidOperationException("A save-transfer client owner is already active.");
             }
             _active = this;
-            _context = RuntimeContext;
-            _context.Messages.RegisterAttributedHandlers(this);
+            RuntimeContext.Messages.RegisterAttributedHandlers(this);
             SceneManager.sceneLoaded += OnSceneLoaded;
             CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldLoaded);
         }
@@ -117,7 +115,7 @@ namespace CardShopCoop.Modules.SaveTransfer
                 && Time.realtimeSinceStartup >= _disconnectAfterFailureAt)
             {
                 _disconnectAfterFailureAt = 0f;
-                _context?.Disconnect?.Invoke(1,
+                RuntimeContext.Disconnect?.Invoke(1,
                     new DisconnectInfo("world transfer failed: " + _failureReason, false,
                         "transfer_failed", true, ConnectionState.Transferring));
                 return;
@@ -382,7 +380,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             SaveTransferRuntime.ReportFailure(reason);
             _failureReason = reason;
             _disconnectAfterFailureAt = Time.realtimeSinceStartup + 0.25f;
-            _context.Send(1, new TransferFailureMessage { Reason = reason });
+            RuntimeContext.Send(1, new TransferFailureMessage { Reason = reason });
         }
 
         private static string BoundWarning(string warning)
@@ -397,7 +395,7 @@ namespace CardShopCoop.Modules.SaveTransfer
 
         private void SetStatus(string status)
         {
-            _context?.SetStatusLine?.Invoke(status, 8f);
+            RuntimeContext.SetStatusLine?.Invoke(status, 8f);
         }
 
         internal static void EmitFullyJoinedFallback()
@@ -407,7 +405,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             {
                 return;
             }
-            owner._context.Send(1, new FullyJoinedMessage());
+            owner.RuntimeContext.Send(1, new FullyJoinedMessage());
         }
 
         internal void Shutdown()
@@ -419,7 +417,7 @@ namespace CardShopCoop.Modules.SaveTransfer
             _shutdown = true;
             SceneManager.sceneLoaded -= OnSceneLoaded;
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldLoaded);
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             _saveBuffer?.Dispose();
             _bundleBuffer?.Dispose();
             _saveBuffer = null;
@@ -437,7 +435,6 @@ namespace CardShopCoop.Modules.SaveTransfer
             {
                 _active = null;
             }
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

@@ -40,10 +40,7 @@ namespace CardShopCoop.Modules.GameObjectIdentity
             var active = Active
                 ?? throw new InvalidOperationException(
                     "The identity box client is not active; cannot send a box intent.");
-            var context = active._context
-                ?? throw new InvalidOperationException(
-                    "The identity box client has no runtime context; cannot send a box intent.");
-            context.Send(1, message);
+            active.RuntimeContext.Send(1, message);
         }
     }
 

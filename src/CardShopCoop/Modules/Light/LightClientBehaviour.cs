@@ -15,7 +15,6 @@ namespace CardShopCoop.Modules.Light
     {
         private const string PredictionScope = "light";
         private static LightClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private bool _joined;
@@ -29,13 +28,12 @@ namespace CardShopCoop.Modules.Light
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             var lifecycle = false;
             try
             {
                 ResetSessionState();
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -54,7 +52,7 @@ namespace CardShopCoop.Modules.Light
                 }
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -65,7 +63,6 @@ namespace CardShopCoop.Modules.Light
 
 
                 ResetSessionState();
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -92,7 +89,7 @@ namespace CardShopCoop.Modules.Light
 
         private void TryApplyPending()
         {
-            if (_shutdown || _pendingState == null || _context == null || !_context.InGame())
+            if (_shutdown || _pendingState == null || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -124,7 +121,7 @@ namespace CardShopCoop.Modules.Light
         /// light back through the same game surface.</summary>
         private void ObserveToggle(bool armed, bool prior)
         {
-            if (!armed || _context == null || !_joined || !_context.InGame())
+            if (!armed || !_joined || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -138,7 +135,7 @@ namespace CardShopCoop.Modules.Light
 
             ActionLedger.Submit(
                 PredictionScope,
-                actionId => _context.Send(1, new LightSwitchIntentMessage
+                actionId => RuntimeContext.Send(1, new LightSwitchIntentMessage
                 {
                     ActionId = actionId,
                     IsActive = after,
@@ -190,7 +187,7 @@ namespace CardShopCoop.Modules.Light
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
@@ -200,7 +197,6 @@ namespace CardShopCoop.Modules.Light
 
 
             ResetSessionState();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -222,8 +218,8 @@ namespace CardShopCoop.Modules.Light
             {
                 __state = default;
                 var active = _active;
-                if (active == null || !active._joined || active._context == null
-                    || !active._context.InGame())
+                if (active == null || !active._joined
+                    || !active.RuntimeContext.InGame())
                 {
                     return;
                 }

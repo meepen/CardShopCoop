@@ -26,7 +26,6 @@ namespace CardShopCoop.Modules.Catalog
             "UpdateTotalCostAndBoxCount", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
         private static CatalogClientBehaviour _active;
-        private CoopRuntimeContext _context;
         private CatalogLicenseStateMessage _pendingState;
         private readonly Dictionary<string, CatalogLicenseDeltaMessage> _pendingDeltas = new();
         private readonly HashSet<int> _productSideEffectsApplied = new();
@@ -42,11 +41,10 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 CatalogInterop.ProbeOptionalSurfaces();
@@ -60,7 +58,7 @@ namespace CardShopCoop.Modules.Catalog
                 SceneManager.sceneLoaded -= OnSceneLoaded;
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -70,7 +68,6 @@ namespace CardShopCoop.Modules.Catalog
                 }
 
 
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -109,7 +106,7 @@ namespace CardShopCoop.Modules.Catalog
 
         private void ApplyPendingState()
         {
-            if (_shutdown || !_contentReady || !_context.InGame() || !CatalogInterop.IsSceneReady)
+            if (_shutdown || !_contentReady || !RuntimeContext.InGame() || !CatalogInterop.IsSceneReady)
             {
                 return;
             }
@@ -208,7 +205,7 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            if (!_contentReady || !_context.InGame() || !CatalogInterop.IsSceneReady)
+            if (!_contentReady || !RuntimeContext.InGame() || !CatalogInterop.IsSceneReady)
             {
                 DeferDelta(message);
                 return;
@@ -442,7 +439,7 @@ namespace CardShopCoop.Modules.Catalog
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             _pendingState = null;
@@ -454,7 +451,6 @@ namespace CardShopCoop.Modules.Catalog
             }
 
 
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

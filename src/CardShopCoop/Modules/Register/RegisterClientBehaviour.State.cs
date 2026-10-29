@@ -108,7 +108,7 @@ namespace CardShopCoop.Modules.Register
 
         private bool CanRender(Customer customer)
         {
-            if (_context == null || !_context.InGame() || !IsSceneReady())
+            if (!RuntimeContext.InGame() || !IsSceneReady())
             {
                 return false;
             }

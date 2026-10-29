@@ -26,7 +26,6 @@ namespace CardShopCoop.Modules.Tutorial
 
         private static TutorialHostBehaviour _active;
 
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
 
@@ -37,7 +36,6 @@ namespace CardShopCoop.Modules.Tutorial
                 return;
             }
 
-            _context = RuntimeContext;
             TutorialInterop.Reset();
             _active = this;
             SceneManager.sceneLoaded += OnSceneLoaded;
@@ -51,7 +49,7 @@ namespace CardShopCoop.Modules.Tutorial
         [OnSessionStarted]
         private void SeedState()
         {
-            if (_shutdown || _context == null || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 // Hosting before the shop data is loaded has no progression to seed; the first
                 // in-game change publishes it and the join baseline carries it from then on.
@@ -156,7 +154,7 @@ namespace CardShopCoop.Modules.Tutorial
 
         private void Publish(Guid actionId, bool rejected)
         {
-            if (_shutdown || _context == null || CoopCore.Instance?.Net == null)
+            if (_shutdown || CoopCore.Instance?.Net == null)
             {
                 return;
             }
@@ -230,7 +228,6 @@ namespace CardShopCoop.Modules.Tutorial
             }
 
             TutorialInterop.Reset();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

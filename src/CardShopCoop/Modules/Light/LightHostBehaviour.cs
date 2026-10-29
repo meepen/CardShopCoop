@@ -16,7 +16,6 @@ namespace CardShopCoop.Modules.Light
     {
         private static LightHostBehaviour _active;
         private readonly HashSet<int> _fullyJoined = new();
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
 
@@ -28,12 +27,11 @@ namespace CardShopCoop.Modules.Light
             }
 
 
-            _context = RuntimeContext;
             var registered = false;
             var lifecycle = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 registered = true;
                 _active = this;
                 CEventManager.AddListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
@@ -52,7 +50,7 @@ namespace CardShopCoop.Modules.Light
                 }
                 if (registered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
 
@@ -62,7 +60,6 @@ namespace CardShopCoop.Modules.Light
                 }
 
 
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -102,7 +99,7 @@ namespace CardShopCoop.Modules.Light
 
             if (!LightInterop.IsSceneReady(LightInterop.FindSceneManager()))
             {
-                ActionLedger.Rollback(_context, context.Connection.Id, message.ActionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, message.ActionId);
                 return;
             }
             LightSwitchState.Apply(message.IsActive);
@@ -111,14 +108,14 @@ namespace CardShopCoop.Modules.Light
 
         private void BroadcastState(Guid actionId)
         {
-            if (_shutdown || _context == null || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || !LightSwitchState.TryGet(out var isActive))
             {
                 return;
             }
 
 
-            _context.Broadcast(new LightSwitchStateMessage
+            RuntimeContext.Broadcast(new LightSwitchStateMessage
             {
                 ActionId = actionId,
                 IsActive = isActive,
@@ -127,14 +124,14 @@ namespace CardShopCoop.Modules.Light
 
         private void SendState(int peer)
         {
-            if (_shutdown || _context == null || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || !LightSwitchState.TryGet(out var isActive))
             {
                 return;
             }
 
 
-            _context.Send(peer, new LightSwitchStateMessage
+            RuntimeContext.Send(peer, new LightSwitchStateMessage
             {
                 ActionId = Guid.Empty,
                 IsActive = isActive,
@@ -157,7 +154,7 @@ namespace CardShopCoop.Modules.Light
         /// and are covered by the ready baselines and the GameTime mirror.</summary>
         private void OnShopLightToggled()
         {
-            if (_shutdown || _context == null || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || !LightSwitchState.TryGet(out var isActive))
             {
                 return;
@@ -186,7 +183,7 @@ namespace CardShopCoop.Modules.Light
 
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             CEventManager.RemoveListener<CEventPlayer_GameDataFinishLoaded>(OnWorldReady);
             SceneManager.sceneLoaded -= OnSceneLoaded;
             if (ReferenceEquals(_active, this))
@@ -196,7 +193,6 @@ namespace CardShopCoop.Modules.Light
 
 
             _fullyJoined.Clear();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();

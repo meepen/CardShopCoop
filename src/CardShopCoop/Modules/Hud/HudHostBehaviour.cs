@@ -18,7 +18,6 @@ namespace CardShopCoop.Modules.Hud
         private const int MaxProgressContribution = 100000000;
 
         private static HudHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
         private Guid _pendingActionId;
@@ -43,11 +42,10 @@ namespace CardShopCoop.Modules.Hud
                 return;
             }
 
-            _context = RuntimeContext;
             var handlersRegistered = false;
             try
             {
-                _context.Messages.RegisterAttributedHandlers(this);
+                RuntimeContext.Messages.RegisterAttributedHandlers(this);
                 handlersRegistered = true;
                 _active = this;
                 Harmony.CreateClassProcessor(typeof(EventQueuePatch)).Patch();
@@ -61,7 +59,7 @@ namespace CardShopCoop.Modules.Hud
                 CoopPlugin.Log.LogError($"HUD host initialization failed: {error}");
                 if (handlersRegistered)
                 {
-                    _context.Messages.UnregisterAttributedHandlers(this);
+                    RuntimeContext.Messages.UnregisterAttributedHandlers(this);
                 }
 
                 if (ReferenceEquals(_active, this))
@@ -69,7 +67,6 @@ namespace CardShopCoop.Modules.Hud
                     _active = null;
                 }
 
-                _context = null;
                 throw;
             }
             _initialized = true;
@@ -155,7 +152,7 @@ namespace CardShopCoop.Modules.Hud
 
         private bool IsAuthenticatedSender(MessageContext context)
         {
-            return !_shutdown && _context.InGame() && context?.Connection != null
+            return !_shutdown && RuntimeContext.InGame() && context?.Connection != null
                 && context.IsAuthenticated;
         }
 
@@ -163,7 +160,7 @@ namespace CardShopCoop.Modules.Hud
         {
             if (actionId != Guid.Empty && context?.Connection != null)
             {
-                ActionLedger.Rollback(_context, context.Connection.Id, actionId);
+                ActionLedger.Rollback(RuntimeContext, context.Connection.Id, actionId);
             }
         }
 
@@ -207,7 +204,7 @@ namespace CardShopCoop.Modules.Hud
             }
 
             _contributionsByEvent.Remove(evt);
-            if (_shutdown || !_context.InGame())
+            if (_shutdown || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -224,7 +221,7 @@ namespace CardShopCoop.Modules.Hud
             {
                 case HudContributionKind.AddCoin:
                 case HudContributionKind.ReduceCoin:
-                    _context.Broadcast(new HudWalletDeltaMessage
+                    RuntimeContext.Broadcast(new HudWalletDeltaMessage
                     {
                         ActionId = contribution.ActionId,
                         Coins = snapshot.Coins,
@@ -233,7 +230,7 @@ namespace CardShopCoop.Modules.Hud
 
                     break;
                 case HudContributionKind.AddShopExperience:
-                    _context.Broadcast(new HudProgressDeltaMessage
+                    RuntimeContext.Broadcast(new HudProgressDeltaMessage
                     {
                         ActionId = contribution.ActionId,
                         Experience = snapshot.Experience,
@@ -242,7 +239,7 @@ namespace CardShopCoop.Modules.Hud
 
                     break;
                 case HudContributionKind.AddFame:
-                    _context.Broadcast(new HudFameDeltaMessage
+                    RuntimeContext.Broadcast(new HudFameDeltaMessage
                     {
                         ActionId = contribution.ActionId,
                         Fame = snapshot.Fame,
@@ -285,7 +282,7 @@ namespace CardShopCoop.Modules.Hud
         private void SendBaseline(int connectionId)
         {
             var snapshot = Snapshot();
-            _context.Send(connectionId, snapshot);
+            RuntimeContext.Send(connectionId, snapshot);
         }
 
         private static HudAuthoritativeState Snapshot()
@@ -308,7 +305,7 @@ namespace CardShopCoop.Modules.Hud
             }
 
             _shutdown = true;
-            _context?.Messages.UnregisterAttributedHandlers(this);
+            RuntimeContext.Messages.UnregisterAttributedHandlers(this);
             if (ReferenceEquals(_active, this))
             {
                 _active = null;
@@ -317,7 +314,6 @@ namespace CardShopCoop.Modules.Hud
             _pendingActionId = Guid.Empty;
             _contributionsByEvent.Clear();
             HudPresentationState.Clear();
-            _context = null;
         }
 
         private void OnDestroy() => Shutdown();
@@ -329,8 +325,8 @@ namespace CardShopCoop.Modules.Hud
             private static void Prefix(CEvent evt)
             {
                 var active = _active;
-                if (active == null || active._shutdown || active._context == null
-                    || !active._context.InGame() || !TryGetContributionKind(evt, out var kind))
+                if (active == null || active._shutdown
+                    || !active.RuntimeContext.InGame() || !TryGetContributionKind(evt, out var kind))
                 {
                     return;
                 }

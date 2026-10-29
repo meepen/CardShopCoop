@@ -16,7 +16,6 @@ namespace CardShopCoop.Modules.Register
     public sealed partial class RegisterHostBehaviour : CoopBehaviour
     {
         private static RegisterHostBehaviour _active;
-        private CoopRuntimeContext _context;
         private bool _shutdown;
         private bool _initialized;
 
@@ -29,7 +28,6 @@ namespace CardShopCoop.Modules.Register
                 return;
             }
 
-            _context = RuntimeContext;
             _active = this;
             RegisterHooks.PatchHost(Harmony);
             _initialized = true;

@@ -19,7 +19,7 @@ namespace CardShopCoop.Modules.Register
         /// <summary>True while this host may observe the game. The framework's host-apply scope
         /// suppresses observation so the handler publishes exactly one snapshot after the action.</summary>
         internal bool CanObserve => !_shutdown && !RegisterActions.HostApplying
-            && _context != null && _context.InGame();
+            && RuntimeContext.InGame();
 
         private static RegisterSnapshot StateOf(InteractableCashierCounter counter)
             => counter == null ? null : counter.GetExtendedInformation<RegisterSnapshot>();
@@ -30,7 +30,7 @@ namespace CardShopCoop.Modules.Register
         /// existing guests).</summary>
         private void PublishAllCounters(bool seed = false)
         {
-            if (_shutdown || _context == null || !_context.InGame()
+            if (_shutdown || !RuntimeContext.InGame()
                 || RegisterInterop.Counters == null)
             {
                 return;
@@ -74,7 +74,7 @@ namespace CardShopCoop.Modules.Register
         /// host-owned counter publishable during the small window before the presence roster is
         /// built.</summary>
         private PlayerRef HostSelf()
-            => ((ICoopContext)_context)?.Self ?? new PlayerRef(0, null, true, true);
+            => ((ICoopContext)RuntimeContext)?.Self ?? new PlayerRef(0, null, true, true);
 
         /// <summary>Reads the effective owner from the authoritative snapshot and the game's manned
         /// state. A snapshot from before the manning hook still resolves the host as the owner, and
@@ -181,7 +181,7 @@ namespace CardShopCoop.Modules.Register
         private void PublishNow(InteractableCashierCounter counter, PlayerRef owner, Guid actionId,
             bool rejected = false, bool seed = false)
         {
-            if (_shutdown || counter == null || _context == null || !_context.InGame())
+            if (_shutdown || counter == null || !RuntimeContext.InGame())
             {
                 return;
             }
@@ -292,7 +292,7 @@ namespace CardShopCoop.Modules.Register
         /// inverting a snapshot the host has moved past.</summary>
         internal void PublishRejectionState(InteractableCashierCounter counter, Guid actionId)
         {
-            if (_shutdown || counter == null || _context == null || !_context.InGame())
+            if (_shutdown || counter == null || !RuntimeContext.InGame())
             {
                 return;
             }

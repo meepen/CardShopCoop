@@ -10,7 +10,7 @@ namespace CardShopCoop.Modules.World
         private void InstallWorkbench()
         {
             _workbenchInteraction = new WorldWorkbenchInteraction(true, BroadcastWorld, SendWorldTo,
-                () => _context.InGame());
+                () => RuntimeContext.InGame());
             Harmony.CreateClassProcessor(typeof(HostWorkbenchAddItemPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(HostWorkbenchRemoveItemPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(HostWorkbenchTakeItemToHandPatch)).Patch();
@@ -50,7 +50,7 @@ namespace CardShopCoop.Modules.World
                 CoopPlugin.Log.LogWarning("[workbench] dropped op with no live bench object.");
             }
 
-            if (_context.InGame() && IsJoinPhaseSender(context)
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context)
                 && message != null && message.Bench != null)
             {
                 ExecuteWorldCommand(context, message, () =>
@@ -86,7 +86,7 @@ namespace CardShopCoop.Modules.World
                     "[workbench] dropped bundle completion with no live bench object.");
             }
 
-            if (_context.InGame() && IsJoinPhaseSender(context)
+            if (RuntimeContext.InGame() && IsJoinPhaseSender(context)
                 && message != null && message.Bench != null)
             {
                 ExecuteWorldCommand(context, message,

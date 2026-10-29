@@ -14,18 +14,11 @@ namespace CardShopCoop.SampleMod
     [ServerBehaviour]
     public sealed class SampleCounterHost : CoopBehaviour
     {
-        private ICoopContext _context;
         private int _value;
 
         private void OnEnable()
         {
-            _context = Context;
             CoopLog.Info("[sample] host counter online");
-        }
-
-        private void OnDisable()
-        {
-            _context = null;
         }
 
         private void Update()
@@ -43,7 +36,7 @@ namespace CardShopCoop.SampleMod
         {
             if (connection != null)
             {
-                _context.Send(connection.Id, new SampleCounterState { Value = _value });
+                Context.Send(connection.Id, new SampleCounterState { Value = _value });
             }
         }
 
@@ -58,7 +51,7 @@ namespace CardShopCoop.SampleMod
 
         private void Broadcast()
         {
-            _context?.Broadcast(new SampleCounterState { Value = _value });
+            Context.Broadcast(new SampleCounterState { Value = _value });
         }
     }
 }
