@@ -803,7 +803,7 @@ namespace CardShopCoop.UI
             NativeCoopUi.Text(advRt, "Advanced Co-op Configuration", 28f, 40f, 180f, 960f, 36f, NativeCoopUi.Gold, TextAlignmentOptions.Left, wrap: false, title: true);
             NativeCoopUi.Text(advRt, "Crossplay (Steam <-> Xbox Game Pass):", 22f, 40f, 230f, 540f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
             _crossplayBtn = NativeCoopUi.Button(advRt, CoopPlugin.AllowCrossBuildJoin.Value ? "ENABLED" : "DISABLED", CoopPlugin.AllowCrossBuildJoin.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleCrossplay, 620f, 230f, 220f, 40f, 20f);
-            NativeCoopUi.Text(advRt, "Enables connection between Steam (1.03) and Xbox / Game Pass (1.04).", 17f, 40f, 272f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
+            NativeCoopUi.Text(advRt, "Enables connection between the Steam and Xbox / Game Pass versions of the game.", 17f, 40f, 272f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
             NativeCoopUi.Text(advRt, "NSFW Appearance:", 22f, 40f, 320f, 420f, 40f, Color.white, TextAlignmentOptions.Left, wrap: false, title: false);
             _nsfwBtn = NativeCoopUi.Button(advRt, CoopPlugin.AllowNsfw.Value ? "ENABLED" : "DISABLED", CoopPlugin.AllowNsfw.Value ? NativeCoopUi.Green : NativeCoopUi.Orange, OnToggleNsfw, 620f, 320f, 220f, 40f, 20f);
             NativeCoopUi.Text(advRt, "Allow nude/NSFW appearances. When off, the Character tab hides the Nude options.", 17f, 40f, 362f, 960f, 24f, NativeCoopUi.Dim, TextAlignmentOptions.Left, wrap: false, title: false);
