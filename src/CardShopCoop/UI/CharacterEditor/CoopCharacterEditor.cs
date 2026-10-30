@@ -957,9 +957,6 @@ namespace CardShopCoop.UI
                         onColor: null);
                 }
             }
-
-            CoopCharacterEditorWidgets.Note(_content, ref y,
-                "The Nude option appears only while NSFW appearances are allowed.", 30f);
         }
 
         private void BuildColorsPage(ref float y)
@@ -1168,7 +1165,6 @@ namespace CardShopCoop.UI
             _backend.ApplyPreset(name);
             _backend.Save();
             RefreshAll();
-            Hint("Applied preset: " + name);
         }
 
         private void OnBlendshape(string name, float value)
