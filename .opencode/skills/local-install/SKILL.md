@@ -12,7 +12,7 @@ only apply here.
 ## Installs
 
 - **Real game install** (`GamePath`): `Z:\SteamLibrary\steamapps\common\TCG Card Shop Simulator`
-  — the Steam **public** branch (buildid `26249007`), currently game `1.03` on Unity
+  — the Steam **public** branch (buildid `26320596`), currently game `1.06` on Unity
   `6000.0.66f2` (Unity 6, record backend). `Directory.Build.user.props` pins `GamePath` to it, so a
   plain `-p:Deploy=true` build deploys here and nowhere else. This is the default Deploy target.
 - **Game Pass install**: `Z:\XboxApps\TCG Card Shop Simulator\Content`
@@ -80,11 +80,11 @@ only apply here.
 
 ## Test setup
 
-- The live test pair is a **single-build** one: host & client = `1.03` on the Steam install.
+- The live test pair is a **single-build** one: host & client = `1.06` on the Steam install.
 - The Game Pass install is a second, **different-build** copy (`1.04` / Unity 6). It is modded
-  identically to the Steam install, but the two builds differ in content/enum values, so a
-  cross-build join is normally refused even with `AllowCrossBuildJoin` on; it is not part of the
-  `1.03` test pair.
+  identically to the Steam install, but the two builds differ in content/enum values and have
+  diverged further since (1.05 and 1.06 shipped only on Steam), so a cross-build join is normally
+  refused even with `AllowCrossBuildJoin` on; it is not part of the `1.06` test pair.
 
 ## Decompiled baselines on this machine
 
@@ -101,16 +101,19 @@ machine. Present here:
 | `decompiled\1.0-25119539`, `decompiled\1.0-25314665` | intermediate builds of the old public branch |
 | `decompiled\1.0-25315983` | historical public 2021.3 build (no longer supported) |
 | `decompiled\1.01`, `decompiled\1.02` | historical public 2021.3 builds (no longer supported) |
-| `decompiled\1.03` | **the installed Steam 1.03 build** (Steam buildid `26249007`), Unity 6000.0.66f2, record backend |
-| `decompiled\1.04-gamepass` | **the installed Xbox / Game Pass 1.04 build**, same codebase plus `GA\Gamecore*` |
+| `decompiled\1.03` | public 1.03 build (Steam buildid `26249007`), Unity 6000.0.66f2, record backend — no longer installed |
+| `decompiled\1.04` | public 1.04 build (Steam buildid `26274531`), decompiled 10/29 |
+| `decompiled\1.05` | public 1.05 build (Steam buildid `26302800`), decompiled 10/29 — the previous baseline |
+| `decompiled\1.06` | **the installed Steam 1.06 build** (Steam buildid `26320596`), decompiled 10/30; adds the mouse-vs-gamepad camera priority and the price-tag amount/half-size fixes over 1.05 |
+| `decompiled\1.04-gamepass` | **the installed Xbox / Game Pass 1.04 build**, same 1.00 lineage plus `GA\Gamecore*` |
 | `decompiled\EnhancedPrefabLoader`, `decompiled\PhoneOverhaul` | third-party mod sources kept for reference |
 | `decompiled-grading\` | Grading Overhaul reference output |
 
 The two builds the plugin must support, and which of the above maps to each:
-- public/default (game `1.03`, Unity 6000.0.66f2, record backend) → `decompiled\1.03`
+- public/default (game `1.06`, Unity 6000.0.66f2, record backend) → `decompiled\1.06`
 - Xbox / Game Pass (game `1.04`, Unity 6000.0.66f2, record backend) → `decompiled\1.04-gamepass`
 
-The installed Steam build is `1.03` (Steam buildid `26249007`), decompiled at `decompiled\1.03`.
+The installed Steam build is `1.06` (Steam buildid `26320596`), decompiled at `decompiled\1.06`.
 The installed Game Pass build is `1.04`, decompiled at `decompiled\1.04-gamepass`. Both are Unity 6
 and use the record backend; the 2021.3 baselines above are historical only. The Game Pass build ships a 4 KB **stub**
 `com.rlabrecque.steamworks.net` (no real Steamworks types) — see the Steam isolation in

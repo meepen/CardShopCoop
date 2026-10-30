@@ -94,10 +94,11 @@ needed; not every feature needs every file.
   owner is an NPC, packaging box, decoration, or placed `InteractableObject`. Global values are
   classes marked `[GlobalInformation]` and use the same catalog. They join the session handshake
   catalog; never add a string type name to the wire.
-- Verify game interactions against both required baselines: legacy `decompiled\1.0-25315983`
-  and beta `decompiled\1.00` (regenerating or diffing baselines is covered by the
-  `decompile` skill). Anything present in only one build must be accessed by reflection
-  (use the established `WarehouseBoxSync.Probe` pattern); never directly reference such types.
+- Verify game interactions against both required live baselines: the Steam public build and the
+  Xbox / Game Pass build (regenerating or diffing baselines is covered by the `decompile` skill;
+  the `local-install` skill lists the current decompiled directories for this PC). Anything
+  present in only one build must be accessed by reflection (use the established
+  `WarehouseBoxSync.Probe` pattern); never directly reference such types.
 - During migrations, delete feature-specific legacy code after the new module owns the flow,
   including relevant `Sync`, `Patches/GamePatches.cs`, `CoopCore*`, and generic `Net/Messages`
   portions when no longer needed. Do not leave duplicate active paths.

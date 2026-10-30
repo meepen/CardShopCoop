@@ -24,11 +24,14 @@ patch included - requires both players to update together.
 
 The mod must work on **both** live game builds from one DLL:
 
-- **The public/default branch** is game `1.03` on Unity `6000.0.66f2` (Steam buildid `26249007`).
-  It is the 1.00 codebase: warehouse storage is `StoredBoxRecord`s (the "record backend"), and it
-  carries the `GA.*` platform layer, animation instancing and the `StartOptimized` shop scene.
-- **The Xbox / Game Pass build** is game `1.04` on Unity `6000.0.66f2`; it is the same codebase
-  plus the Xbox `GA.Gamecore*` platform types. It also uses the record backend.
+- **The public/default branch** is game `1.06` on Unity `6000.0.66f2` (Steam buildid `26320596`).
+  It carries the `GA.*` platform layer, animation instancing and the `StartOptimized` shop scene,
+  and stores warehouse boxes as `StoredBoxRecord`s (the "record backend").
+- **The Xbox / Game Pass build** is game `1.04` on Unity `6000.0.66f2`; it is the same Unity 6
+  lineage plus the Xbox `GA.Gamecore*` platform types. It also uses the record backend. It trails
+  the public branch by several patches (1.05 and 1.06 shipped only on Steam), so the public build
+  is the feature reference - check whether a behaviour changed after 1.04 before assuming Game
+  Pass has the same code.
 
 Both live builds are Unity 6. The old Unity 2021 compatibility branches (the Resources character
 prefab path, `TMP_Text.enableWordWrapping`, the live-box warehouse backend) are gone; do not
