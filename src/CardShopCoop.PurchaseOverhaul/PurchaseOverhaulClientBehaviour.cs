@@ -121,7 +121,7 @@ namespace CardShopCoop.PurchaseOverhaul
             return false;
         }
 
-        private static bool BuyLicensePrefix(object product, out string message,
+        private static bool BuyLicensePrefix(object p, out string message,
             ref bool __result)
         {
             var active = _active;
@@ -131,7 +131,7 @@ namespace CardShopCoop.PurchaseOverhaul
                 return true;
             }
 
-            __result = active.TrySendLicense(product, out message);
+            __result = active.TrySendLicense(p, out message);
             return false;
         }
 
