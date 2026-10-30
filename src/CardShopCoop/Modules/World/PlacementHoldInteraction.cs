@@ -514,9 +514,14 @@ namespace CardShopCoop.Modules.World
                 CancelLocalMove();
             }
 
-            if (_remote.ContainsKey(obj))
+            if (_remote.TryGetValue(obj, out var previous))
             {
-                return;
+                // A missed end (a host cancel or box-up path that did not broadcast) can leave a
+                // stale remote hold. Replace it instead of silently refusing the new begin.
+                CoopPlugin.Log.LogInfo("[placement-hold] replacing stale remote hold entity="
+                    + PlacementInterop.Describe(obj) + ".");
+                StopRemote(previous);
+                _remote.Remove(obj);
             }
 
             if (!obj.GetIsMovingObject())

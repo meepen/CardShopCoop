@@ -26,6 +26,8 @@ namespace CardShopCoop.Modules.World
             Harmony.CreateClassProcessor(typeof(PlayerBoxThrowPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(PlayerBoxDropPatch)).Patch();
             Harmony.CreateClassProcessor(typeof(PlayerBoxPlacementPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(FurnitureBoxUpPatch)).Patch();
+            Harmony.CreateClassProcessor(typeof(FurnitureUnboxPatch)).Patch();
             // A furniture purchase boxes the furniture before the outer factory settles the
             // package at its delivery pose. Republish placement state once that move is done.
             var purchaseSpawn = AccessTools.Method(typeof(ShelfManager),
@@ -363,6 +365,49 @@ namespace CardShopCoop.Modules.World
                 if (isPlayer)
                 {
                     __instance?.StopLerpToTransform();
+                }
+            }
+        }
+
+        /// <summary>The host's own furniture box-up while the piece is still in placement move
+        /// mode: release the placement hold first so the game's BoxUpObject can start the box
+        /// hold, and tell observers the ghost ended. A client has the same prefix in
+        /// WorldClientBehaviour.PlayerBoxInteraction.</summary>
+        [HarmonyPatch(typeof(InteractableObject), "BoxUpObject")]
+        private static class FurnitureBoxUpPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractableObject __instance, bool holdBox)
+            {
+                if (_instance == null || __instance == null || !holdBox
+                    || __instance is InteractablePlayTable)
+                {
+                    return;
+                }
+
+                _instance._placementHold?.LocalEnded(__instance);
+            }
+        }
+
+        /// <summary>Opening a furniture package on the host drops the package out of the host's
+        /// hand before vanilla starts the unboxed piece's move preview. The client already gets
+        /// this from the game's OnExitHoldBoxMode; doing it explicitly keeps the host's held box
+        /// from staying parented to the hand until the piece is placed.</summary>
+        [HarmonyPatch(typeof(InteractablePackagingBox_Shelf), "OnPressOpenBox")]
+        private static class FurnitureUnboxPatch
+        {
+            [HarmonyPrefix]
+            private static void Prefix(InteractablePackagingBox_Shelf __instance)
+            {
+                if (_instance?._playerBoxInteraction == null || __instance == null)
+                {
+                    return;
+                }
+
+                if (_instance._boxNetworkInteraction != null
+                    && _instance._boxNetworkInteraction.TryGetId(__instance, out var boxId))
+                {
+                    _instance._playerBoxInteraction.ReleaseLocalHold(boxId);
                 }
             }
         }
