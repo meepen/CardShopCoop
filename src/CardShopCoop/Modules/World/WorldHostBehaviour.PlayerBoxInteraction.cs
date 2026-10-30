@@ -387,6 +387,22 @@ namespace CardShopCoop.Modules.World
 
                 _instance._placementHold?.LocalEnded(__instance);
             }
+
+            [HarmonyPostfix]
+            private static void Postfix(InteractableObject __instance, bool holdBox)
+            {
+                if (_instance?._playerBoxInteraction == null || __instance == null || !holdBox
+                    || __instance is InteractablePlayTable)
+                {
+                    return;
+                }
+
+                var box = __instance.GetPackagingBoxShelf();
+                if (box != null && !ReferenceEquals(_instance._playerBoxInteraction.LocalHeldBox, box))
+                {
+                    _instance._playerBoxInteraction.TakeBigIntoLocalHand(box);
+                }
+            }
         }
 
         /// <summary>Opening a furniture package on the host drops the package out of the host's
@@ -404,10 +420,9 @@ namespace CardShopCoop.Modules.World
                     return;
                 }
 
-                if (_instance._boxNetworkInteraction != null
-                    && _instance._boxNetworkInteraction.TryGetId(__instance, out var boxId))
+                if (ReferenceEquals(_instance._playerBoxInteraction.LocalHeldBox, __instance))
                 {
-                    _instance._playerBoxInteraction.ReleaseLocalHold(boxId);
+                    _instance._playerBoxInteraction.ReleaseLocalHold();
                 }
             }
         }
@@ -942,6 +957,27 @@ namespace CardShopCoop.Modules.World
                 ReleaseConflictingLocalHold(box);
                 box.StartHoldBox(true, controller.m_HoldItemPos);
             }
+        }
+
+        /// <summary>Puts a boxed furniture package into the hand at the big-item pose. The host
+        /// uses this after its own BoxUpObject(true) if vanilla did not leave the new package held,
+        /// so the box does not fall to the ground. The client already gets this from vanilla's
+        /// ExecuteBoxUpObject(holdBox:true).</summary>
+        internal void TakeBigIntoLocalHand(InteractablePackagingBox box)
+        {
+            if (box == null || IsBeingPlaced(box))
+            {
+                return;
+            }
+
+            var controller = SceneRef<InteractionPlayerController>.Get();
+            if (controller == null)
+            {
+                return;
+            }
+
+            ReleaseConflictingLocalHold(box);
+            box.StartHoldBox(true, controller.m_HoldBigItemPos);
         }
 
         /// <summary>Releases whatever box the controller currently holds unless it is
