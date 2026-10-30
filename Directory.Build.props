@@ -3,7 +3,7 @@
     <!-- Single source of truth for the plugin's public/release version. -->
     <CardShopCoopVersion>2.3.0</CardShopCoopVersion>
     <!-- Independent public API assembly version; bumps only for public API changes. -->
-    <CardShopCoopApiVersion>1.0.0</CardShopCoopApiVersion>
+    <CardShopCoopApiVersion>2.3.0</CardShopCoopApiVersion>
     <!-- "Deploy" is a solution configuration meaning "build and copy into the game". A
          command-line -p:Deploy=true still works and wins over this default. -->
     <Deploy Condition="'$(Configuration)' == 'Deploy'">true</Deploy>

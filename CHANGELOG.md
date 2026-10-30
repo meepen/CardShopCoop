@@ -6,7 +6,7 @@
 - Players are now addressed as peer objects (`Context.Self`, `Context.Host`, `Context.Peers`). The old connection-id send calls are gone.
 - There are no longer any action keys to assign or match. Each command is answered and cleaned up on its own.
 - External co-op mods must be rebuilt against the new public API. The old action helpers and send calls were removed.
-- The public API now has its own stable version, `CardShopCoop.Api` 1.0.0, separate from the mod version.
+- The public API is versioned separately at `CardShopCoop.Api` 2.3.0, independent of future mod releases.
 - Both players must update together, as usual.
 
 ## 2.2.1

@@ -58,5 +58,5 @@ silently proceeding.
 Note `Private=false` on the `CardShopCoop.Api` reference: the API assembly ships with
 CardShopCoopCommunity, and shipping a second copy can load as a second assembly identity.
 
-The sample targets public API `1.0.0`, which ships with CardShopCoopCommunity 2.3.0. Rebuild the
+The sample targets public API `2.3.0`, which ships with CardShopCoopCommunity 2.3.0. Rebuild the
 sample (and your own mod) when you update CardShopCoopCommunity.

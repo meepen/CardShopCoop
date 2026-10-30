@@ -452,7 +452,7 @@ Register once at plugin load and treat it as process-lifetime. Do not dispose th
 
 - Both peers need the same CardShopCoop and mod versions. A mismatch refuses the join.
 - `CoopApi.ApiVersion` is the version of the public API your mod was built against. It is separate
-  from the CardShopCoop release version. CardShopCoop 2.3.0 ships API `1.0.0`.
+  from the CardShopCoop release version. CardShopCoop 2.3.0 ships API `2.3.0`.
 - A mod built against an older Action API must be rebuilt. The old connection-id send calls, action
   keys, and `OnApply` hook are gone.
 - Call the API on the Unity main thread.
