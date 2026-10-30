@@ -1778,17 +1778,11 @@ namespace CardShopCoop
 
             if (action.ActionId != Guid.Empty)
             {
-                // An explicit ActionLedger.Submit records the action and then sends it through
-                // Context.Send. That second pass must be allowed through; only an untracked
-                // non-empty id is a protocol error.
-                if (ActionLedger.IsPending(action.ActionId))
-                {
-                    return false;
-                }
-
-                CoopPlugin.Log.LogError("client ActionMessage " + action.GetType().FullName
-                    + " had an action id that is not pending; refusing to send it.");
-                return true;
+                // A direct world/intent send may mint its own id for host dedupe without being a
+                // local prediction. Explicit ActionLedger.Submit sends are already pending and
+                // follow the same path. Both are ordinary sends here; only an empty id opts into
+                // the automatic ledger submission below.
+                return false;
             }
 
             // The action id is allocated and recorded before the message leaves, so a plain
